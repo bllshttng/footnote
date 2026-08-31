@@ -68,7 +68,10 @@ def test_restart_mux_flag_kills_each_session(monkeypatch) -> None:
     monkeypatch.setattr(
         restart,
         "_mux_sessions",
-        lambda: [{"session": "main", "state": "live"}, {"session": "work", "state": "live"}],
+        lambda: [
+            {"session": "main", "state": "live", "stale": True, "panes": 2},
+            {"session": "work", "state": "live", "stale": False, "panes": 1},
+        ],
     )
 
     result = runner.invoke(app, ["agents", "restart", "--mux"])
@@ -96,9 +99,10 @@ def test_restart_mux_skips_non_live_sessions(monkeypatch) -> None:
     assert not any("dead" in c for c in calls), "must NOT kill a non-live session"
 
 
-def test_restart_auto_restarts_stale_wire_server_without_mux(monkeypatch) -> None:
-    """x-1a85: a stale-wire live server is auto-restarted even WITHOUT --mux (a
-    new client can't attach it anyway); a current-wire server stays opt-in."""
+def test_restart_spares_stale_wire_server_with_live_panes(monkeypatch) -> None:
+    """A stale-wire server with live panes is spared, but sparing is a
+    reported failure, not success: exit-code automation must see the fleet is
+    still skewed. A current-wire server stays opt-in as well."""
     _fake_daemon_binary(monkeypatch)
     calls: list = []
     monkeypatch.setattr(restart.subprocess, "run", _record_run(calls))
@@ -107,18 +111,38 @@ def test_restart_auto_restarts_stale_wire_server_without_mux(monkeypatch) -> Non
         restart,
         "_mux_sessions",
         lambda: [
-            {"session": "old", "state": "live", "stale": True},
-            {"session": "cur", "state": "live", "stale": False},
+            {"session": "old", "state": "live", "stale": True, "panes": 2},
+            {"session": "cur", "state": "live", "stale": False, "panes": 0},
         ],
     )
 
-    result = runner.invoke(app, ["agents", "restart"])  # NO --mux
-    assert result.exit_code == 0
-    assert ["/cargo/bin/fno", "mux", "kill-server", "old"] in calls, "stale auto-restarted"
+    result = runner.invoke(app, ["agents", "restart", "--json"])
+    assert result.exit_code == 1, "a spared stale-wire server is an unrestored fleet"
     assert not any(
-        "kill-server" in c and "cur" in c for c in calls
-    ), "a current-wire server is left opt-in"
+        "kill-server" in c for c in calls
+    ), "live-pane and current-wire servers are left opt-in"
+    payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
+    assert payload["mux_spared"] == ["old"]
+    assert payload["ok"] is False
+    assert "spared" in result.output and "--mux" in result.output, "names the break-glass lever"
     assert "current wire" in result.output, "current-wire server reported, not killed"
+
+
+def test_restart_auto_restarts_stale_wire_server_without_live_panes(monkeypatch) -> None:
+    """A stale-wire server with no live panes still heals pair-deploy skew."""
+    _fake_daemon_binary(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(restart.subprocess, "run", _record_run(calls))
+    monkeypatch.setattr(restart.shutil, "which", lambda n: "/cargo/bin/fno")
+    monkeypatch.setattr(
+        restart,
+        "_mux_sessions",
+        lambda: [{"session": "old", "state": "live", "stale": True, "panes": 0}],
+    )
+
+    result = runner.invoke(app, ["agents", "restart"])
+    assert result.exit_code == 0
+    assert ["/cargo/bin/fno", "mux", "kill-server", "old"] in calls
 
 
 def test_restart_daemon_failure_exits_nonzero(monkeypatch) -> None:

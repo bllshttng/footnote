@@ -11385,6 +11385,18 @@ async fn attach_and_run(
                 Err(ProtoError::Closed) => {
                     break Ok(exit_with_notice("session ended (server closed)".into()));
                 }
+                // A decode failure mid-session is not a clean IO drop. It is
+                // either a corrupt/truncated frame on the socket, or a newer
+                // server whose additive ServerMsg this build cannot decode
+                // (the floor admits floor-compatible clients). Name both, or
+                // the operator is sent binary-shopping for a connection loss,
+                // or reads a real skew as "connection lost".
+                Err(e @ ProtoError::Malformed(_)) => break Err(format!(
+                    "cannot decode a server message: {e} - this client speaks wire v{}; \
+                     either the connection carried a corrupt frame or the server is newer, \
+                     and updating fno fixes the latter",
+                    crate::proto::PROTO_VERSION
+                )),
                 Err(e) => break Err(format!("connection lost: {e}")),
             },
             bytes = stdin_rx.recv() => match bytes {

@@ -1776,7 +1776,7 @@ pub fn run(socket: PathBuf) -> i32 {
         }
     }
     // Stamp this server's wire version next to its socket (x-1a85) so `fno mux
-    // ls` can flag a stale-wire server after a binary upgrade. Best-effort: a
+    // ls` can flag a below-floor server after a binary upgrade. Best-effort: a
     // write failure only means `ls` reads no version and treats the server as
     // stale (conservative - a spurious restart, never a missed skew), so it must
     // never abort the server.
@@ -15048,6 +15048,34 @@ async fn handle_control(
     }
 }
 
+/// Recover enough of an undecodable `Control` envelope to answer a newer
+/// floor-compatible client instead of closing silently on an unknown verb.
+fn unknown_control_refusal(value: &serde_json::Value) -> Option<ServerMsg> {
+    let control = value.get("Control")?.as_object()?;
+    let proto = u32::try_from(control.get("proto")?.as_u64()?).ok()?;
+    let build = control.get("build")?.as_str()?;
+    if let Err(reason) = check_attach_version(proto, build) {
+        return Some(ServerMsg::Err {
+            code: err_code::VERSION_SKEW,
+            msg: reason,
+        });
+    }
+    let verb = control
+        .get("verb")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|object| object.keys().next())
+        .map(String::as_str)
+        .unwrap_or("unknown");
+    Some(ServerMsg::Err {
+        code: err_code::BAD_REQUEST,
+        msg: format!(
+            "unknown control verb {verb:?}; server {} speaks wire v{}",
+            crate::proto::BUILD_VERSION,
+            crate::proto::PROTO_VERSION
+        ),
+    })
+}
+
 /// Resolve when the control peer closes its half (or sends stray bytes). Used
 /// only to notice a mid-`PaneWait` disconnect; a one-shot client is otherwise
 /// silent until it reads the reply and closes.
@@ -15066,15 +15094,50 @@ async fn handle_client(
     id: u64,
     stats: PaneStats,
 ) {
-    let attach = tokio::time::timeout(ATTACH_TIMEOUT, read_msg::<_, ClientMsg>(&mut stream)).await;
-    let (rows, cols, cwd) = match attach {
-        Ok(Ok(ClientMsg::Attach {
+    let first = tokio::time::timeout(
+        ATTACH_TIMEOUT,
+        read_msg::<_, serde_json::Value>(&mut stream),
+    )
+    .await;
+    let first = match first {
+        Ok(Ok(value)) => match <ClientMsg as serde::Deserialize>::deserialize(&value) {
+            Ok(message) => message,
+            Err(error) => {
+                if let Some(reply) = unknown_control_refusal(&value) {
+                    let _ = write_msg(&mut stream, &reply).await;
+                } else {
+                    eprintln!("fno mux: initial client message failed to decode: {error}");
+                    // The refusal above recovers every envelope shape this
+                    // build knows. An envelope it cannot interpret at all
+                    // must not restore the silent close this branch removed:
+                    // even a hopeless decode gets a loud refusal, so drift
+                    // surfaces as a client-side error, never a dead socket.
+                    let _ = write_msg(
+                        &mut stream,
+                        &ServerMsg::Err {
+                            code: err_code::BAD_REQUEST,
+                            msg: format!(
+                                "undecodable first message; server {} speaks wire v{}",
+                                crate::proto::BUILD_VERSION,
+                                crate::proto::PROTO_VERSION
+                            ),
+                        },
+                    )
+                    .await;
+                }
+                return;
+            }
+        },
+        _ => return,
+    };
+    let (rows, cols, cwd) = match first {
+        ClientMsg::Attach {
             proto,
             build,
             rows,
             cols,
             cwd,
-        })) => {
+        } => {
             if let Err(reason) = check_attach_version(proto, &build) {
                 // Refuse loudly with both versions; the client relays it.
                 let _ = write_msg(&mut stream, &ServerMsg::Bye { reason }).await;
@@ -15086,7 +15149,7 @@ async fn handle_client(
         // Pre-Attach management pair (wire shapes FROZEN, no version
         // handshake - proto.rs): Query answers one Info then closes;
         // KillServer triggers shutdown. Neither registers a client.
-        Ok(Ok(ClientMsg::Query)) => {
+        ClientMsg::Query => {
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
             if core_tx.send(CoreMsg::Query(reply_tx)).await.is_ok() {
                 if let Ok(info) = reply_rx.await {
@@ -15095,14 +15158,14 @@ async fn handle_client(
             }
             return;
         }
-        Ok(Ok(ClientMsg::KillServer)) => {
+        ClientMsg::KillServer => {
             let _ = core_tx.send(CoreMsg::Kill).await;
             return;
         }
         // A v4 one-shot control connection (`fno mux pane ...`): versioned
         // like Attach, answered with exactly one reply, then closed. Never
         // registers a client, never splits into reader/writer tasks.
-        Ok(Ok(ClientMsg::Control { proto, build, verb })) => {
+        ClientMsg::Control { proto, build, verb } => {
             handle_control(stream, core_tx, resolver, proto, build, verb).await;
             return;
         }
@@ -15830,6 +15893,29 @@ mod tests {
             pane_label(Some("build"), Some("x-1"), "/w", Some("taskpolicy")),
             "build"
         );
+    }
+
+    #[test]
+    fn unknown_control_verb_gets_typed_wire_refusal() {
+        let request = serde_json::json!({
+            "Control": {
+                "proto": crate::proto::PROTO_VERSION + 1,
+                "build": crate::proto::BUILD_VERSION,
+                "verb": {"FutureVerb": null},
+            }
+        });
+
+        match unknown_control_refusal(&request) {
+            Some(ServerMsg::Err { code, msg }) => {
+                assert_eq!(code, err_code::BAD_REQUEST);
+                assert!(msg.contains("FutureVerb"), "{msg}");
+                assert!(
+                    msg.contains(&format!("v{}", crate::proto::PROTO_VERSION)),
+                    "{msg}"
+                );
+            }
+            other => panic!("expected typed unknown-verb refusal, got {other:?}"),
+        }
     }
 
     #[test]

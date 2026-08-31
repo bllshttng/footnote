@@ -241,6 +241,72 @@ PROTO_PATCH="$(git --no-pager log -p --cc --no-textconv --no-color \
     exit 2
 }
 
+# ---------------------------------------------------------------------------
+# MIN_COMPAT_PROTO gets the same collision guard as PROTO_VERSION.
+#
+# Two branches both moving the floor to the same value merge silently, exactly
+# like the version const: the narrowed compatibility range lands with no
+# effective move, and clients the old floor would have refused slip past the
+# handshake. Same patch, same base-tip comparison, same fail-closed parsing.
+# A source without the floor const at all is pre-floor history: absent on both
+# sides and untouched passes; newly ADDED here passes (nothing to be
+# non-monotonic against); REMOVED here fails, because deleting the floor
+# narrows nothing - it deletes the guard.
+# ---------------------------------------------------------------------------
+floor_line_at() {
+    local rev="$1" label="$2" blob line
+    if ! blob="$(git show "$rev:$PROTO_FILE")"; then
+        echo "ERROR: cannot read $PROTO_FILE at $label ($rev)" >&2
+        return 1
+    fi
+    # Here-string, not a pipe: same SIGPIPE discipline as the version scan.
+    line="$(grep -E '^pub const MIN_COMPAT_PROTO' <<<"$blob" || true)"
+    printf '%s\n' "$line"
+}
+FLOOR_HEAD_LINE="$(floor_line_at "$HEAD_SHA" "PR head")" || exit 1
+FLOOR_BASE_LINE="$(floor_line_at "$BASE_TIP" "$REMOTE/$BASE_REF tip")" || exit 1
+
+grep -qE '^[-+ ]*[-+]pub const MIN_COMPAT_PROTO' <<<"$PROTO_PATCH"
+FLOOR_GREP_RC=$?
+case "$FLOOR_GREP_RC" in
+    0|1) ;;  # touched, or genuinely untouched
+    *)
+        echo "ERROR: cannot scan this PR's patch for MIN_COMPAT_PROTO (grep exit $FLOOR_GREP_RC) - unable to verify" >&2
+        exit 2 ;;
+esac
+
+if [[ "$FLOOR_GREP_RC" -ne 0 && "$FLOOR_HEAD_LINE" == "$FLOOR_BASE_LINE" ]]; then
+    : # untouched and identical: nothing to check
+elif [[ -z "$FLOOR_BASE_LINE" ]]; then
+    : # floor newly introduced by this PR; no base value to collide with
+elif [[ -z "$FLOOR_HEAD_LINE" ]]; then
+    echo "ERROR: this PR removes the MIN_COMPAT_PROTO line from $PROTO_FILE." >&2
+    echo "       The floor is the compatibility guard; it must not be deleted." >&2
+    exit 1
+else
+    parse_floor() {
+        local line="$1" label="$2"
+        if [[ ! "$line" =~ =[[:space:]]*([0-9]+)[[:space:]]*\; ]]; then
+            echo "ERROR: cannot parse a floor out of $label line: $line" >&2
+            return 1
+        fi
+        printf '%s\n' "${BASH_REMATCH[1]}"
+    }
+    FLOOR_H="$(parse_floor "$FLOOR_HEAD_LINE" "PR head")" || exit 1
+    FLOOR_B="$(parse_floor "$FLOOR_BASE_LINE" "$REMOTE/$BASE_REF tip")" || exit 1
+    if (( 10#$FLOOR_H <= 10#$FLOOR_B )); then
+        echo "ERROR: MIN_COMPAT_PROTO move is not monotonic against $REMOTE/$BASE_REF." >&2
+        echo "       $REMOTE/$BASE_REF tip: floor v$FLOOR_B" >&2
+        echo "       this PR:               floor v$FLOOR_H" >&2
+        echo "" >&2
+        echo "       Usually: a parallel branch moved the floor to v$FLOOR_B and" >&2
+        echo "       merged first; this PR's identical edit then landed with no" >&2
+        echo "       effective move. Re-base onto the merged base, or raise the" >&2
+        echo "       floor above v$FLOOR_B if the shape change needs it." >&2
+        exit 1
+    fi
+fi
+
 # Read the base version BEFORE deciding the line was untouched.
 #
 # Both greps anchor `pub const` at column 0, so if the const is ever indented

@@ -451,17 +451,15 @@ def _live_mux_sessions(
 def stale_mux_servers(
     runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
 ) -> list[str]:
-    """Live mux sessions on a STALE WIRE VERSION: the running server predates the
-    installed binary's ``PROTO_VERSION``, so a new client's handshake is rejected
-    and the server is already unreachable (the fix is `fno agents restart`, which now
-    auto-cuts these over). The precise signal is the ``stale`` field
+    """Live mux sessions on a wire below the compatibility floor. The precise signal is the ``stale`` field
     ``fno mux ls --json`` computes from each server's ``.ver`` sidecar (x-1a85); a
     pre-sidecar server has no ``.ver`` and reads as stale, so the check works
     across the very upgrade that introduces it. This replaces the old
     ``socket mtime < binary mtime`` heuristic, which flagged EVERY server after
     any reinstall (a wire-agnostic false alarm). Best-effort and advisory: any
     missing binary / non-zero exit / unparseable JSON yields ``[]``. `fno doctor`
-    renders this; `fno doctor update` nudges on it; `fno agents restart` auto-restarts it."""
+    renders this; `fno doctor update` nudges on it; `fno agents restart` auto-restarts
+    pane-less rows and spares rows with live panes unless ``--mux`` is explicit."""
     fno = _cargo_installed_mux() or shutil.which("fno")
     if not fno:
         return []
@@ -491,19 +489,22 @@ def stale_mux_servers(
     ]
 
 
-def _read_source_wire_version(source: Path) -> Optional[int]:
+def _read_source_wire(source: Path) -> Optional[int]:
     """Parse ``PROTO_VERSION`` out of the source checkout's
-    ``crates/fno/src/proto.rs``. ``source`` is the ``cli/`` dir (this module's
-    discovery convention, ``_discover_source``); its parent is the repo root in
-    both dev-clone and plugin layouts. None on any read/parse failure - the
-    readiness resolver treats that as a degraded input, never a bogus wire."""
+    ``crates/fno/src/proto.rs`` in one read. ``source`` is the ``cli/`` dir
+    (this module's discovery convention, ``_discover_source``); its parent is
+    the repo root in both dev-clone and plugin layouts. None on any
+    read/parse failure - the readiness resolver treats that as a degraded
+    input, never a bogus wire. Attachability itself is NOT decided here: the
+    running server's gate is, and readiness reads it from the ``stale``
+    verdict ``fno mux ls --json`` already carries."""
     proto_path = source.parent / "crates" / "fno" / "src" / "proto.rs"
     try:
         text = proto_path.read_text(encoding="utf-8")
     except OSError:
         return None
-    match = re.search(r"^pub const PROTO_VERSION: u32 = (\d+);", text, re.MULTILINE)
-    return int(match.group(1)) if match else None
+    version = re.search(r"^pub const PROTO_VERSION: u32 = (\d+);", text, re.MULTILINE)
+    return int(version.group(1)) if version else None
 
 
 def _live_mux_rows(
@@ -688,7 +689,7 @@ def update_readiness(
 
     update_ready = bool(installed_rev and source_rev and installed_rev != source_rev)
 
-    source_wire = _read_source_wire_version(resolved_source) if resolved_source else None
+    source_wire = _read_source_wire(resolved_source) if resolved_source else None
     if resolved_source is not None and source_wire is None:
         degraded.append("source PROTO_VERSION unreadable")
 
@@ -699,10 +700,28 @@ def update_readiness(
         live_rows = []
         wire_bump = True  # unknown live state: never assert shells survive.
     else:
+        # Attachability is decided by the SERVER's gate, and the floor range
+        # in the source consts cannot see it: a pre-floor generation (wire
+        # 58/59) gates attach with client_proto == its PROTO_VERSION, so a
+        # wire inside [floor, source_wire) still refuses the new client. The
+        # binary's own `stale` verdict (SessionRow::wire_stale) knows that
+        # gate; consume it. For an older fno that emits no stale field,
+        # equality is the fallback for the same reason. A live server NEWER
+        # than the source is a bump in its own right: installing the source
+        # is a downgrade, and the older installed build's gate refuses the
+        # still-running newer server.
+        def _row_unattachable(row: dict, source: int) -> bool:
+            wire = row.get("wire_version")
+            if not isinstance(wire, int):
+                return True
+            if "stale" in row:
+                return bool(row.get("stale")) or wire > source
+            return wire != source
+
         wire_bump = (
             True
             if source_wire is None
-            else any(r.get("wire_version") != source_wire for r in live_rows)
+            else any(_row_unattachable(r, source_wire) for r in live_rows)
         )
 
     shells = sum(int(r.get("panes") or 0) for r in live_rows)
@@ -1108,13 +1127,14 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         outcome = "refreshed"
 
     # Best-effort mux advisory: a long-running mux server keeps speaking the OLD
-    # proto after this refresh (the mux deliberately survives a reinstall), which
-    # silently blocks agent dispatch until restarted. Nothing else nudges for it.
+    # proto after this refresh. Pane-hosting servers are spared by default;
+    # pane-less servers are auto-restarted, and --mux is the force-kill lever.
     for sess in stale_mux_servers():
         typer.echo(
             f"fno doctor update: note: mux server '{sess}' speaks an OLD wire version"
-            " (a new client can't attach it); run 'fno agents restart' to auto-cut it"
-            " over (ends that session's panes)",
+            " (a new client can't attach it); run 'fno agents restart' to heal"
+            " pane-less servers, or use 'fno agents restart --mux' to force-kill"
+            " and end live panes",
             err=True,
         )
 
