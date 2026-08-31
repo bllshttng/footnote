@@ -102,5 +102,22 @@ if not re.search(r"bootstrap_(?:command|output|status|exec)\s*\(", bootstrap_tex
         file=sys.stderr,
     )
     raise SystemExit(1)
+bootstrap_callers = []
+for path in sorted(source_root.glob("*.rs")):
+    if path.name in ("bootstrap.rs", "process_admission.rs"):
+        continue
+    if re.search(
+        r"bootstrap_(?:command|output|status|exec)\s*\(",
+        path.read_text(encoding="utf-8"),
+    ):
+        bootstrap_callers.append(str(path.relative_to(root)))
+if bootstrap_callers:
+    print(
+        "process-admission coverage: bootstrap_* bypass helpers called outside"
+        " bootstrap.rs and process_admission.rs:",
+        file=sys.stderr,
+    )
+    print("\n".join(bootstrap_callers), file=sys.stderr)
+    raise SystemExit(1)
 print(f"process-admission coverage: inspected={inspected} bypasses=0")
 PY

@@ -1,3 +1,4 @@
+use fno::process_admission::BYPASS_HINT;
 use fno::process_admission::{
     configured_max_processes, decide_panes, decide_processes, AdmissionDecision, Census, MaxPanes,
     MaxProcesses, PaneCount, Scope,
@@ -69,7 +70,7 @@ fn ac2_err_refuses_at_fleet_ceiling_with_positive_marker() {
 
     assert_eq!(
         decision.refusal(),
-        Some("process admission refused: count=2 ceiling=2 scope=fleet reason=over-limit; set FNO_PROCESS_ADMISSION=off to bypass this gate for recovery".into())
+        Some(format!("process admission refused: count=2 ceiling=2 scope=fleet reason=over-limit{BYPASS_HINT}").into())
     );
 }
 
@@ -83,7 +84,7 @@ fn ac4_neg_refuses_incomplete_snapshot_without_substituting_zero() {
     assert_eq!(
         decision.refusal(),
         Some(
-            "process admission refused: count=unknown ceiling=2 scope=fleet reason=measurement-unavailable; set FNO_PROCESS_ADMISSION=off to bypass this gate for recovery"
+            format!("process admission refused: count=unknown ceiling=2 scope=fleet reason=measurement-unavailable{BYPASS_HINT}")
                 .into(),
         )
     );
@@ -134,7 +135,7 @@ fn ac2_err_creation_path_emits_positive_refusal_marker() {
 
     assert_eq!(
         refusal,
-        Some("process admission refused: count=2 ceiling=2 scope=fleet reason=over-limit; set FNO_PROCESS_ADMISSION=off to bypass this gate for recovery".into())
+        Some(format!("process admission refused: count=2 ceiling=2 scope=fleet reason=over-limit{BYPASS_HINT}").into())
     );
 }
 
@@ -183,7 +184,7 @@ fn ac3_edge_concurrent_launchers_remeasure_after_the_first_spawn() {
     assert_eq!(
         refusals,
         vec![
-            "process admission refused: count=1 ceiling=1 scope=fleet reason=over-limit; set FNO_PROCESS_ADMISSION=off to bypass this gate for recovery"
+            format!("process admission refused: count=1 ceiling=1 scope=fleet reason=over-limit{BYPASS_HINT}")
                 .to_string(),
         ]
     );

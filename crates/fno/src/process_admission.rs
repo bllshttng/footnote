@@ -108,6 +108,7 @@ pub enum AdmissionReason {
     OverLimit,
     MeasurementUnavailable,
     LockUnavailable,
+    EnvOverrideInvalid,
 }
 
 /// The result of one pre-spawn decision.
@@ -153,9 +154,12 @@ impl fmt::Display for AdmissionFailure {
 impl std::error::Error for AdmissionFailure {}
 
 /// The lock is held from the census through the child-creation syscall. It is
-/// intentionally released before the child lifetime begins.
+/// intentionally released before the child lifetime begins. A recovery-permit
+/// bypass carries `None`: the whole point of the switch is to work when the
+/// install is broken or replaced, so it must not depend on reading the
+/// executable it is recovering.
 pub struct AdmissionPermit {
-    _lock: File,
+    _lock: Option<File>,
     scope: Scope,
     count: usize,
     ceiling: usize,
@@ -219,9 +223,10 @@ impl AdmissionDecision {
             AdmissionReason::OverLimit => "over-limit",
             AdmissionReason::MeasurementUnavailable => "measurement-unavailable",
             AdmissionReason::LockUnavailable => "lock-unavailable",
+            AdmissionReason::EnvOverrideInvalid => "env-override-invalid",
         };
         Some(format!(
-            "process admission refused: count={count} ceiling={ceiling} scope={} reason={reason}; set FNO_PROCESS_ADMISSION=off to bypass this gate for recovery",
+            "process admission refused: count={count} ceiling={ceiling} scope={} reason={reason}{BYPASS_HINT}",
             scope.as_str(),
         ))
     }
@@ -269,14 +274,20 @@ pub fn decide_panes(count: PaneCount, ceiling: MaxPanes) -> AdmissionDecision {
 
 pub const DEFAULT_MAX_PROCESSES: usize = 400;
 pub const DEFAULT_PANE_GROUP_MAX: usize = 4;
+/// The recovery hint every refusal carries, shared with the e2e assertions so
+/// the string can only drift in one place.
+pub const BYPASS_HINT: &str = "; set FNO_PROCESS_ADMISSION=off to bypass this gate for recovery; the value is inherited by children spawned from that shell";
 const LOCK_FILE: &str = "fno-process-admission.lock";
 const CHILD_MARKERS_FILE: &str = "fno-process-admission.children";
 const ADMISSION_SWITCH: &str = "FNO_PROCESS_ADMISSION";
 
 fn admission_disabled() -> Result<bool, String> {
     match std::env::var(ADMISSION_SWITCH) {
-        Ok(value) if value.eq_ignore_ascii_case("off") => Ok(true),
-        Ok(value) if value.eq_ignore_ascii_case("on") => Ok(false),
+        // Trimming first: a templated env file loves to append a newline or a
+        // trailing space, and a switch that refuses on whitespace is a switch
+        // that strands a wedged fleet over invisible bytes.
+        Ok(value) if value.trim().eq_ignore_ascii_case("off") => Ok(true),
+        Ok(value) if value.trim().eq_ignore_ascii_case("on") => Ok(false),
         Ok(value) => Err(format!(
             "{ADMISSION_SWITCH}={value:?} is invalid; accepted values are on|off"
         )),
@@ -300,22 +311,11 @@ fn override_failure(scope: Scope, ceiling: usize, detail: String) -> AdmissionFa
 }
 
 fn bypass_permit(scope: Scope, ceiling: usize) -> Result<AdmissionPermit, AdmissionFailure> {
-    let executable = std::env::current_exe().map_err(|error| {
-        override_failure(
-            scope,
-            ceiling,
-            format!("cannot create recovery permit: {error}"),
-        )
-    })?;
-    let lock = File::open(executable).map_err(|error| {
-        override_failure(
-            scope,
-            ceiling,
-            format!("cannot create recovery permit: {error}"),
-        )
-    })?;
+    // No flock here on purpose: the recovery switch has to survive the exact
+    // scenarios a lock depends on being readable (replaced or unlinked
+    // binary), so the permit simply holds no lock at all.
     Ok(AdmissionPermit {
-        _lock: lock,
+        _lock: None,
         scope,
         count: 0,
         ceiling,
@@ -400,7 +400,7 @@ pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
     let decision = decide_processes(&census, ceiling);
     match decision {
         AdmissionDecision::Admit => Ok(AdmissionPermit {
-            _lock: lock,
+            _lock: Some(lock),
             scope: Scope::Fleet,
             count: census.count().expect("admitted census has a count"),
             ceiling: ceiling.get(),
@@ -443,7 +443,7 @@ pub fn admit_tab(
     let decision = decide_panes(PaneCount::new(pane_count), ceiling);
     match decision {
         AdmissionDecision::Admit => Ok(AdmissionPermit {
-            _lock: lock,
+            _lock: Some(lock),
             scope: Scope::Tab,
             count: pane_count,
             ceiling: ceiling.get(),
@@ -520,7 +520,7 @@ pub fn admit_pane(
         });
     }
     Ok(AdmissionPermit {
-        _lock: lock,
+        _lock: Some(lock),
         scope: Scope::Fleet,
         count: fleet.count().expect("admitted census has a count"),
         ceiling: fleet_ceiling.get(),
@@ -532,8 +532,10 @@ pub fn admit_pane(
 #[cfg(test)]
 fn test_permit(scope: Scope, count: usize, ceiling: usize) -> AdmissionPermit {
     AdmissionPermit {
-        _lock: File::open(std::env::current_exe().expect("test executable path"))
-            .expect("test executable is readable"),
+        _lock: Some(
+            File::open(std::env::current_exe().expect("test executable path"))
+                .expect("test executable is readable"),
+        ),
         scope,
         count,
         ceiling,

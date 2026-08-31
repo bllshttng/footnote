@@ -295,7 +295,7 @@ done <<<"$CONFIG_FILES"
 
 [ "$CONFIG_DORMANT" -eq 1 ] ||
     [ "$CONFIG_CANARY_SEEN" -eq 1 ] ||
-    fail "config scan did not see and clear its marked canary; scan is vacuous"
+    fail "config scan did not see and clear its marked canary; scan is vacuous. The canary fixture carries the leaf review.github_apps: if you registered a different leaf, update scripts/ci/fixtures/retired-config-leaf-canary.py to carry that leaf instead"
 
 if [ -n "$CONFIG_HITS" ]; then
     echo "check-retired-command-strings: retired config leaves remain live:" >&2
