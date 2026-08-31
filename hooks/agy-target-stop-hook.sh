@@ -395,9 +395,19 @@ else
         --cwd "$TARGET_CWD" \
         2>>"$ROOT/.fno/agy-loop-check.stderr.log") || verb_rc=$?
 
-    if [[ $verb_rc -ne 0 ]] || ! printf '%s' "$DECISION_JSON" | jq -e . >/dev/null 2>&1; then
+    # Same invariant as the claude adapter: a non-zero exit means a BROKEN
+    # checker only when the reply carries no verdict. A driver may return a
+    # full decision payload on a non-zero code (loopcheck.rs king_decide does),
+    # while CLI misuse returns {"error": ...} with no `decision` field. Key on
+    # the field so a real verdict is honored and only a verdictless reply
+    # counts toward the give-up ceiling. Unreachable here today, because this
+    # adapter refuses to gate a king above and never passes --driver, so it
+    # only ever runs the target driver whose blocks exit 0. Kept identical
+    # anyway: two stop adapters that disagree about the same reply is how the
+    # claude side shipped the bug this mirrors.
+    if ! printf '%s' "$DECISION_JSON" | jq -e '.decision' >/dev/null 2>&1; then
         emit_event "loop_check_gh_error"
-        echo "agy stop-hook: WARNING: loop-check unavailable (rc=$verb_rc / non-JSON)" >&2
+        echo "agy stop-hook: WARNING: loop-check unavailable (rc=$verb_rc / no decision)" >&2
         tail -n 5 "$ROOT/.fno/agy-loop-check.stderr.log" >&2 2>/dev/null || true
         unavailable_continue_or_allow
     fi
