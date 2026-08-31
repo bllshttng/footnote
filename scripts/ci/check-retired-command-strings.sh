@@ -116,8 +116,12 @@ while IFS= read -r line || [ -n "$line" ]; do
     CONFIG_DISPOSITIONS+=("$disposition")
     CONFIG_REPLACEMENTS+=("$replacement")
 done <"$CONFIG_REGISTRY"
-[ "${#CONFIG_KEYS[@]}" -gt 0 ] ||
-    fail "$CONFIG_REGISTRY holds no entries; config scan is vacuous"
+# Zero active entries is a valid state: a tombstone can be filed before the
+# removal it describes lands. Rather than fail as vacuous, the config scan
+# goes dormant and says so on the success line, so a pass never silently
+# omits its scope.
+CONFIG_DORMANT=0
+[ "${#CONFIG_KEYS[@]}" -gt 0 ] || CONFIG_DORMANT=1
 
 [ -f "$CONFIG_CANARY" ] ||
     fail "config canary not found at $CONFIG_CANARY"
@@ -289,7 +293,8 @@ while IFS= read -r file; do
     done <"$file"
 done <<<"$CONFIG_FILES"
 
-[ "$CONFIG_CANARY_SEEN" -eq 1 ] ||
+[ "$CONFIG_DORMANT" -eq 1 ] ||
+    [ "$CONFIG_CANARY_SEEN" -eq 1 ] ||
     fail "config scan did not see and clear its marked canary; scan is vacuous"
 
 if [ -n "$CONFIG_HITS" ]; then
@@ -414,6 +419,9 @@ fi
     fail "clean, but the ${MARKER} canary at ${CANARY_FILE} was never seen and cleared; the marker spelling or the fixture drifted, so this pass is vacuous"
 
 echo "retired-command strings OK: inspected ${INSPECTED} runnable-form site(s), ${MARKED} declared at the site, ${ALLOWED} declared by path, controls fired"
+if [ "$CONFIG_DORMANT" -eq 1 ]; then
+    echo "config scan dormant: no retired leaves registered"
+fi
 # Name the paths, never just the count. A whole-file exemption that shows up
 # only as a number reads the same as no exemption at all.
 if [ -n "$ALLOWED_PATHS" ]; then
