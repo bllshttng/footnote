@@ -142,6 +142,7 @@ update
 version
 whoami context
 whoami cost
+whoami ledger
 whoami scoreboard
 whoami status
 worker
