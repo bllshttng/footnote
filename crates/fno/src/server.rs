@@ -6378,13 +6378,7 @@ impl Core {
                 })
             })
             .map(|(sid, _)| *sid)
-            .or_else(|| {
-                self.session
-                    .squads
-                    .iter()
-                    .find(|squad| squad.owns_path(&facts.cwd))
-                    .map(|squad| squad.id)
-            })
+            .or_else(|| self.session.find_by_cwd(&facts.cwd))
             .unwrap_or(view.0);
         // (x-d285) A claude row's resume runs the canonical re-entry
         // plan; the `None` arm fires the off-loop resolution and the
@@ -9602,13 +9596,9 @@ impl Core {
                     // membership FIRST (cwd ownership only as a fallback), so
                     // the panel shows it where ResumeAgent will actually place
                     // the pane - the two lookups must agree.
-                    let squad = self.member_squad_for_agent(a).or_else(|| {
-                        self.session
-                            .squads
-                            .iter()
-                            .find(|s| s.owns_path(&a.cwd))
-                            .map(|s| s.id)
-                    });
+                    let squad = self
+                        .member_squad_for_agent(a)
+                        .or_else(|| self.session.find_by_cwd(&a.cwd));
                     out.push(AgentRow {
                         spawned_by_session: a.spawned_by_session.clone(),
                         harness_session_id: a.harness_session_id.clone(),
@@ -9650,13 +9640,7 @@ impl Core {
                     let squad = self
                         .member_squad_for_agent(a)
                         .or_else(|| mission_squad_for(&a.name))
-                        .or_else(|| {
-                            self.session
-                                .squads
-                                .iter()
-                                .find(|s| s.owns_path(&a.cwd))
-                                .map(|s| s.id)
-                        });
+                        .or_else(|| self.session.find_by_cwd(&a.cwd));
                     // (x-6851 US3) Every row carries its cwd basename: an orphan
                     // uses it for the `~ elsewhere` disambiguation suffix
                     // (x-0090 AC2-UI), a squad-matched row for the foreign-cwd
@@ -9792,13 +9776,7 @@ impl Core {
                 S::Stopping => (false, Some("stopping…".to_string())),
                 S::Removing => (false, Some("removing…".to_string())),
             };
-            let squad = mission_squad_for(&r.name).or_else(|| {
-                self.session
-                    .squads
-                    .iter()
-                    .find(|s| s.owns_path(&r.cwd))
-                    .map(|s| s.id)
-            });
+            let squad = mission_squad_for(&r.name).or_else(|| self.session.find_by_cwd(&r.cwd));
             // (x-6851 US3) Every row carries its cwd basename - including a
             // squad-matched external-lifecycle row, so its foreign-cwd subline
             // still renders (the "every row" wire contract; codex review).
@@ -11041,13 +11019,7 @@ impl Core {
         // then the shared placement helper. The slot is recorded only after
         // placement succeeds, and NO squad member is persisted - the one
         // deliberate difference from the ordinary attach tail.
-        let owner = self
-            .session
-            .squads
-            .iter()
-            .find(|s| !spawn_cwd.is_empty() && s.owns_path(&spawn_cwd))
-            .map(|s| s.id)
-            .unwrap_or(view.0);
+        let owner = self.session.find_by_cwd(&spawn_cwd).unwrap_or(view.0);
         let dest = match self.resolve_placement_target(&PaneTarget::CurrentRoute, Some(owner)) {
             Ok(d) => d,
             Err(e) => {
@@ -11863,13 +11835,7 @@ impl Core {
                 // default: the squad whose `owns_path` matches the row cwd, so
                 // the attach lands where the agent lives, not the viewer's
                 // squad; fall back to the viewed squad for an orphan (AC1-EDGE).
-                let owner = self
-                    .session
-                    .squads
-                    .iter()
-                    .find(|s| !row_cwd.is_empty() && s.owns_path(&row_cwd))
-                    .map(|s| s.id)
-                    .unwrap_or(view.0);
+                let owner = self.session.find_by_cwd(&row_cwd).unwrap_or(view.0);
                 // (x-d6a8 G3) An anchored drop ("attach beside THIS pane") names a
                 // concrete pane the operator can see, which overrides owner
                 // routing: the pane lands in the anchor's OWN tab, resolved from
