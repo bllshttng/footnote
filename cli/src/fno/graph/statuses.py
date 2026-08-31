@@ -182,6 +182,9 @@ def readiness_status(entry: dict, id_to_entry: dict[str, dict]) -> tuple[str | N
     # membership hash. Tuple-`in` tolerated this; a frozenset does not.
     if isinstance(status, str) and status in _OVERLAY_TERMINAL_STATUSES:
         return status, None
+    pending_reason = pending_supersession_reason(entry)
+    if pending_reason:
+        return "blocked", pending_reason
     kind, blocker_id = compute_readiness(entry, id_to_entry)
     if kind == "ready":
         return status, None

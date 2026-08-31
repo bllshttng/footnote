@@ -93,6 +93,7 @@ def test_doctor_flags_tmp_state_dir(
         f"schema_version: 1\nconfig:\n  state_dir: {state_dir}/\n",
     )
     env = {**_ENV, "FNO_CONFIG": str(settings)}
+    env["FNO_TEST_HERMETIC"] = "0"
     result = runner.invoke(app, ["config", "doctor"], env=env)
     assert result.exit_code != 0, (
         f"Expected non-zero exit for /tmp state_dir, got {result.exit_code}:\n{result.output}"

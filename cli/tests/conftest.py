@@ -333,8 +333,12 @@ def _clear_settings_cache() -> None:
     Also resets config._loaded_from so paths.config_file() returns the correct
     path for the new test's settings file (Finding 3 fix isolation).
     """
+    from importlib import import_module
+
+    for module_name, function_name in HERMETIC_CACHED_STATE_CLEARERS:
+        getattr(import_module(module_name), function_name).cache_clear()
+
     from fno import config as _cfg
-    _cfg.load_settings.cache_clear()  # type: ignore[attr-defined]
     _cfg._loaded_from = None  # reset loaded_from tracker (Finding 3)
     # The merged-global-config cache read_global_block serves from; same
     # test-isolation rationale as the load_settings reset above.
@@ -344,15 +348,14 @@ def _clear_settings_cache() -> None:
         clear_global_merged_cache()
     except Exception:
         pass
-    # Also clear paths._settings and resolve_repo_root which have their own @cache
-    try:
-        import fno.paths as _paths
-        if hasattr(_paths, "_settings"):
-            _paths._settings.cache_clear()  # type: ignore[attr-defined]
-        if hasattr(_paths, "resolve_repo_root"):
-            _paths.resolve_repo_root.cache_clear()  # type: ignore[attr-defined]
-    except Exception:
-        pass
+
+
+HERMETIC_CACHED_STATE_CLEARERS: tuple[tuple[str, str], ...] = (
+    ("fno.config", "load_settings"),
+    ("fno.paths", "_settings"),
+    ("fno.paths", "resolve_repo_root"),
+    ("fno.plan.reconcile_status", "_node_status_map"),
+)
 
 
 MINIMAL_TARGET_STATE = """\

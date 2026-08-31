@@ -1073,15 +1073,21 @@ def test_recovery_scan_rejects_short_session_identity(tmp_path):
 
 def _run_codex(tmp_path, codex_dir, **kw):
     """Discover with empty claude stores + fake psutil so only codex rows surface."""
-    return discover.discover_live_sessions(
+    include_daemon = kw.pop("include_daemon", False)
+    kwargs = dict(
         sessions_dir=tmp_path / "no-sessions",
         projects_dir=tmp_path / "no-projects",
         codex_sessions_dir=codex_dir,
         name_map_path=tmp_path / ".fno" / "session-names.json",
+        registry_path=tmp_path / "missing-registry.json",
         psutil_mod=_FakePsutil(alive={}),
         project_resolver=kw.pop("project_resolver", lambda c: None),
         **kw,
     )
+    if include_daemon:
+        return discover.discover_live_sessions(**kwargs)
+    with patch.object(discover, "_discover_from_codex_daemon", return_value=[]):
+        return discover.discover_live_sessions(**kwargs)
 
 
 def test_us2_codex_rollout_surfaces_live_session(tmp_path):
@@ -1178,7 +1184,7 @@ def test_codex_truth_reuses_discovered_rollout_path(tmp_path, monkeypatch):
         lambda *_args, **_kwargs: pytest.fail("rollout store was rescanned"),
     )
 
-    sessions = _run_codex(tmp_path, codex)
+    sessions = _run_codex(tmp_path, codex, include_daemon=True)
 
     assert sessions[0].truth_state == "watching"
     assert sessions[0].transcript_path == str(rollout)
@@ -1676,7 +1682,7 @@ def test_daemon_row_is_enriched_by_recent_rollout(tmp_path, monkeypatch):
         ],
     )
 
-    sessions = _run_codex(tmp_path, codex)
+    sessions = _run_codex(tmp_path, codex, include_daemon=True)
 
     assert len(sessions) == 1
     assert sessions[0].cwd == "/rollout/repo"

@@ -45,12 +45,15 @@ the decision store could not answer.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
 from fno.pr import _merge
+
+_LOG = logging.getLogger(__name__)
 
 COVERED = 0
 REFUSED = 3
@@ -92,6 +95,31 @@ GATE_NONBLOCKING_CATEGORIES = frozenset(
 # that landed on the valve, never a merge that was reviewed, and a receipt
 # that cannot tell the two apart is a receipt that lies.
 OVERRIDE_NOTE_PREFIX = "override: "
+
+
+def _log_config_receipt(root: Path, key: str) -> None:
+    """Log the root, deciding file, and searched candidates for a gate key."""
+    try:
+        from fno.config import describe_settings_for_repo, resolve_source
+
+        candidates = describe_settings_for_repo(root)
+        source = resolve_source(key, root=root)
+        decider = str(source[0]) if source is not None else "default"
+        searched = ", ".join(str(path) for path in candidates) or "<none>"
+        _LOG.debug(
+            "config receipt: key=%s root=%s source=%s searched=%s",
+            key,
+            root,
+            decider,
+            searched,
+        )
+    except Exception as exc:  # noqa: BLE001 - the receipt must not change gate posture
+        _LOG.debug(
+            "config receipt unavailable: key=%s root=%s error=%s",
+            key,
+            root,
+            exc,
+        )
 
 # The note on the one COVERED answer that means "this gate does not apply
 # here". A reader cannot tell it from a real covered verdict by the empty
@@ -448,7 +476,9 @@ def _github_approval_satisfies(cwd: str) -> bool:
     reading the same checkout this one does."""
     from fno.pr import _reviews
 
-    return _reviews._resolved_github_approval_flag(str(_repo_root(cwd)))
+    root = _repo_root(cwd)
+    _log_config_receipt(root, "config.review.github_approval_satisfies")
+    return _reviews._resolved_github_approval_flag(str(root))
 
 
 def rests_on_self_attestation_alone(
@@ -514,6 +544,7 @@ def _corroboration_refusal(cov: Optional[dict], cwd: str) -> Optional[str]:
         from fno.config import load_settings_for_repo
 
         root = _repo_root(cwd)
+        _log_config_receipt(root, "config.review.require_corroboration")
         review = load_settings_for_repo(root).review
         if not getattr(review, "require_corroboration", False):
             return None
@@ -1020,6 +1051,7 @@ def _resolved_categories(cwd: str) -> frozenset[str]:
         from fno.review.findings import resolve_nonblocking_categories
 
         root = _repo_root(cwd)
+        _log_config_receipt(root, "config.review.nonblocking_categories")
         return resolve_nonblocking_categories(
             getattr(
                 load_settings_for_repo(root).review, "nonblocking_categories", None
@@ -1351,6 +1383,7 @@ def resolved_max_rounds(cwd: str) -> int:
         from fno.config import load_settings_for_repo
 
         root = _repo_root(cwd)
+        _log_config_receipt(root, "config.review.max_rounds")
         value = getattr(load_settings_for_repo(root).review, "max_rounds", None)
         if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
             return value

@@ -859,12 +859,26 @@ def get_cmd(
     as one object.
     """
     import json
+    import os
     import sys
 
-    from fno.config import load_settings, resolve_source
+    from fno.config import describe_settings_for_repo, load_settings, resolve_source
+    from fno.paths import resolve_repo_root
     from pydantic import BaseModel
 
     root = load_settings()
+    # The receipt must describe the chain that PRODUCED the value.
+    # load_settings() reads a pinned FNO_CONFIG through the env branch, which
+    # short-circuits the repo chain, so provenance seeded at the repo root
+    # would name files that did not decide the key.
+    pinned_config = os.environ.get("FNO_CONFIG")
+    settings_root = (
+        Path(pinned_config).resolve().parent
+        if pinned_config
+        else resolve_repo_root().resolve()
+    )
+    provenance_root: Optional[Path] = None if pinned_config else settings_root
+    searched_candidates = describe_settings_for_repo(provenance_root)
 
     def _traverse(dotted: str) -> tuple[bool, object]:
         node: object = root
@@ -907,7 +921,7 @@ def get_cmd(
     # command exists to end, just with the block as the lie.
     is_leaf = not isinstance(node, (BaseModel, dict))
     if is_leaf:
-        source = resolve_source(key)
+        source = resolve_source(key, root=provenance_root)
         if source is None and (
             key.startswith("providers.")
             or key.startswith("config.providers.")
@@ -916,7 +930,9 @@ def get_cmd(
         ):
             # The value resolved through the rename; provenance must too, or a
             # file that DOES set the key reports "source: default".
-            source = resolve_source(key.replace("providers", "accounts", 1))
+            source = resolve_source(
+                key.replace("providers", "accounts", 1), root=provenance_root
+            )
         if source is not None:
             decider, overridden = source
         else:
@@ -939,6 +955,8 @@ def get_cmd(
                     "value": value,
                     "source": str(decider) if decider else None,
                     "overrides": [str(p) for p in overridden],
+                    "root": str(settings_root),
+                    "searched": [str(p) for p in searched_candidates],
                 },
                 default=str,
             )
@@ -951,6 +969,8 @@ def get_cmd(
             source_line += " (overrides " + ", ".join(str(p) for p in overridden) + ")"
     else:
         source_line = "source: mixed - a block merges leaves from several files; query a leaf (e.g. auto_merge.enabled) for its decider"
+    searched = ", ".join(str(path) for path in searched_candidates) or "<none>"
+    source_line += f" (root: {settings_root}; searched: {searched})"
 
     if isinstance(node, BaseModel):
         typer.echo(node.model_dump_json())
