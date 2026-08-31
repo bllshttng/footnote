@@ -1086,6 +1086,19 @@ def set_cmd(
         # Scope + path printed once (AC2-UI).
         typer.echo(f"({results[0].scope}: {results[0].path})")
 
+    for r in results:
+        if r.lease:
+            scope_flag = " --local" if r.scope == "project" else ""
+            release = (
+                f"fno config unset {r.key}{scope_flag}"
+                if r.key == "review.optional_apps"
+                else f"fno config set {r.key} true{scope_flag}"
+            )
+            typer.echo(
+                f"lease: {r.key} held by {r.lease['holder']}, expires at "
+                f"{r.lease['expires_at']}; release: {release}"
+            )
+
     _check_overridden_writes(results)
 
     # x-e106: setting pr_watch.enabled couples to the launchd agent so enabled

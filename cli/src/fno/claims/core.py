@@ -1866,6 +1866,19 @@ def reap_dead_claims(
                         # bearing on whether the archive itself worked.
                         reaped += 1
                         archived_paths.add(entry)
+                        if fresh.key.startswith("config-optout:"):
+                            # Read-time revocation is the safety guarantee. The
+                            # restore is cleanup for the human-facing file and
+                            # must never be allowed to turn a failed restore
+                            # into an honored opt-out.
+                            try:
+                                from fno.config.writer import _restore_reaped_optout
+
+                                _restore_reaped_optout(fresh)
+                            except Exception as exc:  # noqa: BLE001 - keep sweeping
+                                reap_failed.append(
+                                    (str(entry), f"opt-out restore failed: {exc}")
+                                )
                         emit_claim_reaped(
                             fresh,
                             root=root_label,

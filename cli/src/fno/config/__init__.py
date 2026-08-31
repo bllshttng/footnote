@@ -1178,6 +1178,9 @@ class ReviewBlock(BaseModel):
     # into the claim TTL bounds at use (`_review_hold.resolve_ttl_ms`), never at
     # parse: a misconfigured TTL must not make the merge guard unreadable.
     hold_ttl_minutes: int = 90
+    # How long a merge-gating opt-out claim remains valid. The claim layer caps
+    # the same value at 24 hours, so a writer cannot create an unbounded lease.
+    optout_ttl_minutes: int = Field(default=60, ge=1, le=24 * 60)
     # The INVOCATION list (Locked Decision 2): which AI reviewers /pr requests a
     # review from (gemini | codex | coderabbit | claude | none). Distinct from
     # required_bots (the GATE: which GitHub bot logins must have reviewed before
@@ -5193,6 +5196,9 @@ def load_settings() -> SettingsModel:
     # there is no need for an additional explicit nested call (which caused duplicate emission).
     _warn_unknown_keys(raw, SettingsModel)
 
+    from fno.config.optouts import revoke_unbacked_optouts
+
+    revoke_unbacked_optouts(raw)
     return SettingsModel.model_validate(raw)
 
 
@@ -5220,6 +5226,10 @@ def settings_from_files(paths: list[Path]) -> SettingsModel:
     # Alias per-layer (see load_settings) so precedence holds across legacy/canonical.
     for parsed in reversed(layers):
         raw = _deep_merge(raw, _alias_legacy_keys(parsed))
+    raw = _unwrap_config_dict(raw)
+    from fno.config.optouts import revoke_unbacked_optouts
+
+    revoke_unbacked_optouts(raw)
     return SettingsModel.model_validate(raw)
 
 
@@ -5241,6 +5251,10 @@ def load_settings_for_repo(repo_root: Path) -> SettingsModel:
         raw = _deep_merge(raw, parsed)
     if candidates:
         raw = _layer_worktree_local_override(raw, candidates[0].parent)
+    raw = _unwrap_config_dict(raw)
+    from fno.config.optouts import revoke_unbacked_optouts
+
+    revoke_unbacked_optouts(raw)
     return SettingsModel.model_validate(raw)
 
 

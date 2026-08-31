@@ -33,12 +33,25 @@ import tomli_w
 import yaml
 from pydantic import BaseModel, ValidationError
 
+from fno.claims import (
+    CLAIM_UNAVAILABLE,
+    ClaimCorrupted,
+    ClaimGoneAway,
+    ClaimHeldByOther,
+    ClaimValidationError,
+    acquire_claim,
+    claim_status,
+    release_claim,
+)
+from fno.claims.io import claims_root_for
 from fno.config import (
     SettingsModel,
     _global_settings_path,
     _migrate_yaml_to_toml,
     _strip_none,
 )
+from fno.config.optouts import MERGE_GATING_OPTOUTS
+from fno.harness_identity import resolve_attester_identity
 from fno.time_budget import validate_timeout_budget
 
 
@@ -56,6 +69,7 @@ class SetResult:
     value: Any
     path: Path
     scope: str  # "global" | "project"
+    lease: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -66,6 +80,101 @@ class UnsetResult:
     default: Any  # the model default the key reverts to once removed
     path: Path
     scope: str  # "global" | "project"
+
+
+_OPT_OUT_CLAIM_PREFIX = "config-optout:"
+
+
+def _resolve_optout_holder() -> str:
+    """Return the session identity that is allowed to hold an opt-out lease."""
+    session_id, _witness = resolve_attester_identity()
+    if not session_id:
+        raise ConfigSetError(
+            "merge-gating opt-out requires a resolved attester session"
+        )
+    return session_id
+
+
+def _optout_claim_key(key: str) -> str:
+    return f"{_OPT_OUT_CLAIM_PREFIX}{key}"
+
+
+def _stored_leaf(data: dict[str, Any], parts: list[str]) -> tuple[bool, Any]:
+    node: Any = data
+    for part in parts:
+        if not isinstance(node, dict) or part not in node:
+            return False, None
+        node = node[part]
+    return True, node
+
+
+def _is_optout_value(key: str, present: bool, value: Any) -> bool:
+    return present and value == MERGE_GATING_OPTOUTS[key]
+
+
+def _optout_status(key: str) -> dict[str, Any]:
+    claim_key = _optout_claim_key(key)
+    return claim_status(claim_key, root=claims_root_for(claim_key))
+
+
+def _release_optout_claim(key: str, holder: str) -> None:
+    release_claim(
+        _optout_claim_key(key),
+        holder,
+        root=claims_root_for(_optout_claim_key(key)),
+    )
+
+
+def _optout_ttl_ms(data: dict[str, Any]) -> int:
+    present, value = _stored_leaf(data, ["review", "optout_ttl_minutes"])
+    minutes = value if present else 60
+    if isinstance(minutes, bool) or not isinstance(minutes, int):
+        raise ConfigSetError(
+            "review.optout_ttl_minutes must be an integer between 1 and 1440",
+            2,
+        )
+    return minutes * 60 * 1000
+
+
+def _lease_dict(claim: Any) -> dict[str, Any]:
+    return {
+        "holder": claim.holder,
+        "acquired_at": claim.acquired_at,
+        "expires_at": claim.expires_at,
+    }
+
+
+def _restore_reaped_optout(claim: Any) -> Optional[Path]:
+    """Restore the value recorded by a retired ``config-optout`` claim."""
+    key = str(getattr(claim, "key", ""))
+    if not key.startswith(_OPT_OUT_CLAIM_PREFIX):
+        return None
+    metadata = getattr(claim, "metadata", {})
+    if not isinstance(metadata, dict):
+        raise ConfigSetError(f"{key} has invalid restore metadata")
+    config_key = metadata.get("config_key")
+    config_path = metadata.get("config_path")
+    if not isinstance(config_key, str) or config_key not in MERGE_GATING_OPTOUTS:
+        raise ConfigSetError(f"{key} has invalid config_key restore metadata")
+    if not isinstance(config_path, str) or not config_path:
+        raise ConfigSetError(f"{key} has no config_path restore metadata")
+
+    target = Path(os.path.realpath(config_path))
+    parts = _storage_parts(config_key.split("."))
+    prior_present = bool(metadata.get("prior_present", False))
+    prior_value = metadata.get("prior_value")
+
+    def _restore(existing: dict[str, Any]) -> dict[str, Any]:
+        present, value = _stored_leaf(existing, parts)
+        if not _is_optout_value(config_key, present, value):
+            return existing
+        if prior_present:
+            return _deep_set(existing, parts, prior_value)
+        return _deep_unset(existing, parts)[0]
+
+    if not target.exists() and not prior_present:
+        return None
+    return _locked_update(target, _restore)
 
 
 def _unwrap_optional(ann: Any) -> Any:
@@ -581,6 +690,9 @@ def set_config_values(
 
     target = _target_path(scope, repo_root)
     final_values: dict[str, Any] = {}
+    leases: dict[str, dict[str, Any]] = {}
+    newly_acquired: list[tuple[str, str]] = []
+    releases: list[tuple[str, str]] = []
 
     def _validate_and_merge(existing: dict[str, Any]) -> dict[str, Any]:
         # Phase 1: coerce/parse + apply every key, collecting the distinct
@@ -599,6 +711,74 @@ def set_config_values(
                 blocks[block[0]] = block[1]
         for block_parts, parent_cls in blocks.items():
             _validate_block(data, block_parts, parent_cls)
+
+        for key in order:
+            if key not in MERGE_GATING_OPTOUTS:
+                continue
+            before_present, before = _stored_leaf(existing, parts_by_key[key])
+            after_present, after = _stored_leaf(data, parts_by_key[key])
+            before_active = _is_optout_value(key, before_present, before)
+            after_active = _is_optout_value(key, after_present, after)
+            status = _optout_status(key)
+            state = status.get("state")
+            claim_key = _optout_claim_key(key)
+            root = claims_root_for(claim_key)
+
+            if after_active:
+                holder = _resolve_optout_holder()
+                existing_holder = status.get("holder")
+                metadata = {
+                    "config_key": key,
+                    "config_path": str(
+                        Path(os.path.realpath(target)) if target.is_symlink() else target
+                    ),
+                    "scope": scope,
+                    "prior_present": before_present and not before_active,
+                    "prior_value": before if before_present and not before_active else None,
+                }
+                # An idempotent refresh must preserve the original value that
+                # the lease is responsible for restoring.
+                if (
+                    state in {"live", "suspect"}
+                    and existing_holder == holder
+                    and isinstance(status.get("metadata"), dict)
+                ):
+                    old_metadata = status["metadata"]
+                    if old_metadata.get("config_key") == key:
+                        metadata = old_metadata
+                try:
+                    claim = acquire_claim(
+                        claim_key,
+                        holder,
+                        reason="merge-gating opt-out",
+                        ttl_ms=_optout_ttl_ms(data),
+                        metadata=metadata,
+                        root=root,
+                    )
+                except ClaimHeldByOther as exc:
+                    raise ConfigSetError(str(exc), 1) from exc
+                except CLAIM_UNAVAILABLE as exc:
+                    raise ConfigSetError(
+                        f"cannot acquire {claim_key}: {exc}", 1
+                    ) from exc
+                except (ClaimCorrupted, ClaimGoneAway, ClaimValidationError, OSError) as exc:
+                    raise ConfigSetError(
+                        f"cannot acquire {claim_key}: {exc}", 1
+                    ) from exc
+                leases[key] = _lease_dict(claim)
+                if not (
+                    state in {"live", "suspect"} and existing_holder == holder
+                ):
+                    newly_acquired.append((key, holder))
+            elif state in {"live", "suspect"}:
+                holder = _resolve_optout_holder()
+                if status.get("holder") != holder:
+                    raise ConfigSetError(
+                        f"claim {claim_key!r} held by {status.get('holder')}; "
+                        "only its holder may release the opt-out",
+                        1,
+                    )
+                releases.append((key, holder))
         return data
 
     try:
@@ -611,11 +791,26 @@ def set_config_values(
     except OSError as exc:
         # AC2-FR: the temp+rename already left the original intact; surface a
         # clean non-zero exit.
+        for key, holder in newly_acquired:
+            _release_optout_claim(key, holder)
         raise ConfigSetError(
             f"failed to write {target}: {exc} (settings left unchanged)", 1
         ) from exc
+    except Exception:
+        for key, holder in newly_acquired:
+            _release_optout_claim(key, holder)
+        raise
+
+    for key, holder in releases:
+        _release_optout_claim(key, holder)
     return [
-        SetResult(key=key, value=final_values[key], path=written, scope=scope)
+        SetResult(
+            key=key,
+            value=final_values[key],
+            path=written,
+            scope=scope,
+            lease=leases.get(key),
+        )
         for key in order
     ]
 
@@ -728,8 +923,23 @@ def unset_config_value(
     target = _target_path(scope, repo_root)
     real_target = Path(os.path.realpath(target)) if target.is_symlink() else target
 
+    release_holder: Optional[str] = None
+    if key in MERGE_GATING_OPTOUTS:
+        status = _optout_status(key)
+        if status.get("state") in {"live", "suspect"}:
+            release_holder = _resolve_optout_holder()
+            claim_key = _optout_claim_key(key)
+            if status.get("holder") != release_holder:
+                raise ConfigSetError(
+                    f"claim {claim_key!r} held by {status.get('holder')}; "
+                    "only its holder may release the opt-out",
+                    1,
+                )
+
     # No file -> nothing to remove; do not create an empty settings file.
     if not real_target.exists():
+        if release_holder:
+            _release_optout_claim(key, release_holder)
         return UnsetResult(
             key=key, was=None, present=False, default=default,
             path=real_target, scope=scope,
@@ -754,6 +964,9 @@ def unset_config_value(
         raise ConfigSetError(
             f"failed to write {target}: {exc} (settings left unchanged)", 1
         ) from exc
+
+    if release_holder:
+        _release_optout_claim(key, release_holder)
 
     return UnsetResult(
         key=key,

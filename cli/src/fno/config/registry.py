@@ -203,7 +203,7 @@ FIELD_META: dict[str, Meta] = {
         "advanced", "Local-attestation reviewers (code-review | peer | declare, or a name from review.reviewer_registry) that produce no GitHub review: loop-check accepts a head-pinned review_attestation event as gate evidence. Lets a solo/claude-only harness express a real gate with no App bot. sigma is retired; naming it here refuses at init with `/fno:review` named as the replacement.",
     ),
     "review.self_review_required": Meta(
-        "advanced", "When true (default), a code payload floors the harness-resolved self-review reviewer (claude /code-review, codex /review) onto the required set on a stock install, so a /target that ships code is held for a head-pinned attestation instead of asking an epic leader. Set false to opt out and restore unreviewed code-PR shipping.",
+        "advanced", "When true (default), a code payload floors the harness-resolved self-review reviewer (claude /code-review, codex /review) onto the required set on a stock install, so a /target that ships code is held for a head-pinned attestation instead of asking an epic leader. Set false only under a live claim; the opt-out lapses after review.optout_ttl_minutes and disarms unattended auto-merge while held.",
     ),
     "review.require_corroboration": Meta(
         "advanced", "When true (default false), a PR whose only coverage is the author's own (self_attested) local attestation reads as uncovered; the refusal names both satisfying paths: a second session's head-pinned attestation, or a GitHub App review. Read `fno doctor`'s self-attestation report before flipping it - that row is the number of recent merged PRs that would have been held.",
@@ -219,6 +219,9 @@ FIELD_META: dict[str, Meta] = {
     ),
     "review.hold_ttl_minutes": Meta(
         "advanced", "How long a registered review hold blocks a merge before it ages out (default 90). A review that starts registers review:branch:<branch>; fno do pr status and fno do pr merge refuse while it is live, so a merge cannot land on the pre-review code. A wedge bound, not an estimate: an expired hold clears with a receipt rather than holding the lane forever.",
+    ),
+    "review.optout_ttl_minutes": Meta(
+        "advanced", "How long a merge-gating opt-out claim remains live (default 60 minutes, maximum 24 hours). The claim is global, expires automatically, and disarms unattended auto-merge while held.",
     ),
     "review.peers": Meta(
         "advanced", "Harness peers run locally and gate on a head-pinned clean verdict. Scalar or {provider, model} entries need no second GitHub account; adding identity opts into legacy posted-review mode.",

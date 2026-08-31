@@ -744,7 +744,10 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
             s.github_apps = value_as_login_list(v);
         }
         if let Some(v) = review.get("optional_apps") {
-            s.optional_apps = value_as_login_list(v);
+            let explicit_empty = matches!(v, toml::Value::Array(items) if items.is_empty());
+            if !explicit_empty || live_merge_gating_optout("review.optional_apps") {
+                s.optional_apps = value_as_login_list(v);
+            }
         }
         if let Some(v) = review.get("reviewers") {
             s.reviewers = value_as_reviewers(v);
@@ -778,8 +781,12 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
         }
         if let Some(v) = review.get("self_review_required") {
             // A malformed value stays None -> normalized to true (obligation on,
-            // fail-closed); only an explicit bool reaches the field.
-            s.self_review_required = v.as_bool();
+            // fail-closed); an explicit false is also obligation-on unless the
+            // global claim that backs this opt-out is LIVE.
+            let parsed = v.as_bool();
+            if parsed != Some(false) || live_merge_gating_optout("review.self_review_required") {
+                s.self_review_required = parsed;
+            }
         }
         if let Some(v) = review.get("nudge") {
             s.nudge_overrides = value_as_nudge_overrides(v);
@@ -817,6 +824,14 @@ fn lax_bool(v: &toml::Value) -> Option<bool> {
                     _ => None,
                 })
         })
+}
+
+fn live_merge_gating_optout(key: &str) -> bool {
+    let claim_key = format!("config-optout:{key}");
+    matches!(
+        crate::claims::status(&claim_key, None).0,
+        crate::claims::ClaimState::Live
+    )
 }
 
 /// Infallible wrapper: an unparseable file fails CLOSED (unsatisfiable login
@@ -15653,6 +15668,57 @@ mod tests {
             !passes.iter().any(|p| p.head == "h" && p.is_pass),
             "a same-head retraction must revoke the pass"
         );
+    }
+
+    #[test]
+    fn live_optional_apps_optout_is_honored() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("FNO_CLAIMS_ROOT");
+        let root = std::env::temp_dir().join(format!("fno-loop-optional-{}", std::process::id()));
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let key = "config-optout:review.optional_apps";
+        let acquired = crate::claims::acquire(
+            key,
+            "session-a",
+            crate::claims::AcquireOpts {
+                ttl_ms: Some(300_000),
+                events_dir: Some(root.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            acquired,
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+
+        let settings = parse_settings("[review]\noptional_apps = []\n");
+
+        assert_eq!(settings.optional_apps, Some(Vec::new()));
+        let _ = crate::claims::release(key, "session-a", None, Some(&root));
+        match prior {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+    }
+
+    #[test]
+    fn unbacked_self_review_optout_defaults_to_obligation_on() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("FNO_CLAIMS_ROOT");
+        let root = std::env::temp_dir().join(format!("fno-loop-optout-{}", std::process::id()));
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+
+        let settings = parse_settings("[review]\nself_review_required = false\n");
+
+        assert_eq!(settings.self_review_required, None);
+        match prior {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
     }
 
     #[test]

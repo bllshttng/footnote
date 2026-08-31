@@ -892,7 +892,10 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // worker cannot export the grant at finalize time to arm its own merge.
     let env_grant = approved && m.auto_merge_source.as_deref() == Some("env-target-auto-merge");
     let (auto_merge_armed, auto_merge_blocked_reason) = if should_arm {
-        if !env_grant && !crate::agents_config::auto_merge_enabled(&cwd) {
+        if let Some(blocked) = merge_gating_optout_block_reason() {
+            eprintln!("finalize: native auto-merge withheld: {blocked}");
+            (false, Some(blocked))
+        } else if !env_grant && !crate::agents_config::auto_merge_enabled(&cwd) {
             let blocked = "live config resolves auto_merge.enabled=false; sanctioned \
 override (operator levers): arm the standing switch (`fno config set \
 auto_merge.enabled true`) or start the run with TARGET_AUTO_MERGE=1 from \
@@ -1953,6 +1956,54 @@ fn should_arm_auto_merge(reason: &str, auto_merge_approved: bool) -> bool {
         && classify_legacy(reason)
             .map(|record| record.projection().merge_armable)
             .unwrap_or(false)
+}
+
+fn optout_release_command(key: &str) -> &'static str {
+    match key {
+        "review.optional_apps" => "fno config unset review.optional_apps",
+        "review.self_review_required" => "fno config set review.self_review_required true",
+        "auto_merge.require_checks_pass" => "fno config set auto_merge.require_checks_pass true",
+        _ => "fno agents claim release",
+    }
+}
+
+fn merge_gating_optout_block_reason_for(key: &str, claim: &crate::claims::ClaimRecord) -> String {
+    let expires = claim
+        .expires_at
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!(
+        "merge-gating opt-out in force (config-optout:{key}, held by {}, expires {expires}); an opt-out disarms UNATTENDED merge by design. Sanctioned path: merge deliberately (`fno do pr merge`) from the session holding the opt-out, or release it (`{}`) and let the gate green normally.",
+        claim.holder,
+        optout_release_command(key),
+    )
+}
+
+fn merge_gating_optout_block_reason() -> Option<String> {
+    let directory = crate::claims::claims_dir_for(None)?;
+    if directory.is_dir() {
+        // A claims directory that exists but cannot be read is not evidence of
+        // no opt-out. Refuse ambient auto-merge until the instrument is readable.
+        if std::fs::read_dir(&directory).is_err() {
+            return Some(format!(
+                "merge-gating opt-out instrument unreadable at {}; sanctioned path: restore claims access before unattended merge",
+                directory.display()
+            ));
+        }
+    }
+    for key in crate::claims::MERGE_GATING_OPTOUT_KEYS {
+        let claim_key = format!("config-optout:{key}");
+        let (state, claim) = crate::claims::status(&claim_key, None);
+        if state == crate::claims::ClaimState::Live {
+            if let Some(claim) = claim {
+                return Some(merge_gating_optout_block_reason_for(key, &claim));
+            }
+            return Some(format!(
+                "merge-gating opt-out claim {claim_key} is live but unreadable; sanctioned path: restore claims access before unattended merge"
+            ));
+        }
+    }
+    None
 }
 
 /// Return why configured optional-review evidence forbids native auto-merge,
@@ -3356,6 +3407,67 @@ mod tests {
     }
 
     // ── x-1951: arm auto-merge at the green gate, not at PR creation ────────
+
+    #[test]
+    fn opt_out_block_reason_names_claim_and_deliberate_path() {
+        let claim = crate::claims::ClaimRecord {
+            schema_version: 1,
+            key: "config-optout:review.self_review_required".into(),
+            holder: "session-a".into(),
+            acquired_at: 10,
+            pid: Some(std::process::id() as i32),
+            host: "test-host".into(),
+            pid_unavailable: false,
+            expires_at: Some(20),
+            reason: None,
+            harness: None,
+            pid_provenance: None,
+            machine_id: None,
+            metadata: serde_json::Map::new(),
+        };
+
+        let reason = merge_gating_optout_block_reason_for("review.self_review_required", &claim);
+
+        assert!(reason.contains("config-optout:review.self_review_required"));
+        assert!(reason.contains("held by session-a"));
+        assert!(reason.contains("expires 20"));
+        assert!(reason.contains("fno do pr merge"));
+        assert!(reason.contains("fno config set review.self_review_required true"));
+    }
+
+    #[test]
+    fn live_opt_out_claim_blocks_native_auto_merge_guard() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("FNO_CLAIMS_ROOT");
+        let root = std::env::temp_dir().join(format!("fno-finalize-optout-{}", std::process::id()));
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let key = "config-optout:review.self_review_required";
+        let acquired = crate::claims::acquire(
+            key,
+            "session-a",
+            crate::claims::AcquireOpts {
+                ttl_ms: Some(300_000),
+                events_dir: Some(root.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            acquired,
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+
+        let reason = merge_gating_optout_block_reason().expect("live opt-out must block arming");
+
+        assert!(reason.contains("config-optout:review.self_review_required"));
+        assert!(reason.contains("held by session-a"));
+        let _ = crate::claims::release(key, "session-a", None, Some(&root));
+        match prior {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+    }
 
     #[test]
     fn auto_merge_arms_only_on_an_approved_green_pr_terminal() {

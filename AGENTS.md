@@ -172,7 +172,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 ## CLI subsystems (summary + doc)
 
 - **`fno agents claim`** - the one work-claim primitive; atomic lockfiles under `.fno/claims/`. `target init` already claims the node - never `claim acquire` manually. [coordination](docs/architecture/coordination.md).
-- **`fno agents mail` - king-mediated native review.** A worker self-invokes the native review verb (claude `/code-review`, codex `/review`) via the Skill tool first; when refused, `fno agents mail send <worker> --raw '/<verb>'` fires it at the prompt line (a wrapped reply won't). The code-payload self-review obligation is enforced at the stop gate (`loopcheck.rs`) and `fno do pr merge`; opt out `config.review.self_review_required = false`. [review lanes](docs/architecture/review-lanes.md).
+- **`fno agents mail` - native review.** A worker runs the native review via Skill; raw mail is the fallback. The stop gate and `fno do pr merge` enforce code review; `review.self_review_required = false` needs a live claim, expires after `review.optout_ttl_minutes`, and disarms unattended auto-merge. [review lanes](docs/architecture/review-lanes.md).
 - **`fno inbox decide`** - records a ruling per subject. `fno inbox decisions X` recovers it, newest first. [decision-record](docs/architecture/decision-record.md).
 - **`fno whoami` / `fno whoami status`** - read-only self-introspection; run when confused after compaction.
 - **`fno do target start <node>`** - one-verb worktree cold-start (ensure off `origin/main` -> heal `.fno` symlink -> `target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
