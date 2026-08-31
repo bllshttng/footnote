@@ -1441,6 +1441,66 @@ def worktree_overlap_observed(
     return _build("worktree_overlap_observed", source, data)
 
 
+_MISSING = object()
+
+
+def config_write(
+    *,
+    key: str,
+    scope: str,
+    root_kind: str,
+    config_path: str,
+    present_before: bool,
+    present_after: bool,
+    old_value: Any = _MISSING,
+    new_value: Any = _MISSING,
+    redacted: bool = False,
+    attester_session_id: str,
+    attester_witness: str,
+) -> dict[str, Any]:
+    """Build a typed receipt for one changed config leaf."""
+    if not isinstance(key, str) or not key.strip():
+        raise ValidationError("config_write key cannot be empty")
+    if scope not in {"global", "project"}:
+        raise ValidationError(f"unknown config_write scope: {scope!r}")
+    if root_kind not in {"operator", "project"}:
+        raise ValidationError(f"unknown config_write root_kind: {root_kind!r}")
+    if not isinstance(config_path, str) or not config_path:
+        raise ValidationError("config_write config_path cannot be empty")
+    if not isinstance(present_before, bool) or not isinstance(present_after, bool):
+        raise ValidationError("config_write presence flags must be booleans")
+    if not present_before and not present_after:
+        raise ValidationError("config_write cannot record a no-change write")
+    if present_before and old_value is _MISSING:
+        raise ValidationError("config_write old_value is required when present_before is true")
+    if present_after and new_value is _MISSING:
+        raise ValidationError("config_write new_value is required when present_after is true")
+    if not isinstance(redacted, bool):
+        raise ValidationError("config_write redacted must be a boolean")
+    if not isinstance(attester_session_id, str):
+        raise ValidationError("config_write attester_session_id must be a string")
+    if attester_witness not in {"process", "env_only", "conflict"}:
+        raise ValidationError(f"unknown config_write attester_witness: {attester_witness!r}")
+
+    data: dict[str, Any] = {
+        "key": key,
+        "scope": scope,
+        "root_kind": root_kind,
+        "config_path": config_path,
+        "present_before": present_before,
+        "present_after": present_after,
+        "attester_session_id": attester_session_id,
+        "attester_witness": attester_witness,
+    }
+    if present_before:
+        data["old_value"] = old_value
+    if present_after:
+        data["new_value"] = new_value
+    if redacted:
+        data["redacted"] = True
+    return _build("config_write", "config", data)
+
+
 class HermeticEscapeError(RuntimeError):
     """A test process tried to append to a journal outside its sandbox."""
 
@@ -1626,4 +1686,5 @@ __all__ = [
     "verify_child_promise",
     "wave_advanced",
     "worktree_overlap_observed",
+    "config_write",
 ]
