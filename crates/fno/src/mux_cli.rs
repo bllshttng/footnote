@@ -243,7 +243,7 @@ impl SessionRow {
         self.is_live()
             && self
                 .wire_version
-                .map_or(true, |version| version < proto::FLOOR_SINCE_PROTO)
+                .is_none_or(|version| version < proto::FLOOR_SINCE_PROTO)
     }
 }
 
