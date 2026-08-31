@@ -15,7 +15,6 @@ from fno.agents.dispatch import DispatchAskError
 from fno.agents.harnesses._acp import (
     AcpStdioSession,
     error_detail as _acp_error_detail,
-    initialize_params,
     iter_jsonl,  # noqa: F401  (re-exported for the contract test)
 )
 
