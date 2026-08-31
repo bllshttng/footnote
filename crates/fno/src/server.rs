@@ -10367,7 +10367,7 @@ impl Core {
         }
         if agents
             .as_deref()
-            .is_some_and(|rows| pane_is_dnd(rows, &self.session_name, pane))
+            .is_ok_and(|rows| pane_is_dnd(rows, &self.session_name, pane))
         {
             return ServerMsg::Err {
                 code: err_code::TARGET_DND,
@@ -25892,7 +25892,7 @@ mod tests {
                 "mux":{{"session":"test","pane_id":{p1}}}}}]}}"#
         );
         let rows = agents_view::derive_rows(&raw, 0).unwrap();
-        match core.pane_send(p1, b"must-not-land", false, None, Some(rows)) {
+        match core.pane_send(p1, b"must-not-land", false, None, Ok(rows)) {
             ServerMsg::Err { msg, .. } => assert!(msg.contains("DND"), "wording: {msg}"),
             other => panic!("expected DND refusal, got {other:?}"),
         }
