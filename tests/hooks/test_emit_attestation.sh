@@ -342,6 +342,35 @@ case "$RECEIPT" in
   *) fail "refusal lacks the base sha: $RECEIPT" ;;
 esac
 
+# 12c. A FAILED event writer must not be reported as a journaled row: the
+#      receipt claims the terminal only on the writer's own success, so an
+#      operator told "a refused row was emitted" can trust that it exists
+#      (the inline P2: an unconditional receipt over a suppressed emit
+#      failure made the attempt indistinguishable from an unrecorded one).
+cat > "$TMP/fno-emit-dead" <<'DEADSTUB'
+#!/usr/bin/env bash
+if [[ "$1" == "doctor" && "$2" == "event" && "$3" == "emit" ]]; then
+  exit 3
+fi
+exit 0
+DEADSTUB
+chmod +x "$TMP/fno-emit-dead"
+rm -f "$TMP/last-emit.txt"
+RECEIPT="$(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+  FNO="$TMP/fno-emit-dead" bash "$EMITTER" code-review pass 2>&1 >/dev/null)"
+RECEIPT_RC=$?
+[[ $RECEIPT_RC -ne 0 ]] && pass "empty diff still refuses with a dead writer" \
+  || fail "dead writer let the emit through (exit $RECEIPT_RC)"
+[[ ! -f "$TMP/last-emit.txt" ]] && pass "dead writer journals nothing" \
+  || fail "dead writer journaled anyway"
+case "$RECEIPT" in
+  *"could NOT be journaled"*)
+    pass "dead writer is reported as unrecorded, never as emitted" ;;
+  *"row was emitted"*)
+    fail "receipt claims a row the dead writer never wrote: $RECEIPT" ;;
+  *) fail "receipt unclear about the failed journal: $RECEIPT" ;;
+esac
+
 # 12b. A binary-only diff is a real review: numstat prints "-" for binary
 #      files, so the LINE count is an honest 0 while a file genuinely changed.
 #      The emit must attest with lines=0 files=1 - a lines-only refusal would

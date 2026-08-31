@@ -237,7 +237,12 @@ if [[ -z "$reviewed_base_sha" ]]; then
   # stage=refused, so the sent row does not orphan. Pre-attempt refusals
   # (detached HEAD, usage errors) journal nothing by design - no review
   # attempt exists for them to terminate.
-  "${FNO:-fno}" doctor event emit -t review_invocation -s daemon \
+  # The receipt claims a journaled row only on the writer's own success: a
+  # suppressed emit failure with an unconditional "row was emitted" tells the
+  # operator a terminal exists while the attempt stays indistinguishable from
+  # an unrecorded one. A failed journal is reported AS a failure, never hidden.
+  refusal_row_note="the refused review_invocation row could NOT be journaled (the event writer failed); the attempt is unrecorded"
+  if "${FNO:-fno}" doctor event emit -t review_invocation -s daemon \
     --events "$repo_root/.fno/events.jsonl" \
     -d "$(jq -cn \
       --arg invocation_id "$invocation_id" \
@@ -247,8 +252,10 @@ if [[ -z "$reviewed_base_sha" ]]; then
       --arg head_sha "$head_sha" \
       --arg branch "$branch" \
       '{invocation_id:$invocation_id,stage:$stage,verb:$verb,reason:$reason,head_sha:$head_sha,branch:$branch}')" \
-    >/dev/null 2>&1 || true
-  echo "emit-attestation: cannot resolve the base branch '${base}' to a merge-base; the diff under review is unmeasurable, so no event emitted (a refused review_invocation row was emitted for invocation ${invocation_id})" >&2
+    >/dev/null 2>&1; then
+    refusal_row_note="a refused review_invocation row was emitted for invocation ${invocation_id}"
+  fi
+  echo "emit-attestation: cannot resolve the base branch '${base}' to a merge-base; the diff under review is unmeasurable, so no attestation emitted (${refusal_row_note})" >&2
   exit 1
 fi
 reviewed_head_sha="$head_sha"
@@ -262,10 +269,13 @@ reviewed_line_count="$(git diff --numstat "${reviewed_base_sha}..HEAD" 2>/dev/nu
 if (( reviewed_file_count == 0 )); then
   # The refusal is durable, not just stderr: one review_invocation row with
   # stage=refused closes the `sent` row this attempt opened, carrying the same
-  # invocation_id and the measured zero. Best-effort (the script still exits 1
-  # whatever happens to the emit), and it attests nothing - a refusal never
-  # clears the coverage gate; it names why the attempt produced no verdict.
-  "${FNO:-fno}" doctor event emit -t review_invocation -s daemon \
+  # invocation_id and the measured zero. The script still exits 1 whatever
+  # happens to the emit, and it attests nothing - a refusal never clears the
+  # coverage gate; it names why the attempt produced no verdict. The receipt
+  # claims the row only on the writer's success (same rule as the
+  # unresolvable-base refusal above).
+  refusal_row_note="the refused review_invocation row could NOT be journaled (the event writer failed); the attempt is unrecorded"
+  if "${FNO:-fno}" doctor event emit -t review_invocation -s daemon \
     --events "$repo_root/.fno/events.jsonl" \
     -d "$(jq -cn \
       --arg invocation_id "$invocation_id" \
@@ -278,9 +288,11 @@ if (( reviewed_file_count == 0 )); then
       --arg reviewed_head_sha "$reviewed_head_sha" \
       --argjson reviewed_file_count "$reviewed_file_count" \
       '{invocation_id:$invocation_id,stage:$stage,verb:$verb,reason:$reason,head_sha:$head_sha,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_file_count:$reviewed_file_count}')" \
-    >/dev/null 2>&1 || true
+    >/dev/null 2>&1; then
+    refusal_row_note="a refused review_invocation row was emitted for invocation ${invocation_id}"
+  fi
   echo "emit-attestation: the diff under review is empty (no changed files, base ${reviewed_base_sha} .. HEAD ${reviewed_head_sha} on branch ${branch})." >&2
-  echo "A review with nothing to read is not a pass; a refused review_invocation row was emitted for invocation ${invocation_id}." >&2
+  echo "A review with nothing to read is not a pass; ${refusal_row_note}." >&2
   echo "If you are reviewing a worktree from the canonical checkout, hand the review its" >&2
   echo "target explicitly: run from the worktree path, or pass the PR number to the review verb." >&2
   exit 1
