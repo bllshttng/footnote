@@ -198,7 +198,7 @@ _RUNNER_PASSTHROUGH = (
     # opt-in live grok journey. The live test restores real HOME because Grok's
     # credential lives under ~/.grok, while its cwd remains an isolated fixture.
     "FNO_GROK_LIVE",
-    # opt-in live kimi journey (the credential-gated waves of x-cdfa). The
+    # opt-in live kimi journey (the credential-gated onboarding waves). The
     # live test restores real HOME because kimi's credential lives under
     # ~/.kimi-code, while its cwd remains an isolated fixture.
     "FNO_KIMI_LIVE",

@@ -1,8 +1,6 @@
 """Credential-free contract tests for kimi's ACP stdio lane."""
 from __future__ import annotations
 
-import json
-import os
 import shutil
 import subprocess
 import time
@@ -12,7 +10,6 @@ import pytest
 
 
 KIMI = shutil.which("kimi")
-LIVE = os.environ.get("FNO_KIMI_LIVE") == "1"
 
 
 def _driver():

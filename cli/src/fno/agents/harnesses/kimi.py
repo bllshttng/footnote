@@ -200,6 +200,13 @@ class KimiAcpSession:
         deadline = time.monotonic() + STDERR_SETTLE_S
         while not self._stderr and time.monotonic() < deadline:
             time.sleep(0.05)
+            if self.proc is not None and self.proc.poll() is not None:
+                # A dead child's stderr is final once the drain thread has
+                # finished; no line will ever arrive, so do not spend the
+                # whole settle waiting for one.
+                if self._stderr_thread is not None:
+                    self._stderr_thread.join(timeout=0.5)
+                break
         return self.stderr_text
 
     def send(self, message: dict[str, Any]) -> None:
@@ -313,7 +320,8 @@ class KimiAcpSession:
     def initialize(self) -> dict[str, Any]:
         response = self.request("initialize", initialize_params())
         result = self.result(response, "initialize")
-        agent_name = (result.get("agentInfo") or {}).get("name")
+        agent_info = result.get("agentInfo")
+        agent_name = agent_info.get("name") if isinstance(agent_info, dict) else None
         if result.get("protocolVersion") != 1 or agent_name != "Kimi Code CLI":
             raise RuntimeError(
                 "kimi ACP initialize did not return the positive protocolVersion 1 "
