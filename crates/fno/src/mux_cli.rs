@@ -2795,7 +2795,8 @@ pub enum PaneCmd {
     },
     /// `pane keeper list`: read the keeper sockets DIRECTLY - no server is
     /// consulted, because the question this answers is "did the keeper
-    /// survive the server's death". Registered hidden (not in PANE_VERBS).
+    /// survive the server's death". Named in PANE_VERBS so the dispatcher's
+    /// refusal teaches it; the root menu stays the advertisement surface.
     KeeperList {
         json: bool,
         /// `--stale-after <dur>`: also flag keepers older than this.

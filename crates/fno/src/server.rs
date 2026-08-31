@@ -27934,8 +27934,10 @@ mod tests {
                 stale_after: Some(std::time::Duration::from_secs(86_400)),
             }
         );
-        // Not advertised: the curated-menu gate holds the pane surface.
-        assert!(!crate::mux_cli::PANE_VERBS.contains("keeper"));
+        // Named in the refusal surface (the verb-ratchet requires the
+        // dispatcher's message to name every verb it accepts); the curated
+        // root menu stays the one advertisement surface.
+        assert!(crate::mux_cli::PANE_VERBS.contains("keeper"));
     }
 
     #[test]
