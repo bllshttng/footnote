@@ -65,6 +65,9 @@ cd "$REPO_ROOT"
 REGISTRY="scripts/ci/retired-commands.txt"
 OK_PATHS="scripts/ci/retired-ok-paths.txt"
 MARKER='retired-ok:'
+CONFIG_REGISTRY="scripts/ci/retired-config-leaves.txt"
+CONFIG_CANARY="scripts/ci/fixtures/retired-config-leaf-canary.py"
+CONFIG_MARKER='retired-config-ok:'
 
 fail() {
     echo "check-retired-command-strings: $*" >&2
@@ -77,7 +80,11 @@ fail() {
 # A malformed line exits non-zero naming the line number rather than being
 # skipped: a silently dropped entry is a retired command the gate stops
 # looking for, which is the failure this whole file exists to prevent.
-declare -a CMDS INSTEAD RULING
+# Every array is ASSIGNED empty, never merely declared: bash 5.x under set -u
+# treats a declared-but-unassigned array as unbound even for ${#arr[@]}, while
+# bash 3.2 does not, so the construct reads differently across the machines
+# this gate runs on.
+declare -a CMDS=() INSTEAD=() RULING=()
 lineno=0
 while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
@@ -90,10 +97,47 @@ done <"$REGISTRY"
 
 [ "${#CMDS[@]}" -gt 0 ] || fail "$REGISTRY holds no entries; nothing to police"
 
+# --- 1a. Parse retired configuration leaves -------------------------------
+# A retired config key remains a live surface if it survives in a model,
+# reader, example, or caller-facing explanation. Keep the disposition in a
+# small, exact tombstone list so the audit can account for every removal.
+[ -f "$CONFIG_REGISTRY" ] || fail "config registry not found at $CONFIG_REGISTRY"
+declare -a CONFIG_KEYS=() CONFIG_DISPOSITIONS=() CONFIG_REPLACEMENTS=()
+CONFIG_KEY_COUNT=0
+lineno=0
+while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+    case "$line" in ''|'#'*) continue ;; esac
+    IFS='|' read -r key disposition replacement <<<"$line"
+    [[ "$key" =~ ^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$ ]] ||
+        fail "$CONFIG_REGISTRY:$lineno: malformed config path '$key'"
+    case "$disposition" in
+        constant|derived|one-shot|deleted) ;;
+        *) fail "$CONFIG_REGISTRY:$lineno: invalid disposition '$disposition'" ;;
+    esac
+    [ -n "$replacement" ] ||
+        fail "$CONFIG_REGISTRY:$lineno: missing replacement/remedy"
+    CONFIG_KEYS+=("$key")
+    CONFIG_DISPOSITIONS+=("$disposition")
+    CONFIG_REPLACEMENTS+=("$replacement")
+    CONFIG_KEY_COUNT=$((CONFIG_KEY_COUNT + 1))
+done <"$CONFIG_REGISTRY"
+# Zero active entries is a valid state: a tombstone can be filed before the
+# removal it describes lands. Rather than fail as vacuous, the config scan
+# goes dormant and says so on the success line, so a pass never silently
+# omits its scope.
+CONFIG_DORMANT=0
+[ "$CONFIG_KEY_COUNT" -gt 0 ] || CONFIG_DORMANT=1
+
+[ -f "$CONFIG_CANARY" ] ||
+    fail "config canary not found at $CONFIG_CANARY"
+grep -qF "$CONFIG_MARKER" "$CONFIG_CANARY" ||
+    fail "config canary lacks $CONFIG_MARKER; config scan is vacuous"
+
 # --- 1b. Parse the path allowlist ------------------------------------------
 # A whole-file exemption for the one case an in-file marker is not free: a
 # byte-budgeted file re-read on a schedule pays for the marker every time.
-declare -a OK_PATH_LIST
+declare -a OK_PATH_LIST=()
 if [ -f "$OK_PATHS" ]; then
     lineno=0
     while IFS= read -r line || [ -n "$line" ]; do
@@ -195,6 +239,83 @@ SURFACES=(
     "agents:md"
     "commands:md"
 )
+
+# The command scan above owns per-surface controls. Config leaves use the same
+# tracked caller-facing tree plus committed YAML/TOML files, which lets a
+# nested TOML table be checked without inventing a second surface taxonomy.
+CONFIG_FILES=""
+CONFIG_DIRS=""
+for surface in "${SURFACES[@]}"; do
+    dir="${surface%%:*}"
+    case " $CONFIG_DIRS " in *" $dir "*) ;; *) CONFIG_DIRS="${CONFIG_DIRS}${CONFIG_DIRS:+$'\n'}${dir}" ;; esac
+done
+CONFIG_DIRS="${CONFIG_DIRS}${CONFIG_DIRS:+$'\n'}.github"
+while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    for ext in py rs sh md yaml yml toml; do
+        ext_files="$(git ls-files -- "$dir" | grep -E "\.${ext}\$" || true)"
+        [ -n "$ext_files" ] && CONFIG_FILES="${CONFIG_FILES}${CONFIG_FILES:+$'\n'}${ext_files}"
+    done
+done < <(printf '%s\n' "$CONFIG_DIRS")
+[ -n "$CONFIG_DIRS" ] || fail "no config-scan directories; config scan is vacuous"
+[ -n "$CONFIG_FILES" ] || fail "no tracked config-scan files; config scan is vacuous"
+
+CONFIG_HITS=""
+CONFIG_CANARY_SEEN=0
+for idx in "${!CONFIG_KEYS[@]}"; do
+    key="${CONFIG_KEYS[$idx]}"
+    while IFS= read -r hit; do
+        [ -n "$hit" ] || continue
+        file="${hit%%:*}"; rest="${hit#*:}"; num="${rest%%:*}"
+        case "$file" in
+            "$CONFIG_REGISTRY"|"$CONFIG_CANARY")
+                [ "$file" = "$CONFIG_CANARY" ] && CONFIG_CANARY_SEEN=1
+                continue
+                ;;
+        esac
+        CONFIG_HITS="${CONFIG_HITS}${CONFIG_HITS:+$'\n'}${file}:${num}:${key}"
+    done < <(git grep -nF -- "$key" -- $CONFIG_FILES || true)
+done
+
+# A dotted path is not required in TOML examples. Flatten the active table
+# while scanning key assignments so `[review]` plus `github_apps = [...]`
+# cannot evade an exact-path search.
+while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    case "$file" in *.toml) ;; *) continue ;; esac
+    current=""
+    toml_num=0
+    while IFS= read -r toml_line || [ -n "$toml_line" ]; do
+        toml_num=$((toml_num + 1))
+        case "$toml_line" in
+            \[*\]) current="${toml_line#\[}"; current="${current%\]}"; continue ;;
+        esac
+        for idx in "${!CONFIG_KEYS[@]}"; do
+            key="${CONFIG_KEYS[$idx]}"; prefix="${key%.*}"; leaf="${key##*.}"
+            if [ "$current" = "$prefix" ] && [[ "$toml_line" =~ ^[[:space:]]*${leaf}[[:space:]]*= ]]; then
+                CONFIG_HITS="${CONFIG_HITS}${CONFIG_HITS:+$'\n'}${file}:${toml_num}:${key}"
+            fi
+        done
+    done <"$file"
+done <<<"$CONFIG_FILES"
+
+[ "$CONFIG_DORMANT" -eq 1 ] ||
+    [ "$CONFIG_CANARY_SEEN" -eq 1 ] ||
+    fail "config scan did not see and clear its marked canary; scan is vacuous. The canary fixture carries the leaf review.github_apps: if you registered a different leaf, update scripts/ci/fixtures/retired-config-leaf-canary.py to carry that leaf instead"
+
+if [ -n "$CONFIG_HITS" ]; then
+    echo "check-retired-command-strings: retired config leaves remain live:" >&2
+    while IFS= read -r hit; do
+        [ -n "$hit" ] || continue
+        file="${hit%%:*}"; rest="${hit#*:}"; num="${rest%%:*}"; key="${rest##*:}"
+        for idx in "${!CONFIG_KEYS[@]}"; do
+            [ "$key" = "${CONFIG_KEYS[$idx]}" ] || continue
+            echo "${file}:${num}: ${key} (${CONFIG_DISPOSITIONS[$idx]}); replacement/remedy: ${CONFIG_REPLACEMENTS[$idx]}" >&2
+            break
+        done
+    done <<<"$CONFIG_HITS"
+    exit 1
+fi
 
 RAW=""
 for surface in "${SURFACES[@]}"; do
@@ -304,6 +425,9 @@ fi
     fail "clean, but the ${MARKER} canary at ${CANARY_FILE} was never seen and cleared; the marker spelling or the fixture drifted, so this pass is vacuous"
 
 echo "retired-command strings OK: inspected ${INSPECTED} runnable-form site(s), ${MARKED} declared at the site, ${ALLOWED} declared by path, controls fired"
+if [ "$CONFIG_DORMANT" -eq 1 ]; then
+    echo "config scan dormant: no retired leaves registered"
+fi
 # Name the paths, never just the count. A whole-file exemption that shows up
 # only as a number reads the same as no exemption at all.
 if [ -n "$ALLOWED_PATHS" ]; then

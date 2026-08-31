@@ -1,3 +1,4 @@
+use fno::process_admission::BYPASS_HINT;
 use fno::process_admission::{
     configured_max_processes, decide_panes, decide_processes, AdmissionDecision, Census, MaxPanes,
     MaxProcesses, PaneCount, Scope,
@@ -69,7 +70,7 @@ fn ac2_err_refuses_at_fleet_ceiling_with_positive_marker() {
 
     assert_eq!(
         decision.refusal(),
-        Some("process admission refused: count=2 ceiling=2 scope=fleet reason=over-limit".into())
+        Some(format!("process admission refused: count=2 ceiling=2 scope=fleet reason=over-limit{BYPASS_HINT}").into())
     );
 }
 
@@ -83,7 +84,7 @@ fn ac4_neg_refuses_incomplete_snapshot_without_substituting_zero() {
     assert_eq!(
         decision.refusal(),
         Some(
-            "process admission refused: count=unknown ceiling=2 scope=fleet reason=measurement-unavailable"
+            format!("process admission refused: count=unknown ceiling=2 scope=fleet reason=measurement-unavailable{BYPASS_HINT}")
                 .into(),
         )
     );
@@ -134,7 +135,7 @@ fn ac2_err_creation_path_emits_positive_refusal_marker() {
 
     assert_eq!(
         refusal,
-        Some("process admission refused: count=2 ceiling=2 scope=fleet reason=over-limit".into())
+        Some(format!("process admission refused: count=2 ceiling=2 scope=fleet reason=over-limit{BYPASS_HINT}").into())
     );
 }
 
@@ -183,7 +184,7 @@ fn ac3_edge_concurrent_launchers_remeasure_after_the_first_spawn() {
     assert_eq!(
         refusals,
         vec![
-            "process admission refused: count=1 ceiling=1 scope=fleet reason=over-limit"
+            format!("process admission refused: count=1 ceiling=1 scope=fleet reason=over-limit{BYPASS_HINT}")
                 .to_string(),
         ]
     );
@@ -206,6 +207,52 @@ fn process_ceiling_uses_its_own_wire_and_process_default() {
     std::env::set_var("FNO_PROCESS_ADMISSION_MAX", "not-processes");
     assert!(configured_max_processes().is_err());
     restore_max_processes(previous);
+}
+
+#[test]
+fn ac5_hp_off_switch_bypasses_cap_before_config_and_lock() {
+    let _env_lock = ADMISSION_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous_mode = std::env::var_os("FNO_PROCESS_ADMISSION");
+    let previous_max = std::env::var_os("FNO_PROCESS_ADMISSION_MAX");
+
+    std::env::set_var("FNO_PROCESS_ADMISSION", "off");
+    std::env::set_var("FNO_PROCESS_ADMISSION_MAX", "not-a-number");
+
+    assert!(fno::process_admission::admit_fleet().is_ok());
+    assert!(fno::process_admission::admit_tab(99, Some(1)).is_ok());
+    assert!(fno::process_admission::admit_pane(99, Some(1)).is_ok());
+
+    restore_env("FNO_PROCESS_ADMISSION", previous_mode);
+    restore_env("FNO_PROCESS_ADMISSION_MAX", previous_max);
+}
+
+#[test]
+fn ac5_err_invalid_off_switch_fails_closed_with_accepted_values() {
+    let _env_lock = ADMISSION_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let previous_mode = std::env::var_os("FNO_PROCESS_ADMISSION");
+
+    std::env::set_var("FNO_PROCESS_ADMISSION", "maybe");
+    let error = match fno::process_admission::admit_fleet() {
+        Ok(_) => panic!("invalid switch must refuse"),
+        Err(error) => error,
+    };
+
+    assert!(error.detail().contains("FNO_PROCESS_ADMISSION"));
+    assert!(error.detail().contains("on|off"));
+    restore_env("FNO_PROCESS_ADMISSION", previous_mode);
+}
+
+fn restore_env(name: &str, previous: Option<std::ffi::OsString>) {
+    match previous {
+        Some(value) => std::env::set_var(name, value),
+        None => std::env::remove_var(name),
+    }
 }
 
 fn restore_max_processes(previous: Option<std::ffi::OsString>) {

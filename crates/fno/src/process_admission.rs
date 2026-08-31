@@ -108,6 +108,7 @@ pub enum AdmissionReason {
     OverLimit,
     MeasurementUnavailable,
     LockUnavailable,
+    EnvOverrideInvalid,
 }
 
 /// The result of one pre-spawn decision.
@@ -153,9 +154,12 @@ impl fmt::Display for AdmissionFailure {
 impl std::error::Error for AdmissionFailure {}
 
 /// The lock is held from the census through the child-creation syscall. It is
-/// intentionally released before the child lifetime begins.
+/// intentionally released before the child lifetime begins. A recovery-permit
+/// bypass carries `None`: the whole point of the switch is to work when the
+/// install is broken or replaced, so it must not depend on reading the
+/// executable it is recovering.
 pub struct AdmissionPermit {
-    _lock: File,
+    _lock: Option<File>,
     scope: Scope,
     count: usize,
     ceiling: usize,
@@ -219,10 +223,11 @@ impl AdmissionDecision {
             AdmissionReason::OverLimit => "over-limit",
             AdmissionReason::MeasurementUnavailable => "measurement-unavailable",
             AdmissionReason::LockUnavailable => "lock-unavailable",
+            AdmissionReason::EnvOverrideInvalid => "env-override-invalid",
         };
         Some(format!(
-            "process admission refused: count={count} ceiling={ceiling} scope={} reason={reason}",
-            scope.as_str()
+            "process admission refused: count={count} ceiling={ceiling} scope={} reason={reason}{BYPASS_HINT}",
+            scope.as_str(),
         ))
     }
 }
@@ -269,8 +274,55 @@ pub fn decide_panes(count: PaneCount, ceiling: MaxPanes) -> AdmissionDecision {
 
 pub const DEFAULT_MAX_PROCESSES: usize = 400;
 pub const DEFAULT_PANE_GROUP_MAX: usize = 4;
+/// The recovery hint every refusal carries, shared with the e2e assertions so
+/// the string can only drift in one place.
+pub const BYPASS_HINT: &str = "; set FNO_PROCESS_ADMISSION=off to bypass this gate for recovery; the value is inherited by children spawned from that shell";
 const LOCK_FILE: &str = "fno-process-admission.lock";
 const CHILD_MARKERS_FILE: &str = "fno-process-admission.children";
+const ADMISSION_SWITCH: &str = "FNO_PROCESS_ADMISSION";
+
+fn admission_disabled() -> Result<bool, String> {
+    match std::env::var(ADMISSION_SWITCH) {
+        // Trimming first: a templated env file loves to append a newline or a
+        // trailing space, and a switch that refuses on whitespace is a switch
+        // that strands a wedged fleet over invisible bytes.
+        Ok(value) if value.trim().eq_ignore_ascii_case("off") => Ok(true),
+        Ok(value) if value.trim().eq_ignore_ascii_case("on") => Ok(false),
+        Ok(value) => Err(format!(
+            "{ADMISSION_SWITCH}={value:?} is invalid; accepted values are on|off"
+        )),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+            "{ADMISSION_SWITCH} is not valid UTF-8; accepted values are on|off"
+        )),
+    }
+}
+
+fn override_failure(scope: Scope, ceiling: usize, detail: String) -> AdmissionFailure {
+    AdmissionFailure {
+        decision: AdmissionDecision::Refuse {
+            count: None,
+            ceiling,
+            scope,
+            reason: AdmissionReason::MeasurementUnavailable,
+        },
+        detail,
+    }
+}
+
+fn bypass_permit(scope: Scope, ceiling: usize) -> Result<AdmissionPermit, AdmissionFailure> {
+    // No flock here on purpose: the recovery switch has to survive the exact
+    // scenarios a lock depends on being readable (replaced or unlinked
+    // binary), so the permit simply holds no lock at all.
+    Ok(AdmissionPermit {
+        _lock: None,
+        scope,
+        count: 0,
+        ceiling,
+        #[cfg(test)]
+        track_children: false,
+    })
+}
 
 /// Read the already-resolved process cap carried by the Python launcher. A
 /// direct Rust client uses the same process-unit default as Python.
@@ -305,6 +357,17 @@ pub fn configured_pane_group_max(requested: Option<usize>) -> usize {
 /// Acquire the machine-global admission lock, measure the relevant process
 /// tree, and return a permit that must remain alive through the spawn syscall.
 pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
+    match admission_disabled() {
+        Ok(true) => return bypass_permit(Scope::Fleet, DEFAULT_MAX_PROCESSES),
+        Ok(false) => {}
+        Err(detail) => {
+            return Err(override_failure(
+                Scope::Fleet,
+                DEFAULT_MAX_PROCESSES,
+                detail,
+            ))
+        }
+    }
     let (ceiling, config_error) = match configured_max_processes() {
         Ok(value) => (value, None),
         Err(error) => (MaxProcesses::new(DEFAULT_MAX_PROCESSES), Some(error)),
@@ -337,7 +400,7 @@ pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
     let decision = decide_processes(&census, ceiling);
     match decision {
         AdmissionDecision::Admit => Ok(AdmissionPermit {
-            _lock: lock,
+            _lock: Some(lock),
             scope: Scope::Fleet,
             count: census.count().expect("admitted census has a count"),
             ceiling: ceiling.get(),
@@ -358,6 +421,11 @@ pub fn admit_tab(
     pane_count: usize,
     requested_cap: Option<usize>,
 ) -> Result<AdmissionPermit, AdmissionFailure> {
+    match admission_disabled() {
+        Ok(true) => return bypass_permit(Scope::Tab, DEFAULT_PANE_GROUP_MAX),
+        Ok(false) => {}
+        Err(detail) => return Err(override_failure(Scope::Tab, DEFAULT_PANE_GROUP_MAX, detail)),
+    }
     let ceiling = MaxPanes::new(configured_pane_group_max(requested_cap));
     #[cfg(test)]
     if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
@@ -375,7 +443,7 @@ pub fn admit_tab(
     let decision = decide_panes(PaneCount::new(pane_count), ceiling);
     match decision {
         AdmissionDecision::Admit => Ok(AdmissionPermit {
-            _lock: lock,
+            _lock: Some(lock),
             scope: Scope::Tab,
             count: pane_count,
             ceiling: ceiling.get(),
@@ -396,6 +464,17 @@ pub fn admit_pane(
     pane_count: usize,
     requested_cap: Option<usize>,
 ) -> Result<AdmissionPermit, AdmissionFailure> {
+    match admission_disabled() {
+        Ok(true) => return bypass_permit(Scope::Fleet, DEFAULT_MAX_PROCESSES),
+        Ok(false) => {}
+        Err(detail) => {
+            return Err(override_failure(
+                Scope::Fleet,
+                DEFAULT_MAX_PROCESSES,
+                detail,
+            ))
+        }
+    }
     let (fleet_ceiling, config_error) = match configured_max_processes() {
         Ok(value) => (value, None),
         Err(error) => (MaxProcesses::new(DEFAULT_MAX_PROCESSES), Some(error)),
@@ -441,7 +520,7 @@ pub fn admit_pane(
         });
     }
     Ok(AdmissionPermit {
-        _lock: lock,
+        _lock: Some(lock),
         scope: Scope::Fleet,
         count: fleet.count().expect("admitted census has a count"),
         ceiling: fleet_ceiling.get(),
@@ -453,8 +532,10 @@ pub fn admit_pane(
 #[cfg(test)]
 fn test_permit(scope: Scope, count: usize, ceiling: usize) -> AdmissionPermit {
     AdmissionPermit {
-        _lock: File::open(std::env::current_exe().expect("test executable path"))
-            .expect("test executable is readable"),
+        _lock: Some(
+            File::open(std::env::current_exe().expect("test executable path"))
+                .expect("test executable is readable"),
+        ),
         scope,
         count,
         ceiling,
@@ -506,8 +587,33 @@ pub fn std_status(command: &mut std::process::Command) -> io::Result<std::proces
     child.wait()
 }
 
+/// Bootstrap runs before the Python CLI and its configuration exist. These
+/// helpers are intentionally separate from the normal launch seam so the
+/// first-run recovery path cannot be blocked by the policy it is meant to
+/// recover from.
+pub(crate) fn bootstrap_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    std::process::Command::new(program)
+}
+
+pub(crate) fn bootstrap_output(
+    command: &mut std::process::Command,
+) -> io::Result<std::process::Output> {
+    command.output()
+}
+
+pub(crate) fn bootstrap_status(
+    command: &mut std::process::Command,
+) -> io::Result<std::process::ExitStatus> {
+    command.status()
+}
+
 #[cfg(unix)]
 pub fn std_exec(command: &mut std::process::Command) -> io::Error {
+    command.exec()
+}
+
+#[cfg(unix)]
+pub(crate) fn bootstrap_exec(command: &mut std::process::Command) -> io::Error {
     command.exec()
 }
 

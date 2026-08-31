@@ -1,0 +1,9 @@
+# Retired dotted config paths. Format: <path>|<disposition>|<replacement/remedy>
+#
+# review.github_apps is tombstoned PENDING its removal. The deletion is real,
+# separable work: 149 live references across cli/src, crates, hooks, docs and
+# skills at filing time, and the leaf is canonical (required_bots aliases it),
+# so removal is a review-gate change, not a string sweep. It is recorded as a
+# carveout and does not ride this gate PR. Zero active entries puts the config
+# scan in dormant mode. Re-register the line verbatim when the removal lands.
+# review.github_apps|deleted|use one-shot review evidence

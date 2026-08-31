@@ -22,6 +22,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 GATE = REPO_ROOT / "scripts" / "ci" / "check-retired-command-strings.sh"
 REGISTRY = REPO_ROOT / "scripts" / "ci" / "retired-commands.txt"
 CANARY = REPO_ROOT / "scripts" / "ci" / "fixtures" / "retired-command-canary.sh"
+CONFIG_REGISTRY = REPO_ROOT / "scripts" / "ci" / "retired-config-leaves.txt"
+CONFIG_CANARY = REPO_ROOT / "scripts" / "ci" / "fixtures" / "retired-config-leaf-canary.py"
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -39,6 +41,8 @@ def repo(tmp_path: Path) -> Path:
     shutil.copy(GATE, tmp_path / "scripts/ci/check-retired-command-strings.sh")
     shutil.copy(REGISTRY, tmp_path / "scripts/ci/retired-commands.txt")
     shutil.copy(CANARY, tmp_path / "scripts/ci/fixtures/retired-command-canary.sh")
+    shutil.copy(CONFIG_REGISTRY, tmp_path / "scripts/ci/retired-config-leaves.txt")
+    shutil.copy(CONFIG_CANARY, tmp_path / "scripts/ci/fixtures/retired-config-leaf-canary.py")
     (tmp_path / "scripts/ci/retired-ok-paths.txt").write_text("# none\n")
 
     # Every surface must hold at least one tracked file of its extension, or
@@ -83,6 +87,34 @@ def test_runnable_form_in_a_python_string_fails(repo: Path) -> None:
     result = _run(repo)
     assert result.returncode == 1
     assert "cli/src/fno/new.py" in result.stderr
+
+
+def test_retired_config_key_in_caller_surface_fails(repo: Path) -> None:
+    (repo / "scripts/ci/retired-config-leaves.txt").write_text(
+        "review.github_apps|deleted|use one-shot review evidence\n"
+    )
+    _add(repo, "cli/src/fno/config.py", 'HELP = "set review.github_apps"\n')
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "review.github_apps" in result.stderr
+
+
+def test_retired_config_key_in_nested_toml_fails(repo: Path) -> None:
+    (repo / "scripts/ci/retired-config-leaves.txt").write_text(
+        "review.github_apps|deleted|use one-shot review evidence\n"
+    )
+    _add(repo, "docs/config.toml", "[review]\ngithub_apps = []\n")
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "docs/config.toml" in result.stderr
+
+
+def test_missing_config_canary_fails_closed(repo: Path) -> None:
+    (repo / "scripts/ci/fixtures/retired-config-leaf-canary.py").unlink()
+    _git(repo, "add", "-A")
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "config canary not found" in result.stderr
 
 
 def test_failure_message_names_command_replacement_and_ruling(repo: Path) -> None:

@@ -6101,9 +6101,15 @@ fn review_events_path() -> PathBuf {
         }
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let root = std::process::Command::new("git")
-        .args(["-C", &cwd.to_string_lossy(), "rev-parse", "--show-toplevel"])
-        .output()
+    let mut command = crate::process_admission::std_command("git");
+    command.args(["-C", &cwd.to_string_lossy(), "rev-parse", "--show-toplevel"]);
+    let probe = crate::process_admission::std_output(&mut command);
+    if let Err(error) = &probe {
+        // The spawn itself failed (admission refusal, missing git). Say so, or
+        // the fallback silently lands the journal where no reader looks.
+        eprintln!("fno mux: review-events git probe failed ({error}); events fall back to the current directory");
+    }
+    let root = probe
         .ok()
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
@@ -6115,10 +6121,15 @@ fn review_events_path() -> PathBuf {
 
 fn review_invocation_branch_and_head() -> (Option<String>, Option<String>) {
     let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(["rev-parse", "--verify"])
-            .args(args)
-            .output()
+        let mut command = crate::process_admission::std_command("git");
+        command.args(["rev-parse", "--verify"]).args(args);
+        let probe = crate::process_admission::std_output(&mut command);
+        if let Err(error) = &probe {
+            eprintln!(
+                "fno mux: review-evidence git probe failed ({error}); evidence fields will be null"
+            );
+        }
+        probe
             .ok()
             .filter(|output| output.status.success())
             .and_then(|output| String::from_utf8(output.stdout).ok())
@@ -6126,9 +6137,9 @@ fn review_invocation_branch_and_head() -> (Option<String>, Option<String>) {
             .filter(|value| !value.is_empty())
     };
     let head = git(&["HEAD"]);
-    let branch = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
+    let mut command = crate::process_admission::std_command("git");
+    command.args(["rev-parse", "--abbrev-ref", "HEAD"]);
+    let branch = crate::process_admission::std_output(&mut command)
         .ok()
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
