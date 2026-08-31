@@ -231,7 +231,8 @@ config active-backlog	T1	config active-backlog	5
 config assert-subagent-budget	T1	config assert-subagent-budget	6	
 config doctor	T1	config doctor	20
 config get	KEEP	config get	69	deliberate readability slack for a high-traffic distinct operation
-config paths	T1	config paths	36	
+config history	T1	config history	1
+config paths	T1	config paths	36
 config plugins	T1	config plugins	10
 config project	T1	config project	9
 config rm	T1	config rm	0

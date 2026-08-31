@@ -1229,7 +1229,7 @@ def history(
         help="Exact config key or dotted prefix to filter.",
     ),
     limit: int = typer.Option(50, "--limit", min=1, help="Maximum rows to print."),
-    json_out: bool = typer.Option(False, "--json", help="Emit matching rows as JSONL."),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit matching rows as JSONL."),
     scope: Literal["global", "project", "all"] = typer.Option(
         "all", "--scope", help="Limit rows by the config scope that was written."
     ),
