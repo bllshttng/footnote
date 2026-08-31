@@ -710,18 +710,18 @@ def update_readiness(
         # than the source is a bump in its own right: installing the source
         # is a downgrade, and the older installed build's gate refuses the
         # still-running newer server.
-        def _row_unattachable(row: dict) -> bool:
+        def _row_unattachable(row: dict, source: int) -> bool:
             wire = row.get("wire_version")
             if not isinstance(wire, int):
                 return True
             if "stale" in row:
-                return bool(row.get("stale")) or wire > source_wire
-            return wire != source_wire
+                return bool(row.get("stale")) or wire > source
+            return wire != source
 
         wire_bump = (
             True
             if source_wire is None
-            else any(_row_unattachable(r) for r in live_rows)
+            else any(_row_unattachable(r, source_wire) for r in live_rows)
         )
 
     shells = sum(int(r.get("panes") or 0) for r in live_rows)
