@@ -6725,6 +6725,7 @@ mod tests {
             name: name.into(),
             cwd: "/tmp/seen".into(),
             exited: false,
+            dnd: false,
             liveness: crate::agents_view::Liveness::Alive,
             badge: None,
             reason: None,

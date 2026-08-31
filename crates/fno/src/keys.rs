@@ -330,7 +330,6 @@ fn keymap() -> Keymap {
 pub fn prefix_display() -> String {
     key_disp(prefix())
 }
-}
 
 /// After a resize chord fires, bare resize keys (`H/J/K/L`) keep resizing for
 /// this long without re-pressing prefix (tmux `bind -r` / `repeat-time`, 500ms
@@ -516,7 +515,7 @@ impl Scanner {
             let mut replay = false;
             match std::mem::replace(&mut self.state, State::Normal(0)) {
                 State::Normal(open_idx) => {
-                    if b == self.keymap.prefix {
+                    if b == prefix() {
                         // Prefix disarms first, then chords normally (Locked 5);
                         // a prefix+resize re-arms at its emission site below.
                         self.repeat = None;

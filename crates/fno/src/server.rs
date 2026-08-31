@@ -16391,6 +16391,7 @@ mod tests {
                 name: "live-paneless".into(),
                 cwd: "/live".into(),
                 exited: false,
+                dnd: false,
                 badge: None,
                 reason: None,
                 mux: None,
@@ -20354,8 +20355,8 @@ mod tests {
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
-            exited: true,
             dnd: false,
+            exited: true,
             badge: None,
             reason: None,
             mux: None,
@@ -20435,8 +20436,8 @@ mod tests {
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
-            exited: true,
             dnd: false,
+            exited: true,
             badge: None,
             reason: None,
             mux: None,
@@ -20780,6 +20781,7 @@ mod tests {
             name: "w".into(),
             cwd: "/w".into(),
             exited: true,
+            dnd: false,
             badge: None,
             reason: None,
             mux: None,
@@ -20934,6 +20936,7 @@ mod tests {
             harness: Some("claude".into()),
             name: "worker".into(),
             cwd: "/w".into(),
+            dnd: false,
             exited: false,
             badge: None,
             reason: None,
@@ -24322,6 +24325,7 @@ mod tests {
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
+            dnd: false,
             exited: true,
             badge: None,
             reason: None,
@@ -24432,6 +24436,7 @@ mod tests {
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
+            dnd: false,
             exited: true,
             badge: None,
             reason: None,
@@ -24504,6 +24509,7 @@ mod tests {
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
+            dnd: false,
             exited: true,
             badge: None,
             reason: None,
@@ -25883,7 +25889,7 @@ mod tests {
                 "mux":{{"session":"test","pane_id":{p1}}}}}]}}"#
         );
         let rows = agents_view::derive_rows(&raw, 0).unwrap();
-        match core.pane_send(p1, b"must-not-land", false, Some(rows)) {
+        match core.pane_send(p1, b"must-not-land", false, None, Some(rows)) {
             ServerMsg::Err { msg, .. } => assert!(msg.contains("DND"), "wording: {msg}"),
             other => panic!("expected DND refusal, got {other:?}"),
         }
