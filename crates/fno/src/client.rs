@@ -12862,9 +12862,15 @@ async fn dispatch_event(
             // Persist here too: prefix+s and the settings toggle write the
             // same key, or the two entry points disagree about what the
             // operator asked for. Fire-and-forget, so the flip stays instant;
-            // a lost write just means this flip was session-only.
+            // a lost write just means this flip was session-only. The writes
+            // serialize: config set is a read-modify-write of one file, and
+            // two overlapping processes could persist the earlier flip last.
             let enabled = if view.status_on { "true" } else { "false" };
-            tokio::spawn(spawn_config_set("mux.status_row", enabled));
+            tokio::spawn(async move {
+                static TOGGLE_WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+                let _guard = TOGGLE_WRITE.lock().await;
+                let _ = spawn_config_set("mux.status_row", enabled).await;
+            });
         }
         Event::CycleSection => {
             // Pure local state, no I/O - usable even when the socket write path
