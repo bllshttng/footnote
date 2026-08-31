@@ -6659,13 +6659,10 @@ fn zero_evidence_attestation(val: &Value) -> bool {
 /// `Refused` local verdict so `review_state` reads `ReviewerRefused` -
 /// "attempted, nothing to review" - instead of the generic unreviewed that is
 /// byte-identical to "never attempted" at every coverage surface. A refused
-/// verdict never counts toward coverage; it only names the state, and a later
-/// real review outranks it (`review_state` checks `Reviewed` first).
-fn local_refused_verdicts(
-    events_text: &str,
-    head_branch: &str,
-    head_sha: &str,
-) -> Vec<ReviewerVerdict> {
+/// verdict never counts toward coverage; it only names the state, a later
+/// real review outranks it (`review_state` checks `Reviewed` first), and a
+/// moved head retires it (exact-head scoping, below).
+fn local_refused_verdicts(events_text: &str, head_sha: &str) -> Vec<ReviewerVerdict> {
     let mut out: Vec<ReviewerVerdict> = Vec::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
@@ -6681,11 +6678,17 @@ fn local_refused_verdicts(
             .pointer("/data/head_sha")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let line_branch = val
-            .pointer("/data/branch")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
+        // EXACT-HEAD scoping, deliberately narrower than an attestation's: a
+        // refusal is a terminal of one ATTEMPT at one measured head, not a
+        // claim about the branch. Admitting it on the branch arm alone would
+        // park ReviewerRefused at every later head (an author's fix push
+        // cannot clear it, only a real review can), which reads downstream as
+        // "the reviewer declined" at a head nobody attempted - and the local
+        // refusal feeds the same reviewer_refused paths a bot quota bounce
+        // does. Once the head moves, the state honestly returns to unreviewed:
+        // nothing has reviewed the new head. An empty head (a forged or legacy
+        // row) scopes to nothing.
+        if line_head.is_empty() || line_head != head_sha {
             continue;
         }
         let mut name = val
@@ -7002,7 +7005,7 @@ pub fn classify_coverage_tiled(
     let (local_passes, pairs_raising_findings) =
         local_latest_attestations(events_text, head_branch, head_sha);
     let mut verdicts: Vec<ReviewerVerdict> = Vec::new();
-    verdicts.extend(local_refused_verdicts(events_text, head_branch, head_sha));
+    verdicts.extend(local_refused_verdicts(events_text, head_sha));
 
     if github_read_ok {
         // (1) Collect distinct KNOWN review-App authors that posted a review
@@ -14850,10 +14853,8 @@ mod tests {
     #[test]
     fn refused_invocation_row_out_of_scope_is_ignored() {
         // A refusal on ANOTHER branch's attempt is not this PR's state; only
-        // in-scope rows (branch match, or the exact head) mint a verdict. The
-        // row below carries a foreign branch AND a foreign head: an exact-head
-        // match alone would admit it through the legacy arm, so both must
-        // differ for this to be the honest out-of-scope shape.
+        // exact-head rows mint a verdict. The row below carries a foreign
+        // branch AND a foreign head.
         let events = serde_json::json!({
             "type": "review_invocation",
             "data": {"invocation_id": "ri-1", "stage": "refused",
@@ -14873,6 +14874,39 @@ mod tests {
             "abc123",
         );
         assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
+        assert!(rep.refused_reviewers().is_empty());
+    }
+
+    #[test]
+    fn refused_invocation_row_retires_when_the_head_moves() {
+        // The refusal is a terminal of ONE attempt at ONE measured head, not a
+        // claim about the branch: once the author pushes a new head, the old
+        // refusal must not park ReviewerRefused at the new head (round-2
+        // review finding 1 - the state read as "the reviewer declined" at a
+        // head nobody attempted, and only a real review could clear it).
+        let events = serde_json::json!({
+            "type": "review_invocation",
+            "data": {"invocation_id": "ri-1", "stage": "refused",
+                     "verb": "/review", "reason": "empty_diff",
+                     "head_sha": "abc123", "branch": "feature/x"}
+        })
+        .to_string();
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Stale,
+            "feature/x",
+            "def456",
+        );
+        assert_eq!(
+            rep.review_state(),
+            Some(ReviewState::Unreviewed),
+            "a moved head retires the old refusal; nothing reviewed the new head"
+        );
         assert!(rep.refused_reviewers().is_empty());
     }
 

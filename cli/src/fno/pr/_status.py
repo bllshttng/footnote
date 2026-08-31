@@ -1052,23 +1052,34 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             # classes carry different remedies: an empty diff means the
             # reviewer's checkout was the wrong one; an unresolvable base means
             # the checkout was fine but could not measure against the base.
-            # Diagnosing one as the other sends the caller to move a review
-            # that was aimed correctly.
-            reasons = {str(v.get("refusal_reason") or "") for v in local_refused}
-            if reasons - {"", "empty_diff"}:
+            # Both classes can be present at once (two attempts), so each is
+            # diagnosed with its own reviewer names - one message for all
+            # classes misdiagnoses whichever it drops.
+            empty = [
+                str(v.get("name") or "review")
+                for v in local_refused
+                if str(v.get("refusal_reason") or "empty_diff") == "empty_diff"
+            ]
+            unresolvable = [
+                str(v.get("name") or "review")
+                for v in local_refused
+                if str(v.get("refusal_reason") or "") == "unresolvable_base"
+            ]
+            if empty:
                 sys.stderr.write(
-                    f"note: reviewer_refused: {who} ran and refused to attest "
-                    "(its checkout could not resolve the base to a "
-                    "merge-base). Fetch the base in the reviewer's checkout, "
-                    "or run a local review at HEAD.\n"
+                    f"note: reviewer_refused: {', '.join(empty)} ran and refused "
+                    "to attest (an empty diff at the reviewer's checkout: it "
+                    "sat on the base branch, so the review read nothing). Fire "
+                    "from the PR worktree session (`fno do target "
+                    "request-self-review --pr <n>`) or spawn the reviewer with "
+                    "--cwd <worktree>.\n"
                 )
-            else:
+            if unresolvable:
                 sys.stderr.write(
-                    f"note: reviewer_refused: {who} ran and refused to attest "
-                    "(an empty diff at the reviewer's checkout: it sat on the "
-                    "base branch, so the review read nothing). Fire from the PR "
-                    "worktree session (`fno do target request-self-review --pr "
-                    "<n>`) or spawn the reviewer with --cwd <worktree>.\n"
+                    f"note: reviewer_refused: {', '.join(unresolvable)} ran and "
+                    "refused to attest (its checkout could not resolve the "
+                    "base to a merge-base). Fetch the base in the reviewer's "
+                    "checkout, or run a local review at HEAD.\n"
                 )
         else:
             sys.stderr.write(

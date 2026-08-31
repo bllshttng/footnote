@@ -3076,8 +3076,6 @@ def _codex_review_subject_nonempty(cwd: str | None, base_ref: str) -> tuple[bool
             "or fire from the PR worktree session"
         )
 
-    import subprocess
-
     def _git(*args: str) -> str | None:
         try:
             proc = subprocess.run(
