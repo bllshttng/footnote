@@ -584,10 +584,9 @@ pub fn run_finalize(args: &[String]) -> i32 {
             );
             return 0;
         }
+        Some(false) if ship => {}
         Some(false) => {
-            // Ledger row already written by the prior non-ship finalize; skip the
-            // redundant ledger step (register-task would dedup it anyway) and run
-            // only the ship side-effects below.
+            // A non-ship do-stamp terminal has no stronger ledger truth to add.
             skip_ledger = true;
         }
         None => {}

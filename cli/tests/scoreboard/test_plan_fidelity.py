@@ -13,8 +13,11 @@ AC3  a planned row with no joinable delivery is `unjoined`, never scored 0%.
 from __future__ import annotations
 
 import json
+import tempfile
 from datetime import datetime
+from pathlib import Path
 
+from fno.cost._register import append_to_tasks_json
 from fno.scoreboard.fold import build_plan_fidelity
 
 NOW = datetime(2026, 7, 3, 20, 0, 0)
@@ -440,6 +443,61 @@ def test_refuse_disposition_passes_when_every_planned_row_joined():
     )
     assert pf["gate"]["would_refuse"] is False
     assert pf["gate"]["unjoined_count"] == 0
+
+
+def test_same_session_delivery_promotion_closes_fidelity_join():
+    with tempfile.TemporaryDirectory() as td:
+        ledger = Path(td) / "ledger.json"
+        plan_path = "/x/revived-session.md"
+        planned = {
+            "fno_id": "revived-session",
+            "session_id": "revived-session",
+            "completed": "2026-07-03T10:00:00",
+            "termination_reason": "NoProgress",
+            "phases_completed": ["think", "plan"],
+            "phases_skipped": [],
+            "plan_path": plan_path,
+            "project": "fno",
+            "cost_usd": 2.0,
+        }
+        append_to_tasks_json(ledger, planned)
+
+        before = build_plan_fidelity(
+            json.loads(ledger.read_text())["entries"],
+            [],
+            since_days=28,
+            now=NOW,
+            read_plan_doc=lambda p: PLAN_DOC,
+            read_summary=lambda r: "",
+            read_diff=lambda r: [],
+            unmeasurable="refuse",
+        )
+        assert before["results"][0]["status"] == "unjoined"
+        assert before["gate"]["would_refuse"] is True
+
+        append_to_tasks_json(
+            ledger,
+            {
+                **planned,
+                "completed": "2026-07-03T11:00:00",
+                "termination_reason": "DonePRGreen",
+                "pr_number": 976,
+                "graph_node_id": "x-46f9",
+            },
+        )
+
+        after = build_plan_fidelity(
+            json.loads(ledger.read_text())["entries"],
+            [],
+            since_days=28,
+            now=NOW,
+            read_plan_doc=lambda p: PLAN_DOC,
+            read_summary=lambda r: "",
+            read_diff=lambda r: [],
+            unmeasurable="refuse",
+        )
+        assert after["results"][0]["status"] == "joined"
+        assert after["gate"]["would_refuse"] is False
 
 
 def test_unknown_unmeasurable_raises_rather_than_silently_defaulting():

@@ -31,17 +31,12 @@ import yaml
 _WEDGE_REASONS = frozenset({"NoProgress", "Budget", "Aborted"})
 
 # Terminal reasons that count a node as DELIVERED for telemetry (cost
-# attribution + shipped/surviving node sets). An explicit allowlist, NOT a
-# `startswith("Done")` prefix match: DoneAwaitingMerge is a Done* terminal
-# (the agent finished) but the PR is NOT merged and its CI is red pending a
-# human merge past pre-existing main-red, so counting it as delivered would
-# inflate autonomy/survival metrics before the work actually lands. DoneBatched
-# stays (it delivers via the shared batch PR). This is intentionally looser than
-# finalize.SHIP_REASONS (which gates plan stamp/graduate on DonePRGreen|
-# DoneAdvisory only) - "delivered for telemetry" and "graduate the plan" differ.
-_SHIPPED_TERMINALS = frozenset(
-    {"DonePRGreen", "DoneAdvisory", "DoneDelivery", "DoneBatched"}
-)
+# An explicit allowlist, NOT a `startswith("Done")` prefix match - see
+# fno.terminals for why DoneAwaitingMerge is absent. This is intentionally
+# looser than finalize.SHIP_REASONS (which gates plan stamp/graduate on
+# DonePRGreen|DoneAdvisory only) - "delivered for telemetry" and "graduate
+# the plan" differ.
+from fno.terminals import DELIVERED_TERMINALS as _SHIPPED_TERMINALS  # noqa: E402
 
 
 def _is_shipped_reason(termination_reason: str | None) -> bool:
