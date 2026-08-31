@@ -297,6 +297,25 @@ fn rerun_allowed(agents: &[RegistryAgent], session: &str, pane: u64) -> Result<(
     }
 }
 
+/// The guard's verdict on one raw registry read. Pure, so every arm of the
+/// fail-closed matrix is a unit test.
+///
+/// An unattributable row is an agent whose PANE is unknown. `rerun_allowed`
+/// reasons from absence ("no row for this pane means shell"), and that
+/// inference is only sound over a lossless read. So a row-level malformation
+/// earns the same verdict a document-level one already gets, for the same
+/// reason: absent liveness must never read as idle.
+fn classify_guard_registry(raw: &str, now: u64) -> Result<Vec<RegistryAgent>, &'static str> {
+    match agents_view::derive_rows_counted(raw, now) {
+        None => Err("agents registry malformed - target agent state unknown"),
+        Some((_, unattributable)) if unattributable > 0 => Err(
+            "agents registry carries a row with no readable pane binding - \
+             target agent state unknown",
+        ),
+        Some((rows, _)) => Ok(rows),
+    }
+}
+
 /// (x-fbb1) Whether a focused NON-viewer leaf may be taken over by `.`=here.
 /// Pure over the three inputs so the reap gate (the safety-critical bit) is
 /// unit-testable without a Core, mirroring [`rerun_allowed`]. Take-over is
@@ -524,10 +543,12 @@ enum CoreMsg {
         guarded: bool,
         expected_identity: Option<String>,
         /// Fresh registry snapshot for a guarded send, read off-loop in
-        /// `handle_control`. `None` means either the read failed (guarded ->
-        /// fail closed) or the send is unguarded (unused). `Some(rows)` is the
-        /// idle authority the guard checks, `rows` empty => no agents => proceed.
-        agents: Option<Vec<RegistryAgent>>,
+        /// `handle_control`. `Err` carries the refusal reason: either the read
+        /// failed or the registry carries a row whose pane cannot be read
+        /// (guarded -> fail closed); an unguarded send leaves it unused.
+        /// `Ok(rows)` is the idle authority the guard checks, `rows` empty =>
+        /// no agents => proceed.
+        agents: Result<Vec<RegistryAgent>, &'static str>,
         reply: ControlReply,
     },
     PaneWait {
@@ -2621,10 +2642,10 @@ fn no_resume_form_reason(harness: &str, session_id: &str) -> String {
     format!("{harness} has no resume form; session {session_id} is not resumable")
 }
 
-/// The registry rows the restore verb classifies against, read fresh from
-/// the registry file at verb time. In tests, `RESTORE_REGISTRY_ROWS`
-/// overrides the file (a unit test cannot populate the real registry, and
-/// reading it would clobber the fake rows the test installed).
+// The registry rows the restore verb classifies against, read fresh from
+// the registry file at verb time. In tests, `RESTORE_REGISTRY_ROWS`
+// overrides the file (a unit test cannot populate the real registry, and
+// reading it would clobber the fake rows the test installed).
 #[cfg(test)]
 thread_local! {
     static RESTORE_REGISTRY_ROWS: std::cell::RefCell<Option<Option<Vec<RegistryAgent>>>> =
@@ -7693,7 +7714,7 @@ impl Core {
             HOLD_WORKERS_OVERRIDE.with(|slot| {
                 slot.borrow()
                     .map(crate::digest_overlay::policy_from_hold_workers)
-                    .unwrap_or_else(|| restore_policy_now())
+                    .unwrap_or_else(restore_policy_now)
             })
         });
         #[cfg(not(test))]
@@ -10250,30 +10271,32 @@ impl Core {
     /// serial, the check and the inject are atomic: no other input for this
     /// pane interleaves between them, so the writer-claim holder cannot start a
     /// burst in the gap. `agents` is the FRESH registry snapshot read off-loop
-    /// for this send (not `self.agents`, which is parked with no viewer); `None`
-    /// here means the read failed, so the guard fails closed. Raw `PaneSend`
-    /// (`guarded == false`) is the writer-claim holder's own channel and stays
-    /// unguarded (`agents` is unused).
+    /// for this send (not `self.agents`, which is parked with no viewer); `Err`
+    /// carries the refusal reason - the read failed, or the registry carries a
+    /// row whose pane cannot be read - so the guard fails closed. Raw
+    /// `PaneSend` (`guarded == false`) is the writer-claim holder's own channel
+    /// and stays unguarded (`agents` is unused).
     fn pane_send(
         &mut self,
         pane: u64,
         bytes: &[u8],
         guarded: bool,
         expected_identity: Option<&str>,
-        agents: Option<Vec<RegistryAgent>>,
+        agents: Result<Vec<RegistryAgent>, &'static str>,
     ) -> ServerMsg {
         let Some(entry) = self.panes.get(&pane) else {
             return dead_pane(pane);
         };
         if let Some(expected) = expected_identity {
             let host = entry.name.as_deref().unwrap_or("<unknown>");
-            let Some(rows) = agents.as_deref() else {
-                return ServerMsg::Err {
-                    code: err_code::TARGET_IDENTITY_MISMATCH,
-                    msg: format!(
-                        "addressed {expected}, pane hosts {host}; agent registry unreadable"
-                    ),
-                };
+            let rows = match agents.as_deref() {
+                Ok(rows) => rows,
+                Err(reason) => {
+                    return ServerMsg::Err {
+                        code: err_code::TARGET_IDENTITY_MISMATCH,
+                        msg: format!("addressed {expected}, pane hosts {host}; {reason}"),
+                    };
+                }
             };
             let matches: Vec<&RegistryAgent> = rows
                 .iter()
@@ -10320,11 +10343,14 @@ impl Core {
             }
         }
         if guarded {
-            let Some(rows) = agents.as_deref() else {
-                return ServerMsg::Err {
-                    code: err_code::TARGET_NOT_IDLE,
-                    msg: "agents registry unreadable - target agent state unknown".to_string(),
-                };
+            let rows = match agents.as_deref() {
+                Ok(rows) => rows,
+                Err(reason) => {
+                    return ServerMsg::Err {
+                        code: err_code::TARGET_NOT_IDLE,
+                        msg: reason.to_string(),
+                    };
+                }
             };
             if let Err(reason) = rerun_allowed(rows, &self.session_name, pane) {
                 return ServerMsg::Err {
@@ -14572,6 +14598,27 @@ async fn read_guard_agents() -> Option<Vec<RegistryAgent>> {
     }
 }
 
+/// The classified twin of [`read_guard_agents`], for the guarded-`PaneSend`
+/// lane only: same io, but the raw read goes through
+/// [`classify_guard_registry`], so a row-level malformation refuses the send
+/// instead of reading as "no row for that pane". The tolerant twin stays as-is
+/// on purpose - the display verbs render what they can read and must not blank
+/// a whole sideline over one bad row.
+async fn read_guard_agents_for_send() -> Result<Vec<RegistryAgent>, &'static str> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let read =
+        tokio::task::spawn_blocking(|| std::fs::read_to_string(agents_view::registry_path())).await;
+    match read {
+        Ok(Ok(raw)) => classify_guard_registry(&raw, now),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Ok(Err(_)) => Err("agents registry unreadable - target agent state unknown"),
+        Err(_) => Err("agents registry read failed - target agent state unknown"),
+    }
+}
+
 /// Return every pane/worker pair that blocks an unforced tab close. Matching
 /// is exact on the server session and pane id, and every joined row whose
 /// liveness is not positively `Dead` is destructive-risk evidence. Rows that
@@ -14747,9 +14794,11 @@ async fn handle_control(
             // is what closes the client/server HOME-divergence gap; passing the
             // snapshot into the core loop keeps the check + inject atomic.
             let agents = if guarded || expected_identity.is_some() {
-                read_guard_agents().await
+                // The classified read: an unattributable row refuses here,
+                // before the core loop, instead of reading as "no agent".
+                read_guard_agents_for_send().await
             } else {
-                None
+                Ok(Vec::new()) // raw send: agents unused (unguarded, unaddressed)
             };
             core_tx
                 .send(CoreMsg::PaneSend {
@@ -16144,7 +16193,7 @@ mod tests {
             b"payload",
             false,
             Some("target-id"),
-            Some(vec![addressed]),
+            Ok(vec![addressed]),
         ) {
             ServerMsg::Err { msg, .. } => {
                 assert!(msg.contains("addressed"), "refusal names addressee: {msg}");
@@ -16170,8 +16219,66 @@ mod tests {
                 b"payload",
                 false,
                 Some("target-id"),
-                Some(vec![first, duplicate]),
+                Ok(vec![first, duplicate]),
             ),
+            ServerMsg::Ok
+        ));
+    }
+
+    #[test]
+    fn pane_send_refuses_when_the_registry_carries_an_unattributable_row() {
+        // AC4-ERR (x-0b40), the guard seam: the registry carries a malformed
+        // row for the target pane's session; the classified read refuses, and
+        // the guarded send answers TARGET_NOT_IDLE with that reason instead of
+        // reading the pane as a shell and writing into a working agent. The
+        // assertion is the refusal itself, never "the bytes did not land".
+        let (mut core, pane) = template_core();
+        core.session_name = "sess".into();
+        let raw =
+            r#"{"agents":[{"name":"half","cwd":"/w","status":"live","mux":{"session":"sess"}}]}"#;
+        let reason = classify_guard_registry(raw, 0).unwrap_err();
+        match core.pane_send(pane, b"payload", true, None, Err(reason)) {
+            ServerMsg::Err { code, msg } => {
+                assert_eq!(code, err_code::TARGET_NOT_IDLE);
+                assert!(
+                    msg.contains("no readable pane binding"),
+                    "refusal carries the row-level cause: {msg}"
+                );
+            }
+            other => panic!("expected guard refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_send_identity_check_carries_the_registry_refusal_reason() {
+        // The identity check consumes the same Result (x-0b40): its Err arm
+        // reports the carried reason, not the old hardcoded "unreadable".
+        let (mut core, pane) = template_core();
+        core.session_name = "sess".into();
+        core.panes.get_mut(&pane).unwrap().name = Some("hosted".into());
+        let reason = classify_guard_registry("not json", 0).unwrap_err();
+        match core.pane_send(pane, b"payload", false, Some("target-id"), Err(reason)) {
+            ServerMsg::Err { code, msg } => {
+                assert_eq!(code, err_code::TARGET_IDENTITY_MISMATCH);
+                assert!(
+                    msg.contains("malformed"),
+                    "carried reason, not hardcoded text: {msg}"
+                );
+            }
+            other => panic!("expected identity refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_send_on_an_empty_registry_proceeds_like_a_shell() {
+        // AC5-EDGE (x-0b40): a missing registry reads as Ok(empty) - no
+        // daemon, no agents - and the guarded send proceeds exactly as today.
+        // Empty stays permission; only an unreadable or unattributable read
+        // refuses.
+        let (mut core, pane) = template_core();
+        core.session_name = "sess".into();
+        assert!(matches!(
+            core.pane_send(pane, b"payload", true, None, Ok(Vec::new())),
             ServerMsg::Ok
         ));
     }
@@ -23449,8 +23556,59 @@ mod tests {
     }
 
     #[test]
+    fn classify_guard_registry_fails_closed_on_a_row_with_no_readable_pane_binding() {
+        // AC4-ERR (x-0b40), the positive marker: the malformed row IS the
+        // defect. A registry holding an agent whose pane cannot be read must
+        // refuse - a nameless row used to be skipped outright and read as
+        // "no row for this pane, it is a shell", so the guarded send wrote
+        // into a working agent.
+        let raw =
+            r#"{"agents":[{"name":"ok","cwd":"/w","status":"live"},{"cwd":"/w","status":"live"}]}"#;
+        let err = classify_guard_registry(raw, 0).unwrap_err();
+        assert!(
+            err.contains("no readable pane binding"),
+            "refusal names the row-level cause: {err}"
+        );
+    }
+
+    #[test]
+    fn classify_guard_registry_fails_closed_on_a_present_but_unparseable_mux() {
+        // The fold arm (x-0b40): the row SURVIVES derivation with `mux: None`,
+        // so this is not a skip and a drop count alone would miss it. The
+        // half-read `session` is this pane's own; the missing `pane_id` is
+        // exactly the part that cannot be attributed.
+        let raw =
+            r#"{"agents":[{"name":"half","cwd":"/w","status":"live","mux":{"session":"sess"}}]}"#;
+        let err = classify_guard_registry(raw, 0).unwrap_err();
+        assert!(
+            err.contains("no readable pane binding"),
+            "refusal names the row-level cause: {err}"
+        );
+    }
+
+    #[test]
+    fn classify_guard_registry_keeps_document_and_row_failures_distinct() {
+        // Document-level malformation already failed closed and keeps its own
+        // reason (x-0b40 leaves that arm untouched); a clean registry still
+        // proceeds, the control that keeps the two refusals above honest.
+        assert_eq!(
+            classify_guard_registry("not json", 0).unwrap_err(),
+            "agents registry malformed - target agent state unknown"
+        );
+        assert!(classify_guard_registry(
+            r#"{"agents":[{"name":"a","cwd":"/w","status":"live","mux":{"session":"s","pane_id":1}}]}"#,
+            0
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn rerun_allowed_on_a_plain_shell_pane() {
-        // AC-HP: a pane with no agent row is a shell - rerun is always safe.
+        // AC-HP (x-0b40): over a LOSSLESS read, a pane with no agent row is a
+        // shell - rerun is always safe. The losslessness is the precondition,
+        // not a given: `classify_guard_registry` is what refuses a registry
+        // carrying a row with no readable pane binding BEFORE this predicate
+        // runs, so absence reaching here really does mean absence.
         assert_eq!(rerun_allowed(&[], "main", 7), Ok(()));
         // Another agent on a different pane does not gate this one.
         assert_eq!(
