@@ -600,7 +600,7 @@ impl PtyShell {
             }
             let _ = child.wait();
         };
-        let (stream, reply, _ring) =
+        let (stream, reply, _ring, seed_buf) =
             match keeper_handshake(&sock_path, keeper_handshake_quiet()) {
                 Ok(found) => match found {
                     Some(found) => found,
@@ -629,7 +629,15 @@ impl PtyShell {
                 }
             }
         }
-        let pty = wire_keeper(stream, child_pid, sock_path, pane_id, out_tx, exit_tx);
+        let pty = wire_keeper(
+            stream,
+            child_pid,
+            sock_path,
+            pane_id,
+            seed_buf,
+            out_tx,
+            exit_tx,
+        );
         drop(keeper_child);
         Ok(PtyShell::Keeper(pty))
     }
@@ -805,12 +813,20 @@ pub fn adopt_keeper_socket(
 ) -> Result<Option<KeeperAdoption>, String> {
     match keeper_handshake(sock, keeper_handshake_quiet())? {
         None => Ok(None),
-        Some((stream, reply, ring)) => {
+        Some((stream, reply, ring, seed_buf)) => {
             let child_pid = reply
                 .get("child_pid")
                 .and_then(serde_json::Value::as_u64)
                 .map(|p| p as u32);
-            let shell = wire_keeper(stream, child_pid, sock.to_path_buf(), pane_id, out_tx, exit_tx);
+            let shell = wire_keeper(
+                stream,
+                child_pid,
+                sock.to_path_buf(),
+                pane_id,
+                seed_buf,
+                out_tx,
+                exit_tx,
+            );
             Ok(Some(KeeperAdoption {
                 shell: PtyShell::Keeper(shell),
                 reply,
@@ -887,6 +903,7 @@ fn keeper_handshake(
     Option<(
         std::os::unix::net::UnixStream,
         serde_json::Value,
+        Vec<u8>,
         Vec<u8>,
     )>,
     String,
@@ -975,10 +992,14 @@ fn keeper_handshake(
         }
     }
     // The reader thread inherits this fd; it needs clean blocking reads.
+    // `buf` may hold a PARTIAL frame the quiet window cut in half: it must
+    // seed the reader, or the tail arrives unanchored and the stream
+    // desyncs (a payload byte read as a tag decodes as garbage - observed
+    // as a phantom Exited that reaped a live pane).
     stream
         .set_read_timeout(None)
         .map_err(|e| e.to_string())?;
-    Ok(Some((stream, reply, ring)))
+    Ok(Some((stream, reply, ring, buf)))
 }
 
 /// Wire a handshaken keeper connection into the mux: the reader thread
@@ -991,6 +1012,7 @@ fn wire_keeper(
     child_pid: Option<u32>,
     sock_path: PathBuf,
     pane_id: u64,
+    seed_buf: Vec<u8>,
     out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
 ) -> KeeperPty {
@@ -1000,6 +1022,7 @@ fn wire_keeper(
     spawn_keeper_reader(
         read_half,
         pane_id,
+        seed_buf,
         out_tx,
         exit_tx,
         Arc::clone(&exited),
@@ -1030,10 +1053,13 @@ fn wire_keeper(
 /// channel. A socket EOF with no Exited frame means the keeper is gone;
 /// the keeper holds the master, so its child is going down with it - mark
 /// exited and signal the pane's death the same way a Local reader would.
+/// `seed_buf` carries the partial frame the handshake's quiet window cut in
+/// half; seeding it keeps the byte stream anchored (see `keeper_handshake`).
 #[allow(clippy::too_many_arguments)]
 fn spawn_keeper_reader(
     mut reader: std::os::unix::net::UnixStream,
     pane_id: u64,
+    seed_buf: Vec<u8>,
     out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
     exited: Arc<AtomicBool>,
@@ -1042,7 +1068,7 @@ fn spawn_keeper_reader(
     std::thread::Builder::new()
         .name("fno-mux-keeper-reader".into())
         .spawn(move || {
-            let mut buf: Vec<u8> = Vec::with_capacity(8192);
+            let mut buf = seed_buf;
             let mut read_buf = [0u8; 8192];
             'outer: loop {
                 loop {
@@ -1147,6 +1173,7 @@ impl KeeperPty {
         spawn_keeper_reader(
             read_half,
             0,
+            Vec::new(),
             out_tx,
             exit_tx,
             Arc::clone(&exited),

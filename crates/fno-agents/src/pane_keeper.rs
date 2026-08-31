@@ -253,11 +253,14 @@ pub fn parse_pane_args(args: &[String]) -> Result<KeeperConfig, String> {
 /// The shared keeper state the threads touch.
 struct Keeper {
     ring: Mutex<Ring>,
-    /// The connected client's write half, when one is attached. Single-client:
-    /// a new connect replaces the old.
-    client: Mutex<Option<std::os::unix::net::UnixStream>>,
-    /// Bumped per accept so a departing old client cannot clear a newer one's
-    /// slot.
+    /// The SUBSCRIBER: the one client the pty's output streams to and the
+    /// one whose Input/Resize/Kill frames drive the child. The first live
+    /// client takes it (the mux server, at spawn or adoption); a later
+    /// client (the `keeper list` probe) is served Identify but never steals
+    /// the stream. `gen` is that client's accept generation.
+    client: Mutex<Option<(u64, std::os::unix::net::UnixStream)>>,
+    /// Bumped per accept so a departing old client cannot clear a newer
+    /// subscriber's slot.
     client_gen: AtomicU64,
     /// The prebuilt IdentifyReply frame (version, both pids, argv, cwd, age).
     identify: OnceLock<Vec<u8>>,
@@ -266,11 +269,17 @@ struct Keeper {
     /// fleet count and later kill must aim at.
     child_pid: AtomicU32,
     master: Mutex<Box<dyn MasterPty + Send>>,
+    /// The pty input writer, taken ONCE at startup and reused for every
+    /// Input frame. portable-pty's `take_writer` is take-once by contract:
+    /// its writer sends EOT (a literal Ctrl-D) when dropped, so a
+    /// write-and-drop per frame would end the child's stdin after the first
+    /// keystroke, and a second `take_writer` refuses outright.
+    input: Mutex<Option<Box<dyn Write + Send>>>,
 }
 
 impl Keeper {
-    /// Send one frame to the attached client, if any. The lock-held write
-    /// serializes the two writer threads (pty reader, socket thread).
+    /// Send one frame to the subscriber, if any. The lock-held write
+    /// serializes the pty-reader thread and any subscriber-side reply.
     fn send(&self, frame: &Frame) {
         let encoded = encode(frame);
         self.send_raw(&encoded);
@@ -278,7 +287,7 @@ impl Keeper {
 
     fn send_raw(&self, encoded: &[u8]) {
         let mut guard = self.client.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(stream) = guard.as_mut() {
+        if let Some((_, stream)) = guard.as_mut() {
             let _ = stream.write_all(encoded);
             let _ = stream.flush();
         }
@@ -357,6 +366,13 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         .spawn_command(cmd)
         .map_err(|e| format!("spawn {}: {e}", cfg.argv[0]))?;
     drop(pair.slave);
+    // Take the single writer NOW: portable-pty allows exactly one
+    // `take_writer` per master, and the Input arm reuses it for the pane's
+    // whole life.
+    let input = pair
+        .master
+        .take_writer()
+        .map_err(|e| format!("pty writer: {e}"))?;
     let child_pid = child.process_id().unwrap_or(0);
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -370,6 +386,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         identify: OnceLock::new(),
         child_pid: AtomicU32::new(child_pid),
         master: Mutex::new(pair.master),
+        input: Mutex::new(Some(input)),
     });
     let identify = encode(&Frame::IdentifyReply(
         serde_json::json!({
@@ -414,8 +431,10 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         })
         .map_err(|e| format!("pty reader thread: {e}"))?;
 
-    // The accept-loop thread: one client at a time, serial. On disconnect
-    // the keeper keeps running (AC1-HP) - the loop returns to the accept.
+    // The accept loop: every connection is served on its own thread, so a
+    // `keeper list` probe is answered even while the server holds the
+    // subscriber seat. On a subscriber's disconnect the keeper keeps
+    // running (AC1-HP); the next subscriber is the server that re-adopts.
     {
         let keeper = Arc::clone(&keeper);
         std::thread::Builder::new()
@@ -424,9 +443,25 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                 for stream in listener.incoming() {
                     let Ok(stream) = stream else { break };
                     let gen = keeper.client_gen.fetch_add(1, Ordering::SeqCst) + 1;
-                    *keeper.client.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some(stream.try_clone().expect("clone keeper client"));
-                    serve_client(&keeper, stream, gen);
+                    let keeper = Arc::clone(&keeper);
+                    std::thread::Builder::new()
+                        .name("fno-keeper-cli".into())
+                        .spawn(move || {
+                            // First come, first seated: an empty subscriber
+                            // slot takes THIS connection.
+                            let mut slot =
+                                keeper.client.lock().unwrap_or_else(|e| e.into_inner());
+                            let is_subscriber = slot.is_none();
+                            if is_subscriber {
+                                *slot = Some((
+                                    gen,
+                                    stream.try_clone().expect("clone keeper client"),
+                                ));
+                            }
+                            drop(slot);
+                            serve_client(&keeper, stream, gen, is_subscriber);
+                        })
+                        .expect("spawn keeper client thread");
                 }
             })
             .map_err(|e| format!("accept thread: {e}"))?;
@@ -445,8 +480,14 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     std::process::exit(code);
 }
 
-/// Serve one accepted connection to completion, then drop it.
-fn serve_client(keeper: &Keeper, mut stream: std::os::unix::net::UnixStream, gen: u64) {
+/// Serve one accepted connection to completion, then drop it. Only the
+/// subscriber drives the child; every connection may Identify.
+fn serve_client(
+    keeper: &Keeper,
+    mut stream: std::os::unix::net::UnixStream,
+    gen: u64,
+    is_subscriber: bool,
+) {
     let mut buf: Vec<u8> = Vec::with_capacity(8192);
     let mut read_buf = [0u8; 8192];
     loop {
@@ -460,14 +501,24 @@ fn serve_client(keeper: &Keeper, mut stream: std::os::unix::net::UnixStream, gen
                 }
                 Decode::Frame(frame, used) => {
                     buf.drain(..used);
+                    // Only the subscriber drives the child; a probe's
+                    // driving frames are ignored, never honored.
+                    if !is_subscriber
+                        && matches!(
+                            frame,
+                            Frame::Input(_) | Frame::Resize(_, _) | Frame::Kill
+                        )
+                    {
+                        continue;
+                    }
                     match frame {
                         Frame::Input(bytes) => {
-                            let master = keeper.master.lock().unwrap_or_else(|e| e.into_inner());
-                            // take_writer hands out a fresh writer per call;
-                            // a full kernel input buffer blocks here, which
+                            // A full kernel input buffer blocks here, which
                             // backpressures the client - bounded, never a
                             // queue that grows.
-                            if let Ok(mut writer) = master.take_writer() {
+                            let mut writer =
+                                keeper.input.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(writer) = writer.as_mut() {
                                 let _ = writer.write_all(&bytes);
                                 let _ = writer.flush();
                             }
@@ -494,8 +545,20 @@ fn serve_client(keeper: &Keeper, mut stream: std::os::unix::net::UnixStream, gen
                             }
                         }
                         Frame::Identify => {
+                            // The reply goes to the ASKING connection. For
+                            // the subscriber that write must serialize with
+                            // the pty reader's Output writes (shared slot
+                            // lock); a probe's stream has a single writer.
+                            let mut reply_on = |encoded: &[u8]| {
+                                if is_subscriber {
+                                    keeper.send_raw(encoded);
+                                } else {
+                                    let _ = stream.write_all(encoded);
+                                    let _ = stream.flush();
+                                }
+                            };
                             if let Some(frame) = keeper.identify.get() {
-                                keeper.send_raw(frame);
+                                reply_on(frame);
                             }
                             // Replay the retained window (AC3-HP), with the
                             // drop stated rather than silent.
@@ -505,16 +568,18 @@ fn serve_client(keeper: &Keeper, mut stream: std::os::unix::net::UnixStream, gen
                                 (ring.snapshot(), std::mem::take(&mut ring.dropped))
                             };
                             if dropped > 0 {
-                                keeper.send(&Frame::Output(
-                                    format!(
-                                        "\r\n[keeper: {dropped} byte(s) of earlier output \
-                                         fell off the ring]\r\n"
-                                    )
-                                    .into_bytes(),
-                                ));
+                                reply_on(
+                                    &encode(&Frame::Output(
+                                        format!(
+                                            "\r\n[keeper: {dropped} byte(s) of earlier output \
+                                             fell off the ring]\r\n"
+                                        )
+                                        .into_bytes(),
+                                    )),
+                                );
                             }
                             if !snapshot.is_empty() {
-                                keeper.send(&Frame::Output(snapshot));
+                                reply_on(&encode(&Frame::Output(snapshot)));
                             }
                         }
                         // Frames only the keeper sends arriving from a
@@ -529,10 +594,14 @@ fn serve_client(keeper: &Keeper, mut stream: std::os::unix::net::UnixStream, gen
             Ok(n) => buf.extend_from_slice(&read_buf[..n]),
         }
     }
-    // Only clear OUR slot: a newer client may already hold it.
-    let mut client = keeper.client.lock().unwrap_or_else(|e| e.into_inner());
-    if keeper.client_gen.load(Ordering::SeqCst) == gen {
-        *client = None;
+    // Only clear OUR seat: a newer subscriber may already hold it.
+    if is_subscriber {
+        let mut client = keeper.client.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((seated_gen, _)) = client.as_ref() {
+            if *seated_gen == gen {
+                *client = None;
+            }
+        }
     }
 }
 
