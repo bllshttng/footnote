@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -199,11 +200,319 @@ def test_execute_retask_same_tier_orders_clear_rename_status_then_target():
         "switch_verified": True,
         "target_submit_confirmed": True,
         "registry_name": "target-x-bdb9",
+        "source_session_id": "old-session",
+        "current_session_id": "new-session",
+        "transition": "succession",
+        "registry_rows": 1,
+        "lineage_recorded": True,
     }
     assert [text for text, _submit in sends] == [
         "/clear", "/status", "$fno:target --no-merge x-bdb9"
     ]
     assert tiers == [("gpt-5.6-sol", "high")]
+
+
+def test_execute_retask_refuses_source_pr_before_clear():
+    from fno.agents.retask import execute_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9", settings=_settings(provider="codex"), env={}
+    )
+    sends: list[tuple[str, bool]] = []
+    receipt = execute_retask(
+        _row(),
+        target,
+        node="x-bdb9",
+        read_frame=lambda: pytest.fail("source PR guard must run first"),
+        ready_frame=lambda _frame: _screen_verdict(),
+        send=lambda text, submit: sends.append((text, submit)) or True,
+        restamp=lambda: pytest.fail("source PR guard must run first"),
+        rename=lambda _name: pytest.fail("source PR guard must run first"),
+        source_preflight=lambda _entry: {
+            "status": "refused",
+            "reason": "source_pr_not_green",
+            "pr": 1168,
+            "head": "source-head",
+            "verdict": "red",
+            "blockers": {"failing": 4},
+        },
+    )
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "source_pr_not_green"
+    assert receipt["pr"] == 1168
+    assert sends == []
+
+
+def test_source_preflight_joins_exact_session_and_refuses_open_non_green(
+    monkeypatch,
+):
+    import fno.agents.retask as retask
+
+    row = _row()
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{
+            "id": "x-source",
+            "cwd": "/repo",
+            "pr_number": 1168,
+            "sessions": [{"harness": "codex", "session_id": "old-session"}],
+        }],
+    )
+    monkeypatch.setattr(
+        retask.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout=json.dumps({
+                "pr_state": "OPEN",
+                "green": False,
+                "head_sha": "source-head",
+                "verdict": "red",
+                "checks": {"failing": 4},
+            }),
+        ),
+    )
+
+    receipt = retask._source_preflight(row)
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "source_pr_not_green"
+    assert receipt["source_node_id"] == "x-source"
+    assert receipt["pr"] == 1168
+
+
+def test_source_preflight_multi_phase_entries_on_one_node_are_not_ambiguous(
+    monkeypatch,
+):
+    import fno.agents.retask as retask
+
+    row = _row()
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{
+            "id": "x-source",
+            "cwd": "/repo",
+            "pr_number": None,
+            "sessions": [
+                {"harness": "codex", "session_id": "old-session", "phase": "think"},
+                {"harness": "codex", "session_id": "old-session", "phase": "blueprint"},
+            ],
+        }],
+    )
+
+    receipt = retask._source_preflight(row)
+
+    assert receipt["status"] == "ready"
+    assert receipt["source_node_id"] == "x-source"
+
+
+def test_source_preflight_two_distinct_nodes_stay_ambiguous(monkeypatch):
+    import fno.agents.retask as retask
+
+    row = _row()
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [
+            {
+                "id": "x-one",
+                "pr_number": None,
+                "sessions": [{"harness": "codex", "session_id": "old-session"}],
+            },
+            {
+                "id": "x-two",
+                "pr_number": None,
+                "sessions": [{"harness": "codex", "session_id": "old-session"}],
+            },
+        ],
+    )
+
+    receipt = retask._source_preflight(row)
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "source_node_ambiguous"
+
+
+def test_execute_retask_accepts_x_dfe7_succession_receipt_and_names_one_row():
+    from fno.agents.retask import execute_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9", settings=_settings(provider="codex"), env={}
+    )
+    sends: list[tuple[str, bool]] = []
+    frames = iter([
+        "› Ask Codex to do anything\n",
+        "Model: gpt-5.6-sol (reasoning high, summaries auto)",
+    ])
+    receipt = execute_retask(
+        _row(),
+        target,
+        node="x-bdb9",
+        read_frame=lambda: next(frames),
+        ready_frame=lambda _frame: _screen_verdict(),
+        send=lambda text, submit: sends.append((text, submit)) or True,
+        restamp=lambda: {
+            "classification": "succession",
+            "predecessor_session_id": "old-session",
+            "current_session_id": "new-session",
+            "registry_rows": 1,
+            "lineage_recorded": True,
+        },
+        rename=lambda _name: "target-x-bdb9",
+    )
+
+    assert receipt["transition"] == "succession"
+    assert receipt["source_session_id"] == "old-session"
+    assert receipt["current_session_id"] == "new-session"
+    assert receipt["registry_rows"] == 1
+    assert receipt["lineage_recorded"] is True
+    assert receipt["target_submit_confirmed"] is True
+
+
+def test_run_retask_parses_codex_clear_receipt_before_accepting_successor(monkeypatch):
+    import fno.agents.retask as retask
+
+    row = _row()
+    target = retask.RetaskCoordinate(
+        harness="codex", provider=None, model="gpt-5.6-sol", effort="high",
+        substrate="pane", permission_mode=None, route=None, account=None,
+    )
+    successor = SimpleNamespace(
+        name=row.name,
+        harness="codex",
+        harness_session_id="new-session",
+        predecessor_session_ids=["old-session"],
+        forked_from_session_id=None,
+    )
+    reads = iter([
+        "› Ask Codex to do anything\n",
+        "To continue this session, run codex resume old-session\n",
+        "Model: gpt-5.6-sol (reasoning high, summaries auto)",
+    ])
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
+    monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(retask, "_source_preflight", lambda _entry: {"status": "ready"})
+    monkeypatch.setattr(retask, "load_registry", lambda **_kwargs: [successor])
+    monkeypatch.setattr(retask, "rename_agent", lambda *_args, **_kwargs: SimpleNamespace(name="target-x-bdb9"))
+    monkeypatch.setattr("fno.agents.registry.project_verified_tier", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("fno.agents.mux_spawn._pane_osc_title", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "fno.agents.mux_spawn._evaluate_manifest_screen",
+        lambda *_args, **_kwargs: _screen_verdict(),
+    )
+
+    def run(command, **_kwargs):
+        if "read" in command:
+            return SimpleNamespace(returncode=0, stdout=next(reads), stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(retask.subprocess, "run", run)
+
+    receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+
+    assert receipt["status"] == "retasked"
+    assert receipt["source_session_id"] == "old-session"
+    assert receipt["current_session_id"] == "new-session"
+    assert receipt["transition"] == "succession"
+    assert receipt["registry_rows"] == 1
+
+
+def test_run_retask_succession_verdict_rides_the_shared_classifier(monkeypatch):
+    """A shared-verdict refusal from x-dfe7's classifier refuses the retask."""
+    import fno.agents.retask as retask
+
+    row = _row()
+    target = retask.RetaskCoordinate(
+        harness="codex", provider=None, model="gpt-5.6-sol", effort="high",
+        substrate="pane", permission_mode=None, route=None, account=None,
+    )
+    successor = SimpleNamespace(
+        name=row.name,
+        harness="codex",
+        harness_session_id="new-session",
+        predecessor_session_ids=["old-session"],
+        forked_from_session_id=None,
+    )
+    reads = iter([
+        "› Ask Codex to do anything\n",
+        "To continue this session, run codex resume old-session\n",
+        "Model: gpt-5.6-sol (reasoning high, summaries auto)",
+    ])
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
+    monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(retask, "_source_preflight", lambda _entry: {"status": "ready"})
+    monkeypatch.setattr(retask, "load_registry", lambda **_kwargs: [successor])
+    monkeypatch.setattr(retask, "classify_session_transition", lambda *_args: "deferred")
+    monkeypatch.setattr(retask, "rename_agent", lambda *_args, **_kwargs: pytest.fail("classifier refusal must stop before rename"))
+    monkeypatch.setattr("fno.agents.registry.project_verified_tier", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("fno.agents.mux_spawn._pane_osc_title", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "fno.agents.mux_spawn._evaluate_manifest_screen",
+        lambda *_args, **_kwargs: _screen_verdict(),
+    )
+
+    def run(command, **_kwargs):
+        if "read" in command:
+            return SimpleNamespace(returncode=0, stdout=next(reads), stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(retask.subprocess, "run", run)
+
+    receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "session_transition_not_succession"
+    assert receipt["cleared"] is True
+    assert "registry_name" not in receipt
+
+
+@pytest.mark.parametrize(
+    "transition",
+    [
+        {
+            "classification": "branch",
+            "reason": "session_transition_not_succession",
+            "predecessor_session_id": "old-session",
+            "current_session_id": "new-session",
+        },
+        {
+            "classification": "succession",
+            "predecessor_session_id": "other-session",
+            "current_session_id": "new-session",
+            "registry_rows": 1,
+            "lineage_recorded": True,
+        },
+        {
+            "classification": "succession",
+            "predecessor_session_id": "old-session",
+            "current_session_id": "new-session",
+            "registry_rows": 2,
+            "lineage_recorded": True,
+        },
+    ],
+)
+def test_execute_retask_refuses_any_transition_weaker_than_one_succession_row(transition):
+    from fno.agents.retask import execute_retask, resolve_target_coordinate
+
+    target = resolve_target_coordinate(
+        "x-bdb9", settings=_settings(provider="codex"), env={}
+    )
+    sends: list[tuple[str, bool]] = []
+    receipt = execute_retask(
+        _row(),
+        target,
+        node="x-bdb9",
+        read_frame=lambda: "› Ask Codex to do anything\n",
+        ready_frame=lambda _frame: _screen_verdict(),
+        send=lambda text, submit: sends.append((text, submit)) or True,
+        restamp=lambda: transition,
+        rename=lambda _name: pytest.fail("rename must wait for succession proof"),
+    )
+
+    assert receipt["status"] == "refused"
+    assert receipt["cleared"] is True
+    assert receipt["target_submit_confirmed"] is False
+    assert sends == [("/clear", True)]
 
 
 def test_execute_retask_refuses_live_busy_even_when_cached_snapshot_is_idle():
@@ -444,6 +753,7 @@ def test_run_retask_converts_mux_timeout_to_structured_refusal(monkeypatch):
     )
     monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
     monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(retask, "_source_preflight", lambda _entry: {"status": "ready"})
 
     def timeout(*_args, **_kwargs):
         raise retask.subprocess.TimeoutExpired("fno mux", 10)
@@ -468,6 +778,7 @@ def test_run_retask_passes_live_osc_title_to_manifest_evaluator(monkeypatch):
     observed: dict[str, object] = {}
     monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
     monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(retask, "_source_preflight", lambda _entry: {"status": "ready"})
     monkeypatch.setattr(
         "fno.agents.mux_spawn._pane_osc_title",
         lambda *_args, **_kwargs: "⠋ Working",
@@ -505,6 +816,7 @@ def test_run_retask_refuses_claude_when_live_title_is_unavailable(monkeypatch):
     sends: list[str] = []
     monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
     monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(retask, "_source_preflight", lambda _entry: {"status": "ready"})
     monkeypatch.setattr("fno.agents.mux_spawn._pane_osc_title", lambda *_args: None)
     monkeypatch.setattr(
         "fno.agents.mux_spawn._evaluate_manifest_screen",
@@ -539,6 +851,7 @@ def test_run_retask_timeout_mid_transaction_reports_the_true_pane_state(monkeypa
     )
     monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
     monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(retask, "_source_preflight", lambda _entry: {"status": "ready"})
     monkeypatch.setattr(
         retask,
         "load_registry",
@@ -560,7 +873,7 @@ def test_run_retask_timeout_mid_transaction_reports_the_true_pane_state(monkeypa
     calls = {"n": 0}
 
     def timeout_after_two(*_args, **_kwargs):
-        # 1: initial frame read, 2: /clear send; die on the /status send.
+        # 1: initial frame read, 2: /clear send; die while settling the clear.
         calls["n"] += 1
         if calls["n"] > 2:
             raise retask.subprocess.TimeoutExpired("fno mux", 15)
@@ -570,10 +883,9 @@ def test_run_retask_timeout_mid_transaction_reports_the_true_pane_state(monkeypa
     receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
 
     assert receipt["status"] == "refused"
-    assert receipt["reason"] == "pane_send_timeout"
+    assert receipt["reason"] == "pane_wait_timeout"
     assert receipt["cleared"] is True
-    assert receipt["session_restamped"] is True
-    assert receipt["registry_name"] == "target-x-bdb9"
+    assert receipt["session_restamped"] is False
 
 
 def test_menu_delta_exact_match_beats_substring_and_shortest_wins():

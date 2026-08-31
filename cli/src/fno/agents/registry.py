@@ -2249,6 +2249,20 @@ def record_session_observation(
                     entry_primary, session_id, predecessor_reachable
                 )
             if classification == "succession":
+                existing = next(
+                    (
+                        candidate
+                        for candidate in entries
+                        if candidate is not entry
+                        and candidate.harness == harness
+                        and candidate.harness_session_id == session_id
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    raise ValueError(
+                        f"succession session {session_id!r} already has a registry row"
+                    )
                 if entry_primary not in entry.predecessor_session_ids:
                     entry.predecessor_session_ids.append(entry_primary)
                 entry.harness_session_id = session_id

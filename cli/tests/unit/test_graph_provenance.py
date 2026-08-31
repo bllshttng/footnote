@@ -727,6 +727,63 @@ def test_append_session_record_appends(tmp_path, monkeypatch):
     assert rows[0]["observed_model"]["kind"] == "unreadable"
 
 
+def test_cli_session_close_codex_receipt_reads_back_exact_blueprint_entry(tmp_path, monkeypatch):
+    """AC1-HP: close writes and positively reads the exact Codex phase entry."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "ab-close0001", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    for marker in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID"):
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setenv("CODEX_THREAD_ID", "codex-full-session-b")
+
+    result = CliRunner().invoke(C.cli, [
+        "session", "close", "ab-close0001",
+        "--summary", "saved plan",
+        "--launch", "/fno:target ab-close0001",
+        "--json",
+    ])
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.stdout)
+    assert receipt["phase"] == "blueprint"
+    assert receipt["harness"] == "codex"
+    assert receipt["session_id"] == "codex-full-session-b"
+    entries = [
+        row for row in read_graph(g)[0]["sessions"]
+        if row.get("phase") == "blueprint"
+        and row.get("harness") == "codex"
+        and row.get("session_id") == "codex-full-session-b"
+    ]
+    assert entries and entries[0].get("ended_at")
+
+
+def test_cli_session_close_without_identity_refuses_before_closed_receipt(tmp_path, monkeypatch):
+    """AC1-ERR: unresolved identity is a visible nonzero close refusal."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "ab-close0002", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    for marker in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID"):
+        monkeypatch.delenv(marker, raising=False)
+
+    result = CliRunner().invoke(C.cli, [
+        "session", "close", "ab-close0002",
+        "--summary", "saved plan",
+        "--launch", "/fno:target ab-close0002",
+    ])
+
+    assert result.exit_code != 0
+    assert "session close: no ambient identity" in result.output
+    assert not any(row.get("status") == "closed" for row in read_graph(g)[0]["sessions"])
+
+
 def test_append_session_record_same_session_two_phases(tmp_path, monkeypatch):
     """AC1-HP: think + blueprint in one session -> two independently-queryable entries."""
     g = _make_graph(tmp_path, [{"id": "ab-add00002", "title": "t"}])
