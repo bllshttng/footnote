@@ -80,7 +80,11 @@ fail() {
 # A malformed line exits non-zero naming the line number rather than being
 # skipped: a silently dropped entry is a retired command the gate stops
 # looking for, which is the failure this whole file exists to prevent.
-declare -a CMDS INSTEAD RULING
+# Every array is ASSIGNED empty, never merely declared: bash 5.x under set -u
+# treats a declared-but-unassigned array as unbound even for ${#arr[@]}, while
+# bash 3.2 does not, so the construct reads differently across the machines
+# this gate runs on.
+declare -a CMDS=() INSTEAD=() RULING=()
 lineno=0
 while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
@@ -98,7 +102,8 @@ done <"$REGISTRY"
 # reader, example, or caller-facing explanation. Keep the disposition in a
 # small, exact tombstone list so the audit can account for every removal.
 [ -f "$CONFIG_REGISTRY" ] || fail "config registry not found at $CONFIG_REGISTRY"
-declare -a CONFIG_KEYS CONFIG_DISPOSITIONS CONFIG_REPLACEMENTS
+declare -a CONFIG_KEYS=() CONFIG_DISPOSITIONS=() CONFIG_REPLACEMENTS=()
+CONFIG_KEY_COUNT=0
 lineno=0
 while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
@@ -115,13 +120,14 @@ while IFS= read -r line || [ -n "$line" ]; do
     CONFIG_KEYS+=("$key")
     CONFIG_DISPOSITIONS+=("$disposition")
     CONFIG_REPLACEMENTS+=("$replacement")
+    CONFIG_KEY_COUNT=$((CONFIG_KEY_COUNT + 1))
 done <"$CONFIG_REGISTRY"
 # Zero active entries is a valid state: a tombstone can be filed before the
 # removal it describes lands. Rather than fail as vacuous, the config scan
 # goes dormant and says so on the success line, so a pass never silently
 # omits its scope.
 CONFIG_DORMANT=0
-[ "${#CONFIG_KEYS[@]}" -gt 0 ] || CONFIG_DORMANT=1
+[ "$CONFIG_KEY_COUNT" -gt 0 ] || CONFIG_DORMANT=1
 
 [ -f "$CONFIG_CANARY" ] ||
     fail "config canary not found at $CONFIG_CANARY"
@@ -131,7 +137,7 @@ grep -qF "$CONFIG_MARKER" "$CONFIG_CANARY" ||
 # --- 1b. Parse the path allowlist ------------------------------------------
 # A whole-file exemption for the one case an in-file marker is not free: a
 # byte-budgeted file re-read on a schedule pays for the marker every time.
-declare -a OK_PATH_LIST
+declare -a OK_PATH_LIST=()
 if [ -f "$OK_PATHS" ]; then
     lineno=0
     while IFS= read -r line || [ -n "$line" ]; do
