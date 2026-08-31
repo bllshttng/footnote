@@ -39,20 +39,29 @@ class RetaskCoordinate:
 
 
 def _source_node_for_entry(entry: AgentEntry) -> tuple[Optional[dict], Optional[str]]:
-    """Join a live registry row to exactly one graph session entry."""
+    """Join a live registry row to exactly one graph node.
+
+    One node can legitimately carry several session rows under the same
+    (harness, session_id) - think and blueprint phases of one session - so
+    matching rows are deduplicated by node id and only DISTINCT nodes count
+    as ambiguity.
+    """
     from fno.graph.load import load_graph
 
     session_id = entry.harness_session_id
     if not session_id:
         return None, "source_node_unresolved"
-    matches = [
-        node
-        for node in load_graph()
-        for session in node.get("sessions", [])
-        if isinstance(session, dict)
-        and session.get("harness") == entry.harness
-        and session.get("session_id") == session_id
-    ]
+    by_node: dict = {}
+    for node in load_graph():
+        for session in node.get("sessions", []):
+            if (
+                isinstance(session, dict)
+                and session.get("harness") == entry.harness
+                and session.get("session_id") == session_id
+            ):
+                by_node[node.get("id")] = node
+                break
+    matches = list(by_node.values())
     if not matches:
         return None, "source_node_unresolved"
     if len(matches) > 1:

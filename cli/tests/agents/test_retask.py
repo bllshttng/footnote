@@ -282,6 +282,57 @@ def test_source_preflight_joins_exact_session_and_refuses_open_non_green(
     assert receipt["pr"] == 1168
 
 
+def test_source_preflight_multi_phase_entries_on_one_node_are_not_ambiguous(
+    monkeypatch,
+):
+    import fno.agents.retask as retask
+
+    row = _row()
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{
+            "id": "x-source",
+            "cwd": "/repo",
+            "pr_number": None,
+            "sessions": [
+                {"harness": "codex", "session_id": "old-session", "phase": "think"},
+                {"harness": "codex", "session_id": "old-session", "phase": "blueprint"},
+            ],
+        }],
+    )
+
+    receipt = retask._source_preflight(row)
+
+    assert receipt["status"] == "ready"
+    assert receipt["source_node_id"] == "x-source"
+
+
+def test_source_preflight_two_distinct_nodes_stay_ambiguous(monkeypatch):
+    import fno.agents.retask as retask
+
+    row = _row()
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [
+            {
+                "id": "x-one",
+                "pr_number": None,
+                "sessions": [{"harness": "codex", "session_id": "old-session"}],
+            },
+            {
+                "id": "x-two",
+                "pr_number": None,
+                "sessions": [{"harness": "codex", "session_id": "old-session"}],
+            },
+        ],
+    )
+
+    receipt = retask._source_preflight(row)
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "source_node_ambiguous"
+
+
 def test_execute_retask_accepts_x_dfe7_succession_receipt_and_names_one_row():
     from fno.agents.retask import execute_retask, resolve_target_coordinate
 
