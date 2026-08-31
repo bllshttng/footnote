@@ -2466,7 +2466,10 @@ mod tests {
         // repeats without the prefix while the window is open, then forwards.
         let t0 = Instant::now();
         let mut scanner = Scanner::default();
-        assert_eq!(format!("{:?}", scanner.scan(b"\x02\\", t0)), "[ShowPaneIds]");
+        assert_eq!(
+            format!("{:?}", scanner.scan(b"\x02\\", t0)),
+            "[ShowPaneIds]"
+        );
         assert_eq!(
             format!("{:?}", scanner.scan(b"\\", t0 + Duration::from_millis(40))),
             "[ShowPaneIds]"
