@@ -106,7 +106,7 @@ because a misrouted `send` could publish a malformed message.)
 
 ## `hold` - timed DND for the current session
 
-Route explicit hold verbs and ordinary operator language to the shipped timed hold. Requests such as "hold my mail", "turn on DND", "do not interrupt me", or "I need your time for ten minutes" mean this session should stop prompt-line mail injection while the operator is talking to it.
+Route explicit hold verbs and ordinary operator language to the shipped timed hold. Requests such as "hold my mail", "turn on DND", "do not interrupt me", or "I need your time for ten minutes" mean this session stops prompt-line mail injection while the operator is talking to it.
 
 - A single duration runs `fno agents mail hold --minutes <N>`.
 - A duration range uses its upper bound: "5-10 minutes" runs `--minutes 10`, so DND does not expire inside the requested window.
@@ -114,7 +114,7 @@ Route explicit hold verbs and ordinary operator language to the shipped timed ho
 - "Is DND on?" or equivalent runs `fno agents mail hold --status`.
 - No duration uses the CLI's five-minute default.
 
-Run the genuine command and report its exact receipt. Intent alone is not DND. The active registry row, `fno agents list` DND field, and mux `[DND]` marker are the proof. The hold blocks peer/script injection and drains on release or expiry; it does not mute the operator's ordinary typing in the attached mux client.
+Run the genuine command and report its exact receipt. Intent alone is not DND. The active registry row, `fno agents list` DND field, and mux `[DND]` marker are the proof. The hold blocks peer/script injection and drains on release or expiry. It does not mute the operator's ordinary typing in the attached mux client.
 
 ---
 

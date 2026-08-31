@@ -316,11 +316,15 @@ fn classify_guard_registry(raw: &str, now: u64) -> Result<Vec<RegistryAgent>, &'
     }
 }
 
-/// True only when the current session/pane join names a row that explicitly
-/// declared the bus-only delivery policy. DND is presence, never liveness.
+/// True only when the current session/pane join names a LIVE row that
+/// explicitly declared the bus-only delivery policy. DND is presence, never
+/// liveness, but an exited row is skipped (matching [`rerun_allowed`]): a hold
+/// stamped on a reaped agent must not veto the shell or successor that
+/// inherited the pane and can never lift it.
 fn pane_is_dnd(agents: &[RegistryAgent], session: &str, pane: u64) -> bool {
     agents.iter().any(|a| {
-        a.dnd
+        !a.exited
+            && a.dnd
             && a.mux
                 .as_ref()
                 .is_some_and(|(s, p)| s == session && *p == pane)
@@ -10367,9 +10371,8 @@ impl Core {
         {
             return ServerMsg::Err {
                 code: err_code::TARGET_DND,
-                msg:
-                    "target is DND; use fno agents mail send to queue durable until the hold lifts"
-                        .to_string(),
+                msg: "target is DND; use fno agents mail send to queue durable until the hold lifts, or fno agents mail hold --off to release it"
+                    .to_string(),
             };
         }
         if guarded {

@@ -6260,7 +6260,9 @@ fn send_pane_bytes(
         },
     )? {
         ServerMsg::Ok => Ok(()),
-        ServerMsg::Err { code, msg } if code == err_code::TARGET_IDENTITY_MISMATCH => {
+        ServerMsg::Err { code, msg }
+            if code == err_code::TARGET_IDENTITY_MISMATCH || code == err_code::TARGET_DND =>
+        {
             Err(ControlError::FatalCode { code, msg })
         }
         ServerMsg::Err { msg, .. } => Err(ControlError::Fatal(msg)),
@@ -6287,6 +6289,7 @@ fn submit_pane(
             ControlError::FatalCode { code, .. } if code == err_code::TARGET_IDENTITY_MISMATCH => {
                 EXIT_TARGET_IDENTITY_MISMATCH
             }
+            ControlError::FatalCode { code, .. } if code == err_code::TARGET_DND => EXIT_TARGET_DND,
             ControlError::FatalCode { .. } => EXIT_ERROR,
         };
     }
@@ -6297,6 +6300,9 @@ fn submit_pane(
         if let ControlError::FatalCode { code, .. } = e {
             if code == err_code::TARGET_IDENTITY_MISMATCH {
                 return EXIT_TARGET_IDENTITY_MISMATCH;
+            }
+            if code == err_code::TARGET_DND {
+                return EXIT_TARGET_DND;
             }
         }
         return EXIT_SUBMIT_UNCONFIRMED;
@@ -6424,6 +6430,10 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
         Ok(ServerMsg::Err { code, msg }) if code == err_code::TARGET_NOT_IDLE => {
             eprintln!("fno mux block: {msg} - rerun with --force to override");
             return EXIT_TARGET_NOT_IDLE;
+        }
+        Ok(ServerMsg::Err { code, msg }) if code == err_code::TARGET_DND => {
+            eprintln!("fno mux block: {msg}");
+            return EXIT_TARGET_DND;
         }
         Ok(ServerMsg::Err { msg, .. }) => {
             eprintln!("fno mux block: {msg}");

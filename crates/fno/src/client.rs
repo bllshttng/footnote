@@ -12859,6 +12859,12 @@ async fn dispatch_event(
             write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
                 .await
                 .map_err(|e| format!("resize send failed: {e}"))?;
+            // Persist here too: prefix+s and the settings toggle write the
+            // same key, or the two entry points disagree about what the
+            // operator asked for. Fire-and-forget, so the flip stays instant;
+            // a lost write just means this flip was session-only.
+            let enabled = if view.status_on { "true" } else { "false" };
+            tokio::spawn(spawn_config_set("mux.status_row", enabled));
         }
         Event::CycleSection => {
             // Pure local state, no I/O - usable even when the socket write path
@@ -14235,8 +14241,17 @@ async fn spawn_config_set(key: &str, value: &str) -> Result<(), String> {
     let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
     // --local: the startup ladder gives the project config precedence, so a
     // global write is silently shadowed on the next attach to this workspace.
+    // FNO_CONFIG is the exception: when it pins an explicit file, that file is
+    // the ONLY candidate on both write and read, and --local would land the
+    // write somewhere the latch never looks.
+    let scope: &[&str] = if std::env::var_os("FNO_CONFIG").is_some_and(|v| !v.is_empty()) {
+        &[]
+    } else {
+        &["--local"]
+    };
     command
-        .args(["config", "set", key, value, "--local"])
+        .args(["config", "set", key, value])
+        .args(scope)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

@@ -59,7 +59,7 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 
 **Replying to a2a mail (the one rule).** Answer any `<fno_mail ... id="X">` with `fno agents mail reply --to X "..."`: it threads the reply and resolves the sender itself, live or drained, so never re-type a handle or inspect `harness`/`model`. Optional for FYIs.
 
-**Read send evidence literally.** `delivered (hosted)` is confirmed. `queued (durable)` can sit undrained - no receipt is no coordination. Before re-sending, `peek` (busy can still receive), then `resume`/`attach`. A `[bus-only]` queue drains by design; the recipient's turn-boundary `notify-self` surfaces it. A bus-only receipt IS coordination, never a stranded message.
+**Read send evidence literally.** `delivered (hosted)` is confirmed. `queued (durable)` can sit undrained - no receipt is no coordination. Before re-sending, `peek` (busy can still receive), then `resume`/`attach`. A `[DND (bus-only)]` queue drains. The recipient's turn-boundary `notify-self` surfaces it. A bus-only receipt IS coordination, never a stranded message.
 
 **Pane drives carry an envelope; `typed` is not `delivered`.** `fno mux pane send` wraps in `<fno_mail>` by default and refuses a pane showing an option prompt. `--raw` types bytes verbatim; without `--submit` a send only types (`submitted` confirms a real submit). On a `live-miss` that reads busy, `fno agents mail send --force` retypes the wrapped body, keeping msg-id, reply handle and outbox row. `typed (pane <id>)` is not delivery. [Details](docs/architecture/pane-transport.md).
 
