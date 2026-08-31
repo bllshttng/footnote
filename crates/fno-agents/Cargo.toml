@@ -50,6 +50,10 @@ thiserror = "2"
 blake3 = "1"
 tracing = "0.1"
 libc = "0.2"
+# The pane keeper lane opens the pty pair it owns (the mux server holds only a
+# unix socket to it). Same crate the mux's own pty.rs uses, so both sides of
+# the keeper protocol speak one pty implementation.
+portable-pty = "0.9"
 # Cross-platform OS CSPRNG for minting interactive-claude session UUIDs
 # (client_verbs/bin). Already present transitively, so declaring it adds no new
 # compile cost; replaces a hardcoded `/dev/urandom` read that was unix-only

@@ -92,6 +92,7 @@ pub mod nudge;
 pub mod opencode_ask;
 pub mod opencode_serve;
 pub mod osc;
+pub mod pane_keeper;
 pub mod paths;
 pub mod pi;
 pub mod protocol;
