@@ -3343,9 +3343,9 @@ fn parse_duration(value: &str) -> Result<std::time::Duration, String> {
         Some('d') => (value[..value.len() - 1].into(), 86_400),
         _ => (value.into(), 1),
     };
-    let n: u64 = digits
-        .parse()
-        .map_err(|_| format!("--stale-after needs a duration like 24h, 90m or 3600, got {value:?}"))?;
+    let n: u64 = digits.parse().map_err(|_| {
+        format!("--stale-after needs a duration like 24h, 90m or 3600, got {value:?}")
+    })?;
     Ok(std::time::Duration::from_secs(n.saturating_mul(unit)))
 }
 
@@ -3395,9 +3395,11 @@ pub(crate) fn pane_keeper_list(json: bool, stale_after: Option<std::time::Durati
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(750)));
                 let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(750)));
                 let identified = (|| -> Option<serde_json::Value> {
+                    use crate::pty::{
+                        keeper_decode, keeper_frame_identify, KeeperRead,
+                        KEEPER_TAG_IDENTIFY_REPLY, KEEPER_TAG_OUTPUT,
+                    };
                     use std::io::{Read as _, Write as _};
-                    use crate::pty::{keeper_frame_identify, keeper_decode, KeeperRead,
-                        KEEPER_TAG_IDENTIFY_REPLY, KEEPER_TAG_OUTPUT};
                     stream.write_all(&keeper_frame_identify()).ok()?;
                     let mut buf: Vec<u8> = Vec::new();
                     let mut read_buf = [0u8; 4096];
@@ -3434,7 +3436,8 @@ pub(crate) fn pane_keeper_list(json: bool, stale_after: Option<std::time::Durati
                             ("started_at", "started_at"),
                         ] {
                             let _ = key;
-                            row[field] = reply.get(field).cloned().unwrap_or(serde_json::Value::Null);
+                            row[field] =
+                                reply.get(field).cloned().unwrap_or(serde_json::Value::Null);
                         }
                         let child_pid = reply.get("child_pid").and_then(serde_json::Value::as_u64);
                         if let Some(pid) = child_pid {
@@ -3451,8 +3454,10 @@ pub(crate) fn pane_keeper_list(json: bool, stale_after: Option<std::time::Durati
                             .map(|t| now.saturating_sub(t));
                         if let (Some(age), Some(cap)) = (age, stale_after) {
                             if age > cap.as_secs() {
-                                row["stale"] =
-                                    serde_json::json!(format!("aged {age}s (> {}s)", cap.as_secs()));
+                                row["stale"] = serde_json::json!(format!(
+                                    "aged {age}s (> {}s)",
+                                    cap.as_secs()
+                                ));
                             }
                         }
                     }
@@ -3462,7 +3467,10 @@ pub(crate) fn pane_keeper_list(json: bool, stale_after: Option<std::time::Durati
         rows.push(row);
     }
     if json {
-        println!("{}", serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()));
+        println!(
+            "{}",
+            serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
+        );
     } else if rows.is_empty() {
         println!("no keeper panes");
     } else {
@@ -3474,11 +3482,23 @@ pub(crate) fn pane_keeper_list(json: bool, stale_after: Option<std::time::Durati
             };
             println!(
                 "session {} pane {} keeper {} child {} cwd {}{}",
-                row.get("session").and_then(serde_json::Value::as_str).unwrap_or("?"),
-                row.get("pane_key").and_then(serde_json::Value::as_str).unwrap_or("?"),
-                row.get("keeper_pid").and_then(serde_json::Value::as_u64).map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
-                row.get("child_pid").and_then(serde_json::Value::as_u64).map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
-                row.get("cwd").and_then(serde_json::Value::as_str).unwrap_or("?"),
+                row.get("session")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?"),
+                row.get("pane_key")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?"),
+                row.get("keeper_pid")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".into()),
+                row.get("child_pid")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".into()),
+                row.get("cwd")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?"),
                 desc,
             );
         }

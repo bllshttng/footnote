@@ -581,14 +581,7 @@ impl PtyShell {
         let dir = keeper_dir();
         let sock_path = dir.join(format!("{session}-{pane_id}.sock"));
         let keeper_child = launch_keeper(
-            keeper_bin,
-            &sock_path,
-            session,
-            pane_id,
-            rows,
-            cols,
-            cwd,
-            argv,
+            keeper_bin, &sock_path, session, pane_id, rows, cols, cwd, argv,
         )?;
         // Only the failure paths below consume this; a success leaves the
         // keeper to its own lifecycle (it unlinks its socket and exits when
@@ -630,13 +623,7 @@ impl PtyShell {
             }
         }
         let pty = wire_keeper(
-            stream,
-            child_pid,
-            sock_path,
-            pane_id,
-            seed_buf,
-            out_tx,
-            exit_tx,
+            stream, child_pid, sock_path, pane_id, seed_buf, out_tx, exit_tx,
         );
         drop(keeper_child);
         Ok(PtyShell::Keeper(pty))
@@ -860,7 +847,9 @@ fn launch_keeper(
         "--pane-key",
         &pane_id.to_string(),
         "--cwd",
-        &cwd.map(|p| p.to_path_buf()).unwrap_or_else(std::env::temp_dir).to_string_lossy(),
+        &cwd.map(|p| p.to_path_buf())
+            .unwrap_or_else(std::env::temp_dir)
+            .to_string_lossy(),
         "--rows",
         &rows.max(1).to_string(),
         "--cols",
@@ -921,7 +910,9 @@ fn keeper_handshake(
     stream
         .set_read_timeout(Some(KEEPER_REPLY_TIMEOUT))
         .map_err(|e| e.to_string())?;
-    stream.write_all(&keeper_frame_identify()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(&keeper_frame_identify())
+        .map_err(|e| e.to_string())?;
 
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     let mut ring = Vec::new();
@@ -996,9 +987,7 @@ fn keeper_handshake(
     // seed the reader, or the tail arrives unanchored and the stream
     // desyncs (a payload byte read as a tag decodes as garbage - observed
     // as a phantom Exited that reaped a live pane).
-    stream
-        .set_read_timeout(None)
-        .map_err(|e| e.to_string())?;
+    stream.set_read_timeout(None).map_err(|e| e.to_string())?;
     Ok(Some((stream, reply, ring, buf)))
 }
 
@@ -1034,7 +1023,11 @@ fn wire_keeper(
         .name("fno-mux-keeper-writer".into())
         .spawn(move || {
             while let Ok(frame) = frame_rx.recv() {
-                if writer_half.write_all(&frame).and_then(|()| writer_half.flush()).is_err() {
+                if writer_half
+                    .write_all(&frame)
+                    .and_then(|()| writer_half.flush())
+                    .is_err()
+                {
                     break; // keeper gone; senders see Disconnected
                 }
             }
@@ -1164,7 +1157,10 @@ impl KeeperPty {
     /// on the wire, which needs a peer that observes them - the fake keeps
     /// those tests honest without dragging real processes into unit time.
     #[cfg(test)]
-    pub(crate) fn for_test(stream: std::os::unix::net::UnixStream, child_pid: Option<u32>) -> KeeperPty {
+    pub(crate) fn for_test(
+        stream: std::os::unix::net::UnixStream,
+        child_pid: Option<u32>,
+    ) -> KeeperPty {
         let exited = Arc::new(AtomicBool::new(false));
         let reader_done = Arc::new(AtomicBool::new(false));
         let read_half = stream.try_clone().expect("clone keeper test stream");

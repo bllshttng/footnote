@@ -4084,14 +4084,7 @@ impl Core {
         // The worker path is the keeper path: a recorded member's pane
         // outlives this server. Everything else spawns inline.
         let pid = self
-            .spawn_pane_shell_with_permit(
-                &argv,
-                rows,
-                cols,
-                &cwd,
-                permit,
-                worker.is_some(),
-            )
+            .spawn_pane_shell_with_permit(&argv, rows, cols, &cwd, permit, worker.is_some())
             .map_err(|e| (err_code::SPAWN_FAILED, e))?;
         if claim {
             // Writer-claim ELIGIBILITY, set only at agent spawn (Locked 5).
@@ -7788,7 +7781,9 @@ impl Core {
                     });
                     self.notice_all(format!(
                         "keeper readopt: re-adopted pane {id} (child pid {}) from {}",
-                        child_pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
+                        child_pid
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "?".into()),
                         sock.display()
                     ));
                 }
@@ -7819,10 +7814,9 @@ impl Core {
             if a.placed {
                 return false;
             }
-            let by_name =
-                worker.is_some() && agent_self_from_argv(&a.argv).as_deref() == worker;
-            let by_session = session_id.is_some()
-                && resume_target_from_argv(&a.argv).as_deref() == session_id;
+            let by_name = worker.is_some() && agent_self_from_argv(&a.argv).as_deref() == worker;
+            let by_session =
+                session_id.is_some() && resume_target_from_argv(&a.argv).as_deref() == session_id;
             by_name || by_session
         });
         let Some(a) = hit else {
@@ -8038,9 +8032,12 @@ impl Core {
                     // later resume FOCUS it instead of opening a second
                     // writer.
                     if let Some(pid) = self.take_adopted_for_member(m) {
-                        let binding = worker_binding_key(m)
-                            .unwrap_or_else(|| worker_name.to_string());
-                        self.worker_pane.entry(binding.clone()).or_default().push(pid);
+                        let binding =
+                            worker_binding_key(m).unwrap_or_else(|| worker_name.to_string());
+                        self.worker_pane
+                            .entry(binding.clone())
+                            .or_default()
+                            .push(pid);
                         member_panes.push((binding, pid, m.tab_name.clone()));
                         continue;
                     }
@@ -27840,7 +27837,10 @@ mod tests {
             !sock.exists(),
             "a socket with nothing behind it is removed, not waited on"
         );
-        assert!(core.panes.is_empty(), "no pane is minted for a stale socket");
+        assert!(
+            core.panes.is_empty(),
+            "no pane is minted for a stale socket"
+        );
     }
 
     #[test]
@@ -27932,6 +27932,10 @@ mod tests {
         // The empty read is a valid answer, never a failure: the done-probe
         // greps this verb's --json on machines that may hold no keepers.
         let rc = crate::mux_cli::pane_keeper_list(true, Some(std::time::Duration::from_secs(0)));
-        assert_eq!(rc, crate::mux_cli::EXIT_OK, "an empty keeper list is exit 0");
+        assert_eq!(
+            rc,
+            crate::mux_cli::EXIT_OK,
+            "an empty keeper list is exit 0"
+        );
     }
 }

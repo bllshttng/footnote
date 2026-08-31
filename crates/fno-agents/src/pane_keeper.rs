@@ -125,9 +125,9 @@ pub fn decode(buf: &[u8]) -> Decode {
         TAG_IDENTIFY => Frame::Identify,
         TAG_IDENTIFY_REPLY => Frame::IdentifyReply(payload.to_vec()),
         TAG_OUTPUT => Frame::Output(payload.to_vec()),
-        TAG_EXITED if payload.len() == 4 => {
-            Frame::Exited(i32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]))
-        }
+        TAG_EXITED if payload.len() == 4 => Frame::Exited(i32::from_le_bytes([
+            payload[0], payload[1], payload[2], payload[3],
+        ])),
         _ => {
             return Decode::Violation(format!(
                 "frame tag {tag} with {len} payload byte(s) is not a keeper frame"
@@ -449,14 +449,11 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                         .spawn(move || {
                             // First come, first seated: an empty subscriber
                             // slot takes THIS connection.
-                            let mut slot =
-                                keeper.client.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut slot = keeper.client.lock().unwrap_or_else(|e| e.into_inner());
                             let is_subscriber = slot.is_none();
                             if is_subscriber {
-                                *slot = Some((
-                                    gen,
-                                    stream.try_clone().expect("clone keeper client"),
-                                ));
+                                *slot =
+                                    Some((gen, stream.try_clone().expect("clone keeper client")));
                             }
                             drop(slot);
                             serve_client(&keeper, stream, gen, is_subscriber);
@@ -504,10 +501,7 @@ fn serve_client(
                     // Only the subscriber drives the child; a probe's
                     // driving frames are ignored, never honored.
                     if !is_subscriber
-                        && matches!(
-                            frame,
-                            Frame::Input(_) | Frame::Resize(_, _) | Frame::Kill
-                        )
+                        && matches!(frame, Frame::Input(_) | Frame::Resize(_, _) | Frame::Kill)
                     {
                         continue;
                     }
@@ -516,8 +510,7 @@ fn serve_client(
                             // A full kernel input buffer blocks here, which
                             // backpressures the client - bounded, never a
                             // queue that grows.
-                            let mut writer =
-                                keeper.input.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut writer = keeper.input.lock().unwrap_or_else(|e| e.into_inner());
                             if let Some(writer) = writer.as_mut() {
                                 let _ = writer.write_all(&bytes);
                                 let _ = writer.flush();
@@ -568,15 +561,13 @@ fn serve_client(
                                 (ring.snapshot(), std::mem::take(&mut ring.dropped))
                             };
                             if dropped > 0 {
-                                reply_on(
-                                    &encode(&Frame::Output(
-                                        format!(
-                                            "\r\n[keeper: {dropped} byte(s) of earlier output \
+                                reply_on(&encode(&Frame::Output(
+                                    format!(
+                                        "\r\n[keeper: {dropped} byte(s) of earlier output \
                                              fell off the ring]\r\n"
-                                        )
-                                        .into_bytes(),
-                                    )),
-                                );
+                                    )
+                                    .into_bytes(),
+                                )));
                             }
                             if !snapshot.is_empty() {
                                 reply_on(&encode(&Frame::Output(snapshot)));
@@ -675,6 +666,9 @@ mod tests {
         // One chunk bigger than the whole ring keeps its tail.
         ring.push(b"WXYZ0123456789");
         assert_eq!(ring.snapshot(), b"0123456789");
-        assert_eq!(ring.dropped, 17, "3 old + 4 overflow + 10 displaced, all counted");
+        assert_eq!(
+            ring.dropped, 17,
+            "3 old + 4 overflow + 10 displaced, all counted"
+        );
     }
 }

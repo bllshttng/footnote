@@ -52,7 +52,8 @@ fn ppid_of(pid: u32) -> Option<u32> {
 fn spawn_via_launcher(cfg_args: &str) -> u32 {
     let script = format!(
         "{} --pane {} >/dev/null 2>&1 & echo $!",
-        keeper_bin(), cfg_args
+        keeper_bin(),
+        cfg_args
     );
     let out = Command::new("/bin/sh")
         .arg("-c")
@@ -75,11 +76,14 @@ fn identify(sock: &PathBuf) -> serde_json::Value {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    stream.write_all(&fno_agents::pane_keeper::encode(
-        &fno_agents::pane_keeper::Frame::Identify,
-    ))
-    .unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .write_all(&fno_agents::pane_keeper::encode(
+            &fno_agents::pane_keeper::Frame::Identify,
+        ))
+        .unwrap();
     let mut buf = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -111,7 +115,10 @@ fn identify(sock: &PathBuf) -> serde_json::Value {
             }
         }
     }
-    panic!("no identify reply within the deadline; got {} bytes", buf.len());
+    panic!(
+        "no identify reply within the deadline; got {} bytes",
+        buf.len()
+    );
 }
 
 struct KillGuard(u32);
@@ -150,19 +157,31 @@ fn pane_keeper_outlives_parent() {
 
     // The named keeper is alive, and its CHILD is alive - read through the
     // protocol, never inferred from a process count.
-    assert!(alive(keeper_pid), "keeper pid {keeper_pid} must survive its launcher");
+    assert!(
+        alive(keeper_pid),
+        "keeper pid {keeper_pid} must survive its launcher"
+    );
     let reply = identify(&sock);
     assert_eq!(reply["v"], 1, "protocol version rides the reply: {reply}");
     let child_pid = reply["child_pid"].as_u64().expect("child_pid in reply") as u32;
     assert_ne!(child_pid, 0, "the child pid is a real pid");
-    assert_ne!(child_pid, keeper_pid, "the reply names the CHILD, not the keeper");
-    assert!(alive(child_pid), "child pid {child_pid} must be alive after the launcher died");
+    assert_ne!(
+        child_pid, keeper_pid,
+        "the reply names the CHILD, not the keeper"
+    );
+    assert!(
+        alive(child_pid),
+        "child pid {child_pid} must be alive after the launcher died"
+    );
     assert_eq!(
         ppid_of(child_pid),
         Some(keeper_pid),
         "the surviving child is still parented by the surviving keeper"
     );
-    assert_eq!(reply["keeper_pid"], keeper_pid, "the reply names its own pid");
+    assert_eq!(
+        reply["keeper_pid"], keeper_pid,
+        "the reply names its own pid"
+    );
     let _child = KillGuard(child_pid);
     let _ = std::fs::remove_file(&sock);
 }
@@ -204,16 +223,14 @@ fn identify_names_cwd_and_argv() {
         sock.display()
     ));
     let _keeper = KillGuard(keeper_pid);
-    let _child = KillGuard(
-        {
-            let reply = identify(&sock);
-            assert_eq!(reply["cwd"], "/tmp", "cwd rides the reply: {reply}");
-            assert_eq!(
-                reply["argv"],
-                serde_json::json!(["sleep", "60"]),
-                "the provider argv rides the reply: {reply}"
-            );
-            reply["child_pid"].as_u64().unwrap() as u32
-        },
-    );
+    let _child = KillGuard({
+        let reply = identify(&sock);
+        assert_eq!(reply["cwd"], "/tmp", "cwd rides the reply: {reply}");
+        assert_eq!(
+            reply["argv"],
+            serde_json::json!(["sleep", "60"]),
+            "the provider argv rides the reply: {reply}"
+        );
+        reply["child_pid"].as_u64().unwrap() as u32
+    });
 }
