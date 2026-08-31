@@ -2843,12 +2843,12 @@ def test_impossible_remedies_name_the_attended_command(monkeypatch, tmp_path, ca
 
 
 def test_stale_attestation_refusal_names_the_operator_waiver():
-    """A refusal caused by a MOVED head teaches the waiver that answers it.
+    """A refusal a MOVED head caused teaches the waiver that answers it.
 
     d-4d05272e waives coverage-at-head for merging, and the refusal never said
-    so, leaving the waiver reachable only by querying the decision store. Six
-    agents in one night each hit this wall and stalled, and eight PRs aged
-    16-21h behind it.
+    so, leaving the waiver reachable only by querying the decision store.
+    Narrow by design: rounds tile, so this is the minority shape, not the
+    common one (see the docstring's measurement).
     """
     from fno.pr import _coverage_gate
 
@@ -2867,8 +2867,10 @@ def test_stale_attestation_refusal_names_the_operator_waiver():
 def test_a_never_reviewed_refusal_is_left_alone():
     """The waiver answers a STALE attestation, never an absent one.
 
-    Widening it to a PR nothing has reviewed turns a gate into a bypass, so the
-    guidance is gated on a stale verdict actually existing.
+    This is the load-bearing half. An empty chain is 95 of the 115 uncovered
+    rows measured, so a version of the guidance that also fired here would
+    hand a merge hint to the dominant case: the one where nothing ever
+    reviewed and the gate is doing its job.
     """
     from fno.pr import _coverage_gate
 

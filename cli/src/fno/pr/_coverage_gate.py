@@ -852,22 +852,27 @@ def _ordinary_verdict(
 def _with_stale_waiver_guidance(refusal: str, cov) -> str:
     """Name the operator waiver on a refusal a STALE attestation caused.
 
-    Coverage is head-pinned, so a review that finds anything destroys its own
-    coverage: the fix it demanded moves the head its attestation names. Only a
-    review that finds NOTHING can leave a covered head. Operator ruling
-    d-4d05272e exists for exactly that treadmill and waives the gate for
-    merging, but nothing in the refusal said so, so the waiver was reachable
-    only by querying the decision store. On 2026-08-30 six agents each
-    rediscovered the wall and stopped, and eight PRs aged 16-21h behind it,
-    while the stop hook offered two remedies standing rules forbid (a third
-    round past the cap, and a recovery attestation for a round that never
-    passed).
+    Rounds ACCUMULATE: `_reviews._tiling_chain` counts a verdict at an older
+    sha when that sha is in the chain, so a fix landing on top of a review does
+    not throw the review away. Measured over 387 tiling events: 272 covered,
+    and of the 115 uncovered, 95 carried an EMPTY chain - nothing had reviewed
+    at any sha. So the common uncovered row is a review that never emitted
+    (the empty-diff and lost-attestation defects), not a review the head
+    outran, and this text is deliberately not aimed at that majority.
 
-    Gated on a stale verdict EXISTING. The waiver answers an attestation the
-    head moved out from under, never a PR nothing has reviewed; widening it to
-    an absent attestation would turn the gate into a bypass. Advisory only:
-    this returns text, never authority, and `coverage-waive` still refuses a
-    harness-identified session.
+    It answers the remaining minority, where something did review and the row
+    still refuses. Operator ruling d-4d05272e waives the gate there, and
+    nothing in the refusal said so, so the waiver was reachable only by
+    querying the decision store - while the stop hook offered two remedies
+    standing rules forbid (a third round past the cap, and a recovery
+    attestation for a round that never passed).
+
+    Gated on a stale verdict EXISTING, and that gate carries most of the
+    safety: an empty chain is the 83% case, so a version of this text that
+    also fired on a never-reviewed PR would hand a merge hint to exactly the
+    rows where the gate is doing its job. Advisory only: this returns text,
+    never authority, and `coverage-waive` still refuses a harness-identified
+    session.
     """
     if not isinstance(cov, dict) or not cov.get("stale_verdicts"):
         return refusal
