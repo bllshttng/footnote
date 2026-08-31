@@ -43,32 +43,35 @@ def _resume_command(harness: object, session_id: str) -> str | None:
     return " ".join(t.replace("{session_id}", session_id) for t in tokens)
 
 
-def _graph_harnesses(node_id: object) -> dict[str, str]:
-    """session_id -> harness, from the node's durable sessions[] provenance."""
+def _graph_node(node_id: object) -> dict | None:
+    """The graph node's durable provenance (sessions[], plan_path)."""
     if not isinstance(node_id, str) or not node_id:
-        return {}
+        return None
     for node in read_graph_nodes(_paths.graph_json()):
         if isinstance(node, dict) and node.get("id") == node_id:
-            return {
-                s["session_id"]: s["harness"]
-                for s in node.get("sessions", []) or []
-                if isinstance(s, dict) and s.get("session_id") and s.get("harness")
-            }
-    return {}
+            return node
+    return None
 
 
 def _print_row(row: dict) -> None:
     node = row.get("graph_node_id")
+    gnode = _graph_node(node)
     pr = row.get("pr_number")
     typer.echo(f"node:     {node or '-'}")
     typer.echo(f"pr:       {'#' + str(pr) if pr else '-'}  {row.get('pr_url') or ''}".rstrip())
-    if row.get("plan_path"):
-        typer.echo(f"plan:     {row['plan_path']}")
+    # A backstop row never learned the plan path; the graph node did.
+    plan_path = row.get("plan_path") or (gnode or {}).get("plan_path")
+    if plan_path:
+        typer.echo(f"plan:     {plan_path}")
     if row.get("root_path"):
         typer.echo(f"worktree: {row['root_path']}")
     typer.echo(f"status:   {row.get('status') or '-'}  ({row.get('completed') or '-'})")
 
-    harnesses = _graph_harnesses(node)
+    harnesses = {
+        s["session_id"]: s["harness"]
+        for s in (gnode or {}).get("sessions", []) or []
+        if isinstance(s, dict) and s.get("session_id") and s.get("harness")
+    }
     sessions = row.get("sessions")
     if not isinstance(sessions, list) or not sessions:
         # A legacy row predating the field. Never a blank: an absent key and a
