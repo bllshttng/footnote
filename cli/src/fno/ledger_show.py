@@ -43,19 +43,8 @@ def _resume_command(harness: object, session_id: str) -> str | None:
     return " ".join(t.replace("{session_id}", session_id) for t in tokens)
 
 
-def _graph_node(node_id: object) -> dict | None:
-    """The graph node's durable provenance (sessions[], plan_path)."""
-    if not isinstance(node_id, str) or not node_id:
-        return None
-    for node in read_graph_nodes(_paths.graph_json()):
-        if isinstance(node, dict) and node.get("id") == node_id:
-            return node
-    return None
-
-
-def _print_row(row: dict) -> None:
+def _print_row(row: dict, gnode: dict | None) -> None:
     node = row.get("graph_node_id")
-    gnode = _graph_node(node)
     pr = row.get("pr_number")
     typer.echo(f"node:     {node or '-'}")
     typer.echo(f"pr:       {'#' + str(pr) if pr else '-'}  {row.get('pr_url') or ''}".rstrip())
@@ -145,7 +134,13 @@ def ledger_show_command(arg: str) -> None:
         )
         raise typer.Exit(code=1)
 
+    # One graph read for the whole result, not one per matched row.
+    nodes = {
+        n.get("id"): n
+        for n in read_graph_nodes(_paths.graph_json())
+        if isinstance(n, dict) and n.get("id")
+    }
     for i, row in enumerate(matches):
         if i:
             typer.echo("---")
-        _print_row(row)
+        _print_row(row, nodes.get(row.get("graph_node_id")))

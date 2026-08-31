@@ -160,6 +160,14 @@ def test_harvest_dry_run_reports_counts_without_writing(ledger_path):
 # --- change 4: the marker never leaks out as a session id --------------------
 
 
+def test_observer_first_session_id_skips_the_marker():
+    from fno.observer.fold import _first_session_id
+
+    assert _first_session_id({"sessions": [LEDGER_SESSION_UNRESOLVED]}) is None
+    assert _first_session_id({"sessions": [UUID]}) == UUID
+    assert _first_session_id({}) is None
+
+
 def test_resolve_pr_sessions_skips_the_marker(tmp_path):
     _write_ledger(
         tmp_path / "ledger.json",
