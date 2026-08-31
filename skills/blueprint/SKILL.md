@@ -155,7 +155,7 @@ fi
 
    **Record exactly one outcome** in the plan frontmatter as a `consolidation:` block. The schema is [references/quick-template.md](references/quick-template.md). `validate-plan.sh` refuses a plan written after 2026-08-17 without a well-formed one. Plans created before the gate warn until backfilled:
 
-   - **absorb** - the other node is a wave of THIS deliverable. Record its id and a reason a later reader can check. After intake (3b), run `fno backlog supersede <this-node> --replaces <other> --reason "<recorded reason>"`. Record the reversal (`fno backlog unsupersede <other>`) in the block.
+   - **absorb** - the other node is a wave of THIS deliverable. Record its id and a reason a later reader can check. After intake (3b), run `fno backlog supersede <this-node> --replaces <other> --cause "<inherited cause>" --surface <repo-relative-path>`. `--cause` and `--surface` are required; the old row stays active until a merged PR covers every declared surface, which is what `--surface` is for. Record the reversal (`fno backlog unsupersede <other>`) in the block.
    - **append** - THIS node's content belongs on the OTHER node. Record the id and reason, write no second plan, and stop. The validator rejects an append outcome inside a written plan, because the file contradicts the decision. The content reaches the other node through its own channel (`fno backlog update <other> --details ...`).
    - **proceed_alone** - record every id considered under `proceed_alone_against:` with the reason each is not the same work. An empty candidate list is a legal `proceed_alone`.
 
