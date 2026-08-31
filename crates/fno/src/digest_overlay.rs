@@ -702,6 +702,31 @@ fn parse_bool(v: &str) -> Option<bool> {
 /// running `fno` binary (the installed layout, mirroring `resolve_daemon_bin`),
 /// else bare `fno-agents` on PATH. Crate-visible: the server's claim-sweep
 /// shell-out (x-54fa) resolves the same binary the same way.
+/// The cargo profile dir (`…/target/debug`) of a running binary's directory,
+/// when that binary is a dev-build artifact: `exe_dir` itself for a plain
+/// binary, its parent for a TEST binary (cargo links those one level deeper,
+/// at `…/target/debug/deps`). `None` outside a cargo target tree. Without
+/// the `deps` arm, every test that resolves a paired binary through
+/// [`paired_bin`] falls off the probe to PATH - green on a machine whose
+/// PATH happens to carry an installed copy, red on CI, with no code
+/// difference between the two.
+fn dev_profile_dir(exe_dir: &Path) -> Option<PathBuf> {
+    let is_profile = |d: &Path| {
+        d.file_name()
+            .is_some_and(|n| n == "debug" || n == "release")
+    };
+    if is_profile(exe_dir) {
+        return Some(exe_dir.to_path_buf());
+    }
+    if exe_dir.file_name().is_some_and(|n| n == "deps") {
+        let parent = exe_dir.parent()?;
+        if is_profile(parent) {
+            return Some(parent.to_path_buf());
+        }
+    }
+    None
+}
+
 /// Resolve a paired binary that ships alongside this one: `$<env_var>` when
 /// set, else a sibling of the running binary (the installed layout), else
 /// the sibling crate's cargo target dir (dev builds keep per-crate target
@@ -719,16 +744,10 @@ pub(crate) fn paired_bin(env_var: &str, name: &str) -> PathBuf {
         if sibling.exists() {
             return sibling;
         }
-        // …/crates/fno/target/debug → …/crates/fno/target → …/crates/fno
-        // → …/crates
-        if dir
-            .file_name()
-            .is_some_and(|d| d == "debug" || d == "release")
-            && dir
-                .parent()
-                .is_some_and(|p| p.file_name().is_some_and(|d| d == "target"))
-        {
-            let dev = dir
+        // …/crates/fno/target/debug (or …/debug/deps for a test binary)
+        // → …/crates/fno/target → …/crates/fno → …/crates
+        if let Some(profile) = dev_profile_dir(dir) {
+            let dev = profile
                 .parent()
                 .and_then(|t| t.parent())
                 .and_then(|crate_dir| crate_dir.parent())
@@ -736,7 +755,7 @@ pub(crate) fn paired_bin(env_var: &str, name: &str) -> PathBuf {
                     crates
                         .join("fno-agents")
                         .join("target")
-                        .join(dir.file_name().unwrap())
+                        .join(profile.file_name().unwrap())
                         .join(name)
                 })
                 .filter(|p| p.exists());
@@ -835,6 +854,39 @@ pub async fn on_attach(session: &str, focused_cwd: &str) -> Option<Vec<String>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dev_profile_dir_recognizes_both_cargo_binary_shapes() {
+        // A plain dev binary sits IN the profile dir; a test binary sits in
+        // its deps/ subdir. Both must resolve, or a test that spawns a
+        // paired binary passes on machines with an installed PATH copy and
+        // fails on CI - no code difference between the two.
+        let base = std::env::temp_dir().join(format!("fno-devprof-{}", std::process::id()));
+        let debug = base.join("crates/fno/target/debug");
+        std::fs::create_dir_all(debug.join("deps")).unwrap();
+        assert_eq!(
+            dev_profile_dir(&debug).as_deref(),
+            Some(debug.as_path()),
+            "the profile dir itself"
+        );
+        assert_eq!(
+            dev_profile_dir(&debug.join("deps")).as_deref(),
+            Some(debug.as_path()),
+            "the deps/ subdir of a test binary"
+        );
+        assert_eq!(
+            dev_profile_dir(&base.join("usr/local/bin")),
+            None,
+            "an installed layout is not a dev profile"
+        );
+        assert_eq!(dev_profile_dir(&base), None, "a bare dir is not either");
+        // A deps/ dir NOT under a profile dir (pathological) reads as none.
+        let stray = base.join("deps");
+        std::fs::create_dir_all(&stray).unwrap();
+        assert_eq!(dev_profile_dir(&stray), None);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     #[test]
     fn nested_mux_restore_hold_workers_is_readable() {
