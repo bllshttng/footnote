@@ -11636,12 +11636,21 @@ def cmd_reconcile(
 
                 _led_node = _find_node(post_entries, record.node_id)
                 _led_project = (_led_node or {}).get("project")
+                # The graph node already carries the durable per-phase
+                # provenance (sessions[] with harness + session_id); hand it to
+                # the backstop so a created row never lands session-less.
+                _led_sessions = [
+                    s["session_id"]
+                    for s in (_led_node or {}).get("sessions", []) or []
+                    if isinstance(s, dict) and s.get("session_id")
+                ]
                 upsert_ledger_pr(
                     record.node_id,
                     record.pr_number,
                     record.pr_url,
                     _led_project,
                     record.merged_at,
+                    node_sessions=_led_sessions,
                 )
             except Exception as _led_exc:  # noqa: BLE001 - never abort the close
                 typer.echo(
@@ -11961,6 +11970,20 @@ def cmd_reconcile(
                         f"{_eid} still open, waiting on: {', '.join(_outstanding)}",
                         err=True,
                     )
+
+    # Ledger session harvest (x-4f1b): fill every execution row's ABSENT
+    # `sessions` from its graph node and mark the rest explicitly, before the
+    # sweep reports. Reconcile auto-fires on SessionStart, so this lands
+    # before any reaping work can consult a row. Run on BOTH output paths -
+    # the --json payload's consumers (the SessionStart hook) discard stderr,
+    # so the count line rides stderr there to keep the JSON parseable.
+    from fno.cost._register import harvest_ledger_sessions
+
+    _harvest_nodes = {
+        e.get("id"): e for e in post_entries if isinstance(e, dict) and e.get("id")
+    }
+    _filled, _marked = harvest_ledger_sessions(_harvest_nodes, dry_run=dry_run)
+    typer.echo(f"ledger harvest: filled {_filled}, marked {_marked}", err=json_out)
 
     if json_out:
         payload = {
