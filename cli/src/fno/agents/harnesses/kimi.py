@@ -1,9 +1,8 @@
 """Kimi's ACP-over-stdio driving lane.
 
-The subprocess owns a held stdin pipe for the life of the session. ACP uses
-JSON-RPC response ids for correlation, and notifications can arrive between a
-request and its response, so a clean process exit is never a turn or request
-receipt.
+The protocol loop lives in :mod:`fno.agents.harnesses._acp`, shared with the
+grok driver; this module carries kimi's identity layer - the argv, the auth
+vocabulary, the positive markers, and the stderr diagnostic seam.
 
 Kimi mints its own session ids. Version 0.38.0 has no caller-assigned id
 anywhere: ``-S/--session [id]`` is resume-only, and no flag names an id for a
@@ -13,17 +12,22 @@ in; there is nothing to pass.
 """
 from __future__ import annotations
 
-import io
-import json
-import select
-import subprocess
-import threading
 import time
 from pathlib import Path
-from typing import Any, Iterator, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from fno.agents.dispatch import DispatchAskError
-from fno.agents.harnesses.pi import iter_jsonl
+from fno.agents.harnesses._acp import (
+    AcpStdioSession,
+    error_detail as _acp_error_detail,
+    initialize_params,
+    iter_jsonl,  # noqa: F401  (re-exported for the contract test)
+)
+
+# A read that cannot time out is a hang, not a wait; the shared core enforces
+# the bound through _request_timeout, which reads this at call time so a test
+# can shorten it.
+KIMI_REQUEST_TIMEOUT_S = 180.0
 
 AUTH_MARKERS = (
     "authentication required",
@@ -31,11 +35,6 @@ AUTH_MARKERS = (
     "not authenticated",
     "not signed in",
 )
-
-# A read that cannot time out is a hang, not a wait. ACP notifications arrive
-# between a request and its response, so "no bytes yet" is normal and only a
-# DEADLINE distinguishes a working turn from a dead one.
-KIMI_REQUEST_TIMEOUT_S = 180.0
 
 # kimi announces the real failure condition on stderr alone. Measured against
 # 0.38.0: the JSON-RPC error says only "Authentication required", while stderr
@@ -56,13 +55,6 @@ def is_auth_error(text: str) -> bool:
     """
     lowered = text.lower()
     return any(marker in lowered for marker in AUTH_MARKERS)
-
-
-def _error_detail(error: dict[str, Any], sep: str) -> str:
-    """Join an ACP error's message and data so both reach the caller."""
-    return sep.join(
-        str(part) for part in (error.get("message", error), error.get("data")) if part
-    )
 
 
 class KimiAuthenticationRequired(DispatchAskError):
@@ -104,15 +96,6 @@ def kimi_acp_argv(*, model: Optional[str] = None) -> list[str]:
     return argv
 
 
-def initialize_params() -> dict[str, Any]:
-    """Return the standard ACP initialize request parameters."""
-    return {
-        "protocolVersion": 1,
-        "clientInfo": {"name": "fno", "version": "0.1.0"},
-        "clientCapabilities": {},
-    }
-
-
 def session_list_params() -> dict[str, Any]:
     """Empty params: kimi answers session/list unauthenticated (measured)."""
     return {}
@@ -136,8 +119,10 @@ def session_new_params(
     return params
 
 
-class KimiAcpSession:
+class KimiAcpSession(AcpStdioSession):
     """A live ``kimi acp`` process with correlated ACP requests."""
+
+    tool = "kimi"
 
     def __init__(
         self,
@@ -147,55 +132,22 @@ class KimiAcpSession:
         argv: Optional[Sequence[str]] = None,
         env: Optional[dict[str, str]] = None,
     ) -> None:
-        self.cwd = Path(cwd)
-        self.argv = list(argv or kimi_acp_argv(model=model))
-        self.session_id: Optional[str] = None
-        self._env = env
-        self.proc: Optional[subprocess.Popen[bytes]] = None
-        self._events: Optional[Iterator[dict[str, Any]]] = None
-        self.notifications: list[dict[str, Any]] = []
-        self._stderr: list[str] = []
-        self._stderr_thread: Optional[threading.Thread] = None
-        self._request_id = 0
-        self._read_deadline: Optional[float] = None
+        super().__init__(cwd, argv=list(argv or kimi_acp_argv(model=model)), env=env)
 
-    def __enter__(self) -> "KimiAcpSession":
-        self.start()
-        return self
+    def _request_timeout(self) -> float:
+        return KIMI_REQUEST_TIMEOUT_S
 
-    def __exit__(self, *exc: object) -> None:
-        self.close()
-
-    def start(self) -> "KimiAcpSession":
-        self.proc = subprocess.Popen(
-            self.argv,
-            cwd=str(self.cwd),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=self._env,
-        )
-        stderr = self.proc.stderr
-        if stderr is not None:
-            def _drain() -> None:
-                for line in iter(stderr.readline, b""):
-                    self._stderr.append(line.decode("utf-8", "replace").rstrip("\n"))
-
-            self._stderr_thread = threading.Thread(target=_drain, daemon=True)
-            self._stderr_thread.start()
-        return self
-
-    @property
-    def stderr_text(self) -> str:
-        return "\n".join(self._stderr)
+    def _session_list_params(self) -> dict[str, Any]:
+        return session_list_params()
 
     def _settled_stderr(self) -> str:
         """Wait a bounded moment for stderr before composing a refusal.
 
         The condition the refusal exists to carry arrives on stderr at roughly
         the same moment as the JSON-RPC error on stdout, and the drain thread
-        is async. The wait stops early once a line lands and is bounded so a
-        silent child cannot turn a diagnostic into a second hang.
+        is async. The wait stops early once a line lands, and once the child
+        is dead (its stderr is final), and is bounded so a silent child cannot
+        turn a diagnostic into a second hang.
         """
         deadline = time.monotonic() + STDERR_SETTLE_S
         while not self._stderr and time.monotonic() < deadline:
@@ -208,114 +160,6 @@ class KimiAcpSession:
                     self._stderr_thread.join(timeout=0.5)
                 break
         return self.stderr_text
-
-    def send(self, message: dict[str, Any]) -> None:
-        if self.proc is None or self.proc.stdin is None:
-            raise RuntimeError("kimi ACP session is not started")
-        try:
-            self.proc.stdin.write((json.dumps(message) + "\n").encode())
-            self.proc.stdin.flush()
-        except BrokenPipeError as exc:
-            # A dead child must fail typed: dispatch branches on exit codes,
-            # and this is the one write path where a raw OSError would escape
-            # that contract as an untyped traceback.
-            code = self.proc.poll()
-            raise DispatchAskError(
-                f"kimi ACP child is gone (broken pipe, code {code}); "
-                f"stderr: {self._settled_stderr() or '<empty>'}",
-                exit_code=code if code else 1,
-            ) from exc
-
-    def events(self) -> Iterator[dict[str, Any]]:
-        if self.proc is None or self.proc.stdout is None:
-            raise RuntimeError("kimi ACP session is not started")
-        if self._events is not None:
-            return self._events
-        stdout = self.proc.stdout
-        if not isinstance(stdout, io.BufferedReader):
-            # Popen(PIPE) yields a BufferedReader; a stream without read1
-            # cannot be bounded, and an unbounded read is the defect this
-            # module bans. Refuse the shape; never fall back to it.
-            raise RuntimeError(
-                f"kimi ACP stdout is not a BufferedReader, so the read "
-                f"cannot be bounded; stderr: {self.stderr_text or '<empty>'}"
-            )
-
-        def _chunks() -> Iterator[bytes]:
-            while True:
-                # Bounded by the per-request deadline `request()` publishes. An
-                # unbounded read here would hang initialize/session_new/prompt
-                # forever whenever kimi went silent without closing stdout.
-                deadline = self._read_deadline
-                if deadline is not None:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise self._read_timeout()
-                    try:
-                        ready, _, _ = select.select([stdout], [], [], remaining)
-                    except (OSError, ValueError) as exc:
-                        # A stream that cannot be watched cannot be bounded, and
-                        # an unbounded read IS the defect. Refuse instead of
-                        # falling back to the blocking read1 below.
-                        raise RuntimeError(
-                            f"kimi ACP stdout cannot be watched, so the read "
-                            f"cannot be bounded: {exc}; "
-                            f"stderr: {self.stderr_text or '<empty>'}"
-                        ) from exc
-                    if not ready:
-                        raise self._read_timeout()
-                chunk = stdout.read1(65536)
-                if not chunk:
-                    return
-                yield chunk
-
-        self._events = iter_jsonl(_chunks())
-        return self._events
-
-    def _read_timeout(self) -> RuntimeError:
-        return RuntimeError(
-            f"kimi ACP read exceeded {KIMI_REQUEST_TIMEOUT_S:.0f}s with no "
-            f"response; stderr: {self.stderr_text or '<empty>'}"
-        )
-
-    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        self._request_id += 1
-        request_id = self._request_id
-        self._read_deadline = time.monotonic() + KIMI_REQUEST_TIMEOUT_S
-        self.send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
-        for message in self.events():
-            # A response has id and no method. A server-to-client request
-            # (session/request_permission and friends) also carries an id, so
-            # keying on the id alone either swallows it into notifications,
-            # leaving kimi blocked awaiting a permission until the deadline
-            # reads as "read exceeded", or, on an id collision, returns the
-            # server's request as the response to ours.
-            if "method" in message and message.get("id") is not None:
-                self.notifications.append(message)
-                raise RuntimeError(
-                    f"kimi ACP sent server-to-client request "
-                    f"{message.get('method')!r} (id {message.get('id')}) during "
-                    f"{method!r}; fno answers no server requests yet; "
-                    f"stderr: {self.stderr_text or '<empty>'}"
-                )
-            if message.get("id") == request_id:
-                return message
-            self.notifications.append(message)
-        raise RuntimeError(
-            f"kimi ACP stream ended before response id {request_id} for {method!r}; "
-            f"stderr: {self.stderr_text or '<empty>'}"
-        )
-
-    @staticmethod
-    def result(response: dict[str, Any], method: str) -> dict[str, Any]:
-        error = response.get("error")
-        if isinstance(error, dict):
-            detail = _error_detail(error, " ")
-            raise RuntimeError(f"kimi ACP {method} failed: {detail}")
-        result = response.get("result")
-        if not isinstance(result, dict):
-            raise RuntimeError(f"kimi ACP {method} returned no positive result")
-        return result
 
     def initialize(self) -> dict[str, Any]:
         response = self.request("initialize", initialize_params())
@@ -331,10 +175,6 @@ class KimiAcpSession:
             )
         return result
 
-    def session_list(self) -> dict[str, Any]:
-        response = self.request("session/list", session_list_params())
-        return self.result(response, "session/list")
-
     def session_new(self, add_dirs: Optional[Sequence[Path | str]] = None) -> str:
         """Create a session and return the id kimi MINTED.
 
@@ -345,7 +185,7 @@ class KimiAcpSession:
         response = self.request("session/new", session_new_params(self.cwd, add_dirs))
         error = response.get("error")
         if isinstance(error, dict):
-            detail = _error_detail(error, " ")
+            detail = _acp_error_detail(error)
             if is_auth_error(detail):
                 # The stderr half is the diagnostic half: the JSON-RPC message
                 # alone names no condition. Wait the bounded moment so the
@@ -389,38 +229,3 @@ class KimiAcpSession:
             {"sessionId": session_id, "cwd": str(self.cwd), "mcpServers": []},
         )
         return self.result(response, "session/fork")
-
-    def prompt(self, message: str) -> dict[str, Any]:
-        """Run one ACP turn and retain notifications for positive assertions."""
-        response = self.request(
-            "session/prompt",
-            {
-                "sessionId": self.session_id,
-                "prompt": [{"type": "text", "text": message}],
-            },
-        )
-        return self.result(response, "session/prompt")
-
-    def close(self) -> None:
-        if self.proc is None:
-            return
-        if self.proc.stdin is not None:
-            try:
-                self.proc.stdin.close()
-            except OSError:
-                pass
-        try:
-            self.proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.proc.wait(timeout=5)
-        if self._stderr_thread is not None:
-            self._stderr_thread.join(timeout=5)
-            self._stderr_thread = None
-        for stream in (self.proc.stdout, self.proc.stderr):
-            if stream is not None:
-                try:
-                    stream.close()
-                except OSError:
-                    pass
-        self._events = None
