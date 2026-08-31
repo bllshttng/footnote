@@ -297,6 +297,47 @@ def test_append_to_tasks_json_keeps_nonpromotable_duplicates_first():
             assert entries == [existing]
 
 
+def test_append_to_tasks_json_promotion_drops_node_backstop_row():
+    """A promoted row must supersede the node's reconcile-backstop, exactly as
+    the append path's collapse rule does; otherwise the node double-counts."""
+    with tempfile.TemporaryDirectory() as td:
+        ledger = Path(td) / "ledger.json"
+        planned = {
+            "fno_id": "target-1",
+            "session_id": "target-1",
+            "termination_reason": "Budget",
+            "completed": "first",
+            "plan_path": "/x/plan.md",
+            "cost_usd": 2.0,
+        }
+        backstop = {
+            "type": "execution",
+            "status": "done",
+            "graph_node_id": "node-1",
+            "pr_number": 976,
+            "backstop": True,
+            "termination_reason": "reconcile-backstop",
+            "session_id": None,
+        }
+        ledger.write_text(json.dumps({"entries": [planned, backstop]}))
+
+        register_task.append_to_tasks_json(
+            ledger,
+            {
+                "fno_id": "target-1",
+                "termination_reason": "DonePRGreen",
+                "completed": "second",
+                "graph_node_id": "node-1",
+                "pr_number": 976,
+            },
+        )
+
+        entries = json.loads(ledger.read_text())["entries"]
+        assert len(entries) == 1
+        assert entries[0]["termination_reason"] == "DonePRGreen"
+        assert entries[0].get("backstop") is not True
+
+
 def test_render_tasks_md_handles_bare_list_shape():
     """Regression test for ab-67063a76 (render path).
 

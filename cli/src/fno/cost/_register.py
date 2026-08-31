@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fno import paths as _paths
+from fno.terminals import DELIVERED_TERMINALS as _DELIVERED_TERMINALS
 
 
 def safe_number(val, as_type: str = "float", decimals: int = 2):
@@ -575,11 +576,6 @@ def _write_ledger_data(tasks_path: Path, data: dict) -> None:
         raise
 
 
-_DELIVERED_TERMINALS = frozenset(
-    {"DonePRGreen", "DoneAdvisory", "DoneDelivery", "DoneBatched"}
-)
-
-
 def append_to_tasks_json(tasks_path: Path, entry: dict) -> None:
     """Append entry to a ledger.json file atomically with flock."""
     tasks_path.parent.mkdir(parents=True, exist_ok=True)
@@ -628,6 +624,20 @@ def append_to_tasks_json(tasks_path: Path, entry: dict) -> None:
                         if aliases:
                             promoted["sessions"] = aliases
                         data["entries"][index] = promoted
+                        # Promotion bypasses the append path below, so apply
+                        # the same collapse rule: a promoted full-fidelity row
+                        # must never coexist with the node's backstop row.
+                        promoted_node = promoted.get("graph_node_id")
+                        if promoted_node:
+                            data["entries"] = [
+                                e
+                                for j, e in enumerate(data["entries"])
+                                if j == index
+                                or not (
+                                    e.get("backstop")
+                                    and e.get("graph_node_id") == promoted_node
+                                )
+                            ]
                         _write_ledger_data(tasks_path, data)
                         print(
                             f"Promoted target fno_id {new_scalar} "
