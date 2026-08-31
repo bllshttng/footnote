@@ -832,6 +832,21 @@ fn node_from_argv(argv: &[String]) -> Option<String> {
     env_token_from_argv(argv, "FNO_NODE=")
 }
 
+/// Resolve the `fno-agents-worker` binary the keeper lane execs: the test
+/// override `$FNO_AGENTS_WORKER_BIN`, else a sibling of the running `fno`
+/// binary (the installed layout, mirroring `fno_agents_bin`), else bare
+/// `fno-agents-worker` on PATH.
+fn keeper_worker_bin() -> std::path::PathBuf {
+    if let Some(v) = std::env::var_os("FNO_AGENTS_WORKER_BIN") {
+        return std::path::PathBuf::from(v);
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("fno-agents-worker")))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("fno-agents-worker"))
+}
+
 /// (x-c914) The pane's `FNO_ACCOUNT` birth account, parsed from the same
 /// `env(1)` wrapper prefix as `FNO_NODE` (`_mesh_env_wrapper` stamps it when a
 /// spawn was routed with `--account`). `None` for a default-account or ad-hoc
@@ -3525,6 +3540,24 @@ impl Core {
         cwd: &str,
         permit: crate::process_admission::AdmissionPermit,
     ) -> Result<u64, String> {
+        self.spawn_pane_shell_with_permit(argv, rows, cols, cwd, permit, false)
+    }
+
+    /// The one spawn fork in the road: `keeper = true` routes a worker pane
+    /// through a `fno-agents-worker --pane` process that owns the pty master
+    /// out-of-process, so the pane child outlives this server and a fresh
+    /// server re-adopts it. Plain shells and ad-hoc panes keep the inline
+    /// master: dying with the server is correct for them, and keeper-per-pane
+    /// would double the fleet process count.
+    fn spawn_pane_shell_with_permit(
+        &mut self,
+        argv: &[String],
+        rows: u16,
+        cols: u16,
+        cwd: &str,
+        permit: crate::process_admission::AdmissionPermit,
+        keeper: bool,
+    ) -> Result<u64, String> {
         if argv.is_empty() {
             return Err("pane run needs a command (empty argv)".into());
         }
@@ -3535,17 +3568,32 @@ impl Core {
         let resume_target = resume_target_from_argv(argv);
         let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
-        let pty = PtyShell::spawn_cmd_with_permit(
-            argv,
-            rows,
-            cols,
-            dir,
-            &self.session_name,
-            id,
-            self.out_tx.clone(),
-            self.exit_tx.clone(),
-            permit,
-        )
+        let pty = if keeper {
+            PtyShell::spawn_cmd_keeper_with_permit(
+                &keeper_worker_bin(),
+                argv,
+                rows,
+                cols,
+                dir,
+                &self.session_name,
+                id,
+                self.out_tx.clone(),
+                self.exit_tx.clone(),
+                permit,
+            )
+        } else {
+            PtyShell::spawn_cmd_with_permit(
+                argv,
+                rows,
+                cols,
+                dir,
+                &self.session_name,
+                id,
+                self.out_tx.clone(),
+                self.exit_tx.clone(),
+                permit,
+            )
+        }
         .map_err(|e| e.to_string())?;
         self.register_pane(
             id,
@@ -4018,8 +4066,17 @@ impl Core {
         let pane_count = self.placement_pane_count(dest, &placement);
         let permit = crate::process_admission::admit_pane(pane_count, placement.max_panes)
             .map_err(|e| (err_code::SPAWN_FAILED, e.to_string()))?;
+        // The worker path is the keeper path: a recorded member's pane
+        // outlives this server. Everything else spawns inline.
         let pid = self
-            .spawn_pane_cmd_with_permit(&argv, rows, cols, &cwd, permit)
+            .spawn_pane_shell_with_permit(
+                &argv,
+                rows,
+                cols,
+                &cwd,
+                permit,
+                worker.is_some(),
+            )
             .map_err(|e| (err_code::SPAWN_FAILED, e))?;
         if claim {
             // Writer-claim ELIGIBILITY, set only at agent spawn (Locked 5).

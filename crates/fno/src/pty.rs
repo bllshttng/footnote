@@ -205,7 +205,22 @@ pub fn shell_candidates(env_shell: Option<&OsStr>) -> Vec<OsString> {
 
 /// A live PTY-managed shell. The server owns this for the pane's lifetime -
 /// client attach/detach never touches it (AC4-HP).
-pub struct PtyShell {
+///
+/// Two ownership forms. `Local` is today's inline master: the mux server
+/// process holds the pty master, and a server death hangs the child up
+/// (SIGHUP through the closing master) - correct for plain shells. `Keeper`
+/// holds only a unix socket to a `fno-agents-worker --pane` process that
+/// owns the master out-of-process; the child survives the server and a
+/// fresh server re-adopts it. No trait: one enum, two variants, and there
+/// will never be a third.
+pub enum PtyShell {
+    Local(LocalPty),
+    Keeper(KeeperPty),
+}
+
+/// The inline form: the server holds the master. The pre-keeper body,
+/// moved wholesale.
+pub struct LocalPty {
     // Held for the fd + resize; boxed trait object as returned by portable-pty.
     master: Box<dyn MasterPty + Send>,
     // Input goes through a dedicated writer thread (spawn_writer): a PTY
@@ -222,7 +237,27 @@ pub struct PtyShell {
     _shell_rc: Option<ShellRc>,
 }
 
-impl PtyShell {
+/// The keeper-hosted form: the master lives in a `fno-agents-worker --pane`
+/// process; this side holds the single-client unix socket to it.
+pub struct KeeperPty {
+    // The socket path, for diagnostics and the keeper list.
+    _sock_path: PathBuf,
+    // The CHILD's pid (answered by the keeper's Identify), never the
+    // keeper's: a fleet count and any later kill must aim at the process
+    // the user sees.
+    child_pid: Option<u32>,
+    // Set when the Exited frame arrives OR the socket dies without one
+    // (a dead keeper takes its child's terminal down with it).
+    exited: Arc<AtomicBool>,
+    reader_done: Arc<AtomicBool>,
+    // Encoded frames queued for the writer thread: Input, Resize, Kill.
+    // Same shape and rationale as LocalPty's input queue - the socket write
+    // can block against a keeper whose child stopped reading, so it never
+    // runs on the core loop.
+    frame_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+}
+
+impl LocalPty {
     /// Spawn the first spawnable candidate from `candidates` on a fresh
     /// `rows`x`cols` PTY, starting the shell in `cwd` when given and still a
     /// directory (a vanished dir degrades to the server's cwd rather than
@@ -241,7 +276,7 @@ impl PtyShell {
         pane_id: u64,
         out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
-    ) -> Result<PtyShell, PtyError> {
+    ) -> Result<LocalPty, PtyError> {
         let permit =
             crate::process_admission::admit_fleet().map_err(|e| PtyError::Spawn(e.to_string()))?;
         Self::spawn_with_permit(
@@ -262,7 +297,7 @@ impl PtyShell {
         out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
         permit: crate::process_admission::AdmissionPermit,
-    ) -> Result<PtyShell, PtyError> {
+    ) -> Result<LocalPty, PtyError> {
         let pair = open_pty(rows, cols)?;
         let mut errors = Vec::new();
         let mut child = None;
@@ -314,7 +349,7 @@ impl PtyShell {
         pane_id: u64,
         out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
-    ) -> Result<PtyShell, PtyError> {
+    ) -> Result<LocalPty, PtyError> {
         let permit =
             crate::process_admission::admit_fleet().map_err(|e| PtyError::Spawn(e.to_string()))?;
         Self::spawn_cmd_with_permit(
@@ -334,7 +369,7 @@ impl PtyShell {
         out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
         permit: crate::process_admission::AdmissionPermit,
-    ) -> Result<PtyShell, PtyError> {
+    ) -> Result<LocalPty, PtyError> {
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| PtyError::Spawn("empty argv".into()))?;
@@ -449,6 +484,614 @@ impl PtyShell {
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+    }
+}
+
+impl PtyShell {
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn(
+        candidates: &[OsString],
+        rows: u16,
+        cols: u16,
+        cwd: Option<&std::path::Path>,
+        session: &str,
+        pane_id: u64,
+        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        exit_tx: tokio::sync::mpsc::Sender<u64>,
+    ) -> Result<PtyShell, PtyError> {
+        LocalPty::spawn(
+            candidates, rows, cols, cwd, session, pane_id, out_tx, exit_tx,
+        )
+        .map(PtyShell::Local)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_with_permit(
+        candidates: &[OsString],
+        rows: u16,
+        cols: u16,
+        cwd: Option<&std::path::Path>,
+        session: &str,
+        pane_id: u64,
+        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        exit_tx: tokio::sync::mpsc::Sender<u64>,
+        permit: crate::process_admission::AdmissionPermit,
+    ) -> Result<PtyShell, PtyError> {
+        LocalPty::spawn_with_permit(
+            candidates, rows, cols, cwd, session, pane_id, out_tx, exit_tx, permit,
+        )
+        .map(PtyShell::Local)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_cmd(
+        argv: &[String],
+        rows: u16,
+        cols: u16,
+        cwd: Option<&std::path::Path>,
+        session: &str,
+        pane_id: u64,
+        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        exit_tx: tokio::sync::mpsc::Sender<u64>,
+    ) -> Result<PtyShell, PtyError> {
+        LocalPty::spawn_cmd(argv, rows, cols, cwd, session, pane_id, out_tx, exit_tx)
+            .map(PtyShell::Local)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_cmd_with_permit(
+        argv: &[String],
+        rows: u16,
+        cols: u16,
+        cwd: Option<&std::path::Path>,
+        session: &str,
+        pane_id: u64,
+        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        exit_tx: tokio::sync::mpsc::Sender<u64>,
+        permit: crate::process_admission::AdmissionPermit,
+    ) -> Result<PtyShell, PtyError> {
+        LocalPty::spawn_cmd_with_permit(
+            argv, rows, cols, cwd, session, pane_id, out_tx, exit_tx, permit,
+        )
+        .map(PtyShell::Local)
+    }
+
+    /// Spawn `argv` inside a keeper process (the worker-pane path): the
+    /// master is born in `fno-agents-worker --pane`, so the child outlives
+    /// this server. This server holds only the keeper socket. Admission is
+    /// recorded against the CHILD's pid (the keeper's Identify answer), so
+    /// a fleet count and any later kill aim at the process the user sees.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_cmd_keeper_with_permit(
+        keeper_bin: &std::path::Path,
+        argv: &[String],
+        rows: u16,
+        cols: u16,
+        cwd: Option<&std::path::Path>,
+        session: &str,
+        pane_id: u64,
+        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        exit_tx: tokio::sync::mpsc::Sender<u64>,
+        permit: crate::process_admission::AdmissionPermit,
+    ) -> Result<PtyShell, PtyError> {
+        if argv.is_empty() {
+            return Err(PtyError::Spawn("empty argv".into()));
+        }
+        let dir = keeper_dir();
+        let sock_path = dir.join(format!("{session}-{pane_id}.sock"));
+        let keeper_child = launch_keeper(
+            keeper_bin,
+            &sock_path,
+            session,
+            pane_id,
+            rows,
+            cols,
+            cwd,
+            argv,
+        )?;
+        // Only the failure paths below consume this; a success leaves the
+        // keeper to its own lifecycle (it unlinks its socket and exits when
+        // the child does).
+        let cleanup = |mut child: std::process::Child| {
+            // SAFETY: SIGKILL to a process we just spawned and are refusing.
+            unsafe {
+                libc::kill(child.id() as libc::pid_t, libc::SIGKILL);
+            }
+            let _ = child.wait();
+        };
+        let (stream, reply, _ring) =
+            match keeper_handshake(&sock_path, keeper_handshake_quiet()) {
+                Ok(found) => match found {
+                    Some(found) => found,
+                    None => {
+                        cleanup(keeper_child);
+                        return Err(PtyError::Spawn(format!(
+                            "keeper at {} died before answering Identify",
+                            sock_path.display()
+                        )));
+                    }
+                },
+                Err(e) => {
+                    cleanup(keeper_child);
+                    return Err(PtyError::Spawn(format!("keeper handshake: {e}")));
+                }
+            };
+        let child_pid = reply
+            .get("child_pid")
+            .and_then(serde_json::Value::as_u64)
+            .map(|p| p as u32);
+        if !crate::process_admission::is_root_program(std::ffi::OsStr::new(&argv[0])) {
+            if let Some(pid) = child_pid {
+                if let Err(error) = permit.record_child(pid) {
+                    cleanup(keeper_child);
+                    return Err(PtyError::Spawn(format!("admission marker failed: {error}")));
+                }
+            }
+        }
+        let pty = wire_keeper(stream, child_pid, sock_path, pane_id, out_tx, exit_tx);
+        drop(keeper_child);
+        Ok(PtyShell::Keeper(pty))
+    }
+
+    pub fn child_pid(&self) -> Option<u32> {
+        match self {
+            PtyShell::Local(local) => local.child_pid(),
+            PtyShell::Keeper(keeper) => keeper.child_pid,
+        }
+    }
+
+    pub fn write_input(&self, bytes: &[u8]) -> Result<(), PtyError> {
+        match self {
+            PtyShell::Local(local) => local.write_input(bytes),
+            PtyShell::Keeper(keeper) => keeper.send_frame(keeper_frame_input(bytes)),
+        }
+    }
+
+    pub fn resize(
+        &self,
+        rows: u16,
+        cols: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    ) -> Result<(), PtyError> {
+        match self {
+            PtyShell::Local(local) => local.resize(rows, cols, pixel_width, pixel_height),
+            // The keeper protocol carries no pixels (the frame is 4 bytes);
+            // a hosted TUI re-derives from rows/cols.
+            PtyShell::Keeper(keeper) => {
+                let _ = (pixel_width, pixel_height);
+                keeper.send_frame(keeper_frame_resize(rows, cols))
+            }
+        }
+    }
+
+    pub fn is_child_alive(&self) -> bool {
+        match self {
+            PtyShell::Local(local) => local.is_child_alive(),
+            PtyShell::Keeper(keeper) => keeper.is_child_alive(),
+        }
+    }
+
+    pub fn is_reap_ready(&self) -> bool {
+        match self {
+            PtyShell::Local(local) => local.is_reap_ready(),
+            PtyShell::Keeper(keeper) => keeper.is_reap_ready(),
+        }
+    }
+
+    /// Kill and reap. For a keeper pane the Kill frame makes the KEEPER
+    /// kill its own child, then the keeper exits (a deliberate close must
+    /// kill: surviving a hangup never becomes surviving a close).
+    pub fn kill(&self) {
+        match self {
+            PtyShell::Local(local) => local.kill(),
+            PtyShell::Keeper(keeper) => keeper.kill(),
+        }
+    }
+}
+
+// ---- the keeper client half ------------------------------------------------
+
+/// The keeper frame protocol tags. Mirrors
+/// `crates/fno-agents/src/pane_keeper.rs`; the two sides ship from this
+/// repo, and the version rides the Identify reply so an upgraded client
+/// meeting an older keeper refuses loudly instead of decoding garbage.
+const KEEPER_TAG_INPUT: u8 = 1;
+const KEEPER_TAG_RESIZE: u8 = 2;
+const KEEPER_TAG_KILL: u8 = 3;
+const KEEPER_TAG_IDENTIFY: u8 = 4;
+const KEEPER_TAG_IDENTIFY_REPLY: u8 = 5;
+const KEEPER_TAG_OUTPUT: u8 = 6;
+const KEEPER_TAG_EXITED: u8 = 7;
+
+/// The keeper protocol version this client speaks.
+pub const KEEPER_PROTOCOL_VERSION: u32 = 1;
+
+fn keeper_frame_input(bytes: &[u8]) -> Vec<u8> {
+    keeper_encode(KEEPER_TAG_INPUT, bytes)
+}
+
+fn keeper_frame_resize(rows: u16, cols: u16) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(4);
+    payload.extend_from_slice(&rows.to_le_bytes());
+    payload.extend_from_slice(&cols.to_le_bytes());
+    keeper_encode(KEEPER_TAG_RESIZE, &payload)
+}
+
+fn keeper_frame_kill() -> Vec<u8> {
+    keeper_encode(KEEPER_TAG_KILL, &[])
+}
+
+fn keeper_frame_identify() -> Vec<u8> {
+    keeper_encode(KEEPER_TAG_IDENTIFY, &[])
+}
+
+fn keeper_encode(tag: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5 + payload.len());
+    out.push(tag);
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+enum KeeperRead {
+    /// tag, payload, bytes consumed.
+    Frame(u8, Vec<u8>, usize),
+    NeedMore,
+}
+
+/// Read one frame from `buf`, consuming whole frames only.
+fn keeper_decode(buf: &[u8]) -> KeeperRead {
+    if buf.len() < 5 {
+        return KeeperRead::NeedMore;
+    }
+    let tag = buf[0];
+    let len = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+    if buf.len() < 5 + len {
+        return KeeperRead::NeedMore;
+    }
+    KeeperRead::Frame(tag, buf[5..5 + len].to_vec(), 5 + len)
+}
+
+/// `<state-root>/mux/panes/`: session-keyed keeper sockets. See
+/// docs/state-root-inventory.md for the owner + lifetime row.
+pub fn keeper_dir() -> PathBuf {
+    crate::proto::mux_dir().join("panes")
+}
+
+/// Every keeper socket for `session`, newest-last. The sweep and the
+/// `pane keeper list` verb both read this.
+pub fn keeper_sockets(session: &str) -> Vec<PathBuf> {
+    let dir = keeper_dir();
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    let prefix = format!("{session}-");
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with(&prefix) && name.ends_with(".sock") {
+            out.push(entry.path());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Launch the keeper process for one pane. Plain pipes (the conversation
+/// lives on the keeper's OWN pty); the keeper setsid's itself out of this
+/// process group before anything else.
+#[allow(clippy::too_many_arguments)]
+fn launch_keeper(
+    keeper_bin: &std::path::Path,
+    sock_path: &std::path::Path,
+    session: &str,
+    pane_id: u64,
+    rows: u16,
+    cols: u16,
+    cwd: Option<&std::path::Path>,
+    argv: &[String],
+) -> Result<std::process::Child, PtyError> {
+    let mut cmd = std::process::Command::new(keeper_bin);
+    cmd.args([
+        "--pane",
+        "--sock",
+        &sock_path.to_string_lossy(),
+        "--session",
+        session,
+        "--pane-key",
+        &pane_id.to_string(),
+        "--cwd",
+        &cwd.map(|p| p.to_path_buf()).unwrap_or_else(std::env::temp_dir).to_string_lossy(),
+        "--rows",
+        &rows.max(1).to_string(),
+        "--cols",
+        &cols.max(1).to_string(),
+        "--",
+    ]);
+    cmd.args(argv);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    // stderr inherits: a keeper startup failure reaches the server's log.
+    // Same fork discipline as the portable-pty path: never overlap a fork
+    // with another spawn's fork window.
+    let _fork = fork_guard();
+    cmd.spawn().map_err(|e| {
+        PtyError::Spawn(format!(
+            "cannot launch keeper {}: {e}",
+            keeper_bin.display()
+        ))
+    })
+}
+
+/// How long the handshake waits for the keeper's socket to appear.
+const KEEPER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long the handshake waits for each frame.
+const KEEPER_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// After the Identify reply, drain ring Output until this much silence -
+/// the replay is finite and arrives in one burst.
+fn keeper_handshake_quiet() -> std::time::Duration {
+    std::time::Duration::from_millis(150)
+}
+
+/// Connect to a keeper and run the Identify handshake synchronously.
+/// Returns (stream, IdentifyReply json, ring bytes). The stream is returned
+/// with blocking reads restored. `None`-valued Ok means the socket never
+/// appeared (the keeper died at startup).
+fn keeper_handshake(
+    sock_path: &std::path::Path,
+    quiet: std::time::Duration,
+) -> Result<
+    Option<(
+        std::os::unix::net::UnixStream,
+        serde_json::Value,
+        Vec<u8>,
+    )>,
+    String,
+> {
+    let deadline = std::time::Instant::now() + KEEPER_CONNECT_TIMEOUT;
+    let mut stream = loop {
+        match std::os::unix::net::UnixStream::connect(sock_path) {
+            Ok(s) => break s,
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(_) => return Ok(None),
+        }
+    };
+    stream
+        .set_read_timeout(Some(KEEPER_REPLY_TIMEOUT))
+        .map_err(|e| e.to_string())?;
+    stream.write_all(&keeper_frame_identify()).map_err(|e| e.to_string())?;
+
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
+    let mut ring = Vec::new();
+    let mut read_buf = [0u8; 8192];
+    // Phase 1: read until the IdentifyReply lands. A premature EOF or the
+    // Exited frame means the keeper's child died at startup.
+    let reply = loop {
+        // Parse whatever whole frames are already buffered.
+        let mut answered = None;
+        loop {
+            match keeper_decode(&buf) {
+                KeeperRead::NeedMore => break,
+                KeeperRead::Frame(tag, payload, used) => {
+                    buf.drain(..used);
+                    match tag {
+                        KEEPER_TAG_IDENTIFY_REPLY => {
+                            let value: serde_json::Value = serde_json::from_slice(&payload)
+                                .map_err(|e| format!("identify reply is not json: {e}"))?;
+                            match value.get("v").and_then(serde_json::Value::as_u64) {
+                                Some(v) if v <= KEEPER_PROTOCOL_VERSION as u64 => {}
+                                Some(v) => {
+                                    return Err(format!(
+                                        "keeper speaks protocol v{v}; this client speaks \
+                                         v{KEEPER_PROTOCOL_VERSION} - update fno"
+                                    ));
+                                }
+                                None => return Err("identify reply carries no version".into()),
+                            }
+                            answered = Some(value);
+                        }
+                        KEEPER_TAG_OUTPUT => ring.extend_from_slice(&payload),
+                        KEEPER_TAG_EXITED => {
+                            return Err("keeper's child exited during the handshake".into());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if let Some(value) = answered {
+            break value;
+        }
+        let n = stream.read(&mut read_buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("keeper closed the socket before answering Identify".into());
+        }
+        buf.extend_from_slice(&read_buf[..n]);
+    };
+    // Phase 2: the ring replay follows the reply in one burst; drain until
+    // `quiet` of silence. Only the drain read carries the short timeout.
+    let _ = stream.set_read_timeout(Some(quiet));
+    loop {
+        let n = match stream.read(&mut read_buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        buf.extend_from_slice(&read_buf[..n]);
+        loop {
+            match keeper_decode(&buf) {
+                KeeperRead::NeedMore => break,
+                KeeperRead::Frame(tag, payload, used) => {
+                    buf.drain(..used);
+                    if tag == KEEPER_TAG_OUTPUT {
+                        ring.extend_from_slice(&payload);
+                    }
+                }
+            }
+        }
+    }
+    // The reader thread inherits this fd; it needs clean blocking reads.
+    stream
+        .set_read_timeout(None)
+        .map_err(|e| e.to_string())?;
+    Ok(Some((stream, reply, ring)))
+}
+
+/// Wire a handshaken keeper connection into the mux: the reader thread
+/// turns Output frames into pane-tagged sends and the Exited frame into the
+/// exit signal; the writer thread drains the bounded frame queue. Shape is
+/// the Local variant's, with the socket standing in for the pty.
+#[allow(clippy::too_many_arguments)]
+fn wire_keeper(
+    stream: std::os::unix::net::UnixStream,
+    child_pid: Option<u32>,
+    sock_path: PathBuf,
+    pane_id: u64,
+    out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    exit_tx: tokio::sync::mpsc::Sender<u64>,
+) -> KeeperPty {
+    let exited = Arc::new(AtomicBool::new(false));
+    let reader_done = Arc::new(AtomicBool::new(false));
+    let read_half = stream.try_clone().expect("clone keeper stream");
+    spawn_keeper_reader(
+        read_half,
+        pane_id,
+        out_tx,
+        exit_tx,
+        Arc::clone(&exited),
+        Arc::clone(&reader_done),
+    );
+    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
+    let mut writer_half = stream;
+    std::thread::Builder::new()
+        .name("fno-mux-keeper-writer".into())
+        .spawn(move || {
+            while let Ok(frame) = frame_rx.recv() {
+                if writer_half.write_all(&frame).and_then(|()| writer_half.flush()).is_err() {
+                    break; // keeper gone; senders see Disconnected
+                }
+            }
+        })
+        .expect("spawn keeper writer thread");
+    KeeperPty {
+        _sock_path: sock_path,
+        child_pid,
+        exited,
+        reader_done,
+        frame_tx,
+    }
+}
+
+/// The keeper reader thread: socket frames -> the shared pane-tagged
+/// channel. A socket EOF with no Exited frame means the keeper is gone;
+/// the keeper holds the master, so its child is going down with it - mark
+/// exited and signal the pane's death the same way a Local reader would.
+#[allow(clippy::too_many_arguments)]
+fn spawn_keeper_reader(
+    mut reader: std::os::unix::net::UnixStream,
+    pane_id: u64,
+    out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    exit_tx: tokio::sync::mpsc::Sender<u64>,
+    exited: Arc<AtomicBool>,
+    reader_done: Arc<AtomicBool>,
+) {
+    std::thread::Builder::new()
+        .name("fno-mux-keeper-reader".into())
+        .spawn(move || {
+            let mut buf: Vec<u8> = Vec::with_capacity(8192);
+            let mut read_buf = [0u8; 8192];
+            'outer: loop {
+                loop {
+                    match keeper_decode(&buf) {
+                        KeeperRead::NeedMore => break,
+                        KeeperRead::Frame(tag, payload, used) => {
+                            buf.drain(..used);
+                            match tag {
+                                KEEPER_TAG_OUTPUT => {
+                                    if out_tx.blocking_send((pane_id, payload)).is_err() {
+                                        break 'outer; // consumer gone
+                                    }
+                                }
+                                KEEPER_TAG_EXITED => {
+                                    exited.store(true, Ordering::Release);
+                                    break 'outer;
+                                }
+                                // Identify replies are a handshake-time
+                                // shape; late ones are noise.
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                match reader.read(&mut read_buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&read_buf[..n]),
+                }
+            }
+            exited.store(true, Ordering::Release);
+            reader_done.store(true, Ordering::Release);
+            let _ = exit_tx.blocking_send(pane_id);
+        })
+        .expect("spawn keeper reader thread");
+}
+
+impl KeeperPty {
+    /// Queue one encoded frame. Same fail-closed policy as LocalPty's
+    /// keystroke queue: a full queue drops, a dead writer thread reports.
+    fn send_frame(&self, frame: Vec<u8>) -> Result<(), PtyError> {
+        use std::sync::mpsc::TrySendError;
+        self.frame_tx.try_send(frame).map_err(|e| match e {
+            TrySendError::Full(_) => PtyError::Write(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "keeper frame queue full; frame dropped",
+            )),
+            TrySendError::Disconnected(_) => PtyError::Write(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "keeper writer thread gone (keeper exited)",
+            )),
+        })
+    }
+
+    /// The child lives while the keeper has not told us otherwise AND the
+    /// pid itself still exists - a wedged keeper cannot fake a live child,
+    /// and a dead one cannot hide a live child behind a lost socket.
+    fn is_child_alive(&self) -> bool {
+        if self.exited.load(Ordering::Acquire) {
+            return false;
+        }
+        match self.child_pid {
+            Some(pid) => {
+                // SAFETY: signal 0 is the existence probe.
+                let hit = unsafe { libc::kill(pid as libc::pid_t, 0) };
+                hit == 0
+            }
+            None => true, // unknown pid: the socket is the only evidence
+        }
+    }
+
+    fn is_reap_ready(&self) -> bool {
+        self.reader_done.load(Ordering::Acquire) && !self.is_child_alive()
+    }
+
+    /// Deliberate close: Kill frame, then wait briefly for the Exited that
+    /// proves the child is down and the keeper is leaving. The reader
+    /// thread performs the actual state flip; this only bounds the wait.
+    fn kill(&self) {
+        if self.send_frame(keeper_frame_kill()).is_err() {
+            return; // keeper already gone; the exit signal fires from the reader
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !self.exited.load(Ordering::Acquire) {
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 }
@@ -915,7 +1558,7 @@ fn wire(
     out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
     shell_rc: Option<ShellRc>,
-) -> Result<PtyShell, PtyError> {
+) -> Result<LocalPty, PtyError> {
     // Standard pattern: drop the slave so only the child holds it.
     drop(pair.slave);
     let writer = pair
@@ -929,7 +1572,7 @@ fn wire(
     let reader_done = Arc::new(AtomicBool::new(false));
     spawn_reader(reader, pane_id, out_tx, exit_tx, Arc::clone(&reader_done))?;
     let input_tx = spawn_writer(writer)?;
-    Ok(PtyShell {
+    Ok(LocalPty {
         master: pair.master,
         input_tx,
         child: Mutex::new(child),
