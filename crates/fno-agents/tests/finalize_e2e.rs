@@ -1075,7 +1075,10 @@ fn finalize_nonship_then_ship_runs_ship_sideeffects() {
         2,
         "ledger writer sees both terminal observations: {c}"
     );
-    assert!(c.contains("register-task reason=Budget"), "first terminal: {c}");
+    assert!(
+        c.contains("register-task reason=Budget"),
+        "first terminal: {c}"
+    );
     assert!(
         c.contains("register-task reason=DonePRGreen"),
         "delivered terminal: {c}"
