@@ -3426,15 +3426,7 @@ pub(crate) fn pane_keeper_list(json: bool, stale_after: Option<std::time::Durati
                         row["stale"] = serde_json::json!("no identify answer inside the timeout");
                     }
                     Some(reply) => {
-                        for (key, field) in [
-                            ("v", "v"),
-                            ("keeper_pid", "keeper_pid"),
-                            ("child_pid", "child_pid"),
-                            ("cwd", "cwd"),
-                            ("argv", "argv"),
-                            ("started_at", "started_at"),
-                        ] {
-                            let _ = key;
+                        for field in ["v", "keeper_pid", "child_pid", "cwd", "argv", "started_at"] {
                             row[field] =
                                 reply.get(field).cloned().unwrap_or(serde_json::Value::Null);
                         }

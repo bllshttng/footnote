@@ -1,6 +1,6 @@
 # The pane keeper: worker panes that outlive the mux server
 
-A worker pane's pty master does not live in the mux server. It lives in a keeper process: `fno-agents-worker --pane`, spawned per pane by the server. When the server dies, the keeper and its child keep running. The next server on the same session re-adopts the same child instead of spawning a replacement. Plain panes are unchanged. The server holds their master directly, and they die with it, exactly as they always have.
+A worker pane's pty master does not live in the mux server. It lives in a keeper process: `fno-agents-worker --pane`, spawned per pane by the server. When the server dies, the keeper and its child keep running. The next server on the same session re-adopts the same child instead of spawning a replacement. Plain panes are unchanged. The server holds their master directly, and they die with it, exactly as they always have. Worker panes spawned by the resume path are the one exception. `resume_worker_into` hosts them inline, so they die with the server like plain panes. Giving them a keeper means reusing the canonical mesh spawn wrapper, which lives in the Python launcher.
 
 ## Ownership rule
 

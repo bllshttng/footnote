@@ -7799,12 +7799,16 @@ impl Core {
                     ));
                 }
                 Err(e) => {
-                    // A keeper that refuses the handshake is wedged or
-                    // speaks an incompatible protocol: name it, drop the
-                    // socket, and keep adopting the rest.
-                    let _ = std::fs::remove_file(&sock);
+                    // A keeper that refuses the handshake is wedged or speaks
+                    // an incompatible protocol: name it and keep adopting the
+                    // rest. The socket STAYS - a live listener is the pane's
+                    // only address, and unlinking it strands a running child
+                    // with no path to re-adopt it (the same leave-alone policy
+                    // as SeatHeld). The next start retries the handshake; a
+                    // socket whose keeper is actually gone lands in the
+                    // NoListener arm above and is removed there.
                     self.notice_all(format!(
-                        "keeper readopt: {} refused adoption ({e}); removed",
+                        "keeper readopt: {} refused adoption ({e}); left in place for the next start",
                         sock.display()
                     ));
                 }
