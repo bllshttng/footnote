@@ -11367,6 +11367,9 @@ def cmd_reconcile(
     # (x-59a6 review fix) so its "still open" read agrees with the same
     # preview `candidates`/`healed_epics` already report as would-close.
     _sim: Optional[list[dict]] = None
+    # The post-lock graph exists only when the sweep mutated something; the
+    # ledger harvest below falls back to a fresh read when it stayed empty.
+    post_entries: list[dict] = []
 
     if not dry_run and (closeable or strandable or strandable_contained or owed_evidence):
         # Apply every close in ONE locked mutation rather than locking once
@@ -11636,12 +11639,21 @@ def cmd_reconcile(
 
                 _led_node = _find_node(post_entries, record.node_id)
                 _led_project = (_led_node or {}).get("project")
+                # The graph node already carries the durable per-phase
+                # provenance (sessions[] with harness + session_id); hand it to
+                # the backstop so a created row never lands session-less.
+                _led_sessions = [
+                    s["session_id"]
+                    for s in (_led_node or {}).get("sessions", []) or []
+                    if isinstance(s, dict) and s.get("session_id")
+                ]
                 upsert_ledger_pr(
                     record.node_id,
                     record.pr_number,
                     record.pr_url,
                     _led_project,
                     record.merged_at,
+                    node_sessions=_led_sessions,
                 )
             except Exception as _led_exc:  # noqa: BLE001 - never abort the close
                 typer.echo(
@@ -11962,6 +11974,24 @@ def cmd_reconcile(
                         err=True,
                     )
 
+    # Ledger session harvest (x-4f1b): fill every execution row's ABSENT
+    # `sessions` from its graph node and mark the rest explicitly, before the
+    # sweep reports. Reconcile auto-fires on SessionStart, so this lands
+    # before any reaping work can consult a row. The counts ride the JSON
+    # payload on --json (a stray stdout line breaks json.loads consumers)
+    # and a plain line on the human path.
+    from fno.cost._register import harvest_ledger_sessions
+
+    _harvest_nodes = {
+        e.get("id"): e
+        for e in (post_entries or read_graph(_graph_path()))
+        if isinstance(e, dict) and e.get("id")
+    }
+    _filled, _marked = harvest_ledger_sessions(_harvest_nodes, dry_run=dry_run)
+    _harvest = {"filled": _filled, "marked": _marked}
+    if not json_out:
+        typer.echo(f"ledger harvest: filled {_filled}, marked {_marked}")
+
     if json_out:
         payload = {
             "dry_run": dry_run,
@@ -12012,6 +12042,7 @@ def cmd_reconcile(
             # the exact failure mode this feature exists to end.
             "sync_catchup": sync_catchup,
             "claim_reap": claim_reap,
+            "ledger_harvest": _harvest,
             "failures": [
                 {
                     "node_id": r.node_id,

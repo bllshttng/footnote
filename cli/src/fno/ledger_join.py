@@ -18,6 +18,8 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from fno.cost._register import LEDGER_SESSION_UNRESOLVED
+
 #: Opening words of every reason that names an INFRA failure - something that
 #: should have worked did not - as opposed to a benign no-match. Kept beside the
 #: return sites that produce them so the two cannot drift apart silently.
@@ -106,6 +108,12 @@ def resolve_pr_sessions(
             # Strip: a whitespace-padded id would not match the same id elsewhere,
             # and a whitespace-only one is junk that must not become a filter.
             s = str(s).strip()
+            # The unresolved marker says "we looked and found nothing"; it is
+            # not a session and must never reach a consumer's id filter. When
+            # it is the only value, `out` stays empty and the honest
+            # `no ledger entry` reason below is the answer.
+            if s == LEDGER_SESSION_UNRESOLVED:
+                continue
             if s and s not in seen:
                 seen.add(s)
                 out.append(s)

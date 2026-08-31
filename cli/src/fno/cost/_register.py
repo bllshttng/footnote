@@ -23,6 +23,21 @@ from pathlib import Path
 from fno import paths as _paths
 from fno.terminals import DELIVERED_TERMINALS as _DELIVERED_TERMINALS
 
+# The recorded value when no harness session id resolves. A row that omits
+# `sessions` is indistinguishable from a run that had no session at all; this
+# says "we looked and found nothing", which is a different fact.
+LEDGER_SESSION_UNRESOLVED = "unresolved:no-harness-session"
+
+
+def sessions_or_unresolved(*candidates: object) -> list[str]:
+    """Distinct non-empty ids in order, or the explicit unresolved marker."""
+    out: list[str] = []
+    for c in candidates:
+        s = str(c).strip() if c else ""
+        if s and s not in out:
+            out.append(s)
+    return out or [LEDGER_SESSION_UNRESOLVED]
+
 
 def safe_number(val, as_type: str = "float", decimals: int = 2):
     """Convert a value to float or int safely. Returns None on failure."""
@@ -401,12 +416,9 @@ def build_entry(
     # Current key is claude_session_id; old-key fallback for one release.
     claude_tid = state.get("claude_session_id") or state.get("claude_transcript_id") or ""
     codex_tid = state.get("codex_thread_id") or ""
-    _seen: set[str] = set()
-    sessions: list[str] = []
-    for candidate in (session_id, target_sid, harness_sid, claude_tid, codex_tid):
-        if candidate and candidate not in _seen:
-            sessions.append(candidate)
-            _seen.add(candidate)
+    sessions = sessions_or_unresolved(
+        session_id, target_sid, harness_sid, claude_tid, codex_tid
+    )
 
     # Completion summary path and text
     summary_path = os.environ.get("TARGET_SUMMARY_PATH")
@@ -689,6 +701,7 @@ def upsert_ledger_pr(
     pr_url: str | None,
     project: str | None,
     merged_at: str | None,
+    node_sessions: list[str] | None = None,
 ) -> str:
     """Stamp or create a ledger row for a merged node, keyed on ``graph_node_id``.
 
@@ -754,6 +767,7 @@ def upsert_ledger_pr(
                 "backstop": True,
                 "termination_reason": "reconcile-backstop",
                 "session_id": None,
+                "sessions": sessions_or_unresolved(*(node_sessions or ())),
             })
             outcome = "created"
 
@@ -763,6 +777,48 @@ def upsert_ledger_pr(
         os.close(lock_fd)
 
     return outcome
+
+
+def harvest_ledger_sessions(nodes_by_id: dict, *, dry_run: bool) -> tuple[int, int]:
+    """Fill an ABSENT ``sessions`` key from the row's graph node. Never overwrite.
+
+    Fill-only and idempotent: a row that already carries the key (real ids OR
+    the unresolved marker) is skipped, so a second pass changes nothing. Runs
+    under the same ``/tmp/fno-ledger.lock`` the append path takes.
+
+    Returns ``(filled, marked)``.
+    """
+    ledger_path = _paths.ledger_json()
+    if not ledger_path.exists():
+        return (0, 0)
+    lock_path = Path("/tmp/fno-ledger.lock")
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        data = _load_ledger_data(ledger_path)
+        filled = marked = 0
+        for row in data["entries"]:
+            if not isinstance(row, dict) or row.get("type") != "execution":
+                continue
+            if "sessions" in row:
+                continue
+            node = nodes_by_id.get(row.get("graph_node_id") or "") if nodes_by_id else None
+            ids = [
+                s["session_id"]
+                for s in (node or {}).get("sessions", []) or []
+                if isinstance(s, dict) and s.get("session_id")
+            ]
+            row["sessions"] = sessions_or_unresolved(*ids)
+            if ids:
+                filled += 1
+            else:
+                marked += 1
+        if not dry_run and (filled or marked):
+            _write_ledger_data(ledger_path, data)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+    return (filled, marked)
 
 
 def render_tasks_md(tasks_json_path: Path, tasks_md_path: Path) -> None:
@@ -855,6 +911,16 @@ def build_quick_entry(
     cost = cost_json or {}
     tokens = cost.get("tokens", {})
 
+    # The planning-session callers are claude-only scripts that guess the
+    # transcript id by mtime; when that guess is wrong or absent, ask the
+    # ambient harness identity before falling to the marker.
+    try:
+        from fno.harness_identity import current_session_id
+
+        ambient_sid = current_session_id()
+    except Exception:  # noqa: BLE001 - the row still lands without an ambient id
+        ambient_sid = None
+
     return {
         "type": entry_type,
         "status": "done",
@@ -883,7 +949,7 @@ def build_quick_entry(
         # catches transcript-UUID overlap, but the under-flock dedup
         # would silently no-op since entry.get("session_id") is None).
         "session_id": session_id or None,
-        "sessions": [session_id] if session_id else [],
+        "sessions": sessions_or_unresolved(session_id, ambient_sid),
         "phases_completed": [],
         "phases_skipped": [],
         "points": None,

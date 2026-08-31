@@ -20,6 +20,7 @@ from typing import Optional
 
 import yaml
 
+from fno.cost._register import LEDGER_SESSION_UNRESOLVED
 from fno.scoreboard.fold import (
     _WEDGE_REASONS,
     _ci_reds_from_fires,
@@ -62,6 +63,10 @@ def _first_session_id(row: dict) -> Optional[str]:
     sessions = row.get("sessions")
     if isinstance(sessions, list) and sessions:
         first = sessions[0]
+        # The unresolved marker says "we looked and found nothing"; it is not
+        # a session id and must never surface as one.
+        if first == LEDGER_SESSION_UNRESOLVED:
+            return None
         return first if isinstance(first, str) else None
     return None
 
