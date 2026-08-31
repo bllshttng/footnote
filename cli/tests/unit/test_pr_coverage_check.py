@@ -2842,38 +2842,88 @@ def test_impossible_remedies_name_the_attended_command(monkeypatch, tmp_path, ca
     assert "coverage-override label" in line
 
 
-def test_stale_attestation_refusal_names_the_operator_waiver():
-    """A refusal a MOVED head caused teaches the waiver that answers it.
+def test_the_waiver_text_names_substance_and_the_real_pr_number():
+    """The rendered sentence must be runnable and resolvable by a stranger.
 
-    d-4d05272e waives coverage-at-head for merging, and the refusal never said
-    so, leaving the waiver reachable only by querying the decision store.
-    Narrow by design: rounds tile, so this is the minority shape, not the
-    common one (see the docstring's measurement).
+    No decision ID: every other one in `cli/src` sits in a comment or a data
+    record, and an OSS operator querying their own decision store for ours
+    gets nothing back, so citing it as the authority is unresolvable. The
+    substance (attended operator, CI green, no unresolved P1) is the part that
+    is actually actionable. The PR number is interpolated for the same reason
+    the self-review hint drops a `<level>` placeholder twenty lines up: a
+    worker copies a copy-me slot verbatim.
     """
     from fno.pr import _coverage_gate
 
-    cov = {"coverage": "uncovered", "stale_verdicts": [{"name": "code-review"}]}
-    out = _coverage_gate._with_stale_waiver_guidance("base refusal", cov)
+    out = _coverage_gate._with_stale_waiver_guidance("base refusal", 1314)
 
     assert "base refusal" in out
-    assert "d-4d05272e" in out
-    # Both conditions, and the one that never waives.
     assert "CI green" in out
     assert "no unresolved P1" in out
     assert "P1 does not waive" in out
-    assert "coverage-waive" in out
+    assert "coverage-waive 1314 --reason" in out
+    assert "<pr>" not in out
+    # The ID SHAPE, not the bare prefix: `d-` alone also matches
+    # "attended-operator", a substring hit on the wrong symbol.
+    assert not re.search(r"\bd-[0-9a-f]{8}\b", out), out
 
 
-def test_a_never_reviewed_refusal_is_left_alone():
-    """The waiver answers a STALE attestation, never an absent one.
+def test_a_stale_verdict_is_matched_by_NAME_not_by_existence():
+    """The discriminator that keeps the waiver on the refusal it answers.
 
-    This is the load-bearing half. An empty chain is 95 of the 115 uncovered
-    rows measured, so a version of the guidance that also fired here would
-    hand a merge hint to the dominant case: the one where nothing ever
-    reviewed and the gate is doing its job.
+    `_stale_verdicts` collects every producer, so "any stale verdict exists"
+    says only that something once reviewed. That is a different claim from
+    "the evidence THIS conjunct wanted exists but went stale", and conflating
+    them attaches a merge lever to a refusal caused by a reviewer that never
+    reviewed at any sha.
     """
     from fno.pr import _coverage_gate
 
-    for cov in ({"coverage": "uncovered", "stale_verdicts": []}, {}, None):
-        out = _coverage_gate._with_stale_waiver_guidance("base refusal", cov)
-        assert out == "base refusal", cov
+    cov = {"stale_verdicts": [{"name": "some-bot", "producer": "github_app"}]}
+    assert _coverage_gate._has_stale_verdict(cov) is True
+    assert _coverage_gate._has_stale_verdict(cov, "code-review") is False
+
+    cov2 = {"stale_verdicts": [{"name": "code-review", "producer": "local"}]}
+    assert _coverage_gate._has_stale_verdict(cov2, "code-review") is True
+
+    for empty in ({"stale_verdicts": []}, {}, None, "not-a-dict"):
+        assert _coverage_gate._has_stale_verdict(empty) is False, empty
+        assert _coverage_gate._has_stale_verdict(empty, "code-review") is False, empty
+
+
+def test_a_missing_code_review_is_not_answered_by_another_bots_stale_row(
+    enabled, live_head, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """The load-bearing regression: required code-review never ran at ANY sha.
+
+    Same row as the attestation-refusal test above - covered, counted, one
+    github_app verdict - so the failing conjunct is the missing local pass,
+    not staleness. The spy answers True to the UNNAMED question and False to
+    the named one, so the waiver sentence appears here only if the branch
+    asked "does any stale verdict exist". It must ask for `code-review`.
+    """
+    from fno.pr import _coverage_gate
+
+    asked = []
+
+    def spy(cov, name=None):
+        asked.append(name)
+        return name is None
+
+    monkeypatch.setattr(_coverage_gate, "_has_stale_verdict", spy)
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: True)
+    _seed_row(
+        tmp_path,
+        coverage="covered",
+        count=2,
+        head=HEAD,
+        verdicts=[{"name": "some-bot", "producer": "github_app", "verdict": "reviewed"}],
+    )
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+
+    assert state == _coverage_gate.REFUSED
+    assert "required code-review has no head-pinned local pass attestation" in refusal
+    assert "coverage-waive" not in refusal, refusal
+    assert asked == ["code-review"], asked

@@ -827,6 +827,11 @@ def _ordinary_verdict(
             f"run the harness review verb at HEAD{sized}, "
             "then emit the code-review attestation"
         )
+        # The failing conjunct is a code-review local pass, so only a stale
+        # code-review answers it. Any-stale-verdict would attach the waiver
+        # here on an unrelated producer's old row while the reviewer whose
+        # absence caused this refusal never reviewed at any sha.
+        stale_caused_it = _has_stale_verdict(cov, "code-review")
     else:
         refusal = _merge._coverage_refused_reason(
             cov,
@@ -834,9 +839,15 @@ def _ordinary_verdict(
             _merge._coverage_sources(cwd) if cov is None else None,
             self_review_hint=hint,
         )
-    # Appended here, where `cov` is in scope, rather than in `coverage_verdict`:
-    # one site, and a granted waiver discards this refusal anyway.
-    refusal = _with_stale_waiver_guidance(refusal, cov)
+        # A reviewer that declined AT HEAD is a stronger signal than a head
+        # that moved, and it is not staleness: offering a merge lever on top
+        # of a decline reads as a way around it.
+        stale_caused_it = failed != "reviewer_refused" and _has_stale_verdict(cov)
+    # Appended here, where `cov` and `pr_number` are in scope, rather than in
+    # `coverage_verdict`: one site, and a granted waiver discards this refusal
+    # anyway.
+    if stale_caused_it:
+        refusal = _with_stale_waiver_guidance(refusal, pr_number)
     if override_refusal:
         # The label is present but stayed shut; naming that first beats a
         # generic uncovered refusal the operator cannot act on.
@@ -849,7 +860,23 @@ def _ordinary_verdict(
     ), (head, disposition_hard)
 
 
-def _with_stale_waiver_guidance(refusal: str, cov) -> str:
+def _has_stale_verdict(cov, name: Optional[str] = None) -> bool:
+    """Whether a verdict went stale - optionally, one from a named reviewer.
+
+    ``name`` is the discriminator that keeps the waiver text attached to the
+    refusal it answers. `_stale_verdicts` collects EVERY producer, so an
+    unnamed check says only "something once reviewed", which is not the same
+    claim as "the evidence this conjunct wanted exists but went stale".
+    """
+    if not isinstance(cov, dict):
+        return False
+    stale = cov.get("stale_verdicts") or []
+    if name is None:
+        return bool(stale)
+    return any(isinstance(v, dict) and v.get("name") == name for v in stale)
+
+
+def _with_stale_waiver_guidance(refusal: str, pr_number: int) -> str:
     """Name the operator waiver on a refusal a STALE attestation caused.
 
     Rounds ACCUMULATE: `_reviews._tiling_chain` counts a verdict at an older
@@ -861,27 +888,23 @@ def _with_stale_waiver_guidance(refusal: str, cov) -> str:
     outran, and this text is deliberately not aimed at that majority.
 
     It answers the remaining minority, where something did review and the row
-    still refuses. Operator ruling d-4d05272e waives the gate there, and
+    still refuses. A standing operator ruling waives the gate there, and
     nothing in the refusal said so, so the waiver was reachable only by
     querying the decision store - while the stop hook offered two remedies
     standing rules forbid (a third round past the cap, and a recovery
     attestation for a round that never passed).
 
-    Gated on a stale verdict EXISTING, and that gate carries most of the
-    safety: an empty chain is the 83% case, so a version of this text that
-    also fired on a never-reviewed PR would hand a merge hint to exactly the
-    rows where the gate is doing its job. Advisory only: this returns text,
-    never authority, and `coverage-waive` still refuses a harness-identified
-    session.
+    The CALLER decides whether staleness is the cause, because only the caller
+    knows which conjunct failed. This renders text; it never decides. Advisory
+    only: the sentence returns a lever, never authority, and `coverage-waive`
+    still refuses a harness-identified session.
     """
-    if not isinstance(cov, dict) or not cov.get("stale_verdicts"):
-        return refusal
     return (
-        f"{refusal}. A prior attestation exists but its head moved, which is "
-        "what operator ruling d-4d05272e waives: with CI green and no "
-        "unresolved P1, this may merge without a head-pinned attestation. "
-        "P1 does not waive and still blocks. The lever is attended-operator "
-        "only: `fno do pr coverage-waive <pr> --reason ...`"
+        f"{refusal}. A prior attestation exists but its head moved, which a "
+        "standing operator ruling waives: with CI green and no unresolved P1, "
+        "this may merge without a head-pinned attestation. P1 does not waive "
+        "and still blocks. The lever is attended-operator only: "
+        f"`fno do pr coverage-waive {pr_number} --reason ...`"
     )
 
 
