@@ -95,7 +95,10 @@ set -euo pipefail
 # workspace-restore raise: reboot recovery is exactly the moment no agent is
 # reading docs. The bullet was already cut to its floor and the redundant
 # deep-dive list entry dropped; 263 is the measured remainder, zero spare.
-CEILING_BYTES=38428
+# Main's DND work merged in +2; the pane-keeper bullet paid it by dropping
+# "child " before pid (6 B), and the ceiling followed down to 38424. Zero
+# spare, still.
+CEILING_BYTES=38424
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
