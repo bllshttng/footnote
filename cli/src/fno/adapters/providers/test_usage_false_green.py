@@ -199,13 +199,22 @@ class TestIncoherentTimeLimitReset:
     ) -> None:
         """Measured: label '1m', resets_at five days out, because the row's
         nextResetTime is the PLAN period and not that window's reset."""
-        one_min = [w for w in _parse_zai_windows(zai_live) if w.label == "1m"]
+        # Anchor the parse to the RECORDING moment. The parser's coherence
+        # rule compares resets_at against live time, so an unanchored parse
+        # of the 2026-08-27 recording flips meaning as the wall clock moves:
+        # the five-day reset read as "far future, incoherent, drop" while it
+        # stayed ahead of the clock, and as "within span, publish" once the
+        # clock passed it. Anchored, the pin is deterministic.
+        recorded_at = 1787818296.0
+        one_min = [
+            w for w in _parse_zai_windows(zai_live, now=recorded_at) if w.label == "1m"
+        ]
         assert one_min, "no 1m window parsed"
         w = one_min[0]
         if w.resets_at is None:
             return  # dropped to None rather than published: the legal outcome
         # Otherwise the reset must lie within the window's own span (plus slack).
-        assert w.resets_at - 1787818296.0 <= 60 * 2, (
+        assert w.resets_at - recorded_at <= 60 * 2, (
             f"a 1m window resetting at {w.resets_at} describes a different span"
         )
 

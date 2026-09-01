@@ -1,12 +1,13 @@
 //! `fno-agents-worker` entrypoint. Two lanes:
 //!
-//! - `--pane`: the pane keeper. Owns a pane's pty master in its own process
-//!   (setsid'd, SIGHUP-immune), so the pane child outlives the mux server
-//!   and a fresh server re-adopts it instead of re-spawning. This is the
-//!   lane retired at G4 and restored once the crashes it predicted kept
-//!   biting: the deleted worker.rs module doc named the undo ("supervisor
-//!   fd-keeper") and the mux now fills it. The daemon builds this argv;
-//!   humans never type it.
+//! - `--keeper`: the keeper. Owns a hosted child's pty master in its own
+//!   process (setsid'd, SIGHUP-immune), so the child outlives whatever
+//!   launched it and a fresh mux server re-adopts a pane instead of
+//!   re-spawning it. `--pane` is the alias the mux server's call sites spell
+//!   it by; a pane-less lane-B thread is the same keeper with no pane behind
+//!   it. This is the lane retired at G4 and restored once the crashes it
+//!   predicted kept biting: the deleted worker.rs module doc named the undo
+//!   ("supervisor fd-keeper"). Callers build this argv; humans never type it.
 //! - `--stream`: the claude stream-json adoption lane.
 //!
 //! The worker ignores SIGHUP so a stray hangup (e.g. the controlling
@@ -37,10 +38,11 @@ fn main() {
         return;
     }
 
-    // Two lanes: `--pane` (the keeper: pty master ownership outlives the mux
-    // server) and `--stream` (claude stream-json adoption, launched by the
-    // daemon's spawn_claude_stream_lane). Everything else refuses, truthfully.
-    if args.iter().any(|a| a == "--pane") {
+    // Two lanes: `--keeper` (the keeper: pty master ownership outlives the
+    // mux server; `--pane` is the alias its call sites spell it by) and
+    // `--stream` (claude stream-json adoption, launched by the daemon's
+    // spawn_claude_stream_lane). Everything else refuses, truthfully.
+    if args.iter().any(|a| a == "--keeper" || a == "--pane") {
         if let Err(msg) = pane_keeper_lane(&args) {
             eprintln!("fno-agents-worker: {msg}");
             std::process::exit(2);
@@ -49,7 +51,7 @@ fn main() {
     }
     if !args.iter().any(|a| a == "--stream") {
         eprintln!(
-            "fno-agents-worker: pass a lane: --pane (keeper) or --stream \
+            "fno-agents-worker: pass a lane: --keeper (alias --pane) or --stream \
              (claude stream-json adoption)"
         );
         std::process::exit(2);
@@ -57,7 +59,7 @@ fn main() {
     run_stream_lane(args);
 }
 
-/// `--pane` entrypoint: parse, then run the keeper to completion.
+/// `--keeper` / `--pane` entrypoint: parse, then run the keeper to completion.
 fn pane_keeper_lane(args: &[String]) -> Result<(), String> {
     let cfg = fno_agents::pane_keeper::parse_pane_args(args)?;
     fno_agents::pane_keeper::run(cfg)
