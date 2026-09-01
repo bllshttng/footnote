@@ -767,14 +767,16 @@ def test_reroute_receipts_tell_the_truth(monkeypatch):
 RETIRE_GRACE = 900
 
 
-def _retire_run(rows, transcripts, *, now_s=NOW_1840, grace=RETIRE_GRACE):
+def _retire_run(rows, transcripts, *, now_s=NOW_1840, grace=RETIRE_GRACE, node_state=None):
     """The classifier with an EXPLICIT grace: reading the machine's real config
-    inside a unit test makes the verdict depend on the developer's settings."""
+    inside a unit test makes the verdict depend on the developer's settings.
+    ``node_state`` injects the graph read; None keeps the empty graph every
+    pre-change caller saw."""
     return verdicts(
         rows,
         transcript_for=lambda sid: transcripts.get(sid),
         claim_for=lambda node: {},
-        node_state_for=lambda node: None,
+        node_state_for=node_state if node_state is not None else (lambda node: None),
         now_s=now_s,
         retire_grace_s_value=grace,
     )
@@ -1328,6 +1330,155 @@ def test_reap_outranks_retire_on_the_same_row():
         retire_grace_s_value=RETIRE_GRACE,
     )
     assert v.verdict == REAP
+
+
+# ---------------------------------------------------------------------------
+# Retire on EITHER the worker's own closed promise OR external proof the work
+# landed (node done AND its PR merged). Both halves of the external marker are
+# required, and silence is still never a marker.
+# ---------------------------------------------------------------------------
+
+#: A finished think/blueprint worker ends on a recap, never a <promise>: the
+#: promise is a ship-phase artifact. Textually that recap is indistinguishable
+#: from a session that died mid-stream, which is the whole defect.
+RECAP_TAIL = (
+    "Plan written and the node moved to ready. Discovery read four seams; the "
+    "graph seam was the only one the predicate needed."
+)
+
+MERGED_NODE = {"status": "done", "merge_status": "merged"}
+
+
+def _shipped_row(row_id="dddd4444-0000", name="think-worker"):
+    """A spawned row bound to a node whose PR has merged - the population the
+    twelve hand-reaped rows of 2026-09-01 came from. The node id is the
+    allowlisted synthetic token, never a real one."""
+    return Row(row_id, name, "idle", "x-aaaa", "/tmp/bp", "spawn")
+
+
+def test_shipped_work_basis_requires_both_done_and_merged():
+    basis = watchdog._shipped_work_basis(_shipped_row(), lambda n: dict(MERGED_NODE))
+    assert basis == "node x-aaaa done and its PR merged"
+
+
+def test_shipped_work_basis_refuses_done_without_merge_status():
+    """460 done nodes on the reference graph, 42 of them carrying no
+    merge_status: done alone would stop rows whose work never shipped."""
+    assert watchdog._shipped_work_basis(_shipped_row(), lambda n: {"status": "done"}) == ""
+    assert (
+        watchdog._shipped_work_basis(
+            _shipped_row(), lambda n: {"status": "done", "merge_status": "draft"}
+        )
+        == ""
+    )
+
+
+def test_shipped_work_basis_refuses_a_raising_read():
+    def boom(node):
+        raise RuntimeError("graph unreadable")
+
+    assert watchdog._shipped_work_basis(_shipped_row(), boom) == ""
+
+
+def test_shipped_work_basis_refuses_a_crowned_row():
+    """The same exclusion reap_decision records: a king spans many nodes, so
+    resolving its row to ONE node's status mis-buckets it."""
+    row = Row(
+        "dddd4444-0000", "king", "idle", "x-aaaa", "/tmp/bp", "spawn", crowned=True
+    )
+    assert watchdog._shipped_work_basis(row, lambda n: dict(MERGED_NODE)) == ""
+
+
+def test_shipped_work_retires_without_a_promise():
+    """THE REPRO: a think/blueprint worker whose node is done and whose PR is
+    merged ends on a recap with no <promise>, so it fell through both lanes
+    and held a live slot forever (twelve rows reaped by hand, 2026-09-01). The
+    graph is the positive marker about the WORK that the tail cannot speak."""
+    row = _shipped_row()
+    [v] = _retire_run(
+        [row],
+        {row.row_id: _facts(RECAP_TAIL, age_min=20)},
+        node_state=lambda n: dict(MERGED_NODE),
+    )
+    assert v.verdict == watchdog.RETIRE
+    assert v.action == "stop"
+    assert "x-aaaa" in v.basis and "merged" in v.basis
+
+
+def test_a_shipped_row_retasked_by_the_operator_never_retires():
+    """A trailing USER turn is an operator re-task or answer: it clears any
+    stale assistant marker, and the row owes its next move. The shipped marker
+    reads only a turn the worker itself ended, so a re-tasked row refuses
+    exactly as the promise path always did."""
+    row = _shipped_row()
+    [v] = _retire_run(
+        [row],
+        {row.row_id: _facts("Archive the worktree when you can.", age_min=20, role="user")},
+        node_state=lambda n: dict(MERGED_NODE),
+    )
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_shipped_without_merge_status_keeps_todays_refusal():
+    """The merge half is load-bearing: a done node with no merge_status is the
+    42-row population whose work may never have shipped. Today's refusal,
+    unchanged."""
+    row = _shipped_row()
+    [v] = _retire_run(
+        [row],
+        {row.row_id: _facts(RECAP_TAIL, age_min=20)},
+        node_state=lambda n: {"status": "done"},
+    )
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_a_shipped_row_parked_on_watching_never_retires():
+    """A `<watching>` tail is an armed external wait the row is still in play
+    on, whatever the graph says: reconcile can mark the node done and merged
+    while the worker is still parked waiting on a check, and stopping it kills
+    the wait it is parked on."""
+    row = _shipped_row()
+    facts = _facts('<watching reason="ci" pr="9" timeout="30m">', age_min=20)
+    [v] = _retire_run(
+        [row],
+        {row.row_id: facts},
+        node_state=lambda n: dict(MERGED_NODE),
+    )
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_a_shipped_row_ending_on_a_question_still_holds():
+    """A worker whose PR merged and who then asked the operator something still
+    owes an answer; stopping it strands the question. The basis names the
+    reading that actually decided it: a question-tail classifies your-move,
+    never done."""
+    facts = _facts(
+        "Node x-aaaa shipped. Should I also archive the worktree?", age_min=20
+    )
+    answer, basis = watchdog.retire_decision(
+        _shipped_row(),
+        facts=facts,
+        now_s=NOW_1840,
+        grace_s=RETIRE_GRACE,
+        node_state_for=lambda n: dict(MERGED_NODE),
+    )
+    assert answer is False
+    assert "your-move" in basis
+    assert "question the operator owes" in basis
+
+
+def test_a_shipped_row_mid_tool_call_never_retires():
+    """The c696fddd case: a row re-tasked after its PR merged is mid tool call
+    and must not be stopped."""
+    facts = _facts(RECAP_TAIL, age_min=20, kind="tool")
+    answer, _ = watchdog.retire_decision(
+        _shipped_row(),
+        facts=facts,
+        now_s=NOW_1840,
+        grace_s=RETIRE_GRACE,
+        node_state_for=lambda n: dict(MERGED_NODE),
+    )
+    assert answer is False
 
 
 def test_one_rotation_per_sweep_across_reroute_rows(monkeypatch):
