@@ -527,6 +527,10 @@ body[data-local="false"] .detail { padding-left:15px }
 .dot { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; color:var(--muted);
   white-space:nowrap; font-variant-numeric:tabular-nums }
 .votes { color:var(--accent); cursor:copy; border-radius:4px; padding:1px 4px }
+/* A zero stays clickable but stops shouting: 2389 accent pills would make
+   one real vote look the same as none, which is the signal this pill exists
+   to show. */
+.votes.z { color:var(--muted) }
 .votes:hover { background:var(--accent-soft) }
 .haspl { color:var(--accent) }
 .haspr { color:var(--done) }
@@ -771,7 +775,7 @@ _DASHBOARD_JS = """\
     // the same copy is this button, reached by expanding the row.
     if (LOCAL) h += '<span><b>id</b> ' + esc(n.id) + ' <button class=\"pbtn\" type=\"button\" data-copy=\"id\">Copy</button></span>';
     h += '<span><b>status</b> ' + esc(n.s) + '</span>' + (n.p ? '<span><b>priority</b> ' + esc(n.p) + '</span>' : '') + (n.sz ? '<span><b>size</b> ' + esc(n.sz) + '</span>' : '') + '</div>';
-    if (LOCAL && n.en) h += '<div class="kv"><span><b>encounters</b> ' + n.en + ' (' + (n.en - n.eo) + ' agent, ' + n.eo + ' operator)</span><button class="pbtn" type="button" data-copy="vote">Copy upvote</button></div>';
+    if (LOCAL) h += '<div class="kv"><span><b>encounters</b> ' + n.en + ' (' + (n.en - n.eo) + ' agent, ' + n.eo + ' operator)</span><button class="pbtn" type="button" data-copy="vote">Copy upvote</button></div>';
     if (n.pa) h += '<div class=\"blk kin\"><div class=\"h\">Parent</div><div class=\"item\">'
       // No not-found marker here: pt_ is empty BOTH when the parent is absent
       // from the graph and when it simply has no title, so a marker keyed on it
@@ -809,7 +813,7 @@ _DASHBOARD_JS = """\
         row.dataset.project = n.project; row.dataset.s = n.s;
         if (n.ty) row.dataset.type = n.ty;
         var main = document.createElement('button'); main.className = 'rmain'; main.type = 'button';
-        var votePill = LOCAL && n.en ? '<span class=\"votes\" title=\"' + (n.en - n.eo) + ' agent, ' + n.eo + ' operator\">▲ ' + n.en + '</span>' : '';
+        var votePill = LOCAL ? '<span class=\"votes' + (n.en ? '' : ' z') + '\" title=\"' + (n.en - n.eo) + ' agent, ' + n.eo + ' operator\">▲ ' + n.en + '</span>' : '';
         main.innerHTML = (LOCAL ? '<span class=\"rid\">' + esc(n.id) + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\">' + typeBadge(n.ty) + '<span class=\"pill s-' + esc(n.s) + '\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill' + (n.p === 'p0' || n.p === 'p1' ? ' pr-p1' : '') + '\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + '</span><span class=\"dot\">' + kidBar(n) + votePill + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
         main.setAttribute('aria-expanded', 'false');
         // The id is the thing most often copied out of this board, so it is
@@ -821,7 +825,7 @@ _DASHBOARD_JS = """\
         if (LOCAL && n.id) { var rid = main.querySelector('.rid');
           if (rid) { rid.title = 'Copy node id';
             rid.addEventListener('click', function (ev) { ev.stopPropagation(); copyText(n.id, rid); }); } }
-        if (LOCAL && n.en) { var votes = main.querySelector('.votes');
+        if (LOCAL) { var votes = main.querySelector('.votes');
           if (votes) votes.addEventListener('click', function (ev) { ev.stopPropagation(); copyText(voteCommand(n), votes); }); }
         main.addEventListener('click', function () { var old = row.querySelector('.detail');
           if (old) { old.remove(); main.setAttribute('aria-expanded', 'false'); return; }
@@ -1049,15 +1053,14 @@ def _dashboard_rows(
                     ],
                 }
             )
+            # Emitted on EVERY local row, zero included. A vote surface
+            # guarded by the count it exists to seed can never render a first
+            # vote, so the count is always present and the guards below read
+            # only LOCAL. `dv` stays conditional: divergence is a ranking of
+            # nodes that carry demand, and a zero has nothing to diverge from.
+            row.update({"en": len(voters), "eo": len(voters & operators)})
             if voters:
-                operator_count = len(voters & operators)
-                row.update(
-                    {
-                        "en": len(voters),
-                        "eo": operator_count,
-                        "dv": divergence_score(entry, priority_for(entry)),
-                    }
-                )
+                row["dv"] = divergence_score(entry, priority_for(entry))
             plan_path = str(row["pl"])
             if vault and plan_path:
                 row["link"] = _obsidian_url(vault, plan_path)

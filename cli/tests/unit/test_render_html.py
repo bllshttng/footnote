@@ -92,7 +92,7 @@ def test_local_dashboard_renders_vote_controls_and_public_dashboard_excludes_the
     assert '"en":3' in local
     assert '"eo":1' in local
     assert '"dv":' in local
-    assert 'class="votes"' in local
+    assert 'class="votes' in local
     assert "--operator --evidence" in local
     assert 'id="demandOnly"' in local
     assert 'data-copy="vote"' in local
@@ -1004,3 +1004,39 @@ def test_the_public_backlog_agrees_with_the_dashboard_on_a_stale_completed_row()
     assert "ab-00000060" not in listed, "a completed row is not open backlog"
     assert "ab-00000061" in listed, "control: genuinely open work still lists"
     assert "ab-00000062" in listed, "control: the deferred sentinel is not a completion"
+
+
+def test_zero_encounter_row_still_renders_a_clickable_vote_pill(tmp_path: Path):
+    """A first vote must be castable from the board.
+
+    The pill used to be conditional on the count it exists to seed, so a node
+    with no encounters rendered an empty string and had nothing to click. The
+    affordance appeared only after a vote existed, which the CLI was then the
+    only way to cast.
+    """
+    entry = _entry("ab-novote01", project="alpha", title="Never voted on")
+    local_path = tmp_path / "local.html"
+    render_graph_html([entry], local_path)
+    local = local_path.read_text()
+
+    row = _dashboard_rows([entry], local=True)[0]
+    assert row["en"] == 0
+    assert row["eo"] == 0
+
+    # The pill, its click listener, and the detail's Copy upvote button are
+    # three separately guarded surfaces. A guard that still reads the count
+    # leaves one of them dead on a zero-vote row.
+    assert "LOCAL && n.en ?" not in local
+    assert "if (LOCAL && n.en) { var votes" not in local
+    assert "if (LOCAL && n.en) h +=" not in local
+    assert 'class="votes' in local
+    assert "Copy upvote" in local
+
+    # A zero is clickable but muted, so one real vote still reads as demand
+    # against 2389 rows that carry none.
+    assert ".votes.z { color:var(--muted) }" in local
+    assert "(n.en ? '' : ' z')" in local
+
+    # The demand filter is the one place the count must still be read: that
+    # view exists to show only nodes carrying a vote.
+    assert "state.demand && !n.en" in local
