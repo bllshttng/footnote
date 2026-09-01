@@ -601,6 +601,175 @@ pub struct GcSummary {
     /// silently, judging an arbitrary first eight and reporting nothing about
     /// the rest. Reporting the spend is what replaces it.
     pub dormant_probes_escalated: usize,
+    /// `(row id, reason)` for every past-grace row classified reaped-shaped
+    /// but HELD because no resumable receipt could be staged for it (x-b150):
+    /// no session identity, a harness with no capability row, or a receipt
+    /// that would not persist. Unknown never reaps - a removal the operator
+    /// cannot undo needs at least the record of how to come back.
+    pub kept_no_receipt: Vec<(String, String)>,
+}
+
+/// One reaped row's recovery record (x-b150). Built from the registry row
+/// itself - the fields present on every row - plus the harness-DECLARED
+/// interactive resume form read from the capability table (the same single
+/// source `fno whoami ledger` renders), and enriched from the ledger entry
+/// when one exists. Written durably BEFORE the retain drops the row, so a
+/// reaped row stays recoverable even when its ledger entry does not exist and
+/// never will (kings, blueprint and rescue sessions never open a PR, so no
+/// target run ever writes them one).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ReapReceipt {
+    pub row_name: String,
+    pub short_id: String,
+    pub harness: String,
+    pub harness_session_id: String,
+    pub cwd: String,
+    pub log_path: Option<String>,
+    pub created_at: String,
+    pub reaped_at: String,
+    /// The resume command, rendered from the capability table's
+    /// `interactive_resume` form. Never hardcoded here.
+    pub resume: String,
+    /// Ledger enrichment (node / pr / plan) when the session resolves there.
+    /// The ledger stays the richer source; this is the copy that survives
+    /// when the row has no ledger entry at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ledger: Option<Value>,
+}
+
+/// Sanitize a receipt filename component: the session id comes from registry
+/// rows and is not guaranteed filename-safe across harnesses.
+fn receipt_filename_part(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Where reap receipts live: `<agents home>/reap-receipts/`, one file per
+/// reaped row keyed by `<harness>-<session id>`, the resume identity.
+fn reap_receipt_path(home: &AgentsHome, receipt: &ReapReceipt) -> std::path::PathBuf {
+    home.root().join("reap-receipts").join(format!(
+        "{}-{}.json",
+        receipt_filename_part(&receipt.harness),
+        receipt_filename_part(&receipt.harness_session_id)
+    ))
+}
+
+/// Persist one receipt durably. 0600 like the rest of the agents tree.
+fn write_reap_receipt(home: &AgentsHome, receipt: &ReapReceipt) -> std::io::Result<()> {
+    let path = reap_receipt_path(home, receipt);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(receipt)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?,
+    )?;
+    let _ = crate::paths::set_file_mode_0600(&path);
+    Ok(())
+}
+
+/// The ledger row naming `session_id` in its `sessions`, read from the
+/// default global ledger. Best-effort by contract (x-b150 change 5): a
+/// missing or unreadable ledger answers None and the receipt stands on the
+/// row's own fields. (ponytail: `config.paths.*` overrides are not consulted
+/// here; the reader that owns overrides is the Python ledger reader, and the
+/// enrichment is a bonus, never the floor.)
+fn ledger_entry_for_session(session_id: &str, ledger_path: &std::path::Path) -> Option<Value> {
+    let content = std::fs::read_to_string(ledger_path).ok()?;
+    let data: Value = serde_json::from_str(&content).ok()?;
+    let rows = match data.get("entries").unwrap_or(&data) {
+        Value::Array(rows) => rows,
+        _ => return None,
+    };
+    rows.iter()
+        .find(|r| {
+            r.get("sessions")
+                .and_then(Value::as_array)
+                .is_some_and(|sessions| sessions.iter().any(|s| s.as_str() == Some(session_id)))
+        })
+        .cloned()
+}
+
+/// Build the receipt from the row, or say exactly why it cannot be built.
+///
+/// The gate's positive requirement: a resume command from the capability
+/// table. A row with no session identity, an empty harness name, a harness
+/// with no capability row, or a harness that declares no interactive resume
+/// form has no record of how to come back - that is the Unknown case, and
+/// unknown never reaps.
+fn build_reap_receipt(
+    e: &state::RegistryEntry,
+    ledger: Option<&Value>,
+) -> Result<ReapReceipt, String> {
+    let harness = e.harness_name();
+    if harness.is_empty() {
+        return Err("missing harness identity".to_string());
+    }
+    let sid = e
+        .harness_session_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "missing harness session identity".to_string())?;
+    let contract = crate::harness_capabilities::HarnessContract::packaged()
+        .map_err(|err| format!("capability table unreadable: {err}"))?;
+    let argv = contract
+        .render_session_argv(harness, "interactive_resume", Some(sid))
+        .map_err(|err| format!("no interactive resume form declared: {err}"))?;
+    Ok(ReapReceipt {
+        row_name: e.name.clone(),
+        short_id: e.short_id.clone(),
+        harness: harness.to_string(),
+        harness_session_id: sid.to_string(),
+        cwd: e.cwd.clone(),
+        log_path: e.log_path.clone(),
+        created_at: e.created_at.clone(),
+        reaped_at: now_rfc3339_like(),
+        resume: argv.join(" "),
+        ledger: ledger.cloned(),
+    })
+}
+
+/// The receipt gate at the classification arms. Stages the receipt for a row
+/// the policy just classified reap-shaped; a row whose receipt cannot be
+/// staged is held and named in `kept_no_receipt`. Returns whether the row may
+/// proceed to `to_reap`.
+fn stage_reap_receipt(
+    e: &state::RegistryEntry,
+    id: &str,
+    receipts: &mut std::collections::BTreeMap<String, ReapReceipt>,
+    kept_no_receipt: &mut Vec<(String, String)>,
+) -> bool {
+    let ledger = ledger_entry_for_session(
+        e.harness_session_id.as_deref().unwrap_or(""),
+        &default_ledger_path(),
+    );
+    match build_reap_receipt(e, ledger.as_ref()) {
+        Ok(receipt) => {
+            receipts.insert(e.name.clone(), receipt);
+            true
+        }
+        Err(reason) => {
+            kept_no_receipt.push((id.to_string(), reason));
+            false
+        }
+    }
+}
+
+/// `$HOME/.fno/ledger.json`, the ledger's default global path. Tests inject
+/// their own by building receipts with an explicit `ledger` value instead.
+fn default_ledger_path() -> std::path::PathBuf {
+    let base = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    base.join(".fno").join("ledger.json")
 }
 
 /// Distinct canonical repo roots the registry knows about, deduplicated.
@@ -1621,6 +1790,11 @@ fn gc_sweep_impl_with_node_cascade(
     // `created_at` is the spawn-stamped identity discriminant: a replacement
     // session carries a fresh one.
     let mut to_reap: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    // Staged reap receipts (x-b150), keyed by row name: built at
+    // classification, persisted just before the registry write that drops the
+    // row. A row with no staged receipt never reaches `to_reap`.
+    let mut receipts: std::collections::BTreeMap<String, ReapReceipt> =
+        std::collections::BTreeMap::new();
     // Rows in `to_reap` that got there on age alone, keyed by registry name.
     let mut backstop_ids: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
@@ -1849,15 +2023,21 @@ fn gc_sweep_impl_with_node_cascade(
         }
         match crate::gc::gc_action(&row, now, grace_secs) {
             crate::gc::GcAction::Reap => {
-                to_reap.insert(e.name.clone(), e.created_at.clone());
+                if stage_reap_receipt(e, &id, &mut receipts, &mut summary.kept_no_receipt) {
+                    to_reap.insert(e.name.clone(), e.created_at.clone());
+                }
             }
             crate::gc::GcAction::ReapBackstop => {
-                to_reap.insert(e.name.clone(), e.created_at.clone());
-                backstop_ids.insert(e.name.clone(), id.clone());
+                if stage_reap_receipt(e, &id, &mut receipts, &mut summary.kept_no_receipt) {
+                    to_reap.insert(e.name.clone(), e.created_at.clone());
+                    backstop_ids.insert(e.name.clone(), id.clone());
+                }
             }
             crate::gc::GcAction::ReapDormant => {
-                to_reap.insert(e.name.clone(), e.created_at.clone());
-                dormant_ids.insert(e.name.clone(), id.clone());
+                if stage_reap_receipt(e, &id, &mut receipts, &mut summary.kept_no_receipt) {
+                    to_reap.insert(e.name.clone(), e.created_at.clone());
+                    dormant_ids.insert(e.name.clone(), id.clone());
+                }
             }
             crate::gc::GcAction::StampExit => {
                 to_stamp.insert(e.name.clone(), e.created_at.clone());
@@ -1939,6 +2119,33 @@ fn gc_sweep_impl_with_node_cascade(
     }
 
     let now_stamp = now_rfc3339_like();
+    // Persist every receipt BEFORE the retain drops its row (x-b150): the
+    // ordering IS the losslessness. A receipt that will not write holds its
+    // row in the registry for the next sweep instead.
+    to_reap.retain(|name, _| {
+        let Some(receipt) = receipts.get(name) else {
+            // Unreachable: the gate stages a receipt before any insert. A row
+            // that somehow got here is kept - fail closed, never unreapable.
+            summary
+                .kept_no_receipt
+                .push((name.clone(), "no staged receipt".to_string()));
+            return false;
+        };
+        match write_reap_receipt(home, receipt) {
+            Ok(()) => true,
+            Err(err) => {
+                let id = if receipt.short_id.is_empty() {
+                    receipt.row_name.clone()
+                } else {
+                    receipt.short_id.clone()
+                };
+                summary
+                    .kept_no_receipt
+                    .push((id, format!("receipt did not persist: {err}")));
+                false
+            }
+        }
+    });
     // Names actually removed under the lock (identity still matched), so the emit
     // + summary report only what really happened (AC1-ERR / no phantom reaps).
     let mut reaped_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -10778,6 +10985,222 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert!(reg.entries.iter().any(|e| e.name == "stuck"));
     }
 
+    // ── x-b150: the reap receipt gate ────────────────────────────────────────
+
+    /// A past-grace dead row with no ledger entry still reaps, and the receipt
+    /// on disk is built from the ROW: resume command included, fields the
+    /// ledger never carried for this row present. This is the 12-of-26
+    /// population (kings, blueprint and rescue sessions) the ledger reader
+    /// cannot serve.
+    #[test]
+    fn reap_receipt_built_from_the_row_when_the_ledger_has_no_entry() {
+        let home = tmp_home("gc-receipt-row");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = ask_row("king-mux", Some(exited_at.as_str()));
+            e.short_id = "kingmux".into();
+            e.log_path = Some("/tmp/king-mux.log".into());
+            e.pid = Some(999_999_999); // no such process: confirmed dead
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &no_tails,
+            &|_| None,
+            &|_| None,
+        );
+
+        assert_eq!(summary.reaped, vec!["kingmux".to_string()]);
+        assert!(summary.kept_no_receipt.is_empty());
+        // The row is gone AND the record of how to come back is on disk.
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(reg.entries.iter().all(|e| e.name != "king-mux"));
+        let path = home
+            .root()
+            .join("reap-receipts")
+            .join("claude-king-mux-sess.json");
+        let raw = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("receipt must be durable before the row leaves: {e}"));
+        let receipt: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(receipt["row_name"], "king-mux");
+        assert_eq!(receipt["harness"], "claude");
+        assert_eq!(receipt["harness_session_id"], "king-mux-sess");
+        assert_eq!(receipt["cwd"], "/tmp");
+        assert_eq!(receipt["log_path"], "/tmp/king-mux.log");
+        assert_eq!(receipt["created_at"], "2020-01-01T00:00:00Z");
+        assert_eq!(receipt["resume"], "claude --resume king-mux-sess");
+        assert!(
+            receipt.get("ledger").is_none(),
+            "no ledger entry exists for this session; none may be invented"
+        );
+    }
+
+    /// A row the policy would remove but whose receipt cannot be built is
+    /// Unknown, and unknown never reaps: no registry write, a named gate in
+    /// the report, no receipt file.
+    #[test]
+    fn a_row_whose_receipt_cannot_be_built_is_never_reaped() {
+        let home = tmp_home("gc-receipt-unknown");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = ask_row("no-cap-row", Some(exited_at.as_str()));
+            e.short_id = "nocap".into();
+            // A harness whose capability row does not exist yet (grok ships a
+            // readiness manifest, not a row) carries a session identity but
+            // no declared resume form: the Unknown case, by name.
+            e.harness = Some("grok".into());
+            e.pid = Some(999_999_999); // confirmed dead: nothing else holds it
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &no_tails,
+            &|_| None,
+            &|_| None,
+        );
+
+        assert!(summary.reaped.is_empty());
+        assert_eq!(summary.kept_no_receipt.len(), 1);
+        let (id, reason) = &summary.kept_no_receipt[0];
+        assert_eq!(id, "nocap");
+        assert!(reason.contains("grok"), "{reason}");
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(reg.entries.iter().any(|e| e.name == "no-cap-row"));
+        assert!(!home.root().join("reap-receipts").exists());
+    }
+
+    /// The receipt's resume command is rendered from the capability table,
+    /// never a local literal: the test renders the declared form itself and
+    /// compares, so a harness whose form changes cannot silently strand a
+    /// stale command in new receipts.
+    #[test]
+    fn the_resume_form_comes_from_the_capability_table() {
+        let toml: std::collections::BTreeMap<String, toml::Value> =
+            toml::from_str(crate::harness_capabilities::CAPABILITY_TOML).unwrap();
+        for harness in ["claude", "codex"] {
+            let tokens: Vec<String> = toml["harness"][&harness]["resume_strategy"]["forms"]
+                ["interactive_resume"]["tokens"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t.as_str().unwrap().replace("{session_id}", "s-1"))
+                .collect();
+            let mut e = ask_row("form", None);
+            e.harness = Some(harness.into());
+            e.harness_session_id = Some("s-1".into());
+            let receipt = build_reap_receipt(&e, None).unwrap();
+            assert_eq!(receipt.resume, tokens.join(" "), "{harness}");
+        }
+        // A harness with no capability row (grok ships a readiness manifest,
+        // not a row) cannot produce a resume command: Unknown, by name.
+        let mut e = ask_row("grok-row", None);
+        e.harness = Some("grok".into());
+        e.harness_session_id = Some("g-1".into());
+        let err = build_reap_receipt(&e, None).unwrap_err();
+        assert!(err.contains("grok"), "{err}");
+    }
+
+    /// The ledger entry wins the enrichment (change 5): when the session
+    /// resolves there, the receipt carries node/pr/plan alongside the row's
+    /// own fields. The lookup itself answers None for a session the ledger
+    /// never recorded - the 12-of-26 population.
+    #[test]
+    fn the_ledger_entry_enriches_the_receipt_when_one_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.json");
+        std::fs::write(
+            &path,
+            json!({
+                "entries": [{
+                    "graph_node_id": "x-abc1",
+                    "pr_number": 1325,
+                    "pr_url": "https://github.com/o/r/pull/1325",
+                    "plan_path": "/plans/x-abc1.md",
+                    "sessions": ["s-ledger"],
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let row = ledger_entry_for_session("s-ledger", &path).expect("the session resolves");
+        assert_eq!(row["graph_node_id"], "x-abc1");
+        assert!(ledger_entry_for_session("s-never-recorded", &path).is_none());
+
+        let mut e = ask_row("shipped", None);
+        e.harness_session_id = Some("s-ledger".into());
+        let receipt = build_reap_receipt(&e, Some(&row)).unwrap();
+        let led = receipt.ledger.expect("ledger enrichment present");
+        assert_eq!(led["pr_number"], 1325);
+    }
+
+    /// Durability ordering, enforced not narrated: a receipt that cannot be
+    /// written holds its row in the registry. The receipts dir is pre-created
+    /// as a FILE, so the persist write fails and the sweep keeps the row.
+    #[test]
+    fn a_row_reaps_only_after_its_receipt_is_durable() {
+        let home = tmp_home("gc-receipt-durability");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        std::fs::write(home.root().join("reap-receipts"), b"not a directory").unwrap();
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = ask_row("undeliverable", Some(exited_at.as_str()));
+            e.short_id = "undeliv".into();
+            e.pid = Some(999_999_999); // confirmed dead: the policy would reap
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &no_tails,
+            &|_| None,
+            &|_| None,
+        );
+
+        assert!(summary.reaped.is_empty());
+        assert!(
+            summary
+                .kept_no_receipt
+                .iter()
+                .any(|(id, reason)| id == "undeliv" && reason.contains("receipt did not persist")),
+            "the persist failure must be surfaced: {:?}",
+            summary.kept_no_receipt
+        );
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(reg.entries.iter().any(|e| e.name == "undeliverable"));
+    }
+
     // A codex THREAD row (the x-6678 shape): harness codex, interactive host,
     // no claude short id, no pane of its own - the row that owns no pid by
     // design, because the shared daemon's pid is not the worker's to hold.
@@ -11788,6 +12211,10 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             row.cwd = repo.to_string_lossy().into_owned();
             row.exited_at = Some("2020-01-01T00:00:00Z".into());
             row.log_path = Some(stale_log(&repo));
+            // A real bg worker carries its session identity, so the receipt
+            // gate stages a record and the row reaches the dispatch path this
+            // test exercises.
+            row.harness_session_id = Some("019cdead-0000-7000-8000-000000000001".into());
             registry.entries.push(row);
         })
         .unwrap();
@@ -11827,6 +12254,9 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             row.cwd = repo.to_string_lossy().into_owned();
             row.exited_at = Some("2020-01-01T00:00:00Z".into());
             row.log_path = Some(stale_log(&repo));
+            // Session identity present, so the receipt gate stages a record
+            // and the sweep reaches the dead-dispatch write this test breaks.
+            row.harness_session_id = Some("019cdead-0000-7000-8000-000000000001".into());
             registry.entries.push(row);
         })
         .unwrap();

@@ -1661,6 +1661,11 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
             .iter()
             .map(|(id, reason)| json!({"id": id, "reason": reason}))
             .collect();
+        let no_receipt: Vec<Value> = summary
+            .kept_no_receipt
+            .iter()
+            .map(|(id, reason)| json!({"id": id, "reason": reason}))
+            .collect();
         return format!(
             "{}\n",
             json!({
@@ -1671,6 +1676,7 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
                 "node_session_refused": node_refused,
                 "kept_dirty": kept,
                 "kept_uncorroborated": summary.kept_uncorroborated,
+                "kept_no_receipt": no_receipt,
                 "dormant_probes_escalated": summary.dormant_probes_escalated,
                 "dry_run": dry_run,
             })
@@ -1716,6 +1722,9 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
         out.push_str(&format!(
             "  kept {id} (uncorroborated: no confirmed-dead pid, no positively-stale transcript, no gone harness session yet)\n"
         ));
+    }
+    for (id, reason) in &summary.kept_no_receipt {
+        out.push_str(&format!("  kept {id} (no resumable receipt: {reason})\n"));
     }
     if dry_run {
         out.push_str("(dry-run: no changes made)\n");
