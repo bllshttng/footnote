@@ -644,9 +644,11 @@ from fno.ledger_show import ledger_show_command  # noqa: E402
 from fno.scoreboard.cli import scoreboard_command  # noqa: E402
 
 whoami_app.command("context", hidden=True)(context_command)
-# Unhidden (x-b150): a reader nobody can find is a reader nobody runs. The
-# epic that needed it invented a verb name because this one was invisible.
-whoami_app.command("ledger")(ledger_show_command)
+# Hidden alias (x-6db9): the advertised primary is `fno agents history`, which
+# reads this ledger BESIDE the live registry and reap receipts. Kept working
+# so in-flight callers and muscle memory keep resolving; the store keeps its
+# name, the verb names the question.
+whoami_app.command("ledger", hidden=True)(ledger_show_command)
 whoami_app.command("scoreboard", hidden=True)(scoreboard_command)
 
 
