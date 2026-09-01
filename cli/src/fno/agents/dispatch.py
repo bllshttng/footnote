@@ -1578,6 +1578,247 @@ def _codex_thread_spawn(
     return str(session_id)
 
 
+def _lane_b_worker_binary() -> Optional[Path]:
+    """The ``fno-agents-worker`` keeper binary.
+
+    Mirrors the Rust resolver's order: ``$FNO_AGENTS_WORKER_BIN`` override,
+    then the sibling of the resolved ``fno-agents`` binary, then ``PATH``.
+    """
+    override = (os.environ.get("FNO_AGENTS_WORKER_BIN") or "").strip()
+    if override:
+        candidate = Path(override).expanduser()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    from fno import rust_binary
+
+    agent_bin = rust_binary.resolve_binary()
+    if agent_bin is not None:
+        sibling = agent_bin.with_name("fno-agents-worker")
+        if sibling.is_file() and os.access(sibling, os.X_OK):
+            return sibling
+    found = shutil.which("fno-agents-worker")
+    return Path(found) if found else None
+
+
+def _lane_b_keeper_socket(name: str) -> Path:
+    """``<state-root>/mux/threads/<name>.sock``: the pane-less keeper's
+    socket, session-keyed beside the pane keepers' ``mux/panes/`` (see
+    docs/state-root-inventory.md for the owner + lifetime row)."""
+    return paths.state_dir() / "mux" / "threads" / f"{name}.sock"
+
+
+def _keeper_identify(sock: Path, timeout_sec: float = 10.0) -> dict:
+    """Connect to a keeper, send ``Identify``, return its reply dict.
+
+    The positive control for a lane-B spawn: a reply proves a keeper
+    process is alive behind the socket, and its ``session_id`` proves the
+    child runs the session fno minted. Raises ``TimeoutError`` when no
+    keeper answers inside the bound."""
+    import socket
+
+    deadline = time.monotonic() + timeout_sec
+    last_err: Optional[BaseException] = None
+    while time.monotonic() < deadline:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(2.0)
+                s.connect(str(sock))
+                # Frame protocol (crates/fno-agents/src/pane_keeper.rs):
+                # u8 tag | u32 LE payload length | payload; Identify is tag
+                # 4 with no payload.
+                s.sendall(b"\x04" + (0).to_bytes(4, "little"))
+                buf = b""
+                while time.monotonic() < deadline:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while len(buf) >= 5:
+                        tag = buf[0]
+                        length = int.from_bytes(buf[1:5], "little")
+                        if len(buf) < 5 + length:
+                            break
+                        payload = buf[5 : 5 + length]
+                        buf = buf[5 + length :]
+                        if tag == 5:  # IdentifyReply, JSON payload
+                            return json.loads(payload)
+                last_err = TimeoutError("keeper closed the socket before replying")
+        except OSError as exc:
+            last_err = exc
+        time.sleep(0.05)
+    raise TimeoutError(f"no keeper answered Identify on {sock}: {last_err}")
+
+
+def _lane_b_thread_spawn(
+    *,
+    name: str,
+    harness: str,
+    cwd: Path,
+    lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
+) -> dict:
+    """Host a lane-B harness thread on a pane-less keeper (x-889a).
+
+    A lane-B harness (``thread_lane`` == ``"keeper"``: a transcript on disk
+    but no live process fno could hand a session to) gets its thread by fno
+    holding the pty master itself: this mints the harness session id
+    BEFORE launch, renders the harness's ``interactive_create`` argv
+    through the capability seam, and runs that argv under
+    ``fno-agents-worker --keeper`` - the SAME keeper the mux hosts panes
+    on, with no pane behind it. The registry row carries the minted id in
+    ``harness_session_id`` and the keeper socket in
+    ``messaging_socket_path``; the pi thread arm the viewport already
+    ships resolves the id into a Drive-tier attach id with no
+    ``agents_view.rs`` edit.
+
+    NOT wired into :func:`dispatch_spawn`: pi's ``thread`` capability row
+    stays false, so the public dispatch surface still refuses this lane
+    (AC4-ERR) and the only callers are the test harness and a later
+    group's journey. Lane A (claude, codex; ``thread_lane`` ==
+    ``"attach"``) is refused here and never spawns a keeper (AC3-EDGE).
+
+    Returns the spawn receipt dict (session id, keeper socket, pids,
+    rendered argv).
+    """
+    import uuid
+
+    from fno.agents.harness_map import render_session_argv, thread_lane
+    from fno.harness_identity import scrub_ambient_identity
+
+    if thread_lane(harness) != "keeper":
+        raise DispatchAskError(
+            f"harness {harness!r} is not a keeper-lane harness "
+            f"(thread_lane != 'keeper'); lane B hosts transcript-only "
+            f"harnesses, and lane A keeps its harness-owned path",
+            exit_code=2,
+        )
+    validate_spawn_name(name)
+    worker_bin = _lane_b_worker_binary()
+    if worker_bin is None:
+        raise DispatchAskError(
+            "lane-B thread spawn needs the fno-agents runtime; install it "
+            "(cargo build --release -p fno-agents) or use --substrate pane",
+            exit_code=13,
+        )
+
+    registry_path = paths.agents_registry_path()
+
+    def _on_wait() -> None:
+        print(f"Waiting for agent {name!r} lock...", file=sys.stderr, flush=True)
+
+    with hold_agent_lock(name, registry_path, timeout=lock_timeout, on_wait=_on_wait):
+        entries = load_registry()
+        if any(e.name == name for e in entries):
+            raise DispatchAskError(
+                f"agent {name!r} already exists; "
+                f"use 'fno agents rm {name}' first or pick another name",
+                exit_code=2,
+            )
+
+        session_id = str(uuid.uuid4())
+        try:
+            argv = render_session_argv(harness, "interactive_create", session_id)
+        except DispatchResolveError as exc:
+            raise DispatchAskError(
+                f"harness {harness!r} cannot render an interactive_create "
+                f"argv: {exc}",
+                exit_code=2,
+            ) from exc
+
+        sock = _lane_b_keeper_socket(name)
+        log_path = paths.state_dir() / "agents" / name / "keeper.log"
+        sock.parent.mkdir(parents=True, exist_ok=True)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        keeper_argv = [
+            str(worker_bin),
+            "--keeper",
+            "--sock",
+            str(sock),
+            "--session",
+            name,
+            "--pane-key",
+            session_id,
+            "--cwd",
+            str(cwd),
+            "--",
+            *argv,
+        ]
+        env = dict(os.environ)
+        # A spawned child inherits its parent's ROUTE but never its
+        # IDENTITY; the keeper passes its own env through to the harness
+        # child unchanged, so the scrub has to happen here.
+        scrub_ambient_identity(env)
+        stderr_fh = open(log_path, "ab")
+        try:
+            proc = subprocess.Popen(
+                keeper_argv,
+                cwd=str(cwd),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_fh,
+                start_new_session=True,
+            )
+        finally:
+            stderr_fh.close()
+        try:
+            reply = _keeper_identify(sock)
+        except TimeoutError as exc:
+            proc.kill()
+            raise DispatchAskError(
+                f"lane-B keeper never answered Identify on {sock}: {exc}; "
+                f"see {log_path}",
+                exit_code=1,
+            ) from exc
+        if reply.get("session_id") != session_id:
+            proc.kill()
+            raise DispatchAskError(
+                f"keeper answered session_id {reply.get('session_id')!r}, "
+                f"expected the minted {session_id!r}",
+                exit_code=1,
+            )
+
+        _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()
+        new_entry = AgentEntry(
+            name=name,
+            cwd=str(cwd),
+            log_path=str(log_path),
+            harness=harness,
+            host_mode="interactive",
+            harness_session_id=session_id,
+            pid=proc.pid,
+            messaging_socket_path=str(sock),
+            spawned_by_session=_cx_session,
+            spawned_by_harness=_cx_harness,
+            spawned_by_cwd=_cx_cwd,
+            origin="spawn",
+        )
+        try:
+            update_registry(lambda es: es + [new_entry])
+        except (AgentResolutionError, OSError, RegistryVersionError) as exc:
+            proc.kill()
+            raise DispatchAskError(
+                f"registry write failed: {exc}; keeper for {name!r} stopped",
+                exit_code=12,
+            ) from exc
+
+    _emit_ev(
+        "agent_ask_done",
+        stage="dispatch",
+        name=name,
+        provider=harness,
+        substrate="thread",
+    )
+    return {
+        "name": name,
+        "harness": harness,
+        "session_id": session_id,
+        "keeper_socket": str(sock),
+        "keeper_pid": reply.get("keeper_pid"),
+        "child_pid": reply.get("child_pid"),
+        "argv": argv,
+    }
+
+
 def _claude_create_path(
     *,
     name: str,

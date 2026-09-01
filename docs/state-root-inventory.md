@@ -43,6 +43,7 @@ One file per install. These belong at the root.
 | `session-names.json`, `.lock` | `agents/discover.py` | grows per session |
 | `mux/` (`<session>.sock`, `.ver`, `.pid`, `.detach`, `.log`) | `crates/fno/src/proto.rs::mux_dir()`, following `config.state_dir` (`FNO_MUX_DIR` overrides) | server-managed; `kill-server` owns socket removal |
 | `mux/panes/<session>-<pane>.sock` | `crates/fno/src/pty.rs::keeper_dir()`, written by each `fno-agents-worker --pane` keeper | unlinked by the keeper when its child exits; a server-start sweep unlinks leftovers whose keeper is gone, and `fno mux pane keeper list` names them |
+| `mux/threads/<agent>.sock` | `cli/src/fno/agents/dispatch.py::_lane_b_keeper_socket()`, written by each `fno-agents-worker --keeper` it launches (the pane-less lane-B thread keeper; a session-keyed subfolder, never a top-level write) | unlinked by the keeper when its child exits; no server-start sweep yet - the restart journey that owns re-adoption is a later group of the same epic, so until then a crashed keeper's leftover is named by the registry row's `messaging_socket_path` |
 | `mux-view.json`, `.lock` | `crates/fno/src/view_store.rs` (follows the mux state root; `FNO_AGENTS_HOME` overrides) | permanent |
 | `installed-rev`, `installed-rust-rev`, `source-path` | `update.py`, `doctor.py` | permanent |
 | `my-priorities.md` | the operator, by hand or with their own `~/.fno/board.py` scratch script (not a repo file, and not `cli/src/fno/king/board.py`); read via `paths.operator_lane()` | permanent |
