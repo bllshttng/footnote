@@ -2748,6 +2748,79 @@ def _reap_execution_enabled() -> bool:
         return False
 
 
+def _persist_reap_receipt(row_id: str) -> tuple[bool, str]:
+    """Build and durably write the reap receipt from the registry row (x-b150).
+
+    Returns ``(ok, detail)``. A row whose receipt cannot be built - no session
+    identity, or a harness with no capability row - never reaps: the caller
+    refuses and the row stays. The resume form is rendered from the capability
+    table (the same single source ``fno whoami ledger`` reads), never a
+    hardcoded string, and the ledger entry enriches the receipt when one
+    exists. Mirrors the daemon sweep's Rust receipt: same keys, same
+    ``reap-receipts/`` directory, so a reader cannot tell which writer ran.
+    """
+    from fno import paths as _paths
+    from fno.agents.harness_map import DispatchResolveError, render_session_argv
+    from fno.agents.registry import load_registry
+    from fno.scoreboard.fold import load_ledger_rows
+
+    try:
+        entries = load_registry(_paths.agents_registry_path())
+    except Exception as exc:  # noqa: BLE001 - an unreadable registry is never a reap
+        return False, f"registry unreadable, receipt cannot be staged: {exc}"
+    entry = next(
+        (e for e in entries if row_id in (e.name, getattr(e, "short_id", "") or e.name)),
+        None,
+    )
+    if entry is None:
+        return False, f"registry has no row {row_id!r}, receipt cannot be staged"
+    harness = (getattr(entry, "harness", "") or "").strip()
+    sid = (getattr(entry, "harness_session_id", "") or "").strip()
+    if not harness or not sid:
+        return False, (
+            f"row {row_id!r} carries no resumable identity "
+            f"(harness={harness!r}, session={bool(sid)})"
+        )
+    try:
+        argv = render_session_argv(harness, "interactive_resume", sid)
+    except DispatchResolveError as exc:
+        return False, f"row {row_id!r}: {exc}"
+    receipt: dict = {
+        "row_name": entry.name,
+        "short_id": getattr(entry, "short_id", "") or "",
+        "harness": harness,
+        "harness_session_id": sid,
+        "cwd": entry.cwd,
+        "log_path": (getattr(entry, "log_path", "") or None),
+        "created_at": entry.created_at,
+        "reaped_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "resume": " ".join(argv),
+    }
+    try:
+        match = next(
+            (
+                r
+                for r in load_ledger_rows(_paths.ledger_json())
+                if sid in (r.get("sessions") or [])
+            ),
+            None,
+        )
+    except Exception:  # noqa: BLE001 - enrichment is a bonus, never the floor
+        match = None
+    if match is not None:
+        receipt["ledger"] = match
+    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in sid)
+    dir_path = _paths.agents_home_dir() / "reap-receipts"
+    path = dir_path / f"{harness}-{safe}.json"
+    try:
+        dir_path.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+        path.chmod(0o600)
+    except OSError as exc:
+        return False, f"receipt did not persist for {row_id!r}: {exc}"
+    return True, str(path)
+
+
 def _apply_wake(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
     before = tail_facts(v.row_id, cwd)
     before_epoch = before.last_event_epoch if before is not None else None
@@ -2901,6 +2974,13 @@ def _apply_reap(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
             f"rm would act on a canonical checkout. Stop and remove this row "
             f"by hand",
         )
+    # The receipt gate (x-b150): rm removes the registry row, the only place
+    # the row's resume identity lives. A receipt that cannot be built and
+    # persisted holds the row here - unknown never reaps, same as the daemon
+    # sweep's gate.
+    receipt_ok, receipt_detail = _persist_reap_receipt(v.row_id)
+    if not receipt_ok:
+        return "refused", f"reap refused: {receipt_detail}"
     stopped = runner(
         [*_fno(), "agents", "stop", v.row_id],
         capture_output=True, text=True, timeout=60, check=False,

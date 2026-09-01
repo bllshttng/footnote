@@ -651,8 +651,9 @@ def test_reap_applies_on_clean_worktree(tmp_path, monkeypatch):
         return _Proc(0)
     v = Verdict("eeee1111-0000", "w1", "working", REAP, "node x done", "stop+rm")
     # The delete-target guard has its own test below; this one exercises
-    # the mechanism past it.
+    # the mechanism past it. The receipt gate has its own tests too.
     monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
+    monkeypatch.setattr(watchdog, "_persist_reap_receipt", lambda rid: (True, "staged"))
     outcome, _ = apply_verdict(
         v, lanes="all", cwd=str(repo), runner=runner, reap_enabled=True
     )
@@ -2573,6 +2574,7 @@ def test_a_failed_rm_after_a_successful_stop_reports_rather_than_refuses(
     it sends a stop to a stopped session."""
     monkeypatch.setattr(watchdog, "worktree_refusal", lambda cwd: None)
     monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
+    monkeypatch.setattr(watchdog, "_persist_reap_receipt", lambda rid: (True, "staged"))
     seen = []
 
     def runner(argv, **kwargs):
@@ -4295,3 +4297,95 @@ def test_manual_report_and_tick_share_one_fleet_scope(monkeypatch):
         json_out=False, apply=False, apply_all=False, only=None, mail_to=""
     )
     assert captured["roots"] == ["/fleet/scope"]
+
+
+# -- x-b150: the reap receipt gate -------------------------------------------
+
+
+def _receipt_row(**over):
+    from types import SimpleNamespace as ns
+
+    row = ns(
+        name="king-mux",
+        short_id="kingmux",
+        harness="claude",
+        harness_session_id="019cdddd-0000-7000-8000-000000000009",
+        cwd="/wt/king",
+        log_path="/tmp/king-mux.log",
+        created_at="2026-08-30T10:00:00Z",
+    )
+    for k, v in over.items():
+        setattr(row, k, v)
+    return row
+
+
+def test_reap_receipt_is_built_from_the_row_with_the_capability_table_resume(
+    monkeypatch, tmp_path
+):
+    """The receipt's fields come from the registry row, and the resume
+    command is rendered from the capability table - the same single source
+    `fno whoami ledger` reads - never a hardcoded string."""
+    import fno.agents.registry as registry_mod
+    import fno.paths as paths_mod
+
+    monkeypatch.setattr(
+        registry_mod, "load_registry", lambda path=None: [_receipt_row()]
+    )
+    monkeypatch.setattr(paths_mod, "agents_registry_path", lambda: tmp_path / "reg.json")
+    monkeypatch.setattr(paths_mod, "agents_home_dir", lambda: tmp_path)
+    monkeypatch.setattr(paths_mod, "ledger_json", lambda: tmp_path / "no-ledger.json")
+
+    ok, detail = watchdog._persist_reap_receipt("king-mux")
+
+    assert ok, detail
+    receipt = json.loads((tmp_path / "reap-receipts" / detail.split("/")[-1]).read_text())
+    assert receipt["resume"] == (
+        f"claude --resume {_receipt_row().harness_session_id}"
+    )
+    assert receipt["harness"] == "claude"
+    assert receipt["harness_session_id"] == _receipt_row().harness_session_id
+    assert receipt["cwd"] == "/wt/king"
+    assert receipt["log_path"] == "/tmp/king-mux.log"
+    assert receipt["row_name"] == "king-mux"
+    assert "ledger" not in receipt, "no ledger entry exists; none may be invented"
+
+
+def test_reap_receipt_names_the_harness_with_no_capability_row(monkeypatch, tmp_path):
+    """grok ships a readiness manifest, not a capability row: no declared
+    resume form, so the receipt cannot be built and the row never reaps."""
+    import fno.agents.registry as registry_mod
+    import fno.paths as paths_mod
+
+    monkeypatch.setattr(
+        registry_mod,
+        "load_registry",
+        lambda path=None: [_receipt_row(harness="grok")],
+    )
+    monkeypatch.setattr(paths_mod, "agents_registry_path", lambda: tmp_path / "reg.json")
+    monkeypatch.setattr(paths_mod, "agents_home_dir", lambda: tmp_path)
+    monkeypatch.setattr(paths_mod, "ledger_json", lambda: tmp_path / "no-ledger.json")
+
+    ok, detail = watchdog._persist_reap_receipt("king-mux")
+
+    assert not ok
+    assert "grok" in detail
+
+
+def test_apply_reap_refuses_when_the_receipt_cannot_be_staged(monkeypatch):
+    """The gate sits before the stop: a row whose receipt cannot be written
+    keeps its registry row and nothing runs against it."""
+    monkeypatch.setattr(watchdog, "worktree_refusal", lambda cwd: None)
+    monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
+    monkeypatch.setattr(
+        watchdog, "_persist_reap_receipt", lambda rid: (False, "no resumable identity")
+    )
+    ran = []
+
+    def runner(argv, **kwargs):
+        ran.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    v = Verdict("aaaa1111-0000", "w1", "working", REAP, "node x done", "stop+rm")
+    outcome, detail = watchdog._apply_reap(v, cwd="/wt/x", runner=runner)
+    assert outcome == "refused" and "no resumable identity" in detail
+    assert ran == [], "nothing may run against a row the gate held"
