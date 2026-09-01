@@ -1618,6 +1618,7 @@ def reap_dead_claims(
     apply: bool = False,
     abandonment_probe: Optional[Callable[[Claim], Optional[bool]]] = None,
     node_settlement: Optional[Callable[..., Optional[bool]]] = None,
+    optout_sink: Optional[list[Claim]] = None,
 ) -> dict[str, Any]:
     """Archive every provably-dead claim across one or more claims roots.
 
@@ -1695,6 +1696,11 @@ def reap_dead_claims(
     fires no event: the "nothing is written" promise above covers the
     event log too, so `fno backlog reconcile --dry-run`'s own preview
     contract is not silently broken by the reap it previews.
+
+    ``optout_sink``, when given, collects every archived ``config-optout:``
+    claim so the caller can restore the human-facing config file; the reaper
+    itself stays config-free. A caller that passes no sink skips the restore,
+    which read-time revocation still covers.
     """
     use_dirs = _default_reap_roots() if roots is None else _dedup_roots(roots)
 
@@ -1866,19 +1872,14 @@ def reap_dead_claims(
                         # bearing on whether the archive itself worked.
                         reaped += 1
                         archived_paths.add(entry)
-                        if fresh.key.startswith("config-optout:"):
-                            # Read-time revocation is the safety guarantee. The
-                            # restore is cleanup for the human-facing file and
-                            # must never be allowed to turn a failed restore
-                            # into an honored opt-out.
-                            try:
-                                from fno.config.writer import _restore_reaped_optout
-
-                                _restore_reaped_optout(fresh)
-                            except Exception as exc:  # noqa: BLE001 - keep sweeping
-                                reap_failed.append(
-                                    (str(entry), f"opt-out restore failed: {exc}")
-                                )
+                        if fresh.key.startswith("config-optout:") and optout_sink is not None:
+                            # The caller owns the opt-out restore: importing the
+                            # config layer here would tie claims (infra) to
+                            # config (policy) and mypy reads that edge as an
+                            # import cycle. Read-time revocation is the safety
+                            # guarantee either way; the restore is cleanup for
+                            # the human-facing file.
+                            optout_sink.append(fresh)
                         emit_claim_reaped(
                             fresh,
                             root=root_label,

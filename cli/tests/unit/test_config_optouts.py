@@ -176,9 +176,13 @@ def test_reaper_restores_the_recorded_prior_value(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    summary = reap_dead_claims(roots=[root], apply=True)
+    optout_sink: list = []
+    summary = reap_dead_claims(roots=[root], apply=True, optout_sink=optout_sink)
 
     assert summary["reaped"] == 1
+    from fno.config.writer import restore_reaped_optouts
+
+    assert restore_reaped_optouts(optout_sink) == []
     assert "self_review_required = false" not in config.read_text(encoding="utf-8")
     assert "self_review_required = true" not in config.read_text(encoding="utf-8")
 

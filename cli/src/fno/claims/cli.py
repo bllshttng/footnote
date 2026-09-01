@@ -1641,12 +1641,20 @@ def reap_cmd(
     to confirm each move before counting it `reaped` - an exit code alone is not
     evidence. Exits 1 when any reapable file's move could not be confirmed.
     """
+    optout_sink: list = []
     summary = reap_dead_claims(
         roots=list(root) if root else None,
         apply=apply,
         abandonment_probe=_abandonment_probe(),
         node_settlement=_node_settlement(),
+        optout_sink=optout_sink,
     )
+    if optout_sink:
+        from fno.config.writer import restore_reaped_optouts
+
+        summary.setdefault("reap_failed", []).extend(
+            restore_reaped_optouts(optout_sink)
+        )
 
     if json_output:
         typer.echo(json.dumps(summary))

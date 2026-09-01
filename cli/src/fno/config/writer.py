@@ -177,6 +177,26 @@ def _restore_reaped_optout(claim: Any) -> Optional[Path]:
     return _locked_update(target, _restore)
 
 
+def restore_reaped_optouts(sink: list[Any]) -> list[tuple[str, str]]:
+    """Restore every claim a reaper collected in ``optout_sink``.
+
+    The reaper stays config-free, so the callers that hold the sink call this
+    right after the sweep and fold the failures into their own ``reap_failed``
+    reporting. Read-time revocation is the safety guarantee; this is cleanup
+    for the human-facing file and must never be allowed to turn a failed
+    restore into an honored opt-out.
+    """
+    failures: list[tuple[str, str]] = []
+    for claim in sink:
+        try:
+            _restore_reaped_optout(claim)
+        except Exception as exc:  # noqa: BLE001 - keep restoring the rest
+            failures.append(
+                (str(getattr(claim, "key", "")), f"opt-out restore failed: {exc}")
+            )
+    return failures
+
+
 def _unwrap_optional(ann: Any) -> Any:
     """``Optional[X]`` / ``Union[X, None]`` / ``X | None`` -> ``X`` (best-effort).
 

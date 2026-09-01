@@ -11903,11 +11903,19 @@ def cmd_reconcile(
         # claim until its TTL. A producer on one of N paths is the same defect
         # as a guard on one of N, from the other side. Same for the
         # node_settlement (x-94f8).
+        _optout_sink: list = []
         _reap = reap_dead_claims(
             apply=not dry_run,
             abandonment_probe=_abandonment_probe(),
             node_settlement=_node_settlement(),
+            optout_sink=_optout_sink,
         )
+        if _optout_sink:
+            from fno.config.writer import restore_reaped_optouts
+
+            _reap.setdefault("reap_failed", []).extend(
+                restore_reaped_optouts(_optout_sink)
+            )
         claim_reap = {"outcome": "ok", **_reap}
         _count = _reap["would_reap"] if dry_run else _reap["reaped"]
         _failed = _reap.get("reap_failed") or []
