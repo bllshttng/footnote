@@ -7118,13 +7118,6 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
             }),
         );
     }
-    // A non-PTY row (empty short_id == Python-authored; the daemon's create path
-    // always derives a non-empty short_id) for codex/gemini has no daemon worker
-    // to stop. Mirror Python `stop_agent`: these providers are "synchronous
-    // between asks (no persistent process to stop)" -- emit `agent_stopped` and
-    // return cleanly, leaving the registry UNCHANGED. Falling through to the PTY
-    // path would probe the agents-root `worker.sock` (absent -> "confirmed
-    // down") and then write `status = Exited`, a status Python's loader rejects,
     // A lane-B keeper thread (x-889a): fno's own keeper hosts the child and
     // the row's short_id is empty, so without this arm the no-op arm below
     // reports a stop that stopped nothing (PR 1332 review finding). Kill is
@@ -7163,6 +7156,13 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
         );
         return Response::ok(req.id, json!({"stopped": true, "backend": "keeper-thread"}));
     }
+    // A non-PTY row (empty short_id == Python-authored; the daemon's create path
+    // always derives a non-empty short_id) for codex/gemini has no daemon worker
+    // to stop. Mirror Python `stop_agent`: these providers are "synchronous
+    // between asks (no persistent process to stop)" -- emit `agent_stopped` and
+    // return cleanly, leaving the registry UNCHANGED. Falling through to the PTY
+    // path would probe the agents-root `worker.sock` (absent -> "confirmed
+    // down") and then write `status = Exited`, a status Python's loader rejects,
     // corrupting a Python-readable registry (Codex P1, PR #364).
     if entry.short_id.is_empty() {
         let _ = ctx.emitter.emit(

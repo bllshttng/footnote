@@ -550,3 +550,64 @@ def test_stop_agent_refuses_a_keeper_that_never_confirms(lane_b_home) -> None:
         stop.set()
         thread.join(timeout=5)
         shutil.rmtree(short_state, ignore_errors=True)
+
+
+def test_stop_agent_stops_a_keeper_that_dies_between_probe_and_kill(lane_b_home) -> None:
+    """A keeper that answers the liveness probe and then dies (the SIGKILLed
+    mid-stop shape) is a clean stop, not an error: the unreachability poll
+    confirms the socket is gone before the row goes terminal."""
+    from fno.agents.dispatch import _stop_keeper_thread
+    from fno.agents.registry import AgentEntry, load_registry, update_registry
+
+    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-"))
+    sock = short_state / "mux" / "threads" / "wk-vanish.sock"
+    sock.parent.mkdir(parents=True, exist_ok=True)
+    seen: dict[str, object] = {}
+
+    # The vanishing keeper: serve exactly one connection (the probe), then die
+    # WITHOUT unlinking the socket path, the shape a SIGKILLed keeper leaves.
+    # Closing a listening AF_UNIX socket never unlinks its bound path.
+    def _serve() -> None:
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(sock))
+        server.listen(8)
+        server.settimeout(5)
+        seen["ready"] = True
+        try:
+            conn, _ = server.accept()
+            conn.close()
+        except OSError:
+            pass
+        finally:
+            server.close()
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while "ready" not in seen and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    entry = AgentEntry(
+        name="wk-vanish",
+        cwd=str(lane_b_home),
+        log_path=str(lane_b_home / "keeper.log"),
+        harness="pi",
+        host_mode="interactive",
+        harness_session_id="sess-vanish",
+        pid=4242,
+        keeper_child_pid=555,
+        messaging_socket_path=str(sock),
+        origin="spawn",
+    )
+    update_registry(lambda entries: entries + [entry])
+
+    try:
+        result = _stop_keeper_thread("wk-vanish", entry, str(sock), grace_s=5)
+        assert result.name == "wk-vanish"
+        row = next(e for e in load_registry() if e.name == "wk-vanish")
+        assert row.status == "exited", "a keeper that died mid-stop is gone, not refused"
+        assert row.exited_at
+        assert not sock.exists(), "the stale socket file is reaped on the clean stop"
+    finally:
+        thread.join(timeout=5)
+        shutil.rmtree(short_state, ignore_errors=True)

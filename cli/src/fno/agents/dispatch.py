@@ -4091,11 +4091,11 @@ def _stop_keeper_thread(
                 # Frame protocol (crates/fno-agents/src/pane_keeper.rs):
                 # u8 tag | u32 LE length | payload; Kill is tag 3, no payload.
                 conn.sendall(b"\x03" + (0).to_bytes(4, "little"))
-        except OSError as exc:
-            raise DispatchAskError(
-                f"keeper socket for {name!r} accepted no Kill frame ({sock}): {exc}",
-                exit_code=1,
-            ) from exc
+        except OSError:
+            # The socket answered the probe but refused the connect or the
+            # send: the keeper died in between. Fall through to the poll below,
+            # which confirms the socket is gone before the row goes terminal.
+            pass
         deadline = time.monotonic() + grace_s
         while time.monotonic() < deadline:
             if not _reachable():
