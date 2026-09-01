@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional, Tuple
 
@@ -189,17 +188,22 @@ def _spawning_outlived_by_a_live_pid(
     return (now_dt - created_at) > timedelta(seconds=SPAWN_TIMEOUT_S)
 
 
-#: (x-2019) The bracketed capacity suffix a model token may carry. A request
-#: spelled `glm-5.3[1m]` served by a session answering as `glm-5.3` is the
-#: SAME model to the operator's eye - the suffix names the context window the
-#: caller asked for, not a different model - so the comparison strips exactly
-#: one trailing suffix from each side before comparing.
-_MODEL_SUFFIX_RE = re.compile(r"\[[^\]]+\]$")
-
-
 def _model_family(token: str) -> str:
-    """The model token with one trailing bracketed suffix removed, lowercased."""
-    return _MODEL_SUFFIX_RE.sub("", token.strip()).lower()
+    """The model token with one trailing bracketed suffix removed, lowercased.
+
+    A request spelled `glm-5.3[1m]` served by a session answering as
+    `glm-5.3` is the SAME model to the operator's eye - the suffix names the
+    context window the caller asked for, not a different model - so the
+    comparison strips exactly one trailing bracket group from each side
+    first. Line-for-line the Rust twin (`state.rs` `model_family`); a
+    divergence here would make the two languages disagree on whether a row
+    is substituted, so any change lands on both sides together.
+    """
+    trimmed = token.strip()
+    idx = trimmed.rfind("[")
+    if idx > 0 and trimmed.endswith("]"):
+        return trimmed[:idx].lower()
+    return trimmed.lower()
 
 
 def model_substitution(

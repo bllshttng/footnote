@@ -64,3 +64,24 @@ from fno.agents.row_contradiction import model_substitution
 )
 def test_model_substitution_specimen_table(requested, observed, expected) -> None:
     assert model_substitution(requested, observed) == expected
+
+
+@pytest.mark.parametrize(
+    ("token", "family"),
+    [
+        # Twin-parity specimens: `_model_family` is line-for-line the Rust
+        # `model_family` in state.rs, and each row here is asserted against
+        # the Rust function's rule by hand. A divergence between the two
+        # languages would make a claude-lane row and a daemon-served row
+        # disagree on whether the same pair is substituted.
+        ("glm-5.3[1m]", "glm-5.3"),
+        ("[1m]", "[1m]"),  # a leading bracket group is the token, not a suffix
+        ("a[b]c]", "a"),  # strip from the last '[' when the token ends ']'
+        ("GLM-5.3", "glm-5.3"),
+        (" glm-5.3 ", "glm-5.3"),
+    ],
+)
+def test_model_family_matches_the_rust_rule(token, family) -> None:
+    from fno.agents.row_contradiction import _model_family
+
+    assert _model_family(token) == family
