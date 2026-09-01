@@ -188,6 +188,10 @@ The mux squad store uses the exact worker identity pair `(harness, harness_sessi
 
 The agents lifecycle store at `~/.fno/agents/events.jsonl` owns `agent_spawned` receipts. The repository-local `.fno/events.jsonl` is a project event journal and is not a spawn-receipt source. Persistent thread receipts emit `substrate: thread`; `bg` remains an input alias during the compatibility window, while pane receipts continue to emit `substrate: pane`.
 
+### Registry row removal is never silent
+
+Every registry row removal announces itself at the write choke point, whatever door drops the row. The remover stages a recovery receipt under `<agents home>/reap-receipts/` first, then emits one `registry_row_removed` event per row into the same lifecycle store, naming the row and the remover; a row with no resumable identity still announces with `receipt_staged: false`. `update_registry` is the only removal door in both languages (Rust `state.rs`, Python `registry.py`), so a removal with no event cannot exist. `agent_row_reaped` remains the reap door's own richer event; `registry_row_removed` fires for every door beside it.
+
 Squad cleanup uses positive member liveness. A tombstone or exact terminal identity is dead, a current exact identity is live, and an unreadable or unjoinable identity is unknown and remains stored. A missing row alone is not proof of death.
 
 ## Contract with gates
