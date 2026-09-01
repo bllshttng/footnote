@@ -328,6 +328,27 @@ pub fn dead_row_grace_secs(cwd: &Path, harness: &str) -> u64 {
     .unwrap_or(DEFAULT_DEAD_ROW_GRACE_SECS)
 }
 
+/// Default reap-receipt retention: 7 days. A reaped row's resume handle
+/// survives a week by default before the GC sweep expires it (x-6db9).
+pub const DEFAULT_REAP_RECEIPT_RETAIN_DAYS: u64 = 7;
+
+/// Resolve `agents.reap_receipts.retain_days` for the GC sweep's receipt
+/// expiry, same precedence + fail-open degrade as [`dead_row_grace_secs`]:
+/// an unparseable value degrades to the default rather than deleting every
+/// receipt on a config typo.
+pub fn reap_receipt_retain_days(cwd: &Path) -> u64 {
+    resolve(cwd, |t| {
+        t.get("agents")?
+            .as_table()?
+            .get("reap_receipts")?
+            .as_table()?
+            .get("retain_days")?
+            .as_integer()
+            .and_then(|i| u64::try_from(i).ok())
+    })
+    .unwrap_or(DEFAULT_REAP_RECEIPT_RETAIN_DAYS)
+}
+
 // --- Spawn-gate knobs (x-c5cc). Same precedence + fail-open degrade as
 // `dead_row_grace_secs`; all coerce invalid values to their defaults so a config
 // typo can never brick the spawn primitive.

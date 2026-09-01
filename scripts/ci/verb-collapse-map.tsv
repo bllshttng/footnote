@@ -22,6 +22,7 @@ agents drive-authority	T1	agents drive-authority	9
 agents finalize	T1	agents finalize	26
 agents gate	T1	agents gate	6
 agents heal-token	T1	agents heal-token	8
+agents history	T1	agents history	3
 agents kill-check	T1	agents kill-check	4
 agents king done	T1	agents king done	5
 agents king escalate	T1	agents king escalate	1

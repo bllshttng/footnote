@@ -102,15 +102,17 @@ def test_heal_token_accepts_hidden_cross_project_recovery_flag(
 
 
 # x-71b6: the advertised `fno agents` menu (the In-N-Out verbs).
+# `history` joins as the advertised session-history reader.
 _ADVERTISED_AGENTS_VERBS = {
     "spawn", "list", "logs", "watch", "attach", "stop", "resume", "status",
-    "watchdog",
+    "watchdog", "history",
 }
 
 
-def test_agents_help_advertises_only_the_eight_menu_verbs(runner: CliRunner) -> None:
+def test_agents_help_advertises_only_the_menu_verbs(runner: CliRunner) -> None:
     """AC1-HP: `fno agents --help` lists at most 12 verbs, and exactly the
-    advertised set (spawn/list/logs/watch/attach/stop/resume/status/watchdog)."""
+    advertised set (spawn/list/logs/watch/attach/stop/resume/status/watchdog/
+    history)."""
     import click
     import typer.main
 

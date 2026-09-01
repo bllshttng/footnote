@@ -270,6 +270,7 @@ _AGENTS_RESERVED_KEYS = frozenset(
         "min_free_gb",
         "profiles",
         "provider_limits",
+        "reap_receipts",
         "silence_deadline_seconds",
         "spawn_permission_mode",
         "worker_qos",

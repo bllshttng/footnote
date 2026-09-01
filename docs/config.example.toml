@@ -302,6 +302,10 @@ route = ""
 # Default claude account pin for bare spawns, forwarded as --account; an explicit --account wins, empty = unset.
 account = ""
 
+[agents.reap_receipts]
+# Days a reap receipt (the resume handle for a reaped row) stays before the GC sweep expires it (default 7). A receipt whose reaped_at cannot be read is kept and named, never deleted on a failed read.
+retain_days = 7
+
 [agents.codex]
 # Use full-yolo (drop sandbox) for headless codex workers.
 headless_yolo = false
