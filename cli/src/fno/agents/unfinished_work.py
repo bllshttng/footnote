@@ -191,13 +191,13 @@ def _owner_set_verdict(probes: Sequence[OwnerProbe], sources_ok: bool) -> str:
 class NodeObs:
     node_id: str
     status: str
-    is_container: bool = False
     touched_at_epoch: Optional[float] = None
     cwd: Optional[str] = None
     worktree_path: Optional[str] = None
     ahead_count: Optional[int] = None  # origin/main..HEAD where a worktree resolves
     claim: Optional[dict] = None  # {"state", "holder", "pid", ...} or None
     owner_probes: tuple = ()
+    is_container: bool = False
 
 
 @dataclass(frozen=True)

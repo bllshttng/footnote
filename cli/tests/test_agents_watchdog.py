@@ -3677,6 +3677,7 @@ def _node_obs(
     ahead=None,
     probes=(),
     cwd=None,
+    is_container=False,
 ):
     return uw.NodeObs(
         node_id=node_id,
@@ -3687,6 +3688,7 @@ def _node_obs(
         ahead_count=ahead,
         claim={"state": claim_state} if claim_state is not None else None,
         owner_probes=tuple(probes),
+        is_container=is_container,
     )
 
 
@@ -3853,8 +3855,7 @@ def test_ac3_started_free_claim_nodes_carry_target_verbs_and_idle_order():
 
 
 def test_ac3_container_is_not_reported_as_started_free_claim():
-    container = _node_obs("x-container")
-    object.__setattr__(container, "is_container", True)
+    container = _node_obs("x-container", is_container=True)
 
     snap = uw.classify(_uw_obs(nodes=[container]))
 
