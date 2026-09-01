@@ -1687,6 +1687,11 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
             .iter()
             .map(|(id, reason)| json!({"id": id, "reason": reason}))
             .collect();
+        let kept_receipts: Vec<Value> = summary
+            .kept_receipts
+            .iter()
+            .map(|(id, reason)| json!({"id": id, "reason": reason}))
+            .collect();
         return format!(
             "{}\n",
             json!({
@@ -1702,6 +1707,8 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
                 "kept_not_terminal": summary.kept_not_terminal,
                 "kept_contradicted": summary.kept_contradicted,
                 "cleared_contradiction": summary.cleared_contradiction,
+                "expired_receipts": summary.expired_receipts,
+                "kept_receipts": kept_receipts,
                 "dormant_probes_escalated": summary.dormant_probes_escalated,
                 "dry_run": dry_run,
             })
@@ -1770,6 +1777,12 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
         out.push_str(&format!(
             "  cleared stale exited_at on {id} (the liveness ladder proves the row alive)\n"
         ));
+    }
+    for name in &summary.expired_receipts {
+        out.push_str(&format!("  expired receipt {name}\n"));
+    }
+    for (name, reason) in &summary.kept_receipts {
+        out.push_str(&format!("  kept receipt {name} ({reason})\n"));
     }
     if dry_run {
         out.push_str("(dry-run: no changes made)\n");

@@ -22,7 +22,12 @@ from pathlib import Path
 import typer
 
 from fno import paths as _paths
-from fno.ledger_show import _PR_URL_SHAPE, _print_row, resolve_ledger_matches
+from fno.ledger_show import (
+    _NODE_ID_SHAPE,
+    _PR_URL_SHAPE,
+    _print_row,
+    resolve_ledger_matches,
+)
 from fno.scoreboard.fold import load_ledger_rows, read_graph_nodes
 
 # AC6: a legacy row predating the uuid write path legitimately carries no
@@ -94,12 +99,12 @@ def history_command(arg: str) -> None:
             joined_sids.update(s for s in sessions if isinstance(s, str))
 
     digits = arg[1:] if arg.startswith("#") else arg
-    if digits.isdigit() or _PR_URL_SHAPE.search(arg):
-        url_pr = _PR_URL_SHAPE.search(arg)
+    url_pr = _PR_URL_SHAPE.search(arg)
+    if url_pr or digits.isdigit():
         arg_kind, node, pr = "pr", None, (
             int(url_pr.group(1)) if url_pr else int(digits)
         )
-    elif tried and tried[0].startswith("node "):
+    elif _NODE_ID_SHAPE.match(arg):
         arg_kind, node, pr = "node", arg, None
     else:
         arg_kind, node, pr = "session", None, None
@@ -217,7 +222,7 @@ def _print_coverage_notes(row: dict, gnode: dict | None) -> None:
     }
     known = (
         isinstance(sessions, list)
-        and any(harnesses.get(s) for s in sessions)
+        and any(harnesses.get(s) for s in sessions if isinstance(s, str))
     )
     if not known:
         typer.echo(

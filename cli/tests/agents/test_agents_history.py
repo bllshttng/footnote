@@ -138,6 +138,28 @@ def test_node_finds_receipt_through_ledger_enrichment(history):
     assert "EXIT=0" in out
 
 
+def test_node_finds_receipt_even_when_the_ledger_is_unreadable(history, tmp_path):
+    # A broken ledger must not downgrade a node arg to session kind: the
+    # receipt's own enrichment still answers, and the receipt section must
+    # never print a false absence for a file that is on disk.
+    (tmp_path / "ledger.json").write_text("{not json")
+    run = history(receipts=[_receipt(node="x-9f2e")])
+    out = run("x-9f2e")
+    assert "resume:   " + _REASUME_VERBATIM in out
+    assert "no reap receipt on disk" not in out
+
+
+def test_coverage_notes_survive_unhashable_session_elements(history, tmp_path):
+    # A corrupt row's sessions list can hold anything; the coverage notes
+    # degrade to 'not recorded' instead of crashing the whole verb.
+    corrupt = [dict(ROWS[0])]
+    corrupt[0] = {k: v for k, v in corrupt[0].items() if k != "sessions"}
+    corrupt[0]["sessions"] = [{"bad": 1}]
+    run = history(rows=corrupt)
+    out = run("x-3344")
+    assert "EXIT=0" in out
+
+
 def test_ledger_fields_match_whoami_ledger(history):
     run = history()
     out = run("x-3344")

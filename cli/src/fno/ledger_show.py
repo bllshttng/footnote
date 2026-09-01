@@ -85,7 +85,9 @@ def _print_row(row: dict, gnode: dict | None, session_absent_note: str | None = 
         if sid == LEDGER_SESSION_UNRESOLVED:
             typer.echo("          no resume handle was recorded for this run")
             continue
-        harness = harnesses.get(sid)
+        # A corrupt row's sessions list can hold an unhashable element; it
+        # degrades to the unrecorded note, never a crash.
+        harness = harnesses.get(sid) if isinstance(sid, str) else None
         cmd = _resume_command(harness, sid)
         if harness:
             typer.echo(f"          harness: {harness}")
