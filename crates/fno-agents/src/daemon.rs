@@ -834,7 +834,7 @@ const WORKTREE_SWEEP_INTERVAL_SECS: u64 = 86_400;
 /// costs one sweep and changes nothing.
 const STALE_SWEEP_INTERVAL_SECS: i64 = 21_600;
 
-/// One fleet's stale-sweep reading, parsed from the verb's `Summary:` line.
+/// One fleet's stale-sweep reading, parsed from the verb's JSON line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaleSweepReport {
     pub stale: usize,
@@ -842,42 +842,29 @@ pub struct StaleSweepReport {
     pub outcome: String,
 }
 
-/// Parse `fno agents stale-escalate --json`'s summary line.
+/// Parse the JSON object `fno agents stale-escalate --json` prints on stdout.
 ///
-/// Returns `None` rather than a zeroed report when the line is absent. A sweep
-/// that could not read its own output must not report "0 stale, not asked",
-/// which is indistinguishable from a clean machine: an absence has two
-/// explanations and a count must only ever come from a real reading. The
+/// The scheduled invocation passes `--json`, so stdout is ONE JSON line whose
+/// `summary` field happens to carry a `Summary: ...` string - the line itself
+/// never starts with it. Parse the object's fields, not that embedded text.
+///
+/// Returns `None` rather than a zeroed report when no readable object is
+/// present. A sweep that could not read its own output must not report
+/// "0 stale", which is indistinguishable from a clean machine: an absence has
+/// two explanations and a count must only ever come from a real reading. The
 /// outcome word rides along because on the refused path the count is NOT a
 /// real reading - the event must be able to say so rather than fabricate a
 /// measured zero.
 pub fn parse_stale_sweep(stdout: &str) -> Option<StaleSweepReport> {
     let line = stdout
         .lines()
-        .find(|l| l.trim_start().starts_with("Summary:"))?;
-    let num_before = |needle: &str| -> Option<usize> {
-        let idx = line.find(needle)?;
-        line[..idx].split_whitespace().last()?.parse().ok()
-    };
-    let stale = num_before(" stale,")?;
-    let outcome_idx = line.find("outcome ")? + "outcome ".len();
-    let outcome: String = line[outcome_idx..]
-        .split(|c: char| c == ',' || c == ' ')
-        .next()?
-        .to_string();
-    let oldest_h = line
-        .find(" oldest ")
-        .and_then(|i| {
-            line[i + " oldest ".len()..]
-                .split_whitespace()
-                .next()
-                .and_then(|tok| tok.trim_end_matches('h').parse().ok())
-        })
-        .unwrap_or(0);
+        .map(str::trim_start)
+        .find(|l| l.starts_with('{'))?;
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
     Some(StaleSweepReport {
-        stale,
-        oldest_h,
-        outcome,
+        stale: usize::try_from(value.get("stale_count")?.as_u64()?).ok()?,
+        oldest_h: value.get("oldest_h")?.as_i64()?,
+        outcome: value.get("outcome")?.as_str()?.to_string(),
     })
 }
 
@@ -11659,8 +11646,9 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
 
     #[test]
     fn stale_summary_parses_the_asked_line() {
-        let line =
-            "{\"outcome\": \"asked\", ...}\nSummary: 12 stale, outcome asked, oldest 1829h\n";
+        // The verb's ACTUAL --json output, embedded summary text and all -
+        // not a synthetic standalone Summary line the parser could never see.
+        let line = r#"{"outcome": "asked", "question_id": "q-37222570", "stale_count": 12, "oldest_h": 1829, "summary": "Summary: 12 stale, outcome asked, oldest 1829h"}"#;
         let r = parse_stale_sweep(line).expect("parses");
         assert_eq!(r.stale, 12);
         assert_eq!(r.oldest_h, 1829);
@@ -11671,7 +11659,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     fn stale_summary_carries_the_refused_outcome_word() {
         // On the refused path the count is NOT a real reading, so the event
         // must carry the word that says so instead of a fabricated zero.
-        let line = "Summary: 0 stale, outcome refused, oldest 0h\n";
+        let line = r#"{"outcome": "refused", "question_id": "", "stale_count": 0, "oldest_h": 0, "summary": "Summary: 0 stale, outcome refused, oldest 0h"}"#;
         let r = parse_stale_sweep(line).expect("parses");
         assert_eq!(r.stale, 0);
         assert_eq!(r.outcome, "refused");
@@ -11681,10 +11669,18 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     fn stale_summary_reads_duplicate_as_not_asked() {
         // A duplicate no-op is a real reading, not silence: the event must
         // carry the measured set even when the fold asked nothing.
-        let line = "Summary: 12 stale, outcome duplicate, oldest 1830h\n";
+        let line = r#"{"outcome": "duplicate", "question_id": "q-37222570", "stale_count": 12, "oldest_h": 1830, "summary": "Summary: 12 stale, outcome duplicate, oldest 1830h"}"#;
         let r = parse_stale_sweep(line).expect("parses");
         assert_eq!(r.stale, 12);
         assert_eq!(r.outcome, "duplicate");
+    }
+
+    #[test]
+    fn stale_parser_refuses_the_text_mode_line() {
+        // If the verb ever regresses to text-only output, the parser must
+        // answer None (loud error event), never misread the embedded
+        // summary text as a reading.
+        assert!(parse_stale_sweep("Summary: 12 stale, outcome asked, oldest 1829h\n").is_none());
     }
 
     #[test]
@@ -11700,7 +11696,12 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     fn stale_sweep_honours_its_own_6h_floor() {
         let home = tmp_home("stale-sweep-floor");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let out = || Some("Summary: 1 stale, outcome asked, oldest 30h\n".to_string());
+        let out = || {
+            Some(
+                r#"{"outcome": "asked", "question_id": "q-aa", "stale_count": 1, "oldest_h": 30, "summary": "Summary: 1 stale, outcome asked, oldest 30h"}"#
+                    .to_string(),
+            )
+        };
         let now = 1_000_000;
 
         assert_eq!(stale_sweep(&home, &emitter, now, &out), 1);
@@ -11720,7 +11721,12 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         // sweep fires at all: outcome none still emits.
         let home = tmp_home("stale-sweep-quiet");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let out = || Some("Summary: 0 stale, outcome none, oldest 0h\n".to_string());
+        let out = || {
+            Some(
+                r#"{"outcome": "none", "question_id": "", "stale_count": 0, "oldest_h": 0, "summary": "Summary: 0 stale, outcome none, oldest 0h"}"#
+                    .to_string(),
+            )
+        };
 
         assert_eq!(stale_sweep(&home, &emitter, 1_000_000, &out), 1);
         let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();

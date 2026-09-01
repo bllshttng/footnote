@@ -79,6 +79,14 @@ def reconcile_stale(stale_pairs, *, root: Path, session_id: "str | None",
 
     existing = already_asked(root, key, marker=STALE_MARKER)
     if existing:
+        # Hygiene on the repeat visit: a previous run that appended its ask
+        # but died mid-close leaves superseded asks open. Closing them here
+        # keeps one-open-ask-per-set true without re-asking.
+        for q in _open_stale_questions(root):
+            if q.id != existing:
+                _close_question(
+                    q.id, f"stale set changed; superseded by {existing}", root
+                )
         return ("duplicate", existing)
 
     import secrets
@@ -87,17 +95,11 @@ def reconcile_stale(stale_pairs, *, root: Path, session_id: "str | None",
     from fno.outstanding.core import append_question_event
 
     qid = f"q-{secrets.token_hex(4)}"
-    # Close every OTHER-key ask first: the retired emitter left two open
-    # questions 41 minutes apart (q-033129d3, q-901c5b11), which is the
-    # pile-up noise that trains a reader to ignore the channel.
-    for q in _open_stale_questions(root):
-        _close_question(q.id, f"stale set changed; superseded by {qid}", root)
-
-    oldest = oldest_h([v.basis or "" for v, _row in stale_pairs])
     shown = [
         f"{v.name} [node {_row.node or 'unknown'}]: {v.basis}"
         for v, _row in stale_pairs
     ]
+    oldest = oldest_h([v.basis or "" for v, _row in stale_pairs])
     age_clause = f", oldest {oldest}h" if oldest is not None else ""
     question = (
         f"[{STALE_MARKER}:{key}] The fleet watchdog holds {len(stale_pairs)} "
@@ -109,6 +111,8 @@ def reconcile_stale(stale_pairs, *, root: Path, session_id: "str | None",
         f"triage {len(stale_pairs)} stale watchdog row(s){age_clause}: "
         "fno agents watchdog --only stale"
     )
+    # Append the replacement BEFORE closing the superseded asks: a failed
+    # close must cost a duplicate ask, never an empty channel.
     append_question_event(
         operator_question(
             question_id=qid,
@@ -120,4 +124,8 @@ def reconcile_stale(stale_pairs, *, root: Path, session_id: "str | None",
         ),
         root,
     )
+    for q in _open_stale_questions(root):
+        if q.id == qid:
+            continue
+        _close_question(q.id, f"stale set changed; superseded by {qid}", root)
     return ("asked", qid)

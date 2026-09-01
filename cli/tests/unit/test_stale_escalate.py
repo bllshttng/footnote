@@ -118,7 +118,7 @@ def test_changed_set_closes_the_old_ask_and_asks_fresh(tmp_path: Path) -> None:
 
 
 def test_emptied_set_closes_the_open_ask(tmp_path: Path) -> None:
-    transcripts = {"dddd4444-0000": _tail("stopped mid turn", 61 * 1440)}
+    transcripts = {"dddd4444-0000": _tail("stopped mid turn", 61 * 1440 * 60)}
     _outcome, asked_id = _stale_run(tmp_path, [_stale_row()], transcripts)
 
     outcome, closed_id = _stale_run(tmp_path, [_stale_row()], {})
@@ -126,6 +126,41 @@ def test_emptied_set_closes_the_open_ask(tmp_path: Path) -> None:
     assert outcome == "closed"
     assert closed_id == asked_id
     assert read_open_questions(tmp_path) == []
+
+
+def test_duplicate_run_closes_straggler_asks_from_an_interrupted_supersede(
+    tmp_path: Path,
+) -> None:
+    """The append-before-close ordering costs a failed close a duplicate
+    outcome, never an empty channel - and the duplicate visit finishes the
+    closes the interrupted run left behind."""
+    transcripts = {"dddd4444-0000": _tail("stopped mid turn", 61 * 1440 * 60)}
+    _outcome, kept_id = _stale_run(tmp_path, [_stale_row()], transcripts)
+
+    # Simulate the interrupted supersede: an older-key ask still open beside
+    # the current one.
+    from fno.events import operator_question
+    from fno.outstanding.core import append_question_event
+
+    stale_id = "q-deadbeef"
+    append_question_event(
+        operator_question(
+            question_id=stale_id,
+            question=f"[watchdog-stale:000000000000] superseded remain: k0",
+            session_id="watchdog-test",
+            cwd=str(tmp_path),
+            ask="triage",
+            source="daemon",
+        ),
+        tmp_path,
+    )
+    assert len(read_open_questions(tmp_path)) == 2
+
+    outcome, seen_id = _stale_run(tmp_path, [_stale_row()], transcripts)
+
+    assert outcome == "duplicate"
+    assert seen_id == kept_id
+    assert [q.id for q in read_open_questions(tmp_path)] == [kept_id]
 
 
 def test_refused_sweep_escalates_and_closes_nothing(
