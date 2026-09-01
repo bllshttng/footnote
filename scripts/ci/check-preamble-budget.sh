@@ -98,7 +98,11 @@ set -euo pipefail
 # Main's DND work merged in +2; the pane-keeper bullet paid it by dropping
 # "child " before pid (6 B), and the ceiling followed down to 38424. Zero
 # spare, still.
-CEILING_BYTES=38424
+# Keeper-why raise: the pane-keeper bullet gained one plan-mandated clause
+# ("and the page answers why not the daemon", +41 B) pointing at the new
+# Why-a-separate-process section, and paid 8 B by dropping "process" after
+# keeper. 33 is the measured remainder, zero spare.
+CEILING_BYTES=38457
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
