@@ -4871,7 +4871,6 @@ def cmd_next(
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import (
         detect_project,
-        filter_by_project,
         make_selection_sort_key,
         descendants_of,
         _find_node,
@@ -4942,66 +4941,39 @@ def cmd_next(
             for e in entries
             if (e.get("status") in allowed or is_cold_dispatchable(e)) and not e.get("completed_at")
         ]
-        if roadmap_id:
-            candidates = [e for e in candidates if e.get("roadmap_id") == roadmap_id]
-        if mission:
-            candidates = [e for e in candidates if e.get("mission_id") == mission]
-        if parent_target_id is not None:
-            scope = descendants_of(entries, parent_target_id)
-            candidates = [e for e in candidates if e.get("id") in scope]
-        candidates = filter_by_project(candidates, project_filter, all_)
-        # Selection-time claim enforcement (ab-fcf9cec5): drop nodes a live
-        # session already holds so a second pickup is impossible.
-        claimed = _require_live_claimed_node_ids("backlog selection")
-        if claimed:
-            candidates = [e for e in candidates if e.get("id") not in claimed]
-        # Drop READY nodes that already carry an unmerged open PR so a successor
-        # dispatch (advance / megawalk, both shelling `fno backlog next`) never
-        # re-builds already-PR'd work (ab-372130f6). The PID-based node claim
-        # is gone once the builder session exits, so this PR-state guard is the
-        # only in-flight signal left during the review window.
-        #
-        # Scoped to status "ready": a deferred/idea row only appears here when
-        # an operator explicitly asked for it via --include-deferred /
-        # --include-ideas, and the defer contract says those resurface on
-        # request. The guard is about AUTO re-selection of fresh ready work, not
-        # explicit re-engagement, so it must not suppress an explicitly-included
-        # paused PR-bearing node (codex PR #516 P2). The auto paths only ever
-        # pass bare `next` (allowed == {"ready"}), so this scoping is a no-op
-        # for them and the originally-observed bug node (ready + open PR) is
-        # still caught.
-        candidates = [
-            e for e in candidates if e.get("status") != "ready" or not _has_unmerged_open_pr(e)
-        ]
-        # Containers are never directly buildable (x-33b2): an epic's work lives
-        # in its decomposed children, so `next` must never return it - it
-        # otherwise ranks first among its siblings (make_selection_sort_key) and
-        # is repeatedly re-selected as the head, starving the genuinely-ready leaf
-        # below it. Build the leaves, not the box; the epic closes itself via
-        # _cascade_close_parents when its last child lands. Computed from the FULL
-        # graph so a parent already filtered out of `candidates` still suppresses
-        # correctly. Shared with cmd_ready.
-        container_ids = _container_ids(entries)
-        candidates = [e for e in candidates if e.get("id") not in container_ids]
-        # Batch-lane Wave 2: a node already committed to an open batch ships via
-        # the batch PR, so drop it from the dispatch pool (else a second worker
-        # rebuilds work already on the shared branch). Cleared on abandon so a
-        # requeued member resurfaces. Shared with cmd_ready.
-        candidates = [e for e in candidates if not _is_batched_member(e)]
-        # G1 guards (x-3236): dead-ancestor + stale-ready quarantine. The single
-        # narrowing choke point shared with the converge path
-        # (advance._direct_dependents), so a leaf under a killed epic or a
-        # long-abandoned ready node is never dispatched. Fail-open per guard.
-        from fno.backlog.advance import selection_guards, _guard_staleness_days
+        # The narrowing cascade lives in `fno.backlog.explain` and is shared
+        # with `fno backlog advance --explain`, so the explanation of a
+        # selection can never drift from the selection. Order is unchanged; each
+        # step's own reasoning now rides on the filter it belongs to:
+        #   roadmap / mission / parent-scope - explicit scoping flags.
+        #   project - detects from the candidate list, so it narrows a LIST.
+        #   live-claim (ab-fcf9cec5) - a live session already holds the node.
+        #   unmerged-open-pr (ab-372130f6) - the only in-flight signal left once
+        #     the builder session's pid claim dies; scoped to `ready` so an
+        #     explicitly --include-deferred/--include-ideas row still surfaces.
+        #   container (x-33b2) - build the leaves, not the box.
+        #   batched - ships via the batch PR.
+        #   selection-guard (x-3236) - dead ancestor / stale-ready quarantine.
+        from fno.backlog.explain import build_selection_filters, run_cascade
 
-        guard_now = datetime.now(timezone.utc)
-        guard_stale = _guard_staleness_days()
-        guard_by_id = {e.get("id"): e for e in entries if e.get("id")}
-        candidates = [
-            e
-            for e in candidates
-            if not selection_guards(e, guard_by_id, guard_now, staleness_days=guard_stale)
-        ]
+        # Selection-time claim enforcement (ab-fcf9cec5) and the container set
+        # are read ONCE here, under this call's graph read, and handed to the
+        # cascade: recomputing inside it would read a different instant.
+        claimed = _require_live_claimed_node_ids("backlog selection")
+        container_ids = _container_ids(entries)
+        candidates = run_cascade(
+            candidates,
+            build_selection_filters(
+                entries,
+                roadmap_id=roadmap_id,
+                mission=mission,
+                parent_target_id=parent_target_id,
+                project_filter=project_filter,
+                all_=all_,
+                claimed=claimed,
+                container_ids=container_ids,
+            ),
+        ).survivors
         # Epics-first, then flat priority (C3, Locked Decision 7). Build the
         # key from the FULL graph so epic parents resolve even when filtered
         # out of the candidate set.
