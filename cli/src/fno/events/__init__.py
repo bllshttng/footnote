@@ -639,8 +639,16 @@ def validate(event: dict[str, Any]) -> None:
             head = data.get("head_sha")
             if isinstance(branch, str) and branch.strip():
                 try:
-                    from fno.pr._coverage_gate import cap_verdict
+                    # importlib, not an import statement: the gate is an
+                    # optional runtime dependency of this validator, and a
+                    # static import edge from fno.events into fno.pr makes
+                    # mypy degrade the lazy Path constants in
+                    # fno.graph._constants for every downstream reader.
+                    import importlib
 
+                    cap_verdict = importlib.import_module(
+                        "fno.pr._coverage_gate"
+                    ).cap_verdict
                     nonterminal = cap_verdict(
                         os.getcwd(), head if isinstance(head, str) else "", branch, None
                     ).nonterminal_keys
