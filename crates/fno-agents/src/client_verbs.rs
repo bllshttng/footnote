@@ -1896,6 +1896,13 @@ pub enum RowLiveness {
 /// 3. **Transcript truth state** (claude rows): `working`, `watching` or
 ///    `your-move` is life. `done` is a TURN state, not a process state, and
 ///    answers nothing here.
+/// 4. **Codex rollout freshness** (codex rows, x-798a): the session's rollout
+///    jsonl under `~/.codex/sessions/` written within
+///    [`CODEX_ROLLOUT_FRESH_SECS`] proves the worker is still advancing. The
+///    heartbeat rung cannot cover these rows - it needs `exited_at` to
+///    advance past, and an unstamped codex row (no pid to confirm dead, no
+///    reconcile to terminal) never gets one - so without this rung every
+///    codex row answered `Unknown` forever and could never be reaped.
 ///
 /// Silence on every rung is `Unknown`. The ladder NEVER returns `Dead`: only
 /// a positive death proof may, and absence never is one. A missing or
@@ -1957,6 +1964,51 @@ pub(crate) fn row_liveness_indexed(
     row_liveness_with_indexed(entry, sockets, family1_truth_state)
 }
 
+/// Rung 4's freshness window (x-798a): a codex rollout jsonl written within
+/// this many seconds of now proves the session is advancing. A quiet rollout
+/// proves nothing - it falls through to `Unknown`, which keeps. The window
+/// only decides whether the sweep NAMES the row live; absence never
+/// authorizes a reap, so no value here can open a removal path.
+const CODEX_ROLLOUT_FRESH_SECS: u64 = 1800;
+
+/// Rung 4 (x-798a): is any rollout jsonl for `session_id` under the codex
+/// store fresh? A codex session writes `rollout-*.jsonl` (session id in the
+/// filename, nested date dirs) for as long as it advances - the same store
+/// shape `HarnessStoreIndex` resolves in daemon.rs. Fail closed on the whole
+/// subtree: an absent or unreadable directory reads as not-fresh, and
+/// not-fresh is `Unknown`, which keeps. Fires only when the CALLER keyed it
+/// on a codex row; a claude row is never judged by this store.
+fn codex_rollout_fresh(codex_root: &std::path::Path, session_id: &str, now: u64) -> bool {
+    let mut stack = vec![codex_root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            // Absent or unreadable store: fail closed, never fresh.
+            return false;
+        };
+        for entry in rd.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            let path = entry.path();
+            if ft.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with("rollout-") || !name.contains(session_id) {
+                continue;
+            }
+            if let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+                if let Ok(secs) = modified.duration_since(std::time::UNIX_EPOCH) {
+                    if now.saturating_sub(secs.as_secs()) <= CODEX_ROLLOUT_FRESH_SECS {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// [`row_liveness`] with the truth-state read injected, mirroring
 /// `claude_resume_argv_with_truth`'s seam so tests can stage transcript reads
 /// (including the read that FAILS - a `None` truth state is the unreadable
@@ -1974,11 +2026,44 @@ where
     row_liveness_with_indexed(entry, &sockets, truth_fn)
 }
 
+/// Like [`row_liveness_with`] but with the codex store root pinned too, so a
+/// test points rung 4 at a temp tree instead of the developer's `~/.codex`.
+#[cfg(test)]
+pub(crate) fn row_liveness_with_codex_root<F>(
+    entry: &crate::state::RegistryEntry,
+    claude_home: &ClaudeHome,
+    codex_root: &std::path::Path,
+    truth_fn: F,
+) -> RowLiveness
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let sockets = sessions_socket_index(claude_home);
+    row_liveness_full(entry, &sockets, Some(codex_root), truth_fn)
+}
+
 /// The ladder core: socket rung answered from a prebuilt index, heartbeat and
 /// truth rungs as documented on [`row_liveness`].
 pub(crate) fn row_liveness_with_indexed<F>(
     entry: &crate::state::RegistryEntry,
     sockets: &std::collections::HashMap<String, String>,
+    truth_fn: F,
+) -> RowLiveness
+where
+    F: Fn(&str) -> Option<String>,
+{
+    row_liveness_full(entry, sockets, None, truth_fn)
+}
+
+/// [`row_liveness_with_indexed`] with the codex store root injectable (`None`
+/// resolves `$HOME/.codex/sessions`, the production shape). Keying stays the
+/// caller's rule to keep: rung 4 fires ONLY for codex rows, so a claude row
+/// is never judged by the codex store (the AC3 rule `HarnessStoreIndex`
+/// already states).
+fn row_liveness_full<F>(
+    entry: &crate::state::RegistryEntry,
+    sockets: &std::collections::HashMap<String, String>,
+    codex_root: Option<&std::path::Path>,
     truth_fn: F,
 ) -> RowLiveness
 where
@@ -2023,6 +2108,27 @@ where
             Some("working" | "watching" | "your-move")
         ) {
             return RowLiveness::Alive;
+        }
+    }
+    if entry.harness_name() == "codex" {
+        if let Some(sid) = entry
+            .harness_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let resolved = codex_root.map(std::borrow::Cow::Borrowed).or_else(|| {
+                std::env::var("HOME").ok().map(|h| {
+                    std::borrow::Cow::Owned(
+                        std::path::PathBuf::from(h).join(".codex").join("sessions"),
+                    )
+                })
+            });
+            if let Some(root) = resolved.as_deref() {
+                if codex_rollout_fresh(root, sid, crate::claude_ask::now_epoch_secs()) {
+                    return RowLiveness::Alive;
+                }
+            }
         }
     }
     RowLiveness::Unknown
