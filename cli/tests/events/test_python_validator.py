@@ -660,7 +660,7 @@ def test_a_findings_free_pass_over_an_undisposed_fail_is_refused_by_key(
     with pytest.raises(ValidationError) as exc:
         validate(_attestation_event("pass", "feature/x-ob"))
     assert "cli/src/fake.py:779:correctness" in str(exc.value)
-    assert "dispositions" in str(exc.value)
+    assert "disposition" in str(exc.value)
 
 
 def test_a_pass_carrying_the_fixed_disposition_is_emitted_unchanged(
@@ -708,3 +708,29 @@ def test_an_unreadable_event_log_produces_rather_than_refuses(
     monkeypatch.setattr(gate, "attestation_chain", _boom)
     monkeypatch.chdir(tmp_path)
     assert validate(_attestation_event("pass", "feature/x-ob")) is None
+
+
+def test_a_nonblocking_or_declined_disposition_does_not_clear_the_key(
+    tmp_path, monkeypatch
+) -> None:
+    """Only `fixed` clears at emit: the gate keeps `nonblocking` and an
+    uncorroborated `declined` non-terminal by its own rules, so a producer
+    check that waved those through would emit a pass the gate still refuses."""
+    _seed_obligation_chain(tmp_path, [_obligation_chain_event(0, "fail", [_OB_HARD])])
+    monkeypatch.chdir(tmp_path)
+    for disposition in ("nonblocking", "declined"):
+        with pytest.raises(ValidationError) as exc:
+            validate(
+                _attestation_event(
+                    "pass",
+                    "feature/x-ob",
+                    dispositions=[
+                        {
+                            "finding_key": "cli/src/fake.py:779:correctness",
+                            "disposition": disposition,
+                            "reason": "attempted",
+                        }
+                    ],
+                )
+            )
+        assert "cli/src/fake.py:779:correctness" in str(exc.value), disposition

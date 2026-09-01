@@ -621,20 +621,24 @@ def validate(event: dict[str, Any]) -> None:
                     f"{disposition_enum}, reason}} objects"
                 )
         # The producer's disposition obligation, enforced where every writer
-        # already passes (the script, the hooks, the sanctioned manual emit):
-        # a findings-free pass attests nothing about EARLIER findings, so
-        # emitting one over a branch whose chain still holds non-terminal
-        # blocking findings leaves them non-terminal forever - the silent
-        # deadlock that surfaces rounds later as an impossible merge. The
-        # outstanding set is the cap helper's nonterminal keys minus the
-        # dispositions this record carries. Enforced HERE rather than in the
-        # classify builder so no producer surface needs new flags or a newer
-        # caller to be covered, and an older deployment without this check
-        # degrades to today's behavior instead of refusing to emit. A reader
-        # without a branch cannot scope the chain and is not asked; an
-        # unreadable log produces rather than refuses, because an instrument
-        # failure must not wedge every reviewer on the machine.
-        if data.get("verdict") == "pass" and not (findings or dispositions):
+        # already passes (the script with or without a findings file, the
+        # hooks, the sanctioned manual emit): a findings-free pass attests
+        # nothing about EARLIER findings, so emitting one over a branch whose
+        # chain still holds non-terminal blocking findings leaves them
+        # non-terminal forever - the silent deadlock that surfaces rounds
+        # later as an impossible merge. Only a `fixed` disposition carried by
+        # THIS record leaves the outstanding set: the gate keeps `nonblocking`
+        # and an uncorroborated `declined` non-terminal by its own rules, and
+        # a producer check that waved those through would emit a pass the
+        # gate still refuses - the delayed failure this exists to make loud.
+        # Enforced HERE rather than in the classify builder so no producer
+        # surface needs new flags or a newer caller to be covered, and an
+        # older deployment without this check degrades to today's behavior
+        # instead of refusing to emit. A reader without a branch cannot
+        # scope the chain and is not asked; an unreadable log produces
+        # rather than refuses, because an instrument failure must not wedge
+        # every reviewer on the machine.
+        if data.get("verdict") == "pass" and not findings:
             branch = data.get("branch")
             head = data.get("head_sha")
             if isinstance(branch, str) and branch.strip():
@@ -654,14 +658,22 @@ def validate(event: dict[str, Any]) -> None:
                     ).nonterminal_keys
                 except Exception:  # noqa: BLE001 - instrument failure, not absence
                     nonterminal = []
-                if nonterminal:
+                disposing = {
+                    entry.get("finding_key")
+                    for entry in (dispositions or [])
+                    if isinstance(entry, dict)
+                    and entry.get("disposition") == "fixed"
+                }
+                outstanding = [key for key in nonterminal if key not in disposing]
+                if outstanding:
                     raise ValidationError(
                         "review_attestation refused: a findings-free pass "
                         "disposes nothing, and branch "
-                        f"{branch} still holds non-terminal blocking finding(s): "
-                        f"{', '.join(nonterminal)}; carry a dispositions entry "
-                        "(fixed or declined with a reason) for every finding "
-                        "you verified"
+                        f"{branch} still holds non-terminal blocking finding(s) "
+                        f"without a fixed disposition here: "
+                        f"{', '.join(outstanding)}; carry a fixed disposition "
+                        "for every finding you verified (a decline stays the "
+                        "merge gate's call, never the producer's)"
                     )
 
     # Same chokepoint rationale: mail_escalation's reason drives the overlay
