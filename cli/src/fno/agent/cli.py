@@ -644,7 +644,9 @@ from fno.ledger_show import ledger_show_command  # noqa: E402
 from fno.scoreboard.cli import scoreboard_command  # noqa: E402
 
 whoami_app.command("context", hidden=True)(context_command)
-whoami_app.command("ledger", hidden=True)(ledger_show_command)
+# Unhidden (x-b150): a reader nobody can find is a reader nobody runs. The
+# epic that needed it invented a verb name because this one was invisible.
+whoami_app.command("ledger")(ledger_show_command)
 whoami_app.command("scoreboard", hidden=True)(scoreboard_command)
 
 
