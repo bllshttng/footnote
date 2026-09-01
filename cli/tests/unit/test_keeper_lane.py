@@ -352,8 +352,6 @@ def _pid_alive(pid: int) -> bool:
     """Same zombie rule as the lane's ``_is_dead``: the planted keeper's
     parent (this test process) has not waited, so a group-killed keeper reads
     as killable-by-``os.kill(0)`` until the finally block waits it."""
-    import os
-
     import psutil
 
     try:

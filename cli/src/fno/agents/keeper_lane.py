@@ -153,7 +153,7 @@ def keeper_verdict(obs: KeeperObs, *, grace_s: Optional[float] = None) -> tuple[
     if obs.sock_state not in REAPABLE_SOCK_STATES:
         if obs.sock_state == SILENT:
             return LEAVE, (
-                f"socket accepted and stayed silent - silence never proves death"
+                "socket accepted and stayed silent - silence never proves death"
             )
         if obs.sock_state == UNREADABLE:
             return LEAVE, "argv declares no --sock, so the socket arm cannot read"
