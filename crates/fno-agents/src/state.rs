@@ -2037,16 +2037,39 @@ mod tests {
 
     #[test]
     fn state_substrate_roundtrips_and_absence_reads_none() {
-        // v23: the lane stamp survives the typed round-trip, and a row without
-        // one reads None - absence means unknown, never "pane".
-        let json = serde_json::to_string(&sample_entry("thread-worker")).unwrap();
-        assert!(!json.contains("substrate")); // skip-when-None keeps old rows slim
+        // v23: the lane stamp survives the FILE round-trip through the same
+        // load/save pair the daemon uses, and a row without one reads None -
+        // absence means unknown, never "pane".
+        let dir = tmpdir("substrate");
+        let path = dir.join("registry.json");
         let mut stamped = sample_entry("thread-worker");
         stamped.substrate = Some("thread".into());
-        let json = serde_json::to_string(&stamped).unwrap();
-        let back: RegistryEntry = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.substrate.as_deref(), Some("thread"));
-        // Python-authored shape (the key present) parses; absent key reads None.
+        let mut old_row = sample_entry("old-row");
+        // Distinct session identity: the write path backfills
+        // harness_session_id from codex_session_id, and two rows sharing
+        // "uuid-1" refuse the store on an identity collision.
+        old_row.codex_session_id = Some("uuid-2".into());
+        update_registry(&path, |r| {
+            r.entries.push(stamped);
+            r.entries.push(old_row);
+        })
+        .unwrap();
+        let reg = load_registry(&path).unwrap();
+        let thread_row = reg
+            .entries
+            .iter()
+            .find(|e| e.name == "thread-worker")
+            .unwrap();
+        assert_eq!(thread_row.substrate.as_deref(), Some("thread"));
+        let old_row = reg.entries.iter().find(|e| e.name == "old-row").unwrap();
+        assert_eq!(old_row.substrate, None);
+
+        // skip-when-None keeps an unstamped row's key off disk entirely.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let old_obj = raw.split("old-row").nth(1).unwrap();
+        assert!(!old_obj.contains("substrate"));
+
+        // Python-authored shape (the key present) parses into the same value.
         let python_row = r#"{"name":"m","provider":"claude","cwd":"/p","log_path":null,
             "created_at":"2026-07-02T00:00:00Z","status":"live",
             "substrate":"headless"}"#;
