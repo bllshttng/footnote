@@ -1306,6 +1306,15 @@ def cmd_apply(
             node["completed_at"] = None
             node["deferred_at"] = datetime.now(timezone.utc).isoformat()
             node["deferred_reason"] = d["reason"]
+            # Same classification contract as cmd_defer: exact-match only,
+            # sparse key (a re-deferral must not inherit the old kind).
+            from fno.graph._constants import classify_deferred_reason
+
+            resolved_kind = classify_deferred_reason(d["reason"])
+            if resolved_kind:
+                node["deferred_kind"] = resolved_kind
+            else:
+                node.pop("deferred_kind", None)
             # Clear the canonical lock field; _normalize_lock_fields re-syncs the
             # session_id mirror and clears the harness stamp at serialize.
             node["locked_by"] = None
