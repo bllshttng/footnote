@@ -166,6 +166,22 @@ def test_dotted_module_that_does_not_exist_fails_a_differential(
 # --- degenerate trees -------------------------------------------------------
 
 
+def test_help_prints_the_whole_header_including_every_exit_code() -> None:
+    """The help range is bounded by the first line of code, not a line number.
+
+    A hardcoded `sed -n '1,33p'` truncated the exit-code list at 0 and hid 1
+    and 2, which are the codes a CI author actually needs. Any range that
+    counts lines drifts again the next time the header grows.
+    """
+    result = subprocess.run(
+        ["bash", str(GATE), "--help"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    for code in ("#   0", "#   1", "#   2"):
+        assert code in result.stdout, f"help truncated before {code}:\n{result.stdout}"
+    assert "set -uo pipefail" not in result.stdout, "help leaked past the header"
+
+
 def test_a_tree_with_no_parity_files_fails_loud(tmp_path: Path) -> None:
     """A zero-file pass is an absence, and an absence has three explanations.
     The gate refuses rather than reporting a green it did not earn."""

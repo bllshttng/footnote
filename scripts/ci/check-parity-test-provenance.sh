@@ -41,7 +41,10 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --root) ROOT="$2"; shift 2 ;;
-    -h|--help) sed -n '1,33p' "$0"; exit 0 ;;
+    # Print the whole header, bounded by the first line of code rather than by
+    # a line number. A hardcoded range silently truncates the moment the header
+    # grows, and the first thing it cuts is the tail of the exit-code list.
+    -h|--help) sed -n '/^set -uo/q;p' "$0"; exit 0 ;;
     *) echo "ERROR: unknown argument: $1" >&2; exit 2 ;;
   esac
 done

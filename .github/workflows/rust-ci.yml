@@ -33,6 +33,10 @@ on:
       - scripts/ci/check-reviewer-descriptor-parity.sh
       - scripts/ci/check-review-app-parity.sh
       - scripts/ci/check-parity-test-provenance.sh
+      # The provenance gate's differential oracles. A PR that deletes a Python
+      # leg without converting its parity test is the exact case the gate
+      # exists to catch, and such a PR need not touch crates/ at all.
+      - cli/src/fno/agents/harnesses/**
       - scripts/ci/preflight.sh
       - scripts/tests/stress-rust-e2e-concurrency.sh
       - cli/src/fno/config/__init__.py
