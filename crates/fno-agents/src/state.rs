@@ -4071,3 +4071,112 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+// ---------------------------------------------------------------------------
+// v23 (x-2019): the substitution verdict. The Rust twin of
+// fno.agents.row_contradiction.model_substitution - one comparison, two
+// languages, so the daemon's list rows and Python's emitters cannot disagree
+// about which row substituted.
+// ---------------------------------------------------------------------------
+
+/// The bracketed capacity suffix a model token may carry: a request spelled
+/// `glm-5.3[1m]` served by a session answering as `glm-5.3` is the SAME model
+/// to the operator's eye - the suffix names the context window requested, not
+/// a different model - so the comparison strips exactly one trailing suffix
+/// from each side before comparing.
+fn model_family(token: &str) -> String {
+    let trimmed = token.trim();
+    match trimmed.rfind('[') {
+        Some(idx) if trimmed.ends_with(']') && idx > 0 => trimmed[..idx].to_lowercase(),
+        _ => trimmed.to_lowercase(),
+    }
+}
+
+/// The three-word comparison: `substituted` names the silent replacement,
+/// `match` is same-family after suffix normalization, `unknown` covers every
+/// missing or unreadable side - an unanswered probe is not a verdict, and
+/// neither is a row whose mint never saw a request.
+pub fn model_substitution(
+    requested: Option<&str>,
+    observed: Option<&serde_json::Value>,
+) -> &'static str {
+    let observed_token = match observed {
+        Some(v) if v.get("kind").and_then(serde_json::Value::as_str) == Some("observed") => {
+            v.get("model").and_then(serde_json::Value::as_str)
+        }
+        Some(v) if v.is_string() => v.as_str(),
+        _ => None,
+    };
+    let (Some(req), Some(obs)) = (requested, observed_token) else {
+        return "unknown";
+    };
+    if req.trim().is_empty() || obs.trim().is_empty() {
+        return "unknown";
+    }
+    if model_family(req) == model_family(obs) {
+        "match"
+    } else {
+        "substituted"
+    }
+}
+
+#[cfg(test)]
+mod substitution_tests {
+    use super::*;
+
+    #[test]
+    fn specimen_table_matches_the_node() {
+        let obs = |m: &str| serde_json::json!({"kind": "observed", "model": m});
+        // The operator's specimen trio, verbatim.
+        assert_eq!(
+            model_substitution(Some("glm-5.3[1m]"), Some(&obs("glm-5.3"))),
+            "match"
+        );
+        assert_eq!(
+            model_substitution(Some("glm-5.3-flash[1m]"), Some(&obs("glm-5.3-flash"))),
+            "match"
+        );
+        assert_eq!(
+            model_substitution(Some("glm-5.3[1m]"), Some(&obs("glm-5.3-flash"))),
+            "substituted"
+        );
+        // Family change reads the same in either direction.
+        assert_eq!(
+            model_substitution(Some("glm-5.3-flash"), Some(&obs("glm-5.3"))),
+            "substituted"
+        );
+        // Missing / unreadable sides are UNKNOWN, never a match.
+        assert_eq!(model_substitution(None, Some(&obs("glm-5.3"))), "unknown");
+        assert_eq!(
+            model_substitution(
+                Some("glm-5.3[1m]"),
+                Some(&serde_json::json!({"kind": "no-transcript"}))
+            ),
+            "unknown"
+        );
+        assert_eq!(model_substitution(Some("glm-5.3[1m]"), None), "unknown");
+        assert_eq!(
+            model_substitution(Some(""), Some(&obs("glm-5.3"))),
+            "unknown"
+        );
+        assert_eq!(
+            model_substitution(
+                Some("glm-5.3[1m]"),
+                Some(&serde_json::json!({"kind": "observed", "model": null}))
+            ),
+            "unknown"
+        );
+        // A bare observed string (the direct-call shape) still compares.
+        assert_eq!(
+            model_substitution(Some("glm-5.3[1m]"), Some(&serde_json::json!("glm-5.3"))),
+            "match"
+        );
+        assert_eq!(
+            model_substitution(
+                Some("glm-5.3[1m]"),
+                Some(&serde_json::json!("glm-5.3-flash"))
+            ),
+            "substituted"
+        );
+    }
+}
