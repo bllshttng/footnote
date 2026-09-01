@@ -1093,10 +1093,13 @@ def _probe_liveness(entry: Any) -> str:
 
     Two rungs, mirroring the Rust ladder's answer vocabulary:
 
-    - **pid**: a recorded ``pid`` + ``pid_start_time`` is reuse-safe. A
-      process gone, or present with a different start time, is a POSITIVE
-      death proof; a matching start time is a positive life marker. psutil
-      unreadable falls through - a failed read is never a verdict.
+    - **pid**: delegated to ``spawn_gate._pid_alive``, the one reader that
+      knows ``pid_start_time`` is a per-platform incarnation token (Linux
+      /proc ticks, macOS epoch microseconds), not an epoch second - and
+      that compares it reuse-safe. A process gone, or present under a
+      different incarnation, is a POSITIVE death proof; a matching
+      incarnation is a positive life marker; an unreadable probe answers
+      None and falls through - a failed read is never a verdict.
     - **heartbeat**: an ``inside_leg`` report whose ``received_at`` is
       STRICTLY LATER than ``exited_at`` proves the row advanced past its own
       exit stamp - the x-d3ad rule as a positive marker. A report carrying a
@@ -1109,29 +1112,30 @@ def _probe_liveness(entry: Any) -> str:
     """
     if entry is None:
         return "unknown"
-    try:
-        import psutil
-    except Exception:  # noqa: BLE001 - a missing prober is silence, not death
-        psutil = None  # type: ignore[assignment]
+    from fno.agents.spawn_gate import _pid_alive
+
     pid = getattr(entry, "pid", None)
     start = getattr(entry, "pid_start_time", None)
-    if psutil is not None and pid is not None and start is not None:
-        try:
-            proc = psutil.Process(int(pid))
-            if abs(proc.create_time() - float(start)) > 1.0:
-                return "dead"
+    if pid is not None and start is not None:
+        alive = _pid_alive(int(pid), int(start))
+        if alive is True:
             return "alive"
-        except psutil.NoSuchProcess:
+        if alive is False:
             return "dead"
-        except Exception:  # noqa: BLE001 - a failed probe is never a verdict
-            pass
-    beat = getattr(entry, "inside_leg", None) or {}
+    # The heartbeat read fails open into "unknown": a malformed report (a
+    # non-dict leg, a non-numeric ttl) is a failed read, never a verdict.
+    beat = getattr(entry, "inside_leg", None)
+    if not isinstance(beat, dict):
+        beat = {}
     received = _iso_epoch_s(beat.get("received_at"))
     exited = _iso_epoch_s(getattr(entry, "exited_at", None))
     if received is not None and exited is not None and received > exited:
-        ttl_ms = beat.get("ttl_ms")
-        if ttl_ms is None or received + float(ttl_ms) / 1000.0 > time.time():
-            return "alive"
+        try:
+            ttl_ms = beat.get("ttl_ms")
+            if ttl_ms is None or received + float(ttl_ms) / 1000.0 > time.time():
+                return "alive"
+        except (TypeError, ValueError):
+            pass
     return "unknown"
 
 
@@ -1444,15 +1448,10 @@ def _stamp_age_s(stamp: Optional[str], now_s: float) -> Optional[float]:
     "just now" (a protector) rather than as a negative age that compares
     below every window.
     """
-    if not stamp:
+    epoch = _iso_epoch_s(stamp)
+    if epoch is None:
         return None
-    try:
-        parsed = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return max(0.0, now_s - parsed.timestamp())
+    return max(0.0, now_s - epoch)
 
 
 def _mins(now_s: float, epoch: Optional[float]) -> Optional[int]:

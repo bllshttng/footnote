@@ -2630,7 +2630,9 @@ def test_a_crown_does_not_block_the_claim_basis():
 def test_probe_liveness_positive_markers_only(monkeypatch):
     """The group 1 probe's vocabulary, pinned: positive markers answer
     alive/dead, silence answers unknown - never a guess in either
-    direction."""
+    direction. The pid leg is delegated to ``spawn_gate._pid_alive`` (the
+    one reader that knows the incarnation-token units), so it is staged at
+    that seam; this test pins the probe's own read of the answers."""
     class Entry:
         def __init__(self, pid=None, start=None, exited_at=None, beat=None,
                      ttl_ms=None):
@@ -2642,38 +2644,26 @@ def test_probe_liveness_positive_markers_only(monkeypatch):
                 else {**beat, **({"ttl_ms": ttl_ms} if ttl_ms is not None else {})}
             )
 
-    class FakeProc:
-        def __init__(self, create_time):
-            self._t = create_time
+    import fno.agents.spawn_gate as spawn_gate
 
-        def create_time(self):
-            return self._t
-
-    class FakePsutil:
-        class NoSuchProcess(Exception):
-            pass
-
-        @staticmethod
-        def Process(pid):
-            if pid == 4242:
-                return FakeProc(100000.0)
-            raise FakePsutil.NoSuchProcess()
-
-    # pid leg: matching start time is a positive LIFE marker...
-    import sys
-
-    monkeypatch.setitem(sys.modules, "psutil", FakePsutil)
-    assert watchdog._probe_liveness(Entry(pid=4242, start=100000.0)) == "alive"
-    # ...a mismatched start time is a POSITIVE death proof (the pid was
-    # recycled by another process)...
-    assert watchdog._probe_liveness(Entry(pid=4242, start=999999.0)) == "dead"
-    # ...and a process that is gone is a positive death proof.
-    assert watchdog._probe_liveness(Entry(pid=13, start=1.0)) == "dead"
-    monkeypatch.delitem(sys.modules, "psutil")
+    # pid leg: a matching incarnation is a positive LIFE marker...
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, start: True)
+    assert watchdog._probe_liveness(Entry(pid=4242, start=100000)) == "alive"
+    # ...a gone-or-recycled process is a POSITIVE death proof...
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, start: False)
+    assert watchdog._probe_liveness(Entry(pid=4242, start=999999)) == "dead"
+    # ...and an unreadable probe is silence, never death: the heartbeat rung
+    # still gets its say.
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, start: None)
+    beat = {"received_at": "2026-08-31T08:00:00Z"}
+    assert watchdog._probe_liveness(Entry(
+        pid=4242, start=1, exited_at="2026-08-31T00:42:40Z", beat=beat,
+    )) == "alive"
+    assert watchdog._probe_liveness(Entry(pid=4242, start=1)) == "unknown"
+    monkeypatch.undo()
 
     # heartbeat leg: received STRICTLY LATER than exited_at proves the row
     # advanced past its own exit stamp...
-    beat = {"received_at": "2026-08-31T08:00:00Z"}
     assert watchdog._probe_liveness(Entry(
         exited_at="2026-08-31T00:42:40Z", beat=beat)) == "alive"
     # ...a beat that predates the exit stamp proves nothing...
