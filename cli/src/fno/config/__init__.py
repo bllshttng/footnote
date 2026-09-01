@@ -2078,6 +2078,20 @@ def _finite_or(value: object, default: float) -> float:
     return parsed if math.isfinite(parsed) else default
 
 
+class ReapReceiptsBlock(BaseModel):
+    """Retention for the reap-receipt store (nested under 'config.agents').
+
+    A reaped row's resume handle lives at ``~/.fno/reap-receipts/`` for this
+    many days, then the GC sweep expires it. A receipt whose ``reaped_at``
+    cannot be read is kept and named in the sweep summary - a failed read is
+    not evidence of age.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    retain_days: int = 7
+
+
 class AgentsBlock(BaseModel):
     """Agent-runtime settings (nested under 'config.agents').
 
@@ -2153,6 +2167,11 @@ class AgentsBlock(BaseModel):
     # sibling harness's number -- see `agents_config::dead_row_grace_secs`,
     # the resolver this type mirrors.
     dead_row_grace: int | dict[str, int] = 3600
+    # Reap-receipt retention (x-6db9). The Rust daemon expires receipts past
+    # this window in the same GC sweep that writes new ones; the Pydantic
+    # mirror keeps `fno config get` honest. A receipt whose reaped_at cannot
+    # be read is kept, never deleted on a failed read.
+    reap_receipts: ReapReceiptsBlock = Field(default_factory=ReapReceiptsBlock)
     codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     # Spawn-gate knobs (x-c5cc). Scalar guards retain their fail-open defaults;

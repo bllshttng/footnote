@@ -1639,7 +1639,12 @@ fn run_reap(rest: &[String]) -> i32 {
         // Source "daemon" matches the event schema's declared source for
         // agent_row_reaped; the manual verb is the same operation as the tick.
         let emitter = fno_agents::events::EventEmitter::new(home.events_jsonl(), "daemon");
-        fno_agents::daemon::gc_sweep(&home, &emitter, &grace_for_harness)
+        fno_agents::daemon::gc_sweep(
+            &home,
+            &emitter,
+            &grace_for_harness,
+            fno_agents::agents_config::reap_receipt_retain_days(&cwd),
+        )
     };
 
     print!("{}", render_reap(&summary, json_out, dry_run));
