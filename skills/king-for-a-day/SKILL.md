@@ -412,6 +412,8 @@ fno agents retask <blueprint-worker> --node <node>
 
 `session close` refuses unresolved identity and records the blueprint session with its honest end. `retask` proves the positive idle marker, clears, waits for the changed session id, renames the registry label, verifies the model tier, and submits the no-merge target only after the switch is verified. A `spawn_required` or other refusal preserves the pane and routes through the existing fresh-spawn path. At or above the context threshold, use a fresh successor instead of clearing. Do not drive the picker or target verb by hand.
 
+The order is close-blueprint, retask, target, and retask itself is the model change, so never target-then-switch: once a target loop is driving the pane, a `/compact` typed at it sits inert in the input box, because the loop keeps taking the turn and the command is never submitted. Two refusals are not evidence about the pane: `pane_not_idle` fires when the entry's screen state was never captured, as on a freshly spawned worker that is genuinely idle, and `worker_not_live` has fired against a long-lived pid that answered a read a second earlier. Read the pane before you believe either. The phase model ladder is policy, not a retask default: the per-stage route and effort live under `config.agents.profiles`, and `--model`/`--effort` on retask moves the reused session to whatever tier the stage table names, up or down.
+
 ```bash
 fno backlog update <node> --dispatch-brief "<sibling facts that bear on this node, or 'none'>"
 fno agents mail send <teammate-handle> "Ruling: <approve/revise summary>. Cross-node: see --dispatch-brief on <node>. Next: /fno:blueprint <node>." --from-self
