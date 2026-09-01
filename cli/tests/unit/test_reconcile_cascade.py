@@ -60,11 +60,11 @@ def _world(tmp_path: Path, *, dependent_blocked_on=KID_A) -> list[dict]:
     measured, so the fixture makes it observable rather than assumed.
     """
     return [
-        _node(UNIT, plan_path=PLAN, pr_number=700,
+        _node(UNIT, status="in_review", plan_path=PLAN, pr_number=700,
               pr_url="https://github.com/o/r/pull/700"),
         _node(KID_A, plan_path=PLAN, parent=UNIT, contained_in=UNIT),
         _node(KID_B, plan_path=PLAN, parent=UNIT, contained_in=UNIT),
-        _node(DEP, blocked_by=[dependent_blocked_on]),
+        _node(DEP, status="idea", blocked_by=[dependent_blocked_on]),
     ]
 
 
