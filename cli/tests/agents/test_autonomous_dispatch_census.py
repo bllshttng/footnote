@@ -90,8 +90,13 @@ def test_all_autonomous_entry_points_reach_an_owned_routing_seam() -> None:
     assert 'trigger="autonomous"' in context_think
 
     # Operator spawns intentionally keep their own attended defaults, but pane
-    # permission still comes from the same harness capability table.
-    assert "capabilities(harness).get(\"route_on_pane\", False)" in attended_spawn
+    # permission still comes from the same harness capability table. The reader
+    # is the posture one (x-f579): an undeclared harness answers
+    # route_on_pane=False instead of raising, so the seam stays a refusal.
+    assert (
+        "capabilities_or_undeclared(harness).get(\"route_on_pane\", False)"
+        in attended_spawn
+    )
 
 
 def test_context_think_legacy_substrate_is_compatibility_only() -> None:

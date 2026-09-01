@@ -458,6 +458,12 @@ PANE_HOSTABLE_PROVIDERS: tuple[str, ...] = (
     "pi",
 )
 
+#: x-f579: the token shape an UNDECLARED harness name must match before the
+#: pane lane will even look it up on PATH. Checked first, so a shell-hostile
+#: string never reaches shutil.which() or an argv. Undeclared names name CLI
+#: binaries, and this is the shape of one; declared harnesses never hit it.
+_UNDECLARED_HARNESS_TOKEN = re.compile(r"[a-z][a-z0-9._-]{0,31}")
+
 
 def permission_pane_tokens(provider: str, mode: str) -> list[str]:
     """Map a ``--permission-mode`` value to provider-native pane argv tokens.
@@ -602,6 +608,20 @@ def effort_tokens(harness: str, value: str) -> list[str]:
         # xhigh, max. Exact passthrough, like claude's - pi validates the
         # vocabulary itself, and fno does not keep a second copy of it.
         return ["--thinking", value]
+    from fno.agents.harness_map import is_declared
+
+    if not is_declared(harness):
+        # x-f579: the CLI seam validates --effort before routing, so an
+        # undeclared harness reaches THIS raise first. The advice names the
+        # undeclared lane's own escape (the operator's `--` passthrough), not
+        # "omit the flag" - the vendor's spelling is real, just unmeasured.
+        raise DispatchAskError(
+            f"--effort is not available for harness {harness!r}: fno has no "
+            "capability row for it, so there is no measured mapping to the "
+            "vendor's own flag spelling. Pass the vendor's own flag after "
+            "'--' instead.",
+            exit_code=2,
+        )
     raise DispatchAskError(
         f"harness {harness!r} has no reasoning-effort surface; omit --effort",
         exit_code=2,
@@ -1257,9 +1277,16 @@ def build_pane_argv(
     if message.strip().startswith(("/", "$fno:")):
         message = normalize_command(message, provider)
 
-    from fno.agents.harness_map import render_session_argv
+    from fno.agents.harness_map import is_declared, render_session_argv
 
-    identity = render_session_argv(provider, "interactive_create", session_uuid)
+    # An undeclared harness has no resume contract to render an identity from,
+    # and none is invented: the generic arm below is the bare binary. Any
+    # session pinning is a per-vendor flag shape this lane refuses to guess.
+    identity = (
+        render_session_argv(provider, "interactive_create", session_uuid)
+        if is_declared(provider)
+        else [provider]
+    )
 
     # x-b6e2: resolve the Tier-3 passthrough tokens once, up front, so an
     # unmappable (provider, flag) cell fails closed BEFORE any provider arm builds
@@ -1474,6 +1501,19 @@ def build_pane_argv(
             # no equal-form. fno's DRIVING lane is rpc, where the message rides
             # a JSON string field that no parser can read as a flag.
             argv += [message]
+        return argv
+    if not is_declared(provider):
+        # The undeclared lane: fno is the VIEWPORT, nothing more. No identity
+        # flag, no model, no effort, no permission mapping and no tier3 state
+        # grant - every one of those is a per-vendor spelling, and inventing one
+        # is the guess this lane exists to refuse. Whatever the binary needs
+        # rides the operator's own `-- <flags>` (x-1caa passthrough).
+        #
+        # The seed is deliberately NOT in argv: `seed_rode_in_argv` then answers
+        # False and `_submit_spawn_seed` types it after readiness, the same path
+        # agy already takes. Nothing new is written for it.
+        argv = [provider]
+        argv += pane_passthrough_tokens(passthrough, argv)
         return argv
     raise DispatchAskError(f"provider {provider!r} has no interactive pane form", exit_code=2)
 
@@ -2865,9 +2905,12 @@ def _await_interactive_readiness(
         )
         if trust_refusal:
             return "failed", trust_refusal
-    from fno.agents.harness_map import capabilities
+    from fno.agents.harness_map import capabilities_or_undeclared
 
-    expected = capabilities(provider)["ready_marker"]
+    # x-f579: the readiness probe reads the posture, so an undeclared harness
+    # takes the "no pinned ready marker" arm one line below (live) instead of
+    # raising. A pinned marker is a measurement; an unmeasured harness has none.
+    expected = capabilities_or_undeclared(provider)["ready_marker"]
     if expected == "unsupported":
         return "live", f"harness {provider!r} has no pinned ready marker"
     osc_title = _pane_osc_title(session, pane_id, runner)
@@ -3500,17 +3543,45 @@ def dispatch_spawn_pane(
     # approvals, so warn on every reachable path, not just the CLI seam.
     emit_env_scrub_warning(provider, permission_pinned=bool(permission_mode or yolo))
     validate_spawn_name(name)
-    # x-8f7f: gate the PANE path on PANE_HOSTABLE_PROVIDERS, not KNOWN_PROVIDERS.
-    # A pane host only needs an interactive argv (build_pane_argv) - not a full
-    # Python dispatch adapter. agy is exactly that case (Rust-only provider, no
-    # Python adapter, but pane-hostable), so widening the global KNOWN_PROVIDERS
-    # would leak it into headless/bg Python dispatch that has no agy codepath.
-    if provider not in PANE_HOSTABLE_PROVIDERS:
-        raise DispatchAskError(
-            f"unknown provider {provider!r}; pane-hostable providers: "
-            f"{', '.join(PANE_HOSTABLE_PROVIDERS)}",
-            exit_code=2,
-        )
+    from fno.agents.harness_map import is_declared
+    # x-f579: undeclared has a lane - fno hosts the binary as a pane and is the
+    # viewport (x-8f7f's agy observation, a pane host needs only an interactive
+    # argv, taken to its conclusion). The declared/undeclared fact is read from
+    # the TABLE (is_declared), the same predicate build_pane_argv's generic arm
+    # and the UNDECLARED receipt below read, so the three can never disagree
+    # about a harness. Three named refusals replace the old membership raise,
+    # each fail-closed before any pane exists; a declared harness skips all
+    # three and keeps today's path. PANE_HOSTABLE_PROVIDERS stays the declared
+    # pane ROSTER (spawn defaults, probes); the roster gains no member here.
+    if not is_declared(provider):
+        if _UNDECLARED_HARNESS_TOKEN.fullmatch(provider) is None:
+            raise DispatchAskError(
+                f"harness {provider!r} is not a spawnable CLI binary name: it "
+                "must match ^[a-z][a-z0-9._-]{0,31}$ (a lowercase letter, then "
+                "lowercase letters, digits, dots, underscores or hyphens). "
+                "Refused before any PATH lookup or argv is composed.",
+                exit_code=2,
+            )
+        if shutil.which(provider) is None:
+            raise DispatchAskError(
+                f"harness {provider!r} resolved to no binary on PATH; a pane "
+                "spawn execs the CLI binary itself, so there is nothing to host",
+                exit_code=2,
+            )
+        for flag, value in (
+            ("--model", model),
+            ("--effort", effort),
+            ("--permission-mode", permission_mode),
+            ("--yolo", yolo),
+        ):
+            if value:
+                raise DispatchAskError(
+                    f"{flag} is not available for harness {provider!r}: fno has "
+                    "no capability row for it, so there is no measured mapping "
+                    "to the vendor's own flag spelling. Pass the vendor's own "
+                    "flag after '--' instead.",
+                    exit_code=2,
+                )
 
     codex_route = None
     if provider == "codex" and role is not None:
@@ -4771,6 +4842,21 @@ def dispatch_spawn_pane(
     # the two agree, and a test pins that. gemini and agy bind no session at all
     # and resolve to None rather than to either lie.
     bound_val = _resolve_bound(session_uuid, provider)
+    if not is_declared(provider):
+        # x-f579 AC9: the receipt STATES the lane, so a caller reading only it
+        # cannot infer a thread lane, steering, or `ask` that are not there, and
+        # knows submit_keys=enter is an unmeasured default rather than a row.
+        # Same predicate as the gate and the generic arm: one table fact.
+        print(
+            f"harness {provider!r} is UNDECLARED: fno has no capability row for it.\n"
+            f"  gives    a mux pane, this registry row, mail by pane-send\n"
+            f"           (submit_keys=enter, an unmeasured default), and the Drive\n"
+            f"           viewport as soon as .fno/config.toml declares\n"
+            f"           [harness.{provider}.attach].\n"
+            f"  withholds a thread lane, steering, and `fno agents ask`. Those need the\n"
+            f"           vendor's own protocol and cannot be generic.",
+            file=sys.stderr,
+        )
     return MuxSpawnResult(
         name=name,
         provider=provider,

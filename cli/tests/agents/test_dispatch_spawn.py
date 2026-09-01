@@ -462,15 +462,20 @@ def test_spawn_codex_plain_no_once_requires_runtime(workdir, monkeypatch) -> Non
     assert "fno-agents runtime" in result.output
 
 
-def test_spawn_unknown_provider_exits_2(workdir) -> None:
-    """Unknown --provider -> clean exit 2 (not a ValueError traceback).
+def test_spawn_unknown_provider_exits_2(workdir, monkeypatch, tmp_path) -> None:
+    """Unknown --harness on the default pane substrate -> clean exit 2 (not a
+    ValueError traceback).
 
-    _check_known_provider raises ValueError; dispatch_spawn must wrap it as
-    DispatchAskError(exit_code=2) because cmd_spawn only catches the latter
-    (Task 1.3 parity hardening - the Rust client prints the same message).
+    x-f579: the pane lane is no longer gated on an allowlist. 'foo' is a
+    well-shaped undeclared name, so the refusal is the PATH one - it names the
+    harness and PATH, before any pane exists. The CliRunner's environment is
+    host-dependent, so PATH is pinned to an empty dir.
     """
     from fno.agents.cli import agents_app
 
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
     runner = _make_runner()
     result = runner.invoke(
         agents_app,
@@ -481,14 +486,8 @@ def test_spawn_unknown_provider_exits_2(workdir) -> None:
         f"expected exit 2 for unknown provider, got {result.exit_code}\n"
         f"output: {result.output}"
     )
-    assert "unknown provider 'foo'" in result.output
-    # Default substrate is `pane`, so the READABLE_PROVIDERS pane gate rejects
-    # (x-8f7f): the message names the pane-hostable set (agy included), not the
-    # narrower Python-dispatchable KNOWN_PROVIDERS set.
-    assert (
-        "pane-hostable providers: claude, codex, gemini, agy, opencode"
-        in result.output
-    )
+    assert "foo" in result.output
+    assert "PATH" in result.output
 
 
 def test_spawn_thread_refusal_names_axis_and_actual_accept_set(workdir) -> None:
@@ -505,14 +504,32 @@ def test_spawn_thread_refusal_names_axis_and_actual_accept_set(workdir) -> None:
     from fno.harness_names import SPAWN_HARNESSES
 
     assert result.exit_code == 2
-    # The accept set is rendered, never spelled out here: a harness added to
-    # SPAWN_HARNESSES must not fail a test that is checking the message SHAPE.
-    assert (
-        "unknown harness 'zai' on the thread substrate (--harness names the "
-        f"CLI BINARY); accepted here: {', '.join(SPAWN_HARNESSES)}."
-    ) in result.output
-    assert "agy and gemini launch on --substrate pane only." in result.output
+    # 'zai' is a VENDOR name with no capability row, so the undeclared arm
+    # answers first: it names the harness, says pane is the only substrate, and
+    # keeps the vendor-axis hint (the reason this exact input is interesting).
+    # It must NOT name gemini's retirement or agy as a successor - a harness
+    # the operator never mentioned (x-f579 AC5-ERR).
+    assert "zai" in result.output
+    assert "no capability row" in result.output
+    assert "--substrate pane" in result.output
     assert "If you meant a model VENDOR, that is -P/--provider." in result.output
+    assert "gemini" not in result.output
+    assert "agy" not in result.output
+
+    # A DECLARED pane-only harness keeps the accept-set message (x-8f7f).
+    declared = _make_runner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "fooagent2", "--harness", "pi",
+            "--substrate", "thread", "hello",
+        ],
+    )
+    assert declared.exit_code == 2
+    assert (
+        "unknown harness 'pi' on the thread substrate (--harness names the "
+        f"CLI BINARY); accepted here: {', '.join(SPAWN_HARNESSES)}."
+    ) in declared.output
+    assert "agy and gemini launch on --substrate pane only." in declared.output
 
 
 def test_spawn_thread_refusal_renders_from_accept_set(monkeypatch) -> None:
@@ -524,11 +541,64 @@ def test_spawn_thread_refusal_renders_from_accept_set(monkeypatch) -> None:
     )
 
     with pytest.raises(dispatch.DispatchAskError) as caught:
-        dispatch._check_spawn_harness("zai")
+        # A DECLARED harness outside SPAWN_HARNESSES renders the accept set;
+        # an undeclared name takes the undeclared arm instead, so the set is
+        # asserted through a declared pane-only harness (pi).
+        dispatch._check_spawn_harness("pi")
 
     expected = ", ".join((*dispatch.SPAWN_HARNESSES,))
     assert f"accepted here: {expected}" in str(caught.value)
     assert expected.endswith("future"), "the monkeypatched name must be rendered"
+
+
+def test_route_on_an_undeclared_harness_refuses_cleanly(
+    workdir, monkeypatch, tmp_path
+) -> None:
+    """Round-1 review finding 1: `--route` on the pane substrate read
+    capabilities() at the route_on_pane guard, which RAISED an uncaught
+    DispatchResolveError (exit 1 traceback) for an undeclared harness. The
+    posture answers route_on_pane=False, so the refusal is the clean exit-2
+    one the guard was written to print."""
+    from fno.agents.cli import agents_app
+
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    result = _make_runner().invoke(
+        agents_app,
+        ["spawn", "--name", "rt", "-H", "nanoclaw", "--route", "zai,glm-5.3", "hi"],
+    )
+    assert result.exit_code == 2, (
+        f"expected the clean route_on_pane refusal, got {result.exit_code}\n"
+        f"output: {result.output}"
+    )
+    assert "route_on_pane" in result.output
+    assert "DispatchResolveError" not in result.output
+
+
+def test_undeclared_harness_thread_and_headless_refuse_pane_only() -> None:
+    """AC5-ERR: thread AND headless both refuse an undeclared harness, naming
+    it, saying it declares no capability row, and naming pane as its only
+    substrate - never gemini's retirement, never agy the successor."""
+    from fno.agents import dispatch
+
+    for kwargs in ({}, {"once": True}):
+        with pytest.raises(dispatch.DispatchAskError) as caught:
+            dispatch.dispatch_spawn(
+                name="peer",
+                message="hi",
+                harness="nanoclaw",
+                cwd="/tmp",
+                **kwargs,
+            )
+        msg = str(caught.value)
+        assert caught.value.exit_code == 2
+        assert "nanoclaw" in msg
+        assert "no capability row" in msg
+        assert "pane" in msg
+        assert "only substrate" in msg
+        assert "gemini" not in msg
+        assert "agy" not in msg
 
 
 # ---------------------------------------------------------------------------

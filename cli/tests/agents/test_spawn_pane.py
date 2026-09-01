@@ -201,14 +201,47 @@ def _spawn(monkeypatch, tmp_path, **kwargs):
     return result, runner
 
 
+def _build_real_mux_binaries(repo: Path, cargo: Path) -> tuple[Path, Path]:
+    """Build BOTH binaries a pane journey drives: the ``fno`` mux binary and
+    the ``fno-agents-worker`` keeper it execs.
+
+    The keeper lane resolves its worker through paired_bin (env override,
+    installed sibling, dev-tree target dir, PATH - crates/fno/src/server.rs
+    ``keeper_worker_bin``). A journey that builds only ``fno`` dies at pane
+    spawn with ENOENT on a checkout where the sibling crate was never built -
+    exactly the changed-packet CI job, which installs a toolchain but runs no
+    crate build step. Building both here and exporting
+    ``FNO_AGENTS_WORKER_BIN`` makes the journey self-contained on every host."""
+    build_env = {
+        **os.environ,
+        "CARGO_HOME": str(cargo.parent.parent),
+        "RUSTUP_HOME": str(cargo.parent.parent.parent / ".rustup"),
+    }
+    for manifest, bin_name in (
+        (repo / "crates" / "fno" / "Cargo.toml", "fno"),
+        (repo / "crates" / "fno-agents" / "Cargo.toml", "fno-agents-worker"),
+    ):
+        built = subprocess.run(
+            [str(cargo), "build", "--manifest-path", str(manifest), "--bin", bin_name],
+            cwd=repo,
+            env=build_env,
+            text=True,
+            capture_output=True,
+        )
+        assert built.returncode == 0, built.stderr
+    fno_bin = repo / "crates" / "fno" / "target" / "debug" / "fno"
+    worker_bin = (
+        repo / "crates" / "fno-agents" / "target" / "debug" / "fno-agents-worker"
+    )
+    return fno_bin, worker_bin
+
+
 def test_late_codex_identity_composes_across_every_peer_surface(
     tmp_path: Path, monkeypatch
 ) -> None:
     """One derived pane identity reaches every public peer surface unchanged."""
     use_tmpdir(monkeypatch, tmp_path)
     repo = Path(__file__).resolve().parents[3]
-    manifest = repo / "crates" / "fno" / "Cargo.toml"
-    fno_bin = repo / "crates" / "fno" / "target" / "debug" / "fno"
     cargo_path = shutil.which("cargo")
     if cargo_path is None:
         # This is the strongest test in the suite and it drives the real fno
@@ -217,26 +250,13 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         # this invariant, and a red that means "no rust here" trains people to
         # ignore reds.
         pytest.skip("cargo not on PATH; this journey drives the real fno binary")
-    cargo = Path(cargo_path)
-    cargo_home = cargo.parent.parent
-    build_env = {
-        **os.environ,
-        "CARGO_HOME": str(cargo_home),
-        "RUSTUP_HOME": str(cargo_home.parent / ".rustup"),
-    }
-    built = subprocess.run(
-        [str(cargo), "build", "--manifest-path", str(manifest), "--bin", "fno"],
-        cwd=repo,
-        env=build_env,
-        text=True,
-        capture_output=True,
-    )
-    assert built.returncode == 0, built.stderr
+    fno_bin, worker_bin = _build_real_mux_binaries(repo, Path(cargo_path))
 
     agents_home = tmp_path / ".fno" / "agents"
     mux_dir = Path("/tmp") / f"fno-i-{os.getpid()}-{uuid.uuid4().hex[:6]}"
     mux_dir.mkdir()
     monkeypatch.setenv("FNO_BIN", str(fno_bin))
+    monkeypatch.setenv("FNO_AGENTS_WORKER_BIN", str(worker_bin))
     monkeypatch.setenv("FNO_AGENTS_HOME", str(agents_home))
     monkeypatch.setenv("FNO_MUX_DIR", str(mux_dir))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claim-root"))
@@ -442,25 +462,10 @@ def test_codex_autonomous_pane_journey_completes_without_operator_input(
     """A fake Codex pane receives its task, exits, and leaves readable output."""
     use_tmpdir(monkeypatch, tmp_path)
     repo = Path(__file__).resolve().parents[3]
-    manifest = repo / "crates" / "fno" / "Cargo.toml"
-    fno_bin = repo / "crates" / "fno" / "target" / "debug" / "fno"
     cargo_path = shutil.which("cargo")
     if cargo_path is None:
         pytest.skip("cargo not on PATH; this journey drives the real fno binary")
-    cargo = Path(cargo_path)
-    cargo_home = cargo.parent.parent
-    built = subprocess.run(
-        [str(cargo), "build", "--manifest-path", str(manifest), "--bin", "fno"],
-        cwd=repo,
-        env={
-            **os.environ,
-            "CARGO_HOME": str(cargo_home),
-            "RUSTUP_HOME": str(cargo_home.parent / ".rustup"),
-        },
-        text=True,
-        capture_output=True,
-    )
-    assert built.returncode == 0, built.stderr
+    fno_bin, worker_bin = _build_real_mux_binaries(repo, Path(cargo_path))
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -485,6 +490,7 @@ sleep 5
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
         "FNO_BIN": str(fno_bin),
+        "FNO_AGENTS_WORKER_BIN": str(worker_bin),
         "FNO_AGENTS_HOME": str(agents_home),
         "FNO_MUX_DIR": str(mux_dir),
         "FNO_CLAIMS_ROOT": str(tmp_path / "claims"),
@@ -1072,6 +1078,72 @@ def test_build_pane_argv_provider_forms(no_state_grant: None, tmp_path: Path) ->
     assert "run" not in opencode and "--session-id" not in opencode
 
 
+def test_generic_pane_arm_hosts_an_undeclared_harness(
+    no_state_grant: None, tmp_path: Path
+) -> None:
+    """AC4-HP: a harness with no capability row builds the VIEWPORT argv - the
+    bare binary plus the operator's own `--` passthrough. No identity flag, no
+    model, no effort, no permission mapping: each is a per-vendor spelling and
+    inventing one is the guess this lane exists to refuse. The seed stays OUT
+    of argv so `_submit_spawn_seed` types it after readiness (the agy path)."""
+    from fno.agents.mux_spawn import build_pane_argv, seed_rode_in_argv
+
+    argv = build_pane_argv(
+        "nanoclaw", "say ready", tmp_path, False, None, passthrough=["--foo", "bar"]
+    )
+    assert argv == ["nanoclaw", "--foo", "bar"]
+    assert argv[0] == "nanoclaw"
+    assert seed_rode_in_argv("say ready", argv) is False
+    assert build_pane_argv("nanoclaw", "", tmp_path, False, None) == ["nanoclaw"]
+    # yolo/model/effort/permission carry no invented spelling on this arm: the
+    # spawn gate refuses them upstream (AC6-ERR) and the builder never guesses.
+    quiet = build_pane_argv("nanoclaw", "", tmp_path, True, None, model="m", effort="high")
+    assert quiet == ["nanoclaw"]
+
+
+def test_declared_pane_argv_is_byte_identical_after_the_generic_arm(
+    no_state_grant: None, tmp_path: Path
+) -> None:
+    """AC8-EDGE: the generic arm sits BELOW every declared arm, so no declared
+    harness's argv changes. Byte-for-byte against the same arguments the
+    provider-forms test pins (this is the red-provable regression guard for
+    the arm's position, not a restatement of that test's semantic claims)."""
+    from fno.agents.mux_spawn import build_pane_argv
+
+    assert build_pane_argv("claude", "task", tmp_path, False, "uuid-1") == [
+        "claude", "--session-id", "uuid-1", "--", "task",
+    ]
+    agy = build_pane_argv("agy", "task", tmp_path, False, "ignored-uuid")
+    assert agy == ["agy", "--dangerously-skip-permissions"]
+    opencode = build_pane_argv("opencode", "task", tmp_path, False, "ignored")
+    assert opencode == ["opencode", "--prompt=task", "--model", "zai-coding-plan/glm-5.3"]
+
+
+def test_terminal_raise_keeps_meaning_for_a_declared_harness_with_no_arm(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC8-EDGE's complement: the generic arm sits ABOVE the terminal raise,
+    which stays and now means "declared, but declares no pane form" - still a
+    real condition, just no longer the one an undeclared harness hits."""
+    import fno.agents.harness_map as hm
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import build_pane_argv
+
+    monkeypatch.setitem(
+        hm._HARNESS_CAPS,
+        "declared-but-armless",
+        {
+            "resume_strategy": {
+                "forms": {
+                    "interactive_create": {"kind": "flag", "tokens": ["declared-but-armless"]}
+                }
+            }
+        },
+    )
+    with pytest.raises(DispatchAskError, match="no interactive pane form"):
+        build_pane_argv("declared-but-armless", "", tmp_path, False, None)
+
+
 def test_build_pane_argv_codex_hook_trust_bypass_on_bypass_posture_only(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1438,6 +1510,214 @@ def test_pane_hostable_set_stays_in_sync_with_build_pane_argv(tmp_path: Path) ->
                 build_pane_argv(readable, "", tmp_path, False, None)
 
 
+def _stub_harness_bin(monkeypatch, tmp_path: Path, name: str) -> Path:
+    """A stub CLI binary on a tmp PATH under a name no roster knows."""
+    bin_dir = tmp_path / "stub-bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / name
+    stub.write_text("#!/bin/sh\nsleep 60\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    return stub
+
+
+def test_undeclared_token_shape_refused_before_any_path_lookup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC10-ERR: a malformed harness token refuses naming the token, before
+    shutil.which and before any argv is composed - a shell-hostile string never
+    reaches a PATH lookup."""
+    import shutil
+
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    def _boom(_name):
+        raise AssertionError("shutil.which ran for a malformed harness token")
+
+    monkeypatch.setattr(shutil, "which", _boom)
+    for bad in ("", "9goose", "Goose", "bad name", "bad/name", "a" * 33):
+        with pytest.raises(DispatchAskError) as caught:
+            dispatch_spawn_pane(
+                name="peer", message="", provider=bad, cwd=tmp_path, runner=FakeRunner()
+            )
+        assert caught.value.exit_code == 2, bad
+        assert bad in str(caught.value) or not bad, bad
+        assert "PATH lookup" in str(caught.value), bad
+
+
+def test_undeclared_harness_not_on_path_refused_naming_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC7-ERR: a well-formed name with no binary on PATH refuses naming PATH
+    and the resolved name, exit 2, before any mux pane is created."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError) as caught:
+        dispatch_spawn_pane(
+            name="peer", message="", provider="notonpath", cwd=tmp_path, runner=runner
+        )
+    msg = str(caught.value)
+    assert caught.value.exit_code == 2
+    assert "notonpath" in msg and "PATH" in msg
+    assert runner.calls == [], "the refusal must fire before any pane exists"
+
+
+@pytest.mark.parametrize(
+    "flag_kwargs",
+    [
+        {"model": "gpt-x"},
+        {"effort": "high"},
+        {"permission_mode": "acceptEdits"},
+        {"yolo": True},
+    ],
+)
+def test_undeclared_capability_flags_refused_with_dashed_advice(
+    tmp_path: Path, monkeypatch, flag_kwargs
+) -> None:
+    """AC6-ERR: capability-keyed flags refuse naming the flag and the harness,
+    advising the vendor's own flag after `--`. No value is inferred and no
+    declared harness's mapping is borrowed."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    _stub_harness_bin(monkeypatch, tmp_path, "nanoclaw")
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError) as caught:
+        dispatch_spawn_pane(
+            name="peer", message="", provider="nanoclaw", cwd=tmp_path,
+            runner=runner, **flag_kwargs,
+        )
+    msg = str(caught.value)
+    assert caught.value.exit_code == 2
+    assert "nanoclaw" in msg
+    expected_flag = "--" + next(iter(flag_kwargs)).replace("_", "-")
+    assert expected_flag in msg, msg
+    assert "capability row" in msg
+    assert "'--'" in msg
+    assert runner.calls == []
+
+
+def test_undeclared_pane_spawn_on_path_reaches_mux(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC1-HP: a stub binary under a rosterless name on PATH reaches the mux
+    pane run and lands a row; readiness reports live via the no-pinned-marker
+    arm (AC via 3.1) and the seed is typed after the probe (AC4-HP). The
+    receipt block and posture assertions land with 4.1's journey."""
+    _stub_harness_bin(monkeypatch, tmp_path, "nanoclaw")
+    result, runner = _spawn(monkeypatch, tmp_path, provider="nanoclaw")
+    assert result.provider == "nanoclaw"
+    assert runner.calls[0][1:4] == ["mux", "pane", "run"]
+    # Readiness: no capability row means no pinned marker, so the probe
+    # answers live rather than raising or blocking the spawn.
+    assert result.readiness == "live"
+    # AC4-HP: the seed rode in NO argv (seed_rode_in_argv is False for the
+    # generic arm), so it must have been typed and submitted after the probe.
+    from fno.agents.mux_spawn import seed_rode_in_argv
+
+    assert seed_rode_in_argv("hello", ["nanoclaw"]) is False
+    assert result.seed == "submitted"
+    assert result.status == "live"
+    from fno.agents.registry import load_registry
+
+    rows = load_registry()
+    assert [row.harness for row in rows] == ["nanoclaw"]
+
+
+def test_undeclared_spawn_journey_states_the_lane(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """AC1/AC9 journey, positive markers only: the registry row exists and
+    carries name+harness, the posture answers declared=False BY NAME, and the
+    receipt carries the UNDECLARED block - what the lane gives, what it
+    withholds, and submit_keys=enter named as an unmeasured default. AC3's
+    pane-to-Drive step (the [harness.<name>.attach] declaration reaching
+    thread_reach == Drive with no code change) is proven Rust-side by
+    crates/fno/tests/attach_override_ac1.rs against a made-up name; this
+    change must not touch crates/."""
+    _stub_harness_bin(monkeypatch, tmp_path, "nanoclaw")
+    result, runner = _spawn(monkeypatch, tmp_path, provider="nanoclaw", name="clawwork")
+    assert runner.calls[0][1:4] == ["mux", "pane", "run"]
+
+    from fno.agents.harness_map import capabilities_or_undeclared
+
+    assert capabilities_or_undeclared("nanoclaw")["declared"] is False
+
+    from fno.agents.registry import load_registry, resolve_agent_in
+
+    rows = load_registry()
+    assert len(rows) == 1
+    assert rows[0].name == "clawwork"
+    assert rows[0].harness == "nanoclaw"
+    # Addressable by name - the mail lane's resolution for a row with no
+    # canonical handle.
+    resolved = resolve_agent_in(rows, "clawwork")
+    assert resolved.entry.name == "clawwork"
+
+    receipt = capsys.readouterr().err
+    for marker in (
+        "nanoclaw",
+        "UNDECLARED",
+        "submit_keys=enter",
+        "[harness.nanoclaw.attach]",
+        "thread lane",
+        "steering",
+        "ask",
+    ):
+        assert marker in receipt, f"receipt must state {marker!r}:\n{receipt}"
+
+
+def test_a_declared_row_outside_the_roster_still_gets_the_declared_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round-1 review finding 2, pinned: the gate, the generic arm, and the
+    receipt read ONE table predicate (is_declared), never roster membership.
+    A declared harness that never made PANE_HOSTABLE_PROVIDERS keeps the
+    declared treatment - the terminal armless raise - not the undeclared
+    PATH refusal or an UNDECLARED receipt."""
+    use_tmpdir(monkeypatch, tmp_path)
+    import fno.agents.harness_map as hm
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    monkeypatch.setitem(
+        hm._HARNESS_CAPS,
+        "declared-but-armless",
+        {
+            "resume_strategy": {
+                "forms": {
+                    "interactive_create": {
+                        "kind": "flag", "tokens": ["declared-but-armless"],
+                    }
+                }
+            }
+        },
+    )
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    with pytest.raises(DispatchAskError) as caught:
+        dispatch_spawn_pane(
+            name="peer",
+            message="",
+            provider="declared-but-armless",
+            cwd=tmp_path,
+            runner=FakeRunner(),
+        )
+    msg = str(caught.value)
+    assert "no interactive pane form" in msg
+    assert "PATH" not in msg, "a declared harness never meets the PATH refusal"
+
+
 def test_ac1_host_pane_gate_admits_hosted_rejects_unhosted(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1472,9 +1752,15 @@ def test_ac1_host_pane_gate_admits_hosted_rejects_unhosted(
     assert oc_row.mux == {"session": "main", "pane_id": 7}
     assert oc_row.status == "live"
 
-    # goose is not pane-hostable -> refused before any mux subprocess.
-    with pytest.raises(DispatchAskError, match="unknown provider 'goose'"):
+    # goose is undeclared -> still refused before any mux subprocess, now by the
+    # PATH refusal (host-independent: PATH points at an empty dir).
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    with pytest.raises(DispatchAskError) as goose_info:
         _spawn(monkeypatch, tmp_path, provider="goose", name="ai")
+    assert "goose" in str(goose_info.value)
+    assert "PATH" in str(goose_info.value)
 
 
 def test_unparseable_pane_id_is_a_loud_error(tmp_path: Path, monkeypatch) -> None:

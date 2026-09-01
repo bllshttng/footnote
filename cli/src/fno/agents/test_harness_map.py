@@ -324,6 +324,73 @@ def test_unknown_harness_fails_loud_naming_the_map():
     assert "fno.agents.harness_map" in msg
 
 
+def test_undeclared_harness_capabilities_still_raises_naming_the_map():
+    """AC2-HP, direction one: a harness with no capability row is UNKNOWN to
+    `capabilities()` - the strict reader keeps raising for everyone, because a
+    caller that needs a measured value must not receive a guess (the x-ea37
+    silent-claude-default shape this change exists to not reproduce)."""
+    for name in ("openclaw", "nanoclaw"):
+        with pytest.raises(DispatchResolveError) as exc:
+            capabilities(name)
+        msg = str(exc.value)
+        assert name in msg
+        assert "fno.agents.harness_map" in msg
+
+
+def test_undeclared_posture_answers_declared_false_without_reading_any_row(
+    monkeypatch,
+):
+    """AC2-HP, direction two: `capabilities_or_undeclared()` answers the frozen
+    fail-closed posture for a rowless harness. Built from literal constants -
+    monkeypatching a sentinel value into a declared row's dict must not leak
+    into the posture, which is the test form of kill criterion guessed_capability."""
+    import fno.agents.harness_map as hm
+
+    sentinel = {"declared": True, "poisoned": True}
+    monkeypatch.setattr(hm, "_HARNESS_CAPS", {"claude": sentinel})
+    for name in ("openclaw", "nanoclaw"):
+        posture = hm.capabilities_or_undeclared(name)
+        assert posture["declared"] is False, name
+        assert posture["thread"] is False, name
+        assert posture["autonomous_pane"] is False, name
+        assert posture["route_on_pane"] is False, name
+        assert posture["resume"] == "unsupported", name
+        assert posture["ready_marker"] == "unsupported", name
+        assert posture["command_surface"] == "undeclared", name
+        # The ONE default rather than a measurement, and its visible-failure
+        # contract: `unsupported` here would refuse mail by pane-send, which
+        # the undeclared lane is supposed to give.
+        assert posture["submit_keys"] == ["enter"], name
+        assert posture["send_keys_enter_delay_ms"] == 0, name
+        assert "poisoned" not in posture, "the posture read a declared row"
+    # A declared harness still gets its own row through the same reader, and
+    # the declared key is present on BOTH answers - callers branch on it.
+    declared = hm.capabilities_or_undeclared("claude")
+    assert declared["poisoned"] is True
+    assert declared["declared"] is True
+    # The module-level dict is frozen: the returned copy shields it.
+    got = hm.capabilities_or_undeclared("openclaw")
+    got["declared"] = True
+    assert hm.UNDECLARED_POSTURE["declared"] is False
+    assert hm.is_declared("openclaw") is False
+    assert hm.is_declared("claude") is True
+
+
+def test_dispatch_command_refuses_undeclared_without_naming_a_neighbour():
+    """AC2-HP: a rowless harness has no command surface to normalize, and the
+    refusal must say THAT rather than falling into the deprecated-harness text,
+    which names agy as a successor - a harness the operator never mentioned."""
+    from fno.agents.harness_map import dispatch_command
+
+    with pytest.raises(DispatchResolveError) as exc:
+        dispatch_command("openclaw")
+    msg = str(exc.value)
+    assert "openclaw" in msg
+    assert "command surface" in msg
+    assert "agy" not in msg
+    assert "gemini" not in msg
+
+
 def test_explicit_bg_on_unearned_harness_is_rejected():
     """thread (and its bg alias) is earned by claude and codex; an explicit
     bg on opencode is a hard error -> headless."""

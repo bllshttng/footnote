@@ -227,3 +227,19 @@ def test_empty_enveloped_body_keeps_the_attribution_refusal(stubbed_transport):
     assert "empty payload: there is nothing to attribute" in result.output
     assert "--raw --submit" in result.output
     assert "</fno_mail>" not in result.output
+
+
+def test_undeclared_harness_empty_body_takes_the_normal_attribution_refusal(
+    stubbed_transport, monkeypatch
+):
+    """x-f579: the empty-payload gate reads the posture, not the table, so an
+    UNDECLARED harness pane gets the ordinary attribution refusal naming
+    --raw --submit - never a capability-table crash, which would make mail by
+    pane-send unreachable for exactly the lane that is supposed to give it."""
+    monkeypatch.setattr(
+        "fno.mail.pane_transport.resolve_pane_harness", lambda _s, _p: "nanoclaw"
+    )
+    result = _prepare("  \n")
+    assert result.exit_code == 3, result.output
+    assert "empty payload: there is nothing to attribute" in result.output
+    assert "--raw --submit" in result.output

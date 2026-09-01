@@ -117,6 +117,24 @@ def _patch_mux(monkeypatch, fake: FakeMux) -> None:
     monkeypatch.setattr(dispatch_mod.subprocess, "run", fake)
 
 
+def test_inject_reads_the_undeclared_posture_instead_of_raising(monkeypatch) -> None:
+    """x-f579 AC1: mail by pane-send reaches an UNDECLARED harness pane. The
+    posture's submit_keys=[enter] takes the same paste-then-CR path every
+    declared harness takes; before the posture this site raised
+    DispatchResolveError at `capabilities(harness)` and the lane was
+    unreachable for a harness the table does not know."""
+    from fno.agents.dispatch import _mux_pane_send
+
+    fake = FakeMux()
+    _patch_mux(monkeypatch, fake)
+    assert (
+        _mux_pane_send(_mux_entry(provider="nanoclaw"), "<fno_mail>hi</fno_mail>")
+        is True
+    )
+    verbs = [c[0][3] for c in fake.calls]
+    assert verbs == ["send", "send"], "paste then enter, the declared-harness shape"
+
+
 def test_guarded_inject_pastes_and_submits_without_a_claim(monkeypatch) -> None:
     # guarded=True (no mail-delivery caller passes it any more, node x-1904):
     # the server-side interlock is the authority, so the send never holds the
@@ -234,7 +252,10 @@ def test_mux_pane_send_uses_the_target_harness_submit_delay(monkeypatch) -> None
     _patch_mux(monkeypatch, fake)
     sleeps = []
     monkeypatch.setattr(dispatch_mod.time, "sleep", sleeps.append)
-    original = harness_map.capabilities
+    # x-f579: the site reads capabilities_or_undeclared (the pane lane's
+    # reader), so that is the seam to pin - the value still comes from the
+    # target harness's own row.
+    original = harness_map.capabilities_or_undeclared
 
     def caps(harness):
         value = dict(original(harness))
@@ -242,7 +263,7 @@ def test_mux_pane_send_uses_the_target_harness_submit_delay(monkeypatch) -> None
         value["submit_keys"] = ["enter"]
         return value
 
-    monkeypatch.setattr(harness_map, "capabilities", caps)
+    monkeypatch.setattr(harness_map, "capabilities_or_undeclared", caps)
     assert dispatch_mod._mux_pane_send(_mux_entry(), "hi") is True
     assert sleeps == [0.125]
     assert fake.calls[1][0][fake.calls[1][0].index("--text") + 1] == "\r"

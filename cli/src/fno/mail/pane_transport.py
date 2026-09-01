@@ -25,12 +25,17 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 #: How many lines of the pane frame the prompt gate reads. Matches the spawn
 #: seed's own read (`_submit_spawn_seed`), so both look at the same window.
 GATE_FRAME_LINES = 40
+
+#: x-f579: undeclared harnesses whose not-prompt-gated note has printed once
+#: this process. Repeats are suppressed (see the comment at the print).
+_UNDECLARED_NOTED: set[str] = set()
 
 
 class PaneSendRefused(Exception):
@@ -259,6 +264,26 @@ def prompt_refusal(
     )
     if identity_refusal:
         return identity_refusal
+    from fno.agents.harness_map import capabilities_or_undeclared
+
+    if not capabilities_or_undeclared(harness)["declared"]:
+        # x-f579: an undeclared harness has NO manifest to evaluate, by
+        # definition, so the detector cannot run for it ever. The undeclared
+        # lane's contract gives mail by pane-send anyway (submit_keys=enter,
+        # the visible-failure default the spawn receipt names), so the gate
+        # skips WITH a note rather than refusing the only delivery mechanism
+        # this harness has. Every declared harness keeps the full gate.
+        if harness not in _UNDECLARED_NOTED:
+            # Once per harness per process (the add_dir_tokens precedent): a
+            # driver loop mails the same pane worker repeatedly, and a repeated
+            # advisory line trains the reader to skip it.
+            _UNDECLARED_NOTED.add(harness)
+            print(
+                f"note: pane {pane_id} hosts undeclared harness {harness!r}; no "
+                "prompt model exists for it, so sends to it are not prompt-gated",
+                file=sys.stderr,
+            )
+        return None
     if receipt_text is None:
         try:
             frame = _run_mux(
@@ -421,9 +446,12 @@ def prepare(
         # harness: a bare CR does not submit every harness's composer, and
         # advice that names a form the pane cannot consume is the defect this
         # module's refusal exists not to commit.
-        from fno.agents.harness_map import capabilities
+        from fno.agents.harness_map import capabilities_or_undeclared
 
-        if capabilities(resolved).get("submit_keys") == ["unsupported"]:
+        # x-f579: the posture answers "enter" for an undeclared harness, so
+        # this stays the ordinary attribution refusal rather than a
+        # capability-table raise - mail by pane-send stays reachable.
+        if capabilities_or_undeclared(resolved).get("submit_keys") == ["unsupported"]:
             raise PaneSendRefused(
                 f"empty payload: there is nothing to attribute, and "
                 f"{resolved} has no programmable submit key. Type the payload "
