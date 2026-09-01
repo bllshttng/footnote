@@ -106,7 +106,7 @@ def stuck_epics(entries: list[dict]) -> list[EpicStuck]:
             continue
         out.append(
             EpicStuck(
-                id=e.get("id"),
+                id=e["id"],
                 status=epic_status,
                 title=e.get("title"),
                 closable=(epic_status != "deferred" and not holders),
