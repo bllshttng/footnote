@@ -11279,7 +11279,7 @@ def cmd_reconcile(
                 entries = read_graph(_graph_path())  # real binds just persisted
             records = scan_merge_drift(entries, node_id=node)
 
-    status_drift = _status_drift(_graph_path())
+    status_drift = _status_drift(_graph_path()) if _full_sweep else {}
     closeable = [r for r in records if r.closeable]
     failures = [r for r in records if r.error is not None]
 

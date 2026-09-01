@@ -744,6 +744,29 @@ def test_reconcile_status_drift_ignores_read_time_blocked_overlay(cli_env):
     assert json.loads(result.output)["reclaimed"] == []
 
 
+def test_reconcile_node_scope_does_not_run_global_status_reclaim(cli_env):
+    graph_path, _sentinel_dir = cli_env
+    _make_graph(graph_path, [
+        _node("ab-scoped-rollup", status="in_progress", plan_path="plans/parent.md"),
+        _node(
+            "ab-scoped-done",
+            parent="ab-scoped-rollup",
+            status="done",
+            completed_at="2026-01-01T00:00:00Z",
+        ),
+        _node("ab-scoped-idea", parent="ab-scoped-rollup", status="idea", plan_path=None),
+    ])
+    before = graph_path.read_bytes()
+
+    result = runner.invoke(
+        app, ["backlog", "reconcile", "--node", "ab-scoped-rollup", "--dry-run", "--json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["reclaimed"] == []
+    assert graph_path.read_bytes() == before
+
+
 def test_reconcile_names_leftover_model_tier_rows(cli_env, monkeypatch):
     """x-baef: leftover model_tier rows read as no difficulty band now, so
     the daily sweep names them and the migration verb until the key is gone;
