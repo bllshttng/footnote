@@ -34,6 +34,14 @@ Other CLIs (Cursor, GitHub Copilot Agents, Kiro, Qoder, Rovo Dev, Trae) are out 
 
 No harness exposes a human-origin discriminator, and ruling d-e1eec854 measured what that costs. A real Claude `UserPromptSubmit` capture on 2026-08-24 exposed `hook_event_name`, `session_id`, `transcript_path`, `cwd`, `prompt_id`, `permission_mode`, and `prompt`, and none of them marks a human. The transcript is no better: across every transcript in one machine's claude project directory, 2173 user turns carrying an `<fno_mail>` envelope were recorded with `promptSource: "typed"` and 2439 with `origin: {"kind": "human"}`, and `fno agents mail send --raw` strips the envelope that is the only remaining marker. So invocation is the authority and a mail-injected invocation cannot be refused. The staged-proposal ceremony that used to stand here refused a headless session and was waved through by an attended chat, which is the shape mail arrives in, so it was retired. See `skills/law/LIMITATIONS.md` for the trade.
 
+## The undeclared lane: any binary on PATH gets a pane
+
+`fno agents spawn -H <name> --substrate pane "<seed>" -- <init flags>` hosts any CLI binary on PATH, not only the harnesses with a capability row. The name must look like a binary name (`^[a-z][a-z0-9._-]{0,31}$`) and must resolve on PATH; each failed check refuses by naming it. fno is the viewport for the result, nothing more.
+
+An undeclared harness gets a mux pane, a registry row, a name, mail by pane-send, and the Drive viewport the moment `.fno/config.toml` declares `[harness.<name>.attach]`. That config block is the only further step. No code change, no roster edit. The lane withholds a thread lane, steering, and `fno agents ask`: those need the vendor's own protocol and must be measured (a row in `cli/src/fno/agents/harness_capabilities.toml`) before they can exist.
+
+Capability lookups answer "undeclared" by name (`harness_map.capabilities_or_undeclared`). The strict reader `capabilities()` still raises for the same name, so nothing silently inherits claude's defaults. The one value that is a default rather than a measurement is `submit_keys=enter`: a harness that submits on something else produces a visibly unsubmitted pane, which mux reports, never a wrong answer attributed to the worker.
+
 ## pi: two lanes, one session, and one unsafe half
 
 pi is the first harness whose driving lane is neither a shellout nor a keystroke PTY, and the first whose worst failure mode is a SUCCESS. Read this before wiring anything to it.

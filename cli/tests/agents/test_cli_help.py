@@ -73,6 +73,24 @@ def test_agents_resume_help_shows_print_command(runner: CliRunner) -> None:
     assert "--cross-project" in out
 
 
+def test_spawn_harness_help_no_longer_presents_a_closed_accepted_set(
+    runner: CliRunner,
+) -> None:
+    """x-f579: `-H/--harness` accepts any binary on PATH into a pane, so the
+    help must not read the declared roster as the accepted set. The roster
+    stays visible - it names what gets the full lane - beside the undeclared
+    lane and its `--` escape for the vendor's own init flags."""
+    code, out = _run(runner, "spawn", "--help")
+    assert code == 0
+    # Rich wraps help at the terminal width, so collapse whitespace before
+    # substring checks - a phrase may break across lines.
+    flat = " ".join(out.split())
+    assert "Any other binary on PATH" in flat
+    assert "viewport" in flat
+    assert "'--'" in flat
+    assert "claude | codex" not in flat, "the pipe list reads as an accepted set"
+
+
 def test_heal_token_accepts_hidden_cross_project_recovery_flag(
     runner: CliRunner, monkeypatch
 ) -> None:

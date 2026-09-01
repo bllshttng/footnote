@@ -1152,10 +1152,12 @@ def cmd_spawn(
         "--harness",
         "-H",
         help=(
-            "The CLI binary to launch: claude | codex | gemini | opencode | agy | pi "
-            "(optional). Defaults to the invoking harness, then claude. NOTE: -H "
-            "no longer means headless; for a one-shot use --substrate headless / "
-            "--headless / --once."
+            "The CLI binary to launch. The declared harnesses - claude, codex, "
+            "gemini, opencode, agy, pi - get the full lane. Any other binary on "
+            "PATH also spawns, into a pane with fno as the viewport; pass its "
+            "init flags after '--'. Defaults to the invoking harness, then "
+            "claude. NOTE: -H no longer means headless; for a one-shot use "
+            "--substrate headless / --headless / --once."
         ),
     ),
     vendor: str | None = typer.Option(
