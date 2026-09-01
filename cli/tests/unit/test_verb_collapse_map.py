@@ -73,7 +73,10 @@ def test_map_covers_current_surface_once():
     # registry a source-ahead process already poisoned: 536 -> 537.
     # Counted from the merged file: main carried 543, added `config history`
     # and this branch adds `doctor plugin-file` -> 545.
-    assert len(mapped) == 546, (
+    # Counted from the merged file at this rebase: 549 lines minus the header
+    # = 548 rows (main's config history + doctor plugin-file, plus this
+    # branch's backfill-deferred-kind and stuck-epics).
+    assert len(mapped) == 548, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
