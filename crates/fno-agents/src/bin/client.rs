@@ -665,19 +665,33 @@ async fn run(args: Vec<String>) -> i32 {
     // second is evaluated. Other verbs skip this entirely. Read before
     // `method`/`params` move into the request.
     //
+    // Daemon-bound is DERIVED from the same capability contract the daemon
+    // routes on (attach lane + a harness-owned server, x-b180). Both binaries
+    // embed the same packaged table, so this predicate and the daemon's route
+    // cannot disagree the way a name test here and a derived route there
+    // could: the next attach-with-server harness arrives with its state_dirs
+    // attached and its gate run without this line learning its name.
+    //
     // The provider default MUST match the daemon's, which is `codex` when the
     // param is absent (`handle_spawn`). A predicate requiring an explicit
     // "codex" here reads false for a spawn with no `-H`, while the daemon still
     // routes it to the codex thread lane - so the grant was never attached and
     // the gate below never ran, on the exact lane this node exists to fix.
-    // Green gate, mute worker. Keep the two defaults identical.
+    // Green gate, mute worker. Keep the two defaults identical. An unreadable
+    // contract answers false here: the daemon refuses the same spawn, so no
+    // grant or gate is skipped for a spawn the daemon would have served.
+    let spawn_provider = params
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("codex");
     let daemon_bound_thread_spawn = method == "agent.spawn"
-        && params
-            .get("provider")
-            .and_then(|v| v.as_str())
-            .unwrap_or("codex")
-            == "codex"
-        && params.get("substrate").and_then(|v| v.as_str()) == Some("thread");
+        && params.get("substrate").and_then(|v| v.as_str()) == Some("thread")
+        && fno_agents::harness_capabilities::HarnessContract::packaged()
+            .and_then(|contract| {
+                Ok(contract.thread_lane(spawn_provider)? == "attach"
+                    && contract.attach_needs_server(spawn_provider)?)
+            })
+            .unwrap_or(false);
     // Hop 1 of the state-root grant (x-f22f). The client inherits
     // FNO_WORKER_ADD_DIRS from the Python seam across `os.execv`, so it reads
     // the ALREADY-RESOLVED set with the same reader every other lane uses -
