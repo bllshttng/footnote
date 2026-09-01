@@ -2305,3 +2305,182 @@ def test_v24_pre_v24_row_without_requested_keys_reads_none(
     assert loaded.requested_model is None
     assert loaded.requested_provider is None
     assert loaded.requested_effort is None
+# x-a879: removal accounting at the write choke point
+# ---------------------------------------------------------------------------
+
+
+def _seed_rows(registry_path: Path, rows: list) -> None:
+    from fno.agents.registry import update_registry
+
+    def seed(entries):
+        entries.extend(rows)
+        return entries
+
+    update_registry(seed, path=registry_path)
+
+
+def _removal_events(events_path: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["type"] == "registry_row_removed"
+    ]
+
+
+def test_update_registry_accounts_for_a_removed_row(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A filtering updater leaves one event and one receipt, receipt first.
+
+    The event rides the canonical writer (``source: "agents"``) onto the
+    global stream beside the daemon's events, and the receipt lands in the
+    same ``reap-receipts/`` directory the Rust and watchdog writers use.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.harness_map import render_session_argv
+    from fno.agents.registry import AgentEntry, update_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    events_path = tmp_path / ".fno" / "events.jsonl"
+    _seed_rows(
+        registry_path,
+        [
+            AgentEntry(
+                name="kept-a",
+                harness="claude",
+                harness_session_id="a-s",
+                cwd="/tmp",
+                log_path="/tmp/a.log",
+            ),
+            AgentEntry(
+                name="dropped",
+                harness="claude",
+                harness_session_id="dropped-s",
+                cwd="/tmp",
+                log_path="/tmp/d.log",
+            ),
+        ],
+    )
+
+    update_registry(
+        lambda es: [e for e in es if e.name != "dropped"], path=registry_path
+    )
+
+    removals = _removal_events(events_path)
+    assert len(removals) == 1, f"exactly one removal event: {removals}"
+    event = removals[0]
+    assert event["source"] == "agents"
+    data = event["data"]
+    assert data["name"] == "dropped"
+    assert data["harness"] == "claude"
+    assert data["harness_session_id"] == "dropped-s"
+    assert data["receipt_staged"] is True
+    assert data["remover"], "the remover is named, not blank"
+
+    receipt_path = (
+        tmp_path / ".fno" / "agents" / "reap-receipts" / "claude-dropped-s.json"
+    )
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["row_name"] == "dropped"
+    assert receipt["removed_by"] == data["remover"]
+    assert receipt["resume"] == " ".join(
+        render_session_argv("claude", "interactive_resume", "dropped-s")
+    )
+
+
+def test_update_registry_emits_nothing_when_nothing_is_removed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, update_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    events_path = tmp_path / ".fno" / "events.jsonl"
+    _seed_rows(
+        registry_path,
+        [
+            AgentEntry(
+                name="solo", harness="claude", cwd="/tmp", log_path="/tmp/s.log"
+            )
+        ],
+    )
+
+    def add_only(entries):
+        entries.append(
+            AgentEntry(
+                name="added", harness="codex", cwd="/tmp", log_path="/tmp/n.log"
+            )
+        )
+        return entries
+
+    update_registry(add_only, path=registry_path)
+
+    assert not events_path.exists(), "a removal-free write never opens the stream"
+
+
+def test_update_registry_announces_a_removal_it_cannot_build_a_receipt_for(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No resumable identity still announces the removal; the write succeeds."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, update_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    events_path = tmp_path / ".fno" / "events.jsonl"
+    _seed_rows(
+        registry_path,
+        [
+            AgentEntry(
+                name="kept", harness="claude", cwd="/tmp", log_path="/tmp/k.log"
+            ),
+            # No session identity: no resume record is renderable.
+            AgentEntry(
+                name="identity-less",
+                harness="claude",
+                cwd="/tmp",
+                log_path="/tmp/i.log",
+            ),
+        ],
+    )
+
+    update_registry(
+        lambda es: [e for e in es if e.name != "identity-less"],
+        path=registry_path,
+    )
+
+    survivors = load_registry(path=registry_path)
+    assert [e.name for e in survivors] == ["kept"]
+
+    removals = _removal_events(events_path)
+    assert len(removals) == 1
+    assert removals[0]["data"]["name"] == "identity-less"
+    assert removals[0]["data"]["receipt_staged"] is False
+    assert removals[0]["data"]["reason"], "the receipt-build failure is the reason"
+    assert not (tmp_path / ".fno" / "agents" / "reap-receipts").exists()
+
+
+def test_write_registry_has_exactly_one_production_caller() -> None:
+    """The low-level write stays a primitive of update_registry alone (x-a879).
+
+    ``write_registry`` gains no removal accounting; its only legitimate
+    production caller is ``update_registry`` itself. A future direct caller
+    is a new silent door, so it must land as a failing count here first.
+    """
+    import fno.agents.registry as reg_module
+
+    fno_pkg = Path(reg_module.__file__).parents[1]
+    callers = []
+    for py in sorted(fno_pkg.rglob("*.py")):
+        if "test" in py.name:
+            continue
+        for lineno, line in enumerate(
+            py.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            stripped = line.strip()
+            if "write_registry(" in line and not stripped.startswith(
+                "def write_registry"
+            ):
+                callers.append(f"{py.relative_to(fno_pkg)}:{lineno}")
+
+    assert len(callers) == 1, f"write_registry grew a second caller: {callers}"
+    assert callers[0].startswith("agents/registry.py:")
