@@ -4143,7 +4143,14 @@ def dispatch_spawn_pane(
                 if session_uuid is not None
                 else None
             )
-            if actual_model is not None and requested_model != actual_model:
+            # Same verdict the row projection uses, not a bare != : a bare
+            # vs [1m]-suffixed spelling of one family is a match, so this
+            # lane cannot cry wolf on a route's own suffix spelling.
+            from fno.agents.row_contradiction import model_substitution as _sub_verdict
+
+            if actual_model is not None and _sub_verdict(
+                requested_model, {"kind": "observed", "model": actual_model}
+            ) == "substituted":
                 from fno.agents import events as _events
 
                 _events.emit(
