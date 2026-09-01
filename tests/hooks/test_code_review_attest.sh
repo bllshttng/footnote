@@ -437,6 +437,36 @@ for fixture in "$FIXTURES"/*.attest "$FIXTURES"/*.unparseable "$FIXTURES"/*.sile
   esac
 done
 
+echo "== A prose review the SIZE of the measured ones still attests =="
+# The three live forks that motivated x-c446 ended in 3497, 2531 and 3357
+# bytes of prose. Those transcripts are no longer on disk, and the corpus is
+# RECORDED data by rule, so this case is deliberately SYNTHETIC and lives
+# here rather than in the fixtures directory: authoring a file that claims to
+# be a measured specimen is the drift the manifest's byte-exactness note
+# forbids.
+#
+# What it asserts is the one thing the small fixtures cannot: that size is not
+# a discriminator. The message crosses the measured range and travels through
+# a python pipe, a bash regex, and an argv, any of which could behave
+# differently on a few thousand bytes than on twenty-six.
+BIG_PROSE="$(python3 -c '
+line = "The diff changes the retry path and I could not confirm the timeout is honored.\n"
+print(line * 45, end="")
+')"
+[[ ${#BIG_PROSE} -gt 3000 ]] \
+  && pass "big-prose fixture is $((${#BIG_PROSE})) bytes, past the measured range" \
+  || fail "big-prose fixture is only ${#BIG_PROSE} bytes, below the measured range"
+run_hook "$(forked_skill_stop "$BIG_PROSE" "code-review")"
+if ! attested; then
+  fail "big-prose: NO attestation (a few thousand bytes of prose is the motivating case)"
+elif ! grep -q '"verdict":"fail' "$EMITTED"; then
+  fail "big-prose: attested without verdict=fail: $(cat "$EMITTED")"
+elif ! grep -q 'prose_unparseable' "$EMITTED"; then
+  fail "big-prose: attested without output_contract=prose_unparseable: $(cat "$EMITTED")"
+else
+  pass "big-prose: attested fail/prose_unparseable"
+fi
+
 echo "== SubagentStop: the header identity lane (payload from the corpus) =="
 run_hook "$(subagent_stop "" "## Review findings"$'\n\n'"$(<"$FIXTURES/headered-json-clean.attest")")"
 expect_attest_verdict "header-opens-message" pass
