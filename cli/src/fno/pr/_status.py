@@ -428,6 +428,7 @@ def _ready_blockers(
     review_lane: bool = True,
     *,
     head: str = "",
+    head_branch: str = "",
     code_review_required: bool = False,
     mergeable: Optional[str] = None,
     counts: Optional[dict] = None,
@@ -450,10 +451,18 @@ def _ready_blockers(
     (``review_lane``; a repo with no review lane has no coverage answer to
     fail).
 
-    The coverage conjuncts themselves are the merge gate's own, read through
-    ``_coverage_gate.covered_conjuncts`` - one copy, never a restatement - so
-    ``ready`` cannot pass a row ``fno do pr merge`` refuses (missing local pass,
-    stale head pin).
+    The coverage conjuncts are the merge gate's own helpers, read through
+    them - one copy, never a restatement: ``covered_conjuncts`` names the
+    row conjuncts (uncovered, no_local_pass, stale_head),
+    ``_corroboration_refusal`` the authorship policy, and ``cap_verdict``
+    the round cap, the state the merge gate answers "coverage impossible".
+    So ``ready`` is a claim about those conjuncts and nothing wider. Two
+    limits stay real and named: a PR whose head branch cannot be read skips
+    the cap conjunct (scoping the chain by exact head alone would narrow it
+    to the current round and read as an acquittal), and the budget the
+    payload reports is an events-axis floor - a GitHub App review round
+    spends a budget this surface does not count, so ``fno do pr merge``
+    may still refuse on rounds its refusal names.
 
     A TERMINAL PR (merged or closed) is exempt from the coverage conjunct: the
     gate guards what would merge, and a PR merged out-of-band (UI, bare gh) has
@@ -520,7 +529,11 @@ def _ready_blockers(
         if cov_word == "unknown":
             blockers.append("review_coverage_unknown")
         else:
-            from fno.pr._coverage_gate import _corroboration_refusal, covered_conjuncts
+            from fno.pr._coverage_gate import (
+                _corroboration_refusal,
+                cap_verdict,
+                covered_conjuncts,
+            )
 
             ok, failed = covered_conjuncts(coverage, head, code_review_required)
             # The corroboration policy is the merge gate's own refusal, read
@@ -531,12 +544,20 @@ def _ready_blockers(
             # blocker, exactly as the merge verb ranks it, because re-running
             # your own review can never satisfy the policy.
             corroboration = _corroboration_refusal(coverage, repo) if repo else None
-            # The exhausted round budget gets its own name (the row's
-            # advisory flag, Rust-computed from the same chain the gate
-            # re-derives): a board reading several PRs must tell "needs
-            # another review round" from "cannot be cleared by reviewing" -
-            # the two prescribe opposite next actions.
-            if coverage.get("impossible") is True:
+            # The round cap is re-derived from the PR's own chain, never read
+            # off a stored flag: the row this function holds carries no
+            # `impossible` key on the recompute path, and `coverage.get(...)`
+            # read that absence as an acquittal - an absence has three
+            # explanations and only one is evidence. An empty head_branch
+            # cannot scope the chain, so it appends no impossible blocker
+            # rather than scope by head alone (that read narrows the chain to
+            # the current round and acquits the very state it is for).
+            cap = (
+                cap_verdict(repo, head, head_branch, coverage, reviews=None)
+                if head_branch and repo
+                else None
+            )
+            if cap is not None and cap.impossible:
                 blockers.append("review_coverage_impossible")
             elif corroboration and (ok or failed == "uncovered"):
                 blockers.append("review_coverage_corroboration")
@@ -757,6 +778,20 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             pr_json.get("headRefName") or "", pr_json.get("headRefOid") or "", cwd
         )
 
+    # The budget block on the payload reads this; the impossible blocker
+    # re-derives the same pure helper inside `_ready_blockers`. Same inputs,
+    # zero gh calls, so the two cannot disagree on policy.
+    rounds_cap = None
+    if not is_terminal and str(pr_json.get("headRefName") or ""):
+        from fno.pr import _coverage_gate
+
+        rounds_cap = _coverage_gate.cap_verdict(
+            cwd or os.getcwd(),
+            str(pr_json.get("headRefOid") or ""),
+            str(pr_json.get("headRefName") or ""),
+            coverage,
+        )
+
     blockers = _ready_blockers(
         green,
         verdict,
@@ -764,6 +799,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         coverage,
         review_lane,
         head=pr_json.get("headRefOid") or "",
+        head_branch=str(pr_json.get("headRefName") or ""),
         code_review_required=code_review_required,
         # A terminal PR has no would-merge left, like the coverage conjunct
         # above - a merged/closed PR's mergeable field is stale and must not
@@ -896,6 +932,28 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         "optional_reviews_unresolved": unresolved,
         "optional_reviews_resolved_unchanged": resolved_unchanged,
         "review_coverage": coverage,
+        # The round budget, from the same cap helper the blocker read, so a
+        # worker sees the budget BEFORE spending the round that trips it.
+        # reviews=None buys a zero-gh read, so the count is the events axis
+        # alone - a FLOOR on a PR with GitHub App reviews, labelled as one
+        # rather than left to read as the merge gate's budget. A PR whose
+        # head branch could not be read is not asked (the chain cannot be
+        # scoped) and a terminal PR has no budget question, so both omit
+        # the keys rather than print an unscoped zero.
+        **(
+            {
+                "rounds_used": rounds_cap.rounds_used,
+                "max_rounds": rounds_cap.max_rounds,
+                "rounds_exhausted": rounds_cap.rounds_used >= rounds_cap.max_rounds,
+                "rounds_axis": "events",
+                "rounds_axis_note": (
+                    "events-axis floor; GitHub App review rounds are counted "
+                    "only by fno do pr merge, whose refusal carries both axes"
+                ),
+            }
+            if rounds_cap is not None
+            else {}
+        ),
         # Reported whether or not it blocked. The original complaint was an
         # empty `ready_blockers` next to a live review: a reader has to be able
         # to see that both probes RAN and what each answered, because an absent

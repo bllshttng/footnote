@@ -3112,3 +3112,149 @@ def test_main_prints_the_gh_call_counter(monkeypatch, capsys):
     monkeypatch.setattr(_cache, "cached_status", lambda pr, refresh=False: 0)
     assert _status.main(["42"]) == 0
     assert "gh call(s) this invocation" in capsys.readouterr().err
+
+
+# ── the round budget rides the payload (constructed chains only) ────────────
+# No live PR sources these fixtures: the specimens that measured the
+# status/merge divergence are being cleared as this lands, and a payload
+# test that needs one would expire with it. The chain is written into the
+# tmp repo the cap helper reads, so the payload and the blocker derive
+# from one constructed source of truth.
+
+
+def _rounds_status_on(monkeypatch, capsys, tmp_path, events_text):
+    """run_status against a tmp repo whose events log is `events_text`.
+
+    Returns the parsed JSON payload. The PR read carries a head branch (the
+    chain-scope input the cap conjunct needs) and the coverage read a
+    covered row, so the rounds keys are the only thing under test.
+    """
+    from fno.pr import _merge
+
+    _no_floor(monkeypatch)
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    (tmp_path / ".fno" / "events.jsonl").write_text(events_text, encoding="utf-8")
+    head = f"{4:040x}"
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: (
+            {
+                "state": "OPEN",
+                "headRefOid": head,
+                "headRefName": "feature/x-rounds",
+                "statusCheckRollup": [
+                    {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
+                ],
+            },
+            "",
+        ),
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {
+            "coverage": "covered",
+            "review_state": "reviewed",
+            "reviewed_count": 1,
+            "head_sha": head,
+        },
+    )
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
+    monkeypatch.setattr(_status, "_merge_hold_reason", lambda pr, cwd: None)
+    from fno.pr._review_hold import ReviewActivity
+
+    monkeypatch.setattr(
+        _status,
+        "_review_activity",
+        lambda branch, pr_head, cwd: ReviewActivity(
+            False, "", "", None, {"probed": False}
+        ),
+    )
+    monkeypatch.setattr(
+        _merge, "_review_lane_configured", lambda repo, pr_number=0: True
+    )
+    code = _status.run_status("42", cwd=str(tmp_path))
+    out = _json.loads(capsys.readouterr().out)
+    assert code == 0
+    return out
+
+
+def _rounds_event(i, verdict, findings):
+    return _json.dumps(
+        {
+            "ts": f"2026-08-31T2{i:02d}:00:00Z",
+            "type": "review_attestation",
+            "source": "hook",
+            "data": {
+                "reviewer": "code-review",
+                "head_sha": f"{i:040x}",
+                "verdict": verdict,
+                "session_id": "s-rounds",
+                "branch": "feature/x-rounds",
+                "reviewed_base_sha": "a" * 40,
+                "reviewed_head_sha": f"{i:040x}",
+                "findings_blocking": len(findings),
+                "findings": findings,
+            },
+        }
+    )
+
+
+_HARD = {
+    "category": "correctness",
+    "verdict": "CONFIRMED",
+    "blocking": True,
+    "has_required_fields": True,
+    "finding_key": "cli/src/fake.py:779:correctness",
+}
+
+
+def test_payload_carries_the_budget_and_its_axis(monkeypatch, capsys, tmp_path):
+    """Five events-axis rounds at max_rounds 2: rounds_used 5,
+    rounds_exhausted true, and the axis labelled - an unlabelled floor is
+    how the two surfaces started disagreeing."""
+    text = "\n".join(
+        [
+            _rounds_event(0, "fail", [_HARD]),
+            *(_rounds_event(i, "pass", []) for i in range(1, 5)),
+        ]
+    )
+    out = _rounds_status_on(monkeypatch, capsys, tmp_path, text)
+    assert out["rounds_used"] == 5
+    assert out["max_rounds"] == 2
+    assert out["rounds_exhausted"] is True
+    assert out["rounds_axis"] == "events"
+    # The floor is NAMED, never implied: a bot-heavy PR under-reports here.
+    assert "floor" in out["rounds_axis_note"]
+    # And the same chain holds ready back through the re-derived conjunct.
+    assert out["ready"] is False
+    assert "review_coverage_impossible" in out["ready_blockers"]
+
+
+def test_payload_reports_an_events_floor_on_a_bot_heavy_pr(
+    monkeypatch, capsys, tmp_path
+):
+    """One events-axis round beside five bot-reviewed commits: status reports
+    1, labels the axis, and does not claim the merge gate's budget."""
+    text = _rounds_event(0, "pass", [])
+    out = _rounds_status_on(monkeypatch, capsys, tmp_path, text)
+    assert out["rounds_used"] == 1
+    assert out["rounds_axis"] == "events"
+    assert out["rounds_exhausted"] is False
+    assert "fno do pr merge" in out["rounds_axis_note"]
+
+
+def test_payload_rounds_keys_present_on_a_chainless_pr(monkeypatch, capsys, tmp_path):
+    """No attestation chain at all: rounds_used 0, exhausted false, and no
+    key omitted - an absent key is indistinguishable from an unasked one."""
+    out = _rounds_status_on(monkeypatch, capsys, tmp_path, "")
+    assert out["rounds_used"] == 0
+    assert out["rounds_exhausted"] is False
+    assert out["max_rounds"] == 2
+    assert out["rounds_axis"] == "events"
