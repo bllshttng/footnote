@@ -182,18 +182,57 @@ def test_lane_b_spawn_kills_the_keeper_when_identify_disagrees(
     lane_b_home, monkeypatch
 ) -> None:
     """A keeper answering a session id other than the minted one is killed,
-    never registered: the row must not point at a session fno did not mint."""
+    never registered: the row must not point at a session fno did not mint.
+    A LIVE keeper answering wrong is an identity bug; a keeper that already
+    EXITED means our spawn never bound and the socket belongs to someone
+    else - the error names the collision, not the identity."""
     recorded = _fake_keeper(monkeypatch, lane_b_home)
+
+    class _LiveProc:
+        pid = 4242
+
+        def poll(self) -> None:
+            return None  # alive: the answering keeper is ours
+
+        def kill(self) -> None:
+            recorded["killed"] = True
 
     def _wrong_identify(sock, timeout_sec=10.0):  # noqa: ANN001
         return {"v": 1, "keeper_pid": 4242, "child_pid": 555, "session_id": "other"}
 
+    monkeypatch.setattr(dispatch_mod.subprocess, "Popen", lambda *a, **k: _LiveProc())
     monkeypatch.setattr(dispatch_mod, "_keeper_identify", _wrong_identify)
     with pytest.raises(DispatchAskError) as exc_info:
         _lane_b_thread_spawn(name="wk-wrong", harness="pi", cwd=lane_b_home)
     assert "expected the minted" in str(exc_info.value)
     assert recorded.get("killed") is True
     assert not list(load_registry())
+
+    class _DeadProc(_LiveProc):
+        def poll(self) -> int:
+            return 2  # exited at the bind refusal: the socket is not ours
+
+    recorded.clear()
+    monkeypatch.setattr(dispatch_mod.subprocess, "Popen", lambda *a, **k: _DeadProc())
+    with pytest.raises(DispatchAskError) as exc_info:
+        _lane_b_thread_spawn(name="wk-collide", harness="pi", cwd=lane_b_home)
+    assert "another keeper still holds" in str(exc_info.value)
+    assert not list(load_registry())
+
+
+def test_lane_b_spawn_wraps_a_registry_read_failure(lane_b_home, monkeypatch) -> None:
+    """A corrupt registry surfaces as the exit-12 envelope every sibling
+    spawn path uses, never a raw traceback."""
+
+    def _boom():
+        raise dispatch_mod.RegistryVersionError("schema ahead")
+
+    _fake_keeper(monkeypatch, lane_b_home)
+    monkeypatch.setattr(dispatch_mod, "load_registry", _boom)
+    with pytest.raises(DispatchAskError) as exc_info:
+        _lane_b_thread_spawn(name="wk-badreg", harness="pi", cwd=lane_b_home)
+    assert exc_info.value.exit_code == 12
+    assert "registry read failed" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

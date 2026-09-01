@@ -1706,7 +1706,12 @@ def _lane_b_thread_spawn(
         print(f"Waiting for agent {name!r} lock...", file=sys.stderr, flush=True)
 
     with hold_agent_lock(name, registry_path, timeout=lock_timeout, on_wait=_on_wait):
-        entries = load_registry()
+        try:
+            entries = load_registry()
+        except (OSError, ValueError, RegistryVersionError) as exc:
+            raise DispatchAskError(
+                f"registry read failed: {exc}", exit_code=12
+            ) from exc
         if any(e.name == name for e in entries):
             raise DispatchAskError(
                 f"agent {name!r} already exists; "
@@ -1770,7 +1775,23 @@ def _lane_b_thread_spawn(
                 exit_code=1,
             ) from exc
         if reply.get("session_id") != session_id:
+            # Read liveness BEFORE the kill: a collision means OUR keeper
+            # already exited (it refuses to bind a socket a live keeper
+            # serves), while an identity bug means the keeper answering is
+            # ours and still alive.
+            ours_exited = proc.poll() is not None
             proc.kill()
+            if ours_exited:
+                # Our keeper exited (it refuses to bind a socket a live
+                # keeper already serves), so the probe reached THAT keeper:
+                # a collision, not an identity bug in this spawn.
+                raise DispatchAskError(
+                    f"another keeper still holds {sock} and answered "
+                    f"session_id {reply.get('session_id')!r}; our keeper "
+                    f"refused to bind. Stop the old keeper (or "
+                    f"'fno agents rm {name}') and retry",
+                    exit_code=1,
+                )
             raise DispatchAskError(
                 f"keeper answered session_id {reply.get('session_id')!r}, "
                 f"expected the minted {session_id!r}",
