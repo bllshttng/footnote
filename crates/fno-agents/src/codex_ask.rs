@@ -1229,6 +1229,8 @@ fn dispatch_create(
         // session's env, so the exported FNO_NODE names the node THIS spawn
         // is for.
         node: std::env::var("FNO_NODE").ok().filter(|v| !v.is_empty()),
+        // The one-shot codex --exec lane: non-interactive by construction.
+        substrate: Some("headless".into()),
         name: name.to_string(),
         short_id: String::new(),
         legacy_provider: String::new(),

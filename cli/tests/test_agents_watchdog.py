@@ -1087,7 +1087,7 @@ def test_an_unmarked_row_never_retires():
     assert v.verdict == watchdog.RETIRE
 
 
-def test_every_registry_row_is_born_with_an_origin():
+def test_every_registry_row_is_born_with_an_origin_and_a_substrate():
     """The producer half, and it has to cover EVERY birth site in BOTH languages.
 
     The consumer only acts on a positive marker, so a birth path that forgets
@@ -1100,6 +1100,13 @@ def test_every_registry_row_is_born_with_an_origin():
     have shipped unmarked with nothing failing. So this walks the Rust struct
     literals as well, and accepts the attribute call form (`registry.AgentEntry`)
     that a plain `func.id` check lets through.
+
+    The walk carries TWO markers. `origin` says what created the row;
+    `substrate` says which lane it was spawned on. An explicit `None` is the
+    point for substrate: it records that the writer considered the question
+    and could not answer it, where an omission cannot be told apart from
+    never-recorded - and a silent default of "pane" is the exact guess the
+    field exists to replace.
     """
     import ast
     import pathlib
@@ -1119,8 +1126,9 @@ def test_every_registry_row_is_born_with_an_origin():
             # `AgentEntry(**row)` rehydrates a row that was already born.
             if any(kw.arg is None for kw in node.keywords):
                 continue
-            if not any(kw.arg == "origin" for kw in node.keywords):
-                missing.append(f"{path.name}:{node.lineno}")
+            for marker in ("origin", "substrate"):
+                if not any(kw.arg == marker for kw in node.keywords):
+                    missing.append(f"{path.name}:{node.lineno} ({marker})")
 
     # Rust has no AST here, so read the literal's field list: from the opening
     # brace to the matching close at the same indent. Struct-update syntax
@@ -1154,18 +1162,21 @@ def test_every_registry_row_is_born_with_an_origin():
                     break
                 body.append(later)
             joined = "\n".join(body)
-            if ".." in joined and "origin" not in joined:
-                continue  # struct-update inherits it
-            if not re.search(r"^\s*origin:", joined, re.MULTILINE):
-                missing.append(f"{path.name}:{i + 1}")
+            for marker in ("origin", "substrate"):
+                if ".." in joined and not re.search(
+                    rf"^\s*{marker}:", joined, re.MULTILINE
+                ):
+                    continue  # struct-update inherits this marker
+                if not re.search(rf"^\s*{marker}:", joined, re.MULTILINE):
+                    missing.append(f"{path.name}:{i + 1} ({marker})")
 
     # A scan that matches nothing passes for the same reason a correct one does,
     # so state the floor. This is a positive control on the instrument, and it
     # caught the anchored regex above reading 8 sites instead of 20.
     assert seen >= 15, f"the Rust scan reached only {seen} literals; it is not looking"
     assert not missing, (
-        "every registry row must state what created it; unmarked at "
-        + ", ".join(missing)
+        "every registry row must state what created it and which lane it ran; "
+        "unmarked at " + ", ".join(missing)
     )
 
 

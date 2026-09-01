@@ -2199,6 +2199,7 @@ mod tests {
     /// the keeper tests name only the fields that carry the scenario.
     fn default_row() -> crate::state::RegistryEntry {
         crate::state::RegistryEntry {
+            substrate: None,
             name: String::new(),
             short_id: String::new(),
             legacy_provider: String::new(),

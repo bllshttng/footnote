@@ -4143,6 +4143,11 @@ fn build_claude_stream_entry(
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     RegistryEntry {
         node: None,
+        // Stream-json adoption is gated on host_mode plus mode, not on a
+        // substrate, and it is not one of the three names - this row's
+        // lifecycle belongs to chat/switchboard/ask, so the axis stays
+        // unknown rather than forcing a "thread" stamp.
+        substrate: None,
         name: name.into(),
         short_id: short_id.into(),
         // Birth marker: the daemon started this PTY worker itself. An absent origin means UNKNOWN,
@@ -4592,6 +4597,8 @@ fn build_codex_thread_entry(
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     RegistryEntry {
         node: None,
+        // The daemon-hosted codex app-server thread lane.
+        substrate: Some("thread".into()),
         name: name.into(),
         short_id: String::new(),
         legacy_provider: String::new(),
@@ -10268,6 +10275,7 @@ mod tests {
     // alone (owns no worktree). `exited_at` controls the grace clock.
     fn ask_row(name: &str, exited_at: Option<&str>) -> RegistryEntry {
         RegistryEntry {
+            substrate: None,
             node: None,
             spawned_by_session: None,
             spawned_by_harness: None,
@@ -13333,6 +13341,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         // Registry entry + state.json with a stale active drive window.
         state::update_registry(&home.registry_json(), |r| {
             r.entries.push(RegistryEntry {
+                substrate: None,
                 node: None,
                 spawned_by_session: None,
                 spawned_by_harness: None,
@@ -13422,6 +13431,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         state::update_registry(&home.registry_json(), |r| {
             r.entries.push(RegistryEntry {
+                substrate: None,
                 node: None,
                 spawned_by_session: None,
                 spawned_by_harness: None,
@@ -13579,6 +13589,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         state::update_registry(&home.registry_json(), |r| {
             r.entries.push(RegistryEntry {
+                substrate: None,
                 node: None,
                 spawned_by_session: None,
                 spawned_by_harness: None,
@@ -14053,6 +14064,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         }
         state::update_registry(&home.registry_json(), |r| {
             r.entries.push(RegistryEntry {
+                substrate: None,
                 node: None,
                 spawned_by_session: None,
                 spawned_by_harness: None,
@@ -14283,6 +14295,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let mut reg = state::Registry::default();
         assert_eq!(derive_short_id("worker-A", &reg), "workerA");
         reg.entries.push(RegistryEntry {
+            substrate: None,
             node: None,
             spawned_by_session: None,
             spawned_by_harness: None,
@@ -14340,6 +14353,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
 
     fn rentry(name: &str, status: AgentStatus, last_reconciled: Option<&str>) -> RegistryEntry {
         RegistryEntry {
+            substrate: None,
             node: None,
             spawned_by_session: None,
             spawned_by_harness: None,
@@ -15826,6 +15840,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         sock: &Path,
     ) -> RegistryEntry {
         RegistryEntry {
+            substrate: None,
             node: None,
             spawned_by_session: None,
             spawned_by_harness: None,
@@ -17379,6 +17394,7 @@ done
     fn seed_stream_row(home: &AgentsHome, name: &str, short_id: &str) {
         state::update_registry(&home.registry_json(), |r| {
             r.entries.push(RegistryEntry {
+                substrate: None,
                 node: None,
                 spawned_by_session: None,
                 spawned_by_harness: None,
@@ -17438,6 +17454,7 @@ done
     /// find, matching a pane-hosted codex row that never bound a session id.
     fn seed_bare_row(name: &str) -> RegistryEntry {
         RegistryEntry {
+            substrate: None,
             node: None,
             spawned_by_session: None,
             spawned_by_harness: None,

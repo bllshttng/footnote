@@ -502,6 +502,7 @@ mod tests {
 
     fn entry(name: &str, provider: &str) -> state::RegistryEntry {
         state::RegistryEntry {
+            substrate: None,
             node: None,
             spawned_by_session: None,
             spawned_by_harness: None,

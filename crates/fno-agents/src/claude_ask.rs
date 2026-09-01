@@ -3593,6 +3593,12 @@ fn create(
         // session's env, so the exported FNO_NODE names the node THIS spawn
         // is for.
         node: std::env::var("FNO_NODE").ok().filter(|v| !v.is_empty()),
+        // The lane this row was spawned on: create's only production caller
+        // is the claude --bg spawn lane, so the stamp is "thread" (the public
+        // name; the client's local selector spells it "bg"). If create ever
+        // serves a second lane, take the substrate from the caller that
+        // resolved it instead of hardcoding.
+        substrate: Some("thread".into()),
         name: name.to_string(),
         // v9: the claude jobId is the unified transport key (was claude_short_id);
         // follow-up/logs read it via `transport_short()`.

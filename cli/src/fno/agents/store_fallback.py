@@ -553,6 +553,9 @@ def adopt_store_hit(
             # registration fails, so it reaches a reader without ever passing
             # the path that would have marked it.
             origin="adopted",
+            # Adoption observed nothing about the lane; the substrate stays
+            # unknown (never "pane").
+            substrate=None,
         )
 
 
