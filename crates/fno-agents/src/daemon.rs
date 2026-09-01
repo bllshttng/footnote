@@ -3898,13 +3898,17 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             fallback
         }
     };
-    // Post-G4 (x-f54c): the daemon hosts no agent PTYs, so the only spawn it
-    // still serves is the claude stream-json ADOPTION lane -- host_mode=interactive
+    // Post-G4 (x-f54c): the daemon hosts no agent PTYs, so the only spawns it
+    // still serves are the claude stream-json ADOPTION lane -- host_mode=interactive
     // + mode=stream_json resumes an idle session as a held stream thread
-    // (`claude -p --resume <uuid>`) for chat/switchboard/ask to drive. Every
-    // interactive PTY host (codex, gemini, claude) moved to the mux, and bg/
-    // headless never reach the daemon, so any other spawn is a retired
-    // PTY-hosting request and errors with a mux pointer.
+    // (`claude -p --resume <uuid>`) for chat/switchboard/ask to drive -- and
+    // attach-with-server thread spawns. Every interactive PTY host (codex,
+    // gemini, claude) moved to the mux, and bg/headless never reach the daemon,
+    // so any other spawn is a retired PTY-hosting request and errors with a
+    // mux pointer. The thread substrate is routed from the capability contract
+    // (`thread_lane` + `attach_needs_server`), never the harness name, and
+    // every arm other than attach-with-server refuses, so the daemon still
+    // hosts no agent PTYs.
     let host_mode = p
         .get("host_mode")
         .and_then(|v| v.as_str())
@@ -3917,8 +3921,8 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
         .get("substrate")
         .and_then(|v| v.as_str())
         .unwrap_or("pane");
-    if provider == "codex" && substrate == "thread" {
-        return spawn_codex_thread_lane(ctx, req, &name, &cwd).await;
+    if substrate == "thread" {
+        return route_thread_spawn(ctx, req, &name, &cwd, &provider).await;
     }
     if host_mode == crate::state::HOST_MODE_INTERACTIVE && provider == "claude" {
         let claude_mode = p
@@ -3953,6 +3957,103 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
          `fno agents spawn --substrate pane`, or use `--substrate bg|headless`. The daemon \
          serves only claude stream-json adoption (host_mode=interactive, mode=stream_json).",
     )
+}
+
+/// Route a thread-substrate spawn from the capability contract alone, never
+/// the harness name: `thread_lane` picks the lane, and on the attach lane
+/// `attach_needs_server` splits harness-owned-server attaches (the app-server
+/// lane below) from harness-owned-client ones, which this daemon cannot serve.
+/// An unreadable table or unknown harness refuses rather than routing. Every
+/// arm but attach-with-server refuses, so the x-f54c invariant holds.
+async fn route_thread_spawn(
+    ctx: &Ctx,
+    req: &Request,
+    name: &str,
+    cwd: &Path,
+    provider: &str,
+) -> Response {
+    let contract = match crate::harness_capabilities::HarnessContract::packaged() {
+        Ok(contract) => contract,
+        Err(error) => {
+            return thread_spawn_refusal(
+                ctx,
+                req,
+                name,
+                provider,
+                &format!("thread spawn refused: capability table unreadable: {error}"),
+            );
+        }
+    };
+    match contract.thread_lane(provider) {
+        Ok("attach") => match contract.attach_needs_server(provider) {
+            Ok(true) => spawn_codex_thread_lane(ctx, req, name, cwd).await,
+            Ok(false) => thread_spawn_refusal(
+                ctx,
+                req,
+                name,
+                provider,
+                &format!(
+                    "thread spawn refused: harness {provider} hosts its own detached thread \
+                     client, so the daemon has no thread to hold for it. Spawn it through the \
+                     client-side detached lane (`fno agents spawn --substrate thread`)."
+                ),
+            ),
+            Err(error) => thread_spawn_refusal(
+                ctx,
+                req,
+                name,
+                provider,
+                &format!("thread spawn refused: {error}"),
+            ),
+        },
+        Ok("keeper") => thread_spawn_refusal(
+            ctx,
+            req,
+            name,
+            provider,
+            &format!(
+                "thread spawn refused: harness {provider} is a keeper-lane harness; fno's \
+                 keeper process holds the pty for its thread. Spawn it through the fno CLI's \
+                 keeper entry point, not the daemon."
+            ),
+        ),
+        Ok(_) => thread_spawn_refusal(
+            ctx,
+            req,
+            name,
+            provider,
+            &format!(
+                "thread spawn refused: harness {provider} declares no interactive resume \
+                 form, so no thread lane exists for it"
+            ),
+        ),
+        Err(error) => thread_spawn_refusal(
+            ctx,
+            req,
+            name,
+            provider,
+            &format!("thread spawn refused: {error}"),
+        ),
+    }
+}
+
+fn thread_spawn_refusal(
+    ctx: &Ctx,
+    req: &Request,
+    name: &str,
+    provider: &str,
+    reason: &str,
+) -> Response {
+    let _ = ctx.emitter.emit(
+        "agent_spawn_failed",
+        &json!({
+            "name": name,
+            "provider": provider,
+            "substrate": "thread",
+            "reason": reason,
+        }),
+    );
+    Response::err(req.id, ErrorCode::InvalidParams, reason)
 }
 
 // ---------------------------------------------------------------------------
@@ -4564,7 +4665,9 @@ fn build_codex_thread_entry(
 
 /// Start and register one Codex app-server thread. The seed turn is detached
 /// after registration so spawn returns a live row immediately while the held
-/// process remains available for later `ask` calls.
+/// process remains available for later `ask` calls. Reached by the derived
+/// route in [`route_thread_spawn`]: the only attach-with-server destination
+/// built, which is why it keeps its honest codex name.
 async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Path) -> Response {
     let model = req.params.get("model").and_then(Value::as_str);
     let yolo = req
@@ -18765,6 +18868,136 @@ done
             _ => panic!("expected error response for unknown provider"),
         }
         std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// The attach lane WITHOUT a harness-owned server (claude) must refuse
+    /// with the client-side-lane pointer, never reach the codex app-server
+    /// lane: `thread_lane` answers "attach" for claude too, so a bare lane
+    /// test would hand a claude thread spawn to codex's app-server.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_spawn_thread_attach_without_server_refuses_with_client_pointer() {
+        let home = tmp_home("spawn-thread-attach-client");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({"name": "test-agent", "provider": "claude", "substrate": "thread"}),
+        );
+        let resp = handle_spawn(&ctx, &req).await;
+        match &resp.payload {
+            crate::protocol::ResponsePayload::Err(e) => {
+                assert_eq!(e.code, ErrorCode::InvalidParams);
+                assert!(
+                    e.message.contains("--substrate thread"),
+                    "attach-without-server must point at the client-side lane; got: {}",
+                    e.message
+                );
+                assert!(
+                    !e.message.contains("retired at G4"),
+                    "this refusal is a lane split, not PTY retirement; got: {}",
+                    e.message
+                );
+            }
+            _ => panic!("expected refusal for an attach lane without a server"),
+        }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// A keeper-lane harness (agy) refuses naming fno's keeper process; the
+    /// text carries no mux pointer and no daemon-PTY retirement claim.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_spawn_thread_keeper_lane_refuses_naming_keeper() {
+        let home = tmp_home("spawn-thread-keeper");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({"name": "test-agent", "provider": "agy", "substrate": "thread"}),
+        );
+        let resp = handle_spawn(&ctx, &req).await;
+        match &resp.payload {
+            crate::protocol::ResponsePayload::Err(e) => {
+                assert_eq!(e.code, ErrorCode::InvalidParams);
+                assert!(
+                    e.message.contains("keeper"),
+                    "keeper-lane refusal must name the keeper process; got: {}",
+                    e.message
+                );
+                assert!(
+                    !e.message.contains("mux"),
+                    "keeper-lane refusal is not a PTY-retirement pointer; got: {}",
+                    e.message
+                );
+                assert!(
+                    !e.message.contains("retired at G4"),
+                    "keeper-lane refusal must not recycle the G4 message; got: {}",
+                    e.message
+                );
+            }
+            _ => panic!("expected refusal for a keeper-lane harness"),
+        }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// An unknown harness on the thread substrate refuses via the contract
+    /// error rather than routing to any lane.
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_spawn_thread_unknown_harness_refuses() {
+        let home = tmp_home("spawn-thread-unknown");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({"name": "test-agent", "provider": "nonexistent-provider", "substrate": "thread"}),
+        );
+        let resp = handle_spawn(&ctx, &req).await;
+        match &resp.payload {
+            crate::protocol::ResponsePayload::Err(e) => {
+                assert_eq!(
+                    e.code,
+                    ErrorCode::InvalidParams,
+                    "unknown harness on the thread substrate must refuse"
+                );
+                assert!(
+                    e.message.contains("unknown harness"),
+                    "refusal must carry the contract error; got: {}",
+                    e.message
+                );
+            }
+            _ => panic!("expected refusal for an unknown harness"),
+        }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// The thread route's provider default is `codex`, matching the client's
+    /// daemon-bound predicate: a thread spawn with no provider reaches the
+    /// app-server lane, never a refusal (green gate, mute worker - the
+    /// defaults-must-match note in client.rs run()).
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_spawn_thread_absent_provider_defaults_to_codex_lane() {
+        with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
+            let home = tmp_home("spawn-thread-default-provider");
+            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+            let worktree = home.root().join("worktree");
+            std::fs::create_dir_all(&worktree).unwrap();
+            let req = Request::new(
+                1,
+                "agent.spawn",
+                json!({
+                    "name": "t",
+                    "substrate": "thread",
+                    "cwd": worktree.to_string_lossy(),
+                    "message": "seed turn",
+                }),
+            );
+            let resp = handle_spawn(&ctx, &req).await;
+            assert!(
+                resp.result().is_some(),
+                "absent provider must default to codex and reach the thread lane: {resp:?}"
+            );
+            std::fs::remove_dir_all(home.root()).ok();
+        })
+        .await;
     }
 
     // --- codex thread lane: actor-driven ask / stop (the x-de10 probes) ---
