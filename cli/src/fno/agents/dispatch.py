@@ -1737,6 +1737,16 @@ def _lane_b_thread_spawn(
                 f"argv: {exc}",
                 exit_code=2,
             ) from exc
+        if harness == "pi":
+            # Provider AND model, both, always: bare pi defaults to provider
+            # google (credentials_not_configured here) and `--provider
+            # openai-codex` without `--model` falls to a Bedrock model - the
+            # x-c198 trap. The pane lane's build_pane_argv has always appended
+            # this pair; the keeper hosts the same TUI and needs the same
+            # completion or the thread comes up unable to answer a prompt.
+            from fno.agents.harnesses.pi import pi_model, pi_provider
+
+            argv = [*argv, "--provider", pi_provider(), "--model", pi_model()]
 
         sock = _lane_b_keeper_socket(name)
         log_path = paths.state_dir() / "agents" / name / "keeper.log"
@@ -4038,6 +4048,106 @@ _PID_STOP_GRACE_S = 5.0
 _PID_STOP_POLL_S = 0.1
 
 
+def _stop_keeper_thread(
+    name: str, existing: AgentEntry, sock: str, grace_s: float = 10.0
+) -> StopResult:
+    """Stop a lane-B keeper-hosted thread over its own socket.
+
+    The PR 1332 review finding: a lane-B row's empty ``short_id`` has no
+    worker JSON-RPC socket, so the generic stop arms either no-op'd (daemon)
+    or refused (here), and a forced ``rm`` probed ``worker_sock("")`` - a
+    socket the keeper does not own - and orphaned keeper and child. The row's
+    ``messaging_socket_path`` under ``mux/threads/`` IS the transport: one
+    Kill frame (the pane_keeper protocol, mirrored from ``_keeper_identify``)
+    and the row goes terminal only after the socket is confirmed unreachable.
+    A keeper that never confirms leaves the row non-terminal and raises.
+    """
+    import socket as _socket
+
+    sock_path = Path(sock)
+
+    def _reachable() -> bool:
+        probe = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        probe.settimeout(1.0)
+        try:
+            probe.connect(sock)
+            return True
+        except OSError:
+            return False
+        finally:
+            probe.close()
+
+    if _reachable():
+        try:
+            with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as conn:
+                conn.settimeout(5.0)
+                conn.connect(sock)
+                # Frame protocol (crates/fno-agents/src/pane_keeper.rs):
+                # u8 tag | u32 LE length | payload; Kill is tag 3, no payload.
+                conn.sendall(b"\x03" + (0).to_bytes(4, "little"))
+        except OSError as exc:
+            raise DispatchAskError(
+                f"keeper socket for {name!r} accepted no Kill frame ({sock}): {exc}",
+                exit_code=1,
+            ) from exc
+        deadline = time.monotonic() + grace_s
+        while time.monotonic() < deadline:
+            if not _reachable():
+                break
+            time.sleep(0.1)
+        else:
+            events.emit(
+                "agent_stop_refused", name=name, provider=existing.harness, backend="keeper-thread"
+            )
+            raise DispatchAskError(
+                f"keeper for {name!r} did not confirm shutdown ({sock}); "
+                "it may still be running",
+                exit_code=1,
+            )
+
+    # The keeper unlinks its own socket on a clean exit; reap the stale file a
+    # SIGKILLed keeper leaves behind, now that the listener is confirmed gone.
+    try:
+        sock_path.unlink()
+    except OSError:
+        pass
+
+    def _mark_exited(entries: list[AgentEntry]) -> list[AgentEntry]:
+        for entry in entries:
+            if entry.name == name:
+                entry.status = "exited"
+                entry.exited_at = _utc_now_iso()
+        return entries
+
+    try:
+        decline_reason: list[str] = []
+        status_written = _update_registry_if_recipient_unchanged(
+            name,
+            _recipient_identity_key(existing),
+            _mark_exited,
+            decline_reason=decline_reason,
+        )
+        if not status_written:
+            events.emit(
+                "agent_stopped_status_write_failed",
+                name=name,
+                provider=existing.harness,
+                reason=decline_reason[0] if decline_reason else "recipient_identity_changed",
+            )
+    except (OSError, RegistryVersionError):
+        events.emit("agent_stopped_status_write_failed", name=name, provider=existing.harness)
+
+    events.emit(
+        "agent_stopped",
+        name=name,
+        provider=existing.harness,
+        claude_exit=None,
+        stopped_by="keeper-thread",
+    )
+    print(f"stopped: {name} (keeper thread)", flush=True)
+    return StopResult(name=name, provider=existing.harness, claude_exit=None)
+
+
 def _stop_by_pid(name: str, existing: AgentEntry) -> StopResult:
     """Stop an agent OUT OF BAND, by signalling its recorded pid.
 
@@ -4238,6 +4348,9 @@ def stop_agent(
                 return StopResult(name=name, provider=existing.harness, claude_exit=None)
 
             if existing.harness != "claude":
+                keeper_sock = getattr(existing, "messaging_socket_path", None)
+                if keeper_sock and "mux/threads/" in keeper_sock:
+                    return _stop_keeper_thread(name, existing, keeper_sock)
                 raise DispatchAskError(
                     f"stop for harness {existing.harness!r} is not implemented",
                     exit_code=2,

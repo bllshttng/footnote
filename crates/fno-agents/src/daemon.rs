@@ -7125,6 +7125,47 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
     // return cleanly, leaving the registry UNCHANGED. Falling through to the PTY
     // path would probe the agents-root `worker.sock` (absent -> "confirmed
     // down") and then write `status = Exited`, a status Python's loader rejects,
+    // A lane-B keeper thread (x-889a): fno's own keeper hosts the child and
+    // the row's short_id is empty, so without this arm the no-op arm below
+    // reports a stop that stopped nothing (PR 1332 review finding). Kill is
+    // delivered over the row's own socket and CONFIRMED before the row goes
+    // terminal; a keeper that will not die leaves the row non-terminal.
+    if let Some(sock) = keeper_thread_sock(&entry) {
+        if !stop_keeper_confirmed(&sock).await {
+            let _ = ctx.emitter.emit(
+                "agent_stop_refused",
+                &json!({"name": name, "backend": "keeper-thread"}),
+            );
+            return Response::err(
+                req.id,
+                ErrorCode::Internal,
+                format!("agent {name}: keeper did not confirm shutdown; it may still be running"),
+            );
+        }
+        let stop_name = name.clone();
+        if let Err(error) = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
+            if let Some(entry) = registry.find_mut(&stop_name) {
+                entry.status = AgentStatus::Exited;
+                entry.exited_at = Some(now_rfc3339_like());
+            }
+        })
+        .await
+        {
+            return Response::err(
+                req.id,
+                state_error_code(&error),
+                format!("keeper thread {name} stopped but registry write failed: {error}"),
+            );
+        }
+        let _ = ctx.emitter.emit(
+            "agent_stopped",
+            &json!({"name": name, "backend": "keeper-thread"}),
+        );
+        return Response::ok(
+            req.id,
+            json!({"stopped": true, "backend": "keeper-thread"}),
+        );
+    }
     // corrupting a Python-readable registry (Codex P1, PR #364).
     if entry.short_id.is_empty() {
         let _ = ctx.emitter.emit(
@@ -7217,7 +7258,47 @@ async fn best_effort_worker_shutdown(sock: &std::path::Path) {
 /// confirmed down. A worker that never dies returns false so the caller can
 /// refuse to claim a clean stop (a swallowed failure would mark the agent exited
 /// while its PTY keeps running, Codex P1).
+/// A lane-B keeper row's own socket: `messaging_socket_path` under
+/// `mux/threads/`, the same predicate mail_inject's resolve_keeper_target_in
+/// keys on. The keeper speaks the pane_keeper frame protocol, never worker
+/// JSON-RPC, so it must not reach the `worker_sock` probe below - that probe
+/// derives `worker_sock("")` from a lane-B row's empty short_id and would
+/// confirm a stop over a socket the keeper does not own, orphaning keeper and
+/// child (PR 1332 review finding).
+fn keeper_thread_sock(entry: &RegistryEntry) -> Option<std::path::PathBuf> {
+    let path = entry.messaging_socket_path.as_deref()?;
+    path.contains("mux/threads/")
+        .then(|| std::path::PathBuf::from(path))
+}
+
+/// Stop a lane-B keeper-hosted thread: one Kill frame over the row's own
+/// socket, then the socket-unreachable confirmation every stop path answers
+/// with. Only a seated subscriber's Kill is honored (pane_keeper.rs: first
+/// come, first seated; the slot clears on disconnect), so a viewer holding
+/// the seat makes this time out and the caller refuses rather than reporting
+/// a stop it did not perform. On Kill the keeper SIGKILLs the child, unlinks
+/// its socket and exits, so "down" here covers keeper AND child.
+async fn stop_keeper_confirmed(sock: &std::path::Path) -> bool {
+    use tokio::io::AsyncWriteExt;
+    if let Ok(mut conn) = tokio::net::UnixStream::connect(sock).await {
+        let frame = crate::pane_keeper::encode(&crate::pane_keeper::Frame::Kill);
+        let _ = tokio::time::timeout(WORKER_ACK_WRITE_TIMEOUT, conn.write_all(&frame)).await;
+    }
+    let down = worker_down_within(sock, Duration::from_secs(5)).await;
+    if down {
+        // A SIGKILLed keeper cannot unlink its own socket; reap the stale
+        // file only after the listener is confirmed gone (Codex P1 rule).
+        let _ = std::fs::remove_file(sock);
+    }
+    down
+}
+
 async fn stop_worker_confirmed(ctx: &Ctx, entry: &RegistryEntry) -> bool {
+    // A lane-B keeper thread's lifecycle lives on its own socket (see
+    // `keeper_thread_sock`); delegate before any worker_sock probe.
+    if let Some(sock) = keeper_thread_sock(entry) {
+        return stop_keeper_confirmed(&sock).await;
+    }
     let sock = ctx.home.worker_sock(&entry.short_id);
     // 1. Graceful: ask the worker to tear down its PTY child + exit. Both the
     //    write (WORKER_ACK_WRITE_TIMEOUT) and the ACK read (WORKER_ACK_TIMEOUT)
@@ -15826,6 +15907,162 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 }
             })
             .unwrap()
+    }
+
+    /// A keeper that honors the Kill contract: on the Kill frame it unlinks
+    /// its socket and stops serving, the way the real keeper exits after
+    /// SIGKILLing its child (pane_keeper.rs). Parks until `stop` flips so the
+    /// test can end the thread deterministically even on refusal paths.
+    fn spawn_killable_keeper(
+        sock: &Path,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::thread::JoinHandle<()> {
+        use crate::pane_keeper::{decode, Decode, Frame};
+        use std::io::Read;
+        use std::os::unix::net::UnixListener;
+        use std::sync::atomic::Ordering::SeqCst;
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(sock).unwrap();
+        let sock_path = sock.to_path_buf();
+        std::thread::Builder::new()
+            .name("killable-keeper".into())
+            .spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                while !stop.load(SeqCst) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream.set_nonblocking(false).unwrap();
+                            let mut buf: Vec<u8> = Vec::new();
+                            let mut chunk = [0u8; 4096];
+                            loop {
+                                match decode(&buf) {
+                                    Decode::NeedMore => {}
+                                    Decode::Violation(_) => return,
+                                    Decode::Frame(frame, used) => {
+                                        buf.drain(..used);
+                                        if matches!(frame, Frame::Kill) {
+                                            // The real keeper kills the child
+                                            // here; there is no child to kill
+                                            // behind the fake.
+                                            let _ = std::fs::remove_file(&sock_path);
+                                            stop.store(true, SeqCst);
+                                            return;
+                                        }
+                                    }
+                                }
+                                match stream.read(&mut chunk) {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                                }
+                            }
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        Err(_) => return,
+                    }
+                }
+                let _ = std::fs::remove_file(&sock_path);
+            })
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn keeper_thread_stop_confirms_the_kill_and_stamps_the_row_exited() {
+        // PR 1332 review finding: a lane-B row's empty short_id fell into the
+        // no-op arm, which reported a stop that stopped nothing. The keeper
+        // arm must Kill over the row's own socket, CONFIRM the keeper went
+        // away, and only then stamp the row terminal.
+        let home = keeper_sweep_home("kpstop");
+        let sock = lane_b_keeper_dir(&home).join("wk-stop.sock");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let keeper = spawn_killable_keeper(&sock, Arc::clone(&stop));
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries
+                .push(lane_b_thread_row("wk-stop", "sess-1", "/repo", Some(555), &sock));
+        })
+        .unwrap();
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+
+        let response =
+            handle_stop(&ctx, &Request::new(1, "agent.stop", json!({"name": "wk-stop"}))).await;
+        let result = response.result().expect("stop errored");
+        assert_eq!(result["stopped"], true, "{result:?}");
+        assert_eq!(result["backend"], "keeper-thread", "{result:?}");
+
+        keeper.join().unwrap();
+        assert!(!sock.exists(), "the keeper unlinks its own socket on Kill");
+        let registry = load_registry_offloaded(home.registry_json()).await.unwrap();
+        let entry = registry.find("wk-stop").unwrap();
+        assert_eq!(entry.status, AgentStatus::Exited);
+        assert!(entry.exited_at.is_some(), "the terminal stamp carries a time");
+        assert!(read_events(&home).iter().any(|event| {
+            event.get("type").and_then(Value::as_str) == Some("agent_stopped")
+                && event
+                    .get("data")
+                    .and_then(|data| data.get("backend"))
+                    .and_then(Value::as_str)
+                    == Some("keeper-thread")
+        }));
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn keeper_thread_stop_refuses_when_the_keeper_never_confirms() {
+        // A keeper that swallows the Kill frame leaves the row non-terminal:
+        // reporting a stop over a live keeper is the zombie shape.
+        let home = keeper_sweep_home("kprefu");
+        let sock = lane_b_keeper_dir(&home).join("wk-stubborn.sock");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _keeper = spawn_silent_keeper(&sock, Arc::clone(&stop));
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries
+                .push(lane_b_thread_row("wk-stubborn", "sess-2", "/repo", Some(555), &sock));
+        })
+        .unwrap();
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+
+        let response = handle_stop(
+            &ctx,
+            &Request::new(2, "agent.stop", json!({"name": "wk-stubborn"})),
+        )
+        .await;
+        assert!(
+            response.result().is_none(),
+            "an unconfirmed keeper must error, not report a stop"
+        );
+        let registry = load_registry_offloaded(home.registry_json()).await.unwrap();
+        assert_ne!(
+            registry.find("wk-stubborn").map(|entry| entry.status),
+            Some(AgentStatus::Exited),
+            "a refused stop must not stamp the row terminal"
+        );
+        assert!(sock.exists(), "a refused stop never unlinks the socket");
+        assert!(read_events(&home).iter().any(|event| {
+            event.get("type").and_then(Value::as_str) == Some("agent_stop_refused")
+        }));
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stop_worker_confirmed_routes_a_keeper_row_to_its_own_socket() {
+        // The forced-rm orphan: a lane-B row's empty short_id derived
+        // worker_sock(""), and the probe over that absent socket confirmed a
+        // stop over a socket the keeper does not own. The delegation must
+        // Kill the row's OWN socket.
+        let home = keeper_sweep_home("kprm");
+        let sock = lane_b_keeper_dir(&home).join("wk-rm.sock");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let keeper = spawn_killable_keeper(&sock, Arc::clone(&stop));
+        let entry = lane_b_thread_row("wk-rm", "sess-3", "/repo", Some(555), &sock);
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+
+        let confirmed = stop_worker_confirmed(&ctx, &entry).await;
+        keeper.join().unwrap();
+        assert!(confirmed, "a Kill-honoring keeper confirms down");
+        assert!(!sock.exists());
+        std::fs::remove_dir_all(home.root()).ok();
     }
 
     #[test]
