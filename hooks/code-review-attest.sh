@@ -68,6 +68,10 @@ record_review_subagent_marker() {
 reviewer_context="unknown"
 execution_context="inline"
 output_contract="json_block"
+# Set by the SubagentStop prose branch only. Initialized here with its siblings
+# because the verdict block below is shared by all three arms, and a default
+# stated once beats three arms each relying on `${unparseable:-}` meaning no.
+unparseable=0
 case "$event" in
   PostToolUse)
     tool_name="$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null || true)"
@@ -316,7 +320,7 @@ total="$(jq -r '(.findings | length) // 0' <<<"$record" 2>/dev/null || echo 0)"
 case "$blocking" in
   ''|*[!0-9]*) blocking=1 ;;  # an unreadable count is not zero findings
 esac
-if [[ "${unparseable:-}" == "1" ]]; then
+if [[ "$unparseable" == "1" ]]; then
   # An unreadable answer is never a pass. The `[]` payload above classifies to
   # zero blocking findings, so without this arm the count would derive `pass`
   # and the row would clear the very coverage it exists to withhold.
@@ -328,7 +332,7 @@ else
 fi
 # The one positive line naming what was classified: a run where the
 # classifier never fired is visibly different from one that classified zero.
-if [[ "${unparseable:-}" == "1" ]]; then
+if [[ "$unparseable" == "1" ]]; then
   echo "code-review-attest: review output was not machine-readable (no json fence, not \"(none)\"); attesting verdict=fail output_contract=prose_unparseable; reviewed head $reviewed_head"
 else
   echo "code-review-attest: classified $total finding(s): $blocking blocking, $nonblocking non-blocking; reviewed head $reviewed_head; findings held"

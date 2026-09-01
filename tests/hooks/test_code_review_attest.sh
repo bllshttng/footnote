@@ -14,16 +14,22 @@
 #   - a fork ending in a fenced json block, WITH the header
 #   - a fork ending in a fenced json block, NO header
 #   - a fork whose entire final text is the literal "(none)"
-# plus the negative half, which matters more: every non-review and every
-# unrecognized shape must emit nothing AND never call the classifier, so the
-# gate holds rather than clearing on evidence that never arrived.
+# plus the negative half, which matters more: every NON-REVIEW shape must emit
+# nothing AND never call the classifier, so the gate holds rather than clearing
+# on evidence that never arrived.
 #
-# One live specimen is deliberately in the NEGATIVE half: a real fork ended
-# with the marker, a blank line, then a sentence naming the file it skipped.
-# A review that excluded the only file in the diff read nothing, so its text
-# appears below as the byte-exact fixture of a must-stay-silent case. The
-# bare-marker protocol shape is the positive; the marker plus trailing prose
-# is not.
+# Since x-c446 the negative half has two floors, not one, and the difference is
+# what the row is allowed to CLAIM. A payload that is not a review at all still
+# emits nothing. A payload that IS a review whose answer nobody can parse emits
+# verdict=fail with output_contract=prose_unparseable. Silence there made a
+# review that found real bugs byte-identical at the gate to a review that never
+# ran. A fail row counts the round and clears nothing, so the gate still holds.
+#
+# One live specimen sits in that second floor: a real fork ended with the
+# marker, a blank line, then a sentence naming the file it skipped. A review
+# that excluded the only file in the diff read nothing. Its text appears below
+# as the byte-exact fixture of a must-not-read-as-clean case. The bare-marker
+# protocol shape is the clean positive; the marker plus trailing prose is not.
 #
 # The hook is driven with FNO pointed at a stub that records `doctor event
 # emit` argv AND serves `do review classify` through the REAL classifier from
@@ -388,7 +394,7 @@ expect_silent "codex-stop-prose-without-structured-review"
 
 # --- THE VERDICT CORPUS (tests/hooks/fixtures/code-review-attest) ----------
 # One byte-exact file per measured final-text shape, the ruled verdict encoded
-# in the filename suffix (.attest / .silent). The walker below drives the hook
+# in the filename suffix (.attest / .unparseable / .silent). The walker drives
 # over every file, so the suite is pinned to the MEASURED PAYLOADS rather than
 # to the predicate: flipping the hook's rule without re-measuring the corpus
 # goes red here (the negative control: flip the rule, watch this walk go red,
