@@ -49,7 +49,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, NamedTuple, Optional, Tuple
 
 from fno.pr import _merge
 
@@ -657,7 +657,6 @@ def _ordinary_verdict(
     disposition_text, disposition_note, disposition_named, disposition_hard = (
         disposition_refusal(chain, cov, cwd)
     )
-    max_rounds = resolved_max_rounds(cwd)
     # The budget counts BOTH evidence axes: a GitHub-App reviewer's rounds
     # leave no attestation row, so the chain alone reads zero on exactly the
     # lane that spins. The reviews read is paid only where it can change the
@@ -668,7 +667,10 @@ def _ordinary_verdict(
         reviews_payload, reviews_unread = _pr_reviews(pr_number, cwd)
     else:
         reviews_payload, reviews_unread = None, ""
-    rounds = rounds_since_last_pass(chain, reviews=reviews_payload)
+    # The one cap computation (the same helper the status surface and the
+    # producer's obligation read), so no surface restates the axis split.
+    cap = _cap_on_chain(chain, cov, cwd, reviews=reviews_payload)
+    rounds, max_rounds = cap.rounds_used, cap.max_rounds
     # A failed reviews read still says so. The budget keeps its answer either
     # way (a cap that fired on a broken read would waive a remainder it may not
     # have spent), but a zero an instrument never contributed to must not read
@@ -683,15 +685,21 @@ def _ordinary_verdict(
     # verdict.
     filed_note = ""
     cap_filed = False
-    if disposition_named and rounds >= max_rounds:
-        if disposition_hard:
-            return (
-                IMPOSSIBLE,
-                _impossible_refusal(rounds, max_rounds, ", ".join(disposition_hard)),
-                "",
-                "",
-                (head, disposition_hard),
-            )
+    if cap.impossible:
+        return (
+            IMPOSSIBLE,
+            _impossible_refusal(rounds, max_rounds, ", ".join(disposition_hard)),
+            "",
+            "",
+            (head, disposition_hard),
+        )
+    if disposition_named and not disposition_hard and rounds >= max_rounds:
+        # The `not disposition_hard` is load-bearing: reaching the cap with a
+        # hard finding while `cap.impossible` did not fire means the events
+        # axis still has rounds while the bot axis spent the budget, and the
+        # ordinary disposition refusal below is then the answer - a local
+        # attestation carrying a `fixed` disposition still clears it. A hard
+        # finding is never filed away by the cap.
         # The operator's ruling on the cap: the PR merges with its remaining
         # findings FILED as nodes, never dropped. The class gate is what makes
         # this safe - nothing here is a confirmed correctness or security
@@ -1375,6 +1383,79 @@ def rounds_since_last_pass(
             continue
         counted.add(oid)
     return max(events_rounds, len(counted))
+
+
+class CapVerdict(NamedTuple):
+    """The round-cap verdict as data, never a refusal string.
+
+    One computation shared by the merge gate (``_ordinary_verdict``), the
+    status surface's ``ready`` conjunct and the attestation producer's
+    disposition obligation, so no caller restates the cap. A caller that
+    needs the sentence builds it from these fields; the fields are the
+    answer of record.
+    """
+
+    #: Rounds spent AND a HARD finding still non-terminal on the events
+    #: axis, the only axis whose rounds can carry a disposition.
+    impossible: bool
+    #: max(events, reviews) when a reviews payload was supplied, else the
+    #: events axis alone.
+    rounds_used: int
+    max_rounds: int
+    #: The CONFIRMED correctness/security finding keys keeping IMPOSSIBLE.
+    hard_keys: list
+    #: Every non-terminal or uncorroborated blocking finding key.
+    nonterminal_keys: list
+
+
+def cap_verdict(
+    cwd: str,
+    head: str,
+    head_branch: str,
+    cov: Optional[dict],
+    reviews: Optional[list[dict]] = None,
+) -> CapVerdict:
+    """The cap over the PR's own attestation chain, re-derived live.
+
+    A pure re-derivation - the chain read, the disposition pass, one config
+    read - that makes zero ``gh`` calls, so a read-only surface can ask the
+    cap question without paying for the reviews axis. An empty
+    ``head_branch`` is the caller saying it cannot scope the chain; pass
+    ``head`` alone would narrow the chain to the current round's exact-head
+    rows and read as an acquittal, so a caller without a branch must not
+    call this and treat the answer as coverage. With ``reviews=None`` the
+    ``rounds_used`` field is a FLOOR: a GitHub-App reviewer's rounds leave
+    no attestation row, so a bot-heavy PR under-reports here and ``fno do
+    pr merge``, which pays the reviews read for its budget, may refuse on
+    rounds this answer never saw.
+    """
+    chain = attestation_chain(cwd, head_branch=head_branch, head=head)
+    return _cap_on_chain(chain, cov, cwd, reviews=reviews)
+
+
+def _cap_on_chain(
+    chain: list[dict],
+    cov: Optional[dict],
+    cwd: str,
+    reviews: Optional[list[dict]] = None,
+) -> CapVerdict:
+    """The cap policy over one chain: the ONE site the two axes split.
+
+    ``rounds_used`` reports ``max(events, reviews)`` - a bot round IS a
+    round and the ordinary budget keeps counting it. The ``impossible``
+    conjunct reads the EVENTS axis alone: only an attestation can carry the
+    ``fixed`` disposition that clears a hard finding, so a chain with local
+    rounds left is never impossible, whatever the bot axis spent. Reading
+    the conjunct off the shared budget let bot rounds manufacture a state
+    whose named remedies are all operator levers while the unspent capacity
+    was local.
+    """
+    _text, _note, named, hard = disposition_refusal(chain, cov, cwd)
+    max_rounds = resolved_max_rounds(cwd)
+    rounds = rounds_since_last_pass(chain, reviews=reviews)
+    events_rounds = rounds_since_last_pass(chain)
+    impossible = bool(hard) and events_rounds >= max_rounds
+    return CapVerdict(impossible, rounds, max_rounds, hard, named)
 
 
 def _pr_reviews(pr_number: int, cwd: str) -> Tuple[Optional[list[dict]], str]:
