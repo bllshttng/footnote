@@ -23,7 +23,7 @@ What each harness fundamentally is, from fno's point of view:
 | Read-only observation (`peek`, `logs`) | yes | yes | yes | yes | yes | yes | yes (pane read) |
 | Loop participation (`loop_participation`) | `native`. `hooks.json` declares a `Stop` group that runs `target-stop-hook.sh`. | `native`. `codex-hooks.json` declares the same `Stop` adapter. | `none`. Nothing wires a gemini stop boundary. The only gemini hook fno installs is SessionStart. A looping dispatch is refused. | `native`. `agy-target-stop-hook.sh` translates agy's wire format over the same `loop-check`, registered as a `Stop` handler by `fno config setup`. | `extension`. opencode has no shell hook and no exit veto. The loop closes through the JS plugin fno installs, which subscribes to `session.idle` and shells the same `loop-check`. | `extension`, with no artifact yet. pi ships no shell hook surface at all; its extension points are in-process TypeScript extensions. `pi.on("agent_settled")` is the right boundary and fno has not written that extension, so a looping dispatch is refused. | `none`. No capability row, no stop boundary. A looping dispatch is refused. |
 
-The pane substrate (the default) is the great equalizer: all six declared harnesses can be spawned as a mux-hosted interactive PTY pane, and through the undeclared lane so can any other binary on PATH. Everything asymmetric lives in the detached lanes. pi is pane-only today, so the pane IS its lane.
+The pane substrate (the default) is the great equalizer: all six declared harnesses can be spawned as a mux-hosted interactive PTY pane. Through the undeclared lane, so can any other binary on PATH. Everything asymmetric lives in the detached lanes. pi is pane-only today, so the pane IS its lane.
 
 ## The undeclared lane
 
