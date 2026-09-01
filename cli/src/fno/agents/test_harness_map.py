@@ -363,8 +363,11 @@ def test_undeclared_posture_answers_declared_false_without_reading_any_row(
         assert posture["submit_keys"] == ["enter"], name
         assert posture["send_keys_enter_delay_ms"] == 0, name
         assert "poisoned" not in posture, "the posture read a declared row"
-    # A declared harness still gets its own row through the same reader.
-    assert hm.capabilities_or_undeclared("claude")["poisoned"] is True
+    # A declared harness still gets its own row through the same reader, and
+    # the declared key is present on BOTH answers - callers branch on it.
+    declared = hm.capabilities_or_undeclared("claude")
+    assert declared["poisoned"] is True
+    assert declared["declared"] is True
     # The module-level dict is frozen: the returned copy shields it.
     got = hm.capabilities_or_undeclared("openclaw")
     got["declared"] = True

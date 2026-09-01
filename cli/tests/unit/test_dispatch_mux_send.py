@@ -280,6 +280,33 @@ def test_an_unrunnable_detector_refuses_rather_than_typing_blind(monkeypatch, ca
     assert "refusing to type blind" in err
 
 
+def test_an_undeclared_harness_sends_ungated_and_never_asks_the_detector(
+    monkeypatch, capsys
+):
+    """x-f579: an undeclared harness has no manifest, so the detector can never
+    run for it. Mail by pane-send is what the lane GIVES (the spawn receipt
+    names it), so the gate skips WITH a note instead of refusing the harness's
+    only delivery mechanism. The detector must never even be asked."""
+    entry = _entry()
+    entry.harness = "nanoclaw"
+    calls: list[dict] = []
+    monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls, screen="ready"))
+    monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
+    detector_calls: list[str] = []
+    _detector(
+        monkeypatch,
+        detector_calls,
+        {"matched": False, "error": "unknown harness: no bundled readiness manifest"},
+    )
+
+    assert dispatch._mux_pane_send(entry, "hello", guarded=False) is True
+    assert "send" in _verbs(calls), "the lane's one delivery path must run"
+    assert detector_calls == [], "no manifest exists; the detector cannot be asked"
+    err = capsys.readouterr().err
+    assert "undeclared harness 'nanoclaw'" in err
+    assert "not prompt-gated" in err
+
+
 def test_an_oserror_reading_the_pane_refuses_instead_of_raising(monkeypatch, capsys):
     """A frame read can fail with an OSError the mux helper does not translate.
 

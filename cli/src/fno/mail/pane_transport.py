@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -259,6 +260,21 @@ def prompt_refusal(
     )
     if identity_refusal:
         return identity_refusal
+    from fno.agents.harness_map import capabilities_or_undeclared
+
+    if not capabilities_or_undeclared(harness)["declared"]:
+        # x-f579: an undeclared harness has NO manifest to evaluate, by
+        # definition, so the detector cannot run for it ever. The undeclared
+        # lane's contract gives mail by pane-send anyway (submit_keys=enter,
+        # the visible-failure default the spawn receipt names), so the gate
+        # skips WITH a note rather than refusing the only delivery mechanism
+        # this harness has. Every declared harness keeps the full gate.
+        print(
+            f"note: pane {pane_id} hosts undeclared harness {harness!r}; no "
+            "prompt model exists for it, so this send is not prompt-gated",
+            file=sys.stderr,
+        )
+        return None
     if receipt_text is None:
         try:
             frame = _run_mux(

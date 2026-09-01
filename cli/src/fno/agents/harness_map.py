@@ -601,9 +601,15 @@ def capabilities_or_undeclared(harness: str) -> dict:
     because a caller that needs a measured value must not receive a guess.
     Only the pane lane - the lane whose whole contract is "fno is the
     viewport" - reads this one, and it branches on the ``declared`` key
-    rather than assuming."""
+    rather than assuming. The key is present on EVERY answer (a declared row
+    gets a copy stamped ``declared: True``); a caller must never reach for
+    ``capabilities()`` to learn which kind it holds."""
     caps = _HARNESS_CAPS.get(harness)
-    return dict(UNDECLARED_POSTURE) if caps is None else caps
+    if caps is None:
+        return dict(UNDECLARED_POSTURE)
+    row = dict(caps)
+    row["declared"] = True
+    return row
 
 
 def render_session_argv(
