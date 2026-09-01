@@ -4,7 +4,7 @@ A thread is fno's own persistent session lane: fno can put a worker on a live se
 
 ## The selector
 
-Threadability is derived, never named. The selector is one field in the packaged capability contract, `cli/src/fno/agents/harness_capabilities.toml`: `resume_strategy.forms`. Both runtimes resolve the lane from it with the same three branches, and neither resolver contains a harness name, so a new harness row lands in its lane with no code edit.
+Threadability is derived, never named. The selector is one field in the packaged capability contract, `cli/src/fno/agents/harness_capabilities.toml`: `resume_strategy.forms`. Both runtimes resolve the lane from it with the same three branches. Neither resolver contains a harness name, so a new row lands in its lane with no code edit.
 
 - `interactive_attach` declares a form: the lane is `attach`.
 - Otherwise `interactive_resume` declares a form: the lane is `keeper`.
@@ -31,4 +31,4 @@ The resolvers are `thread_lane` in `cli/src/fno/agents/harness_map.py` and `Harn
 
 ## The gate rule
 
-A `thread` row flips to true only in the same commit as a passing unattended restart journey: a dispatched worker that resumes into a fresh session, completes its task, and stops on its own. Flipping the row early converts an honest refusal into a spawn that accepts the dispatch and then fails at launch, which is the worse failure mode. Until that commit lands, a false row records an fno backlog item. It never records a harness verdict.
+A `thread` row flips to true only in the same commit as a passing unattended restart journey. The journey is a dispatched worker that resumes into a fresh session, completes its task, and stops on its own. Flip the row early and the honest refusal becomes a spawn that accepts and then fails at launch. Until that commit lands, a false row records an fno backlog item. It never records a harness verdict.
