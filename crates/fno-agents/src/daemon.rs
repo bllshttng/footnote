@@ -3986,7 +3986,7 @@ async fn route_thread_spawn(
     };
     match contract.thread_lane(provider) {
         Ok("attach") => match contract.attach_needs_server(provider) {
-            Ok(true) => spawn_codex_thread_lane(ctx, req, name, cwd).await,
+            Ok(true) => spawn_codex_thread_lane(ctx, req, name, cwd, provider).await,
             Ok(false) => thread_spawn_refusal(
                 ctx,
                 req,
@@ -4667,8 +4667,32 @@ fn build_codex_thread_entry(
 /// after registration so spawn returns a live row immediately while the held
 /// process remains available for later `ask` calls. Reached by the derived
 /// route in [`route_thread_spawn`]: the only attach-with-server destination
-/// built, which is why it keeps its honest codex name.
-async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Path) -> Response {
+/// built, which is why it keeps its honest codex name. That name is also the
+/// precondition: the body drives CodexThread, so a provider it cannot serve
+/// refuses here rather than silently starting a codex thread under the
+/// caller's name. The guard is the destination's own (the route stays
+/// name-free), and it is what a SECOND attach-with-server row meets until
+/// its destination is wired.
+async fn spawn_codex_thread_lane(
+    ctx: &Ctx,
+    req: &Request,
+    name: &str,
+    cwd: &Path,
+    provider: &str,
+) -> Response {
+    if provider != "codex" {
+        return thread_spawn_refusal(
+            ctx,
+            req,
+            name,
+            provider,
+            &format!(
+                "thread spawn refused: the only attach-with-server destination built drives \
+                 the codex app-server; harness {provider} needs its own thread destination \
+                 wired before its spawn can be served"
+            ),
+        );
+    }
     let model = req.params.get("model").and_then(Value::as_str);
     let yolo = req
         .params
@@ -18965,6 +18989,36 @@ done
                 );
             }
             _ => panic!("expected refusal for an unknown harness"),
+        }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// The destination's own precondition: a provider the codex lane cannot
+    /// serve refuses loudly instead of silently starting a codex thread under
+    /// the caller's name. Pinned by calling the lane directly, because no
+    /// packaged row today answers attach-with-server except codex - this is
+    /// the guard a SECOND such row meets until its destination is wired.
+    #[tokio::test(flavor = "current_thread")]
+    async fn codex_thread_lane_refuses_a_provider_it_cannot_serve() {
+        let home = tmp_home("codex-lane-wrong-provider");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({"name": "test-agent", "provider": "claude", "substrate": "thread"}),
+        );
+        let resp =
+            spawn_codex_thread_lane(&ctx, &req, "test-agent", Path::new("/tmp"), "claude").await;
+        match &resp.payload {
+            crate::protocol::ResponsePayload::Err(e) => {
+                assert_eq!(e.code, ErrorCode::InvalidParams);
+                assert!(
+                    e.message.contains("needs its own thread destination"),
+                    "the wrong-harness guard must name the missing destination; got: {}",
+                    e.message
+                );
+            }
+            _ => panic!("expected the codex lane to refuse a provider it cannot serve"),
         }
         std::fs::remove_dir_all(home.root()).ok();
     }
