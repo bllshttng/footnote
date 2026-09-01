@@ -15350,6 +15350,9 @@ _TRACKER_OWNED_VERBS = frozenset(
         "groom",
         # graph-row mutation (stamps deferred_kind under the lock)
         "backfill-deferred-kind",
+        # graph-state read: under an external backend the local graph is not
+        # the store, so the read must refuse with the rest
+        "stuck-epics",
         # orchestration that stamps nodes
         "advance",
         "reconcile",
@@ -15431,7 +15434,6 @@ _FOOTNOTE_OWNED_VERBS = frozenset(
         "batch status",
         "batch metrics",
         # read-only operators' surface over the graph store
-        "stuck-epics",
         # graph-store integrity check (read-only)
         "collisions check",
     }
