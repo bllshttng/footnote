@@ -189,15 +189,22 @@ mod tests {
         removal.removed_by = Some("fno-agents-daemon".into());
         let removal_json: serde_json::Value = serde_json::to_value(&removal).unwrap();
         assert_eq!(
-            removal_json["removed_by"],
-            "fno-agents-daemon",
+            removal_json["removed_by"], "fno-agents-daemon",
             "a non-reap removal says who took the row"
         );
         // Every other key is identical between the two shapes.
-        let mut reap_keys: Vec<&str> =
-            reap_json.as_object().unwrap().keys().map(|k| k.as_str()).collect();
-        let mut removal_keys: Vec<&str> =
-            removal_json.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        let mut reap_keys: Vec<&str> = reap_json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        let mut removal_keys: Vec<&str> = removal_json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
         reap_keys.sort_unstable();
         removal_keys.sort_unstable();
         let mut expected = reap_keys.clone();

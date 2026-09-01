@@ -3343,7 +3343,9 @@ mod tests {
         assert_eq!(event["data"]["receipt_staged"], true);
         assert_eq!(event["data"]["pid"], std::process::id());
         assert!(
-            event["data"]["remover"].as_str().is_some_and(|s| !s.is_empty()),
+            event["data"]["remover"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
             "the remover is named, not blank: {event}"
         );
 
@@ -3411,7 +3413,9 @@ mod tests {
         assert_eq!(event["data"]["name"], "identity-less");
         assert_eq!(event["data"]["receipt_staged"], false);
         assert!(
-            event["data"]["reason"].as_str().is_some_and(|s| !s.is_empty()),
+            event["data"]["reason"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
             "the announce carries the receipt-build failure: {event}"
         );
         assert!(

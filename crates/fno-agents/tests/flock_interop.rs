@@ -257,7 +257,10 @@ print("APPENDED")
     );
     assert!(reg.entries.iter().any(|e| e.name == "python-appended"));
     assert_eq!(
-        reg.entries.iter().filter(|e| e.name.starts_with("row-")).count(),
+        reg.entries
+            .iter()
+            .filter(|e| e.name.starts_with("row-"))
+            .count(),
         29,
         "the daemon's rows were not dropped by the interleaved write"
     );

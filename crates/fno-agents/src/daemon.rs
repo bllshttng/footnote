@@ -17,12 +17,12 @@ use crate::events::EventEmitter;
 // point (`state::update_registry`) can stage the same recovery record for a
 // row removed through ANY door; re-exported so the reap path's references
 // are unchanged.
-pub use crate::receipt::{build_reap_receipt, write_reap_receipt, ReapReceipt};
 use crate::identity::canonical_handle;
 use crate::paths::{self, AgentsHome};
 use crate::protocol::{
     read_request, write_request, write_response, ErrorCode, Namespace, Request, Response,
 };
+pub use crate::receipt::{build_reap_receipt, write_reap_receipt, ReapReceipt};
 use crate::state::{self, RegistryEntry};
 use crate::AgentStatus;
 use serde_json::{json, Map, Value};

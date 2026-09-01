@@ -1046,11 +1046,7 @@ fn a_future_schema_registry_is_refused_not_dropped_on_restart() {
     // The sweep reads the store, computes changes, then refuses the write.
     // The meta-event substitution still names the intended kind, so the
     // substring matches either the plain or the capped form.
-    wait_for_event(
-        &home,
-        "startup_reconcile_failed",
-        Duration::from_secs(30),
-    );
+    wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
     drop(child);
 
     assert_eq!(
