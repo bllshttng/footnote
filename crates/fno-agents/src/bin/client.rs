@@ -1521,8 +1521,11 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
 fn bg_substrate_refusal(harness: &str) -> String {
     use fno_agents::claude_ask::py_repr;
 
+    // Name `thread`, not the `bg` selector this match arm is keyed on. `bg` is
+    // the deprecated alias, so a user who typed `--substrate thread` was being
+    // refused in a vocabulary they did not use and are being moved off.
     let head = format!(
-        "substrate 'bg' (detached interactive thread) is unavailable on harness {}",
+        "substrate 'thread' (detached interactive session) is unavailable on harness {}",
         py_repr(harness)
     );
     let tail = "use --substrate headless for a one-shot";
