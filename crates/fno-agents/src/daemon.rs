@@ -835,11 +835,11 @@ const WORKTREE_SWEEP_INTERVAL_SECS: u64 = 86_400;
 const STALE_SWEEP_INTERVAL_SECS: i64 = 21_600;
 
 /// One fleet's stale-sweep reading, parsed from the verb's `Summary:` line.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaleSweepReport {
     pub stale: usize,
     pub oldest_h: i64,
-    pub asked: bool,
+    pub outcome: String,
 }
 
 /// Parse `fno agents stale-escalate --json`'s summary line.
@@ -847,7 +847,10 @@ pub struct StaleSweepReport {
 /// Returns `None` rather than a zeroed report when the line is absent. A sweep
 /// that could not read its own output must not report "0 stale, not asked",
 /// which is indistinguishable from a clean machine: an absence has two
-/// explanations and a count must only ever come from a real reading.
+/// explanations and a count must only ever come from a real reading. The
+/// outcome word rides along because on the refused path the count is NOT a
+/// real reading - the event must be able to say so rather than fabricate a
+/// measured zero.
 pub fn parse_stale_sweep(stdout: &str) -> Option<StaleSweepReport> {
     let line = stdout
         .lines()
@@ -857,7 +860,11 @@ pub fn parse_stale_sweep(stdout: &str) -> Option<StaleSweepReport> {
         line[..idx].split_whitespace().last()?.parse().ok()
     };
     let stale = num_before(" stale,")?;
-    let asked = line.contains("outcome asked");
+    let outcome_idx = line.find("outcome ")? + "outcome ".len();
+    let outcome: String = line[outcome_idx..]
+        .split(|c: char| c == ',' || c == ' ')
+        .next()?
+        .to_string();
     let oldest_h = line
         .find(" oldest ")
         .and_then(|i| {
@@ -870,7 +877,7 @@ pub fn parse_stale_sweep(stdout: &str) -> Option<StaleSweepReport> {
     Some(StaleSweepReport {
         stale,
         oldest_h,
-        asked,
+        outcome,
     })
 }
 
@@ -908,7 +915,7 @@ pub fn stale_sweep(
                 &json!({
                     "stale_count": r.stale,
                     "oldest_h": r.oldest_h,
-                    "asked": r.asked,
+                    "outcome": r.outcome,
                 }),
             );
             1
@@ -11657,7 +11664,17 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let r = parse_stale_sweep(line).expect("parses");
         assert_eq!(r.stale, 12);
         assert_eq!(r.oldest_h, 1829);
-        assert!(r.asked);
+        assert_eq!(r.outcome, "asked");
+    }
+
+    #[test]
+    fn stale_summary_carries_the_refused_outcome_word() {
+        // On the refused path the count is NOT a real reading, so the event
+        // must carry the word that says so instead of a fabricated zero.
+        let line = "Summary: 0 stale, outcome refused, oldest 0h\n";
+        let r = parse_stale_sweep(line).expect("parses");
+        assert_eq!(r.stale, 0);
+        assert_eq!(r.outcome, "refused");
     }
 
     #[test]
@@ -11667,7 +11684,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let line = "Summary: 12 stale, outcome duplicate, oldest 1830h\n";
         let r = parse_stale_sweep(line).expect("parses");
         assert_eq!(r.stale, 12);
-        assert!(!r.asked);
+        assert_eq!(r.outcome, "duplicate");
     }
 
     #[test]
