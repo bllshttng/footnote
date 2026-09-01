@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+mod common;
+
 const DAEMON_BIN: &str = env!("CARGO_BIN_EXE_fno-agents-daemon");
 const WORKER_BIN: &str = env!("CARGO_BIN_EXE_fno-agents-worker");
 const CLIENT_BIN: &str = env!("CARGO_BIN_EXE_fno-agents");
@@ -989,6 +991,80 @@ fn last_event_of(home: &AgentsHome, kind: &str) -> Option<serde_json::Value> {
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter(|v| v["type"] == kind)
         .next_back()
+}
+
+/// The x-a879 repro (change 4): a real daemon restart over a real-shaped
+/// registry, never a constructed summary. The seeded home is a fresh /tmp
+/// tree; the live `~/.fno/agents` is never touched.
+#[test]
+fn a_daemon_restart_over_a_loss_shaped_registry_loses_no_rows() {
+    use common::{seed_loss_shaped_registry, short_home};
+
+    let home = short_home();
+    seed_loss_shaped_registry(&home);
+
+    let child = start_daemon(&home);
+    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    drop(child);
+
+    let reg = state::load_registry(&home.registry_json()).unwrap();
+    assert_eq!(
+        reg.entries.len(),
+        29,
+        "every seeded row survives the restart"
+    );
+    let kept = reg.entries.iter().find(|e| e.name == "row-07").unwrap();
+    assert_eq!(
+        kept.harness_session_id.as_deref(),
+        Some("sess-0007"),
+        "a surviving row keeps its identity, not just its slot"
+    );
+    let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    assert!(
+        !events.contains("registry_row_removed"),
+        "a restart that keeps every row must announce nothing: {events}"
+    );
+}
+
+/// Change 4 acceptance 3: a row the current binary cannot represent (a
+/// future schema) is read forward, never silently dropped, and the existing
+/// write-side refusal fires instead of a degraded rewrite.
+#[test]
+fn a_future_schema_registry_is_refused_not_dropped_on_restart() {
+    use common::{loss_shaped_rows, short_home};
+
+    let home = short_home();
+    std::fs::create_dir_all(home.root()).unwrap();
+    let body = format!(
+        r#"{{"schema_version":{},"agents":[{}]}}"#,
+        state::REGISTRY_SCHEMA_VERSION + 1,
+        loss_shaped_rows().join(",")
+    );
+    std::fs::write(home.registry_json(), &body).unwrap();
+
+    let child = start_daemon(&home);
+    // The sweep reads the store, computes changes, then refuses the write.
+    // The meta-event substitution still names the intended kind, so the
+    // substring matches either the plain or the capped form.
+    wait_for_event(
+        &home,
+        "startup_reconcile_failed",
+        Duration::from_secs(30),
+    );
+    drop(child);
+
+    assert_eq!(
+        std::fs::read_to_string(home.registry_json()).unwrap(),
+        body,
+        "a future-schema store must not be rewritten behind the reader"
+    );
+    let reg = state::load_registry(&home.registry_json()).unwrap();
+    assert_eq!(reg.entries.len(), 29, "no row is silently dropped");
+    let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    assert!(
+        !events.contains("registry_row_removed"),
+        "a refusal keeps every row, so nothing is announced: {events}"
+    );
 }
 
 #[test]
