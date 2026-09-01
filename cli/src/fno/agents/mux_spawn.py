@@ -2905,9 +2905,12 @@ def _await_interactive_readiness(
         )
         if trust_refusal:
             return "failed", trust_refusal
-    from fno.agents.harness_map import capabilities
+    from fno.agents.harness_map import capabilities_or_undeclared
 
-    expected = capabilities(provider)["ready_marker"]
+    # x-f579: the readiness probe reads the posture, so an undeclared harness
+    # takes the "no pinned ready marker" arm one line below (live) instead of
+    # raising. A pinned marker is a measurement; an unmeasured harness has none.
+    expected = capabilities_or_undeclared(provider)["ready_marker"]
     if expected == "unsupported":
         return "live", f"harness {provider!r} has no pinned ready marker"
     osc_title = _pane_osc_title(session, pane_id, runner)

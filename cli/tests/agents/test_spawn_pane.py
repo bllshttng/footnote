@@ -1600,6 +1600,33 @@ def test_undeclared_capability_flags_refused_with_dashed_advice(
     assert runner.calls == []
 
 
+def test_undeclared_pane_spawn_on_path_reaches_mux(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC1-HP: a stub binary under a rosterless name on PATH reaches the mux
+    pane run and lands a row; readiness reports live via the no-pinned-marker
+    arm (AC via 3.1) and the seed is typed after the probe (AC4-HP). The
+    receipt block and posture assertions land with 4.1's journey."""
+    _stub_harness_bin(monkeypatch, tmp_path, "nanoclaw")
+    result, runner = _spawn(monkeypatch, tmp_path, provider="nanoclaw")
+    assert result.provider == "nanoclaw"
+    assert runner.calls[0][1:4] == ["mux", "pane", "run"]
+    # Readiness: no capability row means no pinned marker, so the probe
+    # answers live rather than raising or blocking the spawn.
+    assert result.readiness == "live"
+    # AC4-HP: the seed rode in NO argv (seed_rode_in_argv is False for the
+    # generic arm), so it must have been typed and submitted after the probe.
+    from fno.agents.mux_spawn import seed_rode_in_argv
+
+    assert seed_rode_in_argv("hello", ["nanoclaw"]) is False
+    assert result.seed == "submitted"
+    assert result.status == "live"
+    from fno.agents.registry import load_registry
+
+    rows = load_registry()
+    assert [row.harness for row in rows] == ["nanoclaw"]
+
+
 def test_ac1_host_pane_gate_admits_hosted_rejects_unhosted(
     tmp_path: Path, monkeypatch
 ) -> None:

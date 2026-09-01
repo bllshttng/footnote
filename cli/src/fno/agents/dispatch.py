@@ -6984,10 +6984,14 @@ def _mux_pane_send(
     if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
         _record_failure("pre-submit")
         return False
-    from fno.agents.harness_map import capabilities
+    from fno.agents.harness_map import capabilities_or_undeclared
 
     harness = getattr(entry, "harness", "") or ""
-    input_caps = capabilities(harness)
+    # x-f579: the posture answers submit_keys=[enter] for an undeclared
+    # harness, so the pane delivery arm below runs for it unchanged. Its
+    # `["unsupported"]` refusal names harness_capabilities.toml, which stays
+    # correct for declared harnesses and unreachable for undeclared ones.
+    input_caps = capabilities_or_undeclared(harness)
     expected_name = getattr(entry, "name", None)
     expected_fno_id = (
         getattr(entry, "fno_id", None)

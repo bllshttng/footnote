@@ -421,9 +421,12 @@ def prepare(
         # harness: a bare CR does not submit every harness's composer, and
         # advice that names a form the pane cannot consume is the defect this
         # module's refusal exists not to commit.
-        from fno.agents.harness_map import capabilities
+        from fno.agents.harness_map import capabilities_or_undeclared
 
-        if capabilities(resolved).get("submit_keys") == ["unsupported"]:
+        # x-f579: the posture answers "enter" for an undeclared harness, so
+        # this stays the ordinary attribution refusal rather than a
+        # capability-table raise - mail by pane-send stays reachable.
+        if capabilities_or_undeclared(resolved).get("submit_keys") == ["unsupported"]:
             raise PaneSendRefused(
                 f"empty payload: there is nothing to attribute, and "
                 f"{resolved} has no programmable submit key. Type the payload "
