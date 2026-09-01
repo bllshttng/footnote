@@ -555,10 +555,30 @@ expect_silent_noclassify "unknown-event"
 run_hook 'not json at all'
 expect_silent_noclassify "garbage-input"
 
-echo "== AC3-INV: a second non-empty fence never reaches the classifier =="
+echo "== AC3-INV: a second non-empty fence never becomes the verdict =="
+# The invariant is about WHAT the second fence may become, not about whether
+# the round leaves a trace. It used to be spelled "stays silent", because
+# silence was the only other outcome the hook had. Since x-c446 there is a
+# third: the ambiguity attests as unparseable, which counts the round and
+# withholds coverage without ever reading the later fence as findings.
+#
+# So the assertion moved to the half that carries the safety. The emitted row
+# must not contain the second fence's content - if `excluded` ever appears in
+# an emitted payload, a later fence was read as the review's verdict, which is
+# the defect this case was written for and is still forbidden.
 TWO_FENCES=$'## Review findings\n\n```json\n[]\n```\n\n```json\n[{"file":"a.py","summary":"excluded","failure_scenario":"f"}]\n```'
 run_hook "$(forked_skill_stop "$TWO_FENCES" "code-review")"
-expect_silent_noclassify "second-fence-nonempty"
+if ! attested; then
+  fail "second-fence-nonempty: NO attestation (ambiguity must attest unparseable, not vanish)"
+elif grep -q "excluded" "$EMITTED"; then
+  fail "second-fence-nonempty: the later fence reached the payload: $(cat "$EMITTED")"
+elif ! grep -q '"verdict":"fail' "$EMITTED"; then
+  fail "second-fence-nonempty: attested without verdict=fail: $(cat "$EMITTED")"
+elif ! grep -q 'prose_unparseable' "$EMITTED"; then
+  fail "second-fence-nonempty: attested without output_contract=prose_unparseable: $(cat "$EMITTED")"
+else
+  pass "second-fence-nonempty: attested fail/prose_unparseable, later fence never read as findings"
+fi
 
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"
