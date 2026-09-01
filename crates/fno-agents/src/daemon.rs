@@ -8020,11 +8020,7 @@ where
                 Some(AgentStatus::Exited)
             } else if matches!(
                 entry.status,
-                AgentStatus::Live
-                    | AgentStatus::Ready
-                    | AgentStatus::Idle
-                    | AgentStatus::Busy
-                    | AgentStatus::Spawning
+                AgentStatus::Live | AgentStatus::Ready | AgentStatus::Idle | AgentStatus::Busy
             ) && bg_live(entry)
                 && liveness(entry) == RowLiveness::Unknown
             {
@@ -8034,11 +8030,17 @@ where
                 // supervisor can leave stale entries - so a row the shared
                 // ladder answers `Unknown` on (no socket, no advancing
                 // heartbeat, no working truth state) carries no positive
-                // running-marker and goes `Orphaned`: the REVERSIBLE
-                // transition, auto-healed to Live the next tick the store hit
-                // and a live pid agree. An advancing heartbeat or a working
-                // truth state answers Alive and blocks the flip (the x-d3ad
-                // resurrected session).
+                // running-marker and goes `Orphaned` - never `Exited`,
+                // silence never proves death. Spawning is EXCLUDED: a row
+                // still coming up has had no chance to produce any marker,
+                // so its silence is meaningless (the same never-reap-
+                // something-still-coming-up rule the sweep uses). An
+                // advancing heartbeat or a working truth state answers Alive
+                // and blocks the flip (the x-d3ad resurrected session). An
+                // Orphaned row is not re-visited here (not live-ish), and gc
+                // still protects it: removal needs positive corroboration,
+                // so a falsely-flipped live worker keeps its transcript
+                // evidence and is never reaped.
                 out.orphans.push(entry.name.clone());
                 out.updated.push(entry.name.clone());
                 Some(AgentStatus::Orphaned)
@@ -11179,6 +11181,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             false,
             &no_tails,
             &|_| None,
+            &live_row_liveness, // x-5d96: injectable so tests stage the ladder
             &|_| None,
         );
 
@@ -11239,6 +11242,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             false,
             &no_tails,
             &|_| None,
+            &live_row_liveness, // x-5d96: injectable so tests stage the ladder
             &|_| None,
         );
 
@@ -11353,6 +11357,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             false,
             &no_tails,
             &|_| None,
+            &live_row_liveness, // x-5d96: injectable so tests stage the ladder
             &|_| None,
         );
 
@@ -15364,6 +15369,27 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         );
         assert_eq!(changes[0].new_status, None);
         assert!(out.orphans.is_empty());
+    }
+
+    #[test]
+    fn a_spawning_row_is_never_flipped_by_the_zombie_arm() {
+        // A row still coming up has had no chance to produce ANY marker, so
+        // its ladder silence is meaningless: Spawning is excluded from the
+        // zombie arm (the sweep's never-reap-something-still-coming-up rule).
+        let mut e = bg_claude_row("spawning", "spawn001");
+        e.status = AgentStatus::Spawning;
+        let entries = vec![e];
+        let (changes, _) = plan_reconcile(
+            &entries,
+            |_| Ok(true),
+            || false,
+            |_| true,
+            |_| true,
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Unknown,
+        );
+        assert_eq!(changes[0].new_status, None);
     }
 
     #[test]
