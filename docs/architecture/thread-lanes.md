@@ -16,6 +16,17 @@ The resolvers are `thread_lane` in `cli/src/fno/agents/harness_map.py` and `Harn
 
 `attach` is the harness owning the session store. Its `interactive_attach` form declares the argv a client uses to re-enter a live session that survives out of process. fno renders that argv, joins the session, and the harness keeps it alive.
 
+The `attach` lane has two destinations. The lane alone cannot pick between them. Both claude and codex answer `attach`, because both declare an `interactive_attach` form. Their sessions are owned by different processes. The discriminator is `pre_exec` on that same form, and it needs no new field. `pre_exec` names the process that keeps a session alive with no client attached.
+
+| Harness | `interactive_attach` | Who owns the live session |
+|---|---|---|
+| codex | `pre_exec = ["codex","app-server","daemon","start"]`, then `codex resume {session_id} --remote unix://` | a shared harness-owned server, started outside the spawn |
+| claude | no `pre_exec`, `claude attach {short_id}` | the detached client process itself |
+
+A non-empty `pre_exec` means the daemon ensures the harness's own server and delegates to it. An empty `pre_exec` means the session lives in the spawned client. The daemon does not host that client. A thread spawn for such a harness is refused there, with a pointer at the client-side lane. `handle_spawn` in `crates/fno-agents/src/daemon.rs` routes on `thread_lane` and then `attach_needs_server`, never on a harness name.
+
+That refusing arm is the reason the split is written down. A route that tested the lane alone sends a claude thread spawn into codex's app-server, because both read `attach`. No claude thread spawn reaches the daemon today. The arm guards the next attach-lane harness rather than fixing a live misroute.
+
 `keeper` is fno owning the PTY. The harness declares `interactive_attach` as `unsupported` while `interactive_resume` declares a working argv: the transcript persists, but no live process does. A thread on such a harness needs fno to hold the terminal for the session's whole life. For pi that lane is hosted and driven: a pane-less keeper process (`fno-agents-worker --keeper`, `crates/fno-agents/src/pane_keeper.rs`) holds the pty master, mail reaches the thread through the keeper's Input frames (the payload as a bracketed paste, then the submit CR as its own write), and stop/rm deliver the Kill frame down the row's own socket. The seven-step restart journey passed end to end on pi 0.84.2: with the mux server and `fno-agents-daemon` both SIGKILLed, the keeper-hosted child kept its pid, cwd and session id, the daemon-start sweep re-bound the same registry row on restart, the session store gained no file, and a second prompt through mail was answered from the first turn's memory (`cli/tests/agents/test_thread_keeper_journey.py`, opt-in `FNO_PI_LIVE=1`).
 
 One invariant governs the daemon's role, because the epic prose once said otherwise: the daemon does not HOST keepers, it DISCOVERS and REBINDS them. The keeper is a separate process whose parent is launchd, never the daemon; `handle_spawn` in `crates/fno-agents/src/daemon.rs` still states that the daemon hosts no agent PTYs, and the daemon-start sweep only walks existing keeper sockets and re-binds survivors to their registry rows.
