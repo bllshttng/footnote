@@ -12,7 +12,7 @@ A worker pane's pty master does not live in the mux server. It lives in a keeper
 
 ## Why a separate process
 
-**The tier split is not ours.** Claude Code ships the same shape: a daemon that holds the roster and hosts no ptys, plus one PTY host process per background session. While background sessions run, look for `claude bg-pty-host` processes, one per session. fno's keeper is that middle tier. The roster lives in one place. Every live pty lives in its own small process beside it.
+**The tier split is not ours.** Claude Code ships the same shape. A daemon holds the roster and hosts no ptys, plus one PTY host process per background session. While background sessions run, look for `claude bg-pty-host` processes, one per session. fno's keeper is that middle tier. The roster lives in one place. Every live pty lives in its own small process beside it.
 
 **`attach` is a vendor feature, not a capability grade.** Only claude and codex declare an `interactive_attach` resume form in `cli/src/fno/agents/harness_capabilities.toml`. They are the two vendors that built a session multiplexer into their binary. pi, agy and opencode declare `unsupported`. That is not weakness. One binary means one terminal means one session. A row reading `unsupported` records the absence of a vendor multiplexer, and the keeper is fno being that multiplexer for everyone else.
 
