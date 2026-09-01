@@ -868,6 +868,25 @@ fn node_from_argv(argv: &[String]) -> Option<String> {
     env_token_from_argv(argv, "FNO_NODE=")
 }
 
+/// Resolve the `fno-agents-worker` binary the keeper lane execs. Shared
+/// shape with `fno_agents_bin` via `paired_bin`: env override, installed
+/// sibling, dev-tree target dir, PATH.
+fn keeper_worker_bin() -> std::path::PathBuf {
+    crate::digest_overlay::paired_bin("FNO_AGENTS_WORKER_BIN", "fno-agents-worker")
+}
+
+/// A pane this server re-adopted from a surviving keeper at startup, before
+/// any stored member is knowable. Restore binds it to its member (or gives
+/// it a tab of its own); `placed` is the once-only guard for that binding.
+#[derive(Clone)]
+struct AdoptedKeeper {
+    pane: u64,
+    child_pid: Option<u32>,
+    argv: Vec<String>,
+    cwd: String,
+    placed: bool,
+}
+
 /// (x-c914) The pane's `FNO_ACCOUNT` birth account, parsed from the same
 /// `env(1)` wrapper prefix as `FNO_NODE` (`_mesh_env_wrapper` stamps it when a
 /// spawn was routed with `--account`). `None` for a default-account or ad-hoc
@@ -2375,6 +2394,9 @@ struct Core {
     /// (and in every legacy-path test: no entry means the reconstructed
     /// argv stands).
     batch_plans: HashMap<String, Result<ReentryVerdict, String>>,
+    /// Keeper-hosted panes adopted at startup, awaiting their stored-member
+    /// binding at restore. Empty once every adoptee is placed.
+    keeper_adopted: Vec<AdoptedKeeper>,
 }
 
 /// At most one `human_touch(inject)` per pane per window: the first keystroke
@@ -3561,6 +3583,24 @@ impl Core {
         cwd: &str,
         permit: crate::process_admission::AdmissionPermit,
     ) -> Result<u64, String> {
+        self.spawn_pane_shell_with_permit(argv, rows, cols, cwd, permit, false)
+    }
+
+    /// The one spawn fork in the road: `keeper = true` routes a worker pane
+    /// through a `fno-agents-worker --pane` process that owns the pty master
+    /// out-of-process, so the pane child outlives this server and a fresh
+    /// server re-adopts it. Plain shells and ad-hoc panes keep the inline
+    /// master: dying with the server is correct for them, and keeper-per-pane
+    /// would double the fleet process count.
+    fn spawn_pane_shell_with_permit(
+        &mut self,
+        argv: &[String],
+        rows: u16,
+        cols: u16,
+        cwd: &str,
+        permit: crate::process_admission::AdmissionPermit,
+        keeper: bool,
+    ) -> Result<u64, String> {
         if argv.is_empty() {
             return Err("pane run needs a command (empty argv)".into());
         }
@@ -3571,17 +3611,33 @@ impl Core {
         let resume_target = resume_target_from_argv(argv);
         let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
-        let pty = PtyShell::spawn_cmd_with_permit(
-            argv,
-            rows,
-            cols,
-            dir,
-            &self.session_name,
-            id,
-            self.out_tx.clone(),
-            self.exit_tx.clone(),
-            permit,
-        )
+        let (pty, keeper_ring) = if keeper {
+            PtyShell::spawn_cmd_keeper_with_permit(
+                &keeper_worker_bin(),
+                argv,
+                rows,
+                cols,
+                dir,
+                &self.session_name,
+                id,
+                self.out_tx.clone(),
+                self.exit_tx.clone(),
+                permit,
+            )
+        } else {
+            PtyShell::spawn_cmd_with_permit(
+                argv,
+                rows,
+                cols,
+                dir,
+                &self.session_name,
+                id,
+                self.out_tx.clone(),
+                self.exit_tx.clone(),
+                permit,
+            )
+            .map(|shell| (shell, Vec::new()))
+        }
         .map_err(|e| e.to_string())?;
         self.register_pane(
             id,
@@ -3595,6 +3651,14 @@ impl Core {
             account,
             resume_target,
         );
+        // The keeper's handshake replay carries everything the child printed
+        // before the reader thread existed; the VT only now exists, so feed
+        // it here (the re-adopt path feeds its ring the same way).
+        if !keeper_ring.is_empty() {
+            if let Some(entry) = self.panes.get_mut(&id) {
+                entry.vt.feed(&keeper_ring);
+            }
+        }
         Ok(id)
     }
 
@@ -4054,8 +4118,10 @@ impl Core {
         let pane_count = self.placement_pane_count(dest, &placement);
         let permit = crate::process_admission::admit_pane(pane_count, placement.max_panes)
             .map_err(|e| (err_code::SPAWN_FAILED, e.to_string()))?;
+        // The worker path is the keeper path: a recorded member's pane
+        // outlives this server. Everything else spawns inline.
         let pid = self
-            .spawn_pane_cmd_with_permit(&argv, rows, cols, &cwd, permit)
+            .spawn_pane_shell_with_permit(&argv, rows, cols, &cwd, permit, worker.is_some())
             .map_err(|e| (err_code::SPAWN_FAILED, e))?;
         if claim {
             // Writer-claim ELIGIBILITY, set only at agent spawn (Locked 5).
@@ -7651,6 +7717,205 @@ impl Core {
     /// in the sideline without stealing the view. Per-squad failure isolation:
     /// a squad that cannot even open a shell is skipped with a notice, never a
     /// crash (AC2-FR: a degraded restore leaves a fully usable session).
+    /// Re-adopt surviving keeper panes at server start, BEFORE restore runs
+    /// (an ordering constraint, not a preference: restore must see adopted
+    /// panes as already-live members so it binds them instead of spawning
+    /// replacements). For each socket: handshake with a short timeout, build
+    /// the Keeper shell, replay the detached window into a fresh grid, and
+    /// stage the adoption for restore to bind. A socket with nothing live
+    /// behind it is unlinked and NAMED - it is a dead keeper's leftover, not
+    /// a pane to wait on.
+    fn keeper_readopt(&mut self) {
+        let sockets = crate::pty::keeper_sockets(&self.session_name);
+        for sock in sockets {
+            let Ok(id) = self.reserve_pane_id() else {
+                break;
+            };
+            match crate::pty::adopt_keeper_socket(
+                &sock,
+                id,
+                self.out_tx.clone(),
+                self.exit_tx.clone(),
+            ) {
+                Ok(crate::pty::KeeperAdopt::NoListener) => {
+                    let _ = std::fs::remove_file(&sock);
+                    self.notice_all(format!(
+                        "keeper readopt: {} had no live keeper behind it; removed",
+                        sock.display()
+                    ));
+                }
+                Ok(crate::pty::KeeperAdopt::SeatHeld) => {
+                    // A live keeper whose subscriber seat is still held: a
+                    // server mid-death. Leave the socket alone - the pane is
+                    // real and the next start adopts it - and say so. The
+                    // reserved id simply goes unused.
+                    self.notice_all(format!(
+                        "keeper readopt: {} still holds a subscriber seat; left for the next start",
+                        sock.display()
+                    ));
+                }
+                Ok(crate::pty::KeeperAdopt::Adopted(adoption)) => {
+                    let str_list = |key: &str| -> Vec<String> {
+                        adoption
+                            .reply
+                            .get(key)
+                            .and_then(serde_json::Value::as_array)
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(serde_json::Value::as_str)
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
+                    let str_field = |key: &str| -> String {
+                        adoption
+                            .reply
+                            .get(key)
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()
+                    };
+                    let num_field = |key: &str| -> u16 {
+                        adoption
+                            .reply
+                            .get(key)
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(24)
+                            .clamp(1, u16::MAX as u64) as u16
+                    };
+                    let argv = str_list("argv");
+                    let cwd = str_field("cwd");
+                    let child_pid = adoption
+                        .reply
+                        .get("child_pid")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|p| p as u32);
+                    let rows = num_field("rows");
+                    let cols = num_field("cols");
+                    self.register_pane(
+                        id,
+                        adoption.shell,
+                        rows,
+                        cols,
+                        node_from_argv(&argv),
+                        agent_self_from_argv(&argv),
+                        cwd.clone(),
+                        cmd_from_argv(&argv),
+                        account_from_argv(&argv),
+                        resume_target_from_argv(&argv),
+                    );
+                    // The detached window (AC3-HP): the keeper replayed its
+                    // ring during the handshake; feed it before any layout
+                    // push so the first frame the operator sees carries it.
+                    if !adoption.ring.is_empty() {
+                        if let Some(entry) = self.panes.get_mut(&id) {
+                            entry.vt.feed(&adoption.ring);
+                        }
+                    }
+                    self.keeper_adopted.push(AdoptedKeeper {
+                        pane: id,
+                        child_pid,
+                        argv,
+                        cwd,
+                        placed: false,
+                    });
+                    self.notice_all(format!(
+                        "keeper readopt: re-adopted pane {id} (child pid {}) from {}",
+                        child_pid
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "?".into()),
+                        sock.display()
+                    ));
+                }
+                Err(e) => {
+                    // A keeper that refuses the handshake is wedged or speaks
+                    // an incompatible protocol: name it and keep adopting the
+                    // rest. The socket STAYS - a live listener is the pane's
+                    // only address, and unlinking it strands a running child
+                    // with no path to re-adopt it (the same leave-alone policy
+                    // as SeatHeld). The next start retries the handshake; a
+                    // socket whose keeper is actually gone lands in the
+                    // NoListener arm above and is removed there.
+                    self.notice_all(format!(
+                        "keeper readopt: {} refused adoption ({e}); left in place for the next start",
+                        sock.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Bind one stored worker member to its re-adopted pane, once. The join
+    /// is the member's own identity read back out of the pane's argv: the
+    /// registered worker name (FNO_AGENT_SELF) or the resumed session id.
+    /// Returns the pane and registers the `worker_pane` mapping restore's
+    /// reconcile-first resume relies on, so a later resume FOCUSES the
+    /// adopted pane instead of spawning a second writer.
+    fn take_adopted_for_member(&mut self, m: &crate::squad_store::StoredMember) -> Option<u64> {
+        let worker = m.worker.as_deref();
+        let session_id = m.harness_session_id.as_deref();
+        let hit = self.keeper_adopted.iter_mut().find(|a| {
+            if a.placed {
+                return false;
+            }
+            let by_name = worker.is_some() && agent_self_from_argv(&a.argv).as_deref() == worker;
+            let by_session =
+                session_id.is_some() && resume_target_from_argv(&a.argv).as_deref() == session_id;
+            by_name || by_session
+        });
+        let Some(a) = hit else {
+            return None;
+        };
+        a.placed = true;
+        Some(a.pane)
+    }
+
+    /// Place any adopted pane restore's member walk did not bind (its stored
+    /// member is gone, or the store held no squads at all). A live pane must
+    /// never be left dangling without a tab: one tab each, named from the
+    /// pane's command, inside the squad owning its cwd (else home).
+    fn place_adopted_leftovers(&mut self, home_sid: u64) {
+        let unplaced: Vec<AdoptedKeeper> = self
+            .keeper_adopted
+            .iter()
+            .filter(|a| !a.placed)
+            .cloned()
+            .collect();
+        for a in unplaced {
+            let owner = self
+                .session
+                .squads
+                .iter()
+                .find(|s| !a.cwd.is_empty() && s.owns_path(&a.cwd))
+                .map(|s| s.id)
+                .unwrap_or(home_sid);
+            if self.session.squad(owner).is_none() {
+                continue;
+            }
+            let cmd = cmd_from_argv(&a.argv).unwrap_or_else(|| "pane".into());
+            let tid = self.session.mint_tab_id();
+            let tab = Tab {
+                name: Some(cmd),
+                id: tid,
+                root: Node::Leaf(a.pane),
+                focus: a.pane,
+            };
+            let Some(sq) = self.session.squads.iter_mut().find(|s| s.id == owner) else {
+                continue;
+            };
+            sq.tabs.push(tab);
+            if let Some(entry) = self.keeper_adopted.iter_mut().find(|x| x.pane == a.pane) {
+                entry.placed = true;
+            }
+            self.notice_all(format!(
+                "keeper readopt: pane {} (child pid {}) placed in its own tab; no stored member matches it",
+                a.pane,
+                a.child_pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
+            ));
+        }
+    }
+
     fn restore_squads(&mut self, rows: u16, cols: u16, home_sid: u64) {
         // Heal the store before reading (x-e447): the old random-mint identity
         // let a repo's home squad append a row per mux restart. The write side
@@ -7672,6 +7937,10 @@ impl Core {
         // attach path and refreshes this via `ExternalLifecycleSync`.
         self.external_lifecycle = loaded.external_lifecycle;
         if loaded.squads.is_empty() {
+            // No stored workspace: adopted panes get their own tabs in home
+            // rather than dangling unplaced.
+            self.place_adopted_leftovers(home_sid);
+            self.restored = true;
             return;
         }
         let live = self.live_attach_ids_now();
@@ -7801,6 +8070,22 @@ impl Core {
                 if m.worker.is_some() {
                     worker_members_total += 1;
                     let worker_name = m.worker.as_deref().expect("checked above");
+                    // A keeper-hosted pane SURVIVED the server death and was
+                    // already re-adopted: bind it into its stored tab and
+                    // spawn nothing. Same pid before and after (the child
+                    // never died), and the worker_pane mapping makes every
+                    // later resume FOCUS it instead of opening a second
+                    // writer.
+                    if let Some(pid) = self.take_adopted_for_member(m) {
+                        let binding =
+                            worker_binding_key(m).unwrap_or_else(|| worker_name.to_string());
+                        self.worker_pane
+                            .entry(binding.clone())
+                            .or_default()
+                            .push(pid);
+                        member_panes.push((binding, pid, m.tab_name.clone()));
+                        continue;
+                    }
                     if hold_workers {
                         members.push(m.clone());
                         let matching_rows: Vec<&RegistryAgent> = self
@@ -8218,6 +8503,7 @@ impl Core {
         // harness's declared form. The reply end is dropped on purpose - at
         // startup the report reaches the operator through the notices the
         // driver emits, not through a control connection.
+        self.place_adopted_leftovers(home_sid);
         if policy == crate::digest_overlay::MuxRestorePolicy::Resume {
             let (tx, _rx) = oneshot::channel::<ServerMsg>();
             self.workspace_restore_start(false, None, tx);
@@ -13664,15 +13950,27 @@ impl Core {
         }
     }
 
-    /// Kill every pane child. Called from serve's shutdown choke point (every
-    /// exit path funnels there) and from `CoreMsg::Kill`'s handler; the two
-    /// layers keep their own call because `handle()` must stay correct for
-    /// callers outside serve. PtyShell has no Drop that kills its child, so an
-    /// exit path that skips this leaves pane children to whatever SIGHUP the
-    /// closing pty master happens to deliver; a worker that ignores SIGHUP
-    /// keeps running.
+    /// Kill every pane child EXCEPT keeper-hosted ones. Called from serve's
+    /// shutdown choke point (every exit path funnels there) and from
+    /// `CoreMsg::Kill`'s handler; the two layers keep their own call because
+    /// `handle()` must stay correct for callers outside serve. PtyShell has
+    /// no Drop that kills its child, so an exit path that skips this leaves
+    /// pane children to whatever SIGHUP the closing pty master happens to
+    /// deliver; a worker that ignores SIGHUP keeps running.
+    ///
+    /// The keeper carve-out is the load-bearing line: a keeper-hosted pane's
+    /// child outlives this server BY DESIGN, and a shutdown sweep that kills
+    /// it silently converts every restart back into the crashes the keeper
+    /// exists to stop. Deliberate close still kills - that is `reap_pane`'s
+    /// `pty.kill()`, which the Keeper variant honors. Any future reaper that
+    /// sweeps pane children on shutdown must keep this exact shape: plain
+    /// panes die, keeper-hosted panes survive for the next server to
+    /// re-adopt.
     fn kill_all_panes(&self) {
         for entry in self.panes.values() {
+            if matches!(entry.pty, PtyShell::Keeper(_)) {
+                continue;
+            }
             entry.pty.kill();
         }
     }
@@ -13943,6 +14241,7 @@ async fn serve(
         last_topology_flush: None,
         reentry_verdict: None,
         batch_plans: HashMap::new(),
+        keeper_adopted: Vec::new(),
     };
 
     // The off-loop registry reader (4a-G2): a 1s interval task stats/reads
@@ -14354,6 +14653,11 @@ async fn serve(
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok();
 
     eprintln!("fno mux: serving {}", socket.display());
+
+    // Re-adopt surviving keeper panes BEFORE any attach can restore: this
+    // runs synchronously before the loop drains its first CoreMsg, so an
+    // early attach's restore sees adopted panes as already-live members.
+    core.keeper_readopt();
 
     // FNO_E2E idle-exit reaper (x-4e30, Fix 2): the ONLY reaper that survives
     // all four leak paths — panic=abort, SIGKILL of the test binary, a
@@ -26207,6 +26511,7 @@ mod tests {
             last_topology_flush: None,
             reentry_verdict: None,
             batch_plans: HashMap::new(),
+            keeper_adopted: Vec::new(),
         }
     }
 
@@ -27589,6 +27894,260 @@ mod tests {
         assert_eq!(
             copy_source(None, || Ok(block(true, false, true, "whole"))),
             None
+        );
+    }
+
+    // ---- the keeper contract (re-adopt, sweep, list) --------------------
+
+    /// The sibling keeper binary when both crates are built side by side
+    /// (CI and this repo's dev flow both do). `None` = skip loudly rather
+    /// than fake a green: these tests assert REAL process survival.
+    fn keeper_test_bin() -> Option<std::path::PathBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../fno-agents/target/debug/fno-agents-worker");
+        p.exists().then(|| p.canonicalize().unwrap_or(p))
+    }
+
+    struct KeeperProcess(std::process::Child);
+
+    impl Drop for KeeperProcess {
+        fn drop(&mut self) {
+            // SAFETY: SIGKILL to a process this test spawned.
+            unsafe {
+                libc::kill(self.0.id() as libc::pid_t, libc::SIGKILL);
+            }
+            let _ = self.0.wait();
+        }
+    }
+
+    fn spawn_keeper_for_test(
+        bin: &std::path::Path,
+        sock: &std::path::Path,
+        provider: &[&str],
+    ) -> KeeperProcess {
+        let mut cmd = std::process::Command::new(bin);
+        cmd.args([
+            "--pane",
+            "--sock",
+            &sock.to_string_lossy(),
+            "--session",
+            "kt",
+            "--pane-key",
+            "3",
+            "--cwd",
+            "/tmp",
+            "--",
+        ]);
+        cmd.args(provider);
+        let child = cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("keeper spawns");
+        KeeperProcess(child)
+    }
+
+    #[test]
+    fn keeper_readopt_adopts_the_surviving_child_and_binds_it_to_its_member() {
+        let Some(bin) = keeper_test_bin() else {
+            eprintln!(
+                "SKIPPING keeper_readopt_adopts_the_surviving_child_and_binds_it_to_its_member: \
+                 build crates/fno-agents first (no sibling fno-agents-worker binary)"
+            );
+            return;
+        };
+        let dir = crate::proto::mux_dir().join("panes");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("kt-3.sock");
+        let _ = std::fs::remove_file(&sock);
+        // The provider argv carries the worker name exactly the mesh wrapper
+        // carries it, so the re-adopt join runs the real parser.
+        let keeper = spawn_keeper_for_test(
+            &bin,
+            &sock,
+            &["env", "FNO_AGENT_SELF=t-keeper-worker", "sleep", "300"],
+        );
+        // The keeper binds asynchronously; the sweep scans what EXISTS, so
+        // wait for the socket before sweeping (a real server start meets
+        // keepers that are minutes old, never milliseconds).
+        let bound = Instant::now();
+        while !sock.exists() {
+            assert!(
+                bound.elapsed() < Duration::from_secs(10),
+                "keeper never bound its socket"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        let mut core = empty_core();
+        core.session_name = "kt".to_string();
+        core.keeper_readopt();
+
+        assert_eq!(core.panes.len(), 1, "the live keeper became one pane");
+        assert_eq!(
+            core.keeper_adopted.len(),
+            1,
+            "the adoption is staged for restore"
+        );
+        let pane = core.keeper_adopted[0].pane;
+        let child_pid = core.keeper_adopted[0]
+            .child_pid
+            .expect("the adopt names the child pid");
+        assert_ne!(
+            child_pid,
+            keeper.0.id(),
+            "the recorded pid is the CHILD's, never the keeper's"
+        );
+        assert_eq!(
+            core.panes[&pane].pty.child_pid(),
+            Some(child_pid),
+            "pane ls will read the child pid"
+        );
+        assert_eq!(
+            core.panes[&pane].name.as_deref(),
+            Some("t-keeper-worker"),
+            "the pane is named from the argv's worker token"
+        );
+
+        // The restore-side join: the member binds by the worker name read
+        // back out of the adopted argv, once, and a stranger never binds.
+        let member = crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tab_name: None,
+            cwd: Some("/tmp".into()),
+            worker: Some("t-keeper-worker".into()),
+            harness: Some("claude".into()),
+            harness_session_id: Some("sess-1".into()),
+        };
+        assert_eq!(
+            core.take_adopted_for_member(&member),
+            Some(pane),
+            "the member's pane is the adopted one"
+        );
+        assert_eq!(
+            core.take_adopted_for_member(&member),
+            None,
+            "the binding is once-only"
+        );
+    }
+
+    #[test]
+    fn keeper_readopt_unlinks_a_socket_with_no_live_keeper_and_names_it() {
+        let dir = crate::proto::mux_dir().join("panes");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("kt-9.sock");
+        std::fs::write(&sock, b"").unwrap(); // a dead keeper's leftover
+
+        let mut core = empty_core();
+        core.session_name = "kt".to_string();
+        core.keeper_readopt();
+
+        assert!(
+            !sock.exists(),
+            "a socket with nothing behind it is removed, not waited on"
+        );
+        assert!(
+            core.panes.is_empty(),
+            "no pane is minted for a stale socket"
+        );
+    }
+
+    #[test]
+    fn keeper_survives_shutdown_sweep_and_plain_panes_do_not() {
+        // The contract the future sigwait reaper must keep: a shutdown-shaped
+        // sweep kills plain pane children and leaves keeper-hosted panes for
+        // the next server to re-adopt. Deliberate close (reap_pane) is the
+        // only path that kills a keeper pane.
+        let mut core = empty_core();
+        core.shells = vec!["/bin/sh".into()];
+        let plain = core.spawn_pane(24, 80, "/tmp").expect("plain pane spawns");
+
+        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+        let keeper_pane = {
+            let id = core.reserve_pane_id().unwrap();
+            core.register_pane(
+                id,
+                PtyShell::Keeper(crate::pty::KeeperPty::for_test(b, Some(999_999))),
+                24,
+                80,
+                None,
+                None,
+                "/tmp".into(),
+                None,
+                None,
+                None,
+            );
+            id
+        };
+
+        core.kill_all_panes();
+
+        // The plain child is dead (poll: SIGKILL is fast but not instant).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while core.panes[&plain].pty.is_child_alive() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the plain pane's child must die in the shutdown sweep"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // The keeper pane got NO kill: nothing arrives on its wire inside a
+        // window far longer than the Local kill takes.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut probe = a;
+        use std::io::Read as _;
+        probe
+            .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        let mut byte = [0u8; 1];
+        assert!(
+            probe.read(&mut byte).is_err(),
+            "the shutdown sweep must never send a Kill frame to a keeper pane"
+        );
+        assert!(core.panes.contains_key(&keeper_pane));
+    }
+
+    #[test]
+    fn keeper_list_parses_as_a_hidden_pane_verb() {
+        let args: Vec<OsString> = vec!["keeper".into(), "list".into(), "--json".into()];
+        let parsed = crate::mux_cli::parse_pane_args(&args).expect("parses");
+        assert_eq!(
+            parsed.cmd,
+            crate::mux_cli::PaneCmd::KeeperList {
+                json: true,
+                stale_after: None
+            }
+        );
+        let args: Vec<OsString> = vec![
+            "keeper".into(),
+            "list".into(),
+            "--stale-after".into(),
+            "24h".into(),
+        ];
+        let parsed = crate::mux_cli::parse_pane_args(&args).expect("parses");
+        assert_eq!(
+            parsed.cmd,
+            crate::mux_cli::PaneCmd::KeeperList {
+                json: false,
+                stale_after: Some(std::time::Duration::from_secs(86_400)),
+            }
+        );
+        // Named in the refusal surface (the verb-ratchet requires the
+        // dispatcher's message to name every verb it accepts); the curated
+        // root menu stays the one advertisement surface.
+        assert!(crate::mux_cli::PANE_VERBS.contains("keeper"));
+    }
+
+    #[test]
+    fn keeper_list_reports_zero_as_zero_and_exits_zero() {
+        // The empty read is a valid answer, never a failure: the done-probe
+        // greps this verb's --json on machines that may hold no keepers.
+        let rc = crate::mux_cli::pane_keeper_list(true, Some(std::time::Duration::from_secs(0)));
+        assert_eq!(
+            rc,
+            crate::mux_cli::EXIT_OK,
+            "an empty keeper list is exit 0"
         );
     }
 }

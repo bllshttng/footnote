@@ -2869,6 +2869,15 @@ pub enum PaneCmd {
     Release {
         pane: u64,
     },
+    /// `pane keeper list`: read the keeper sockets DIRECTLY - no server is
+    /// consulted, because the question this answers is "did the keeper
+    /// survive the server's death". Named in PANE_VERBS so the dispatcher's
+    /// refusal teaches it; the root menu stays the advertisement surface.
+    KeeperList {
+        json: bool,
+        /// `--stale-after <dur>`: also flag keepers older than this.
+        stale_after: Option<std::time::Duration>,
+    },
 }
 
 /// The result of parsing the tokens after `mux pane`. Public for the same
@@ -2956,7 +2965,7 @@ fn parse_block_sel(s: &str) -> Result<BlockSel, String> {
 /// `split` and `break` shipped without reaching the first, so an operator who
 /// typed a bare `fno mux pane` to discover the surface was told verbs that
 /// exist do not.
-pub const PANE_VERBS: &str = "ls|read|run|send|wait|kill|claim|release|split|break|focus";
+pub const PANE_VERBS: &str = "ls|read|run|send|wait|kill|claim|release|split|break|focus|keeper";
 pub const PANE_REFERENCE_USAGE: &str =
     "pane refs are <pane-id> or <session>:<pane-id>; --session overrides the prefix";
 
@@ -2977,9 +2986,10 @@ genuine keystrokes: `fno mux pane send 45 --text 1 --raw --submit` answers a pro
 /// `pane run` stays byte-identical.
 pub const PANE_RUN_WORKER_HELP: &str = "pane run --worker <registry-name> records the pane as a \
 squad member joined to that registry row: after a mux restart the member stays as an idle row in \
-the agent panel, and selecting it resumes the session through its own harness. Startup restore \
-holds (default) or idles it by policy; `fno mux workspace restore` respawns it on demand. A run \
-without --worker records no member.";
+the agent panel, and selecting it resumes the session through its own harness. A keeper-hosted \
+worker pane outlives the server outright and a fresh server re-adopts it in place (`fno mux pane \
+keeper list` reads them); startup restore holds (default) or idles it by policy; `fno mux \
+workspace restore` respawns it on demand. A run without --worker records no member.";
 
 pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let verb = args
@@ -2990,6 +3000,41 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         return Err(format!(
             "{PANE_REFERENCE_USAGE}; verbs: {PANE_VERBS}\n{PANE_SEND_RAW_HELP}\n{PANE_RUN_WORKER_HELP}"
         ));
+    }
+
+    // Hidden verb subtree: `pane keeper list` reads the keeper sockets
+    // directly (no server), so it parses here and dispatches before any
+    // session resolution.
+    if verb == "keeper" {
+        let sub = args
+            .get(1)
+            .and_then(|a| a.to_str())
+            .ok_or_else(|| "pane keeper needs a verb: list".to_string())?;
+        if sub != "list" {
+            return Err(format!("unknown pane keeper verb: {sub} (expected list)"));
+        }
+        let mut json = false;
+        let mut stale_after = None;
+        let mut i = 2;
+        while i < args.len() {
+            let tok = args[i]
+                .to_str()
+                .ok_or_else(|| "non-UTF-8 argument".to_string())?;
+            match tok {
+                "--json" => json = true,
+                "--stale-after" => {
+                    let value = flag_value(args, &mut i, "--stale-after")?;
+                    stale_after = Some(parse_duration(&value)?);
+                }
+                other => return Err(format!("unknown flag: {other}")),
+            }
+            i += 1;
+        }
+        return Ok(ParsedPane {
+            session: None,
+            json,
+            cmd: PaneCmd::KeeperList { json, stale_after },
+        });
     }
 
     // `run` is special: leading options/directives, then the command argv
@@ -3333,6 +3378,11 @@ pub fn pane(args: &[OsString], env_session: Option<&str>) -> i32 {
             return EXIT_USAGE;
         }
     };
+    // The keeper read needs NO server - it exists to answer whether keepers
+    // survived the server's death - so it never touches session resolution.
+    if let PaneCmd::KeeperList { json, stale_after } = parsed.cmd {
+        return pane_keeper_list(json, stale_after);
+    }
     // (x-b80d) focus by selector or picker resolves the HOST session from the
     // registry row: FNO_SESSION names the session you sit in, not the one the
     // target pane lives in. An explicit --session still wins, like `where`.
@@ -3359,6 +3409,168 @@ pub fn pane(args: &[OsString], env_session: Option<&str>) -> i32 {
         }
     };
     dispatch(&session, &sock, parsed.json, parsed.cmd)
+}
+
+/// `24h`, `90m`, `30s`, or bare seconds.
+fn parse_duration(value: &str) -> Result<std::time::Duration, String> {
+    let (digits, unit): (String, u64) = match value.chars().last() {
+        Some('s') => (value[..value.len() - 1].into(), 1),
+        Some('m') => (value[..value.len() - 1].into(), 60),
+        Some('h') => (value[..value.len() - 1].into(), 3600),
+        Some('d') => (value[..value.len() - 1].into(), 86_400),
+        _ => (value.into(), 1),
+    };
+    let n: u64 = digits.parse().map_err(|_| {
+        format!("--stale-after needs a duration like 24h, 90m or 3600, got {value:?}")
+    })?;
+    Ok(std::time::Duration::from_secs(n.saturating_mul(unit)))
+}
+
+/// `fno mux pane keeper list`: one row per keeper socket under the panes
+/// dir, probed DIRECTLY (connect + Identify, short timeout). Answers "did
+/// the keeper survive" with the keeper's own word - its pid, its child's
+/// pid, its cwd and argv - never with a process count. A socket nobody
+/// lives behind is listed with the reason, because a silent zero is the
+/// receipt-can-lie shape. Read-only: this verb never unlinks anything (the
+/// server's readopt sweep owns that).
+pub(crate) fn pane_keeper_list(json: bool, stale_after: Option<std::time::Duration>) -> i32 {
+    let dir = crate::pty::keeper_dir();
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().map(|x| x == "sock").unwrap_or(false))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    for path in names {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let (session, pane_key) = match stem.rsplit_once('-') {
+            Some((s, key)) if key.chars().all(|c| c.is_ascii_digit()) => {
+                (s.to_string(), key.to_string())
+            }
+            _ => (stem.to_string(), String::new()),
+        };
+        let mut row = serde_json::json!({
+            "socket": path.display().to_string(),
+            "session": session,
+            "pane_key": pane_key,
+        });
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // Short timeouts everywhere: a wedged keeper must not wedge the read.
+        match std::os::unix::net::UnixStream::connect(&path) {
+            Err(e) => {
+                row["stale"] = serde_json::json!(format!("no listener: {e}"));
+            }
+            Ok(mut stream) => {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(750)));
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(750)));
+                let identified = (|| -> Option<serde_json::Value> {
+                    use crate::pty::{
+                        keeper_decode, keeper_frame_identify, KeeperRead, KEEPER_TAG_IDENTIFY_REPLY,
+                    };
+                    use std::io::{Read as _, Write as _};
+                    stream.write_all(&keeper_frame_identify()).ok()?;
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut read_buf = [0u8; 4096];
+                    loop {
+                        loop {
+                            match keeper_decode(&buf) {
+                                KeeperRead::NeedMore => break,
+                                KeeperRead::Frame(tag, payload, used) => {
+                                    buf.drain(..used);
+                                    if tag == KEEPER_TAG_IDENTIFY_REPLY {
+                                        return serde_json::from_slice(&payload).ok();
+                                    }
+                                }
+                            }
+                        }
+                        match stream.read(&mut read_buf) {
+                            Ok(0) | Err(_) => return None,
+                            Ok(n) => buf.extend_from_slice(&read_buf[..n]),
+                        }
+                    }
+                })();
+                match identified {
+                    None => {
+                        row["stale"] = serde_json::json!("no identify answer inside the timeout");
+                    }
+                    Some(reply) => {
+                        for field in ["v", "keeper_pid", "child_pid", "cwd", "argv", "started_at"] {
+                            row[field] =
+                                reply.get(field).cloned().unwrap_or(serde_json::Value::Null);
+                        }
+                        let child_pid = reply.get("child_pid").and_then(serde_json::Value::as_u64);
+                        if let Some(pid) = child_pid {
+                            // SAFETY: signal 0 is the existence probe.
+                            let hit = unsafe { libc::kill(pid as libc::pid_t, 0) };
+                            if hit != 0 {
+                                row["stale"] =
+                                    serde_json::json!(format!("child pid {pid} is gone"));
+                            }
+                        }
+                        let age = reply
+                            .get("started_at")
+                            .and_then(serde_json::Value::as_u64)
+                            .map(|t| now.saturating_sub(t));
+                        if let (Some(age), Some(cap)) = (age, stale_after) {
+                            if age > cap.as_secs() {
+                                row["stale"] = serde_json::json!(format!(
+                                    "aged {age}s (> {}s)",
+                                    cap.as_secs()
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        rows.push(row);
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
+        );
+    } else if rows.is_empty() {
+        println!("no keeper panes");
+    } else {
+        for row in &rows {
+            let stale = row.get("stale").and_then(serde_json::Value::as_str);
+            let desc = match stale {
+                Some(reason) => format!(" (STALE: {reason})"),
+                None => String::new(),
+            };
+            println!(
+                "session {} pane {} keeper {} child {} cwd {}{}",
+                row.get("session")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?"),
+                row.get("pane_key")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?"),
+                row.get("keeper_pid")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".into()),
+                row.get("child_pid")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".into()),
+                row.get("cwd")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?"),
+                desc,
+            );
+        }
+    }
+    EXIT_OK
 }
 
 /// Resolve `--session`/env, connect to the EXISTING server, run one control
@@ -4927,6 +5139,9 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
     // server is "no panes" (exit 0); the rest are an error (nothing to act on).
     let mut review_command = None;
     let (verb, read_timeout) = match cmd {
+        // pane() intercepts the keeper read before dispatch; it needs no
+        // server and this arm exists to keep the match total.
+        PaneCmd::KeeperList { .. } => unreachable!("keeper list never reaches dispatch"),
         PaneCmd::Ls { .. } => (ControlVerb::PaneLs, CONTROL_TIMEOUT),
         PaneCmd::Split {
             pane,

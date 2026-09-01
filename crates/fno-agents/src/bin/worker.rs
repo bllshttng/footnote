@@ -1,15 +1,17 @@
-//! `fno-agents-worker` entrypoint. Post-G4 (x-f54c) only the `--stream`
-//! claude stream-json adoption lane survives; the PTY worker lane retired.
+//! `fno-agents-worker` entrypoint. Two lanes:
 //!
-//! Usage (the daemon builds this argv; humans never type it):
-//! ```text
-//! fno-agents-worker --short-id wkA --home /path/.fno/agents \
-//!     --cwd /work [--rows 24] [--cols 80] [--ring-bytes N] -- <provider argv...>
-//! ```
+//! - `--pane`: the pane keeper. Owns a pane's pty master in its own process
+//!   (setsid'd, SIGHUP-immune), so the pane child outlives the mux server
+//!   and a fresh server re-adopts it instead of re-spawning. This is the
+//!   lane retired at G4 and restored once the crashes it predicted kept
+//!   biting: the deleted worker.rs module doc named the undo ("supervisor
+//!   fd-keeper") and the mux now fills it. The daemon builds this argv;
+//!   humans never type it.
+//! - `--stream`: the claude stream-json adoption lane.
 //!
-//! The worker ignores SIGHUP so a stray hangup (e.g. the controlling terminal
-//! going away) cannot take it — and therefore the PTY child — down. Outlasting
-//! the daemon is the whole point.
+//! The worker ignores SIGHUP so a stray hangup (e.g. the controlling
+//! terminal going away) cannot take it - and therefore the PTY child -
+//! down. Outlasting the daemon is the whole point.
 
 use fno_agents::stream_worker::{self, SessionClaim, StreamWorkerConfig};
 use std::path::PathBuf;
@@ -35,17 +37,30 @@ fn main() {
         return;
     }
 
-    // Post-G4 (x-f54c): the PTY worker lane retired with daemon PTY hosting. The
-    // only surviving lane is `--stream` (claude stream-json adoption), launched
-    // by the daemon's spawn_claude_stream_lane.
+    // Two lanes: `--pane` (the keeper: pty master ownership outlives the mux
+    // server) and `--stream` (claude stream-json adoption, launched by the
+    // daemon's spawn_claude_stream_lane). Everything else refuses, truthfully.
+    if args.iter().any(|a| a == "--pane") {
+        if let Err(msg) = pane_keeper_lane(&args) {
+            eprintln!("fno-agents-worker: {msg}");
+            std::process::exit(2);
+        }
+        return;
+    }
     if !args.iter().any(|a| a == "--stream") {
         eprintln!(
-            "fno-agents-worker: the PTY worker lane was retired at G4; only --stream \
-             (claude stream-json adoption) remains"
+            "fno-agents-worker: pass a lane: --pane (keeper) or --stream \
+             (claude stream-json adoption)"
         );
         std::process::exit(2);
     }
     run_stream_lane(args);
+}
+
+/// `--pane` entrypoint: parse, then run the keeper to completion.
+fn pane_keeper_lane(args: &[String]) -> Result<(), String> {
+    let cfg = fno_agents::pane_keeper::parse_pane_args(args)?;
+    fno_agents::pane_keeper::run(cfg)
 }
 
 /// `fno-agents-worker --stream` entrypoint: the claude stream-json host lane.

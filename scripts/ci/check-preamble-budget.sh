@@ -89,7 +89,16 @@ set -euo pipefail
 # Raised by 357 for two positive-marker specimens (zsh eats `:c` in an
 # unquoted HASH:path; stat prints local time and a hand-appended Z falsified
 # an elimination). Measured, no band banked: zero spare.
-CEILING_BYTES=38165
+# Raised by 263 for the pane-keeper pointer: worker panes now outlive the mux
+# server, so the SessionStart line must say the shutdown sweep spares
+# keeper-hosted panes and name the keeper-list verb. Same shape as the
+# workspace-restore raise: reboot recovery is exactly the moment no agent is
+# reading docs. The bullet was already cut to its floor and the redundant
+# deep-dive list entry dropped; 263 is the measured remainder, zero spare.
+# Main's DND work merged in +2; the pane-keeper bullet paid it by dropping
+# "child " before pid (6 B), and the ceiling followed down to 38424. Zero
+# spare, still.
+CEILING_BYTES=38424
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
