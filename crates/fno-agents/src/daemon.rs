@@ -13,6 +13,11 @@
 
 use crate::client_verbs::RowLiveness;
 use crate::events::EventEmitter;
+// The receipt builders moved to `receipt.rs` (x-a879) so the write choke
+// point (`state::update_registry`) can stage the same recovery record for a
+// row removed through ANY door; re-exported so the reap path's references
+// are unchanged.
+pub use crate::receipt::{build_reap_receipt, write_reap_receipt, ReapReceipt};
 use crate::identity::canonical_handle;
 use crate::paths::{self, AgentsHome};
 use crate::protocol::{
@@ -644,73 +649,6 @@ pub struct GcSummary {
     pub kept_receipts: Vec<(String, String)>,
 }
 
-/// One reaped row's recovery record (x-b150). Built from the registry row
-/// itself - the fields present on every row - plus the harness-DECLARED
-/// interactive resume form read from the capability table (the same single
-/// source `fno whoami ledger` renders), and enriched from the ledger entry
-/// when one exists. Written durably BEFORE the retain drops the row, so a
-/// reaped row stays recoverable even when its ledger entry does not exist and
-/// never will (kings, blueprint and rescue sessions never open a PR, so no
-/// target run ever writes them one).
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct ReapReceipt {
-    pub row_name: String,
-    pub short_id: String,
-    pub harness: String,
-    pub harness_session_id: String,
-    pub cwd: String,
-    pub log_path: Option<String>,
-    pub created_at: String,
-    pub reaped_at: String,
-    /// The resume command, rendered from the capability table's
-    /// `interactive_resume` form. Never hardcoded here.
-    pub resume: String,
-    /// Ledger enrichment (node / pr / plan) when the session resolves there.
-    /// The ledger stays the richer source; this is the copy that survives
-    /// when the row has no ledger entry at all.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ledger: Option<Value>,
-}
-
-/// Sanitize a receipt filename component: the session id comes from registry
-/// rows and is not guaranteed filename-safe across harnesses.
-fn receipt_filename_part(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-/// Where reap receipts live: `<agents home>/reap-receipts/`, one file per
-/// reaped row keyed by `<harness>-<session id>`, the resume identity.
-fn reap_receipt_path(home: &AgentsHome, receipt: &ReapReceipt) -> std::path::PathBuf {
-    home.root().join("reap-receipts").join(format!(
-        "{}-{}.json",
-        receipt_filename_part(&receipt.harness),
-        receipt_filename_part(&receipt.harness_session_id)
-    ))
-}
-
-/// Persist one receipt durably. 0600 like the rest of the agents tree.
-fn write_reap_receipt(home: &AgentsHome, receipt: &ReapReceipt) -> std::io::Result<()> {
-    let path = reap_receipt_path(home, receipt);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(receipt)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?,
-    )?;
-    let _ = crate::paths::set_file_mode_0600(&path);
-    Ok(())
-}
-
 /// Expire receipts older than `retain_days` in the sweep that also writes
 /// them (x-6db9): one pass both records and prunes. Ordering note: this runs
 /// BEFORE a receipt this pass may stage, never after - but a freshly written
@@ -793,45 +731,6 @@ fn ledger_entry_in<'a>(rows: &'a [Value], session_id: &str) -> Option<&'a Value>
         r.get("sessions")
             .and_then(Value::as_array)
             .is_some_and(|sessions| sessions.iter().any(|s| s.as_str() == Some(session_id)))
-    })
-}
-
-/// Build the receipt from the row, or say exactly why it cannot be built.
-///
-/// The gate's positive requirement: a resume command from the capability
-/// table. A row with no session identity, an empty harness name, a harness
-/// with no capability row, or a harness that declares no interactive resume
-/// form has no record of how to come back - that is the Unknown case, and
-/// unknown never reaps.
-fn build_reap_receipt(
-    e: &state::RegistryEntry,
-    ledger: Option<&Value>,
-) -> Result<ReapReceipt, String> {
-    let harness = e.harness_name();
-    if harness.is_empty() {
-        return Err("missing harness identity".to_string());
-    }
-    let sid = e
-        .harness_session_id
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "missing harness session identity".to_string())?;
-    let contract = crate::harness_capabilities::HarnessContract::packaged()
-        .map_err(|err| format!("capability table unreadable: {err}"))?;
-    let argv = contract
-        .render_session_argv(harness, "interactive_resume", Some(sid))
-        .map_err(|err| format!("no interactive resume form declared: {err}"))?;
-    Ok(ReapReceipt {
-        row_name: e.name.clone(),
-        short_id: e.short_id.clone(),
-        harness: harness.to_string(),
-        harness_session_id: sid.to_string(),
-        cwd: e.cwd.clone(),
-        log_path: e.log_path.clone(),
-        created_at: e.created_at.clone(),
-        reaped_at: now_rfc3339_like(),
-        resume: argv.join(" "),
-        ledger: ledger.cloned(),
     })
 }
 
