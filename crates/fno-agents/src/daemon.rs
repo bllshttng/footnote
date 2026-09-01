@@ -595,6 +595,12 @@ pub struct GcSummary {
     /// the "stuck and invisible" case `gc.rs`'s own comments warn about;
     /// before this field it had no report at all.
     pub kept_uncorroborated: Vec<String>,
+    /// Rows kept because the liveness re-check reports them alive right now
+    /// (x-98ab). `Live` is the ordinary keep, and it went unreported for
+    /// exactly that reason - which made `fno agents reap --dry-run` on a
+    /// fully-live fleet name ZERO of the 26 rows it kept. A sweep that names
+    /// nothing it kept is indistinguishable from a sweep that never ran.
+    pub kept_live: Vec<String>,
     /// Live-idle rows the stat gate could NOT answer for, so they escalated to
     /// the batched truth probe this sweep. One number, not a cap: the old
     /// `DORMANT_PROBE_CAP` of 8 truncated a sweep over a large roster
@@ -2086,8 +2092,14 @@ fn gc_sweep_impl_with_node_cascade(
                         Some(crate::gc::KeepReason::Uncorroborated) => {
                             summary.kept_uncorroborated.push(id);
                         }
-                        // Live / NotTerminal / WithinGrace: the ordinary,
-                        // expected keep - not what task 5 exists to surface.
+                        // x-98ab: the ordinary keep is still a keep. Reporting
+                        // it is what makes a zero-reap pass over a fully-live
+                        // fleet legible instead of a silent 26-row keep.
+                        Some(crate::gc::KeepReason::Live) => {
+                            summary.kept_live.push(id);
+                        }
+                        // NotTerminal / WithinGrace: mid-flight states on the
+                        // way to a verdict, not what task 5 exists to surface.
                         _ => {}
                     }
                 }
