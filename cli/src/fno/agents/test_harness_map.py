@@ -15,6 +15,7 @@ from fno.agents.harness_map import (
     render_session_argv,
     resolve_dispatch,
     substrate_default,
+    thread_lane,
 )
 
 # Config read is stubbed to empty in every resolve so the tests exercise the
@@ -330,6 +331,57 @@ def test_explicit_bg_on_unearned_harness_is_rejected():
         _resolve(harness="opencode", substrate="bg")
 
 
+def test_thread_lane_is_derived_from_the_attach_declaration():
+    """Lane A where interactive_attach declares a form; lane B where only
+    interactive_resume does. The selector reads the capability contract, so
+    a new row lands in its lane with no code edit."""
+    assert thread_lane("claude") == "attach"
+    assert thread_lane("codex") == "attach"
+    for harness in ("pi", "opencode", "agy", "gemini"):
+        assert thread_lane(harness) == "keeper", harness
+
+
+def test_thread_lane_answers_none_when_neither_form_exists(monkeypatch):
+    import fno.agents.harness_map as hm
+
+    monkeypatch.setattr(
+        hm,
+        "capabilities",
+        lambda _h: {
+            "resume_strategy": {
+                "forms": {
+                    "interactive_attach": {"kind": "unsupported", "tokens": []},
+                    "interactive_resume": {"kind": "unsupported", "tokens": []},
+                }
+            }
+        },
+    )
+    assert hm.thread_lane("synthetic") == "none"
+
+
+def test_thread_lane_resolver_carries_no_harness_name():
+    """The resolver reads a capability field, never a name, so the day a
+    third lane lands no edit happens here."""
+    import inspect
+
+    source = inspect.getsource(thread_lane)
+    for name in known_harnesses():
+        assert name not in source, name
+
+
+def test_thread_refusal_names_the_missing_lane():
+    """The gate keeps its condition and loses its name list: the refusal
+    names which lane fno has not built for THIS harness, and points at
+    headless. Minting nothing is structural - resolve_dispatch is pure."""
+    with pytest.raises(DispatchResolveError) as exc:
+        _resolve(harness="pi", substrate="thread")
+    msg = str(exc.value)
+    assert "keeper" in msg
+    assert "headless" in msg
+    assert "claude" not in msg
+    assert "codex" not in msg
+
+
 def test_explicit_thread_on_codex_is_allowed():
     """Codex's live six-step journey earns explicit persistent threads."""
     out = _resolve(harness="codex", substrate="thread")
@@ -607,9 +659,10 @@ def test_thread_bit_asserts_fnos_own_driver_not_the_resume_primitive():
 
 def test_explicit_thread_on_partial_lane_refused_with_the_reason():
     """An explicit thread request on a launch-only lane is a hard error naming
-    the rule, never a silent ride onto a half-working session."""
-    with pytest.raises(DispatchResolveError, match="journey-proven"):
+    the missing lane, never a silent ride onto a half-working session."""
+    with pytest.raises(DispatchResolveError, match="keeper") as exc:
         _resolve(harness="opencode", substrate="thread")
+    assert "headless" in str(exc.value)
 
 
 def test_known_harnesses_covers_readable_set():
