@@ -310,6 +310,9 @@ tokens = ["gemini", "--session-id", "{session_id}"]
 kind = "flag"
 tokens = ["gemini", "--resume", "{session_id}"]
 
+# model_switch_strategy kind="unsupported" records that fno has not built the
+# switch lane on that harness, never that the harness cannot switch models. It
+# is a lane statement, not a harness measurement; a built lane flips the kind.
 [harness.gemini.model_switch_strategy]
 kind = "unsupported"
 tokens = []
