@@ -372,9 +372,11 @@ def test_thread_lane_resolver_carries_no_harness_name():
 def test_thread_refusal_names_the_missing_lane():
     """The gate keeps its condition and loses its name list: the refusal
     names which lane fno has not built for THIS harness, and points at
-    headless. Minting nothing is structural - resolve_dispatch is pure."""
+    headless. Minting nothing is structural - resolve_dispatch is pure.
+    agy stands in for every still-refused harness now that pi's keeper lane
+    is journey-proven; opencode carries the same guard below."""
     with pytest.raises(DispatchResolveError) as exc:
-        _resolve(harness="pi", substrate="thread")
+        _resolve(harness="agy", substrate="thread")
     msg = str(exc.value)
     assert "keeper" in msg
     assert "headless" in msg
@@ -633,6 +635,9 @@ def test_config_already_native_template_not_double_prefixed():
 def test_substrate_default_table():
     assert substrate_default("claude") == "thread"
     assert substrate_default("codex") == "thread"
+    # pi's keeper lane survived the seven-step restart journey
+    # (test_thread_keeper_journey.py), so its bit reads true.
+    assert substrate_default("pi") == "thread"
     # opencode's serve lane is launch-only (ask refuses, no steering), so its
     # bit remains false until its steering lane earns an unattended journey.
     for h in ("gemini", "agy", "opencode"):
@@ -643,11 +648,15 @@ def test_thread_bit_asserts_fnos_own_driver_not_the_resume_primitive():
     """The bit is a claim about FNO's lane, never about the harness CLI: every
     harness here has a working resume primitive (agy and opencode both measured
     2026-08-26), but only claude has the driver + journey-proven lane the bit
-    asserts. Codex earned the bit through its live six-step journey. OpenCode
-    remains launch-only, so a true bit there would route autonomous spawns onto
-    a session the caller cannot steer, which is worse than refusing."""
+    asserts. Codex earned the bit through its live six-step journey. pi earned
+    it through the seven-step restart journey: both supervisors SIGKILLed, the
+    keeper child kept its pid, cwd and session id, and the session store
+    gained nothing (test_thread_keeper_journey.py). OpenCode remains
+    launch-only, so a true bit there would route autonomous spawns onto a
+    session the caller cannot steer, which is worse than refusing."""
     assert capabilities("claude")["thread"] is True
     assert capabilities("codex")["thread"] is True
+    assert capabilities("pi")["thread"] is True
     for h in ("agy", "opencode"):
         assert capabilities(h)["thread"] is False
     # the resume primitives themselves are all recorded as working

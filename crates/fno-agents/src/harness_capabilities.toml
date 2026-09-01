@@ -531,15 +531,19 @@ status_pattern = ""
 # prompt to bypass and nothing honest to put here.
 permission_bypass = []
 resume = "native-session"
-# FALSE, and it is a statement about fno rather than about pi. The rpc lane is
-# a real driving transport - typed events, an `id` per request, native mid-turn
-# injection - and its driver is built and tested. What does not exist yet is a
-# spawn arm: `dispatch_spawn` has no pi branch, so a `--substrate thread` pi
-# spawn would reach a lane with nothing behind it. This is opencode's situation
-# exactly, and it takes opencode's answer: the bit reads false, autonomous
-# dispatch keeps pi on `pane`, and the bit flips when the spawn arm ships with
-# its own unattended journey test rather than when the transport merely parses.
-thread = false
+# TRUE, and the seven-step restart journey is the evidence
+# (cli/tests/agents/test_thread_keeper_journey.py, journey wk-x61bc, first
+# green 2026-09-01 on pi 0.84.2): with the mux server AND fno-agents-daemon
+# both SIGKILLed, the keeper-hosted child stayed alive under launchd with cwd
+# and session id unchanged, the restart sweep re-bound the same row (same
+# child pid, same socket, same session id), ~/.pi/agent/sessions gained no
+# file across the restart, and a second prompt answered from the first turn's
+# memory. The bit covers the lane dispatch resolves onto, which the lane-B
+# driver spawns and a keeper process hosts. The spawn arm is still unbuilt -
+# dispatch_spawn has no pi branch and pi stays out of SPAWN_HARNESSES - so
+# `fno agents spawn --substrate thread` still refuses pi until that arm ships
+# with its own journey.
+thread = true
 autonomous_pane = false
 route_on_pane = false
 # pi, measured 2026-08-28, replacing the inherited value this row refused to
@@ -606,14 +610,16 @@ session_binding = { strategy = "caller-assigned-cwd-scoped", required = true, ti
 # could deny it the state root. That is the same reading opencode's pane lane
 # carries, arrived at from pi's documented absence rather than from a probe.
 #
-# thread and headless say `unmeasured` rather than borrowing that reading. The
-# spawn lane for neither exists yet (`thread = false` above, and pi is out of
-# SPAWN_HARNESSES), so no worker has ever run on them and no claim write has
-# ever been observed. A lane nothing dispatches must not inherit a stance from
-# the lane that does; when the rpc spawn arm ships, its own journey test is what
-# converts these.
+# thread is unsandboxed by that same reading, earned rather than borrowed: the
+# restart journey ran a real keeper-hosted pi child on this lane, and that
+# process is as ordinary and unsandboxed as a pane child. headless stays
+# `unmeasured` - nothing has run pi headless yet, so no claim write has ever
+# been observed there, and a lane nothing dispatches must not inherit a stance
+# from the lanes that do. pi remains out of SPAWN_HARNESSES (the spawn arm is
+# unbuilt); when that arm ships it brings its own journey for the lanes it
+# opens.
 pane = "unsandboxed"
-thread = "unmeasured"
+thread = "unsandboxed"
 headless = "unmeasured"
 
 # pi has no approval UI, so there is no keystroke answer to record and all

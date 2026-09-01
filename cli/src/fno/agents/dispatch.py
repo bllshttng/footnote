@@ -1609,10 +1609,16 @@ def _lane_b_keeper_socket(name: str) -> Path:
     the Rust registry-side keeper sweep derives the threads dir from the
     agents root's parent (``FNO_AGENTS_HOME``'s parent when set, else
     ``state_dir()``), and the spawn must write the socket where that sweep
-    reads it or a restart rebind silently finds nothing."""
+    reads it or a restart rebind silently finds nothing.
+
+    The override arm keeps ``FNO_AGENTS_HOME``'s literal spelling - no
+    ``resolve()``: the sweep matches the row's socket path byte-for-byte
+    against a dir built from the raw ``--home`` string, and resolving
+    repoints it through symlinked components (macOS ``/var`` ->
+    ``/private/var``), leaving the socket orphaned at every restart."""
     override = os.environ.get("FNO_AGENTS_HOME")
     if override:
-        return Path(override).expanduser().resolve().parent / "mux" / "threads" / f"{name}.sock"
+        return Path(override).expanduser().parent / "mux" / "threads" / f"{name}.sock"
     return paths.state_dir() / "mux" / "threads" / f"{name}.sock"
 
 

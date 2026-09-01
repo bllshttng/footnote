@@ -186,6 +186,26 @@ def test_lane_b_socket_follows_the_agents_home_the_sweep_derives_from(
     assert row.messaging_socket_path == receipt["keeper_socket"]
 
 
+def test_lane_b_socket_keeps_a_symlinked_agents_home_spelling(
+    lane_b_home, monkeypatch, tmp_path
+) -> None:
+    """A symlinked FNO_AGENTS_HOME keeps its literal spelling in the socket
+    path: the Rust sweep matches the row's socket byte-for-byte against a
+    dir derived from the raw --home string, so resolving through the link
+    (macOS /var -> /private/var for every mkdtemp state root) would orphan
+    the socket and every restart rebind would silently find nothing."""
+    real = tmp_path / "realstate"
+    real.mkdir()
+    link = tmp_path / "linkstate"
+    link.symlink_to(real)
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(link / "agents"))
+    _fake_keeper(monkeypatch, lane_b_home)
+    receipt = _lane_b_thread_spawn(name="wk-link", harness="pi", cwd=lane_b_home)
+    assert receipt["keeper_socket"] == str(link / "mux" / "threads" / "wk-link.sock")
+    row = load_registry()[0]
+    assert row.messaging_socket_path == str(link / "mux" / "threads" / "wk-link.sock")
+
+
 def test_lane_b_spawn_records_the_child_pid_the_restart_sweep_asserts(
     lane_b_home, monkeypatch
 ) -> None:
