@@ -3680,7 +3680,9 @@ def dispatch_spawn(
                         provider="claude",
                         short_id=created.short_id,
                         effective_message=effective_message,
-                        model_substituted=created.model_substituted,
+                        # getattr: `created` is any ask-path result, including
+                        # duck-typed stubs minted before the field existed.
+                        model_substituted=getattr(created, "model_substituted", None),
                     )
 
                 # 4b2. opencode bg: delegate to the Rust serve lane. This arm
