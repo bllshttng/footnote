@@ -16,7 +16,6 @@ degrade to the substring lane instead of failing.
 """
 from __future__ import annotations
 
-import hashlib
 import os
 import sqlite3
 import tempfile
@@ -40,7 +39,9 @@ def index_path(graph_path: Path) -> Path:
 
 
 def _graph_hash(graph_path: Path) -> str:
-    return hashlib.sha256(graph_path.read_bytes()).hexdigest()
+    from fno.graph.load import _sha256_file
+
+    return _sha256_file(graph_path)
 
 
 def _fts5_supported() -> bool:
@@ -81,12 +82,14 @@ def _rebuild(graph_path: Path, dest: Path, graph_hash: str) -> None:
         for e in entries:
             if not isinstance(e, dict) or not isinstance(e.get("id"), str):
                 continue
+            # A hand-mangled non-str field would fail the executemany bind
+            # and degrade every search to the fallback forever; coerce here.
             rows.append(
                 (
                     e["id"],
-                    e.get("title") or "",
-                    e.get("slug") or "",
-                    e.get("details") or "",
+                    e.get("title") if isinstance(e.get("title"), str) else "",
+                    e.get("slug") if isinstance(e.get("slug"), str) else "",
+                    e.get("details") if isinstance(e.get("details"), str) else "",
                 )
             )
         conn.executemany("INSERT INTO nodes (id, title, slug, details) VALUES (?,?,?,?)", rows)
