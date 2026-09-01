@@ -7668,6 +7668,73 @@ def _delivery_policy_refusal(target) -> Optional[str]:
     return None
 
 
+def _mail_inject_keeper(
+    recipient: str,
+    text: str,
+    *,
+    harness: str,
+    sender: Optional[str] = None,
+    reason_out: Optional[list] = None,
+) -> bool:
+    """Inject ``text`` into a keeper-hosted lane-B thread (x-0ea6) via the
+    ``fno-agents mail-inject --harness <hosted>`` verb.
+
+    ``harness`` is the hosted harness from the recipient's row. It names the
+    lane (the Rust side routes a keeper-lane harness to the keeper socket and
+    refuses every other name) and the settle-delay table row: the verb
+    defaults ``--enter-delay-ms`` from that row itself, so this side passes no
+    delay and the one fact stays single-sourced. The verb resolves the
+    recipient's registry row, pastes the envelope as one keeper ``Input``
+    frame plus the wire-level CR, and confirms by content in the hosted
+    harness's own transcript store. Returns True only on that confirmed
+    landing; any miss returns False with the verb's reason token in
+    ``reason_out`` so the durable demotion names why.
+
+    Unlike ``_mail_inject_claude`` there is no claude fallback for an unknown
+    harness: a fallback name would route to lane A's socket, so an unreadable
+    row is a refusal, never a wrong-lane guess."""
+    import json
+
+    from fno import rust_binary
+
+    def _record(reason: str) -> None:
+        if reason_out is not None:
+            reason_out.append(reason)
+
+    # x-e21e, same discipline as lane A: a bus-only recipient gets no prompt-
+    # line paste on any transport, refused before the binary and the socket.
+    if _delivery_policy_refusal(recipient) == BUS_ONLY_POLICY:
+        _record(BUS_ONLY_POLICY)
+        return False
+
+    binary = rust_binary.resolve_installed_binary()
+    if binary is None:
+        _record("no-binary")
+        return False
+    argv = [str(binary), "mail-inject", "--session", recipient, "--harness", harness]
+    if sender:
+        argv += ["--sender", sender]
+    try:
+        proc = subprocess.run(
+            argv,
+            input=text,
+            capture_output=True,
+            text=True,
+            timeout=_MAIL_INJECT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _record("probe-unavailable")
+        return False
+    try:
+        out = json.loads(proc.stdout.strip())
+        delivered = bool(out.get("delivered"))
+        _record(str(out.get("reason") or "unknown"))
+        return delivered
+    except (ValueError, AttributeError):
+        _record("unreadable")
+        return False
+
+
 def _mail_inject_claude(
     recipient: str,
     text: str,
@@ -8496,6 +8563,30 @@ def _deliver_live(
             return True
         _record("codex-thread-switchboard-miss")
         return False
+
+    # Keeper-hosted lane-B thread (x-0ea6): the row has neither a pane above
+    # nor a lane-A socket below - its keeper unix socket IS the live
+    # transport. The same mail-inject verb drives it with --harness naming the
+    # hosted harness (which owns the settle delay and the confirm store); the
+    # verb resolves the row by harness session id, pastes the envelope as one
+    # Input frame plus the wire-level CR, and confirms by content in the
+    # hosted harness's transcript store. Any miss demotes with the verb's own
+    # reason token (no-keeper-listener / not-confirmed / not-injectable), so
+    # the durable receipt names the cause instead of a bare live-miss.
+    from fno.agents.harness_map import thread_lane_or_none
+
+    if (
+        entry.harness_session_id
+        and entry.messaging_socket_path
+        and "mux/threads/" in entry.messaging_socket_path
+        and thread_lane_or_none(entry.harness) == "keeper"
+    ):
+        return _mail_inject_keeper(
+            entry.harness_session_id,
+            wrapped,
+            harness=entry.harness,
+            reason_out=reason_out,
+        )
 
     # Route key is the canonical harness, legacy provider as fallback (x-ec59):
     # an unknown harness with no inject lane (e.g. opencode) falls through to the

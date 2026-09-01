@@ -2201,6 +2201,25 @@ def _reply_session_for(from_name: Optional[str]) -> Optional[str]:
     return None
 
 
+def _row_hosts_keeper_thread(session_id: str) -> bool:
+    """Whether ``session_id``'s registry row carries a keeper thread socket.
+
+    The same predicate the mail-inject verb resolves the row by: a
+    ``messaging_socket_path`` under ``mux/threads/``. Anything else - a pane
+    row, no row, an unreadable registry - reads False, and the caller keeps
+    its other lanes. An unreadable registry must not raise here: a send to a
+    keeper-lane recipient whose registry cannot be read still owes the ladder
+    its fall-through rather than an error."""
+    from fno.agents.registry import AgentResolutionError, resolve_agent
+
+    try:
+        entry = resolve_agent(session_id).entry
+    except (AgentResolutionError, OSError):
+        return False
+    sock = getattr(entry, "messaging_socket_path", None) or ""
+    return "mux/threads/" in sock
+
+
 def _name_lane_send(
     message: str,
     *,
@@ -2237,8 +2256,10 @@ def _name_lane_send(
         BUS_ONLY_POLICY,
         _mail_inject_claude,
         _mail_inject_codex,
+        _mail_inject_keeper,
         _mux_pane_send,
     )
+    from fno.agents.harness_map import thread_lane_or_none
     from fno.agents.registry import AgentResolutionError, resolve_agent
     from fno.agents.self_stamp import resolve_self_model, stamp_from
     from fno.agents.store_fallback import is_full_session_id, is_session_shaped
@@ -2501,6 +2522,19 @@ def _name_lane_send(
     if resolved is not None and self_send:
         lanes.append("self-send")
     elif resolved is not None:
+        # x-0ea6: keeper-lane membership is contract-derived. The non-raising
+        # read keeps a row whose harness the table has dropped on its
+        # pre-keeper fall-through lanes (roster rung, durable floor).
+        lane_harness = resolved.agent
+        _keeper_recipient = thread_lane_or_none(lane_harness) == "keeper"
+        # And only when the row really hosts a keeper thread. A keeper-LANE
+        # harness can also sit in a live mux pane (opencode, agy): those rows
+        # carry no mux/threads socket, the verb would answer not-injectable,
+        # and intercepting them here would strand the pane rung below. The
+        # predicate mirrors the verb's own row resolution.
+        _keeper_thread_row = _keeper_recipient and _row_hosts_keeper_thread(
+            resolved.session_id
+        )
         if provider == "claude":
             _resolved_reason: list = []
             injected = _mail_inject_claude(
@@ -2517,10 +2551,32 @@ def _name_lane_send(
                 live_reason = (
                     _resolved_codex_reason[0] if _resolved_codex_reason else None
                 )
-        if not injected:
+        elif _keeper_thread_row:
+            # x-0ea6: a keeper-hosted lane-B thread has neither lane-A socket.
+            # Its live transport is the keeper's own unix socket, resolved by
+            # the verb from the registry row the same resolution above already
+            # read `provider` from. A miss falls through with the verb's own
+            # reason token (no-keeper-listener / not-confirmed / ...), so the
+            # durable demotion below names why instead of a bare live-miss.
+            _resolved_keeper_reason: list = []
+            injected = _mail_inject_keeper(
+                resolved.session_id,
+                wrapped,
+                harness=lane_harness,
+                reason_out=_resolved_keeper_reason,
+            )
+            if not injected:
+                live_reason = (
+                    _resolved_keeper_reason[0] if _resolved_keeper_reason else None
+                )
+        if not injected and not _keeper_thread_row:
             # A send addressed by session id never consults the roster, so a
             # mux-hosted session of any provider would demote to durable with a
             # live pane right there. Not-found means "not mux-hosted", not an error.
+            # A keeper THREAD row sits this rung out (x-0ea6): its live transport
+            # IS the keeper socket the rung above just attempted, the row hosts
+            # no pane by design, and a stale ref would type into an unrelated
+            # pane and read as delivered.
             try:
                 entry = resolve_agent(resolved.session_id).entry
             except (AgentResolutionError, OSError):

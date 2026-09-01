@@ -71,6 +71,49 @@ pub fn default_enter_delay_ms(provider: MailInjectProvider) -> u64 {
         .expect("embedded submit-delay capability")
 }
 
+/// The same settle delay keyed by the recipient harness's OWN name, for the
+/// keeper lane: a keeper-hosted recipient is addressed by its hosted harness
+/// (`--harness pi`), and the delay belongs to that TUI's paste ingestion, so
+/// it resolves off the named row - never a `keeper` constant and never this
+/// enum's lane label. A name the packaged contract does not know falls back
+/// to claude's row (the largest delay), the same unresolved-read-waits-longer
+/// discipline `_mail_inject_claude` applies at the Python edge.
+pub fn enter_delay_for_harness(name: &str) -> u64 {
+    let contract = crate::harness_capabilities::HarnessContract::packaged()
+        .expect("embedded submit-delay capability");
+    match contract.capabilities(name) {
+        Ok(caps) => caps.send_keys_enter_delay_ms.max(0) as u64,
+        Err(_) => contract_enter_delay_ms(&contract, MailInjectProvider::Claude),
+    }
+}
+
+/// True when `name` is a keeper-lane harness in the packaged contract: it has
+/// an interactive resume form but no interactive attach form, so the harness
+/// persists a transcript and fno must hold the pty (Python `thread_lane`'s
+/// mirror, read off the contract, never a name list). Lane A (claude, codex)
+/// owns an attach lane and is never keeper-lane, so it can never route here.
+pub fn keeper_lane_harness(name: &str) -> bool {
+    let Ok(contract) = crate::harness_capabilities::HarnessContract::packaged() else {
+        return false;
+    };
+    let Ok(caps) = contract.capabilities(name) else {
+        return false;
+    };
+    let attach_unsupported = caps
+        .resume_strategy
+        .forms
+        .get("interactive_attach")
+        .map(|form| form.kind == "unsupported")
+        .unwrap_or(true);
+    let resume_supported = caps
+        .resume_strategy
+        .forms
+        .get("interactive_resume")
+        .map(|form| form.kind != "unsupported")
+        .unwrap_or(false);
+    attach_unsupported && resume_supported
+}
+
 /// Interval multiple at which the confirm loop re-sends the wire-level CR. The
 /// initial CR (from `inject_with_submit`) can be swallowed mid-paste by a BUSY
 /// recipient streaming a turn, leaving the envelope sitting unsent; re-Entering
@@ -79,19 +122,28 @@ pub fn default_enter_delay_ms(provider: MailInjectProvider) -> u64 {
 const CR_RESUBMIT_EVERY: u32 = 8;
 
 /// Live-inject target harness. `claude` is the default `control.sock` path;
-/// `codex` routes to the app-server daemon ([`crate::codex_inject`], US8).
+/// `codex` routes to the app-server daemon ([`crate::codex_inject`], US8);
+/// `keeper` types the envelope into a lane-B thread's pty through the keeper
+/// socket's `Input` frames (x-0ea6). The keeper recipient's settle delay and
+/// confirm target resolve from the HOSTED harness's own row - the TUI
+/// receiving the paste - never from this variant's lane label.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum MailInjectProvider {
     Claude,
     Codex,
+    Keeper,
 }
 
 impl MailInjectProvider {
-    /// The capability-table row name for this recipient harness.
+    /// The capability-table row name for this recipient harness. For a keeper
+    /// recipient the ROW name is the hosted harness, resolved at delivery
+    /// from the registry row ([`enter_delay_for_harness`]); this lane label
+    /// is only the audit distinction, and the settle delay never reads it.
     pub fn harness_name(self) -> &'static str {
         match self {
             MailInjectProvider::Claude => "claude",
             MailInjectProvider::Codex => "codex",
+            MailInjectProvider::Keeper => "keeper-hosted",
         }
     }
 }
@@ -161,6 +213,9 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     // Resolved AFTER the parse loop: the default belongs to the RECIPIENT's
     // harness row (x-4b0b), and `--harness` may appear after other flags.
     let mut enter_delay_ms: Option<u64> = None;
+    // The --harness value verbatim: on the keeper lane it names the HOSTED
+    // harness's capability row, which owns the settle delay.
+    let mut harness_flag: Option<String> = None;
     let mut sender: Option<String> = None;
     let mut origin: Option<String> = None;
     let mut probe = false;
@@ -175,16 +230,24 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                 );
             }
             "--harness" | "-H" => {
-                provider = match it.next().map(String::as_str) {
-                    Some("claude") => MailInjectProvider::Claude,
-                    Some("codex") => MailInjectProvider::Codex,
+                let value = it
+                    .next()
+                    .ok_or((2, "mail-inject: --harness needs a value".to_string()))?
+                    .clone();
+                provider = match value.as_str() {
+                    "claude" => MailInjectProvider::Claude,
+                    "codex" => MailInjectProvider::Codex,
+                    name if keeper_lane_harness(name) => MailInjectProvider::Keeper,
                     _ => {
                         return Err((
                             2,
-                            "mail-inject: --harness must be claude or codex".to_string(),
+                            "mail-inject: --harness must be claude, codex, or a \
+                             keeper-lane harness (interactive resume, no attach)"
+                                .to_string(),
                         ))
                     }
                 };
+                harness_flag = Some(value);
             }
             "--provider" => return Err((2, PROVIDER_AXIS_TOMBSTONE.to_string())),
             "--probe" => probe = true,
@@ -240,7 +303,15 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
         }
     }
     let session = session.ok_or((2, "mail-inject: --session is required".to_string()))?;
-    let enter_delay_ms = enter_delay_ms.unwrap_or_else(|| default_enter_delay_ms(provider));
+    // The default belongs to the RECIPIENT's row (x-4b0b). For the keeper lane
+    // the --harness value IS the hosted harness's row name, so the delay
+    // resolves off that row here; lane A keeps its enum-keyed resolution.
+    let enter_delay_ms = enter_delay_ms.unwrap_or_else(|| match provider {
+        MailInjectProvider::Keeper => {
+            enter_delay_for_harness(harness_flag.as_deref().unwrap_or("claude"))
+        }
+        _ => default_enter_delay_ms(provider),
+    });
     Ok(MailInjectArgs {
         session,
         provider,
@@ -310,6 +381,9 @@ pub fn emit_raw_inject_audit_with_origin(
     let (harness, lane) = match provider {
         MailInjectProvider::Claude => ("claude", "control.sock"),
         MailInjectProvider::Codex => ("codex", "codex-daemon"),
+        // The audit records the LANE; the hosted harness's own row resolved
+        // the settle delay and the confirm target at delivery time.
+        MailInjectProvider::Keeper => ("keeper-hosted", "keeper-pty"),
     };
     let payload_for_event: String = text.chars().take(512).collect();
     let mut fields = serde_json::Map::new();
@@ -505,6 +579,189 @@ pub fn deliver_via_control_sock(
         attempts,
         Duration::from_millis(interval_ms),
         || confirm_content_after(&transcript, marker, baseline).unwrap_or(false),
+    )
+}
+
+/// The keeper lane's raw-byte transport: one `Input` frame per write, through
+/// the keeper binary's own frame codec. `send_line` is VERBATIM by the
+/// ControlTransport contract, so `inject_with_submit`'s paste + separate wire
+/// CR sequence rides unchanged - the same keystroke discipline the pane lane
+/// types, just framed for a keeper instead of a mux pane.
+struct KeeperTransport {
+    stream: std::os::unix::net::UnixStream,
+}
+
+impl crate::claude_attach::ControlTransport for KeeperTransport {
+    fn send_line(&mut self, line: &str) -> io::Result<()> {
+        use std::io::Write;
+        self.stream.write_all(&crate::pane_keeper::encode(
+            &crate::pane_keeper::Frame::Input(line.as_bytes().to_vec()),
+        ))?;
+        self.stream.flush()
+    }
+    fn recv_line(&mut self) -> io::Result<Option<String>> {
+        // The keeper never sends the inject frames a line-oriented reply; the
+        // confirm loop polls the transcript, not the socket.
+        Ok(None)
+    }
+}
+
+/// What the keeper lane resolved for one recipient: the keeper socket off the
+/// registry row, the hosted harness (whose row owns the settle delay and the
+/// confirm target), and the row's cwd (pi's session store is cwd-scoped).
+struct KeeperTarget {
+    sock: PathBuf,
+    hosted_harness: String,
+    cwd: PathBuf,
+}
+
+/// Resolve a keeper-hosted lane-B thread by its harness session id: the
+/// registry row carrying that id AND a keeper socket (`messaging_socket_path`
+/// under `mux/threads/`). The row is the only thing that binds a session id to
+/// its keeper - the id alone addresses nothing on this lane. The SINGLE
+/// resolution path for both the send and any future probe, mirroring
+/// `resolve_target`'s one-implementation discipline on the claude lane.
+fn resolve_keeper_target_in(
+    home: &crate::paths::AgentsHome,
+    session: &str,
+) -> Result<KeeperTarget, &'static str> {
+    let registry =
+        crate::state::load_registry(&home.registry_json()).map_err(|_| "registry-unreadable")?;
+    let entry = registry
+        .entries
+        .iter()
+        .find(|e| {
+            e.harness_session_id.as_deref() == Some(session)
+                && e.messaging_socket_path
+                    .as_deref()
+                    .is_some_and(|p| p.contains("mux/threads/"))
+        })
+        .ok_or(NOT_INJECTABLE)?;
+    Ok(KeeperTarget {
+        sock: PathBuf::from(entry.messaging_socket_path.clone().expect("checked above")),
+        hosted_harness: entry.harness_name().to_string(),
+        cwd: PathBuf::from(&entry.cwd),
+    })
+}
+
+/// The confirm target for a keeper-hosted harness: where the SUBMITTED turn
+/// is recorded, so the content confirm has something to grep. pi writes its
+/// session file at the first turn attempt, so a not-yet-filed session returns
+/// a pending target that materializes once the injected turn lands; a
+/// DUPLICATE refuses (the same no-picking discipline as pi resume). Any other
+/// hosted harness has no resolver here yet, and the lane refuses before
+/// typing rather than paste an envelope it can never confirm - an honest
+/// durable demotion beats an unverifiable `delivered`.
+enum KeeperConfirm {
+    /// Poll this file from `baseline` bytes onward.
+    Transcript {
+        path: PathBuf,
+        baseline: u64,
+    },
+    /// The file does not exist yet; every line it ever has is new signal.
+    PendingStore,
+    Refused(&'static str),
+}
+
+fn resolve_keeper_confirm(target: &KeeperTarget, session: &str, pi_root: &Path) -> KeeperConfirm {
+    match target.hosted_harness.as_str() {
+        "pi" => match crate::pi::lookup_sessions_under(pi_root, &target.cwd, session) {
+            crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
+                baseline: transcript_len(&file),
+                path: file,
+            },
+            crate::pi::SessionLookup::None => KeeperConfirm::PendingStore,
+            crate::pi::SessionLookup::Duplicate { .. } => {
+                KeeperConfirm::Refused("duplicate-session-store")
+            }
+            crate::pi::SessionLookup::Unknown { .. } => {
+                KeeperConfirm::Refused("session-store-unreadable")
+            }
+        },
+        _ => KeeperConfirm::Refused("no-confirm-source"),
+    }
+}
+
+/// Deliver `text` to a keeper-hosted lane-B thread (x-0ea6): resolve the row,
+/// connect to its keeper socket, paste the envelope inside bracketed-paste
+/// guards as one `Input` frame, settle the hosted harness's own delay, then
+/// send the wire-level CR - and confirm by CONTENT in the hosted harness's
+/// transcript store, re-Entering on the same cadence as the claude lane
+/// (both loops are the SHARED `inject_with_submit` / `confirm_with_cr_retry`
+/// pair; only the transport and the confirm target differ).
+pub fn deliver_via_keeper_socket(
+    session: &str,
+    text: &str,
+    attempts: u32,
+    interval_ms: u64,
+    enter_delay_ms: u64,
+) -> Result<(), &'static str> {
+    deliver_via_keeper_socket_in(
+        &crate::paths::AgentsHome::from_env(),
+        &crate::pi::pi_sessions_root(),
+        session,
+        text,
+        attempts,
+        interval_ms,
+        enter_delay_ms,
+    )
+}
+
+fn deliver_via_keeper_socket_in(
+    home: &crate::paths::AgentsHome,
+    pi_root: &Path,
+    session: &str,
+    text: &str,
+    attempts: u32,
+    interval_ms: u64,
+    enter_delay_ms: u64,
+) -> Result<(), &'static str> {
+    let target = resolve_keeper_target_in(home, session)?;
+    // Connect BEFORE resolving the confirm (the claude lane's ordering: a
+    // failed connect is a transport miss, never a not-confirmed turn, and the
+    // transcript baseline that confirm resolution takes must postdate the
+    // connect).
+    let stream =
+        std::os::unix::net::UnixStream::connect(&target.sock).map_err(|_| "no-keeper-listener")?;
+    let confirm = resolve_keeper_confirm(&target, session, pi_root);
+    if let KeeperConfirm::Refused(reason) = confirm {
+        // Connected but never typed into: closing without a keystroke is the
+        // honest outcome, and the reason names why nothing was pasted.
+        return Err(reason);
+    }
+    let mut transport = KeeperTransport { stream };
+    let marker = text.lines().next().unwrap_or(text);
+    inject_with_submit(&mut transport, text, Duration::from_millis(enter_delay_ms)).map_err(
+        |e| match e {
+            DriveError::UnsafeText => "unsafe-text",
+            _ => "io-error",
+        },
+    )?;
+    // A PendingStore re-looks-up per poll: pi writes the session file at the
+    // first turn attempt, and THIS inject is that attempt, so the file (and
+    // then the marker) appears within the budget; every line a fresh file has
+    // is new signal, hence the zero baseline.
+    let confirmed = || -> bool {
+        match &confirm {
+            KeeperConfirm::Transcript { path, baseline } => {
+                confirm_content_after(path, marker, *baseline).unwrap_or(false)
+            }
+            KeeperConfirm::PendingStore => {
+                match crate::pi::lookup_sessions_under(pi_root, &target.cwd, session) {
+                    crate::pi::SessionLookup::One { file } => {
+                        confirm_content_after(&file, marker, 0).unwrap_or(false)
+                    }
+                    _ => false,
+                }
+            }
+            KeeperConfirm::Refused(_) => false,
+        }
+    };
+    confirm_with_cr_retry(
+        &mut transport,
+        attempts,
+        Duration::from_millis(interval_ms),
+        confirmed,
     )
 }
 
@@ -902,10 +1159,11 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
     // refuses it upstream; a probe that answered for codex would be answering a
     // question nobody can act on.
     if args.probe {
-        if args.provider == MailInjectProvider::Codex {
+        if args.provider != MailInjectProvider::Claude {
             eprintln!(
                 "mail-inject: --probe is claude-only (the codex lane submits a turn \
-                 with no prompt line, so there is no keystroke path to probe)"
+                 with no prompt line; the keeper lane resolves its socket off the \
+                 registry row, so there is no keystroke path for a probe to answer)"
             );
             return 2;
         }
@@ -974,6 +1232,14 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
                 .await
                 .map_err(|reason| reason.to_string())
         }
+        MailInjectProvider::Keeper => deliver_via_keeper_socket(
+            &args.session,
+            &text,
+            args.attempts,
+            args.interval_ms,
+            args.enter_delay_ms,
+        )
+        .map_err(|reason| reason.to_string()),
     };
 
     // Audit floor: record an unwrapped injection in the ledger (no `<fno_mail>`
@@ -1743,9 +2009,11 @@ mod tests {
         // -H is the harness short flag.
         let h = parse_args(&argv(&["--session", "x", "-H", "codex"])).unwrap();
         assert_eq!(h.provider, MailInjectProvider::Codex);
-        // Unknown harness is a usage error.
+        // Unknown harness is a usage error. (A KEEPER-lane harness is not
+        // unknown - the keeper lane routes it - so the refusal fixture must
+        // be a name no capability row claims.)
         assert_eq!(
-            parse_args(&argv(&["--session", "x", "--harness", "gemini"]))
+            parse_args(&argv(&["--session", "x", "--harness", "notaharness"]))
                 .unwrap_err()
                 .0,
             2
@@ -1882,5 +2150,290 @@ mod tests {
     fn outcome_exit_maps_delivered_to_zero() {
         assert_eq!(outcome_exit(true), 0);
         assert_eq!(outcome_exit(false), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // The keeper lane (x-0ea6): a FAKE keeper speaking the real frame
+    // protocol, a registry row binding the session id to its socket, and a
+    // temp pi sessions root. The real live journey is the last group's.
+    // ------------------------------------------------------------------
+
+    fn keeper_mail_home(tag: &str) -> (crate::paths::AgentsHome, PathBuf) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static C: AtomicU32 = AtomicU32::new(0);
+        let n = C.fetch_add(1, Ordering::Relaxed);
+        let base = std::path::PathBuf::from(format!("/tmp/fnoki{tag}{}_{n}", std::process::id()));
+        let home = crate::paths::AgentsHome::at(base.join("agents"));
+        home.ensure_root().unwrap();
+        let threads = base.join("mux").join("threads");
+        std::fs::create_dir_all(&threads).unwrap();
+        (home, base)
+    }
+
+    fn keeper_mail_row(
+        home: &crate::paths::AgentsHome,
+        name: &str,
+        harness: &str,
+        session: &str,
+        cwd: &Path,
+        sock: &Path,
+    ) {
+        crate::state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(crate::state::RegistryEntry {
+                name: name.into(),
+                cwd: cwd.to_string_lossy().into_owned(),
+                harness: Some(harness.into()),
+                harness_session_id: Some(session.into()),
+                host_mode: Some("interactive".into()),
+                messaging_socket_path: Some(sock.to_string_lossy().into_owned()),
+                status: crate::AgentStatus::Live,
+                pid: Some(4242),
+                created_at: "2026-09-01T00:00:00Z".into(),
+                ..default_row()
+            });
+        })
+        .unwrap();
+    }
+
+    /// A minimal RegistryEntry skeleton: every defaulted optional field, so
+    /// the keeper tests name only the fields that carry the scenario.
+    fn default_row() -> crate::state::RegistryEntry {
+        crate::state::RegistryEntry {
+            name: String::new(),
+            short_id: String::new(),
+            legacy_provider: String::new(),
+            provider: None,
+            model: None,
+            model_basis: None,
+            effort: None,
+            cwd: String::new(),
+            project_root: String::new(),
+            session_id: None,
+            harness: None,
+            harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
+            launch_account: None,
+            related_session_id: None,
+            origin: None,
+            node: None,
+            spawned_by_session: None,
+            spawned_by_harness: None,
+            spawned_by_cwd: None,
+            spawn_trigger: None,
+            legacy_claude_short_id: None,
+            claude_session_uuid: None,
+            messaging_socket_path: None,
+            codex_session_id: None,
+            gemini_session_id: None,
+            mcp_channel_id: None,
+            cc_session_id: None,
+            host_mode: None,
+            status: crate::AgentStatus::Live,
+            last_message_at: None,
+            created_at: String::new(),
+            pid: None,
+            pid_start_time: None,
+            keeper_child_pid: None,
+            log_path: None,
+            last_reconciled_at: None,
+            inside_leg: None,
+            exited_at: None,
+            mux: None,
+            screen_state: None,
+            crown_level: None,
+            crown_scope: None,
+            crown_grantor: None,
+            route_settings_path: None,
+            fno_id: None,
+            delivery_policy: None,
+            sandbox_posture: None,
+        }
+    }
+
+    /// A fake keeper that records every decoded frame and, once the wire CR
+    /// arrives, records the turn like the hosted TUI would: a JSONL line
+    /// carrying the envelope in pi's cwd-scoped session store. Joining the
+    /// handle returns every frame the keeper received.
+    fn spawn_recording_keeper_handle(
+        sock: &Path,
+        text: &str,
+        pi_root: &Path,
+        cwd: &Path,
+        session: &str,
+    ) -> std::thread::JoinHandle<Vec<crate::pane_keeper::Frame>> {
+        use crate::pane_keeper::{decode, Decode, Frame};
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(sock).unwrap();
+        let text = text.to_string();
+        let pi_root = pi_root.to_path_buf();
+        let cwd = cwd.to_path_buf();
+        let session = session.to_string();
+        std::thread::Builder::new()
+            .name("fake-keeper".into())
+            .spawn(move || {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return Vec::new();
+                };
+                let mut frames: Vec<Frame> = Vec::new();
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 8192];
+                'outer: loop {
+                    loop {
+                        match decode(&buf) {
+                            Decode::NeedMore => break,
+                            Decode::Violation(_) => break 'outer,
+                            Decode::Frame(frame, used) => {
+                                buf.drain(..used);
+                                let is_cr =
+                                    matches!(&frame, Frame::Input(b) if b.as_slice() == b"\r");
+                                frames.push(frame);
+                                if is_cr {
+                                    // The TUI submits: record the turn.
+                                    let dir = pi_root.join(crate::pi::encode_cwd(&cwd));
+                                    std::fs::create_dir_all(&dir).unwrap();
+                                    let line = serde_json::json!({ "text": text }).to_string();
+                                    let file =
+                                        dir.join(format!("20260901T000000Z_{session}.jsonl"));
+                                    let mut f = std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(file)
+                                        .unwrap();
+                                    writeln!(f, "{line}").unwrap();
+                                }
+                            }
+                        }
+                    }
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break 'outer,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                frames
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn mail_inject_keeper_parse_resolves_the_hosted_row_delay() {
+        // A keeper-lane --harness value parses to the Keeper lane and resolves
+        // its settle delay off THAT harness's packaged row, never a keeper
+        // constant and never claude's.
+        let a = parse_args(&argv(&["--session", "s1", "--harness", "pi"])).unwrap();
+        assert_eq!(a.provider, MailInjectProvider::Keeper);
+        assert_eq!(a.enter_delay_ms, enter_delay_for_harness("pi"));
+        // Lane A parses unchanged.
+        assert_eq!(
+            parse_args(&argv(&["--session", "s1"])).unwrap().provider,
+            MailInjectProvider::Claude
+        );
+        assert_eq!(
+            parse_args(&argv(&["--session", "s1", "--harness", "codex"]))
+                .unwrap()
+                .provider,
+            MailInjectProvider::Codex
+        );
+        // A harness with no lane here refuses: lane A's attach harnesses and
+        // unknown names alike.
+        assert!(parse_args(&argv(&["--session", "s1", "--harness", "notaharness"])).is_err());
+    }
+
+    #[test]
+    fn mail_inject_keeper_delivers_input_frames_and_confirms_by_content() {
+        use crate::pane_keeper::Frame;
+        let (home, base) = keeper_mail_home("dlv");
+        let cwd = base.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let pi_root = base.join("pistore");
+        // pi's store shape for a never-prompted session: the cwd dir exists,
+        // the session file does not yet.
+        std::fs::create_dir_all(pi_root.join(crate::pi::encode_cwd(&cwd))).unwrap();
+        let sock = base.join("mux/threads/wk-pi.sock");
+        let session = "sess-keep-1";
+        keeper_mail_row(&home, "wk-pi", "pi", session, &cwd, &sock);
+        let text = "<fno_mail from=\"t\">body line\n</fno_mail>";
+        let handle = spawn_recording_keeper_handle(&sock, text, &pi_root, &cwd, session);
+
+        let outcome = deliver_via_keeper_socket_in(&home, &pi_root, session, text, 12, 25, 0);
+        assert_eq!(outcome, Ok(()), "the envelope lands and confirms");
+
+        let frames = handle.join().unwrap();
+        assert_eq!(frames.len(), 2, "one paste frame, one CR frame");
+        assert!(
+            matches!(&frames[0], Frame::Input(b)
+                if b.starts_with(PASTE_BEGIN.as_bytes())
+                    && b.ends_with(PASTE_END.as_bytes())
+                    && b.windows(6).any(|w| w == b"<fno_m")),
+            "the first frame is the bracketed paste of the envelope"
+        );
+        assert!(
+            matches!(&frames[1], Frame::Input(b) if b.as_slice() == b"\r"),
+            "the second frame is the bare wire-level CR"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn mail_inject_keeper_demotes_durable_when_no_listener() {
+        // AC2-ERR: a socket file with nobody behind it names the reason and
+        // never reports delivered.
+        let (home, base) = keeper_mail_home("dead");
+        let cwd = base.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let pi_root = base.join("pistore");
+        std::fs::create_dir_all(pi_root.join(crate::pi::encode_cwd(&cwd))).unwrap();
+        let sock = base.join("mux/threads/wk-dead.sock");
+        std::fs::write(&sock, b"").unwrap();
+        keeper_mail_row(&home, "wk-dead", "pi", "sess-dead", &cwd, &sock);
+
+        let outcome = deliver_via_keeper_socket_in(
+            &home,
+            &pi_root,
+            "sess-dead",
+            "<fno_mail>ping</fno_mail>",
+            2,
+            10,
+            0,
+        );
+        assert_eq!(outcome, Err("no-keeper-listener"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn mail_inject_keeper_refuses_before_typing_without_a_confirm_source() {
+        // A hosted harness with no transcript resolver here refuses BEFORE any
+        // frame is typed: an honest durable demotion beats an unverifiable
+        // delivered.
+        let (home, base) = keeper_mail_home("nosrc");
+        let cwd = base.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let pi_root = base.join("pistore");
+        std::fs::create_dir_all(&pi_root).unwrap();
+        let sock = base.join("mux/threads/wk-grok.sock");
+        keeper_mail_row(&home, "wk-grok", "grok", "sess-grok", &cwd, &sock);
+        let _parked = spawn_recording_keeper_handle(
+            &sock,
+            "<fno_mail>ping</fno_mail>",
+            &pi_root,
+            &cwd,
+            "sess-grok",
+        );
+
+        let outcome = deliver_via_keeper_socket_in(
+            &home,
+            &pi_root,
+            "sess-grok",
+            "<fno_mail>ping</fno_mail>",
+            2,
+            10,
+            0,
+        );
+        assert_eq!(outcome, Err("no-confirm-source"));
+        // The parked fake keeper thread never receives a connection (the lane
+        // refused before connecting) and ends with the test process.
+        std::fs::remove_dir_all(&base).ok();
     }
 }
