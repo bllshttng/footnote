@@ -2146,3 +2146,23 @@ def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):
         ]
     )
     assert [e.node for e in load_registry()] == ["x-bb18"]
+
+    # A refresh may FILL an empty node (a pre-v21 row gains the stamp its
+    # session's own export names) and may never CHANGE a stamped one. A
+    # caller saying nothing fills nothing - no evidence, no write.
+    refreshed = register_existing_session(
+        provider=CLAUDE_HARNESS,
+        session_id="99999999-8888-7777-6666-555555555555",
+        cwd=str(tmp_path),
+        name="nodeworker",
+        node="x-98ab",
+    )
+    assert refreshed.node == "x-98ab", "a refresh must fill an empty node"
+    changed = register_existing_session(
+        provider=CLAUDE_HARNESS,
+        session_id="99999999-8888-7777-6666-555555555555",
+        cwd=str(tmp_path),
+        name="nodeworker",
+        node="x-other",
+    )
+    assert changed.node == "x-98ab", "a refresh must never change a stamped node"

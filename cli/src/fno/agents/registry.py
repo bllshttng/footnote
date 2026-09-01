@@ -1838,6 +1838,14 @@ def register_existing_session(
                 )
                 if origin is not None and upgradeable:
                     entry.origin = origin
+                # x-98ab: same fill-empty discipline as origin. `node` is a
+                # birth fact, but the session's own exported FNO_NODE is
+                # evidence the birth path could have read too, so a refresh
+                # may FILL an empty node and may never change one - otherwise
+                # every row registered before the field existed stays
+                # name-less no matter how often its session re-registers.
+                if node and not entry.node:
+                    entry.node = node
                 # Same preserve-when-silent discipline for the delivery policy:
                 # the SessionStart hook re-fires register without this kwarg
                 # after every resume/compaction, and a blind overwrite would
