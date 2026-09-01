@@ -594,6 +594,16 @@ pub struct RegistryEntry {
     /// field, mirrored in Python's `AgentEntry` (ab-b946b59c); skip when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_start_time: Option<u64>,
+    /// The KEEPER's child pid for a lane-B thread row (x-ac6b): the process
+    /// the keeper hosts, learned from the spawn Identify reply and re-asserted
+    /// unchanged by the registry-side keeper sweep on every daemon start. A
+    /// changed pid means something respawned and is wearing the row's name -
+    /// the exact failure that field exists to catch. Distinct from `pid`,
+    /// which for these rows is the KEEPER's own pid. Mirrors Python's
+    /// `AgentEntry.keeper_child_pid`; skip-when-absent so a pre-field row
+    /// reads as unknown, never as a mismatch (additive-optional, no bump).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keeper_child_pid: Option<u32>,
     #[serde(default)]
     pub log_path: Option<String>,
     /// Timestamp of the most recent reconcile probe (finding #1 High): the
@@ -1976,6 +1986,7 @@ mod tests {
             created_at: "2026-05-24T00:00:00Z".into(),
             pid: Some(1234),
             pid_start_time: None,
+            keeper_child_pid: None,
             log_path: None,
             last_reconciled_at: None,
             inside_leg: None,

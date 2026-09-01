@@ -3121,6 +3121,28 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     )
                 } else {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        // Registry-side keeper sweep FIRST (x-ac6b): re-bind
+                        // surviving lane-B thread rows BEFORE the settle pass
+                        // below reads them - the daemon-side twin of the pane
+                        // sweep's re-adopt-before-restore ordering. Non-fatal
+                        // on error: emit and serve past, like the sweep below.
+                        match keeper_registry_sweep(&home_sweep, &emitter_sweep) {
+                            Ok(report) => {
+                                let _ = emitter_sweep.emit(
+                                    "keeper_sweep_done",
+                                    &json!({
+                                        "sockets": report.sockets,
+                                        "rebound": report.rebound.len(),
+                                        "dead": report.dead.len(),
+                                        "wedged": report.wedged.len(),
+                                    }),
+                                );
+                            }
+                            Err(msg) => {
+                                let _ = emitter_sweep
+                                    .emit("keeper_sweep_failed", &json!({"error": msg}));
+                            }
+                        }
                         // Startup sweep: every thread row reads hosted. The
                         // async recovery pass owns resume-and-settle here and
                         // has not run yet, so settling unhosted rows now would
@@ -4044,6 +4066,7 @@ fn build_claude_stream_entry(
         created_at: now_rfc3339_like(),
         pid: Some(pid),
         pid_start_time,
+        keeper_child_pid: None,
         log_path: Some(log_path.to_string_lossy().into_owned()),
         last_reconciled_at: None,
         inside_leg: None,
@@ -4498,6 +4521,7 @@ fn build_codex_thread_entry(
         // control socket and `thread/loaded/list`, which is where it belongs.
         pid: None,
         pid_start_time: None,
+        keeper_child_pid: None,
         log_path: Some(driver.rollout_path().to_string_lossy().into_owned()),
         last_reconciled_at: None,
         inside_leg: None,
@@ -8628,6 +8652,332 @@ fn codex_session_for_pid_shellout(pid: u32) -> Option<String> {
         .map(str::to_string)
 }
 
+// ---------------------------------------------------------------------------
+// Registry-side keeper sweep (x-ac6b).
+// ---------------------------------------------------------------------------
+
+/// How long one keeper probe waits for the Identify reply. A wedged keeper
+/// (accepts the connection, never answers) must NAME its row inside this
+/// bound and let startup continue - never wedge the daemon (AC4-ERR).
+const KEEPER_SWEEP_REPLY_TIMEOUT: Duration = Duration::from_millis(750);
+/// Budget for the whole sweep. These are local unix sockets, but a fleet of
+/// wedged keepers each burning the reply timeout is still bounded work, and
+/// the sweep shares the startup path with the accept loop.
+const KEEPER_SWEEP_BUDGET: Duration = Duration::from_secs(10);
+
+/// What one keeper socket probe concluded. The trisection mirrors the mux
+/// pane sweep's `KeeperAdopt` (crates/fno/src/pty.rs): no listener is a
+/// leftover to unlink, a live keeper is its socket's only address and is
+/// NEVER unlinked, and silence is named rather than interpreted.
+#[derive(Debug, PartialEq)]
+enum KeeperProbe {
+    /// The socket file exists but nothing accepts behind it: a dead keeper's
+    /// leftover (the keeper unlinks on exit, so this is a kill -9 remainder).
+    NoListener,
+    /// The socket accepted the connection and stayed silent past the bound.
+    /// Silence never proves death; the row is named and left untouched.
+    Silent,
+    /// A keeper answered Identify with this reply JSON.
+    Answered(serde_json::Value),
+}
+
+/// Probe one keeper socket with the keeper binary's own frame codec: send
+/// `Identify` via [`crate::pane_keeper::encode`], read the reply via
+/// [`crate::pane_keeper::decode`]. Ring `Output` frames that share the burst
+/// are skipped (this probe never takes the pty; it is not the subscriber).
+fn probe_keeper_socket(sock: &Path, reply_timeout: Duration) -> KeeperProbe {
+    use crate::pane_keeper::{decode, encode, Decode, Frame};
+    use std::io::{Read, Write};
+    let Ok(mut stream) = std::os::unix::net::UnixStream::connect(sock) else {
+        return KeeperProbe::NoListener;
+    };
+    let _ = stream.set_read_timeout(Some(reply_timeout));
+    if stream.write_all(&encode(&Frame::Identify)).is_err() {
+        return KeeperProbe::Silent;
+    }
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 8192];
+    loop {
+        // Drain whole frames already buffered before blocking on the socket.
+        loop {
+            match decode(&buf) {
+                Decode::NeedMore => break,
+                Decode::Violation(_) => return KeeperProbe::Silent,
+                Decode::Frame(Frame::IdentifyReply(payload), _) => {
+                    match serde_json::from_slice(&payload) {
+                        Ok(value) => return KeeperProbe::Answered(value),
+                        Err(_) => return KeeperProbe::Silent,
+                    }
+                }
+                Decode::Frame(_, used) => {
+                    buf.drain(..used);
+                }
+            }
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => return KeeperProbe::Silent,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+    }
+}
+
+/// What the registry-side keeper sweep did, for the `keeper_sweep_done` event
+/// and tests. Every dead or wedged verdict carries its reason; a verdict
+/// without a named reason is exactly what AC3/AC4 exist to prevent.
+#[derive(Debug, Default, PartialEq)]
+pub struct KeeperSweepReport {
+    /// Sockets examined.
+    pub sockets: usize,
+    /// Rows re-bound live (child pid asserted unchanged).
+    pub rebound: Vec<String>,
+    /// `(row, reason)` marked Exited.
+    pub dead: Vec<(String, String)>,
+    /// `(row, reason)` named but left untouched (silence never proves death).
+    pub wedged: Vec<(String, String)>,
+    /// Socket files unlinked (no listener behind them).
+    pub unlinked: Vec<String>,
+}
+
+/// The keeper socket directory for pane-less lane-B threads:
+/// `<state-root>/mux/threads/`, beside the pane keepers' `mux/panes/`
+/// (Python's `_lane_b_keeper_socket` writes there). Derived from the agents
+/// root's parent the same way `quarantine_interrupted_write_temps` derives
+/// the state root. This sweep and the mux pane sweep each own exactly one
+/// directory - a thread socket has no tab and a pane socket has no row, so
+/// neither discovery walks the other's ground.
+fn lane_b_keeper_dir(home: &AgentsHome) -> PathBuf {
+    home.root()
+        .parent()
+        .unwrap_or(home.root())
+        .join("mux")
+        .join("threads")
+}
+
+/// One planned row mutation out of the sweep.
+struct KeeperSweepChange {
+    name: String,
+    status: Option<AgentStatus>,
+    child_pid: Option<u32>,
+}
+
+/// Re-bind surviving lane-B keeper threads to their registry rows at daemon
+/// start (x-ac6b): the registry-side consumer of the keeper discovery, keyed
+/// on the row rather than on a mux member (a lane-B thread has no tab, so
+/// the mux server's re-adopt sweep never sees its socket).
+///
+/// A keeper-hosted thread survives a daemon death by construction - the
+/// keeper holds the pty master and ignores SIGHUP - but the registry's
+/// knowledge of it does not. This sweep walks each thread socket, Identifies
+/// the keeper behind it (same frames, same binary; the mux pane sweep in
+/// `crates/fno/src/server.rs::keeper_readopt` is the first consumer of that
+/// discovery), and reconciles against the row by harness session id with the
+/// child pid as the assertion: a socket answering a DIFFERENT session id, or
+/// the same id from a different child, is a respawn wearing the row's name,
+/// and is named dead - never silently re-bound to a fresh session (AC3-ERR).
+///
+/// Ordering (the daemon-side twin of the pane sweep's re-adopt-before-restore
+/// hazard): the caller runs this BEFORE the startup reconcile sweep, so the
+/// settle pass reads rows the sweep already re-bound. Strictly non-fatal: an
+/// unreadable registry is an Err the caller emits and serves past, matching
+/// the reconcile sweep's degradation posture.
+pub fn keeper_registry_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+) -> Result<KeeperSweepReport, String> {
+    let dir = lane_b_keeper_dir(home);
+    let mut sockets: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().ends_with(".sock") {
+                sockets.push(entry.path());
+            }
+        }
+    }
+    sockets.sort();
+    let mut report = KeeperSweepReport {
+        sockets: sockets.len(),
+        ..KeeperSweepReport::default()
+    };
+    if sockets.is_empty() {
+        return Ok(report);
+    }
+    let registry = load_registry_asserted(&home.registry_json())
+        .map_err(|e| format!("registry read failed: {e}"))?;
+
+    let start = Instant::now();
+    let mut changes: Vec<KeeperSweepChange> = Vec::new();
+    for (idx, sock) in sockets.iter().enumerate() {
+        if start.elapsed() >= KEEPER_SWEEP_BUDGET {
+            let _ = emitter.emit(
+                "keeper_sweep_budget_exhausted",
+                &json!({"remaining": sockets.len() - idx}),
+            );
+            break;
+        }
+        let sock_str = sock.to_string_lossy().into_owned();
+        // The row is bound by its own socket first; a row whose socket field
+        // was lost but whose identity matches is still found by session id.
+        let row = registry
+            .entries
+            .iter()
+            .find(|e| e.messaging_socket_path.as_deref() == Some(sock_str.as_str()));
+        let probe = probe_keeper_socket(sock, KEEPER_SWEEP_REPLY_TIMEOUT);
+        match probe {
+            KeeperProbe::NoListener => {
+                // The keeper unlinks its socket on every exit path, so a
+                // socket file with nobody behind it is a kill -9 leftover.
+                // Unlink it (the stale-socket contract) and name the row.
+                let _ = std::fs::remove_file(sock);
+                report.unlinked.push(sock_str.clone());
+                let _ = emitter.emit("keeper_socket_unlinked", &json!({"path": sock_str}));
+                if let Some(row) = row {
+                    let reason = "keeper socket has no listener behind it".to_string();
+                    let _ = emitter.emit(
+                        "keeper_row_dead",
+                        &json!({"name": row.name, "reason": reason}),
+                    );
+                    changes.push(KeeperSweepChange {
+                        name: row.name.clone(),
+                        status: Some(AgentStatus::Exited),
+                        child_pid: None,
+                    });
+                    report.dead.push((row.name.clone(), "no listener".into()));
+                }
+            }
+            KeeperProbe::Silent => {
+                // AC4-ERR: named, never interpreted. The socket STAYS - a
+                // live listener is the thread's only address.
+                if let Some(row) = row {
+                    let reason =
+                        format!("keeper accepted but did not answer Identify within {KEEPER_SWEEP_REPLY_TIMEOUT:?}");
+                    let _ = emitter.emit(
+                        "keeper_row_wedged",
+                        &json!({"name": row.name, "reason": reason}),
+                    );
+                    report.wedged.push((row.name.clone(), reason));
+                } else {
+                    let _ = emitter.emit("keeper_socket_silent_no_row", &json!({"path": sock_str}));
+                }
+            }
+            KeeperProbe::Answered(reply) => {
+                let str_field = |key: &str| -> Option<String> {
+                    reply
+                        .get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                };
+                let answered_session = str_field("session_id");
+                let answered_child = reply
+                    .get("child_pid")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|p| p as u32);
+                let answered_cwd = str_field("cwd");
+                let row = row.or_else(|| {
+                    // Session-id fallback: the reconciliation key the plan
+                    // names. Only for a row with no socket of its own.
+                    registry.entries.iter().find(|e| {
+                        e.messaging_socket_path.as_deref().is_none()
+                            && answered_session.is_some()
+                            && e.harness_session_id == answered_session
+                    })
+                });
+                let Some(row) = row else {
+                    let _ = emitter.emit(
+                        "keeper_socket_orphan",
+                        &json!({
+                            "path": sock_str,
+                            "session_id": answered_session,
+                        }),
+                    );
+                    continue;
+                };
+                // Identity triple, each leg named on mismatch: session id
+                // (the reconciliation key), child pid (the respawn catcher),
+                // cwd (byte-equal, the same directory across the restart).
+                let mismatch = if row.harness_session_id != answered_session {
+                    Some(format!(
+                        "keeper answers session id {answered_session:?}, row stores {:?}",
+                        row.harness_session_id
+                    ))
+                } else if let (Some(recorded), Some(answered)) =
+                    (row.keeper_child_pid, answered_child)
+                {
+                    (recorded != answered).then(|| {
+                        format!(
+                            "child pid changed: row records {recorded}, keeper answers {answered}"
+                        )
+                    })
+                } else if let Some(answered_cwd) = answered_cwd.as_deref() {
+                    (!answered_cwd.is_empty() && answered_cwd != row.cwd).then(|| {
+                        format!(
+                            "keeper cwd {answered_cwd:?} differs from row cwd {:?}",
+                            row.cwd
+                        )
+                    })
+                } else {
+                    None
+                };
+                if let Some(reason) = mismatch {
+                    let _ = emitter.emit(
+                        "keeper_row_dead",
+                        &json!({"name": row.name, "reason": reason}),
+                    );
+                    changes.push(KeeperSweepChange {
+                        name: row.name.clone(),
+                        status: Some(AgentStatus::Exited),
+                        child_pid: None,
+                    });
+                    report.dead.push((row.name.clone(), reason));
+                    continue;
+                }
+                // Identity holds. A terminal row is never resurrected by this
+                // sweep (that recovery is reconcile's Orphaned->Live arm);
+                // re-bind only a row that is still live-ish or orphaned.
+                let rebindable =
+                    !matches!(row.status, AgentStatus::Exited | AgentStatus::PermanentDead);
+                if rebindable {
+                    let _ = emitter.emit(
+                        "keeper_row_rebound",
+                        &json!({
+                            "name": row.name,
+                            "child_pid": answered_child,
+                            "session_id": answered_session,
+                        }),
+                    );
+                    changes.push(KeeperSweepChange {
+                        name: row.name.clone(),
+                        status: Some(AgentStatus::Live),
+                        child_pid: answered_child,
+                    });
+                    report.rebound.push(row.name.clone());
+                } else {
+                    let _ = emitter.emit(
+                        "keeper_row_terminal_socket_live",
+                        &json!({"name": row.name, "status": row.status}),
+                    );
+                }
+            }
+        }
+    }
+    if changes.is_empty() {
+        return Ok(report);
+    }
+    let now = now_rfc3339_like();
+    state::update_registry(&home.registry_json(), |r| {
+        for change in &changes {
+            let Some(entry) = r.find_mut(&change.name) else {
+                continue;
+            };
+            apply_reconcile_change(entry, change.status, &now);
+            if let Some(pid) = change.child_pid {
+                entry.keeper_child_pid = Some(pid);
+            }
+        }
+    })
+    .map_err(|e| format!("keeper sweep registry write failed: {e}"))?;
+    Ok(report)
+}
+
 fn run_reconcile_sweep(
     home: &AgentsHome,
     emitter: &EventEmitter,
@@ -9764,6 +10114,7 @@ mod tests {
             created_at: "2020-01-01T00:00:00Z".into(),
             pid: None,
             pid_start_time: None,
+            keeper_child_pid: None,
             log_path: None,
             last_reconciled_at: None,
             inside_leg: None,
@@ -12826,6 +13177,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 created_at: "2026-05-24T00:00:00Z".into(),
                 pid: Some(std::process::id()), // alive -> not reaped
                 pid_start_time: None,
+                keeper_child_pid: None,
                 log_path: Some("/tmp/worker-A.log".into()), // x-7bcd: resolvable handle
                 last_reconciled_at: None,
                 inside_leg: None,
@@ -12914,6 +13266,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 created_at: "2026-05-24T00:00:00Z".into(),
                 pid: None,
                 pid_start_time: None,
+                keeper_child_pid: None,
                 log_path: Some("/tmp/ghost.log".into()), // x-7bcd: resolvable handle
                 last_reconciled_at: None,
                 inside_leg: None,
@@ -13071,6 +13424,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 // PID 2^31-ish: almost certainly not a live process.
                 pid: Some(0x7fff_fff0),
                 pid_start_time: None,
+                keeper_child_pid: None,
                 log_path: Some("/tmp/dead.log".into()), // x-7bcd: resolvable handle
                 last_reconciled_at: None,
                 inside_leg: None,
@@ -13544,6 +13898,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 pid: Some(me),
                 // Bogus start time -> mismatch against our real one -> not ours.
                 pid_start_time: Some(1),
+                keeper_child_pid: None,
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
@@ -13772,6 +14127,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             created_at: "t".into(),
             pid: None,
             pid_start_time: None,
+            keeper_child_pid: None,
             log_path: None,
             last_reconciled_at: None,
             inside_leg: None,
@@ -13828,6 +14184,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             created_at: "t".into(),
             pid: None,
             pid_start_time: None,
+            keeper_child_pid: None,
             log_path: None,
             last_reconciled_at: last_reconciled.map(String::from),
             inside_leg: None,
@@ -15248,6 +15605,355 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         std::fs::remove_dir_all(home.root()).ok();
     }
 
+    // ------------------------------------------------------------------------
+    // Registry-side keeper sweep (x-ac6b). A FAKE keeper answering Identify is
+    // enough here: the real supervisor kill is the last group's journey and
+    // this plan does not claim it.
+    // ------------------------------------------------------------------------
+
+    /// An agents home under a UNIQUE short base dir, so `mux/threads/` (the
+    /// sweep's directory, derived from the agents root's parent) never collides
+    /// between parallel tests the way a shared `/tmp/mux` would.
+    fn keeper_sweep_home(tag: &str) -> AgentsHome {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static C: AtomicU32 = AtomicU32::new(0);
+        let n = C.fetch_add(1, Ordering::Relaxed);
+        let base = PathBuf::from(format!("/tmp/fnokswp{tag}{}_{n}", std::process::id()));
+        let home = AgentsHome::at(base.join("agents"));
+        home.ensure_root().unwrap();
+        std::fs::create_dir_all(lane_b_keeper_dir(&home)).unwrap();
+        home
+    }
+
+    /// A registry row shaped exactly like the lane-B spawn writes it (pi
+    /// harness, interactive, socket-keyed, session id minted before launch).
+    fn lane_b_thread_row(
+        name: &str,
+        session: &str,
+        cwd: &str,
+        child_pid: Option<u32>,
+        sock: &Path,
+    ) -> RegistryEntry {
+        RegistryEntry {
+            node: None,
+            spawned_by_session: None,
+            spawned_by_harness: None,
+            spawned_by_cwd: None,
+            launch_account: None,
+            related_session_id: None,
+            origin: Some("spawn".into()),
+            name: name.into(),
+            short_id: String::new(),
+            legacy_provider: String::new(),
+            provider: None,
+            model: None,
+            model_basis: None,
+            effort: None,
+            harness: Some("pi".into()),
+            harness_session_id: Some(session.into()),
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
+            cwd: cwd.into(),
+            project_root: String::new(),
+            session_id: None,
+            spawn_trigger: None,
+            legacy_claude_short_id: None,
+            claude_session_uuid: None,
+            // The keeper's own pid: NOT the child pid, which rides
+            // keeper_child_pid.
+            pid: Some(4242),
+            pid_start_time: None,
+            keeper_child_pid: child_pid,
+            messaging_socket_path: Some(sock.to_string_lossy().into_owned()),
+            codex_session_id: None,
+            gemini_session_id: None,
+            mcp_channel_id: None,
+            cc_session_id: None,
+            host_mode: Some("interactive".into()),
+            status: AgentStatus::Live,
+            last_message_at: None,
+            created_at: "2026-09-01T00:00:00Z".into(),
+            log_path: None,
+            last_reconciled_at: None,
+            inside_leg: None,
+            exited_at: None,
+            mux: None,
+            screen_state: None,
+            crown_level: None,
+            crown_scope: None,
+            crown_grantor: None,
+            route_settings_path: None,
+            fno_id: None,
+            delivery_policy: None,
+            sandbox_posture: None,
+        }
+    }
+
+    /// A fake keeper behind `sock`, speaking the real frame protocol via the
+    /// binary's own codec. `reply` is the IdentifyReply JSON it answers with.
+    /// Exits after serving one Identify.
+    fn spawn_fake_keeper(sock: &Path, reply: serde_json::Value) -> std::thread::JoinHandle<()> {
+        use std::os::unix::net::UnixListener;
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(sock).unwrap();
+        std::thread::Builder::new()
+            .name("fake-keeper".into())
+            .spawn(move || {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                serve_fake_identify(&mut stream, &reply);
+            })
+            .unwrap()
+    }
+
+    fn serve_fake_identify(stream: &mut std::os::unix::net::UnixStream, reply: &serde_json::Value) {
+        use crate::pane_keeper::{decode, encode, Decode, Frame};
+        use std::io::{Read, Write};
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            loop {
+                match decode(&buf) {
+                    Decode::NeedMore => break,
+                    Decode::Violation(_) => return,
+                    Decode::Frame(Frame::Identify, _) => {
+                        let frame = encode(&Frame::IdentifyReply(reply.to_string().into_bytes()));
+                        let _ = stream.write_all(&frame);
+                        let _ = stream.flush();
+                        // Hold the connection a beat so the probe's reply read
+                        // is not EOF-raced.
+                        std::thread::sleep(Duration::from_millis(100));
+                        return;
+                    }
+                    Decode::Frame(_, used) => {
+                        buf.drain(..used);
+                    }
+                }
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+    }
+
+    /// The AC4 wedged shape: accepts the connection and never answers. Parks
+    /// until `stop` flips so the test can end the thread deterministically.
+    fn spawn_silent_keeper(
+        sock: &Path,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::thread::JoinHandle<()> {
+        use std::io::Read;
+        use std::os::unix::net::UnixListener;
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(sock).unwrap();
+        std::thread::Builder::new()
+            .name("silent-keeper".into())
+            .spawn(move || {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                // Consume the Identify frame, answer nothing.
+                let mut chunk = [0u8; 64];
+                let _ = stream.read(&mut chunk);
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn keeper_registry_sweep_names_every_outcome_and_bounds_the_wedged_probe() {
+        let home = keeper_sweep_home("all");
+        let threads = lane_b_keeper_dir(&home);
+        let cwd = home.root().parent().unwrap().to_string_lossy().into_owned();
+        let sock = |name: &str| threads.join(format!("{name}.sock"));
+
+        // Live: the keeper answers the row's own identity.
+        let live = spawn_fake_keeper(
+            &sock("wk-live"),
+            json!({
+                "v": 1, "keeper_pid": 4242, "child_pid": 111,
+                "session_id": "sess-live", "cwd": cwd, "argv": ["pi", "--session-id", "sess-live"],
+            }),
+        );
+        // Clone: a keeper answering a DIFFERENT session id under the row's
+        // socket - the respawn-wearing-the-name failure (AC3-ERR).
+        let clone = spawn_fake_keeper(
+            &sock("wk-clone"),
+            json!({"v": 1, "keeper_pid": 5, "child_pid": 6, "session_id": "sess-other", "cwd": cwd}),
+        );
+        // Respawn: same session id, DIFFERENT child pid. Passes any liveness
+        // check and must still fail this one - that is the point.
+        let respawn = spawn_fake_keeper(
+            &sock("wk-respawn"),
+            json!({"v": 1, "keeper_pid": 7, "child_pid": 999, "session_id": "sess-respawn", "cwd": cwd}),
+        );
+        // Wedged: accepts, never answers (AC4-ERR).
+        let wedge_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let wedge = spawn_silent_keeper(&sock("wk-wedge"), Arc::clone(&wedge_stop));
+        // Dead: a socket file with no listener behind it.
+        std::fs::write(sock("wk-dead"), b"").unwrap();
+
+        let rows = [
+            lane_b_thread_row("wk-live", "sess-live", &cwd, Some(111), &sock("wk-live")),
+            lane_b_thread_row("wk-clone", "sess-clone", &cwd, Some(222), &sock("wk-clone")),
+            lane_b_thread_row(
+                "wk-respawn",
+                "sess-respawn",
+                &cwd,
+                Some(111),
+                &sock("wk-respawn"),
+            ),
+            lane_b_thread_row("wk-wedge", "sess-wedge", &cwd, Some(333), &sock("wk-wedge")),
+            lane_b_thread_row("wk-dead", "sess-dead", &cwd, Some(444), &sock("wk-dead")),
+        ];
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.extend(rows.iter().cloned());
+        })
+        .unwrap();
+
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let start = Instant::now();
+        let report = keeper_registry_sweep(&home, &emitter).expect("sweep ok");
+        let elapsed = start.elapsed();
+
+        // All five sockets examined; exactly one re-bound.
+        assert_eq!(report.sockets, 5);
+        assert_eq!(
+            report.rebound,
+            vec!["wk-live"],
+            "only the live keeper re-binds"
+        );
+        let dead_names: Vec<&str> = report.dead.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            dead_names,
+            vec!["wk-clone", "wk-dead", "wk-respawn"],
+            "every dead row is named, sorted by socket"
+        );
+        let clone_reason = &report.dead[0].1;
+        assert!(
+            clone_reason.contains("session id") && clone_reason.contains("sess-other"),
+            "the clone's reason names the session mismatch: {clone_reason}"
+        );
+        assert!(
+            report.dead[2].1.contains("child pid changed"),
+            "the respawn's reason names the pid change: {}",
+            report.dead[2].1
+        );
+        assert_eq!(report.wedged[0].0, "wk-wedge", "the wedged row is named");
+        assert!(
+            report.wedged[0].1.contains("did not answer"),
+            "the wedged reason names the silence: {}",
+            report.wedged[0].1
+        );
+        // The stale socket is unlinked; live listeners are never unlinked.
+        assert_eq!(
+            report.unlinked,
+            vec![sock("wk-dead").to_string_lossy().into_owned()]
+        );
+        assert!(sock("wk-clone").exists(), "a live keeper's socket stays");
+        assert!(sock("wk-wedge").exists(), "a wedged keeper's socket stays");
+        // Bounded: one wedged probe costs one reply timeout, not a hang.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the sweep completed inside its budget, took {elapsed:?}"
+        );
+
+        let registry = state::load_registry(&home.registry_json()).unwrap();
+        let row = |name: &str| {
+            registry
+                .entries
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("{name} row"))
+                .clone()
+        };
+        assert_eq!(row("wk-live").status, AgentStatus::Live);
+        assert_eq!(row("wk-live").keeper_child_pid, Some(111));
+        assert_eq!(row("wk-clone").status, AgentStatus::Exited);
+        assert_eq!(row("wk-respawn").status, AgentStatus::Exited);
+        // The recorded child pid survives the dead verdict as forensics.
+        assert_eq!(row("wk-respawn").keeper_child_pid, Some(111));
+        assert_eq!(row("wk-dead").status, AgentStatus::Exited);
+        assert_eq!(
+            row("wk-dead").pid,
+            None,
+            "Exited clears the stale pid (Locked 7)"
+        );
+        // Silence never proves death: the wedged row is untouched.
+        assert_eq!(row("wk-wedge").status, AgentStatus::Live);
+
+        // End the fake keepers before teardown.
+        wedge_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        for handle in [live, clone, respawn, wedge] {
+            handle.join().unwrap();
+        }
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn keeper_reattach_identity_asserts_cwd_session_and_child_pid_across_the_restart() {
+        let home = keeper_sweep_home("id");
+        let threads = lane_b_keeper_dir(&home);
+        let cwd = home.root().parent().unwrap().to_string_lossy().into_owned();
+        // A child pid that is PROVABLY alive: this test process. The keeper
+        // answers it, the row records it, and the assertion that the exact
+        // pid survived the restart is a real signal(0), not a string compare.
+        let child_pid = std::process::id();
+        let sock = threads.join("wk-pi.sock");
+        let keeper = spawn_fake_keeper(
+            &sock,
+            json!({
+                "v": 1, "keeper_pid": 4242, "child_pid": child_pid,
+                "session_id": "sess-pi", "cwd": cwd, "argv": ["pi", "--session-id", "sess-pi"],
+            }),
+        );
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(lane_b_thread_row(
+                "wk-pi",
+                "sess-pi",
+                &cwd,
+                Some(child_pid),
+                &sock,
+            ));
+        })
+        .unwrap();
+
+        // The restart: the daemon died and came back, and its startup sweep is
+        // the only thing that walks the socket back to the row.
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let report = keeper_registry_sweep(&home, &emitter).expect("sweep ok");
+        assert_eq!(report.rebound, vec!["wk-pi"]);
+        assert!(report.dead.is_empty() && report.wedged.is_empty());
+
+        let row = state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|e| e.name == "wk-pi")
+            .unwrap();
+        // Byte-equal identity across the restart, and nothing new minted.
+        assert_eq!(row.status, AgentStatus::Live, "the row is live again");
+        assert_eq!(row.harness_session_id.as_deref(), Some("sess-pi"));
+        assert_eq!(row.cwd, cwd, "cwd is unchanged");
+        assert_eq!(
+            row.keeper_child_pid,
+            Some(child_pid),
+            "the child pid is unchanged"
+        );
+        assert_eq!(row.pid, Some(4242), "the keeper pid field is untouched");
+        // The exact pid is still alive - same child, not a respawn wearing it.
+        // SAFETY: signal 0 against this process's own pid is a pure liveness
+        // probe; it delivers no signal.
+        assert_eq!(unsafe { libc::kill(child_pid as libc::pid_t, 0) }, 0);
+
+        keeper.join().unwrap();
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
     // ---------------------------------------------------------------------------
     // poll_until_ready unit tests (Task 1.1: readiness-detector wiring)
     // ---------------------------------------------------------------------------
@@ -16236,6 +16942,7 @@ done
                 created_at: "2026-06-09T00:00:00Z".into(),
                 pid: None,
                 pid_start_time: None,
+                keeper_child_pid: None,
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,
@@ -16294,6 +17001,7 @@ done
             created_at: "2026-06-09T00:00:00Z".into(),
             pid: None,
             pid_start_time: None,
+            keeper_child_pid: None,
             // x-7bcd: no short_id/harness_session_id (leg 3) and no pid (leg
             // 1) is the whole point of this fixture -- give it leg 2 instead
             // so the write-time guard passes without disturbing that intent.

@@ -202,6 +202,7 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         created_at: now.to_string(),
         pid: w.pid,
         pid_start_time: w.proc_start,
+        keeper_child_pid: None,
         log_path: None,
         last_reconciled_at: None,
         inside_leg: None,

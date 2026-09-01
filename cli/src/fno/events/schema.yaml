@@ -4606,6 +4606,114 @@ event_types:
         error:
           type: string
 
+  - name: keeper_sweep_done
+    description: "The daemon's registry-side keeper sweep completed: surviving lane-B thread rows re-bound, with counts."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        sockets:
+          type: integer
+        rebound:
+          type: integer
+        dead:
+          type: integer
+        wedged:
+          type: integer
+
+  - name: keeper_sweep_failed
+    description: "The registry-side keeper sweep raised an error (unreadable registry, failed write); the daemon continues fail-open."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        error:
+          type: string
+
+  - name: keeper_sweep_budget_exhausted
+    description: "The keeper sweep hit its time budget and stopped; the named remaining sockets were not examined this start."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        remaining:
+          type: integer
+
+  - name: keeper_socket_unlinked
+    description: "A keeper socket with no live listener behind it was unlinked: a dead keeper's leftover, not a thread to wait on."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        path:
+          type: string
+
+  - name: keeper_socket_silent_no_row
+    description: "A keeper socket accepted the Identify probe but never answered, and no registry row is bound to it."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        path:
+          type: string
+
+  - name: keeper_socket_orphan
+    description: "A keeper socket answered Identify but no registry row matches its session id; left in place and named."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        path:
+          type: string
+        session_id:
+          type: string
+
+  - name: keeper_row_dead
+    description: "A lane-B thread row was marked exited by the keeper sweep, with the named reason (no listener, session mismatch, child pid change, cwd change)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        reason:
+          type: string
+
+  - name: keeper_row_wedged
+    description: "A keeper accepted but never answered Identify within the bound; the row is named and left untouched. Silence never proves death."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        reason:
+          type: string
+
+  - name: keeper_row_rebound
+    description: "A surviving keeper thread was re-bound to its registry row at daemon start, identity asserted (session id, child pid, cwd)."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        child_pid:
+          type: integer
+        session_id:
+          type: string
+
+  - name: keeper_row_terminal_socket_live
+    description: "A socket answers a row already in a terminal state; the sweep never resurrects a terminal row, so it is named and left."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+
   # ── a2a status breakpoints: task-boundary protocol family (x-dbaf) ──────────
   # Four task-boundary events carrying the extended envelope in `protocol_family`
   # below (routable fields at envelope level, not smeared into `data`). The

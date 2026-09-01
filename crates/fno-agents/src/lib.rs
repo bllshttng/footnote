@@ -824,6 +824,19 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Startup reconcile sweep (daemon-emitted, plan ab-70faa65b Architecture B)
     "startup_reconcile_done",
     "startup_reconcile_failed",
+    // Registry-side keeper sweep (daemon-emitted, x-ac6b): the daemon-start
+    // walk of the lane-B keeper thread sockets. Every dead or wedged verdict
+    // carries its reason; the rebound/dead/wedged row events name the row.
+    "keeper_sweep_done",
+    "keeper_sweep_failed",
+    "keeper_sweep_budget_exhausted",
+    "keeper_socket_unlinked",
+    "keeper_socket_silent_no_row",
+    "keeper_socket_orphan",
+    "keeper_row_dead",
+    "keeper_row_wedged",
+    "keeper_row_rebound",
+    "keeper_row_terminal_socket_live",
     // Deliver (daemon-emitted, Task 2.2 US4)
     "agent_deliver_injected",
     "agent_deliver_demoted",

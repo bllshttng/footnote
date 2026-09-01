@@ -2022,6 +2022,7 @@ done
                 created_at: "2026-06-09T00:00:00Z".into(),
                 pid: None,
                 pid_start_time: None,
+                keeper_child_pid: None,
                 log_path: None,
                 last_reconciled_at: None,
                 inside_leg: None,

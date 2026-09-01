@@ -1807,6 +1807,10 @@ def _lane_b_thread_spawn(
             host_mode="interactive",
             harness_session_id=session_id,
             pid=proc.pid,
+            # The child pid out of the same Identify reply that proved the
+            # keeper: the daemon's restart sweep asserts it unchanged, so a
+            # respawn wearing this row's name fails instead of recovering.
+            keeper_child_pid=reply.get("child_pid"),
             messaging_socket_path=str(sock),
             spawned_by_session=_cx_session,
             spawned_by_harness=_cx_harness,

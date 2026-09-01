@@ -423,6 +423,13 @@ class AgentEntry:
     cc_session_id: Optional[str] = None
     pid: Optional[int] = None
     pid_start_time: Optional[int] = None
+    # The KEEPER's child pid for a lane-B thread row (x-ac6b): the process the
+    # keeper hosts. Stamped by the lane-B spawn from the Identify reply and
+    # re-asserted unchanged by the Rust daemon's registry-side keeper sweep on
+    # every start - a changed pid means something respawned under the row's
+    # name. Mirrors Rust ``RegistryEntry.keeper_child_pid`` (additive-optional,
+    # no schema bump): without this mirror the daemon's sweep write drops it.
+    keeper_child_pid: Optional[int] = None
     last_reconciled_at: Optional[str] = None
     # Latest inside-leg report for this row's claude pane (inside-out E3.1,
     # "contract v2"; mirrors the Rust `RegistryEntry.inside_leg` /

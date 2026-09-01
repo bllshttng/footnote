@@ -1602,6 +1602,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         created_at: now.to_string(),
         pid: None,
         pid_start_time: None,
+        keeper_child_pid: None,
         log_path: None,
         last_reconciled_at: None,
         inside_leg: None,
