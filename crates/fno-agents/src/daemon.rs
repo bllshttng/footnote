@@ -4458,7 +4458,9 @@ fn build_codex_thread_entry(
         legacy_provider: String::new(),
         provider: Some("openai".into()),
         model: model.map(str::to_string),
-        model_basis: None,
+        // The model arrived on the spawn request, so requested is its basis -
+        // the field no longer reads unpopulated on this mint.
+        model_basis: model.map(|_| "requested".to_string()),
         effort: effort.map(str::to_string),
         harness: Some("codex".into()),
         harness_session_id: Some(session_id.clone()),
@@ -14131,6 +14133,19 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let bounded = build_codex_thread_entry("t", worktree.path(), &start, None, None, false);
         assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
         assert!(!entry_posture_is_full_access(&bounded));
+        // A requested model stamps its basis on the row; an absent one
+        // leaves the basis absent with it.
+        let modeled = build_codex_thread_entry(
+            "t",
+            worktree.path(),
+            &start,
+            Some("gpt-5.6-sol"),
+            None,
+            false,
+        );
+        assert_eq!(modeled.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(modeled.model_basis.as_deref(), Some("requested"));
+        assert_eq!(bounded.model_basis, None);
     }
 
     /// AC12: a PRE-v19 row (no posture key) still parses and reads the safe

@@ -123,6 +123,79 @@ def test_routed_pane_spawn_records_an_existing_route_settings_path(tmp_path, mon
     assert Path(row.route_settings_path).exists()
 
 
+def test_routed_pane_row_stamps_the_route_model(tmp_path, monkeypatch) -> None:
+    """The pane receipt names the route's model; the row must match."""
+    from fno.agents.registry import load_registry
+
+    _spawn_pane(
+        monkeypatch,
+        tmp_path,
+        route_env=dict(ROUTE_ENV),
+        route_provider="zai",
+        route_model="glm-5.3-flash[1m]",
+    )
+    row = load_registry()[0]
+    assert row.model == "glm-5.3-flash[1m]"
+    assert row.model_basis == "requested"
+
+
+def _spawn_routed_bg(monkeypatch, tmp_path, name: str, **kwargs):
+    """Run one claude bg spawn through dispatch_spawn with the fake claude."""
+    from tests.agents._fake_claude import install_fake_claude
+
+    use_tmpdir(monkeypatch, tmp_path)
+    bin_dir = tmp_path / "bin"
+    install_fake_claude(bin_dir)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    for var in ("FNO_SESSION", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(var, raising=False)
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.model_routing import bind_route_provider
+    from fno.agents.spawn_gate import run_gate
+
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+    return dispatch_mod.dispatch_spawn(
+        name=name,
+        message="go",
+        harness="claude",
+        cwd=tmp_path,
+        route_env=bind_route_provider(dict(ROUTE_ENV), "zai"),
+        route_provider="zai",
+        provider_gate=run_gate(name, "bg", route_provider="zai"),
+        **kwargs,
+    )
+
+
+def test_routed_bg_row_stamps_the_route_model(tmp_path, monkeypatch) -> None:
+    """The bg receipt names the route's model; the row must match.
+
+    This is the measured shape that stayed None on every routed claude bg
+    spawn while the receipt printed it (the receipt-can-lie half).
+    """
+    from fno.agents.registry import load_registry
+
+    _spawn_routed_bg(
+        monkeypatch, tmp_path, "router-bg", route_model="glm-5.3-flash[1m]"
+    )
+    row = next(r for r in load_registry() if r.name == "router-bg")
+    assert row.provider == "zai"
+    assert row.model == "glm-5.3-flash[1m]"
+    assert row.model_basis == "requested"
+
+
+def test_routed_bg_explicit_model_beats_the_route_token_on_the_row(tmp_path, monkeypatch) -> None:
+    """An explicit --model wins the argv, so it wins the row."""
+    from fno.agents.registry import load_registry
+
+    _spawn_routed_bg(
+        monkeypatch, tmp_path, "router-bg2", model="glm-5.2", route_model="glm-5.3-flash[1m]"
+    )
+    row = next(r for r in load_registry() if r.name == "router-bg2")
+    assert row.model == "glm-5.2"
+    assert row.model_basis == "requested"
+
+
 def test_unrouted_spawn_records_no_route_path(tmp_path, monkeypatch) -> None:
     from fno.agents.registry import load_registry
 

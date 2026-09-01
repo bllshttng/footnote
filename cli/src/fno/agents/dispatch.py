@@ -1869,6 +1869,10 @@ def _claude_create_path(
     route_provider: Optional[str] = None,
     sandbox_settings: Optional[Mapping[str, object]] = None,
     node: Optional[str] = None,
+    # The model token the ROUTE named (-P vendor/model or --route
+    # vendor,model). Recorded on the row beside an explicit --model; never fed
+    # to the child argv, so launch behavior is untouched.
+    route_model: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
 
@@ -2140,8 +2144,11 @@ def _claude_create_path(
         # reconcile / send-time heal backfills it.
         harness="claude",
         provider=lane_provider,
-        model=model,
-        model_basis="requested" if model else None,
+        # The route's model is in hand at this mint and was dropped (the
+        # receipt named it while the row read None). Explicit --model wins the
+        # argv, so it wins the row; the route's token records otherwise.
+        model=model or route_model,
+        model_basis="requested" if (model or route_model) else None,
         effort=effort,
         harness_session_id=session_uuid,
         spawned_by_session=spawned_by_session,
@@ -3006,6 +3013,9 @@ def dispatch_spawn(
     provider_gate: object | None = None,
     sandbox_settings: Optional[Mapping[str, object]] = None,
     node: Optional[str] = None,
+    # Recorded on the row (never the child argv) so a routed spawn's row
+    # names the model the route pinned, matching the stdout receipt.
+    route_model: Optional[str] = None,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
 
@@ -3561,6 +3571,7 @@ def dispatch_spawn(
                         succession_caller_name=succession_caller_name,
                         route_provider=route_provider,
                         node=node,
+                        route_model=route_model,
                     )
                     return SpawnResult(
                         kind="created",

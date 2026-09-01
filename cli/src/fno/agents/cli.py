@@ -2372,6 +2372,7 @@ def cmd_spawn(
                     provider_gate=gate,
                     passthrough=passthrough,
                     launch_account=account or dispatch_account,
+                    route_model=route_model,
                 )
             except DispatchAskError as exc:
                 print(str(exc), file=sys.stderr)
@@ -2595,6 +2596,9 @@ def cmd_spawn(
                 # x-98ab: the ALREADY-resolved FNO_NODE from the provenance
                 # pass - the node this spawn is FOR, not the ambient value.
                 node=(prov_env or {}).get("FNO_NODE"),
+                # The route's model token, recorded on the row (the receipt
+                # already names it; the row now matches).
+                route_model=route_model,
             )
             spawn_succeeded = result.kind == "created" or bool(
                 result.reply and result.reply.strip()
