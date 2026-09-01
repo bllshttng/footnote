@@ -103,7 +103,7 @@ LEAVE = "leave"
 #: notices a live worker on a node no claim covers.
 UNCLAIMED = "unclaimed"
 RECOVERABLE = "recoverable"
-#: The keeper lane (x-1f8a): a `--only keeper` filter value, not a row
+#: The keeper lane: a `--only keeper` filter value, not a row
 #: verdict - keepers have no registry row by definition (a claimed keeper is
 #: LEAVE), so the keeper findings never appear in the per-row table. Discovery
 #: and the verdict live in :mod:`fno.agents.keeper_lane`.

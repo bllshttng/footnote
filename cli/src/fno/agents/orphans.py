@@ -180,7 +180,7 @@ def reaper_set(reaper: int) -> set[int]:
 def iter_processes(reaper: int = 1) -> Iterator[dict]:
     """Every process this uid can read, as plain dicts.
 
-    Public since the keeper lane joined (x-1f8a): a second
+    Public since the keeper lane joined: a second
     ``psutil.process_iter`` call site is how two sweeps drift apart, so both
     the orphan sweep and the keeper lane enumerate through this one function.
     Isolated behind one function so the tests can substitute a fabricated table
