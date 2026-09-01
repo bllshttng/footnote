@@ -129,6 +129,27 @@ def test_container_rollup_ignores_pending_supersession_child():
     assert parent["status"] == "ready"
 
 
+def test_container_rollup_does_not_pin_parent_with_deferred_child():
+    entries = [
+        _entry("ab-parent-deferred"),
+        _entry(
+            "ab-child-deferred-done",
+            parent="ab-parent-deferred",
+            completed_at="2026-01-01T00:00:00Z",
+        ),
+        _entry(
+            "ab-child-deferred",
+            parent="ab-parent-deferred",
+            deferred_at="2026-01-02T00:00:00Z",
+        ),
+    ]
+
+    result = recompute_statuses(entries)
+
+    parent = next(entry for entry in result if entry["id"] == "ab-parent-deferred")
+    assert parent["status"] == "ready"
+
+
 def test_container_rollup_closes_when_every_child_is_done():
     entries = [
         _entry("ab-parent004"),
