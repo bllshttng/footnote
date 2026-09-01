@@ -4626,10 +4626,13 @@ def cmd_watchdog(
              "outcome": outcome},
         )
     keeper_reaped: dict = {}
-    if apply_all:
+    if apply_all and only is None:
         # Keeper collection rides --apply-all, never --apply: killing a keeper
-        # destroys work, the bar the flag help draws. A crashed or broken lane
-        # is named, never silently skipped.
+        # destroys work, the bar the flag help draws. It also rides the FULL
+        # surface only: `--only <verdict>` is a diagnostic filter over the
+        # session table, and a filtered run must not widen its destructive
+        # scope to a lane the filter did not name. A crashed or broken lane is
+        # named, never silently skipped.
         from fno.agents import keeper_lane
 
         try:

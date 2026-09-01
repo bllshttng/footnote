@@ -548,3 +548,43 @@ def test_json_payload_carries_pid_lane_verdict_reason(tmp_path, monkeypatch) -> 
     assert row["lane"] == "pane"
     assert row["verdict"] == kl.REAP
     assert row["reason"]
+
+
+def test_a_filtered_apply_all_never_collects_keepers(monkeypatch) -> None:
+    """`--only <verdict>` is a diagnostic filter over the SESSION table. The
+    row-sweep apply-all must not widen a filtered run's destructive scope to
+    the keeper lane: only the full `--apply-all` collects."""
+    from typer.testing import CliRunner
+
+    from fno.agents import watchdog as wd
+    from fno.agents.cli import agents_app
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        kl, "discover", lambda *a, **k: calls.append(1) or kl.KeeperLaneResult()
+    )
+    payload = {
+        "generated_at": "2026-09-01T00:00:00Z",
+        "verdicts": [],
+        "counts": {},
+        "warnings": [],
+        "terminal_harness_rows": 0,
+    }
+    monkeypatch.setattr(wd, "run_sweep", lambda **k: (payload, []))
+    monkeypatch.setattr(wd, "mail_gate", lambda *a, **k: (True, "", "sig"))
+    monkeypatch.setattr(wd, "_last_events_signature", lambda: "")
+    monkeypatch.setattr(wd, "verdict_signature", lambda p: "")
+    monkeypatch.setattr(wd, "union_signature", lambda a, b: "")
+    monkeypatch.setattr(wd, "write_sweep_file", lambda *a, **k: None)
+    monkeypatch.setattr(wd, "fresh_non_leave", lambda *a, **k: set())
+    monkeypatch.setattr(wd, "emit_event", lambda *a, **k: None)
+    monkeypatch.setattr(wd, "RotationBudget", lambda: object())
+    runner = CliRunner()
+
+    filtered = runner.invoke(agents_app, ["watchdog", "--only", "ghost", "--apply-all"])
+    assert filtered.exit_code == 0, filtered.output
+    assert calls == [], "a filtered run must never enter the keeper lane"
+
+    full = runner.invoke(agents_app, ["watchdog", "--apply-all"])
+    assert full.exit_code == 0, full.output
+    assert calls, "the full --apply-all collects keepers"
