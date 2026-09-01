@@ -58,7 +58,6 @@ extract_constant() {
 }
 
 rust_claude=$(extract_rust_provider "$CLAUDE_RUST" 'fn create(' '#[cfg(test)]')
-rust_adopt=$(extract_rust_provider "$ADOPT_RUST" 'pub fn mint_adopted_entry' 'pub fn upsert_adopted_row')
 rust_codex=$(extract_rust_provider "$CODEX_RUST" 'fn dispatch_create(' 'fn dispatch_resume(')
 rust_unrouted=$(extract_constant "$RUST_GATE" 'const[[:space:]]+KNOWN_UNROUTED_PROVIDER')
 python_claude=$(extract_python_default "$PYTHON_DEFAULTS" claude)
@@ -75,8 +74,26 @@ require_value() {
 }
 
 require_value 'Rust Claude provider' "$rust_claude"
-require_value 'Rust adopted-Claude provider' "$rust_adopt"
 require_value 'Rust Codex provider' "$rust_codex"
+
+# The adopt path carries NO provider literal: the mint stamps None (adoption
+# observed no route, and the retired unconditional vendor was exactly the
+# wrong-bill guess a vocabulary gate should never enforce), and `adopt`
+# resolves the provider from the route-settings match, recording none on no
+# match. Both shapes are the contract, so both are asserted here.
+adopt_mint=$(awk -v start="pub fn mint_adopted_entry" -v end="pub fn upsert_adopted_row" '
+  index($0, start) == 1 { inside = 1 }
+  inside { print }
+  inside && index($0, end) == 1 { exit }
+' "$ADOPT_RUST")
+if [[ "$adopt_mint" != *'provider: None'* ]]; then
+  echo 'ERROR: Rust adopted-Claude mint must stamp provider: None (adoption observed no route)' >&2
+  failed=1
+fi
+if ! grep -q 'provider_from_route_settings(Some(&model))' "$ADOPT_RUST"; then
+  echo 'ERROR: Rust adopt must resolve the provider via provider_from_route_settings, never a vendor literal' >&2
+  failed=1
+fi
 require_value 'Rust unrouted sentinel' "$rust_unrouted"
 require_value 'Python Claude default provider' "$python_claude"
 require_value 'Python Codex default provider' "$python_codex"
@@ -98,7 +115,9 @@ compare() {
 }
 
 compare 'Rust Claude spawn' "$rust_claude" 'Python Claude default' "$python_claude"
-compare 'Rust Claude adopt' "$rust_adopt" 'Python Claude default' "$python_claude"
+# The adopt path is checked structurally above (None at mint, route-settings
+# match at adopt), not against the claude default: adoption observes no route,
+# so no vendor literal may stand in for one.
 compare 'Rust Codex create' "$rust_codex" 'Python Codex default' "$python_codex"
 compare 'Rust unrouted claim' "$rust_unrouted" 'Python unrouted claim reader' "$python_unrouted"
 

@@ -1588,8 +1588,10 @@ async fn run_status() -> i32 {
 /// `gc_sweep` the daemon runs on its idle tick, operating on the registry
 /// directly under the shared flock (no daemon required), and reports what it did:
 /// the count removed and, for each row KEPT, the specific gate that kept it
-/// (dirty/unprobed worktree, or no positive corroboration yet - x-9de7 task 5)
-/// so a stuck row is never silent and invisible. The grace window is resolved
+/// (dirty/unprobed worktree, no positive corroboration yet - x-9de7 task 5 -
+/// or the liveness re-check itself, x-98ab) so a stuck row is never silent
+/// and invisible, and a zero-reap pass over a live fleet is never silent
+/// about the rows it kept. The grace window is resolved
 /// from `config.agents.dead_row_grace` exactly as the daemon does.
 ///
 /// `--dry-run` runs the identical classification with no registry write and no
@@ -1677,6 +1679,7 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
                 "kept_dirty": kept,
                 "kept_uncorroborated": summary.kept_uncorroborated,
                 "kept_no_receipt": no_receipt,
+                "kept_live": summary.kept_live,
                 "dormant_probes_escalated": summary.dormant_probes_escalated,
                 "dry_run": dry_run,
             })
@@ -1725,6 +1728,11 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
     }
     for (id, reason) in &summary.kept_no_receipt {
         out.push_str(&format!("  kept {id} (no resumable receipt: {reason})\n"));
+    }
+    for id in &summary.kept_live {
+        out.push_str(&format!(
+            "  kept {id} (live: liveness re-check reports it alive)\n"
+        ));
     }
     if dry_run {
         out.push_str("(dry-run: no changes made)\n");
@@ -3880,6 +3888,27 @@ mod tests {
         let out = render_reap(&s, true, false);
         let v: Value = serde_json::from_str(out.trim()).expect("valid json");
         assert_eq!(v["kept_uncorroborated"], json!(["stuck1"]));
+    }
+
+    // -- x-98ab: the Live keep is reported like any other --------------------
+
+    #[test]
+    fn reap_names_the_live_gate_in_text_and_json() {
+        // A zero-reap pass over a fully-live fleet must never read as silence:
+        // all 26 rows kept, every one named with the gate that kept it.
+        let s = fno_agents::daemon::GcSummary {
+            kept_live: vec!["live1".to_string(), "live2".to_string()],
+            ..Default::default()
+        };
+        let text = render_reap(&s, false, false);
+        assert!(
+            text.contains("  kept live1 (live: liveness re-check reports it alive)"),
+            "no named gate for the live row: {text}"
+        );
+        assert!(text.contains("  kept live2 (live:"));
+        let out = render_reap(&s, true, false);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(v["kept_live"], json!(["live1", "live2"]));
     }
 
     #[test]

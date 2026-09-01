@@ -1225,6 +1225,10 @@ fn dispatch_create(
     // in the CLIENT process that inherited the spawning session's env.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     let new_entry = RegistryEntry {
+        // x-98ab: client-side mint - this process inherited the spawning
+        // session's env, so the exported FNO_NODE names the node THIS spawn
+        // is for.
+        node: std::env::var("FNO_NODE").ok().filter(|v| !v.is_empty()),
         name: name.to_string(),
         short_id: String::new(),
         legacy_provider: String::new(),

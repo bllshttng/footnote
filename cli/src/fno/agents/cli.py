@@ -2592,6 +2592,9 @@ def cmd_spawn(
                 route_provider=route_provider,
                 provider_gate=gate,
                 sandbox_settings=sandbox_settings,
+                # x-98ab: the ALREADY-resolved FNO_NODE from the provenance
+                # pass - the node this spawn is FOR, not the ambient value.
+                node=(prov_env or {}).get("FNO_NODE"),
             )
             spawn_succeeded = result.kind == "created" or bool(
                 result.reply and result.reply.strip()

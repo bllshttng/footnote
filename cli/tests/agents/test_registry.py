@@ -713,7 +713,8 @@ def test_us2_schema_version_is_three() -> None:
     """
     from fno.agents.registry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 20
+    # v21 (x-98ab): additive `node` - the backlog node a row works.
+    assert SCHEMA_VERSION == 21
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
@@ -2099,3 +2100,69 @@ def test_a_refresh_fills_an_origin_the_row_never_had(tmp_path, monkeypatch):
     )
     assert register_existing_session(**kwargs, origin=None).origin is None
     assert register_existing_session(**kwargs, origin="operator").origin == "operator"
+
+
+def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):
+    """x-98ab: a row carries the node it works, so a reap decision reads the
+    node off the row instead of parsing it out of a name. Stamped at the
+    register path from the session's own exported FNO_NODE; round-trips the
+    v21 schema (asdict emits the key on every written row, so a pre-v21
+    reader must reject the store rather than silently drop the stamp)."""
+    from fno.agents.registry import (
+        SCHEMA_VERSION,
+        AgentEntry,
+        load_registry,
+        register_existing_session,
+        write_registry,
+    )
+
+    assert SCHEMA_VERSION == 21
+    use_tmpdir(monkeypatch, tmp_path)
+    entry = register_existing_session(
+        provider=CLAUDE_HARNESS,
+        session_id="99999999-8888-7777-6666-555555555555",
+        cwd=str(tmp_path),
+        name="nodeworker",
+        origin="operator",
+        node="x-98ab",
+    )
+    assert entry.node == "x-98ab"
+    loaded = load_registry()
+    assert [e.node for e in loaded] == ["x-98ab"]
+
+    # A caller that cannot know records None - never a value parsed out of
+    # the name - and the v21 write still emits the key (forward-compat).
+    write_registry(
+        [
+            AgentEntry(
+                name="spawned",
+                cwd=str(tmp_path),
+                log_path="",
+                harness=CLAUDE_HARNESS,
+                harness_session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                origin="spawn",
+                node="x-bb18",
+            )
+        ]
+    )
+    assert [e.node for e in load_registry()] == ["x-bb18"]
+
+    # A refresh may FILL an empty node (a pre-v21 row gains the stamp its
+    # session's own export names) and may never CHANGE a stamped one. A
+    # caller saying nothing fills nothing - no evidence, no write.
+    refreshed = register_existing_session(
+        provider=CLAUDE_HARNESS,
+        session_id="99999999-8888-7777-6666-555555555555",
+        cwd=str(tmp_path),
+        name="nodeworker",
+        node="x-98ab",
+    )
+    assert refreshed.node == "x-98ab", "a refresh must fill an empty node"
+    changed = register_existing_session(
+        provider=CLAUDE_HARNESS,
+        session_id="99999999-8888-7777-6666-555555555555",
+        cwd=str(tmp_path),
+        name="nodeworker",
+        node="x-other",
+    )
+    assert changed.node == "x-98ab", "a refresh must never change a stamped node"

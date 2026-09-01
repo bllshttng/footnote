@@ -1066,6 +1066,7 @@ fn dispatch_create(
     // the CLIENT process that inherited the spawning session's env.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     let new_entry = RegistryEntry {
+        node: None,
         name: name.to_string(),
         short_id: String::new(),
         legacy_provider: String::new(),

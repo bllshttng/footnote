@@ -4479,6 +4479,10 @@ def dispatch_spawn_pane(
                         if provider == "claude"
                         else None
                     ),
+                    # x-98ab: the node this pane works, from the SAME resolved
+                    # provenance map the child env got - never the spawning
+                    # session's ambient value.
+                    node=(provenance or {}).get("FNO_NODE") or None,
                     fno_id=stored_session_uuid or name,
                 )
             if entry.crown_level is not None and entry.crown_scope:

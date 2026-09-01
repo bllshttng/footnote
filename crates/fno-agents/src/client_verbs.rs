@@ -393,7 +393,7 @@ const KNOWN_STATUSES: &[&str] = &[
 /// field. v10 (x-880e) removes the on-disk `provider` + per-provider session-id
 /// trio; a legacy v1..=v9 row still carries `provider`, read leniently below.
 const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
 ];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
@@ -1566,6 +1566,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
     // the adopted row.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     RegistryEntry {
+        node: None,
         name: synthesized_name(&short),
         // Birth marker: synthesized from a session identity that arrived
         // without a row, so nothing here observed how that session started.
@@ -1661,6 +1662,11 @@ fn upsert_synthesized_row(
                 merged.exited_at = old.exited_at.clone();
                 merged.predecessor_session_ids = old.predecessor_session_ids.clone();
                 merged.forked_from_session_id = old.forked_from_session_id.clone();
+                // x-98ab: adoption observed nothing about the node, so a
+                // merge keeps whatever a spawn/register path stamped.
+                if merged.node.is_none() {
+                    merged.node = old.node.clone();
+                }
                 reg.entries[i] = merged;
             }
             None => reg.entries.push(entry),
@@ -1702,6 +1708,14 @@ fn persist_manifest_identity(
     let mut entry = mint_synthesized_entry(id, &crate::daemon::now_rfc3339_like());
     entry.last_message_at =
         crate::claude_adopt::transcript_activity(id.canonical_session_id()).map(|(stamp, _)| stamp);
+    // x-98ab: same missing-model closure as the roster adopt - the claude
+    // transcript states the model; the provider comes only from the
+    // route-settings match and otherwise records None.
+    if let Some(model) = crate::claude_adopt::transcript_model(id.canonical_session_id()) {
+        entry.provider = crate::claude_adopt::provider_from_route_settings(Some(&model));
+        entry.model = Some(model);
+        entry.model_basis = Some("verified".to_string());
+    }
     upsert_synthesized_row(&home.registry_json(), entry.clone())
         .map_err(|error| AdoptError::Io(error.to_string()))?;
     serde_json::to_value(&entry).map_err(|error| AdoptError::Io(error.to_string()))

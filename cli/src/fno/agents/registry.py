@@ -224,7 +224,14 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # same forward-compat rationale as v11-v18: asdict emits every key on each
 # written row, so a reader older than the bump must reject the store on
 # version rather than TypeError on the unknown kwargs.
-SCHEMA_VERSION = 20
+# v21 (x-98ab): additive `node` - the backlog node this row works, stamped at
+# the Python spawn seams from the spawn's resolved provenance and at the
+# register path from the session's own exported FNO_NODE. Before it, a reap
+# decision resolved the node by parsing it out of a name and the ledger check
+# a reap needs had no node to read off the row. None on rows whose writer
+# cannot know (adopt, daemon-hosted mints). Same additive-optional shape and
+# forward-compat rationale as v19/v20.
+SCHEMA_VERSION = 21
 
 
 class RegistryVersionError(RuntimeError):
@@ -519,6 +526,17 @@ class AgentEntry:
     # refuses the write rather than evicting either. Rust mirrors it as
     # additive-optional passthrough.
     related_session_id: Optional[str] = None
+    # v21 (x-98ab): the backlog node this row WORKS, stamped once at birth from
+    # the spawn's resolved provenance (the FNO_NODE the spawner exported for
+    # this child, never the spawner's own ambient value) or, at the register
+    # path, from the session's own exported FNO_NODE - there the row describes
+    # the calling session, so its env is the right source. A reap decision
+    # reads the node from here instead of parsing it out of a name. None on
+    # rows whose writer cannot know: adopt (nothing observed the session's
+    # node) and daemon-hosted mints. ABSENCE MEANS UNKNOWN, never "ad-hoc" -
+    # the same discipline as `origin`. Rust's RegistryEntry mirrors it as
+    # additive-optional passthrough so a daemon write-back preserves the stamp.
+    node: Optional[str] = None
 
     @property
     def session_id(self) -> Optional[str]:
@@ -1676,6 +1694,7 @@ def register_existing_session(
     model: Optional[str] = None,
     effort: Optional[str] = None,
     last_message_at: Optional[str] = None,
+    node: Optional[str] = None,
     registry_path: Optional[Path] = None,
 ) -> AgentEntry:
     """Register an operator-started session so peers can address it by name.
@@ -1819,6 +1838,14 @@ def register_existing_session(
                 )
                 if origin is not None and upgradeable:
                     entry.origin = origin
+                # x-98ab: same fill-empty discipline as origin. `node` is a
+                # birth fact, but the session's own exported FNO_NODE is
+                # evidence the birth path could have read too, so a refresh
+                # may FILL an empty node and may never change one - otherwise
+                # every row registered before the field existed stays
+                # name-less no matter how often its session re-registers.
+                if node and not entry.node:
+                    entry.node = node
                 # Same preserve-when-silent discipline for the delivery policy:
                 # the SessionStart hook re-fires register without this kwarg
                 # after every resume/compaction, and a blind overwrite would
@@ -1902,6 +1929,9 @@ def register_existing_session(
             status=_REGISTERED_STATUS,
             origin=origin,
             last_message_at=last_message_at,
+            # x-98ab: the SessionStart caller passes the session's own exported
+            # FNO_NODE; a caller that cannot know leaves None.
+            node=node,
             spawned_by_session=_sb_session,
             spawned_by_harness=_sb_harness,
             spawned_by_cwd=_sb_cwd,
