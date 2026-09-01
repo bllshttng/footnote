@@ -296,6 +296,10 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # and has NO twin on the Rust client - so it must never auto-route to the
     # daemon.
     "sweep",
+    # The session-history reader over live rows, reap receipts and the ledger.
+    # Pure Python (fno.agents.history + the shared ledger matcher); there is no
+    # Rust port, so it must never auto-route to the daemon.
+    "history",
     # x-da8c: the registry-miss healer the Rust lifecycle verbs shell out to.
     # Pure Python (fno.agents.store_fallback); no Rust port. Staying out of
     # RUST_CLIENT_VERBS is the recursion guard for that shellout, so listing it
