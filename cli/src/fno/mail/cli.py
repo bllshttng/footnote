@@ -5782,6 +5782,7 @@ def cmd_notify_self() -> None:
             f"{len(unclaimed)} sent fno agents mail unclaimed (to {who}, >{ttl // 60}m): "
             "recipient has not picked it up; "
             "`fno agents mail sent --unclaimed` to see them, "
+            "`fno agents peek <recipient>` to check, "
             "`fno agents resume <recipient>` to wake one (the wake lane delivers), "
             "`fno agents mail withdraw <id>` to retract one only when stale"
         )

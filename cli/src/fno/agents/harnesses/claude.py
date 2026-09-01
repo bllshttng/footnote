@@ -1328,6 +1328,13 @@ NOT_BLOCKED_STATUSES_LOWER = frozenset(
     s.lower() for s in KNOWN_LIVE_STATUSES if s != "Needs input"
 )
 
+# The WAKE-skip subset, deliberately narrower than NOT_BLOCKED_STATUSES_LOWER.
+# The risk that set guards is injecting keystrokes MID-TURN, and that risk is
+# Working's alone. Idle is between turns: the one state the wake lane exists to
+# move, and the state a silent session sits in. Done has no process to reach.
+# Kept separate because read.py's fill-in gate still needs the idle/done pair.
+WAKE_SKIP_STATUSES_LOWER = frozenset({"working", "done"})
+
 # The INPUT vocabulary: every spelling observed from a real binary, mapped onto
 # the output set. Widening the output set instead (accepting "blocked" as its
 # own value) is what let raw lowercase leak to every consumer, so `Needs input`
