@@ -125,7 +125,14 @@ pub enum SessionLookup {
 /// the "fuller" file discards the one that errored, which is usually the one a
 /// human needs to read.
 pub fn lookup_sessions(cwd: &Path, session_id: &str) -> SessionLookup {
-    let dir = session_dir(cwd);
+    lookup_sessions_under(&pi_sessions_root(), cwd, session_id)
+}
+
+/// [`lookup_sessions`] against an explicit sessions root, so a caller that
+/// owns its own store tree (tests, isolated lanes) resolves with the same
+/// matching rules rather than a mirror of them.
+pub fn lookup_sessions_under(root: &Path, cwd: &Path, session_id: &str) -> SessionLookup {
+    let dir = root.join(encode_cwd(cwd));
     let suffix = format!("_{session_id}.jsonl");
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
