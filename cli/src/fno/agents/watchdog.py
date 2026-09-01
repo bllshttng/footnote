@@ -903,8 +903,9 @@ def retire_decision(
        proves the deliverable landed, node `done` AND its PR `merged`
        (`_shipped_work_basis`). The shipped marker reads only a turn the
        worker itself ended: a trailing user turn is an operator re-task the
-       row owes a move on. Either way it carries no question the operator
-       owes;
+       row owes a move on, and a `<watching>` tail is an armed external wait
+       the row is still in play on whatever the graph says. Either way it
+       carries no question the operator owes;
     3. it has been quiet longer than the grace.
 
     The declared-done path, unlike reap, does not require the node to be done
@@ -983,15 +984,18 @@ def retire_decision(
     # POSITIVE markers for the same fact, the work being over. A shipped row
     # needs no promise it was never going to emit, because a `<promise>` is a
     # ship-phase artifact and a think or blueprint worker legitimately ends on
-    # a recap. The shipped read is gated on the last turn still being the
-    # WORKER's: a trailing user turn is an operator re-task or answer, which
-    # clears any stale assistant marker - the row owes its next move, and the
-    # tail branch below refuses it exactly as the promise path always did.
+    # a recap. Two gates above the either/or keep the armed lane honest: a
+    # trailing USER turn is an operator re-task or answer, which clears any
+    # stale assistant marker - the row owes its next move - and a `<watching>`
+    # tail is an armed external wait the row is still IN PLAY on, whatever the
+    # graph says about the work; stopping it kills the wait it is parked on.
+    # Either way the tail branch below refuses exactly as the promise path
+    # always did.
+    truth = classify_tail(facts.last_role, facts.last_text, age_s)
     shipped_basis = ""
-    if facts.last_role == "assistant":
+    if facts.last_role == "assistant" and truth != "watching":
         shipped_basis = _shipped_work_basis(row, node_state_for)
     if not shipped_basis:
-        truth = classify_tail(facts.last_role, facts.last_text, age_s)
         if truth != "done":
             return False, ""
         # `classify_tail` reaches `done` on any `<promise` in the turn, so the
@@ -1004,7 +1008,7 @@ def retire_decision(
     if _question_pending(facts):
         return (
             False,
-            f"tail reads done but ends on a question the operator owes, "
+            f"tail reads {truth} but ends on a question the operator owes, "
             f"{int(age_s // 60)}m quiet",
         )
     marker = shipped_basis or "worker declared itself done"

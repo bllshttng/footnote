@@ -1421,9 +1421,26 @@ def test_shipped_without_merge_status_keeps_todays_refusal():
     assert v.verdict != watchdog.RETIRE
 
 
+def test_a_shipped_row_parked_on_watching_never_retires():
+    """A `<watching>` tail is an armed external wait the row is still in play
+    on, whatever the graph says: reconcile can mark the node done and merged
+    while the worker is still parked waiting on a check, and stopping it kills
+    the wait it is parked on."""
+    row = _shipped_row()
+    facts = _facts('<watching reason="ci" pr="9" timeout="30m">', age_min=20)
+    [v] = _retire_run(
+        [row],
+        {row.row_id: facts},
+        node_state=lambda n: dict(MERGED_NODE),
+    )
+    assert v.verdict != watchdog.RETIRE
+
+
 def test_a_shipped_row_ending_on_a_question_still_holds():
     """A worker whose PR merged and who then asked the operator something still
-    owes an answer; stopping it strands the question."""
+    owes an answer; stopping it strands the question. The basis names the
+    reading that actually decided it: a question-tail classifies your-move,
+    never done."""
     facts = _facts(
         "Node x-aaaa shipped. Should I also archive the worktree?", age_min=20
     )
@@ -1435,6 +1452,7 @@ def test_a_shipped_row_ending_on_a_question_still_holds():
         node_state_for=lambda n: dict(MERGED_NODE),
     )
     assert answer is False
+    assert "your-move" in basis
     assert "question the operator owes" in basis
 
 
