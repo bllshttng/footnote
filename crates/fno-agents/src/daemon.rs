@@ -10559,7 +10559,11 @@ mod tests {
             "{}",
             message
         );
-        assert!(message.contains("fno agents stop live-codex"), "{}", message);
+        assert!(
+            message.contains("fno agents stop live-codex"),
+            "{}",
+            message
+        );
         assert_eq!(
             state::load_registry(&home.registry_json())
                 .unwrap()
