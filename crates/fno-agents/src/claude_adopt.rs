@@ -16,7 +16,8 @@
 //! `session:<uuid>` key routes to the host-global claims root, so two checkouts
 //! cannot take separate project-local claims for the same session.
 
-use std::path::Path;
+use std::io::BufRead;
+use std::path::{Path, PathBuf};
 
 use crate::claude_roster::RosterWorker;
 use crate::state::{update_registry, RegistryEntry, StateError, HOST_MODE_ATTACHED};
@@ -49,6 +50,91 @@ pub fn transcript_activity(session_id: &str) -> Option<(String, u64)> {
     Some((stamp, age))
 }
 
+/// The model the session is actually running, read from its transcript (x-98ab).
+/// The LAST `message.model` on the file wins: a session can be switched
+/// mid-run, and the most recent value is the only one that answers "what is
+/// this worker running now". `None` for a missing/unreadable transcript or a
+/// session that has stated no model yet - an absence, never a guess.
+pub fn transcript_model(session_id: &str) -> Option<String> {
+    let path = crate::claude_drive::find_transcript(session_id)?;
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    let mut model = None;
+    for line in reader.lines().map_while(Result::ok) {
+        // Parse lazily per line; a transcript is append-only JSONL and the
+        // model lives at ["message"]["model"] on assistant entries.
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if let Some(m) = v
+            .get("message")
+            .and_then(|m| m.get("model"))
+            .and_then(|m| m.as_str())
+        {
+            if !m.is_empty() {
+                model = Some(m.to_string());
+            }
+        }
+    }
+    model
+}
+
+/// The model-provider this session's observed model is recorded to run on,
+/// matched against `~/.fno/route-settings/*.json` (x-98ab). The file's
+/// `FNO_ROUTE_PROVIDER` stamp is the source - the observed model only SELECTS
+/// which recorded routes to consult, so this is a lookup, never the barred
+/// derive-provider-from-model-string inference. `None` when no file matches or
+/// the matches disagree: a row with no real provider source records none.
+///
+/// `FNO_ROUTE_SETTINGS_DIR` overrides the directory for tests.
+pub fn provider_from_route_settings(model: Option<&str>) -> Option<String> {
+    let model = model.filter(|m| !m.is_empty())?;
+    let dir = std::env::var_os("FNO_ROUTE_SETTINGS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".fno")
+                .join("route-settings")
+        });
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut providers: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(env) = v.get("env").and_then(|e| e.as_object()) else {
+            continue;
+        };
+        let file_model = env.get("ANTHROPIC_MODEL").and_then(|m| m.as_str());
+        if file_model != Some(model) {
+            continue;
+        }
+        let provider = env
+            .get("FNO_ROUTE_PROVIDER")
+            .and_then(|p| p.as_str())
+            .filter(|p| !p.is_empty());
+        if let Some(p) = provider {
+            if !providers.iter().any(|x| x == p) {
+                providers.push(p.to_string());
+            }
+        }
+    }
+    if providers.len() == 1 {
+        providers.pop()
+    } else {
+        None
+    }
+}
+
 /// Build the registry row for an adopted held session. Pure (the `now` stamp is
 /// injected) so the row shape is asserted without a clock or a live spawn.
 /// `host_mode = "attached"` distinguishes it from a footnote-spawned interactive
@@ -78,6 +164,9 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         // retire acts only on "spawn", and reap protects "adopted" the same
         // way it protects a row nothing ever stamped.
         origin: Some("adopted".into()),
+        // x-98ab: adoption observed nothing about the session's node, so the
+        // axis stays unknown - never parsed out of the name.
+        node: None,
         // x-d285: adopted, not launched here - HOW this session got its
         // account is unobserved, so the account axis stays unknown (never
         // "default").
@@ -85,7 +174,12 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         related_session_id: None,
         short_id: short,
         legacy_provider: String::new(),
-        provider: Some("anthropic".into()),
+        // x-98ab: provider is stamped by `adopt` from a REAL source (the
+        // route-settings match) or stays None. The old unconditional
+        // "anthropic" here was a guess - an adopted claude worker may be
+        // running on any routed provider, and a wrong stamp is exactly how a
+        // backgrounded session bills the wrong account unobserved.
+        provider: None,
         model: None,
         model_basis: None,
         effort: None,
@@ -150,8 +244,15 @@ pub fn upsert_adopted_row(registry_path: &Path, entry: RegistryEntry) -> Result<
                 // carries it forward instead of reverting the row to the
                 // injectable default (a re-adopted leader must stay bus-only).
                 let policy = reg.entries[i].delivery_policy.clone();
+                // x-98ab: same for `node` - adoption observed nothing about
+                // the node, so replacing the row must not erase one a spawn
+                // or register path stamped.
+                let node = reg.entries[i].node.clone();
                 reg.entries[i] = entry;
                 reg.entries[i].delivery_policy = policy;
+                if reg.entries[i].node.is_none() {
+                    reg.entries[i].node = node;
+                }
             }
             None => reg.entries.push(entry),
         }
@@ -226,6 +327,15 @@ pub fn adopt(
 
     let mut entry = mint_adopted_entry(worker, &crate::daemon::now_rfc3339_like());
     entry.last_message_at = transcript_activity(&worker.session_id).map(|(stamp, _)| stamp);
+    // x-98ab: close the missing-model class at adopt - the transcript states
+    // the model outright, so an adopted row stops attesting nothing and the
+    // attest-model guard gets its premise. Provider comes only from the
+    // route-settings match; with no match it records None rather than a guess.
+    if let Some(model) = transcript_model(&worker.session_id) {
+        entry.provider = provider_from_route_settings(Some(&model));
+        entry.model = Some(model);
+        entry.model_basis = Some("verified".to_string());
+    }
     upsert_adopted_row(registry_path, entry.clone()).map_err(AdoptError::Registry)?;
     Ok(entry)
 }
@@ -284,7 +394,14 @@ mod tests {
         let e = mint_adopted_entry(&worker(), "2026-06-27T17:00:00Z");
         assert_eq!(e.name, "cc-a1b2c3d4");
         assert_eq!(e.harness_name(), "claude");
-        assert_eq!(e.provider.as_deref(), Some("anthropic"));
+        // x-98ab: mint stamps NO provider - the old unconditional "anthropic"
+        // was a guess about how the session is routed, and a wrong stamp is
+        // how a session bills the wrong account unobserved. `adopt` fills it
+        // from the route-settings match or leaves it None.
+        assert_eq!(e.provider, None);
+        // x-98ab: adoption observed nothing about the node; the field reads
+        // unknown, never a value parsed out of the name.
+        assert_eq!(e.node, None);
         assert_eq!(e.host_mode.as_deref(), Some("attached"));
         // Addressing identity is the full uuid; since v9 the wire short lives in
         // the unified short_id field (was claude_short_id).
@@ -296,6 +413,202 @@ mod tests {
         assert_eq!(e.pid, Some(5001));
         assert_eq!(e.pid_start_time, Some(99887766));
         assert_eq!(e.status, AgentStatus::Live);
+    }
+
+    // -- x-98ab: row identity + a sweep that names what it kept --------------
+
+    /// Write a minimal transcript for `uuid` under a fresh temp projects dir
+    /// and point `FNO_CLAUDE_PROJECTS_DIR` at it. The transcript lives one
+    /// project dir down, the shape `find_transcript` scans. Returns the dir.
+    fn seed_transcript(dir_tag: &str, uuid: &str, lines: &[String]) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "fno-adopt-{dir_tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let proj = base.join("-Users-bb16-code-proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join(format!("{uuid}.jsonl")), lines.join("\n") + "\n").unwrap();
+        std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, &base);
+        base
+    }
+
+    fn transcript_line(model: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"role":"assistant","model":"{model}"}},"timestamp":"2026-08-31T00:00:00Z"}}"#
+        )
+    }
+
+    #[test]
+    fn transcript_model_reads_the_stated_model() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
+        let base = seed_transcript("model", uuid, &[transcript_line("glm-5.3-flash[1m]")]);
+        assert_eq!(transcript_model(uuid).as_deref(), Some("glm-5.3-flash[1m]"));
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn transcript_model_takes_the_most_recent_value_when_a_session_switched() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // A session can be switched mid-run; the LAST stated model is the one
+        // answering "what is this worker running now".
+        let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
+        let base = seed_transcript(
+            "model-switch",
+            uuid,
+            &[
+                transcript_line("glm-5.3"),
+                transcript_line("glm-5.3-flash[1m]"),
+            ],
+        );
+        assert_eq!(transcript_model(uuid).as_deref(), Some("glm-5.3-flash[1m]"));
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn transcript_model_records_none_for_a_missing_transcript() {
+        // Absence is None, never a fabricated value - the same discipline as
+        // transcript_activity.
+        assert_eq!(transcript_model("not-a-uuid"), None);
+    }
+
+    fn seed_route_settings(dir_tag: &str, files: &[&str]) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "fno-adopt-{dir_tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        for (i, provider) in files.iter().enumerate() {
+            std::fs::write(
+                base.join(format!("{i:04}.json")),
+                format!(
+                    r#"{{"env":{{"ANTHROPIC_MODEL":"glm-5.3-flash[1m]","ANTHROPIC_BASE_URL":"https://api.example.test","FNO_ROUTE_PROVIDER":"{provider}"}}}}"#
+                ),
+            )
+            .unwrap();
+        }
+        std::env::set_var("FNO_ROUTE_SETTINGS_DIR", &base);
+        base
+    }
+
+    #[test]
+    fn provider_matches_the_recorded_route_files() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // The observed model SELECTS the recorded routes; the provider comes
+        // from the file's FNO_ROUTE_PROVIDER stamp - a lookup, never the
+        // barred derive-from-model-string inference.
+        let base = seed_route_settings("route-one", &["zai"]);
+        assert_eq!(
+            provider_from_route_settings(Some("glm-5.3-flash[1m]")).as_deref(),
+            Some("zai")
+        );
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn provider_records_none_when_routes_disagree() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Two recorded providers for the same model is genuine ambiguity:
+        // guessing here is how the wrong bill gets paid.
+        let base = seed_route_settings("route-ambig", &["zai", "anthropic"]);
+        assert_eq!(
+            provider_from_route_settings(Some("glm-5.3-flash[1m]")),
+            None
+        );
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn provider_records_none_without_a_real_source() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // No matching file: the row records no provider rather than deriving
+        // one from the model string. A model alone must never name a vendor.
+        let base = seed_route_settings("route-none", &["zai"]);
+        assert_eq!(provider_from_route_settings(Some("claude-sonnet-5")), None);
+        assert_eq!(provider_from_route_settings(None), None);
+        assert_eq!(provider_from_route_settings(Some("")), None);
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn adopt_fills_model_and_provider_from_real_sources() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // The full adopt path: the transcript states the model, the route
+        // files name its provider, and the row carries both plus a verified
+        // basis - the premise the attest-model guard needs.
+        let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
+        let projects = seed_transcript("adopt-fill", uuid, &[transcript_line("glm-5.3-flash[1m]")]);
+        let routes = seed_route_settings("adopt-fill", &["zai"]);
+        let dir = std::env::temp_dir().join(format!(
+            "fno-adopt-adoptfill-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = dir.join("registry.json");
+        std::env::set_var("FNO_CLAIMS_ROOT", &dir);
+        let entry = adopt(&reg, &worker(), std::process::id()).unwrap();
+        assert_eq!(entry.model.as_deref(), Some("glm-5.3-flash[1m]"));
+        assert_eq!(entry.model_basis.as_deref(), Some("verified"));
+        assert_eq!(entry.provider.as_deref(), Some("zai"));
+        assert_eq!(entry.node, None);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&projects).ok();
+        std::fs::remove_dir_all(&routes).ok();
+    }
+
+    #[test]
+    fn upsert_refresh_keeps_a_stamped_node() {
+        // A spawn-stamped node survives a re-adopt: adoption observed nothing
+        // about the node, so replacing the row must not erase the stamp.
+        let dir = std::env::temp_dir().join(format!(
+            "fno-adopt-node-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = dir.join("registry.json");
+        let mut stamped = mint_adopted_entry(&worker(), "2026-06-27T17:00:00Z");
+        stamped.node = Some("x-98ab".into());
+        upsert_adopted_row(&reg, stamped).unwrap();
+        upsert_adopted_row(&reg, mint_adopted_entry(&worker(), "2026-06-27T18:00:00Z")).unwrap();
+        let loaded = crate::state::load_registry(&reg).unwrap();
+        assert_eq!(loaded.entries[0].node.as_deref(), Some("x-98ab"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

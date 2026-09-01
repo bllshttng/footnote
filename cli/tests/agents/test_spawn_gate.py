@@ -979,7 +979,14 @@ class TestRunGate:
         python_pane_spawn = mux_python.split("def dispatch_spawn_pane(\n", 1)[1]
 
         assert 'provider: Some("anthropic".to_string())' in rust_claude_spawn
-        assert 'provider: Some("anthropic".into())' in rust_claude_adopt
+        # x-98ab: adopt mints NO provider - the old unconditional "anthropic"
+        # was a guess about an unobserved route, and a wrong stamp is how a
+        # session bills the wrong account with nothing recorded to compare
+        # against. `adopt` fills it from the transcript model matched against
+        # the recorded route-settings files, and records none on no match.
+        assert "provider: None" in rust_claude_adopt
+        assert "provider_from_route_settings(Some(&model))" in adopt_rust
+        assert "transcript_model(&worker.session_id)" in adopt_rust
         assert 'provider: Some("openai".to_string())' in rust_codex_create
         assert 'provider="openai"' in python_codex_create
         assert (
@@ -988,6 +995,19 @@ class TestRunGate:
         )
         assert "provider=lane_provider" in python_claude_spawn
         assert "provider=resolved_lane_provider" in python_pane_spawn
+
+        # x-98ab: every mint site stamps `node` so a reap decision reads the
+        # node off the row instead of parsing it out of a name. The Python
+        # spawn seams take the caller's RESOLVED provenance value (never the
+        # spawner's ambient env); the client-side Rust ask lanes inherit the
+        # spawner's exported FNO_NODE; adopt stamps None because it observed
+        # nothing.
+        assert "node=node," in python_claude_spawn
+        assert "node=node," in python_codex_create
+        assert 'node=(provenance or {}).get("FNO_NODE") or None' in python_pane_spawn
+        assert 'node: std::env::var("FNO_NODE")' in rust_claude_spawn
+        assert 'node: std::env::var("FNO_NODE")' in codex_rust
+        assert "node: None" in rust_claude_adopt
 
     def test_every_registry_mint_site_stamps_spawned_by(self):
         """The parent-edge sibling of the provider stamp test: each mint site
