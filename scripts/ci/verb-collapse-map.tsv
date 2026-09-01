@@ -121,6 +121,7 @@ backlog annotate resolve	T1	backlog annotate resolve	5
 backlog archive	T1	backlog archive	2
 backlog archive-dedupe-ids	T1	backlog archive-dedupe-ids	0
 backlog bases	T1	backlog bases	0
+backlog backfill-deferred-kind	T1	backlog backfill-deferred-kind	1
 backlog batch join	T1	backlog batch join	1
 backlog batch metrics	T1	backlog batch metrics	0
 backlog batch open	T1	backlog batch open	1
@@ -188,6 +189,7 @@ backlog retro drain-postmortems	T1	backlog retro drain-postmortems	1
 backlog retro run	T1	backlog retro run	16	
 backlog retro sweep-carveouts	T1	backlog retro sweep-carveouts	7	
 backlog roadmap	T1	backlog roadmap	1
+backlog stuck-epics	T1	backlog stuck-epics	1
 backlog session add	T1	backlog session add	4
 backlog session close	T1	backlog session close	3
 backlog session reap-open	T1	backlog session reap-open	3

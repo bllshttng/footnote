@@ -7997,15 +7997,36 @@ def cmd_defer(
         "-R",
         help="Why these nodes are being deferred (applies to all). Free text, surfaced in triage.",
     ),
+    kind: Optional[str] = typer.Option(
+        None,
+        "--kind",
+        "-K",
+        help=(
+            "Classify the deferral (expired|blocked|wont_do|superseded|later|"
+            "contingent|carveout|internal_only|junk). Omitted: stamped only when "
+            "the reason exactly matches a known machine-stamped string."
+        ),
+    ),
 ) -> None:
     """Mark one or more backlog nodes as deferred. Sets ``deferred_at`` + ``deferred_reason``.
 
     Atomic across the batch: if any ID is unknown, none are deferred.
     Same reason applies to every ID in the batch.
     """
-    from fno.graph._constants import has_node_id_prefix
+    from fno.graph._constants import (
+        DEFERRED_KINDS,
+        classify_deferred_reason,
+        has_node_id_prefix,
+    )
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node, _find_dependents
+
+    if kind is not None and kind not in DEFERRED_KINDS:
+        typer.echo(
+            f"Error: --kind must be one of {', '.join(DEFERRED_KINDS)}, got '{kind}'",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     ids = _expand_id_args(task_ids)
     if not ids:
@@ -8057,6 +8078,16 @@ def cmd_defer(
             node["completed_at"] = None
             node["deferred_at"] = now
             node["deferred_reason"] = cleaned_reason
+            # Explicit --kind wins; else classify ONLY by exact match against
+            # the machine-stamped table (the maintain drain self-classifies
+            # with no flag). No match leaves the kind unset - an honest
+            # unknown, never a guess from prose. Sparse: no kind means no key
+            # (popped so a re-deferral of a previously stamped node clears it).
+            resolved_kind = kind or classify_deferred_reason(cleaned_reason)
+            if resolved_kind:
+                node["deferred_kind"] = resolved_kind
+            else:
+                node.pop("deferred_kind", None)
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
@@ -8734,6 +8765,7 @@ def cmd_undefer(
             was_deferred.append((tid, bool(node.get("deferred_at"))))
             node["deferred_at"] = None
             node["deferred_reason"] = None
+            node.pop("deferred_kind", None)
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
@@ -8754,6 +8786,160 @@ def cmd_undefer(
             typer.echo(f"warning: {tid} was not deferred", err=True)
         typer.echo(f"Undeferred {tid}")
     _project_plans_from_graph(ids)
+
+
+# -- backfill-deferred-kind --
+
+
+def _load_deferred_kind_map(map_file) -> dict[str, str]:
+    """Parse + validate the operator TSV: ``kind<TAB>exact reason`` per row.
+
+    ``#`` comments and blank lines are ignored. An unknown kind or a
+    malformed row is a hard error BEFORE any graph read: a typo'd map must
+    never half-apply. Duplicate reasons with conflicting kinds are refused;
+    a duplicate with the same kind is idempotent-tolerated.
+    """
+    from fno.graph._constants import DEFERRED_KINDS
+
+    mapping: dict[str, str] = {}
+    for lineno, raw in enumerate(map_file.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw.rstrip("\n")
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if "\t" not in line:
+            raise ValueError(f"{map_file}:{lineno}: expected 'kind<TAB>reason', got no tab")
+        kind, reason = line.split("\t", 1)
+        kind, reason = kind.strip(), reason.strip()
+        if kind not in DEFERRED_KINDS:
+            raise ValueError(
+                f"{map_file}:{lineno}: unknown kind '{kind}' "
+                f"(valid: {', '.join(DEFERRED_KINDS)})"
+            )
+        if not reason:
+            raise ValueError(f"{map_file}:{lineno}: empty reason")
+        if mapping.get(reason, kind) != kind:
+            raise ValueError(f"{map_file}:{lineno}: reason maps to two kinds ({reason[:60]!r})")
+        mapping[reason] = kind
+    return mapping
+
+
+@cli.command("backfill-deferred-kind", hidden=True)
+def cmd_backfill_deferred_kind(
+    map_file: Optional[Path] = typer.Option(
+        None,
+        "--map",
+        help="TSV file: kind<TAB>exact deferred_reason per row. Merged over the code table.",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Write the classification. Default is a dry-run report.",
+    ),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON report"),
+) -> None:
+    """Classify deferred rows by EXACT reason match. Never closes or undefers.
+
+    Mechanical: a node is stamped only when its ``deferred_reason`` equals a
+    known exact string (code table + --map). Anything else stays
+    unclassified - an honest unknown beats a wrong label, because a wrong
+    kind silently changes whether an epic can close. Existing kinds are never
+    overwritten; non-deferred nodes are never touched.
+    """
+    from fno.graph._constants import classify_deferred_reason
+    from fno.graph.store import locked_mutate_graph, read_graph
+
+    extra_map: dict[str, str] = {}
+    if map_file is not None:
+        try:
+            extra_map = _load_deferred_kind_map(map_file)
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1)
+
+    def classify(node) -> str | None:
+        return classify_deferred_reason(node.get("deferred_reason"), extra_map)
+
+    if not apply:
+        entries = read_graph(_graph_path())
+        would: dict[str, int] = {}
+        unclassified = 0
+        for e in entries:
+            if e.get("status") != "deferred" or e.get("deferred_kind"):
+                continue
+            kind = classify(e)
+            if kind:
+                would[kind] = would.get(kind, 0) + 1
+            else:
+                unclassified += 1
+        if json_output:
+            typer.echo(json.dumps({"dry_run": True, "would_stamp": would, "unclassified": unclassified}))
+        else:
+            for kind in sorted(would):
+                typer.echo(f"  {kind}: {would[kind]}")
+            typer.echo(f"  unclassified (stays unknown): {unclassified}")
+            typer.echo("  dry run; pass --apply to write")
+        return
+
+    counts: dict[str, int] = {}
+
+    def mutator(entries):
+        for e in entries:
+            if e.get("status") != "deferred" or e.get("deferred_kind"):
+                continue
+            kind = classify(e)
+            if kind:
+                e["deferred_kind"] = kind
+                counts[kind] = counts.get(kind, 0) + 1
+        return entries
+
+    locked_mutate_graph(_graph_path(), mutator)
+    if json_output:
+        typer.echo(json.dumps({"applied": True, "stamped": counts}))
+    else:
+        for kind in sorted(counts):
+            typer.echo(f"  stamped {kind}: {counts[kind]}")
+        typer.echo(
+            f"  total stamped: {sum(counts.values())} "
+            f"(existing kinds preserved; unclassified left unclassified)"
+        )
+
+
+# -- stuck-epics --
+
+
+@cli.command("stuck-epics", hidden=True)
+def cmd_stuck_epics(
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON report"),
+) -> None:
+    """Epics whose only incomplete children are deferred/superseded.
+
+    Read-only surface for the operator: it NEVER closes, undefers, or
+    re-parents anything. A stuck epic is closable when no child holds it
+    open (graph/epics.holds_epic_open): done and superseded children never
+    do, and a wont_do deferral is a decision, not a delay. Everything else
+    (an unclassified or contingent deferral) holds the epic open and needs a
+    human ruling.
+    """
+    from fno.graph.epics import stuck_epics
+    from fno.graph.store import read_graph
+
+    entries = read_graph(_graph_path())
+    rows = stuck_epics(entries)
+    if json_output:
+        typer.echo(json.dumps({"stuck_epics": rows}, default=lambda o: o.__dict__))
+        return
+    if not rows:
+        typer.echo("no stuck epics")
+        return
+    for r in rows:
+        verdict = "closable" if r.closable else f"held open by {r.held_open_by}"
+        typer.echo(f"  {r.id} [{r.status}] {r.title} - {verdict}")
+        for h in r.holders:
+            typer.echo(f"      {h['id']} [{h['status']}"
+                       f"{', ' + h['deferred_kind'] if h.get('deferred_kind') else ''}]")
+    typer.echo(
+        "  read-only: closing or undefering any of these is an operator ruling, never automatic"
+    )
 
 
 # -- done --
@@ -8820,6 +9006,7 @@ def _apply_completion_fields(node: dict, *, merge_status: Optional[str] = None) 
     # so the row presents as cleanly done with no ghost fields.
     node["deferred_at"] = None
     node["deferred_reason"] = None
+    node.pop("deferred_kind", None)
     node["queued_at"] = None
     node["queued_reason"] = None
     node["completed_at"] = datetime.now(timezone.utc).isoformat()
@@ -12630,6 +12817,10 @@ def cmd_maintain(
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
                     n["deferred_reason"] = reason
+                    # Failure-cascade defers are machinery with its own sentinel
+                    # vocabulary, not an expired drift: no kind (pop so a
+                    # re-deferral cannot inherit one).
+                    n.pop("deferred_kind", None)
                     applied_defers.append(
                         {"node_id": cand.node_id, "streak": cand.streak, "reason": reason}
                     )
@@ -12664,6 +12855,7 @@ def cmd_maintain(
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
                     n["deferred_reason"] = _maintain.STALE_QUARANTINE_REASON
+                    n["deferred_kind"] = "expired"
                     applied_stale_ready.append(
                         {
                             "node_id": cand.node_id,
@@ -12956,7 +13148,8 @@ def cmd_maintain(
         typer.echo(
             f"    fno backlog maintain --no-validity -J "
             f"| jq -r '.stale_ideas[].node_id' "
-            f"| xargs fno backlog defer -R 'stale >{staleness_days}d, drained by maintain'"
+            f"| xargs fno backlog defer -R 'stale >{staleness_days}d, drained by maintain' "
+            f"--kind expired"
         )
     else:
         typer.echo("  stale ideas: 0")
@@ -14246,6 +14439,18 @@ def cmd_find(
     domain: Optional[str] = typer.Option(None, "--domain", "-d", help="Filter by domain"),
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project"),
     status: Optional[str] = typer.Option(None, "--status", "-s", help="Filter by status"),
+    use_fts: bool = typer.Option(
+        False,
+        "--fts",
+        help=(
+            "Full-text search (BM25-ranked whole-word matching) over title+slug+details "
+            "via a hash-validated cache beside graph.json. Exact id/slug lookups are "
+            "unchanged. Falls back to substring search where FTS5 is unavailable."
+        ),
+    ),
+    limit: int = typer.Option(
+        20, "--limit", "-L", min=1, help="Max results for the --fts lane (BM25 rank order)."
+    ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON array"),
 ) -> None:
     """Search graph entries: exact id/slug/bare-hex, else high-recall over title+slug+details.
@@ -14279,6 +14484,36 @@ def cmd_find(
             if match.kind in {"exact", "fuzzy", "branch_derived"}:
                 return [e for e in pool if e.get("id") == match.id]
             return []
+        # --fts: BM25-ranked full-text over the hash-validated cache. Ranked
+        # ids -> pool entries in rank order; nodes dropped by --domain/
+        # --project/--status simply shrink the output. Any FTS5 absence or
+        # cache failure degrades to the substring lane (a stranger on an odd
+        # Python must not lose search).
+        if use_fts and pool is entries:
+            # The cache indexes the LOCAL graph file; under an external
+            # tracker the entries are not those bytes, so the fts lane must
+            # not answer (same backend gate as the archive read-through).
+            from fno.tracker import active_backend_name
+
+            if active_backend_name() == "graph":
+                try:
+                    from fno.graph import fts as graph_fts
+
+                    # Full ranked set, THEN filters, THEN truncate: slicing
+                    # first could evict every in-filter match in favor of
+                    # better-ranked out-of-filter ones.
+                    ranked = graph_fts.search(q, _graph_path(), limit=None)
+                    by_id = {
+                        e.get("id"): e for e in pool if isinstance(e.get("id"), str)
+                    }
+                    kept = [
+                        by_id[i]
+                        for i in ranked
+                        if i in by_id and _passes_filters(by_id[i])
+                    ]
+                    return kept[:limit]
+                except Exception as exc:  # noqa: BLE001 - degrade, never fail
+                    typer.echo(f"warning: fts unavailable ({exc}); using substring search", err=True)
         # High-recall describe-it search over title+slug+details.
         return search_entries(query, pool, fields=("title", "slug", "details"))
 
@@ -14859,6 +15094,7 @@ def cmd_supersede(
         }
         old_node["deferred_at"] = None
         old_node["deferred_reason"] = None
+        old_node.pop("deferred_kind", None)
         # Release anything that was shipping inside it (x-e957, sigma). Same
         # trap `cmd_remove` was fixed for, one step short of deletion: a
         # superseded unit will never merge, so `_strandable_contained_ids`
@@ -14979,6 +15215,7 @@ def cmd_unsupersede(
         node["supersession"] = None
         node["deferred_at"] = None
         node["deferred_reason"] = None
+        node.pop("deferred_kind", None)
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
@@ -15111,6 +15348,11 @@ _TRACKER_OWNED_VERBS = frozenset(
         "rehash",
         "maintain",
         "groom",
+        # graph-row mutation (stamps deferred_kind under the lock)
+        "backfill-deferred-kind",
+        # graph-state read: under an external backend the local graph is not
+        # the store, so the read must refuse with the rest
+        "stuck-epics",
         # orchestration that stamps nodes
         "advance",
         "reconcile",
@@ -15191,6 +15433,7 @@ _FOOTNOTE_OWNED_VERBS = frozenset(
         "batch open",
         "batch status",
         "batch metrics",
+        # read-only operators' surface over the graph store
         # graph-store integrity check (read-only)
         "collisions check",
     }

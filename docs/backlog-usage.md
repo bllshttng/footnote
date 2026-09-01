@@ -171,6 +171,33 @@ The usual remedy is to file what remains as its own node.
 Ancestor epics the cascade auto-closed come back with the child.
 An epic closed on its own evidence is left alone and named, because reopening it discards a judgment the verb never made.
 
+## Deferred kinds
+
+A deferral is two facts wearing one status. One is an expiry: a hygiene sweep aged it out, nobody ruled. One is a decision: a human said no, not now, or wait-for-X. `deferred_kind` separates the two. The difference is load-bearing: a wont-do child never holds its epic open, while an expired one is just drift.
+
+| Kind | Means |
+|------|-------|
+| `expired` | aged out by machinery, no human judgment |
+| `blocked` | waiting on a named thing |
+| `wont_do` | an operator or author ruled against it |
+| `superseded` | the work moved elsewhere |
+| `later` | real intent, not now |
+| `contingent` | fires only if a named condition fires |
+| `carveout` | harvested carve-out backlog |
+| `internal_only` | cut by a build-for-others ruling |
+| `junk` | empty or corrupt placeholder parked in a status |
+
+Classification is EXACT STRING MATCH only, never inference. `fno backlog defer <id> -R "..." --kind wont_do` stamps the kind directly. Without `--kind`, a reason that exactly matches a machine-stamped string (the maintain drain, the stale-ready quarantine) self-classifies. Anything else stays unclassified. That is the contract: an honest unknown beats a wrong label, because a wrong kind silently changes whether an epic can close. `undefer`, `done`, `reopen`, and `unsupersede` clear the kind with the rest of the deferral state.
+
+Two hidden verbs serve the migration and the operator:
+
+- `fno backlog backfill-deferred-kind [--map FILE] [--apply]` classifies existing deferred rows by exact match against the built-in table plus a TSV map (`kind<TAB>exact reason` per line). Dry run by default. It never overwrites an existing kind and never closes or undefers anything.
+- `fno backlog stuck-epics` lists epics whose only incomplete children are deferred or superseded, each with a `closable` verdict and its holders. Read-only: closing one is always an operator ruling.
+
+## Finding work by meaning: find --fts
+
+`fno backlog find --fts "free text query"` searches title, slug, and details through an FTS5 index (BM25-ranked whole-word matching) and finds concepts that share only some of the original words. The index is a CACHE beside graph.json (`graph.json.fts5`), never a second source of truth. It stores the sha256 of the graph bytes, compares on every read, and rebuilds from scratch on any mismatch. There is no incremental write path, so the index cannot answer stale. A build without FTS5 degrades to the ordinary substring search with a warning. The honest limit: a query sharing no words with the node still misses, so filing duplicates before searching stays the failure mode to watch.
+
 ## Node-to-node edges
 
 Four edges connect nodes, and only the first two gate anything.

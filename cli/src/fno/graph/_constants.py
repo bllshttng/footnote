@@ -316,6 +316,57 @@ DIFFICULTY_HELP = (
     "and a senior tech lead's estimate. Do not use current capacity or model quality."
 )
 
+# deferred_kind: separates an EXPIRY from a DECISION inside status=deferred.
+# The deferred_reason is prose, so nothing can query it; 85% of deferred rows
+# are an automated hygiene drain nobody ever ruled on, and the decided rest
+# are invisible inside them. A kind also feeds the epic-closure rules
+# (graph/epics.py): wont_do never holds an epic open, because a ruling is a
+# decision, not a delay. Sparse by design: a node without a kind simply
+# carries no deferred_kind key (readers use .get, never [...]) - an honest
+# unknown beats a wrong label, because a wrong kind silently changes whether
+# an epic can close.
+DEFERRED_KINDS: tuple[str, ...] = (
+    "expired",  # aged out by machinery, no human judgment (maintain drain, stale-quarantine)
+    "blocked",  # waiting on a named thing
+    "wont_do",  # an operator/author ruled against it
+    "superseded",  # the work moved elsewhere (also its own status; kind only on deferred rows)
+    "later",  # real intent, not now
+    "contingent",  # fires only if a named condition fires
+    "carveout",  # harvested carve-out backlog
+    "internal_only",  # cut by a build-for-others ruling
+    "junk",  # empty/corrupt placeholder parked in a status
+)
+
+# Exact-string table: reason -> kind. Footnote-stamped strings ONLY (the
+# maintain drain at its default threshold, and the stale-quarantine guard
+# from maintain.STALE_QUARANTINE_REASON). Operator-specific prose rides the
+# backfill verb's --map file instead, never this table. Matching is exact,
+# byte for byte: no strip, no lowercase, no substring, no regex.
+DEFERRED_KIND_BY_REASON: dict[str, str] = {
+    "stale >30d, drained by maintain": "expired",
+    "stale-quarantine (guard)": "expired",
+}
+
+
+def classify_deferred_reason(
+    reason: object, extra_map: dict[str, str] | None = None
+) -> str | None:
+    """Classify a deferred_reason by EXACT string match. None = unclassified.
+
+    Pure lookup: the reason is never normalized, so a near-miss (a different
+    staleness threshold, a trailing space) stays honestly unknown rather than
+    silently classifying as expired. ``extra_map`` (the backfill verb's --map)
+    merges over the code defaults and is validated for kind membership at
+    load time by the verb, not here.
+    """
+    if not isinstance(reason, str):
+        return None
+    if extra_map:
+        kind = extra_map.get(reason)
+        if kind is not None:
+            return kind
+    return DEFERRED_KIND_BY_REASON.get(reason)
+
 
 def normalize_difficulty(value: str | None) -> str | None:
     """Normalize and validate a filing-time work-difficulty estimate."""

@@ -159,6 +159,10 @@ class Entry(BaseModel):
     # from deferred to done.
     deferred_at: Optional[str] = None
     deferred_reason: Optional[str] = None
+    # Deferred classification: expiry vs decision. Sparse: absent
+    # when unclassified (an honest unknown), never a guess from prose.
+    # Vocabulary: _constants.DEFERRED_KINDS; rules: graph/epics.py.
+    deferred_kind: Optional[str] = None
     # Last time a curation field (status/priority/rank/parent/blocked_by/size)
     # actually changed value, stamped by locked_mutate_graph. Null on a node
     # that has never had a post-creation curation change; a janitorial
