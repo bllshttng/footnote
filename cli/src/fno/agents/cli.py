@@ -4602,7 +4602,7 @@ def cmd_stale_escalate(
             cwd=Path.cwd(),
         )
         stale_count = len(stale_pairs)
-        oldest = se._oldest_h([v.basis or "" for v, _row in stale_pairs]) or 0
+        oldest = se.oldest_h([v.basis or "" for v, _row in stale_pairs]) or 0
 
     summary = f"Summary: {stale_count} stale, outcome {outcome}, oldest {oldest}h"
     if json_out:

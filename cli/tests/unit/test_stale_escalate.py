@@ -152,3 +152,43 @@ def test_refused_sweep_escalates_and_closes_nothing(
     assert result.exit_code == 0
     assert '"outcome": "refused"' in result.output
     assert read_open_questions(tmp_path) == []
+
+
+def test_full_verb_asked_path_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real CLI verb with only the fleet-enumeration seams injected:
+    classification, filtering, the fold, and the --json glue all run, so a
+    glue-only regression (an attribute drift, a mis-keyed field) cannot ship
+    green off function-level tests alone."""
+    from typer.testing import CliRunner
+
+    from fno.agents import watchdog as wd
+    from fno.agents.cli import agents_app
+
+    real_run_sweep = wd.run_sweep
+
+    def seeded(**_kwargs):
+        return real_run_sweep(
+            now_s=_NOW,
+            rows_provider=lambda: ([_stale_row()], []),
+            transcript_fn=lambda sid: {
+                "dddd4444-0000": _tail("stopped mid turn", 61 * 1440 * 60)
+            }.get(sid),
+            claim_fn=lambda node: {},
+            graph_fn=lambda: {},
+        )
+
+    monkeypatch.setattr("fno.agents.watchdog.run_sweep", seeded)
+    monkeypatch.setattr("fno.carveout.core.resolve_carveout_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        "fno.carveout.core.resolve_session_id", lambda _root: "watchdog-test"
+    )
+    result = CliRunner().invoke(agents_app, ["stale-escalate", "--json"])
+    assert result.exit_code == 0, result.output
+    assert '"outcome": "asked"' in result.output
+    assert '"stale_count": 1' in result.output
+    assert '"oldest_h": 1464' in result.output
+    assert "Summary: 1 stale, outcome asked, oldest 1464h" in result.output
+    [question] = read_open_questions(tmp_path)
+    assert "k1" in question.question
