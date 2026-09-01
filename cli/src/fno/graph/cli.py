@@ -10825,6 +10825,24 @@ def cmd_advance(
     project: Optional[str] = typer.Option(
         None, "--project", "-p", help="Restrict next-node selection to this project."
     ),
+    explain: bool = typer.Option(
+        False,
+        "--explain",
+        help=(
+            "Dry run: report why this node and not another, which gate or cap "
+            "would refuse it with its measured value against its threshold, and "
+            "what the capacity grid resolves. Dispatches nothing, claims "
+            "nothing, and ignores config.auto_continue."
+        ),
+    ),
+    explain_node: Optional[str] = typer.Option(
+        None,
+        "--explain-node",
+        help="With --explain: answer for THIS node - the filter that dropped it, or its rank.",
+    ),
+    explain_top: int = typer.Option(
+        5, "--explain-top", help="With --explain: how many ranked candidates to show."
+    ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the decision as JSON."),
     verbose: bool = typer.Option(False, "--verbose", help="Print the dispatch decision to stderr."),
     model: Optional[str] = typer.Option(
@@ -10859,6 +10877,26 @@ def cmd_advance(
     )
     from fno.backlog.advance import advance as _advance
     from fno.backlog.advance import advance_dependents as _advance_deps
+
+    # --explain returns BEFORE every dispatch path, including the pin validation
+    # below: it is a read, so an unparseable --model must not stop it from
+    # reporting why a node did not launch. A graph read that fails exits
+    # non-zero naming the read rather than printing a partial verdict.
+    if explain:
+        from fno.backlog.explain import build_report, render_report
+
+        try:
+            report = build_report(
+                project=project, node_id=explain_node, top=explain_top
+            )
+        except Exception as exc:  # noqa: BLE001 - never a partial verdict
+            typer.echo(f"advance --explain: {exc}", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(json.dumps(report, indent=2, default=str) if json_out else render_report(report))
+        return
+    if explain_node is not None or explain_top != 5:
+        typer.echo("advance: --explain-node / --explain-top require --explain", err=True)
+        raise typer.Exit(code=2)
 
     # Validate the dispatch pins before any spawn; the pin is resolved only when
     # given so an absent pin lets the spawn path keep its per-node/default choice.

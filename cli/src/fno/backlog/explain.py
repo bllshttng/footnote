@@ -189,3 +189,532 @@ def build_selection_filters(
         )
     )
     return fs
+
+
+# ---------------------------------------------------------------------------
+# The report: selection, gates, routing, decision.
+#
+# `advance --explain` is a DRY RUN, not a receipt formatter, and that is the
+# single most consequential decision here. Measured 2026-09-01: all 83
+# `advance_skipped` rows in the project journal carry `reason: "disabled"`.
+# `config.auto_continue.enabled` is false, so advance() returns at its first
+# branch and the whole selection / lane-cap / quota / routing pipeline below has
+# ZERO production instances. A verb that formatted what advance decided would
+# print "disabled" a hundred percent of the time and teach nothing.
+#
+# So this runs the pipeline itself, ignores the armed state, dispatches nothing,
+# claims nothing, and writes no event.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Gate:
+    """One admission gate as an operator needs to read it.
+
+    ``measured`` and ``threshold`` are carried separately from ``verdict`` on
+    purpose. A gate that says only "pass" teaches nothing about how close it is,
+    and a gate that says only "refuse" teaches nothing about what to change.
+    """
+
+    name: str
+    measured: Optional[str]
+    threshold: Optional[str]
+    verdict: str
+    #: The config key an operator would edit, when there is one.
+    key: Optional[str] = None
+    note: Optional[str] = None
+
+    def as_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "measured": self.measured,
+            "threshold": self.threshold,
+            "verdict": self.verdict,
+            "key": self.key,
+            "note": self.note,
+        }
+
+    def line(self) -> str:
+        measured = self.measured if self.measured is not None else "?"
+        threshold = self.threshold if self.threshold is not None else "-"
+        out = f"  {self.name:<22} {measured:>12} / {threshold:<12} {self.verdict}"
+        if self.key:
+            out += f"  [{self.key}]"
+        if self.note:
+            out += f"\n{' ' * 25}{self.note}"
+        return out
+
+
+def _unreadable(name: str, exc: BaseException, *, key: Optional[str] = None) -> Gate:
+    """A gate whose measurement failed.
+
+    Never rendered as a pass and never as 0. An unreadable count and an empty
+    fleet are opposite facts, and the spawn gate itself treats unreadable as a
+    refusal (fail-closed), so showing it as headroom would invert the meaning.
+    """
+    return Gate(name, None, None, f"unreadable: {exc}", key=key)
+
+
+def gates_for(node: Optional[dict], grid_harness: Optional[str] = None) -> list[Gate]:
+    """Every gate advance would consult for ``node``, each measured.
+
+    Calls the measurement functions only - never ``preflight_gate``, which
+    acquires the spawn mutex and a worker slot. An explain that queued behind
+    the real gate would change the fleet it is describing.
+
+    ``grid_harness`` is the harness the capacity grid picked, so the provider
+    lane reported is the one the spawn would actually be counted against rather
+    than the config default the grid was about to override.
+    """
+    from fno.agents.spawn_gate import (
+        ProviderCountUnavailable,
+        census,
+        provider_lanes_cap,
+        provider_live_count,
+    )
+    from fno.backlog import advance as adv
+
+    out: list[Gate] = []
+
+    try:
+        walker_live = adv._claim_is_live(adv._walker_key())
+        out.append(
+            Gate(
+                "walker-claim",
+                "live" if walker_live else "free",
+                "free",
+                "refuse" if walker_live else "pass",
+                note="a live walk owns this repo; it will pick the node up itself"
+                if walker_live
+                else None,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        out.append(_unreadable("walker-claim", exc))
+
+    if node is not None:
+        node_cwd = node.get("_resolved_cwd") or node.get("cwd") or None
+        try:
+            blocked = adv._node_dispatch_block_reason(node["id"], node_cwd)
+            out.append(
+                Gate(
+                    "node-claim",
+                    blocked or "free",
+                    "free",
+                    "refuse" if blocked else "pass",
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            out.append(_unreadable("node-claim", exc))
+
+    # Per-project lanes. Reported with its own deprecation because a display is
+    # an implicit endorsement: x-3f84 ordered parallel.max_lanes deleted, and a
+    # reader seeing it beside live caps would reasonably assume it survived.
+    try:
+        max_lanes = adv._max_lanes()
+        by_project = adv._live_workers_by_project()
+        proj = (node or {}).get("project") or "-"
+        occupied = by_project.get(proj, 0)
+        out.append(
+            Gate(
+                "project-lane",
+                f"{occupied} ({proj})",
+                str(max_lanes),
+                "refuse" if max_lanes >= 0 and occupied >= max_lanes else "pass",
+                key="parallel.max_lanes",
+                note="x-3f84 ordered this knob deleted; it still gates the epic advance",
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        out.append(_unreadable("project-lane", exc, key="parallel.max_lanes"))
+
+    # Provider lanes: the cap that was actually binding on 2026-09-01.
+    provider = _resolved_vendor(node, grid_harness)
+    if provider:
+        try:
+            from fno.config import load_settings, provider_limits_table
+
+            limits = dict(provider_limits_table(load_settings().agents))
+            cap = provider_lanes_cap(limits.get(provider))
+        except Exception as exc:  # noqa: BLE001
+            out.append(_unreadable("provider-lane", exc))
+        else:
+            try:
+                count = provider_live_count(provider)
+            except ProviderCountUnavailable as exc:
+                out.append(
+                    _unreadable(
+                        "provider-lane", exc, key=f"agents.provider_limits.{provider}.lanes"
+                    )
+                )
+            else:
+                full = cap is not None and count >= cap
+                out.append(
+                    Gate(
+                        "provider-lane",
+                        f"{count} ({provider})",
+                        str(cap) if cap is not None else "uncapped",
+                        "refuse" if full else "pass",
+                        key=f"agents.provider_limits.{provider}.lanes",
+                    )
+                )
+
+    try:
+        c = census()
+        cap = int(_max_live())
+        out.append(
+            Gate(
+                "fleet-rows",
+                str(c.slot_count),
+                str(cap),
+                "refuse" if c.slot_count >= cap else "pass",
+                key="agents.max_live",
+                note="x-3f84: rows are not what the machine spends; see the machine gates",
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        out.append(_unreadable("fleet-rows", exc, key="agents.max_live"))
+
+    out.extend(_machine_gates())
+    return out
+
+
+def _max_live() -> int:
+    from fno.config import load_settings
+
+    return int(load_settings().agents.max_live)
+
+
+def _machine_gates() -> list[Gate]:
+    """RAM and load, read the way the gate reads them (never probing to refuse)."""
+    from fno.agents.spawn_gate import available_ram_gb
+
+    out: list[Gate] = []
+    try:
+        from fno.config import load_settings
+
+        agents_cfg = load_settings().agents
+        floor = float(agents_cfg.min_free_gb)
+        per_cpu = float(agents_cfg.max_load_per_cpu)
+    except Exception as exc:  # noqa: BLE001
+        return [_unreadable("machine", exc)]
+
+    try:
+        avail = available_ram_gb()
+    except Exception as exc:  # noqa: BLE001
+        out.append(_unreadable("ram-floor", exc, key="agents.min_free_gb"))
+    else:
+        if avail is None:
+            out.append(
+                Gate("ram-floor", None, f"{floor:.1f}GB", "skipped: RAM unreadable",
+                     key="agents.min_free_gb")
+            )
+        else:
+            out.append(
+                Gate(
+                    "ram-floor",
+                    f"{avail:.1f}GB",
+                    f"{floor:.1f}GB",
+                    "refuse" if avail < floor else "pass",
+                    key="agents.min_free_gb",
+                )
+            )
+
+    try:
+        import os
+
+        load1 = os.getloadavg()[0]
+        cpus = os.cpu_count() or 1
+        trigger = per_cpu * cpus
+        out.append(
+            Gate(
+                "load-trigger",
+                f"{load1:.1f}",
+                f"{trigger:.1f} ({per_cpu:g} x {cpus} cpu)",
+                # Over the trigger the gate does NOT refuse; it asks footprint
+                # whose CPU this is. Calling that "refuse" here would be a
+                # second instrument disagreeing with the first (x-7c0f).
+                "over trigger; attribution decides" if load1 > trigger else "pass",
+                key="agents.max_load_per_cpu",
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        out.append(_unreadable("load-trigger", exc, key="agents.max_load_per_cpu"))
+    return out
+
+
+def _resolved_vendor(node: Optional[dict], grid_harness: Optional[str] = None) -> Optional[str]:
+    """The VENDOR whose lane cap a spawn for ``node`` would be counted against.
+
+    Five axes, never confused: harness, provider (vendor), model, effort,
+    account. `agents.provider_limits` is keyed by VENDOR (`zai`), while a node's
+    own `provider` field and `config.dispatch.harness` carry the HARNESS
+    (`codex`), and `effective_active()` returns an ACCOUNT record (`makers`).
+    An early draft of this function reported `provider-lane 0 (makers)` - an
+    account name checked against a vendor-keyed table, so it could only ever
+    read 0. That is the axis-inference trap by name.
+
+    Resolved through `resolve_lane_vendor`, the shipped harness-to-vendor
+    mapping, rather than a second table here: two tables disagree.
+    """
+    if node is None:
+        return None
+    from fno.agents.spawn_defaults import resolve_lane_vendor
+
+    harness = grid_harness or (node.get("provider") or "").strip() or None
+    if harness is None:
+        try:
+            from fno.dispatch_flags import resolve_dispatch_harness
+
+            harness = resolve_dispatch_harness(None)[0]
+        except Exception:  # noqa: BLE001 - an unresolved harness reports absent
+            return None
+    try:
+        return resolve_lane_vendor([], harness=harness)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def routing_for(node: Optional[dict]) -> dict:
+    """What the capacity grid resolves for ``node``, and from which inputs.
+
+    The chain is RECOVERED, not constructed: `route_resolve.resolve_grid`
+    already returns ``(candidate, chain)`` whose last element is its terminal
+    reason, and `advance._grid_lane_for` throws it away as ``_chain``. The
+    strings are the existing receipt vocabulary and are surfaced verbatim -
+    reformatting them would fork it.
+    """
+    if node is None:
+        return {"chain": [], "candidate": None, "inputs": {}}
+    from fno import route_resolve
+
+    # An unplanned node bills the planning tier at the spawn seam, so the floor
+    # is applied here too or the two dispatch doors price one node differently.
+    role = None if (node.get("plan_path") or "").strip() else "planning"
+    inputs = {
+        "difficulty": node.get("difficulty"),
+        "priority": node.get("priority"),
+        "role": role,
+        "plan_path": node.get("plan_path") or None,
+    }
+    try:
+        inventory = route_resolve.resolve_inventory()
+        capacity = dict(route_resolve.runtime_capacity(inventory=inventory))
+        candidate, chain = route_resolve.resolve_grid(
+            node.get("difficulty"),
+            node.get("priority"),
+            capacity,
+            role=role,
+            inventory=inventory,
+        )
+    except Exception as exc:  # noqa: BLE001 - an unreadable grid is reported
+        return {"chain": [f"grid unreadable: {exc}"], "candidate": None, "inputs": inputs}
+    inputs["capacity"] = {
+        harness: (state.get("state") if isinstance(state, dict) else state)
+        for harness, state in capacity.items()
+    }
+    return {"chain": list(chain), "candidate": candidate, "inputs": inputs}
+
+
+def build_report(
+    *,
+    project: Optional[str],
+    node_id: Optional[str] = None,
+    top: int = 5,
+) -> dict:
+    """Run the selection and routing pipeline as a READ, and report all of it.
+
+    Never dispatches, never claims, never emits. Ignores
+    ``config.auto_continue.enabled`` - see this section's header for why the
+    armed state is context here and not the answer.
+    """
+    from fno.backlog import advance as adv
+    from fno.graph._intake import make_selection_sort_key
+    from fno.graph.cli import _container_ids, _require_live_claimed_node_ids
+    from fno.graph.ladder import is_cold_dispatchable
+    from fno.graph.store import read_graph
+    from fno.paths import graph_json
+
+    entries = read_graph(graph_json())
+    claimed = _require_live_claimed_node_ids("backlog explain")
+    container_ids = _container_ids(entries)
+
+    # The same admission predicate `_pick_ready` opens with, and the same
+    # default `allowed` set the autonomous paths use (bare `next`).
+    candidates = [
+        e
+        for e in entries
+        if (e.get("status") == "ready" or is_cold_dispatchable(e))
+        and not e.get("completed_at")
+    ]
+    pool = len(candidates)
+
+    filters = build_selection_filters(
+        entries,
+        roadmap_id=None,
+        mission=None,
+        parent_target_id=None,
+        project_filter=project,
+        all_=project is None,
+        claimed=claimed,
+        container_ids=container_ids,
+    )
+    cascade = run_cascade(candidates, filters)
+    survivors = sorted(
+        cascade.survivors, key=make_selection_sort_key(entries, live_claimed=claimed)
+    )
+
+    winner = survivors[0] if survivors else None
+    subject_id = node_id or (winner or {}).get("id")
+    by_id = {e.get("id"): e for e in entries if e.get("id")}
+    subject = by_id.get(subject_id) if subject_id else None
+
+    asked: dict = {}
+    if node_id:
+        rank = next(
+            (i for i, e in enumerate(survivors) if e.get("id") == node_id), None
+        )
+        asked = {
+            "id": node_id,
+            "known": node_id in by_id,
+            "dropped_by": cascade.reason_for(node_id),
+            "rank": rank,
+            # A node in neither place was never a candidate: not `ready`, or
+            # already carrying completed_at. Reported as its own answer rather
+            # than as a silent absence.
+            "never_a_candidate": (
+                node_id in by_id
+                and rank is None
+                and cascade.reason_for(node_id) is None
+            ),
+        }
+        if asked["never_a_candidate"]:
+            asked["status"] = by_id[node_id].get("status")
+
+    routing = routing_for(subject)
+    armed, rank_source = adv._auto_continue_resolve()
+
+    return {
+        "selection": {
+            "pool": pool,
+            "drops": [{"filter": n, "dropped": d} for n, d in cascade.drops],
+            "survivors": len(survivors),
+            "head": [
+                {
+                    "id": e.get("id"),
+                    "priority": e.get("priority"),
+                    "difficulty": e.get("difficulty"),
+                    "project": e.get("project"),
+                    "parent": e.get("parent"),
+                    "title": e.get("title"),
+                }
+                for e in survivors[:top]
+            ],
+            "why": {f.name: f.why for f in filters},
+        },
+        "asked": asked,
+        # Routing first: the grid picks the harness, and the harness decides
+        # WHICH provider lane the spawn would be counted against. Reporting a
+        # lane resolved from the config default the grid was about to override
+        # would name the wrong cap.
+        "gates": [
+            g.as_dict()
+            for g in gates_for(subject, (routing.get("candidate") or {}).get("harness"))
+        ],
+        "routing": routing,
+        "decision": {
+            "would_dispatch": subject_id if subject is not None else None,
+            "armed": armed,
+            "armed_rank": rank_source,
+            "note": (
+                "advance is DISARMED, so nothing above would run automatically. "
+                "This report is a dry run of the pipeline, not a record of a "
+                "decision advance made."
+            )
+            if not armed
+            else None,
+        },
+    }
+
+
+def render_report(report: dict) -> str:
+    """The four sections as text. Section order is the operator's question order:
+    which node, which gate, which lane, and only then what advance would do."""
+    out: list[str] = []
+    sel = report["selection"]
+    out.append(f"SELECTION  {sel['pool']} candidates -> {sel['survivors']} eligible")
+    for row in sel["drops"]:
+        if row["dropped"]:
+            why = sel["why"].get(row["filter"], "")
+            out.append(f"  -{row['dropped']:<5} {row['filter']:<18} {why}")
+        else:
+            out.append(f"  -{0:<5} {row['filter']:<18}")
+    if sel["head"]:
+        out.append("  ranked head:")
+        for i, e in enumerate(sel["head"]):
+            marker = "->" if i == 0 else "  "
+            out.append(
+                f"   {marker} {i + 1}. {e['id']}  {e['priority'] or '-':<3} "
+                f"{e['difficulty'] or '-':<7} {(e['title'] or '')[:60]}"
+            )
+
+    asked = report.get("asked") or {}
+    if asked:
+        out.append("")
+        if not asked["known"]:
+            out.append(f"ASKED  {asked['id']}: no such node")
+        elif asked["dropped_by"]:
+            why = sel["why"].get(asked["dropped_by"], "")
+            out.append(f"ASKED  {asked['id']}: dropped by {asked['dropped_by']} - {why}")
+        elif asked.get("never_a_candidate"):
+            out.append(
+                f"ASKED  {asked['id']}: never a candidate "
+                f"(status {asked.get('status')}, not ready and not cold-dispatchable)"
+            )
+        else:
+            out.append(f"ASKED  {asked['id']}: eligible, ranked {asked['rank'] + 1}")
+
+    out.append("")
+    out.append("GATES")
+    for g in report["gates"]:
+        out.append(
+            Gate(
+                g["name"], g["measured"], g["threshold"], g["verdict"], g["key"], g["note"]
+            ).line()
+        )
+
+    routing = report["routing"]
+    out.append("")
+    out.append("ROUTING")
+    inputs = routing.get("inputs") or {}
+    if inputs:
+        out.append(
+            f"  inputs: difficulty={inputs.get('difficulty')} "
+            f"priority={inputs.get('priority')} role={inputs.get('role')} "
+            f"plan={'yes' if inputs.get('plan_path') else 'no'}"
+        )
+        capacity = inputs.get("capacity") or {}
+        if capacity:
+            out.append(
+                "  capacity: "
+                + ", ".join(f"{h}={s}" for h, s in sorted(capacity.items()))
+            )
+    for step in routing.get("chain") or ["(no chain: nothing to route)"]:
+        out.append(f"  {step}")
+    candidate = routing.get("candidate")
+    out.append(
+        f"  -> {candidate['harness']} {candidate['model']}"
+        if candidate
+        else "  -> grid declined; the spawn falls back to caller defaults"
+    )
+
+    d = report["decision"]
+    out.append("")
+    out.append("DECISION")
+    out.append(
+        f"  would dispatch: {d['would_dispatch'] or 'nothing (no eligible node)'}"
+    )
+    out.append(f"  armed: {d['armed']} (rank={d['armed_rank']})")
+    if d.get("note"):
+        out.append(f"  {d['note']}")
+    return "\n".join(out)
