@@ -1,3 +1,6 @@
+//! parity-stage: characterization
+//! parity-oracle: scripts/lib/verify-event-evidence.sh
+//!
 //! Characterization tests for the `verify-evidence` Rust port, frozen against
 //! the bash oracle `scripts/lib/verify-event-evidence.sh` (packaging EPIC
 //! ab-8bdb4642).

@@ -1,3 +1,6 @@
+//! parity-stage: differential
+//! parity-oracle: fno.agents.harnesses.codex
+//!
 //! Wave B3: codex ask cross-language parity harness (ab-0429c6e1).
 //!
 //! Drives the SAME fake `codex` binary through BOTH Python (`harnesses/codex.py`
