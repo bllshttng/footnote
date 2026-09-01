@@ -1779,19 +1779,22 @@ fn registry_entries(home: &AgentsHome) -> Option<Vec<state::RegistryEntry>> {
         .map(|r| r.entries)
 }
 
-/// Precompute the truth rung for every stamped live-ish row in ONE batched
-/// call (`family1_truth_probe_many`'s seam), so the ladder never launches a
-/// serial per-row `fno agents truth` subprocess inside the sweep - N rows
-/// would otherwise hold the GC worker for roughly N probe timeouts. Keyed by
-/// the handle asked for (the row's claude uuid), so the prober's lookup is a
-/// map get. An empty candidate set spends nothing.
+/// Precompute the truth rung for every claude row in ONE batched call
+/// (`family1_truth_probe_many`'s seam), so the ladder never launches a serial
+/// per-row `fno agents truth` subprocess inside the sweep - N rows would
+/// otherwise hold the GC worker for roughly N probe timeouts. Keyed by the
+/// handle asked for (the row's claude uuid), so the prober's lookup is a map
+/// get. Every row qualifies, not only stamped ones: the ladder's `is_live`
+/// vote (x-91f3) reads the truth rung for unstamped rows too, and a
+/// stamped-only batch leaves the transcript - the one marker a pid-less,
+/// unstamped claude row can carry - permanently silent for that vote. An
+/// empty candidate set spends nothing.
 fn batched_row_truths(
     entries: &[state::RegistryEntry],
     truth_tail_states: &dyn Fn(&[String]) -> std::collections::HashMap<String, String>,
 ) -> std::collections::HashMap<String, String> {
     let handles: Vec<String> = entries
         .iter()
-        .filter(|e| e.exited_at.is_some())
         .filter_map(|e| {
             e.claude_session_uuid
                 .as_deref()
@@ -11293,11 +11296,23 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         })
         .unwrap();
 
-        // The ladder as production folds it, hermetic: positive death from a
-        // recorded pid, then the ladder with an EMPTY socket index and truth
-        // answers staged only for the one uuid this test owns - so the only
-        // markers that can fire are the truth rung and the heartbeat rung,
-        // the markers pid-less rows are judged by.
+        // The ladder as production folds it: the truth batch over the
+        // fixture rows with the tail read staged (one uuid answers
+        // `working`), then the production prober over that map - the truth
+        // rung reaches the ladder through the SAME seam the daemon tick
+        // uses, batch included. The socket rung reads the real sessions
+        // index but every fixture row carries an empty short_id, so the
+        // rung is skipped for all of them; the only markers that can fire
+        // are the truth rung and the heartbeat rung, the markers pid-less
+        // rows are judged by.
+        let entries = state::load_registry(&home.registry_json()).unwrap().entries;
+        let truth = batched_row_truths(&entries, &|handles: &[String]| {
+            handles
+                .iter()
+                .filter(|h| h.as_str() == "truth-live-sess")
+                .map(|h| (h.clone(), "working".to_string()))
+                .collect()
+        });
         let summary = gc_sweep_impl(
             &home,
             &emitter,
@@ -11305,15 +11320,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             false,
             &no_tails,
             &|_| None,
-            &|e: &state::RegistryEntry| {
-                fold_positive_death(e).unwrap_or_else(|| {
-                    crate::client_verbs::row_liveness_with_indexed(
-                        e,
-                        &std::collections::HashMap::new(),
-                        |uuid: &str| (uuid == "truth-live-sess").then(|| "working".to_string()),
-                    )
-                })
-            },
+            &live_liveness_prober(truth),
             &|_| None,
         );
 
@@ -11362,6 +11369,48 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert!(
             reg.entries.iter().all(|e| named.contains(e.name.as_str())),
             "every row still on disk, each one named"
+        );
+    }
+
+    #[test]
+    fn the_truth_batch_includes_unstamped_rows() {
+        // The ladder's is_live vote reads the truth rung for EVERY row, so a
+        // stamped-only batch leaves the transcript - the one positive marker
+        // an unstamped, pid-less claude row can carry - permanently silent
+        // for that vote.
+        let stamped = {
+            let mut e = ask_row("stamped", Some("2020-01-01T00:00:00Z"));
+            e.claude_session_uuid = Some("stamped-uuid".into());
+            e
+        };
+        let unstamped = {
+            let mut e = ask_row("unstamped", None);
+            e.claude_session_uuid = Some("unstamped-uuid".into());
+            e
+        };
+        let bare = ask_row("bare", None); // no uuid: must not reach the probe
+        let seen: std::cell::RefCell<Vec<Vec<String>>> = std::cell::RefCell::new(Vec::new());
+        let capture = |handles: &[String]| {
+            seen.borrow_mut().push(handles.to_vec());
+            std::collections::HashMap::new()
+        };
+        batched_row_truths(&[stamped, unstamped], &capture);
+        assert_eq!(
+            seen.borrow().len(),
+            1,
+            "one batched call, however many rows"
+        );
+        let mut handles = seen.borrow_mut().pop().unwrap();
+        handles.sort();
+        assert_eq!(
+            handles,
+            vec!["stamped-uuid".to_string(), "unstamped-uuid".to_string()]
+        );
+        seen.borrow_mut().clear();
+        batched_row_truths(&[bare], &capture);
+        assert!(
+            seen.borrow().is_empty(),
+            "an empty candidate set spends nothing"
         );
     }
 
