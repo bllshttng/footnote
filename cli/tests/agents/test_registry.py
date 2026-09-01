@@ -714,7 +714,9 @@ def test_us2_schema_version_is_three() -> None:
     from fno.agents.registry import SCHEMA_VERSION
 
     # v23 (x-3837): additive `substrate` - the lane a row was spawned on.
-    assert SCHEMA_VERSION == 23
+    # v24 (x-2019): additive `requested_model`/`requested_provider`/
+    # `requested_effort` - the spawn request verbatim beside the effect.
+    assert SCHEMA_VERSION == 24
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:

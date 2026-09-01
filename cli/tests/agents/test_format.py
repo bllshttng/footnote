@@ -557,3 +557,52 @@ def test_discovered_lane_leads_with_the_address_not_the_label() -> None:
     assert header.index("ADDRESS") < header.index("LABEL")
     assert "3ad1f42d" in out
     assert "etl-3ad1f42d" in out
+
+
+# ---------------------------------------------------------------------------
+# v23 (x-2019): the requested axis and the substitution marker on the row
+# ---------------------------------------------------------------------------
+
+
+def test_serialize_entry_carries_the_request_and_names_a_substitution() -> None:
+    """A substituted row shows the verbatim request AND the marker naming both."""
+    observed = {"kind": "observed", "model": "glm-5.3-flash", "samples": 31}
+
+    row = serialize_entry(
+        _claude_entry(requested_model="glm-5.3[1m]"),
+        live_status=None,
+        observed_model=observed,
+    )
+    assert row["requested_model"] == "glm-5.3[1m]"
+    assert row["model_substituted"] == {
+        "requested": "glm-5.3[1m]",
+        "observed": "glm-5.3-flash",
+    }
+
+
+def test_serialize_entry_suffix_stripped_family_match_is_not_substituted() -> None:
+    """glm-5.3[1m] requested vs glm-5.3 observed is a match: marker None."""
+    observed = {"kind": "observed", "model": "glm-5.3", "samples": 8}
+
+    row = serialize_entry(
+        _claude_entry(requested_model="glm-5.3[1m]"),
+        live_status=None,
+        observed_model=observed,
+    )
+    assert row["requested_model"] == "glm-5.3[1m]"
+    assert row["model_substituted"] is None
+
+
+def test_serialize_entry_unknown_request_renders_null_not_clean() -> None:
+    """No stored request: both keys ride the row, the marker reads null."""
+    observed = {"kind": "observed", "model": "glm-5.3-flash", "samples": 8}
+
+    row = serialize_entry(_claude_entry(), live_status=None, observed_model=observed)
+    assert row["requested_model"] is None
+    assert row["model_substituted"] is None
+
+    no_transcript = serialize_entry(
+        _claude_entry(requested_model="glm-5.3[1m]"), live_status=None
+    )
+    assert no_transcript["requested_model"] == "glm-5.3[1m]"
+    assert no_transcript["model_substituted"] is None

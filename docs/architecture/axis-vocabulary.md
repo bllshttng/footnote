@@ -105,6 +105,14 @@ Priority, verbatim: "Explicit Effort > thinking toggle > default `max`".
 
 An unset effort resolves to `max`. fno spawns most workers without one, so a mechanical task pays maximum reasoning tokens by default.
 
+## Requested vs observed: the model axis carries two readings
+
+Every spawn-minted registry row holds the model axis twice. `requested_model`, `requested_provider`, and `requested_effort` record the REQUEST verbatim as the flags spelled it, `[1m]` suffix included, stamped once at birth and never overwritten. `model` with `model_basis`, and the transcript-derived `observed_model` reading, carry what the session ACTUALLY answers as.
+
+The comparison is family-wise and suffix-aware: `glm-5.3[1m]` requested vs `glm-5.3` observed is a match, because the bracketed suffix names the context window the caller asked for, not a different model. `glm-5.3[1m]` vs `glm-5.3-flash` is a substitution, and the spawn path says so at spawn time (stderr line, `model_substituted` event, receipt marker) instead of printing the request back as though it were the effect. The agent-list row derives `model_substituted` at emission from the same observed payload it already carries, so a substitution that surfaces late is visible on the next list read.
+
+Absence of a `requested_*` stamp means unknown, never a default: adoption reuses a live session (correct, standing policy) and observed no request, so its row stamps nothing. The verdict helper lives in `fno.agents.row_contradiction.model_substitution` with its Rust twin in `crates/fno-agents/src/state.rs`.
+
 ## Resolver authority
 
 `inject_spawn_defaults` (`cli/src/fno/agents/spawn_defaults.py`) decides which config value fills which axis on a spawn. It holds one rule: an explicit command-line axis is never overwritten by a profile default. A profile can fill an axis the command line left unset. A profile-filled harness that cannot carry an already-typed route is the case this plan handles. When that fill makes an explicitly-set axis unusable, the refusal names the config path, the value, the axis it set, and the caller's own flags. This is a cross-axis collision, not a precedence bug. No field-wise rule was ever violated, so the report says what happened instead of what looks like an override.
@@ -144,6 +152,8 @@ A literal like `agy` or `openclaw` under a provider-named binding is still a def
 | spawn/register receipt `provider` | provider | present only when a route was applied |
 | spawn/register receipt `model` | model | effective model; an explicit `--model` wins over `--route` |
 | `observed_model` | model | the sole answer to "what is this worker actually running" |
+| agent row `requested_model`, `requested_provider`, `requested_effort` | model, provider, effort | the REQUEST verbatim as typed, stamped once at birth (v23, x-2019) |
+| agent row `model_substituted` | model | the emission-time marker naming both values when request and observation disagree |
 
 ## Canonical spawned-session identity
 
