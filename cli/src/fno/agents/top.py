@@ -30,6 +30,99 @@ from fno.agents.session_procs import tree_rss_mb
 from fno.agents.spawn_gate import LiveWorker, census
 
 
+def lane_rows() -> list[dict]:
+    """Per-provider lane occupancy against the cap that actually refuses.
+
+    The constraint that governs this fleet was invisible. Measured 2026-09-01:
+    `agents.provider_limits.zai.lanes = 7` was binding (7 live zai rows, a
+    spawn refused there) while machine load sat at 1.3 per CPU, far under the
+    `max_load_per_cpu = 8` trigger - so every machine-capacity surface said
+    "plenty of room" and none of them was the thing saying no.
+
+    Counted by the gate's OWN functions (:func:`provider_live_count`,
+    :func:`provider_lanes_cap`), never by a second walk of the registry. A
+    display that recounted would disagree with the refusal the first time
+    either changed, and a lane display that disagrees with the gate is worse
+    than none.
+
+    A count that cannot be read is reported as unreadable and NEVER as 0. Zero
+    free lanes and an unreadable registry are opposite facts, and the gate
+    itself treats the unreadable case as a refusal (fail-closed), so rendering
+    it as an empty fleet would invert the meaning.
+
+    Providers appear when they carry a configured cap, or when a live row names
+    them (uncapped, `cap: None`) - so a provider quietly running uncapped is
+    visible rather than absent.
+    """
+    from fno.agents.spawn_gate import (
+        LIVE_STATUSES,
+        ProviderCountUnavailable,
+        provider_lanes_cap,
+        provider_live_count,
+    )
+
+    try:
+        from fno.config import load_settings, provider_limits_table
+
+        agents_cfg = load_settings().agents
+        limits = dict(provider_limits_table(agents_cfg))
+    except Exception as exc:  # noqa: BLE001 - an unreadable config is reported
+        return [{"provider": None, "unreadable": f"config unreadable: {exc}"}]
+
+    # Which providers to ASK about. A row's mere presence is enough to raise the
+    # question; whether it OCCUPIES a lane is the counter's answer, not this
+    # set's. Keeping the two apart is what stops an uncapped provider from
+    # disappearing just because nothing counted for it.
+    observed: set[str] = set()
+    try:
+        from fno.agents.registry import load_registry
+
+        for row in load_registry():
+            if row.status in LIVE_STATUSES and row.provider:
+                observed.add(row.provider)
+    except Exception:  # noqa: BLE001 - degrade to the configured providers
+        pass
+
+    out: list[dict] = []
+    for provider in sorted(set(limits) | observed):
+        cap = provider_lanes_cap(limits.get(provider))
+        row: dict = {"provider": provider, "cap": cap, "holders": []}
+        counted: set[str] = set()
+        try:
+            row["count"] = provider_live_count(provider, counted)
+        except ProviderCountUnavailable as exc:
+            row["count"] = None
+            row["unreadable"] = str(exc)
+        else:
+            row["full"] = cap is not None and row["count"] >= cap
+            # Holders come from the counter's own tally, never a second walk:
+            # printing rows the count did not include reads as "0 of these 5".
+            row["holders"] = sorted(counted)
+        out.append(row)
+    return out
+
+
+def _render_lane_lines(rows: list[dict]) -> list[str]:
+    """One LANES line per provider; the verdict word is the scannable part."""
+    lines: list[str] = []
+    for r in rows:
+        if r.get("provider") is None:
+            lines.append(f"LANES  {r['unreadable']}")
+            continue
+        cap = r["cap"]
+        if r.get("count") is None:
+            occupancy = f"?/{cap if cap is not None else '-'}"
+            verdict = f"unreadable: {r['unreadable']}"
+        else:
+            occupancy = f"{r['count']}/{cap if cap is not None else '-'}"
+            verdict = "FULL" if r.get("full") else ("ok" if cap is not None else "uncapped")
+        line = f"LANES  {r['provider']:<9} {occupancy:>7}  {verdict}"
+        if r["holders"]:
+            line += f"  holders: {', '.join(r['holders'])}"
+        lines.append(line)
+    return lines
+
+
 def _crown_map() -> dict[str, str]:
     """name -> crown label for crowned registry rows (US9), sourced from
     :func:`crown_reading` so this view and ``fno whoami`` cannot drift into two
@@ -417,11 +510,13 @@ def render_top(
     """
     c = census()
     rows = _rows(c.workers, _crown_map())
+    lanes = lane_rows()
     subagents = _subagent_section() if include_subagents else None
     pane_stats = pane_counter_rows() if include_pane_stats else None
     if as_json:
         payload: dict = {
             "workers": rows,
+            "lanes": lanes,
             "slot_claims": c.slot_claims,
             "warnings": list(c.warnings),
         }
@@ -434,6 +529,12 @@ def render_top(
 
     out: list[str] = []
     out.extend(c.warnings)
+    # Lanes lead. A provider cap refuses spawns that every row below this
+    # block reports as healthy, so burying it under the process table is how
+    # it stayed invisible.
+    if lanes:
+        out.extend(_render_lane_lines(lanes))
+        out.append("")
     header = (
         f"{'SOURCE':<7} {'NAME':<24} {'HARNESS':<9} {'SUBSTRATE':<10} "
         f"{'KING':<9} {'PID':>7} {'RSS_MB':>7} {'PROGRESS':<17} STATUS"

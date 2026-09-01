@@ -445,3 +445,131 @@ def test_pane_stats_flag_renders_into_top(monkeypatch, runner):
     # The flag-off default stays clean.
     result_off = runner.invoke(agents_app, ["top"])
     assert "pane counters" not in result_off.output
+
+
+# -- LANES: the cap that actually refuses --
+#
+# Measured 2026-09-01: agents.provider_limits.zai.lanes = 7 was binding (7 live
+# rows, a spawn refused there) while machine load sat at 1.3 per CPU, far under
+# the max_load_per_cpu = 8 trigger. Every machine-capacity surface said "plenty
+# of room" and none of them was the thing saying no.
+
+
+def _lane_world(monkeypatch, *, count=7, cap=7, holders=("w1", "w2"), raises=None):
+    """Pin the two gate functions the lane block reads, and nothing else."""
+    from fno.agents import top as top_mod
+    from fno.agents.spawn_gate import ProviderCountUnavailable
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+
+    class _Budget:
+        lanes = cap
+
+    monkeypatch.setattr(
+        "fno.config.provider_limits_table", lambda agents: {"zai": _Budget()}
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.provider_lanes_cap", lambda budget: cap
+    )
+
+    def _count(provider, counted=None):
+        if raises:
+            raise ProviderCountUnavailable(raises)
+        if counted is not None:
+            counted.update(holders)
+        return count
+
+    monkeypatch.setattr("fno.agents.spawn_gate.provider_live_count", _count)
+    return top_mod
+
+
+def test_a_full_provider_lane_reads_full_with_its_holders(monkeypatch, runner):
+    """AC8-HP. The binding cap, named, counted, and attributed."""
+    _lane_world(monkeypatch, count=7, cap=7, holders=("t-a879", "t-reaper"))
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(agents_app, ["top"])
+    assert result.exit_code == 0, result.output
+    assert "LANES  zai" in result.output
+    assert "7/7" in result.output
+    assert "FULL" in result.output
+    assert "t-a879" in result.output and "t-reaper" in result.output
+
+
+def test_lane_holders_come_from_the_counter_not_a_second_walk(monkeypatch, runner):
+    """The display and the refusal must read one population.
+
+    A naive registry walk listed five openai rows beside the gate's count of 0,
+    because `status == live` and positive liveness are different populations.
+    Holders now come from the counter's own tally, so a row the count excluded
+    can never be printed as though it occupied a lane.
+    """
+    _lane_world(monkeypatch, count=0, cap=7, holders=())
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(agents_app, ["top"])
+    assert result.exit_code == 0, result.output
+    assert "0/7" in result.output
+    assert "holders:" not in result.output
+
+
+def test_an_unreadable_lane_count_is_never_rendered_as_zero(monkeypatch, runner):
+    """AC10-ERR. Zero free lanes and an unreadable registry are opposite facts.
+
+    The gate itself treats unreadable as a refusal (fail-closed), so printing it
+    as an empty fleet would invert the meaning.
+    """
+    _lane_world(monkeypatch, cap=7, raises="registry forward read skipped rows")
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(agents_app, ["top"])
+    assert result.exit_code == 0, result.output
+    assert "?/7" in result.output
+    assert "unreadable" in result.output
+    assert "0/7" not in result.output
+    # The process table below still renders.
+    assert "SOURCE" in result.output
+
+
+def test_lanes_ride_in_json(monkeypatch, runner):
+    """Script parity: the same facts, same names."""
+    _lane_world(monkeypatch, count=7, cap=7, holders=("t-a879",))
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(agents_app, ["top", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    lanes = {row["provider"]: row for row in payload["lanes"]}
+    assert lanes["zai"]["count"] == 7
+    assert lanes["zai"]["cap"] == 7
+    assert lanes["zai"]["full"] is True
+    assert lanes["zai"]["holders"] == ["t-a879"]
+
+
+def test_the_unattributed_row_warning_fires_once_per_process(monkeypatch):
+    """It describes the registry, not one provider, so asking about three
+    providers used to print it three times."""
+    from fno.agents import spawn_gate
+
+    class _Row:
+        status = "live"
+        provider = None
+        harness = "claude"
+        origin = "adopted"
+        name = "w"
+        pid = None
+        mux = None
+        short_id = None
+
+    monkeypatch.setattr(spawn_gate, "_UNATTRIBUTED_WARNED", set())
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [_Row()])
+    monkeypatch.setattr(spawn_gate, "_provider_live_slot_claims", lambda p, n: 0)
+
+    seen: list[str] = []
+    monkeypatch.setattr(spawn_gate, "_warn", lambda m: seen.append(m))
+
+    spawn_gate.provider_live_count("zai")
+    spawn_gate.provider_live_count("anthropic")
+    spawn_gate.provider_live_count("openai")
+
+    assert len([m for m in seen if "without a provider stamp" in m]) == 1

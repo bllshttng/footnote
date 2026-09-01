@@ -506,8 +506,26 @@ def _provider_roster_live_short_ids(short_ids: set[str]) -> set[str]:
     return live
 
 
-def provider_live_count(provider: str) -> int:
-    """Count provider rows only when status and positive liveness agree."""
+#: Registry shapes already warned about in THIS process. The unattributed-row
+#: warning describes the registry as a whole, not one provider, so a caller
+#: asking about several providers - or a spawn queueing round the gate loop -
+#: repeated the identical line once per call. Deduped per process rather than
+#: silenced: the fact still reaches stderr exactly once.
+_UNATTRIBUTED_WARNED: set[tuple[str, str]] = set()
+
+
+def provider_live_count(provider: str, counted: Optional[set[str]] = None) -> int:
+    """Count provider rows only when status and positive liveness agree.
+
+    ``counted``, when given, is filled with the names of the rows this count
+    actually included. That is deliberately an out-parameter on the COUNTER
+    rather than a second walk in the caller: a display that recounted would
+    disagree with the refusal the first time either changed, and a lane display
+    that disagrees with the gate is worse than no display. Measured while
+    building `fno agents top`'s lane block: a naive registry walk listed five
+    openai rows beside the gate's count of 0, because status and positive
+    liveness are not the same population.
+    """
     try:
         from fno.agents.registry import load_registry
 
@@ -524,6 +542,9 @@ def provider_live_count(provider: str) -> int:
             shape = (row.harness or "unknown", row.origin or "unknown")
             unattributed[shape] = unattributed.get(shape, 0) + 1
         for (harness, origin), count in sorted(unattributed.items()):
+            if (harness, origin) in _UNATTRIBUTED_WARNED:
+                continue
+            _UNATTRIBUTED_WARNED.add((harness, origin))
             _warn(
                 f"{count} live row(s) were minted without a provider stamp "
                 f"(harness={harness}, origin={origin})"
@@ -599,6 +620,8 @@ def provider_live_count(provider: str) -> int:
         if row.short_id and row.short_id in bg_live:
             count += 1
             counted_names.add(row.name)
+    if counted is not None:
+        counted.update(counted_names)
     return count + _provider_live_slot_claims(provider, counted_names)
 
 
