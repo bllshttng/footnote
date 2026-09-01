@@ -152,7 +152,7 @@ A literal like `agy` or `openclaw` under a provider-named binding is still a def
 | spawn/register receipt `provider` | provider | present only when a route was applied |
 | spawn/register receipt `model` | model | effective model; an explicit `--model` wins over `--route` |
 | `observed_model` | model | the sole answer to "what is this worker actually running" |
-| agent row `requested_model`, `requested_provider`, `requested_effort` | model, provider, effort | the REQUEST verbatim as typed, stamped once at birth (v23, x-2019) |
+| agent row `requested_model`, `requested_provider`, `requested_effort` | model, provider, effort | the REQUEST verbatim as typed, stamped once at birth (registry v24) |
 | agent row `model_substituted` | model | the emission-time marker naming both values when request and observation disagree |
 
 ## Canonical spawned-session identity
