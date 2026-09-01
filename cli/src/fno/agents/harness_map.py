@@ -605,6 +605,23 @@ def substrate_default(harness: str) -> str:
     return "thread" if capabilities(harness)["thread"] else "headless"
 
 
+def thread_lane(harness: str) -> str:
+    """Which thread lane this harness needs, from the capability contract
+    alone - never from a name list, so a new row lands in its lane with no
+    code edit here.
+
+    ``attach``  the harness owns the live session; a client re-attaches to it.
+    ``keeper``  the harness persists a transcript only; fno must hold the pty.
+    ``none``    no resume form at all, so no lane can be built.
+    """
+    forms = capabilities(harness)["resume_strategy"]["forms"]
+    if forms.get("interactive_attach", {}).get("kind") != "unsupported":
+        return "attach"
+    if forms.get("interactive_resume", {}).get("kind") != "unsupported":
+        return "keeper"
+    return "none"
+
+
 def effort_values(harness: str) -> list[str]:
     """Return no static catalog: effort values belong to the provider/model."""
     del harness
@@ -721,10 +738,10 @@ def resolve_dispatch(
         )
     if chosen_substrate == "thread" and not caps["thread"]:
         raise DispatchResolveError(
-            f"substrate 'thread' is unsupported on harness {chosen_harness!r} "
-            f"(thread requires fno's own journey-proven driver; claude and codex "
-            f"have one today, while opencode's launch-only serve lane reads false "
-            f"until steering ships; bg is a deprecated alias); use 'headless'"
+            f"substrate 'thread' is unsupported on harness {chosen_harness!r}: "
+            f"fno has not built this harness's {thread_lane(chosen_harness)} lane "
+            f"yet, and a false `thread` row records that gap in fno, never a "
+            f"harness limitation (bg is a deprecated alias); use 'headless'"
         )
     # Only an explicit attended trigger bypasses the autonomy capability check.
     # A missing key is false so newly added or partially specified harnesses stay
