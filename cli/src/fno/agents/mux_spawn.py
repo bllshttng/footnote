@@ -3356,6 +3356,9 @@ def dispatch_spawn_pane(
     codex_sessions_dir: Optional[Path] = None,
     passthrough: Optional[Sequence[str]] = None,
     launch_account: Optional[str] = None,
+    # Recorded on the pane row (never the pane argv) so a routed spawn's row
+    # names the model the route pinned, matching the stdout receipt.
+    route_model: Optional[str] = None,
 ) -> MuxSpawnResult:
     """Spawn ``name`` as a mux-hosted agent pane (AC1-HP).
 
@@ -4442,8 +4445,11 @@ def dispatch_spawn_pane(
                     name=name,
                     harness=provider,
                     provider=resolved_lane_provider,
-                    model=actual_model,
-                    model_basis="requested" if actual_model else None,
+                    # The route's model is in hand at this mint and was dropped
+                    # (the receipt named it while the row read None). Explicit
+                    # --model wins argv, so it wins the row.
+                    model=actual_model or route_model,
+                    model_basis="requested" if (actual_model or route_model) else None,
                     effort=effort,
                     cwd=str(cwd),
                     # Written in the SAME registry transaction as the status, so
@@ -4558,7 +4564,7 @@ def dispatch_spawn_pane(
                 provider=provider,
                 harness_session_id=stored_session_uuid,
                 cwd=str(cwd),
-                model=actual_model,
+                model=actual_model or route_model,
                 substrate="pane",
                 spawned_by_session=spawned_by_session,
                 spawned_by_harness=spawned_by_harness,
