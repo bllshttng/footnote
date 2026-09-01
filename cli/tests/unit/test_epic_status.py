@@ -306,3 +306,106 @@ def test_json_output(graph_env):
     assert kids["x-c1"]["pr_number"] == 460
     assert kids["x-c2"]["status"] == "ready"
     assert kids["x-c2"]["receipt"] == "no receipt found"
+
+
+# -- done, but the merge was never confirmed --
+#
+# A child reads `done` the moment /target finalizes, not when the PR merges, so
+# at a wave gate the graph can report a dependency landed while its branch is
+# still open. `merge_status` is written only when a caller resolved MERGED from
+# gh, so its absence is exactly "nobody confirmed this". Measured 2026-09-01:
+# 16 of 444 done nodes carrying a PR were in this state, spanning 2026-04-28 to
+# 2026-08-26 (specimens x-3a0e/#1178 and x-04b0/#1204).
+
+
+def test_done_child_with_unstamped_merge_is_flagged(graph_env):
+    """AC9-HP."""
+    tmp_path, write = graph_env
+    write([
+        _node("x-epic", type="epic"),
+        _node("x-c1", parent="x-epic", status="done", pr_number=1178, cwd=str(tmp_path)),
+    ])
+    r = _invoke(["backlog", "epic", "status", "x-epic"])
+    assert r.exit_code == 0, r.output
+    assert "merge unconfirmed #1178" in r.output
+    # The done count is qualified in the same breath, not a line below it.
+    assert "1 merge unconfirmed" in r.output
+
+
+def test_a_confirmed_merge_is_not_flagged(graph_env):
+    """The flag keys on evidence, not on the mere presence of a PR."""
+    tmp_path, write = graph_env
+    write([
+        _node("x-epic", type="epic"),
+        _node(
+            "x-c1", parent="x-epic", status="done", pr_number=932,
+            merge_status="merged", cwd=str(tmp_path),
+        ),
+    ])
+    r = _invoke(["backlog", "epic", "status", "x-epic", "--json"])
+    assert r.exit_code == 0, r.output
+    payload = json.loads(r.output)
+    assert payload["children_merge_unconfirmed"] == 0
+    kid = {c["id"]: c for c in payload["children"]}["x-c1"]
+    assert kid["merge_unconfirmed"] is False
+    assert kid["receipt"] == "-"
+
+
+def test_an_open_ready_child_is_never_flagged(graph_env):
+    """Only `done` claims a merge. A ready child with a PR is work in flight."""
+    tmp_path, write = graph_env
+    write([
+        _node("x-epic", type="epic"),
+        _node("x-c1", parent="x-epic", status="ready", pr_number=1204, cwd=str(tmp_path)),
+    ])
+    r = _invoke(["backlog", "epic", "status", "x-epic", "--json"])
+    payload = json.loads(r.output)
+    assert payload["children_merge_unconfirmed"] == 0
+    assert "merge unconfirmed" not in r.output
+
+
+def test_verify_merges_resolves_a_flagged_row_to_merged_unstamped(
+    graph_env, monkeypatch
+):
+    """The probe distinguishes the two explanations the local read cannot."""
+    import subprocess as sp
+
+    tmp_path, write = graph_env
+    write([
+        _node("x-epic", type="epic"),
+        _node("x-c1", parent="x-epic", status="done", pr_number=1178, cwd=str(tmp_path)),
+    ])
+
+    class _P:
+        returncode = 0
+        stdout = json.dumps({"state": "MERGED", "mergedAt": "2026-08-25T00:00:00Z"})
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: _P())
+
+    r = _invoke(["backlog", "epic", "status", "x-epic", "--verify-merges"])
+    assert r.exit_code == 0, r.output
+    assert "merged (unstamped) #1178" in r.output
+
+
+def test_a_failed_probe_leaves_the_row_flagged(graph_env, monkeypatch):
+    """A probe that could not answer is not evidence that the PR merged.
+
+    Downgrading a flagged row on a network blip would turn this instrument into
+    exactly the silent-wrong-answer it exists to catch.
+    """
+    import subprocess as sp
+
+    tmp_path, write = graph_env
+    write([
+        _node("x-epic", type="epic"),
+        _node("x-c1", parent="x-epic", status="done", pr_number=1178, cwd=str(tmp_path)),
+    ])
+
+    def _boom(*a, **k):
+        raise OSError("gh: command not found")
+
+    monkeypatch.setattr(sp, "run", _boom)
+
+    r = _invoke(["backlog", "epic", "status", "x-epic", "--verify-merges"])
+    assert r.exit_code == 0, r.output
+    assert "merge unconfirmed #1178" in r.output

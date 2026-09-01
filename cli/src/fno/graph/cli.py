@@ -489,9 +489,83 @@ def _latest_receipt(node_id: str, events: list[dict]) -> Optional[str]:
     return _format_receipt(latest["type"], latest["data"])
 
 
+def _merge_unconfirmed(child: dict) -> bool:
+    """True when a done child carries a PR that GitHub never confirmed merged.
+
+    A child reads ``done`` the moment ``/target`` finalizes, not when the PR
+    merges, so at a wave gate the graph can say a dependency landed while its
+    branch is still open. ``merge_status`` is written only by
+    :func:`_apply_completion_fields` when a caller resolved MERGED from gh, so
+    its absence is exactly "nobody confirmed this".
+
+    Deliberately NOT called "unmerged". The absence has two explanations - the
+    PR is genuinely open, or it merged through a path that never stamped the
+    field - and asserting the first from the absence of the second is the
+    absence-as-evidence trap. The caller's wording, and ``--verify-merges``,
+    keep that distinction. Measured 2026-09-01: 16 of 444 done nodes carrying a
+    PR were in this state, spanning 2026-04-28 to 2026-08-26.
+    """
+    return (
+        child.get("status") == "done"
+        and bool(child.get("pr_number"))
+        and child.get("merge_status") != "merged"
+    )
+
+
+def _verify_merge(child: dict) -> Optional[str]:
+    """Ask GitHub what actually happened to a flagged child's PR.
+
+    Only ever called for rows :func:`_merge_unconfirmed` already flagged, so
+    the probe is bounded by that set (16 rows fleet-wide on 2026-09-01), never
+    by the child count. Scoped to the child's own checkout because the graph is
+    cross-project and one global ``--repo`` would mis-scope a sibling's PR.
+
+    Returns the resolved note, or None when the probe could not answer. None is
+    the important case: the caller leaves the row FLAGGED. A probe that failed
+    is not evidence that the PR merged, and downgrading the row on a network
+    blip would turn this instrument into the thing it exists to catch.
+    """
+    import subprocess
+
+    from fno.graph._reconcile import GH_QUERY_TIMEOUT_S
+    from fno.graph._intake import project_root_from_settings
+
+    proj = child.get("project")
+    cwd = (
+        (project_root_from_settings(proj) if proj else None)
+        or child.get("_resolved_cwd")
+        or child.get("cwd")
+    )
+    if not cwd:
+        return None
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "view", str(child["pr_number"]), "--json", "state,mergedAt"],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=GH_QUERY_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not (proc.stdout or "").strip():
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    if payload.get("mergedAt") or payload.get("state") == "MERGED":
+        # Merged, but nothing ever stamped merge_status. The graph was right
+        # about the outcome and wrong about the evidence.
+        return f"merged (unstamped) #{child['pr_number']}"
+    state = payload.get("state") or "UNKNOWN"
+    return f"{state} #{child['pr_number']}"
+
+
 def _child_note(child: dict, events: list[dict], worker: Optional[str]) -> str:
     """The inline note for a child row: streak (deferred), receipt (idle ready),
-    or ``-`` (working / done). Never blank for an idle ready child."""
+    merge-unconfirmed (done with an unstamped PR), or ``-``. Never blank for an
+    idle ready child."""
     from fno.graph import failure
 
     node_id = child["id"]
@@ -500,6 +574,8 @@ def _child_note(child: dict, events: list[dict], worker: Optional[str]) -> str:
         return f"streak {failure.consecutive_failures(node_id, events)}"
     if status == "ready" and not worker:
         return _latest_receipt(node_id, events) or "no receipt found"
+    if _merge_unconfirmed(child):
+        return f"merge unconfirmed #{child['pr_number']}"
     return "-"
 
 
@@ -530,10 +606,24 @@ def cmd_epic_status(
     ctx: typer.Context,
     epic: str = typer.Argument(..., help="Epic node id or slug."),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON."),
+    verify_merges: bool = typer.Option(
+        False,
+        "--verify-merges",
+        help=(
+            "Ask GitHub what happened to each merge-unconfirmed child's PR "
+            "(one `gh pr view` per FLAGGED row only). Off by default: the "
+            "table is a local read."
+        ),
+    ),
 ) -> None:
     """One table over an epic's children: status, worker, PR, and an inline
     dispatch receipt (or breaker streak) so an idle/deferred child is never a
-    silent blank. Refuses a non-container node by name."""
+    silent blank. Refuses a non-container node by name.
+
+    A child reads `done` at finalize, not at merge, so a done child whose PR
+    GitHub never confirmed merged is flagged `merge unconfirmed` - the state in
+    which the graph lies at a wave gate. `--verify-merges` resolves those rows
+    against GitHub; without it the whole table is local and needs no network."""
     from fno.graph.fuzzy import resolve_node
     from fno.handoff.output import merge_json_flag, json_mode
 
@@ -575,6 +665,12 @@ def cmd_epic_status(
         node_id = c["id"]
         worker = _live_worker(node_id)
         pr = c.get("pr_number")
+        unconfirmed = _merge_unconfirmed(c)
+        note = _child_note(c, events, worker)
+        if unconfirmed and verify_merges:
+            # A probe that could not answer leaves the row flagged; only a real
+            # answer replaces the note.
+            note = _verify_merge(c) or note
         rows.append(
             {
                 "id": node_id,
@@ -583,9 +679,12 @@ def cmd_epic_status(
                 "status": _status_of(c) or "",
                 "worker": worker,
                 "pr_number": pr,
-                "receipt": _child_note(c, events, worker),
+                "merge_unconfirmed": unconfirmed,
+                "receipt": note,
             }
         )
+
+    unconfirmed_total = sum(1 for r in rows if r["merge_unconfirmed"])
 
     from fno.graph.rollup import scope_growth
     from fno.graph.store import entries_with_archive
@@ -606,6 +705,11 @@ def cmd_epic_status(
                     "slug": epic_node.get("slug"),
                     "children_total": total,
                     "children_done": done,
+                    # Done children whose PR GitHub never confirmed merged. A
+                    # subset of children_done, not a separate bucket: the point
+                    # is that some of that "done" is unevidenced.
+                    "children_merge_unconfirmed": unconfirmed_total,
+                    "merges_verified": verify_merges,
                     "children": rows,
                     # follow_ups is reported only when coverage clears the floor; the
                     # coverage block ships regardless so a suppressed figure explains
@@ -633,7 +737,13 @@ def cmd_epic_status(
         )
         return
 
-    typer.echo(f"epic: {epic_id} ({epic_node.get('slug') or ''})  {done}/{total} done")
+    header = f"epic: {epic_id} ({epic_node.get('slug') or ''})  {done}/{total} done"
+    if unconfirmed_total:
+        # Qualifies the done count in the same breath rather than a line below
+        # it: "3/5 done" beside an unqualified number is what let the graph
+        # read as landed at a wave gate.
+        header += f"  ({unconfirmed_total} merge unconfirmed)"
+    typer.echo(header)
     typer.echo("  " + _scope_growth_line(growth))
     if not rows:
         typer.echo("  (no children)")
