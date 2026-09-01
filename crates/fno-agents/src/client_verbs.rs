@@ -5977,22 +5977,24 @@ mod tests {
         // --print-command is the no-side-effect inspection form: the selected
         // fork id rides the argv and nothing launches. The dead arm probes
         // jobs/<short>/state.json under $HOME, so pin HOME to a throwaway dir
-        // with that state staged -- a pass must not depend on the developer's
-        // real claude home (provider.rs's with_home shape).
-        let _guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let real_home = std::env::temp_dir().join("recover-print-cmd-home");
-        let jobs = real_home.join(".claude").join("jobs").join("11111111");
-        std::fs::create_dir_all(&jobs).unwrap();
-        std::fs::write(
-            jobs.join("state.json"),
-            serde_json::json!({"state": "idle"}).to_string(),
-        )
-        .unwrap();
-        let prev = std::env::var_os("HOME");
-        // SAFETY: single-threaded window under test_env_lock, provider.rs's pattern.
-        unsafe { std::env::set_var("HOME", &real_home) };
+        // with that state staged. The state is staged under the REAL $HOME
+        // (jobs/11111111, removed after) rather than by repinning the HOME
+        // env: set_var is process-global and races every concurrent test's
+        // env reads and spawns (a flaked `git` NotFound on CI), and the lock
+        // only serializes the tests that already take it.
+        let home_dir = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let jobs = home_dir.join(".claude").join("jobs").join("11111111");
+        let staged_here = !jobs.join("state.json").exists();
+        if staged_here {
+            std::fs::create_dir_all(&jobs).unwrap();
+            std::fs::write(
+                jobs.join("state.json"),
+                serde_json::json!({"state": "idle"}).to_string(),
+            )
+            .unwrap();
+        }
 
         let dir = cv_tmpdir();
         let home = AgentsHome::at(dir.path());
@@ -6011,10 +6013,8 @@ mod tests {
             ],
             &home,
         );
-        match prev {
-            // SAFETY: same guarded window.
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
+        if staged_here {
+            std::fs::remove_dir_all(&jobs).unwrap();
         }
         assert_eq!(code, 0);
     }
