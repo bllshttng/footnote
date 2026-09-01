@@ -14443,7 +14443,7 @@ def cmd_find(
         False,
         "--fts",
         help=(
-            "Full-text search (BM25-ranked, word-stem matching) over title+slug+details "
+            "Full-text search (BM25-ranked whole-word matching) over title+slug+details "
             "via a hash-validated cache beside graph.json. Exact id/slug lookups are "
             "unchanged. Falls back to substring search where FTS5 is unavailable."
         ),
@@ -14499,11 +14499,19 @@ def cmd_find(
                 try:
                     from fno.graph import fts as graph_fts
 
-                    ranked = graph_fts.search(q, _graph_path(), limit=limit * 5)
+                    # Full ranked set, THEN filters, THEN truncate: slicing
+                    # first could evict every in-filter match in favor of
+                    # better-ranked out-of-filter ones.
+                    ranked = graph_fts.search(q, _graph_path(), limit=None)
                     by_id = {
                         e.get("id"): e for e in pool if isinstance(e.get("id"), str)
                     }
-                    return [by_id[i] for i in ranked if i in by_id][:limit]
+                    kept = [
+                        by_id[i]
+                        for i in ranked
+                        if i in by_id and _passes_filters(by_id[i])
+                    ]
+                    return kept[:limit]
                 except Exception as exc:  # noqa: BLE001 - degrade, never fail
                     typer.echo(f"warning: fts unavailable ({exc}); using substring search", err=True)
         # High-recall describe-it search over title+slug+details.

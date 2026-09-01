@@ -1,6 +1,6 @@
 """Epic-closure rules over the deferred_kind vocabulary.
 
-The measurement behind this module (x-d6ca, 2026-09-01): six epics report
+The measurement behind this module (2026-09-01): six epics report
 in_progress forever because every incomplete child is deferred or superseded,
 and nothing can raise them. Three rules fix the arithmetic WITHOUT touching a
 row: done children never hold an epic open, superseded children never do (the

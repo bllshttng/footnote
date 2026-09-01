@@ -99,7 +99,7 @@ CANONICAL_FIELD_ORDER: list[str] = [
     "completed_at",
     "deferred_at",
     "deferred_reason",
-    # Deferred classification (x-d6ca): expiry vs decision. Deliberately NOT
+    # Deferred classification: expiry vs decision. Deliberately NOT
     # setdefault-ed below, the same sparse treatment as `contained_in` and for
     # the same reason: stamping `"deferred_kind": null` onto every node would
     # change the bytes of a graph nobody has classified. Listed here only so

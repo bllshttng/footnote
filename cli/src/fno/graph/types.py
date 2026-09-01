@@ -159,7 +159,7 @@ class Entry(BaseModel):
     # from deferred to done.
     deferred_at: Optional[str] = None
     deferred_reason: Optional[str] = None
-    # Deferred classification (x-d6ca): expiry vs decision. Sparse: absent
+    # Deferred classification: expiry vs decision. Sparse: absent
     # when unclassified (an honest unknown), never a guess from prose.
     # Vocabulary: _constants.DEFERRED_KINDS; rules: graph/epics.py.
     deferred_kind: Optional[str] = None

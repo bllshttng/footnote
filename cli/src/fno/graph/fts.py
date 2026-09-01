@@ -39,6 +39,10 @@ def index_path(graph_path: Path) -> Path:
     return Path(str(graph_path) + ".fts5")
 
 
+def _graph_hash(graph_path: Path) -> str:
+    return hashlib.sha256(graph_path.read_bytes()).hexdigest()
+
+
 def _fts5_supported() -> bool:
     try:
         conn = sqlite3.connect(":memory:")
@@ -119,7 +123,7 @@ def ensure_search_index(graph_path: Path) -> Path:
         )
     if not graph_path.exists():
         raise FileNotFoundError(str(graph_path))
-    graph_hash = hashlib.sha256(graph_path.read_bytes()).hexdigest()
+    graph_hash = _graph_hash(graph_path)
     path = index_path(graph_path)
     if path.exists():
         try:
@@ -141,23 +145,35 @@ def ensure_search_index(graph_path: Path) -> Path:
     return path
 
 
-def search(query: str, graph_path: Path, limit: int = 20) -> list[str]:
+def search(query: str, graph_path: Path, limit: int | None = 20) -> list[str]:
     """Ranked node ids for ``query``; ensures the cache first.
 
-    Each whitespace token is double-quoted (internal quotes doubled) and
-    joined by spaces, which FTS5 reads as implicit AND, so arbitrary prose
-    cannot inject query syntax.
+    ``limit=None`` returns the full ranked set (the caller applies its own
+    filters before truncating). Each whitespace token is double-quoted
+    (internal quotes doubled) and joined by spaces, which FTS5 reads as
+    implicit AND, so arbitrary prose cannot inject query syntax.
+
+    The graph can be rewritten between the hash check and the query, which
+    would answer from pre-mutation content. So the hash is re-read AFTER the
+    query: a change forces one full retry, making the answer reflect a
+    snapshot that was current when the read started (the same contract as a
+    plain graph read, never a confidently stale one).
     """
-    path = ensure_search_index(graph_path)
     terms = [f'"{t.replace(chr(34), chr(34) * 2)}"' for t in query.split() if t]
     if not terms:
         return []
-    conn = sqlite3.connect(path)
-    try:
-        rows = conn.execute(
-            "SELECT id FROM nodes WHERE nodes MATCH ? ORDER BY rank LIMIT ?",
-            (" ".join(terms), limit),
-        ).fetchall()
-    finally:
-        conn.close()
-    return [r[0] for r in rows]
+    match_sql = " ".join(terms)
+    for attempt in (0, 1):
+        path = ensure_search_index(graph_path)
+        conn = sqlite3.connect(path)
+        try:
+            rows = conn.execute(
+                "SELECT id FROM nodes WHERE nodes MATCH ? ORDER BY rank LIMIT ?",
+                (match_sql, -1 if limit is None else limit),
+            ).fetchall()
+            answered_hash = _stored_hash(path)
+        finally:
+            conn.close()
+        if attempt or answered_hash == _graph_hash(graph_path):
+            return [r[0] for r in rows]
+    return [r[0] for r in rows]  # unreachable; keeps mypy honest about rows
