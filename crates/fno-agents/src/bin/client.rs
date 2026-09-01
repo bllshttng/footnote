@@ -1680,6 +1680,7 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
                 "kept_uncorroborated": summary.kept_uncorroborated,
                 "kept_no_receipt": no_receipt,
                 "kept_live": summary.kept_live,
+                "kept_not_terminal": summary.kept_not_terminal,
                 "kept_contradicted": summary.kept_contradicted,
                 "cleared_contradiction": summary.cleared_contradiction,
                 "dormant_probes_escalated": summary.dormant_probes_escalated,
@@ -1734,6 +1735,11 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
     for id in &summary.kept_live {
         out.push_str(&format!(
             "  kept {id} (live: liveness re-check reports it alive)\n"
+        ));
+    }
+    for id in &summary.kept_not_terminal {
+        out.push_str(&format!(
+            "  kept {id} (not terminal: no gate has ruled - still coming up or running, and no pid is confirmed dead)\n"
         ));
     }
     for id in &summary.kept_contradicted {
@@ -3921,6 +3927,26 @@ mod tests {
         let out = render_reap(&s, true, false);
         let v: Value = serde_json::from_str(out.trim()).expect("valid json");
         assert_eq!(v["kept_live"], json!(["live1", "live2"]));
+    }
+
+    #[test]
+    fn reap_names_the_not_terminal_gate_in_text_and_json() {
+        // x-91f3: the NotTerminal keep is the blanket that held the measured
+        // registry - the majority verdict on a fleet of pid-less rows - and
+        // it went unnamed, so the verb said "would reap 0" while keeping 26.
+        let s = fno_agents::daemon::GcSummary {
+            kept_not_terminal: vec!["nt1".to_string(), "nt2".to_string()],
+            ..Default::default()
+        };
+        let text = render_reap(&s, false, false);
+        assert!(
+            text.contains("  kept nt1 (not terminal:"),
+            "no named gate for the not-terminal row: {text}"
+        );
+        assert!(text.contains("  kept nt2 (not terminal:"));
+        let out = render_reap(&s, true, false);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(v["kept_not_terminal"], json!(["nt1", "nt2"]));
     }
 
     #[test]
