@@ -13668,15 +13668,18 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert_eq!(summary.reaped.len(), 2);
 
         let reaps = read_events(&home);
+        // The reap event, by type: the removal accounting (x-a879) also emits
+        // registry_row_removed into this log carrying the same short_id, so a
+        // bare short_id match is ambiguous.
         let dead_reap = reaps
             .iter()
-            .find(|e| e["data"]["short_id"] == "dead0001")
+            .find(|e| e["type"] == "agent_row_reaped" && e["data"]["short_id"] == "dead0001")
             .expect("dead dispatch reap event");
         assert_eq!(dead_reap["data"]["node_id"], "x-a35a");
         assert_eq!(dead_reap["data"]["termination_event"], false);
         let done_reap = reaps
             .iter()
-            .find(|e| e["data"]["short_id"] == "done0002")
+            .find(|e| e["type"] == "agent_row_reaped" && e["data"]["short_id"] == "done0002")
             .expect("completed dispatch reap event");
         assert_eq!(done_reap["data"]["node_id"], "x-b44e");
         assert_eq!(done_reap["data"]["termination_event"], true);
