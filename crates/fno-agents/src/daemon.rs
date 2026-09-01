@@ -1690,7 +1690,10 @@ pub fn gc_sweep(
 ) -> GcSummary {
     let store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
-    let prober = live_liveness_prober();
+    let truth = registry_entries(home).map_or_else(std::collections::HashMap::new, |entries| {
+        batched_row_truths(&entries, &live_truth_tail_states)
+    });
+    let prober = live_liveness_prober(truth);
     gc_sweep_impl_with_node_cascade(
         home,
         emitter,
@@ -1720,7 +1723,10 @@ pub fn gc_sweep_dry_run(
     let emitter = EventEmitter::new(std::path::PathBuf::new(), "daemon");
     let store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
-    let prober = live_liveness_prober();
+    let truth = registry_entries(home).map_or_else(std::collections::HashMap::new, |entries| {
+        batched_row_truths(&entries, &live_truth_tail_states)
+    });
+    let prober = live_liveness_prober(truth);
     gc_sweep_impl_with_node_cascade(
         home,
         &emitter,
@@ -1757,13 +1763,51 @@ fn fold_positive_death(e: &state::RegistryEntry) -> Option<crate::client_verbs::
         .then_some(crate::client_verbs::RowLiveness::Dead)
 }
 
+/// One registry read for the pre-sweep truth batch. An unreadable registry
+/// yields no candidates; the sweep body re-reads and reports for itself.
+fn registry_entries(home: &AgentsHome) -> Option<Vec<state::RegistryEntry>> {
+    state::load_registry(&home.registry_json())
+        .ok()
+        .map(|r| r.entries)
+}
+
+/// Precompute the truth rung for every stamped live-ish row in ONE batched
+/// call (`family1_truth_probe_many`'s seam), so the ladder never launches a
+/// serial per-row `fno agents truth` subprocess inside the sweep - N rows
+/// would otherwise hold the GC worker for roughly N probe timeouts. Keyed by
+/// the handle asked for (the row's claude uuid), so the prober's lookup is a
+/// map get. An empty candidate set spends nothing.
+fn batched_row_truths(
+    entries: &[state::RegistryEntry],
+    truth_tail_states: &dyn Fn(&[String]) -> std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    let handles: Vec<String> = entries
+        .iter()
+        .filter(|e| e.exited_at.is_some())
+        .filter_map(|e| {
+            e.claude_session_uuid
+                .as_deref()
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .map(String::from)
+        })
+        .collect();
+    if handles.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    truth_tail_states(&handles)
+}
+
 /// The shared liveness ladder as production runs it (x-5d96): the reader
 /// extracted from `claude_resume_argv_with_truth`, now called by the reaper
-/// instead of a per-caller derivation. The sessions-dir index is built ONCE
-/// per closure (one sweep), however many rows probe. Injected like
-/// `store_matches` so a sweep-level test never depends on what lives in the
-/// developer's real `~/.claude`.
-fn live_liveness_prober() -> impl Fn(&state::RegistryEntry) -> crate::client_verbs::RowLiveness {
+/// instead of a per-caller derivation. The sessions-dir index and the truth
+/// answers are both computed ONCE per closure (one sweep), however many rows
+/// probe - the truth rung reads the batched map, never a per-row subprocess.
+/// Injected like `store_matches` so a sweep-level test never depends on what
+/// lives in the developer's real `~/.claude`.
+fn live_liveness_prober(
+    truth: std::collections::HashMap<String, String>,
+) -> impl Fn(&state::RegistryEntry) -> crate::client_verbs::RowLiveness {
     let home = crate::claude_ask::ClaudeHome::from_env();
     let index: std::cell::RefCell<Option<std::collections::HashMap<String, String>>> =
         std::cell::RefCell::new(None);
@@ -1775,7 +1819,11 @@ fn live_liveness_prober() -> impl Fn(&state::RegistryEntry) -> crate::client_ver
         if built.is_none() {
             *built = Some(crate::client_verbs::sessions_socket_index(&home));
         }
-        crate::client_verbs::row_liveness_indexed(e, built.as_ref().expect("just built"))
+        crate::client_verbs::row_liveness_with_indexed(
+            e,
+            built.as_ref().expect("just built"),
+            |uuid: &str| truth.get(uuid).cloned(),
+        )
     }
 }
 
@@ -2000,21 +2048,24 @@ fn gc_sweep_impl_with_node_cascade(
         // spared, or one the probe did not answer for, keeps `false`: only a
         // positive `done` reading evicts.
         let dormant_done = false;
-        // The liveness ladder is spent only on rows that can read it (the
-        // contradiction consult in the policy), so an ordinary sweep tick
-        // keeps its zero-subprocess shape; elsewhere nothing reads the field.
-        // Live-ish STATUS rows are included: the stored status is a constant
-        // in practice, and a stamped row it still calls live is exactly the
-        // contradiction x-5d96 surfaces.
-        let probe = if (is_live
-            || matches!(
+        // The liveness ladder is spent only on rows the sweep cannot already
+        // vouch for: an `is_live` row has POSITIVE process evidence (worker
+        // socket or owned pid), so its stale stamp clears unconditionally
+        // below (the pre-x-5d96 resurrected contract - keeping the stamp
+        // would let gc reuse an old clock and skip grace at the row's real
+        // death, codex P2 on PR 1329). The ladder is for the rows with no
+        // process surface whose STORED STATUS still reads live-ish: the
+        // status field is a constant in practice, and a stamped row it still
+        // calls live is exactly the contradiction x-5d96 surfaces.
+        let probe = if !is_live
+            && matches!(
                 e.status,
                 AgentStatus::Live
                     | AgentStatus::Ready
                     | AgentStatus::Idle
                     | AgentStatus::Busy
                     | AgentStatus::Spawning
-            ))
+            )
             && exited_at.is_some()
         {
             row_liveness(e)
@@ -2150,27 +2201,27 @@ fn gc_sweep_impl_with_node_cascade(
                 to_stamp.insert(e.name.clone(), e.created_at.clone());
             }
             crate::gc::GcAction::Keep => {
-                // Resurrected: the probe POSITIVELY answers Alive on a stamped
-                // row, so drop the stale exit stamp and let a later death start
-                // a fresh grace clock. This now covers rows whose only life
-                // evidence is the ladder itself (a live socket, a heartbeat
-                // that advanced past the stamp) - on the measured registry
-                // those are exactly the four status-live rows carrying a false
-                // exited_at. An `Unknown` is the contradiction: the stamp is
-                // PRESERVED as evidence and the row is named below. Either way
-                // the disagreement resolves by evidence and gets reported -
-                // never silently in favour of either field.
+                // Resurrected: drop the stale exit stamp so a later death
+                // starts a fresh grace clock. An `is_live` row clears on its
+                // positive process evidence alone (the pre-x-5d96 contract);
+                // a row the ladder POSITIVELY answers Alive on clears too -
+                // on the measured registry those are exactly the status-live
+                // rows carrying a false exited_at with no process surface.
+                // An `Unknown` on a non-is_live row is the contradiction: the
+                // stamp is PRESERVED as evidence and the row is named below.
+                // Either way the disagreement resolves by evidence and gets
+                // reported - never silently in favour of either field.
                 if e.exited_at.is_some()
-                    && row.probe == RowLiveness::Alive
                     && (row.is_live
-                        || matches!(
-                            e.status,
-                            AgentStatus::Live
-                                | AgentStatus::Ready
-                                | AgentStatus::Idle
-                                | AgentStatus::Busy
-                                | AgentStatus::Spawning
-                        ))
+                        || (row.probe == RowLiveness::Alive
+                            && matches!(
+                                e.status,
+                                AgentStatus::Live
+                                    | AgentStatus::Ready
+                                    | AgentStatus::Idle
+                                    | AgentStatus::Busy
+                                    | AgentStatus::Spawning
+                            )))
                 {
                     to_clear.insert(e.name.clone(), e.created_at.clone());
                     summary.cleared_contradiction.push(id);
@@ -7976,6 +8027,7 @@ fn plan_reconcile<P, D, L, B, H, R, V>(
     mut thread_hosted: H,
     mut rollout_exists: R,
     mut liveness: V,
+    roster_readable: bool,
 ) -> (Vec<ReconcileChange>, ReconcileOutcome)
 where
     P: FnMut(&RegistryEntry) -> Result<bool, crate::provider::ReachabilityProbeError>,
@@ -8039,26 +8091,29 @@ where
             } else if matches!(
                 entry.status,
                 AgentStatus::Live | AgentStatus::Ready | AgentStatus::Idle | AgentStatus::Busy
-            ) && bg_live(entry)
+            ) && roster_readable
+                && bg_live(entry)
                 && liveness(entry) == RowLiveness::Unknown
             {
-                // x-5d96: the roster (or an unreadable roster's fail-closed
-                // benefit of the doubt) used to hold a claude row `live`
+                // x-5d96: a roster entry used to hold a claude row `live`
                 // forever. Roster presence is weak evidence - a dead
                 // supervisor can leave stale entries - so a row the shared
                 // ladder answers `Unknown` on (no socket, no advancing
                 // heartbeat, no working truth state) carries no positive
                 // running-marker and goes `Orphaned` - never `Exited`,
-                // silence never proves death. Spawning is EXCLUDED: a row
-                // still coming up has had no chance to produce any marker,
-                // so its silence is meaningless (the same never-reap-
-                // something-still-coming-up rule the sweep uses). An
-                // advancing heartbeat or a working truth state answers Alive
-                // and blocks the flip (the x-d3ad resurrected session). An
-                // Orphaned row is not re-visited here (not live-ish), and gc
-                // still protects it: removal needs positive corroboration,
-                // so a falsely-flipped live worker keeps its transcript
-                // evidence and is never reaped.
+                // silence never proves death. The flip needs a roster read
+                // that SUCCEEDED: an unreadable roster is unknown liveness,
+                // and orphaning a live worker on a transient instrumentation
+                // failure is the false positive this arm must not produce.
+                // Spawning is EXCLUDED: a row still coming up has had no
+                // chance to produce any marker, so its silence is
+                // meaningless (the same never-reap-something-still-coming-up
+                // rule the sweep uses). An advancing heartbeat or a working
+                // truth state answers Alive and blocks the flip (the x-d3ad
+                // resurrected session). An Orphaned row is not re-visited
+                // here (not live-ish), and gc still protects it: removal
+                // needs positive corroboration, so a falsely-flipped live
+                // worker keeps its transcript evidence and is never reaped.
                 out.orphans.push(entry.name.clone());
                 out.updated.push(entry.name.clone());
                 Some(AgentStatus::Orphaned)
@@ -8202,6 +8257,15 @@ fn apply_reconcile_change(e: &mut RegistryEntry, new_status: Option<AgentStatus>
             // verdict dies with the pane for the same reason.
             e.inside_leg = None;
             e.screen_state = None;
+        }
+        if matches!(s, AgentStatus::Orphaned) {
+            // x-5d96 (codex P2, PR 1329): the transition just re-decided the
+            // row's liveness from current evidence, so any `exited_at` it
+            // carried is a stamp from an earlier, falsified reading. Keeping
+            // it would let gc age the row on a clock that started before the
+            // re-decision and skip the grace window at its first real
+            // dead-observation. Cleared, gc stamps fresh.
+            e.exited_at = None;
         }
     }
 }
@@ -8623,6 +8687,11 @@ fn run_reconcile_sweep(
     // on a working teammate costs a duplicate spawn, a stale `live` costs a
     // waiter its timeout.
     let roster = crate::claude_roster::ClaudeRoster::load_default();
+    // The x-5d96 zombie flip fires only when the roster read SUCCEEDED: an
+    // unreadable roster is unknown liveness (the fail-closed branch below),
+    // and orphaning a live worker on a transient instrumentation failure is
+    // the exact false positive the flip must not produce (codex P1, PR 1329).
+    let roster_readable = roster.is_ok();
     let bg_live = |e: &RegistryEntry| -> bool {
         if e.harness_name() != "claude" {
             return false;
@@ -8646,7 +8715,8 @@ fn run_reconcile_sweep(
             .map(Path::new)
             .is_some_and(Path::is_file)
     };
-    let prober = live_liveness_prober();
+    let truth = batched_row_truths(&entries, &live_truth_tail_states);
+    let prober = live_liveness_prober(truth);
     let (changes, outcome) = plan_reconcile(
         &entries,
         probe,
@@ -8656,6 +8726,7 @@ fn run_reconcile_sweep(
         thread_hosted,
         rollout_exists,
         prober,
+        roster_readable,
     );
 
     // Ordered exit teardown (E3.3, AC-X2-4): for every row transitioning to
@@ -13767,6 +13838,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,                   // roster readable: the flip needs a successful roster read
         );
         assert_eq!(out.orphans, vec!["live-but-gone".to_string()]);
         assert_eq!(out.recovered, vec!["back-from-dead".to_string()]);
@@ -13811,6 +13883,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| true,               // thread_hosted: the daemon map names this row
             |_| false,              // rollout_exists (irrelevant while hosted)
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,                   // roster readable: the flip needs a successful roster read
         );
         assert_eq!(
             changes[0].new_status, None,
@@ -13834,6 +13907,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false, // not hosted: the actor is gone (daemon restart, resume failed)
             |_| true,  // the rollout file exists: the durable object survives
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,      // roster readable: the flip needs a successful roster read
         );
         assert_eq!(
             changes[0].new_status,
@@ -13990,6 +14064,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,              // not hosted
             |_| false,              // no rollout: the thread never got far enough to persist
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,                   // roster readable: the flip needs a successful roster read
         );
         assert_eq!(
             changes[0].new_status,
@@ -14018,6 +14093,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,                   // roster readable: the flip needs a successful roster read
         );
         assert_eq!(
             changes[0].new_status, None,
@@ -14051,6 +14127,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,                   // roster readable: the flip needs a successful roster read
         );
         assert_eq!(
             changes[0].new_status,
@@ -14097,6 +14174,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,                   // roster readable: the flip needs a successful roster read
         );
         assert_eq!(
             changes[0].new_status, None,
@@ -14134,6 +14212,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,                   // roster readable: the flip needs a successful roster read
         );
         assert_eq!(
             changes[0].new_status, None,
@@ -14161,6 +14240,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,                   // roster readable: the flip needs a successful roster read
         );
         assert_eq!(changes[0].new_status, Some(AgentStatus::Live));
         assert_eq!(out.recovered, vec!["pidless".to_string()]);
@@ -14194,6 +14274,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,                   // roster readable: the flip needs a successful roster read
         );
         assert_eq!(changes[0].new_status, None, "must NOT flip on inconclusive");
         assert!(out.orphans.is_empty());
@@ -14218,6 +14299,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,                   // roster readable: the flip needs a successful roster read
         );
         assert!(changes.iter().all(|c| c.new_status.is_none()));
         assert!(out.orphans.is_empty() && out.updated.is_empty());
@@ -14251,6 +14333,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,                   // roster readable: the flip needs a successful roster read
         );
         assert_eq!(
             changes[0].new_status,
@@ -14277,6 +14360,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,                   // roster readable: the flip needs a successful roster read
         );
         assert_eq!(changes[0].new_status, None);
         assert!(out.updated.is_empty());
@@ -14306,6 +14390,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,                   // roster readable: the flip needs a successful roster read
         );
         assert_eq!(
             changes[0].new_status, None,
@@ -14324,6 +14409,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,                   // roster readable: the flip needs a successful roster read
         );
         assert_eq!(changes[0].new_status, Some(AgentStatus::Exited));
         assert_eq!(out.updated, vec!["think-web-copy".to_string()]);
@@ -14585,6 +14671,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
+            true,                   // roster readable: the flip needs a successful roster read
         );
         assert_eq!(out.deferred, 2, "two trailing entries should defer");
         assert_eq!(changes.len(), 1, "only one entry probed before budget");
@@ -15318,17 +15405,18 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
 
     #[test]
     fn gc_sweep_surfaces_the_contradiction_instead_of_resolving_it_silently() {
-        // The four-row specimen at sweep level: a live row carrying a stale
-        // exited_at. With the ladder silent, the stamp is PRESERVED and the
-        // row is named - never silently resolved in favour of either field.
-        // With the ladder Alive, the stamp clears as the resurrected row it
-        // is. No answer reaps anything.
+        // The four-row specimen at sweep level, WITHOUT a process surface
+        // (no pid, no worker socket): the stored status reads live, a stale
+        // exited_at sits on the row, and the ladder is silent. The stamp is
+        // PRESERVED and the row is named - never silently resolved in favour
+        // of either field. A ladder-Alive answer clears the stamp as the
+        // resurrected row it is, and an is_live row clears on its positive
+        // process evidence alone. No answer reaps anything.
         let home = tmp_home("gc-contradiction");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         state::update_registry(&home.registry_json(), |r| {
             let mut row = bg_claude_row("g4", "g4face");
             row.status = AgentStatus::Live;
-            row.pid = Some(std::process::id()); // bare-existence live (no start time)
             row.exited_at = Some("2026-08-21T00:42:40Z".into());
             r.entries.push(row);
         })
@@ -15354,9 +15442,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             "a silent ladder must not erase the contradiction's evidence"
         );
 
-        // The positive answer clears the stale stamp (the old resurrected
-        // behaviour), still reaping nothing - and the resolution is REPORTED,
-        // never silent.
+        // The ladder's positive answer clears the stale stamp, still reaping
+        // nothing - and the resolution is REPORTED, never silent.
         let summary = gc_sweep_impl(
             &home,
             &emitter,
@@ -15372,7 +15459,69 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert_eq!(summary.cleared_contradiction, vec!["g4face".to_string()]);
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert!(reg.entries[0].exited_at.is_none());
+
+        // An is_live row (bare-existence pid) clears on its process evidence
+        // ALONE: a kept stamp here would hand gc an old clock that skips
+        // grace at the row's real death (codex P2, PR 1329).
+        state::update_registry(&home.registry_json(), |r| {
+            let mut row = bg_claude_row("live-stamped", "livs0001");
+            row.status = AgentStatus::Live;
+            row.pid = Some(std::process::id());
+            row.exited_at = Some("2026-08-21T00:42:40Z".into());
+            r.entries.push(row);
+        })
+        .unwrap();
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &no_tails,
+            &|_| None,
+            &|_| RowLiveness::Unknown,
+            &|_| None,
+        );
+        assert!(summary.reaped.is_empty());
+        assert_eq!(summary.cleared_contradiction, vec!["livs0001".to_string()]);
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let stamped = reg.entries.iter().find(|e| e.name == "live-stamped");
+        assert!(stamped.unwrap().exited_at.is_none());
         std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn an_unreadable_roster_never_flips_the_zombie_arm() {
+        // codex P1 (PR 1329): an unreadable roster is unknown liveness. The
+        // fail-closed bg_live reading must not combine with a transient
+        // ladder failure to orphan every live bg worker - the flip needs a
+        // roster read that SUCCEEDED.
+        let entries = vec![bg_claude_row("maybe", "mayb0001")];
+        let (changes, _) = plan_reconcile(
+            &entries,
+            |_| Ok(true),
+            || false,
+            |_| true,
+            |_| true, // bg_live fail-closed true on the unreadable roster
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Unknown,
+            false, // the roster read itself FAILED
+        );
+        assert_eq!(changes[0].new_status, None);
+    }
+
+    #[test]
+    fn the_orphan_transition_starts_a_fresh_grace_clock() {
+        // codex P2 (PR 1329): the flip just re-decided liveness from current
+        // evidence, so a carried exited_at is a stamp from a falsified
+        // reading. apply clears it, so gc stamps fresh at the first real
+        // dead-observation instead of aging the row on a clock that predates
+        // the re-decision and skips grace.
+        let mut e = bg_claude_row("zombie", "zomb0001");
+        e.exited_at = Some("2026-08-21T00:42:40Z".into());
+        apply_reconcile_change(&mut e, Some(AgentStatus::Orphaned), "2026-09-01T00:00:00Z");
+        assert_eq!(e.status, AgentStatus::Orphaned);
+        assert!(e.exited_at.is_none());
     }
 
     #[test]
@@ -15393,6 +15542,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Unknown,
+            true, // roster readable
         );
         assert_eq!(changes[0].new_status, Some(AgentStatus::Orphaned));
         assert_eq!(out.orphans, vec!["zombie".to_string()]);
@@ -15413,6 +15563,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Alive,
+            true, // roster readable
         );
         assert_eq!(changes[0].new_status, None);
         assert!(out.orphans.is_empty());
@@ -15435,6 +15586,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Unknown,
+            true, // roster readable
         );
         assert_eq!(changes[0].new_status, None);
     }
@@ -15453,6 +15605,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             |_| false,
             |_| false,
             |_| RowLiveness::Alive,
+            true, // roster readable
         );
         assert_eq!(changes[0].new_status, Some(AgentStatus::Exited));
     }
