@@ -9271,20 +9271,19 @@ def _status_drift(path: Path) -> dict[str, tuple[str, str]]:
     from fno.graph.statuses import recompute_statuses
     from fno.graph.store import _read_json, read_graph
 
-    persisted = {
-        entry["id"]: entry.get("status")
-        for entry in _read_json(path)
-        if (
-            isinstance(entry, dict)
-            and isinstance(entry.get("id"), str)
-            and isinstance(entry.get("status"), str)
-        )
-    }
-    derived = {
-        entry["id"]: entry.get("status")
-        for entry in recompute_statuses(copy.deepcopy(read_graph(path)))
-        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
-    }
+    persisted: dict[str, str] = {}
+    for entry in _read_json(path):
+        node_id = entry.get("id") if isinstance(entry, dict) else None
+        status = entry.get("status") if isinstance(entry, dict) else None
+        if isinstance(node_id, str) and isinstance(status, str):
+            persisted[node_id] = status
+
+    derived: dict[str, str] = {}
+    for entry in recompute_statuses(copy.deepcopy(read_graph(path))):
+        node_id = entry.get("id") if isinstance(entry, dict) else None
+        status = entry.get("status") if isinstance(entry, dict) else None
+        if isinstance(node_id, str) and isinstance(status, str):
+            derived[node_id] = status
     return {
         node_id: (persisted[node_id], derived[node_id])
         for node_id in sorted(persisted.keys() & derived.keys())
