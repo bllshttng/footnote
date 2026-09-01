@@ -14,7 +14,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 KING="$REPO_ROOT/hooks/king-postcompact-reinject.sh"
 BRIEF="$REPO_ROOT/skills/king-for-a-day/references/postcompact-brief.md"
-BRIEF_MAX_BYTES=1600
+# 1600 held 1580 with 20 B of slack. The demand-signal rule added 194 B: agents
+# were not voting because nothing armed taught the verb, and this brief is one
+# of only two armed surfaces that reach an install. Trading was barred by this
+# file's own style-exception header, which says the five rules are the
+# operator's verbatim corrections and must not be shortened. So the cap moves,
+# keeping the same slack 1600 gave 1580.
+BRIEF_MAX_BYTES=1800
 
 [[ -f "$KING" ]] || { echo "FAIL: king hook not found at $KING" >&2; exit 1; }
 export CLAUDE_PLUGIN_ROOT="$REPO_ROOT"

@@ -102,7 +102,20 @@ set -euo pipefail
 # ("and the page answers why not the daemon", +41 B) pointing at the new
 # Why-a-separate-process section, and paid 8 B by dropping "process" after
 # keeper. 33 is the measured remainder, zero spare.
-CEILING_BYTES=38457
+# Demand-signal raise, and it is a RAISE rather than a trade on purpose. The
+# measurement that funded it: 3 of 2392 nodes carried an encounter after six
+# weeks, because `fno backlog encounter` was named only in this repo's
+# AGENTS.md. AGENTS.md does not ship, so for every user but this one the verb
+# was taught in zero places. Only machinery and ARMED skills reach an install,
+# and using-fno is the armed one, so moving the line out of the preamble
+# (option 2) would delete the teaching rather than relocate it. The line was
+# cut before it was paid for, dropping the falsifiability rationale because
+# `fno backlog encounter --help` already carries it, which is the more durable
+# channel anyway. The remainder is 354 B: 345 for the using-fno line and 9 for
+# correcting "one per session" to "one per node per session" in the AGENTS.md
+# bullet, which had misstated the cap since the signal shipped. Zero spare,
+# still.
+CEILING_BYTES=38811
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
