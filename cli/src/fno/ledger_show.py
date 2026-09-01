@@ -43,10 +43,20 @@ def _resume_command(harness: object, session_id: str) -> str | None:
     return " ".join(t.replace("{session_id}", session_id) for t in tokens)
 
 
-def _print_row(row: dict, gnode: dict | None) -> None:
-    node = row.get("graph_node_id")
+# A row whose node was never recovered says so itself; the dash would read as
+# an unasked question rather than the recorded fact.
+def _node_line(row: dict) -> str:
+    node = row.get("graph_node_id") or row.get("node")
+    if node:
+        return f"node:     {node}"
+    if row.get("node_id_unrecoverable"):
+        return "node:     not recorded (this row says node_id_unrecoverable)"
+    return "node:     -"
+
+
+def _print_row(row: dict, gnode: dict | None, session_absent_note: str | None = None) -> None:
     pr = row.get("pr_number")
-    typer.echo(f"node:     {node or '-'}")
+    typer.echo(_node_line(row))
     typer.echo(f"pr:       {'#' + str(pr) if pr else '-'}  {row.get('pr_url') or ''}".rstrip())
     # A backstop row never learned the plan path; the graph node did.
     plan_path = row.get("plan_path") or (gnode or {}).get("plan_path")
@@ -65,7 +75,10 @@ def _print_row(row: dict, gnode: dict | None) -> None:
     if not isinstance(sessions, list) or not sessions:
         # A legacy row predating the field. Never a blank: an absent key and a
         # recorded "no session" are different facts.
-        typer.echo("session:  (absent - this row predates session recording)")
+        typer.echo(
+            session_absent_note
+            or "session:  (absent - this row predates session recording)"
+        )
         return
     for sid in sessions:
         typer.echo(f"session:  {sid}")
@@ -84,14 +97,15 @@ def _print_row(row: dict, gnode: dict | None) -> None:
             typer.echo(f"resume:   (none - {harness} declares no interactive resume form)")
 
 
-def ledger_show_command(arg: str) -> None:
-    """Resolve one node id, PR number, or session id to its ledger row(s)."""
-    try:
-        rows = load_ledger_rows(_paths.ledger_json())
-    except Exception as exc:  # noqa: BLE001 - a broken ledger is the headline
-        typer.echo(f"ledger unreadable: {exc}", err=True)
-        raise typer.Exit(code=1)
+def resolve_ledger_matches(arg: str, rows: list[dict]) -> tuple[list[dict], list[str], str | None]:
+    """Match one argument against ledger rows in three directions.
 
+    Returns ``(matches, tried, slug)`` - the matched rows, the directions
+    tried (for an honest miss), and the repo slug a PR number was attributed
+    with (``None`` when unresolved). Shared with `fno agents history`, which
+    reports the same resolution beside its other two sources; a second
+    matcher here would be the dual-implementation tax.
+    """
     digits = arg[1:] if arg.startswith("#") else arg
     url_pr = _PR_URL_SHAPE.search(arg)
     tried: list[str] = []
@@ -112,7 +126,11 @@ def ledger_show_command(arg: str) -> None:
         ]
     elif _NODE_ID_SHAPE.match(arg):
         tried.append(f"node {arg}")
-        matches = [r for r in rows if r.get("graph_node_id") == arg]
+        # `node` is a legacy spelling of graph_node_id on one measured row
+        # (2026-09-01); matching it keeps the row's own claim resolvable.
+        matches = [
+            r for r in rows if arg in {r.get("graph_node_id"), r.get("node")}
+        ]
     else:
         tried.append(f"session {arg}")
         matches = [
@@ -121,6 +139,18 @@ def ledger_show_command(arg: str) -> None:
             if arg in (r.get("sessions") or [])
             or arg in {r.get("session_id"), r.get("fno_id")}
         ]
+    return matches, tried, slug
+
+
+def ledger_show_command(arg: str) -> None:
+    """Resolve one node id, PR number, or session id to its ledger row(s)."""
+    try:
+        rows = load_ledger_rows(_paths.ledger_json())
+    except Exception as exc:  # noqa: BLE001 - a broken ledger is the headline
+        typer.echo(f"ledger unreadable: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    matches, tried, slug = resolve_ledger_matches(arg, rows)
 
     if not matches:
         suffix = (
