@@ -4562,6 +4562,62 @@ def cmd_watchdog(
         sys.stdout.flush()
 
 
+@agents_app.command("stale-escalate", hidden=True)
+def cmd_stale_escalate(
+    json_out: bool = typer.Option(False, "--json", "-J", help="Machine-readable output."),
+) -> None:
+    """Reconcile the durable stale-row question to the measured fleet.
+
+    Runs the real sweep (roster + transcripts + claims + graph), filters the
+    verdicts no action lane may take (``stale`` - past the wake ceiling),
+    and reconciles ONE ``[watchdog-stale:*]`` operator question to that set:
+    same set is a duplicate, a changed set closes the old ask and asks fresh,
+    an empty set closes what is open. Report-only by contract: this verb
+    never wakes, retires, reaps, or touches a worktree - the daemon's idle
+    tick is its only scheduled caller.
+    """
+    from fno.agents import stale_lane as se
+    from fno.agents import watchdog as wd
+    from fno.carveout.core import resolve_carveout_root, resolve_session_id
+
+    payload, rows = wd.run_sweep()
+    if payload.get("refused"):
+        outcome, qid, stale_count, oldest = "refused", "", 0, 0
+    else:
+        stale_pairs = [
+            (wd.Verdict(**data), row)
+            for data, row in zip(payload["verdicts"], rows)
+            if data["verdict"] == wd.STALE
+        ]
+        try:
+            from fno.paths import resolve_repo_root
+
+            session_id = resolve_session_id(resolve_repo_root())
+        except Exception:  # noqa: BLE001 - an unbound ask still records
+            session_id = None
+        outcome, qid = se.reconcile_stale(
+            stale_pairs,
+            root=resolve_carveout_root(),
+            session_id=session_id,
+            cwd=Path.cwd(),
+        )
+        stale_count = len(stale_pairs)
+        oldest = se._oldest_h([v.basis or "" for v, _row in stale_pairs]) or 0
+
+    summary = f"Summary: {stale_count} stale, outcome {outcome}, oldest {oldest}h"
+    if json_out:
+        sys.stdout.write(json.dumps({
+            "outcome": outcome,
+            "question_id": qid,
+            "stale_count": stale_count,
+            "oldest_h": oldest,
+            "summary": summary,
+        }) + "\n")
+        sys.stdout.flush()
+    else:
+        typer.echo(summary)
+
+
 @agents_app.command("ping", hidden=True)
 def cmd_ping() -> None:
     """Health check (placeholder).
