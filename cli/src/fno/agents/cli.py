@@ -1358,10 +1358,13 @@ def cmd_spawn(
         "--resume",
         "-r",
         help=(
-            "Resume an existing claude session instead of starting fresh: the new "
-            "--bg supervisor continues that transcript (US4 thread revival). "
-            "Accepts a full session uuid OR the 8-hex short-id shown in receipts "
-            "(x-f76e); with no --substrate it implies thread. claude + thread only."
+            "Seed a NEW claude session from an existing transcript. The content "
+            "carries over; the session id does NOT. `claude --bg --resume` always "
+            "forks, so the result is a new id, a new agent-view row, and a new fno "
+            "binding. To bring a session back under its OWN id, use "
+            "`fno agents resume <name>`. Accepts a full session uuid OR the 8-hex "
+            "short-id shown in receipts (x-f76e); with no --substrate it implies "
+            "thread. claude + thread only."
         ),
     ),
     add_dir: str | None = typer.Option(

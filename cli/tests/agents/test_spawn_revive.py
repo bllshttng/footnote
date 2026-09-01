@@ -103,7 +103,9 @@ def test_is_revival_gate(monkeypatch) -> None:
 
 def test_spawn_resume_revives_in_place(workdir_claude, monkeypatch) -> None:
     """AC1-HP: spawn --resume against the row's own exited name updates it in
-    place - one row, fresh short_id, same uuid - instead of exiting 2."""
+    place - one row, fresh short_id - instead of exiting 2. The row records
+    the source uuid as lineage; the live session itself runs under a new id
+    (`claude --bg --resume` always forks)."""
     from fno.agents.cli import agents_app
     from fno.agents.harnesses import claude as claude_mod
 
@@ -121,7 +123,9 @@ def test_spawn_resume_revives_in_place(workdir_claude, monkeypatch) -> None:
     rows = [e for e in load_registry() if e.name == "rev-agent"]
     assert len(rows) == 1  # revived in place, not a same-name duplicate
     assert rows[0].short_id == "7c5dcf5d"  # fresh short_id from the new spawn
-    assert rows[0].harness_session_id == DEAD_UUID  # same conversation preserved
+    # The row keeps the SOURCE id as lineage: `--bg --resume` always forks,
+    # so the live session's real uuid is unknowable from the shell.
+    assert rows[0].harness_session_id == DEAD_UUID
 
 
 def test_spawn_resume_uuid_mismatch_is_collision(workdir_claude, monkeypatch) -> None:
