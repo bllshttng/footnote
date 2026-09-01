@@ -551,6 +551,31 @@ def test_spawn_thread_refusal_renders_from_accept_set(monkeypatch) -> None:
     assert expected.endswith("future"), "the monkeypatched name must be rendered"
 
 
+def test_route_on_an_undeclared_harness_refuses_cleanly(
+    workdir, monkeypatch, tmp_path
+) -> None:
+    """Round-1 review finding 1: `--route` on the pane substrate read
+    capabilities() at the route_on_pane guard, which RAISED an uncaught
+    DispatchResolveError (exit 1 traceback) for an undeclared harness. The
+    posture answers route_on_pane=False, so the refusal is the clean exit-2
+    one the guard was written to print."""
+    from fno.agents.cli import agents_app
+
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    result = _make_runner().invoke(
+        agents_app,
+        ["spawn", "--name", "rt", "-H", "nanoclaw", "--route", "zai,glm-5.3", "hi"],
+    )
+    assert result.exit_code == 2, (
+        f"expected the clean route_on_pane refusal, got {result.exit_code}\n"
+        f"output: {result.output}"
+    )
+    assert "route_on_pane" in result.output
+    assert "DispatchResolveError" not in result.output
+
+
 def test_undeclared_harness_thread_and_headless_refuse_pane_only() -> None:
     """AC5-ERR: thread AND headless both refuse an undeclared harness, naming
     it, saying it declares no capability row, and naming pane as its only

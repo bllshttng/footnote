@@ -287,6 +287,9 @@ def test_an_undeclared_harness_sends_ungated_and_never_asks_the_detector(
     run for it. Mail by pane-send is what the lane GIVES (the spawn receipt
     names it), so the gate skips WITH a note instead of refusing the harness's
     only delivery mechanism. The detector must never even be asked."""
+    from fno.mail import pane_transport
+
+    pane_transport._UNDECLARED_NOTED.clear()
     entry = _entry()
     entry.harness = "nanoclaw"
     calls: list[dict] = []
@@ -305,6 +308,13 @@ def test_an_undeclared_harness_sends_ungated_and_never_asks_the_detector(
     err = capsys.readouterr().err
     assert "undeclared harness 'nanoclaw'" in err
     assert "not prompt-gated" in err
+
+    # The note prints ONCE per harness per process (round-1 review finding 3):
+    # a driver loop mails the same pane repeatedly and a repeated advisory
+    # line trains the reader to skip it.
+    assert dispatch._mux_pane_send(entry, "again", guarded=False) is True
+    again = capsys.readouterr().err
+    assert "not prompt-gated" not in again
 
 
 def test_an_oserror_reading_the_pane_refuses_instead_of_raising(monkeypatch, capsys):

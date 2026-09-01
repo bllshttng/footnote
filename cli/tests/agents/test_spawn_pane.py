@@ -1670,6 +1670,48 @@ def test_undeclared_spawn_journey_states_the_lane(
         assert marker in receipt, f"receipt must state {marker!r}:\n{receipt}"
 
 
+def test_a_declared_row_outside_the_roster_still_gets_the_declared_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Round-1 review finding 2, pinned: the gate, the generic arm, and the
+    receipt read ONE table predicate (is_declared), never roster membership.
+    A declared harness that never made PANE_HOSTABLE_PROVIDERS keeps the
+    declared treatment - the terminal armless raise - not the undeclared
+    PATH refusal or an UNDECLARED receipt."""
+    use_tmpdir(monkeypatch, tmp_path)
+    import fno.agents.harness_map as hm
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    monkeypatch.setitem(
+        hm._HARNESS_CAPS,
+        "declared-but-armless",
+        {
+            "resume_strategy": {
+                "forms": {
+                    "interactive_create": {
+                        "kind": "flag", "tokens": ["declared-but-armless"],
+                    }
+                }
+            }
+        },
+    )
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    with pytest.raises(DispatchAskError) as caught:
+        dispatch_spawn_pane(
+            name="peer",
+            message="",
+            provider="declared-but-armless",
+            cwd=tmp_path,
+            runner=FakeRunner(),
+        )
+    msg = str(caught.value)
+    assert "no interactive pane form" in msg
+    assert "PATH" not in msg, "a declared harness never meets the PATH refusal"
+
+
 def test_ac1_host_pane_gate_admits_hosted_rejects_unhosted(
     tmp_path: Path, monkeypatch
 ) -> None:

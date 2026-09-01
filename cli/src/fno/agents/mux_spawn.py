@@ -3543,14 +3543,17 @@ def dispatch_spawn_pane(
     # approvals, so warn on every reachable path, not just the CLI seam.
     emit_env_scrub_warning(provider, permission_pinned=bool(permission_mode or yolo))
     validate_spawn_name(name)
-    # x-f579: PANE_HOSTABLE_PROVIDERS is the DECLARED pane roster, not the gate.
-    # A harness outside it is undeclared, and undeclared has a lane: fno hosts
-    # the binary as a pane and is the viewport (x-8f7f's agy observation - a
-    # pane host needs only an interactive argv, not a Python adapter - taken to
-    # its conclusion). Three named refusals replace the membership raise, each
-    # fail-closed before any pane exists; a declared harness skips all three
-    # and keeps today's path. The roster itself gains no member here.
-    if provider not in PANE_HOSTABLE_PROVIDERS:
+    from fno.agents.harness_map import is_declared
+    # x-f579: undeclared has a lane - fno hosts the binary as a pane and is the
+    # viewport (x-8f7f's agy observation, a pane host needs only an interactive
+    # argv, taken to its conclusion). The declared/undeclared fact is read from
+    # the TABLE (is_declared), the same predicate build_pane_argv's generic arm
+    # and the UNDECLARED receipt below read, so the three can never disagree
+    # about a harness. Three named refusals replace the old membership raise,
+    # each fail-closed before any pane exists; a declared harness skips all
+    # three and keeps today's path. PANE_HOSTABLE_PROVIDERS stays the declared
+    # pane ROSTER (spawn defaults, probes); the roster gains no member here.
+    if not is_declared(provider):
         if _UNDECLARED_HARNESS_TOKEN.fullmatch(provider) is None:
             raise DispatchAskError(
                 f"harness {provider!r} is not a spawnable CLI binary name: it "
@@ -4839,10 +4842,11 @@ def dispatch_spawn_pane(
     # the two agree, and a test pins that. gemini and agy bind no session at all
     # and resolve to None rather than to either lie.
     bound_val = _resolve_bound(session_uuid, provider)
-    if provider not in PANE_HOSTABLE_PROVIDERS:
+    if not is_declared(provider):
         # x-f579 AC9: the receipt STATES the lane, so a caller reading only it
         # cannot infer a thread lane, steering, or `ask` that are not there, and
         # knows submit_keys=enter is an unmeasured default rather than a row.
+        # Same predicate as the gate and the generic arm: one table fact.
         print(
             f"harness {provider!r} is UNDECLARED: fno has no capability row for it.\n"
             f"  gives    a mux pane, this registry row, mail by pane-send\n"

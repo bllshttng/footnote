@@ -1869,9 +1869,13 @@ def cmd_spawn(
         # pane autonomy and substrate preference. Missing capability stays
         # closed so a newly added harness cannot inherit Claude's route contract.
         if substrate == "pane":
-            from fno.agents.harness_map import capabilities
+            from fno.agents.harness_map import capabilities_or_undeclared
 
-            if not capabilities(harness).get("route_on_pane", False):
+            # x-f579: the posture answers route_on_pane=False for an
+            # undeclared harness, so the refusal stays clean. `capabilities()`
+            # would raise an uncaught DispatchResolveError here (exit 1
+            # traceback) on a lane this change made reachable.
+            if not capabilities_or_undeclared(harness).get("route_on_pane", False):
                 print(
                     f"harness {harness!r} does not have the evidence-backed "
                     "route_on_pane capability; no worker launched, node stays "

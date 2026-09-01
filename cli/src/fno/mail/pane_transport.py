@@ -33,6 +33,10 @@ from typing import Callable, Optional
 #: seed's own read (`_submit_spawn_seed`), so both look at the same window.
 GATE_FRAME_LINES = 40
 
+#: x-f579: undeclared harnesses whose not-prompt-gated note has printed once
+#: this process. Repeats are suppressed (see the comment at the print).
+_UNDECLARED_NOTED: set[str] = set()
+
 
 class PaneSendRefused(Exception):
     """The pane send must not proceed; ``str(exc)`` names why."""
@@ -269,11 +273,16 @@ def prompt_refusal(
         # the visible-failure default the spawn receipt names), so the gate
         # skips WITH a note rather than refusing the only delivery mechanism
         # this harness has. Every declared harness keeps the full gate.
-        print(
-            f"note: pane {pane_id} hosts undeclared harness {harness!r}; no "
-            "prompt model exists for it, so this send is not prompt-gated",
-            file=sys.stderr,
-        )
+        if harness not in _UNDECLARED_NOTED:
+            # Once per harness per process (the add_dir_tokens precedent): a
+            # driver loop mails the same pane worker repeatedly, and a repeated
+            # advisory line trains the reader to skip it.
+            _UNDECLARED_NOTED.add(harness)
+            print(
+                f"note: pane {pane_id} hosts undeclared harness {harness!r}; no "
+                "prompt model exists for it, so sends to it are not prompt-gated",
+                file=sys.stderr,
+            )
         return None
     if receipt_text is None:
         try:
