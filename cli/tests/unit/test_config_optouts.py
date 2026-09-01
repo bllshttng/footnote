@@ -247,6 +247,81 @@ def test_stale_claim_takeover_preserves_the_original_prior_value(tmp_path, monke
     assert replacement["metadata"]["prior_value"] is True
 
 
+def test_config_optout_claims_route_to_the_global_root(tmp_path, monkeypatch):
+    # The Rust gates (loopcheck/finalize) resolve config-optout claims at the
+    # global root; a Python writer landing anywhere else would mint a lease
+    # the merge lane can never see. Pin the Python routing to the same root.
+    from fno.claims.io import _GLOBAL_ID_PREFIXES, global_claims_root
+
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
+
+    assert "config-optout" in _GLOBAL_ID_PREFIXES
+    assert (
+        claims_root_for("config-optout:review.self_review_required")
+        == global_claims_root()
+    )
+
+
+def test_scope_change_takeover_restores_the_new_file_not_the_old(
+    tmp_path, monkeypatch
+):
+    # A stale lease taken over into a DIFFERENT file must not inherit the old
+    # claim's restore metadata: the reaper would edit the old file and leave
+    # the new file's opt-out value as unrestored residue.
+    global_dir = tmp_path / "global-dir"
+    global_dir.mkdir()
+    project_dir = tmp_path / "project-dir"
+    (project_dir / ".fno").mkdir(parents=True)
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(global_dir / "settings.yaml"))
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    monkeypatch.setattr(writer, "_resolve_optout_holder", lambda: "session-a")
+    writer.set_config_value("review.self_review_required", "false", scope="global")
+
+    key = "config-optout:review.self_review_required"
+    path = claim_path(key, root=claims_root_for(key))
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw.update(
+        {
+            "schema_version": 2,
+            "pid": None,
+            "pid_unavailable": True,
+            "expires_at": 1,
+        }
+    )
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    monkeypatch.setattr(writer, "_resolve_optout_holder", lambda: "session-b")
+    writer.set_config_value(
+        "review.self_review_required",
+        "false",
+        scope="project",
+        repo_root=project_dir,
+    )
+
+    taken_over = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert (
+        taken_over["metadata"]["config_path"]
+        == str(project_dir / ".fno" / "config.toml")
+    )
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw.update({"expires_at": 1})
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    optout_sink: list = []
+    summary = reap_dead_claims(
+        roots=[claims_root_for(key)], apply=True, optout_sink=optout_sink
+    )
+    from fno.config.writer import restore_reaped_optouts
+
+    assert summary["reaped"] == 1
+    assert restore_reaped_optouts(optout_sink) == []
+    project_text = (project_dir / ".fno" / "config.toml").read_text(encoding="utf-8")
+    global_text = (global_dir / "config.toml").read_text(encoding="utf-8")
+    assert "self_review_required" not in project_text
+    assert "self_review_required = false" in global_text
+
+
 def test_rust_optout_keys_are_registered_in_python_membership():
     from fno.config.optouts import MERGE_GATING_OPTOUTS
 

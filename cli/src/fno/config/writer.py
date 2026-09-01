@@ -757,12 +757,21 @@ def set_config_values(
                     "prior_value": before if before_present and not before_active else None,
                 }
                 # An idempotent refresh must preserve the original value that
-                # the lease is responsible for restoring.
+                # the lease is responsible for restoring - but only when the
+                # old lease described THIS file. A takeover across a scope
+                # change must not point the future restore at the previous
+                # file and leave the new one's opt-out value unrestored.
                 old_metadata = status.get("metadata")
-                if isinstance(old_metadata, dict) and old_metadata.get("config_key") == key:
-                    # Preserve the original prior value on an idempotent
-                    # refresh, and when a stale lease is taken over while its
-                    # opt-out value still remains in the file.
+                old_path = (
+                    old_metadata.get("config_path")
+                    if isinstance(old_metadata, dict)
+                    else None
+                )
+                if (
+                    isinstance(old_metadata, dict)
+                    and old_metadata.get("config_key") == key
+                    and old_path == metadata["config_path"]
+                ):
                     if state in {"live", "suspect", "stale"}:
                         metadata = old_metadata
                 try:
