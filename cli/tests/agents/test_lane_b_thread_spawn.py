@@ -85,14 +85,27 @@ def lane_b_home(tmp_path, monkeypatch):
 # AC4-ERR: the public dispatch surface still refuses
 # ---------------------------------------------------------------------------
 
-def test_pi_thread_dispatch_still_refuses_at_the_gate(lane_b_home) -> None:
-    """pi's `thread` capability row stays false, so resolve_dispatch refuses
-    the thread substrate - the lane built here is not reachable through the
-    public dispatch surface."""
-    assert capabilities("pi")["thread"] is False
+def test_partial_lane_thread_dispatch_still_refuses_at_the_gate(lane_b_home) -> None:
+    """agy's `thread` capability row stays false until its own journey passes,
+    so resolve_dispatch refuses the thread substrate - the keeper lane built
+    here is not reachable through the public dispatch surface without one."""
+    assert capabilities("agy")["thread"] is False
     with pytest.raises(DispatchResolveError) as exc_info:
+        resolve_dispatch(harness="agy", substrate="thread")
+    assert "substrate 'thread' is unsupported on harness 'agy'" in str(exc_info.value)
+
+
+def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit() -> None:
+    """pi's `thread` row is true behind its passing restart journey
+    (test_thread_keeper_journey.py), so a one-shot dispatch resolves onto the
+    lane this file builds. The autonomous `/target` template still refuses at
+    the loop gate until pi's loop extension ships."""
+    assert capabilities("pi")["thread"] is True
+    resolved = resolve_dispatch(harness="pi", substrate="thread", command="pi --version")
+    assert resolved["substrate"] == "thread"
+    assert resolved["thread"] is True
+    with pytest.raises(DispatchResolveError, match="Dispatch a one-shot instead"):
         resolve_dispatch(harness="pi", substrate="thread")
-    assert "substrate 'thread' is unsupported on harness 'pi'" in str(exc_info.value)
 
 
 def test_lane_b_spawn_is_not_wired_into_dispatch_spawn() -> None:
