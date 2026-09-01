@@ -1481,24 +1481,68 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // held app-server process and register its full thread identity.
         ("codex", "bg") => None,
 
-        // bg is claude + opencode + codex: claude's detached `--bg` thread,
-        // opencode's serve-hosted session, and Codex's app-server lane. Gemini
-        // and agy have no detached-interactive substrate. Hard error pointing
-        // to headless; never a silent substrate swap. (The harness-capability
-        // `thread` bit is a separate claim - autonomous dispatch readiness -
-        // and opencode's reads false until steering ships; this interactive
-        // arm is unaffected.)
+        // The three arms above stay NAMED rather than lane-routed, because
+        // they are three different ownership models and only two of them are
+        // what the contract says they are: claude's thread is hosted by the
+        // detached client itself, codex's by its own app-server, and
+        // opencode's by a serve-hosted HTTP session. opencode is the
+        // deliberate exception - its capability row declares
+        // `interactive_attach` unsupported, so the derived lane reads
+        // `keeper`, while its serve lane is built and working. Routing this
+        // match on the derived lane would send a working path to a refusal;
+        // the mismatch belongs to the capability row, not here.
+        //
+        // The REFUSAL is derived, because a provider name list goes stale the
+        // moment a lane is built and then misdirects the reader it was meant
+        // to help. Hard error pointing to headless; never a silent substrate
+        // swap.
         (other, "bg") => {
-            eprintln!(
-                "substrate 'bg' (detached interactive thread) is claude + codex + opencode; provider {} has no detached-thread substrate - use --substrate headless for a one-shot",
-                py_repr(other)
-            );
+            eprintln!("{}", bg_substrate_refusal(other));
             Some(2)
         }
 
         // Unreachable: provider is validated known above and substrate is
         // validated to pane|bg|headless in build_request.
         _ => None,
+    }
+}
+
+/// The `--substrate bg` refusal, derived from the capability contract instead
+/// of a provider name list.
+///
+/// A name list cannot say what is actually true. A harness whose keeper lane
+/// is built and journey-proven, but whose spawn arm is not, is refused here
+/// today; a list reading "claude + codex + opencode" tells that reader the
+/// harness has no thread lane, which is the opposite of its situation. The
+/// lane is what the reader needs, and the contract already knows it.
+///
+/// Mirrors the wording `resolve_dispatch` uses in `harness_map.py`, so both
+/// runtimes name the same gap: it is in fno, never a harness limitation.
+fn bg_substrate_refusal(harness: &str) -> String {
+    use fno_agents::claude_ask::py_repr;
+
+    let head = format!(
+        "substrate 'bg' (detached interactive thread) is unavailable on harness {}",
+        py_repr(harness)
+    );
+    let tail = "use --substrate headless for a one-shot";
+    let lane = fno_agents::harness_capabilities::HarnessContract::packaged()
+        .ok()
+        .and_then(|contract| contract.thread_lane(harness).ok());
+    match lane {
+        // No resume form at all, so there is no lane for fno to build.
+        Some("none") => {
+            format!("{head}: it declares no resume form, so no thread lane exists for it - {tail}")
+        }
+        Some(lane) => format!(
+            "{head}: fno has not built this harness's {lane} lane spawn arm yet, and that gap is \
+             in fno, never a harness limitation - {tail}"
+        ),
+        // An unreadable table is its own diagnosis, and naming a lane we could
+        // not resolve would be a guess wearing a verdict's clothes.
+        None => format!(
+            "{head}: its thread lane could not be resolved from the capability contract - {tail}"
+        ),
     }
 }
 
