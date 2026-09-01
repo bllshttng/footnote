@@ -60,14 +60,7 @@ def _resolved_categories() -> frozenset[str]:
         return resolve_nonblocking_categories(None)
 
 
-def build_emit_record(
-    payload: Any,
-    *,
-    verdict: str = "",
-    cwd: Optional[str] = None,
-    head_branch: str = "",
-    head: str = "",
-) -> dict[str, Any]:
+def build_emit_record(payload: Any) -> dict[str, Any]:
     """A findings payload into the bounded record ``--emit-record`` prints.
 
     Accepts a bare array of finding records, or an object carrying a
@@ -76,18 +69,6 @@ def build_emit_record(
     branch-scoped round this verdict is). Raises :class:`RecordBuildError`
     on any shape the classifier cannot read: a refusal, never an empty
     record.
-
-    The disposition obligation: a ``verdict=pass`` record that carries no
-    findings and no dispositions, built on a branch (``head_branch`` plus
-    ``cwd``) whose earlier rounds left blocking findings non-terminal,
-    REFUSES, naming every key it must dispose. A bare pass attests that
-    nothing blocked this round; it does not attest that earlier findings
-    were fixed, and emitting one anyway leaves them non-terminal forever -
-    the silent deadlock that surfaces four rounds later as an impossible
-    merge. Callers that pass no branch context (records built outside a
-    review lane) skip the obligation, and an unreadable event log produces
-    the record rather than refusing: an instrument failure must not wedge
-    every reviewer on the machine.
     """
     dispositions: list[dict[str, Any]] = []
     review_round: Optional[int] = None
@@ -161,28 +142,6 @@ def build_emit_record(
         record["dispositions"] = dispositions
     if review_round is not None:
         record["review_round"] = review_round
-    if verdict.strip().lower() == "pass" and cwd and head_branch and not findings:
-        # The chain read is cap_verdict's nonterminal set - one helper, never
-        # a second chain reader. The keys THIS record disposes leave the
-        # outstanding set; a `fixed` entry for a raised key is exactly the
-        # designed exit. An instrument failure (unreadable log, raised read)
-        # produces the record: the gate re-derives from the chain anyway, and
-        # a broken reader here would wedge every reviewer on the machine.
-        try:
-            from fno.pr._coverage_gate import cap_verdict
-
-            nonterminal = cap_verdict(cwd, head, head_branch, None).nonterminal_keys
-        except Exception:  # noqa: BLE001 - instrument failure, not absence
-            nonterminal = []
-        disposing = {entry["finding_key"] for entry in dispositions}
-        outstanding = [key for key in nonterminal if key not in disposing]
-        if outstanding:
-            raise RecordBuildError(
-                "a findings-free pass disposes nothing, and this branch still "
-                "holds non-terminal blocking finding(s): "
-                f"{', '.join(outstanding)}; carry a dispositions entry (fixed "
-                "or declined with a reason) for every finding you verified"
-            )
     return record
 
 
@@ -193,17 +152,6 @@ def classify(
     ),
     emit_record: bool = typer.Option(
         False, "--emit-record", help="Print the bounded attestation record as JSON."
-    ),
-    verdict: str = typer.Option(
-        "",
-        "--verdict",
-        help="The verdict this record rides; 'pass' arms the disposition obligation.",
-    ),
-    branch: str = typer.Option(
-        "", "--branch", help="Head branch, to scope the disposition-obligation chain read."
-    ),
-    head: str = typer.Option(
-        "", "--head", help="Head sha the attestation pins, for the chain read."
     ),
 ) -> None:
     """Classify a findings payload; the one shell entry point producers share."""
@@ -218,13 +166,7 @@ def classify(
         typer.secho(f"classify: {findings_file} is not valid JSON: {exc}", err=True)
         raise typer.Exit(code=2) from exc
     try:
-        record = build_emit_record(
-            payload,
-            verdict=verdict,
-            cwd=str(Path.cwd()) if branch else None,
-            head_branch=branch,
-            head=head,
-        )
+        record = build_emit_record(payload)
     except RecordBuildError as exc:
         typer.secho(f"classify: {findings_file}: {exc}", err=True)
         raise typer.Exit(code=2) from exc
