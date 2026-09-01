@@ -191,6 +191,7 @@ def _owner_set_verdict(probes: Sequence[OwnerProbe], sources_ok: bool) -> str:
 class NodeObs:
     node_id: str
     status: str
+    is_container: bool = False
     touched_at_epoch: Optional[float] = None
     cwd: Optional[str] = None
     worktree_path: Optional[str] = None
@@ -327,6 +328,12 @@ def classify(
     if unknown[KIND_STARTED] is None:
         for node in obs.nodes:
             if node.status != "in_progress":
+                continue
+            if node.is_container:
+                # A container's in_progress is rolled up from its children,
+                # never claimed. "claim free" is vacuous for a row that can
+                # never hold a claim, and /fno:target <epic> does not clear a
+                # rollup.
                 continue
             claim_state = (node.claim or {}).get("state")
             if claim_state is None:
@@ -807,6 +814,15 @@ def collect_observations(
     entries_by_id = {
         str(e.get("id")): e for e in entries if isinstance(e, dict) and e.get("id")
     }
+    container_ids = {
+        entry.get("parent")
+        for entry in entries
+        if (
+            isinstance(entry, dict)
+            and isinstance(entry.get("parent"), str)
+            and entry.get("parent") in entries_by_id
+        )
+    }
 
     registry_by_cwd, registry_ok = (
         (dict(registry_rows[0]), bool(registry_rows[1]))
@@ -1017,6 +1033,7 @@ def collect_observations(
             NodeObs(
                 node_id=node_id,
                 status=str(entry.get("status") or ""),
+                is_container=node_id in container_ids,
                 touched_at_epoch=_parse_iso_epoch(entry.get("touched_at")),
                 cwd=node_cwd,
                 worktree_path=worktree_path,

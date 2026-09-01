@@ -661,6 +661,89 @@ def test_reconcile_happy_path_then_noop(cli_env, monkeypatch):
     assert node2["completed_at"] == first_ts
 
 
+def test_reconcile_reclaims_status_drift_from_container_rollup(cli_env):
+    """A fresh status derivation is applied even when no PR close is pending."""
+    graph_path, _sentinel_dir = cli_env
+    _make_graph(graph_path, [
+        _node("ab-rollup", status="in_progress", plan_path="plans/parent.md"),
+        _node(
+            "ab-rollup-done",
+            parent="ab-rollup",
+            completed_at="2026-01-01T00:00:00Z",
+        ),
+        _node("ab-rollup-idea", parent="ab-rollup", plan_path=None),
+    ])
+
+    result = runner.invoke(app, ["backlog", "reconcile"])
+
+    assert result.exit_code == 0, result.output
+    assert "reclaimed ab-rollup: in_progress -> ready" in result.output
+    parent = next(e for e in _read_entries(graph_path) if e["id"] == "ab-rollup")
+    assert parent["status"] == "ready"
+
+
+def test_reconcile_dry_run_reports_status_reclaim_without_writing(cli_env):
+    graph_path, _sentinel_dir = cli_env
+    _make_graph(graph_path, [
+        _node("ab-dry-rollup", status="in_progress", plan_path="plans/parent.md"),
+        _node(
+            "ab-dry-done",
+            parent="ab-dry-rollup",
+            completed_at="2026-01-01T00:00:00Z",
+        ),
+        _node("ab-dry-idea", parent="ab-dry-rollup", plan_path=None),
+    ])
+    before = graph_path.read_bytes()
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "Would reclaim ab-dry-rollup: in_progress -> ready" in result.output
+    assert graph_path.read_bytes() == before
+
+
+def test_reconcile_json_reports_status_reclaim(cli_env):
+    graph_path, _sentinel_dir = cli_env
+    _make_graph(graph_path, [
+        _node("ab-json-rollup", status="in_progress", plan_path="plans/parent.md"),
+        _node(
+            "ab-json-done",
+            parent="ab-json-rollup",
+            status="done",
+            completed_at="2026-01-01T00:00:00Z",
+        ),
+        _node("ab-json-idea", parent="ab-json-rollup", status="idea", plan_path=None),
+    ])
+    before = graph_path.read_bytes()
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--dry-run", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["reclaimed"] == [
+        {"node_id": "ab-json-rollup", "from": "in_progress", "to": "ready"}
+    ]
+    assert graph_path.read_bytes() == before
+
+
+def test_reconcile_status_drift_ignores_read_time_blocked_overlay(cli_env):
+    graph_path, _sentinel_dir = cli_env
+    _make_graph(graph_path, [
+        _node("ab-overlay-blocker", status="idea", plan_path=None),
+        _node(
+            "ab-overlay-dependent",
+            status="ready",
+            blocked_by=["ab-overlay-blocker"],
+            plan_path="plans/dependent.md",
+        ),
+    ])
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--dry-run", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["reclaimed"] == []
+
+
 def test_reconcile_names_leftover_model_tier_rows(cli_env, monkeypatch):
     """x-baef: leftover model_tier rows read as no difficulty band now, so
     the daily sweep names them and the migration verb until the key is gone;

@@ -85,6 +85,119 @@ def test_ac1_hp_recompute_done():
     assert result[0]["status"] == "done"
 
 
+def test_container_rollup_ignores_finished_child():
+    """A finished child must not pin a planned parent in progress."""
+    entries = [
+        _entry("ab-parent001"),
+        _entry("ab-child001", parent="ab-parent001", completed_at="2026-01-01T00:00:00Z"),
+        _entry("ab-child002", parent="ab-parent001", plan_path=None),
+    ]
+
+    result = recompute_statuses(entries)
+
+    parent = next(entry for entry in result if entry["id"] == "ab-parent001")
+    assert parent["status"] == "ready"
+
+
+def test_container_rollup_keeps_parent_open_for_live_child():
+    entries = [
+        _entry("ab-parent002"),
+        _entry("ab-child003", parent="ab-parent002", completed_at="2026-01-01T00:00:00Z"),
+        _entry("ab-child004", parent="ab-parent002", pr_number=7),
+    ]
+
+    result = recompute_statuses(entries)
+
+    parent = next(entry for entry in result if entry["id"] == "ab-parent002")
+    assert parent["status"] == "in_progress"
+
+
+def test_container_rollup_ignores_pending_supersession_child():
+    entries = [
+        _entry("ab-parent003"),
+        _entry(
+            "ab-child005",
+            parent="ab-parent003",
+            superseded_by="ab-parent003",
+            supersession={"successor": "ab-parent003"},
+        ),
+    ]
+
+    result = recompute_statuses(entries)
+
+    parent = next(entry for entry in result if entry["id"] == "ab-parent003")
+    assert parent["status"] == "ready"
+
+
+def test_container_rollup_closes_when_every_child_is_done():
+    entries = [
+        _entry("ab-parent004"),
+        _entry("ab-child006", parent="ab-parent004", completed_at="2026-01-01T00:00:00Z"),
+        _entry("ab-child007", parent="ab-parent004", completed_at="2026-01-02T00:00:00Z"),
+    ]
+
+    result = recompute_statuses(entries)
+
+    parent = next(entry for entry in result if entry["id"] == "ab-parent004")
+    assert parent["status"] == "done"
+
+
+def test_container_rollup_preserves_parent_pr_over_all_done_children():
+    entries = [
+        _entry("ab-parent005", pr_number=8),
+        _entry("ab-child008", parent="ab-parent005", completed_at="2026-01-01T00:00:00Z"),
+        _entry("ab-child009", parent="ab-parent005", completed_at="2026-01-02T00:00:00Z"),
+    ]
+
+    result = recompute_statuses(entries)
+
+    parent = next(entry for entry in result if entry["id"] == "ab-parent005")
+    assert parent["status"] == "in_review"
+
+
+def test_container_rollup_preserves_parent_open_do_row():
+    entries = [
+        _entry(
+            "ab-parent006",
+            sessions=[
+                {
+                    "phase": "do",
+                    "harness": "codex",
+                    "session_id": "session-006",
+                    "started_at": "2026-01-01T00:00:00Z",
+                }
+            ],
+        ),
+        _entry("ab-child010", parent="ab-parent006", completed_at="2026-01-01T00:00:00Z"),
+        _entry("ab-child011", parent="ab-parent006", deferred_at="2026-01-02T00:00:00Z"),
+    ]
+
+    result = recompute_statuses(entries)
+
+    parent = next(entry for entry in result if entry["id"] == "ab-parent006")
+    assert parent["status"] == "in_progress"
+
+
+def test_container_rollup_uses_child_derived_status_not_read_overlay():
+    now = datetime.now(timezone.utc).isoformat()
+    entries = [
+        _entry("ab-blocker001"),
+        _entry("ab-parent007"),
+        _entry(
+            "ab-child012",
+            parent="ab-parent007",
+            blocked_by=["ab-blocker001"],
+            session_id="session-012",
+            claimed_at=now,
+        ),
+    ]
+
+    result = recompute_statuses(entries)
+
+    parent = next(entry for entry in result if entry["id"] == "ab-parent007")
+    assert parent["status"] == "in_progress"
+
+
 def test_ac1_hp_recompute_ignores_blocked_by_at_write_time():
     """AC1-HP: write-time status no longer derives from blocked_by.
 
