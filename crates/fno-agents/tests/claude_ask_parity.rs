@@ -1,3 +1,6 @@
+//! parity-stage: differential
+//! parity-oracle: fno.agents.harnesses.claude
+//!
 //! Cross-language byte-parity harness (ab-cc926b4e, W4).
 //!
 //! Pins the Rust claude-ask port against the **real** Python implementation

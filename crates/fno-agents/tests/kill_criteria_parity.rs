@@ -1,3 +1,6 @@
+//! parity-stage: characterization
+//! parity-oracle: scripts/lib/kill-criteria.sh
+//!
 //! Characterization tests for the `kill-check` Rust port, frozen against the
 //! bash oracle `scripts/lib/kill-criteria.sh` (packaging EPIC ab-8bdb4642).
 //!

@@ -32,6 +32,11 @@ on:
       - scripts/ci/check-proto-version-bump.sh
       - scripts/ci/check-reviewer-descriptor-parity.sh
       - scripts/ci/check-review-app-parity.sh
+      - scripts/ci/check-parity-test-provenance.sh
+      # The provenance gate's differential oracles. A PR that deletes a Python
+      # leg without converting its parity test is the exact case the gate
+      # exists to catch, and such a PR need not touch crates/ at all.
+      - cli/src/fno/agents/harnesses/**
       - scripts/ci/preflight.sh
       - scripts/tests/stress-rust-e2e-concurrency.sh
       - cli/src/fno/config/__init__.py
@@ -230,6 +235,14 @@ jobs:
         # refusal shape (AC10 - "no marker matched" must never read as "did not
         # refuse"). Pure text extraction; no binary needed.
         run: bash scripts/ci/check-review-app-parity.sh
+
+      - name: Parity-test provenance check
+        # Every *_parity.rs declares whether it pins a LIVE second
+        # implementation (differential) or stands in for a deleted one
+        # (characterization), and this asserts the declaration against disk in
+        # both directions. Catches a finished port that still advertises a dual
+        # implementation, which is how two of these files were miscounted.
+        run: bash scripts/ci/check-parity-test-provenance.sh
 
       - name: Registry schema parity check (ab-0baecaed)
         # Cross-language schema_version lockstep: catches a Rust-only bump of
