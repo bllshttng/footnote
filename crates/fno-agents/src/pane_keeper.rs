@@ -1,5 +1,7 @@
-//! The pane keeper: a per-worker process that owns a pane's pty master and
-//! outlives the mux server.
+//! The pane keeper: a per-worker process that owns a hosted child's pty
+//! master and outlives the mux server. A pane is its lane A (`--pane`, the
+//! mux server's spelling); a pane-less lane-B thread is this same keeper
+//! launched `--keeper` with no pane behind it.
 //!
 //! A pane child spawned directly by the mux server carries the pty slave as
 //! its controlling terminal while the SERVER holds the master. When the
@@ -187,9 +189,10 @@ pub struct KeeperConfig {
     pub argv: Vec<String>,
 }
 
-/// Parse the `--pane` lane argv. The mux server builds this; the shape:
-/// `--pane --sock <path> --session <name> --pane-key <id> --cwd <dir>
-/// [--rows N] [--cols N] [--ring-bytes N] -- <provider argv...>`.
+/// Parse the `--keeper` lane argv (`--pane` is the alias the mux server's
+/// call sites spell it by; a lane-B thread spawn writes `--keeper`). The
+/// shape: `--keeper --sock <path> --session <name> --pane-key <id>
+/// --cwd <dir> [--rows N] [--cols N] [--ring-bytes N] -- <provider argv...>`.
 pub fn parse_pane_args(args: &[String]) -> Result<KeeperConfig, String> {
     let mut sock: Option<String> = None;
     let mut session: Option<String> = None;
@@ -202,7 +205,7 @@ pub fn parse_pane_args(args: &[String]) -> Result<KeeperConfig, String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--pane" => {}
+            "--keeper" | "--pane" => {}
             "--sock" => sock = Some(it.next().ok_or("--sock needs a value")?.clone()),
             "--session" => session = Some(it.next().ok_or("--session needs a value")?.clone()),
             "--pane-key" => pane_key = Some(it.next().ok_or("--pane-key needs a value")?.clone()),
@@ -296,6 +299,28 @@ impl Keeper {
             let _ = stream.flush();
         }
     }
+}
+
+/// The harness session id out of the provider argv, when the argv carries
+/// one. A lane-B harness's rendered create form rides the id fno minted
+/// BEFORE launch (`pi --session-id <id>`), so this is a read of state the
+/// keeper already holds, not a second field to keep in sync. `None` when
+/// the argv names no id - never a guess.
+fn session_id_from_argv(argv: &[String]) -> Option<String> {
+    let mut it = argv.iter();
+    while let Some(arg) = it.next() {
+        if arg == "--session-id" {
+            return it
+                .next()
+                .map(String::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+        }
+        if let Some(value) = arg.strip_prefix("--session-id=") {
+            return (!value.is_empty()).then(|| value.to_string());
+        }
+    }
+    None
 }
 
 /// Run the keeper lane to completion. Only returns on a startup failure
@@ -401,6 +426,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         "rows": cfg.rows,
         "cols": cfg.cols,
         "started_at": started_at,
+        "session_id": session_id_from_argv(&cfg.argv),
     });
     let _ = keeper.identify.set(identify);
 
@@ -674,5 +700,69 @@ mod tests {
             ring.dropped, 17,
             "3 old + 4 overflow + 10 displaced, all counted"
         );
+    }
+
+    #[test]
+    fn keeper_lane_parse_accepts_both_spellings() {
+        let base = [
+            "--sock",
+            "/tmp/k.sock",
+            "--session",
+            "t",
+            "--pane-key",
+            "3",
+            "--cwd",
+            "/tmp",
+            "--",
+            "sleep",
+            "1",
+        ];
+        let with = |lane: &str| {
+            let mut argv: Vec<String> = vec![lane.to_string()];
+            argv.extend(base.iter().map(|s| s.to_string()));
+            parse_pane_args(&argv)
+        };
+        let alias = with("--keeper").expect("--keeper parses");
+        let canonical = with("--pane").expect("--pane parses");
+        assert_eq!(alias.sock, canonical.sock);
+        assert_eq!(alias.session, canonical.session);
+        assert_eq!(alias.pane_key, canonical.pane_key);
+        assert_eq!(alias.cwd, canonical.cwd);
+        assert_eq!(alias.argv, canonical.argv);
+    }
+
+    #[test]
+    fn keeper_lane_session_id_is_read_off_the_argv_never_guessed() {
+        let pi_shape = ["pi", "--session-id", "sid-1", "-m", "x"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            session_id_from_argv(&pi_shape),
+            Some("sid-1".to_string()),
+            "the lane-B create form rides the argv"
+        );
+        let equals_shape = ["pi", "--session-id=sid-2"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            session_id_from_argv(&equals_shape),
+            Some("sid-2".to_string())
+        );
+        let no_id = ["sleep", "60"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            session_id_from_argv(&no_id),
+            None,
+            "an argv with no id answers None, never a guess"
+        );
+        let empty_value = ["pi", "--session-id", ""]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(session_id_from_argv(&empty_value), None);
     }
 }

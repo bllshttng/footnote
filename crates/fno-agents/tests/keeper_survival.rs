@@ -50,9 +50,16 @@ fn ppid_of(pid: u32) -> Option<u32> {
 /// pid (the launcher's `$!`), read from the launcher's stdout - a named pid,
 /// not a scan.
 fn spawn_via_launcher(cfg_args: &str) -> u32 {
+    spawn_via_launcher_lane("--pane", cfg_args)
+}
+
+/// The same launcher, naming the lane token: `--pane` (the mux server's
+/// spelling) or `--keeper` (the lane-B thread spawn's).
+fn spawn_via_launcher_lane(lane: &str, cfg_args: &str) -> u32 {
     let script = format!(
-        "{} --pane {} >/dev/null 2>&1 & echo $!",
+        "{} {} {} >/dev/null 2>&1 & echo $!",
         keeper_bin(),
+        lane,
         cfg_args
     );
     let out = Command::new("/bin/sh")
@@ -70,10 +77,19 @@ fn spawn_via_launcher(cfg_args: &str) -> u32 {
 
 /// Connect to the keeper and read its Identify reply (bounded).
 fn identify(sock: &PathBuf) -> serde_json::Value {
+    // The connect retry carries the same deadline as the read: a keeper
+    // that died at startup never binds, and an unbounded connect loop on
+    // its absent socket spins the test forever instead of failing.
+    let connect_deadline = Instant::now() + Duration::from_secs(10);
     let mut stream = loop {
         if let Ok(s) = UnixStream::connect(sock) {
             break s;
         }
+        assert!(
+            Instant::now() < connect_deadline,
+            "no keeper ever bound {}",
+            sock.display()
+        );
         std::thread::sleep(Duration::from_millis(50));
     };
     stream
@@ -108,8 +124,8 @@ fn identify(sock: &PathBuf) -> serde_json::Value {
                 // Ring replay may carry Output frames before/around the
                 // reply; keep scanning.
                 fno_agents::pane_keeper::Decode::Frame(_, used) => consumed += used,
-                fno_agents::pane_keeper::Decode::Violation(_) => {
-                    panic!("protocol violation reading identify reply")
+                fno_agents::pane_keeper::Decode::Violation(reason) => {
+                    panic!("protocol violation reading identify reply: {reason}")
                 }
                 fno_agents::pane_keeper::Decode::NeedMore => break,
             }
@@ -233,4 +249,79 @@ fn identify_names_cwd_and_argv() {
         );
         reply["child_pid"].as_u64().unwrap() as u32
     });
+}
+
+/// A scratch-dir stub provider: a shebang script that ignores its args and
+/// sleeps - the quiet long-lived child that still carries a
+/// `--session-id <id>` the way a lane-B create form renders one (the same
+/// shape the Python journey test's stub `pi` has).
+fn write_stub_provider(dir: &PathBuf) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let stub = dir.join("stub-pi");
+    std::fs::write(&stub, "#!/bin/sh\nexec /bin/sleep 300\n").unwrap();
+    let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&stub, perms).unwrap();
+    stub
+}
+
+/// The lane-B spelling (x-889a): `--keeper` runs the SAME lane a pane
+/// spawn's `--pane` does - same keeper, same protocol - just with no pane
+/// behind it. Proven against a real process, not the parse alone.
+#[test]
+fn keeper_lane_flag_runs_and_answers_the_session_id() {
+    let sock = scratch_sock("keeper-flag");
+    let _ = std::fs::remove_file(&sock);
+    let cwd = scratch_sock("keeper-flag-cwd");
+    let _ = std::fs::remove_dir_all(&cwd);
+    let stub = write_stub_provider(&cwd);
+    let keeper_pid = spawn_via_launcher_lane(
+        "--keeper",
+        &format!(
+            "--sock {} --session lane-b --pane-key 11 --cwd {} -- \
+             {} --session-id sid-lane-b-1",
+            sock.display(),
+            cwd.display(),
+            stub.display()
+        ),
+    );
+    let _keeper = KillGuard(keeper_pid);
+    let reply = identify(&sock);
+    assert_eq!(reply["v"], 1, "protocol version rides the reply: {reply}");
+    assert_eq!(
+        reply["session_id"], "sid-lane-b-1",
+        "the id fno minted before launch rides the reply: {reply}"
+    );
+    let child_pid = reply["child_pid"].as_u64().expect("child_pid in reply") as u32;
+    let _child = KillGuard(child_pid);
+    assert!(
+        alive(child_pid),
+        "the pane-less keeper still hosts a live child"
+    );
+    assert_eq!(
+        ppid_of(child_pid),
+        Some(keeper_pid),
+        "the child is parented by the keeper, not by any server"
+    );
+    let _ = std::fs::remove_file(&sock);
+}
+
+/// AC2-HP's negative half: an argv that carries no session id answers null,
+/// never a guess. A pane's argv (`sleep 60`) is the everyday case.
+#[test]
+fn keeper_lane_identify_answers_null_when_the_argv_carries_no_id() {
+    let sock = scratch_sock("identify-nosid");
+    let _ = std::fs::remove_file(&sock);
+    let keeper_pid = spawn_via_launcher(&format!(
+        "--sock {} --session ident --pane-key 12 --cwd /tmp -- sleep 60",
+        sock.display()
+    ));
+    let _keeper = KillGuard(keeper_pid);
+    let reply = identify(&sock);
+    assert!(
+        reply["session_id"].is_null(),
+        "no id in the argv means null in the reply: {reply}"
+    );
+    let _child = KillGuard(reply["child_pid"].as_u64().unwrap() as u32);
 }
