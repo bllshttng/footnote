@@ -5133,6 +5133,23 @@ def _aliased_layers(
     return tuple(layers)
 
 
+def _revoke_unbacked_optouts(raw: dict[str, object]) -> dict[str, object]:
+    """Apply the merge-gating opt-out revocation guard to raw config layers.
+
+    The opt-outs module is loaded via importlib, never a static import: paths
+    imports this package, and the claims layer imports paths, so a static
+    ``config -> optouts -> claims.io -> paths -> config`` cycle would pull the
+    whole import graph into one mypy SCC, where the lazy ``__getattr__`` re-exports
+    in ``graph._constants`` degrade to ``Optional[Path]`` and fail unrelated
+    modules. The edge must stay invisible to the import graph, not to runtime.
+    """
+    import importlib
+
+    module = importlib.import_module("fno.config.optouts")
+    result = module.revoke_unbacked_optouts(raw)
+    return result if isinstance(result, dict) else raw
+
+
 @lru_cache(maxsize=1)
 def load_settings() -> SettingsModel:
     """Load, deep-merge, and cache the settings for the lifetime of this process.
@@ -5196,9 +5213,7 @@ def load_settings() -> SettingsModel:
     # there is no need for an additional explicit nested call (which caused duplicate emission).
     _warn_unknown_keys(raw, SettingsModel)
 
-    from fno.config.optouts import revoke_unbacked_optouts
-
-    revoke_unbacked_optouts(raw)
+    raw = _revoke_unbacked_optouts(raw)
     return SettingsModel.model_validate(raw)
 
 
@@ -5227,9 +5242,7 @@ def settings_from_files(paths: list[Path]) -> SettingsModel:
     for parsed in reversed(layers):
         raw = _deep_merge(raw, _alias_legacy_keys(parsed))
     raw = _unwrap_config_dict(raw)
-    from fno.config.optouts import revoke_unbacked_optouts
-
-    revoke_unbacked_optouts(raw)
+    raw = _revoke_unbacked_optouts(raw)
     return SettingsModel.model_validate(raw)
 
 
@@ -5252,9 +5265,7 @@ def load_settings_for_repo(repo_root: Path) -> SettingsModel:
     if candidates:
         raw = _layer_worktree_local_override(raw, candidates[0].parent)
     raw = _unwrap_config_dict(raw)
-    from fno.config.optouts import revoke_unbacked_optouts
-
-    revoke_unbacked_optouts(raw)
+    raw = _revoke_unbacked_optouts(raw)
     return SettingsModel.model_validate(raw)
 
 
