@@ -293,7 +293,9 @@ def test_lane_b_journey_real_keeper_hosts_the_thread(lane_b_home, monkeypatch) -
         return out.stdout.strip()
 
     try:
-        assert _ps_field("comm", keeper_pid).endswith("fno-agents-worker")
+        # `args`, never `comm`: Linux truncates comm to 15 chars
+        # ("fno-agents-work"), which is not the name it is checking.
+        assert "fno-agents-worker" in _ps_field("args", keeper_pid)
         keeper_ppid = _ps_field("ppid", keeper_pid)
         daemon_pids = {
             line.split()[0]
