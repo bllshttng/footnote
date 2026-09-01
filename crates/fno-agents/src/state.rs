@@ -125,7 +125,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // v20 adds the account axis (`launch_account`) and the one optional
 // `related_session_id`. An older writer must refuse rather than erase those
 // fields during a read-modify-write. Accepted set widens to 1..=20.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 20;
+//
+// v21 (x-98ab) adds `node` - the backlog node a row works, stamped by the
+// Python spawn seams from resolved provenance so a reap decision never parses
+// the node out of a name. Additive-optional passthrough: without this mirror a
+// daemon read-modify-write drops the Python stamp. Accepted set widens to 1..=21.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 21;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -529,6 +534,18 @@ pub struct RegistryEntry {
     /// `AgentEntry.related_session_id`; same X3 passthrough.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub related_session_id: Option<String>,
+    /// The backlog node this row WORKS (x-98ab, v21), mirroring Python's
+    /// `AgentEntry.node`: stamped once at birth by the Python spawn seams from
+    /// the spawn's resolved provenance and by the client-side ask lanes from
+    /// their inherited `FNO_NODE`, so a reap decision reads the node instead of
+    /// parsing it out of a name. `None` on rows whose writer cannot know:
+    /// adopt, and daemon-hosted mints (the daemon's ambient `FNO_NODE` names
+    /// whatever session started the daemon, never the child's node). ABSENCE
+    /// MEANS UNKNOWN, never "ad-hoc" - the same discipline as `origin`. Same
+    /// X3 passthrough duty as every Python-stamped field: a row the daemon
+    /// re-serializes must keep the stamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` (ab-b946b59c):
     /// skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1927,6 +1944,7 @@ mod tests {
 
     fn sample_entry(name: &str) -> RegistryEntry {
         RegistryEntry {
+            node: None,
             spawned_by_session: None,
             spawned_by_harness: None,
             spawned_by_cwd: None,

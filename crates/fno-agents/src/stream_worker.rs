@@ -1986,6 +1986,7 @@ done
         let sid = short_id.to_string();
         state::update_registry(&reg_path, |r| {
             r.entries.push(state::RegistryEntry {
+                node: None,
                 spawned_by_session: None,
                 spawned_by_harness: None,
                 spawned_by_cwd: None,

@@ -1026,6 +1026,7 @@ def _codex_create_path(
     model: Optional[str] = None,
     effort: Optional[str] = None,
     add_dir: Optional[str] = None,
+    node: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new codex agent under the per-agent flock.
 
@@ -1131,6 +1132,10 @@ def _codex_create_path(
         # off here made one codex worker read "spawn" and another read absent
         # purely by which language created it.
         origin="spawn",
+        # x-98ab: the node this spawn was FOR, resolved by the caller's
+        # provenance pass - never this process's ambient value, which names
+        # the SPAWNING session's node.
+        node=node,
     )
 
     try:
@@ -1601,6 +1606,7 @@ def _claude_create_path(
     succession_caller_name: Optional[str] = None,
     route_provider: Optional[str] = None,
     sandbox_settings: Optional[Mapping[str, object]] = None,
+    node: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
 
@@ -1898,6 +1904,10 @@ def _claude_create_path(
         # does not guess, because a silent default is how the wrong bill gets
         # paid.
         launch_account=launch_account,
+        # x-98ab: the node this spawn was FOR, resolved by the caller's
+        # provenance pass - never this process's ambient value, which names
+        # the SPAWNING session's node.
+        node=node,
         crown_level=crown_level,
         crown_scope=crown_scope,
         crown_grantor=crown_grantor_val,
@@ -1985,6 +1995,16 @@ def _claude_create_path(
                 king_loop_armed = False
                 king_unarmed_reason = str(exc)
         if revive:
+            # x-98ab: a revival replaces the row wholesale, and the fork caller
+            # passes no node - carry the replaced row's node forward so the
+            # continuation keeps pointing at the node it works.
+            if entry.node is None:
+                entry = replace(
+                    entry,
+                    node=next(
+                        (e.node for e in entries if e.name == name and e.node), None
+                    ),
+                )
             return [entry if e.name == name else e for e in entries]
         return entries + [entry]
 
@@ -2723,6 +2743,7 @@ def dispatch_spawn(
     route_provider: Optional[str] = None,
     provider_gate: object | None = None,
     sandbox_settings: Optional[Mapping[str, object]] = None,
+    node: Optional[str] = None,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
 
@@ -3277,6 +3298,7 @@ def dispatch_spawn(
                         succession=succession,
                         succession_caller_name=succession_caller_name,
                         route_provider=route_provider,
+                        node=node,
                     )
                     return SpawnResult(
                         kind="created",
@@ -3366,6 +3388,7 @@ def dispatch_spawn(
                         model=model,
                         effort=effort,
                         add_dir=add_dir,
+                        node=node,
                     )
                 else:
                     raise DispatchAskError(

@@ -594,6 +594,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             name=args.name or None,
             log_path=args.log_path,
             origin="operator",
+            # x-98ab: the row describes THIS session, so its own exported
+            # FNO_NODE (a node-driven pane carries one) is the right source.
+            node=(os.environ.get("FNO_NODE") or "").strip() or None,
         )
     except Exception as exc:  # fail-open: never block session start (AC7-ERR)
         events.emit(

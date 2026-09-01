@@ -355,6 +355,7 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
     // daemon is DOWN, status recorded `live` and never reconciled.
     state::update_registry(&home.registry_json(), |r| {
         r.entries.push(state::RegistryEntry {
+            node: None,
             spawned_by_session: None,
             spawned_by_harness: None,
             spawned_by_cwd: None,
@@ -920,6 +921,7 @@ async fn status_client_exits_13_when_daemon_down() {
 fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agents::AgentStatus) {
     state::update_registry(&home.registry_json(), |r| {
         r.entries.push(fno_agents::state::RegistryEntry {
+            node: None,
             spawned_by_session: None,
             spawned_by_harness: None,
             spawned_by_cwd: None,
@@ -1074,6 +1076,7 @@ fn daemon_stays_resident_while_a_worker_socket_is_live() {
 fn seed_pane_row(home: &AgentsHome, name: &str) {
     state::update_registry(&home.registry_json(), |r| {
         r.entries.push(fno_agents::state::RegistryEntry {
+            node: None,
             spawned_by_session: None,
             spawned_by_harness: None,
             spawned_by_cwd: None,
@@ -2161,6 +2164,7 @@ async fn cold_start_settles_a_failed_codex_thread_resume_to_orphaned() {
     // short_id, interactive, full session id) whose cwd is gone.
     state::update_registry(&home.registry_json(), |r| {
         r.entries.push(state::RegistryEntry {
+            node: None,
             spawned_by_session: None,
             spawned_by_harness: None,
             spawned_by_cwd: None,

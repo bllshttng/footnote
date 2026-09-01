@@ -3589,6 +3589,10 @@ fn create(
     // markers read here name this row's true parent.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     let new_entry = RegistryEntry {
+        // x-98ab: client-side mint - this process inherited the spawning
+        // session's env, so the exported FNO_NODE names the node THIS spawn
+        // is for.
+        node: std::env::var("FNO_NODE").ok().filter(|v| !v.is_empty()),
         name: name.to_string(),
         // v9: the claude jobId is the unified transport key (was claude_short_id);
         // follow-up/logs read it via `transport_short()`.
