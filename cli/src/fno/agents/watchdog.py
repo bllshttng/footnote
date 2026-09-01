@@ -52,7 +52,15 @@ from typing import Any, Callable, Iterable, Optional
 # would drift from the one the classifier itself uses.
 from fno.agents.session_truth import STALLED_AFTER_S, _HELP_RE, classify_tail
 
-Verdict = namedtuple("Verdict", "row_id name state verdict basis action")
+#: ``cotenants`` is the occupancy tally for THIS row's cwd, filled only on
+#: REAP verdicts and read only by the apply lane's worktree guard (x-ad13):
+#: the tree is never deleted while a peer stands in it, but the row verdict
+#: itself no longer gates on it. Default 0 keeps every positional
+#: construction site valid; only ``verdicts()`` produces REAP verdicts, so
+#: only it fills the field.
+Verdict = namedtuple(
+    "Verdict", "row_id name state verdict basis action cotenants", defaults=(0,)
+)
 #: ``origin`` and ``last_message_at`` are read off the joined registry entry in
 #: ``fleet_rows`` and consulted by ``reap_decision`` as PROTECTORS. They default
 #: to None so an older construction site (and every test that builds a Row
@@ -60,8 +68,13 @@ Verdict = namedtuple("Verdict", "row_id name state verdict basis action")
 #: distinct from "recorded as not-an-operator" or "recorded as never spoke".
 #: ``retire_decision`` reads the same raw ``origin``: the two lanes that act on
 #: who owns a session read one field, so they cannot come to disagree about it.
+#: ``probe`` is the group 1 liveness answer ("alive" | "dead" | "unknown") read
+#: off the same entry, and ``crowned`` whether the row holds an orchestrator
+#: crown - a crown spans many nodes, so a done node is never a reap basis for
+#: one (x-ad13).
 Row = namedtuple(
-    "Row", "row_id name state node cwd origin last_message_at", defaults=(None, None)
+    "Row", "row_id name state node cwd origin last_message_at probe crowned",
+    defaults=(None, None, "unknown", False),
 )
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the
 #: flattened join of those texts; ``last_role``/``last_text`` describe the LAST
@@ -713,6 +726,12 @@ def verdicts(
     # that is fresh says occupied. A transcript that is missing, unreadable
     # or unparseable says UNKNOWN, and unknown counts as occupied, because
     # the cost of guessing wrong is somebody's uncommitted work.
+    #
+    # The tally guards the WORKTREE branch since x-ad13: it rides the REAP
+    # verdict's ``cotenants`` field down to ``_apply_reap``, which holds the
+    # destructive step while a peer stands in the tree. The row verdict
+    # itself is judged on the probe, the receipt and the transcript - never
+    # on who shares the checkout.
     facts_by_row: dict[str, Optional[TailFacts]] = {}
     for row in rows:
         try:
@@ -881,6 +900,14 @@ def retire_decision(
     # already running. Neither is evidence of a worker, so both decline here.
     if row.origin != "spawn":
         return False, ""
+    # The group 1 probe (x-ad13): retire STOPS sessions, so a worker the
+    # probe positively reports alive is never "finished" however done its
+    # tail reads - the same liveness source the reap lane reads, because two
+    # lanes that act on a session must not disagree about whether it is
+    # running. A silent probe is no marker either way and retires on its own
+    # transcript evidence, unchanged.
+    if (row.probe or "unknown") == "alive":
+        return False, "the liveness probe positively reports the worker alive"
     # The state must be one this lane recognises as holding a live slot. A row
     # whose PROCESS is gone holds none, so stopping it frees nothing and the
     # receipt would promise an undo for a session that is not running.
@@ -991,6 +1018,10 @@ REAP_PROTECTION_RULES = {
         "liveness is last-message recency, not a pid; a recent message "
         "protects the session whatever the pid says"
     ),
+    "probe": (
+        "a positively probed-alive worker is never reaped, and a silent "
+        "probe is never death"
+    ),
 }
 
 #: How recent a message has to be to protect. Reuses the module-neighbour that
@@ -1043,6 +1074,67 @@ def finished_with_the_tree(
     ) not in _ENGAGED_TAILS
 
 
+def _iso_epoch_s(stamp: Optional[str]) -> Optional[float]:
+    """Epoch seconds for an ISO stamp, or None when it will not read."""
+    if not stamp:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _probe_liveness(entry: Any) -> str:
+    """The group 1 probe (x-5d96), read off a registry entry: positive
+    markers only. Returns ``"alive"``, ``"dead"`` or ``"unknown"``.
+
+    Two rungs, mirroring the Rust ladder's answer vocabulary:
+
+    - **pid**: a recorded ``pid`` + ``pid_start_time`` is reuse-safe. A
+      process gone, or present with a different start time, is a POSITIVE
+      death proof; a matching start time is a positive life marker. psutil
+      unreadable falls through - a failed read is never a verdict.
+    - **heartbeat**: an ``inside_leg`` report whose ``received_at`` is
+      STRICTLY LATER than ``exited_at`` proves the row advanced past its own
+      exit stamp - the x-d3ad rule as a positive marker. A report carrying a
+      ``ttl_ms`` must still be inside its window, so a three-week-old stamp
+      cannot prove life forever.
+
+    Silence on every rung is ``"unknown"``, never death. That is the whole
+    point of gating reap on this probe: a row reaps only on a positive death
+    proof, and ``unknown`` never reaps (x-ad13).
+    """
+    if entry is None:
+        return "unknown"
+    try:
+        import psutil
+    except Exception:  # noqa: BLE001 - a missing prober is silence, not death
+        psutil = None
+    pid = getattr(entry, "pid", None)
+    start = getattr(entry, "pid_start_time", None)
+    if psutil is not None and pid is not None and start is not None:
+        try:
+            proc = psutil.Process(int(pid))
+            if abs(proc.create_time() - float(start)) > 1.0:
+                return "dead"
+            return "alive"
+        except psutil.NoSuchProcess:
+            return "dead"
+        except Exception:  # noqa: BLE001 - a failed probe is never a verdict
+            pass
+    beat = getattr(entry, "inside_leg", None) or {}
+    received = _iso_epoch_s(beat.get("received_at"))
+    exited = _iso_epoch_s(getattr(entry, "exited_at", None))
+    if received is not None and exited is not None and received > exited:
+        ttl_ms = beat.get("ttl_ms")
+        if ttl_ms is None or received + float(ttl_ms) / 1000.0 > time.time():
+            return "alive"
+    return "unknown"
+
+
 def reap_decision(
     row: Row,
     *,
@@ -1051,7 +1143,6 @@ def reap_decision(
     claim_for: Callable[[str], dict],
     now_s: float,
     quiet_after_s: float,
-    cotenants: int,
     window: str = "none",
 ) -> tuple[str, str]:
     """The ONLY path to a reap verdict. Returns ``(answer, basis)``.
@@ -1078,14 +1169,20 @@ def reap_decision(
     protection window is protected by that recency whatever its pid says - the
     mirror of x-9de7, which forbade the opposite inference - and that one
     answers LAST, so every read with a more specific reason gets to speak
-    before it. Each refusal quotes its rule out of ``REAP_PROTECTION_RULES``
+    before it. Between them sits a third: a row the liveness probe positively
+    reports ALIVE refuses outright, and a silent probe is UNKNOWN, never
+    death (x-ad13) - the read that made the old occupancy guard redundant.
+    Each refusal quotes its rule out of ``REAP_PROTECTION_RULES``
     so the text and the behaviour cannot drift apart.
 
     The positive signals a reap needs, all of them present: the DELIVERABLE
-    is settled (the node is done, or another live session holds its claim),
-    the row is not an operator's, the worktree is this row's ALONE, no 429
-    window is open, the transcript says the session DECLARED ITSELF FINISHED,
-    and nothing spoke to it inside the protection window.
+    is settled (the node is done and the row is uncrowned, or another live
+    session holds its claim), the row is not an operator's, the liveness
+    probe POSITIVELY proves the worker dead, no 429 window is open, the
+    transcript says the session DECLARED ITSELF FINISHED, and nothing spoke
+    to it inside the protection window. Worktree co-tenancy is deliberately
+    NOT among them (x-ad13): a row is metadata, a worktree is a checkout,
+    and the tree is guarded at the apply lane instead.
 
     That last one used to be silence past a 900s bar, which is the defect
     this whole predicate exists to end: silence is a reading about the last
@@ -1115,7 +1212,15 @@ def reap_decision(
         return REAP_UNKNOWN, f"node {row.node} state unreadable ({exc!r})"
 
     reap_basis = ""
-    if entry is not None and entry.get("status") == "done":
+    # A crowned row is never reaped on a node-done basis (x-ad13): a king
+    # spans many nodes, so resolving the row to ONE node's status mis-buckets
+    # it. Measured 2026-08-31, king-footnote-g4 (node x-4c87, done) and
+    # king-isolation (node x-16bd, done) were both alive, and every one of the
+    # 14 ledger hits resolved to a done node - the node-done basis selects
+    # crowned rows first. The claim read below still applies to them: another
+    # live session holding the node's claim is a fact about THIS row's
+    # deliverable, not about the crown.
+    if entry is not None and entry.get("status") == "done" and not row.crowned:
         reap_basis = f"node {row.node} done"
     else:
         try:
@@ -1151,14 +1256,11 @@ def reap_decision(
             f"{REAP_PROTECTION_RULES['origin']}"
         )
 
-    # Read three: occupancy. `rm` deletes the WORKTREE, and a linked worktree
-    # proves its .git is a file, never that one session owns it. Two rows
-    # were measured working one tree on one node.
-    if cotenants:
-        return REAP_UNKNOWN, (
-            f"{reap_basis} but {cotenants} other session(s) share {row.cwd}, "
-            f"never reaped on a shared worktree"
-        )
+    # Read three: occupancy. Held by the apply lane since x-ad13 - the row
+    # verdict no longer gates on it, because a fact about the WORKTREE never
+    # answers a verdict about the ROW. The tally computed in ``verdicts()``
+    # rides the REAP verdict's ``cotenants`` field down to ``_apply_reap``,
+    # which holds the destructive step while a peer stands in the tree.
 
     # Read four: the transcript. None has two causes - never written, and
     # could not be read - and this lane cannot tell them apart, so it treats
@@ -1217,7 +1319,7 @@ def reap_decision(
     #
     # LATE, beside recency, for the reason the recency read is late. Placed up
     # at the early origin read it would answer first on every refusal and
-    # silence the shared-worktree, unreadable-transcript and still-in-play
+    # silence the probe, unreadable-transcript and still-in-play
     # guards, which is the exact bug already fixed once in this predicate.
     #
     # The marginal cost is small, because a row only reaches here by carrying a
@@ -1230,7 +1332,7 @@ def reap_decision(
     #
     # LAST, deliberately, and this position is the whole of its correctness.
     # Placed ahead of the reads above it answered FIRST on every refusal, so a
-    # row refused for sharing a worktree, for an unreadable transcript, or for
+    # row refused by the probe, for an unreadable transcript, or for
     # a tail still parked on <watching> reported "recency unproven" instead -
     # each of those guards still ran and none of them could ever speak. A
     # refusal whose reason names the wrong read is worse than no reason, and
@@ -1296,6 +1398,34 @@ def reap_decision(
             f"{reap_basis}, tail reads {truth}, but last_message_at is "
             f"{'absent' if not row.last_message_at else 'unparseable'}, so "
             f"recency is unproven and {REAP_PROTECTION_RULES['recency']}"
+        )
+
+    # Read nine: the group 1 probe (x-5d96, x-ad13), the LAST gate before a
+    # yes. A row reaps only when the probe POSITIVELY proves the worker
+    # dead; a positive life marker refuses outright, and a silent probe is
+    # UNKNOWN, never death. It sits HERE, after every read with a more
+    # specific reason, for the same reason the recency read sits last:
+    # placed early it answered FIRST on every refusal and silenced the
+    # still-in-play, unreadable-transcript and ownership guards - the
+    # wrong-reason defect this predicate has already fixed once. It replaced
+    # the old occupancy read, which answered a verdict about the ROW from a
+    # fact about the WORKTREE: on this project every session shares one
+    # checkout, so "N other session(s) share <cwd>" was permanently true and
+    # no row could ever reap - and it was also the only thing standing
+    # between the sweep and two live kings, which is why it could not be
+    # relaxed until a liveness source existed. The tree keeps its own guard,
+    # at the apply lane.
+    probe = row.probe or "unknown"
+    if probe == "alive":
+        return REAP_NO, (
+            f"{reap_basis}, tail reads {truth}, but the liveness probe "
+            f"positively reports the worker alive, and "
+            f"{REAP_PROTECTION_RULES['probe']}"
+        )
+    if probe != "dead":
+        return REAP_UNKNOWN, (
+            f"{reap_basis}, tail reads {truth}, but the liveness probe is "
+            f"silent (unknown), and {REAP_PROTECTION_RULES['probe']}"
         )
 
     return REAP_YES, (
@@ -1373,12 +1503,13 @@ def _verdict_one(
             claim_for=claim_for,
             now_s=now_s,
             quiet_after_s=quiet_after_s,
-            cotenants=cotenants,
             window=window,
         )
         if answer is REAP_YES:
+            # `cotenants` rides the verdict for the APPLY lane: co-tenancy
+            # guards the worktree branch now (x-ad13), never the row verdict.
             return Verdict(row.row_id, row.name, row.state, REAP,
-                           reap_basis, "stop+rm")
+                           reap_basis, "stop+rm", cotenants)
         if answer is REAP_UNKNOWN:
             # Not "leave": leave says the row was read and is healthy. This
             # says the read did not answer, which is a different fact and a
@@ -1822,6 +1953,12 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             # `origin` - already answers None here, which retire declines on.
             origin=getattr(match, "origin", None),
             last_message_at=getattr(match, "last_message_at", None),
+            # The group 1 probe and the crown stamp, off the SAME entry.
+            # No entry (a roster-only row) probes "unknown", which refuses -
+            # the honest direction: nothing positive is known about a session
+            # the registry never recorded.
+            probe=_probe_liveness(match),
+            crowned=bool(getattr(match, "crown_level", None)),
         ))
     if skipped_no_sid:
         warnings = [
@@ -2967,6 +3104,19 @@ def _apply_reap(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
     refusal = worktree_refusal(cwd)
     if refusal:
         return "refused", f"reap refused: {refusal}"
+    # The worktree half of the guard split (x-ad13): co-tenancy guards the
+    # TREE at apply, never the row verdict. `rm`'s harness cascade can drag
+    # the checkout with it, and a linked worktree's .git being a file proves
+    # nothing about how many sessions stand in it - so a tally that answers
+    # non-zero holds the destructive step here and names the tree, while the
+    # row above it was judged on its own probe, receipt and transcript.
+    cotenants = getattr(v, "cotenants", 0)
+    if cotenants:
+        return "refused", (
+            f"reap refused: {cotenants} other session(s) share "
+            f"{cwd or 'this cwd'}, so the worktree is not touched. Stop and "
+            f"remove this row by hand once the tree is free"
+        )
     if not _is_linked_worktree(cwd):
         # `claude rm` is documented as removing "session record + worktree",
         # and the ledger join means cwd is routinely a repo ROOT: a

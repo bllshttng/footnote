@@ -219,7 +219,7 @@ def test_identity_joins_on_claim_holder_not_name():
     # node differs (x-2222 vs none). Only the claim/manifest join may decide.
     rows = [
         Row("eeee1111-0000", "target-x-9d11-alpha", "working", "x-2222", "/tmp/a",
-            origin="spawn", last_message_at=STALE_MESSAGE_STAMP),
+            origin="spawn", last_message_at=STALE_MESSAGE_STAMP, probe="dead"),
         Row("ffff2222-0000", "target-x-9d11-beta", "working", None, "/tmp/b"),
     ]
     transcripts = {r.row_id: _facts(FINISHED_TAIL, age_min=200) for r in rows}
@@ -239,7 +239,7 @@ def test_identity_joins_on_claim_holder_not_name():
 def test_node_done_reaps_and_own_claim_does_not():
     rows = [
         Row("aaaa1111-0000", "w1", "working", "x-done", "/tmp/w1",
-            origin="spawn", last_message_at=STALE_MESSAGE_STAMP),
+            origin="spawn", last_message_at=STALE_MESSAGE_STAMP, probe="dead"),
         Row("bbbb2222-0000", "w2", "working", "x-mine", "/tmp/w2"),
     ]
     transcripts = {r.row_id: _facts(FINISHED_TAIL, age_min=200) for r in rows}
@@ -310,7 +310,7 @@ def test_deliverable_reaps_regardless_of_age():
     # decides what to do with an UNKNOWN row, never a finished one.
     rows = [Row("e65d5fff-0000", "t-xd214-mail-raw-onto-rpc", "blocked",
                 "x-d214", "/canonical", origin="spawn",
-                last_message_at=STALE_MESSAGE_STAMP)]
+                last_message_at=STALE_MESSAGE_STAMP, probe="dead")]
     [v] = _run(
         rows,
         {"e65d5fff-0000": _facts("blocked mid turn", age_min=87852)},
@@ -1306,7 +1306,7 @@ def test_reap_outranks_retire_on_the_same_row():
     """Precedence: ghost > reap > retire. A row that satisfies both takes the
     more specific verdict, so the reap lane's config freeze still governs it."""
     row = Row("eeee5555-0000", "w1", "idle", "x-1", "/tmp/w1", "spawn",
-              STALE_MESSAGE_STAMP)
+              STALE_MESSAGE_STAMP, "dead")
     monkey_nodes = {"x-1": {"status": "done"}}
     [v] = verdicts(
         [row],
@@ -2489,19 +2489,23 @@ def test_the_sweep_buys_the_whole_fleet_not_the_interactive_budget(monkeypatch):
     assert spent["timeout"] > claude_mod._AGENTS_JSON_TIMEOUT_DEFAULT
 
 
-def test_a_shared_worktree_is_never_reaped_even_with_a_done_node():
-    """Reap ends in ``rm``, which deletes the worktree out from under a peer.
+def test_a_shared_worktree_row_probed_dead_is_reapable_and_the_tree_is_held(
+    monkeypatch,
+):
+    """The guard split (x-ad13): the ROW is metadata, the TREE is a checkout.
 
-    Measured on the live fleet: two sessions working in one linked worktree,
-    both resolving one node. When that node goes done the quiet one earns a
-    reap and destroys the checkout the busy one is mid-task in.
-    ``_is_linked_worktree`` cannot see this - a linked worktree's .git is a
-    file no matter how many sessions are standing in it.
+    Measured on the live fleet: two sessions working one linked worktree,
+    both resolving one node, and the co-tenancy guard refusing every row on
+    every tree - on this project every session shares one checkout. The
+    co-tenancy fact now guards the WORKTREE branch at apply (the tally rides
+    the verdict's ``cotenants`` field down to ``_apply_reap``), never the
+    row verdict: a row on a shared tree, positively probed dead, earns REAP,
+    and the apply holds the destructive step instead.
     """
     rows = [
-        Row("aaaa1111-0000", "quiet", "working", "x-done", "/wt/x-bcb5"),
-        Row("bbbb2222-0000", "busy", "working", "x-done", "/wt/x-bcb5"),
-        Row("cccc3333-0000", "alone", "working", "x-done", "/wt/solo",
+        Row("aaaa1111-0000", "quiet", "working", "x-done", "/wt/x-bcb5",
+            origin="spawn", last_message_at=STALE_MESSAGE_STAMP, probe="dead"),
+        Row("bbbb2222-0000", "busy", "working", "x-done", "/wt/x-bcb5",
             origin="spawn", last_message_at=STALE_MESSAGE_STAMP),
     ]
     vs = _run(
@@ -2509,14 +2513,180 @@ def test_a_shared_worktree_is_never_reaped_even_with_a_done_node():
         {
             "aaaa1111-0000": _facts(FINISHED_TAIL, age_min=30),
             "bbbb2222-0000": _facts("tool_use Bash", age_min=0, kind="tool"),
-            "cccc3333-0000": _facts(FINISHED_TAIL, age_min=30),
         },
         nodes={"x-done": {"status": "done"}},
     )
-    assert vs[0].verdict == STALE, "a co-tenanted worktree must never reap"
-    assert "share /wt/x-bcb5" in vs[0].basis and vs[0].action == "report"
-    # The sole occupant is untouched: this narrows reap, it does not kill it.
-    assert vs[2].verdict == REAP
+    # Probed dead with a done node: reapable even though a peer shares the
+    # tree. The verdict carries the tally for the apply lane.
+    assert vs[0].verdict == REAP, vs[0].basis
+    assert vs[0].cotenants == 1
+    # The busy co-tenant is not reapable - its own tail says it is mid-task,
+    # which is a fact about the ROW, never about the tree.
+    assert vs[1].verdict != REAP
+
+    # The worktree branch: the apply holds the rm and the tree is not
+    # touched - no stop, no rm reaches the runner while a peer stands in it.
+    monkey_flags = {"ran": False}
+
+    def runner(argv, **kwargs):
+        monkey_flags["ran"] = True
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(watchdog, "worktree_refusal", lambda cwd: None)
+    v = Verdict("aaaa1111-0000", "quiet", "working", REAP,
+                "node x-done done", "stop+rm", cotenants=1)
+    outcome, detail = watchdog._apply_reap(v, cwd="/wt/x-bcb5", runner=runner)
+    assert outcome == "refused" and "share /wt/x-bcb5" in detail
+    assert "not touched" in detail
+    assert monkey_flags["ran"] is False, "the destructive step ran on a shared tree"
+
+
+def test_a_shared_worktree_row_probed_alive_or_unknown_is_refused_and_names_it():
+    """The probe gate, named (x-ad13): on the same shared tree, a row the
+    probe reports ALIVE refuses as NO, and a row the probe cannot answer
+    refuses as UNKNOWN. Neither is ever a YES; the basis names which."""
+    shared = {
+        "aaaa1111-0000": _facts(FINISHED_TAIL, age_min=30),
+    }
+    nodes = {"x-done": {"status": "done"}}
+    for probe, expect in (("alive", "leave"), ("unknown", "stale")):
+        row = Row("aaaa1111-0000", "quiet", "working", "x-done", "/wt/x-bcb5",
+                  origin="spawn", last_message_at=STALE_MESSAGE_STAMP,
+                  probe=probe)
+        [v] = _run([row], shared, nodes=nodes)
+        assert v.verdict == expect, (probe, v.verdict, v.basis)
+        assert "liveness probe" in v.basis, (probe, v.basis)
+        assert probe in v.basis
+
+
+def test_a_king_shaped_row_is_never_reaped():
+    """The measured hazard the guard split was blocked on (x-ad13).
+
+    `king-footnote-g4`, 2026-08-31: a live process, a stale ``exited_at``,
+    a quiet heartbeat, the shared canonical checkout, a done node - every
+    read this predicate had had a positive answer for except the one that
+    asks whether the worker is still running. Relax the old co-tenancy
+    guard without the probe gate and the first sweep reaps two live kings.
+    The probe gate is what makes the split landable, so this exact shape
+    must refuse forever.
+    """
+    row = Row("aaaa1111-0000", "king-footnote-g4", "working", "x-4c87",
+              "/shared/canonical", origin="spawn",
+              last_message_at=STALE_MESSAGE_STAMP, probe="alive")
+    [v] = _run(
+        [row],
+        {"aaaa1111-0000": _facts(FINISHED_TAIL, age_min=120)},
+        nodes={"x-4c87": {"status": "done"}},
+    )
+    assert v.verdict != REAP, v.basis
+    assert "probe positively reports the worker alive" in v.basis, v.basis
+    # The stop lane reads the same probe: retire must not stop a live king
+    # either, however done its tail reads.
+    assert v.verdict != watchdog.RETIRE, v.basis
+
+
+def test_a_crowned_row_is_never_reaped_on_a_node_done_basis():
+    """A king spans many nodes; one node's ``done`` says nothing about the
+    crown. Measured 2026-08-31: all 14 ledger hits resolved to done nodes,
+    including two live kings - the node-done basis selects crowned rows
+    first. With the probe death proof STAGED (the stricter setup, so the
+    crown rule is isolated from the probe gate), a crowned row still refuses
+    where its uncrowned twin reaps."""
+    common = dict(
+        state="working", node="x-4c87", cwd="/shared/canonical",
+        origin="spawn", last_message_at=STALE_MESSAGE_STAMP, probe="dead",
+    )
+    king = Row("aaaa1111-0000", "king-footnote-g4", crowned=True, **common)
+    worker = Row("bbbb2222-0000", "plain-worker", crowned=False, **common)
+    quiet = _facts(FINISHED_TAIL, age_min=120)
+    nodes = {"x-4c87": {"status": "done"}}
+
+    answer, basis = _decide(king, facts=quiet, nodes=nodes)
+    assert answer == watchdog.REAP_NO, basis
+    # The refusal is the deliverable's, not any later guard's: the node-done
+    # basis was never minted for a crowned row.
+    assert basis == "", basis
+
+    answer, basis = _decide(worker, facts=quiet, nodes=nodes)
+    assert answer == watchdog.REAP_YES and "node x-4c87 done" in basis
+
+
+def test_a_crown_does_not_block_the_claim_basis():
+    """The crown bars only the NODE-DONE basis. Another live session
+    holding the node's claim is a fact about THIS row's deliverable and
+    still registers as the basis; the row then answers on the rest of its
+    reads, here a full yes since every one of them passes."""
+    row = Row("aaaa1111-0000", "king-footnote-g4", "working", "x-4c87",
+              "/shared/canonical", origin="spawn",
+              last_message_at=STALE_MESSAGE_STAMP, probe="dead", crowned=True)
+    quiet = _facts(FINISHED_TAIL, age_min=120)
+    answer, basis = _decide(
+        row, facts=quiet,
+        claims={"x-4c87": {"state": "live", "holder": "target-session:zzzz9999-0000"}},
+    )
+    assert answer == watchdog.REAP_YES and "claim held by" in basis
+
+
+def test_probe_liveness_positive_markers_only(monkeypatch):
+    """The group 1 probe's vocabulary, pinned: positive markers answer
+    alive/dead, silence answers unknown - never a guess in either
+    direction."""
+    class Entry:
+        def __init__(self, pid=None, start=None, exited_at=None, beat=None,
+                     ttl_ms=None):
+            self.pid = pid
+            self.pid_start_time = start
+            self.exited_at = exited_at
+            self.inside_leg = (
+                None if beat is None
+                else {**beat, **({"ttl_ms": ttl_ms} if ttl_ms is not None else {})}
+            )
+
+    class FakeProc:
+        def __init__(self, create_time):
+            self._t = create_time
+
+        def create_time(self):
+            return self._t
+
+    class FakePsutil:
+        class NoSuchProcess(Exception):
+            pass
+
+        @staticmethod
+        def Process(pid):
+            if pid == 4242:
+                return FakeProc(100000.0)
+            raise FakePsutil.NoSuchProcess()
+
+    # pid leg: matching start time is a positive LIFE marker...
+    import sys
+
+    monkeypatch.setitem(sys.modules, "psutil", FakePsutil)
+    assert watchdog._probe_liveness(Entry(pid=4242, start=100000.0)) == "alive"
+    # ...a mismatched start time is a POSITIVE death proof (the pid was
+    # recycled by another process)...
+    assert watchdog._probe_liveness(Entry(pid=4242, start=999999.0)) == "dead"
+    # ...and a process that is gone is a positive death proof.
+    assert watchdog._probe_liveness(Entry(pid=13, start=1.0)) == "dead"
+    monkeypatch.delitem(sys.modules, "psutil")
+
+    # heartbeat leg: received STRICTLY LATER than exited_at proves the row
+    # advanced past its own exit stamp...
+    beat = {"received_at": "2026-08-31T08:00:00Z"}
+    assert watchdog._probe_liveness(Entry(
+        exited_at="2026-08-31T00:42:40Z", beat=beat)) == "alive"
+    # ...a beat that predates the exit stamp proves nothing...
+    assert watchdog._probe_liveness(Entry(
+        exited_at="2026-08-31T09:00:00Z", beat=beat)) == "unknown"
+    # ...and a TTL'd beat past its window is not a marker.
+    assert watchdog._probe_liveness(Entry(
+        exited_at="2026-08-31T00:42:40Z", beat=beat, ttl_ms=1000)) == "unknown"
+
+    # Silence on every rung is unknown - a row with no pid, no heartbeat
+    # and no exit stamp is UNPROVEN, never dead.
+    assert watchdog._probe_liveness(Entry()) == "unknown"
+    assert watchdog._probe_liveness(None) == "unknown"
 
 
 def test_ledger_join_reads_the_singular_session_key_without_spreading_it(
@@ -2715,9 +2885,12 @@ def test_occupancy_is_read_from_the_transcript_not_the_roster():
     asks the transcript, and anything it cannot read counts as occupied.
     """
     # A live sibling by TRANSCRIPT, while its roster state says stopped.
+    # Since x-ad13 the tally guards the WORKTREE branch, so it rides the
+    # REAP verdict's ``cotenants`` field instead of refusing the verdict:
+    # the transcript, not the roster, still decides who occupies the tree.
     rows = [
         Row("aaaa1111-0000", "quiet", "working", "x-done", "/wt/one",
-            origin="spawn", last_message_at=STALE_MESSAGE_STAMP),
+            origin="spawn", last_message_at=STALE_MESSAGE_STAMP, probe="dead"),
         Row("bbbb2222-0000", "live-but-reads-stopped", "stopped", "x-done", "/wt/one",
             origin="spawn", last_message_at=STALE_MESSAGE_STAMP),
     ]
@@ -2729,8 +2902,8 @@ def test_occupancy_is_read_from_the_transcript_not_the_roster():
         },
         nodes={"x-done": {"status": "done"}},
     )
-    assert vs[0].verdict == STALE, vs[0].basis
-    assert "share /wt/one" in vs[0].basis
+    assert vs[0].verdict == REAP, vs[0].basis
+    assert vs[0].cotenants == 1, vs[0].cotenants
 
     # An UNREADABLE sibling transcript also holds the tree: absence is not
     # evidence that the sibling left.
@@ -2739,7 +2912,10 @@ def test_occupancy_is_read_from_the_transcript_not_the_roster():
         {"aaaa1111-0000": _facts(FINISHED_TAIL, age_min=120)},
         nodes={"x-done": {"status": "done"}},
     )
-    assert vs[0].verdict == STALE, vs[0].basis
+    assert vs[0].verdict == REAP, vs[0].basis
+    # The unreadable sibling still counts as occupied (absence is not
+    # evidence it left), so the tally that rides the verdict is 1.
+    assert vs[0].cotenants == 1, vs[0].cotenants
 
     # Two genuinely quiet rows have nobody to protect, so the lane still works.
     vs = _run(
@@ -2751,6 +2927,7 @@ def test_occupancy_is_read_from_the_transcript_not_the_roster():
         nodes={"x-done": {"status": "done"}},
     )
     assert vs[0].verdict == REAP, vs[0].basis
+    assert vs[0].cotenants == 0, vs[0].cotenants
 
 
 def test_the_roster_refusal_carries_its_cause(monkeypatch, tmp_path, capsys):
@@ -2795,7 +2972,7 @@ def test_a_watchdog_event_uses_a_source_the_schema_accepts(tmp_path, monkeypatch
 # The reap predicate: one gate, and every failed read is UNKNOWN
 # ---------------------------------------------------------------------------
 
-def _decide(row, *, facts=None, nodes=None, claims=None, cotenants=0,
+def _decide(row, *, facts=None, nodes=None, claims=None,
             node_state_for=None, claim_for=None, now_s=NOW_1840):
     return watchdog.reap_decision(
         row,
@@ -2804,7 +2981,6 @@ def _decide(row, *, facts=None, nodes=None, claims=None, cotenants=0,
         claim_for=claim_for or (lambda n: (claims or {}).get(n, {})),
         now_s=now_s,
         quiet_after_s=watchdog.REAP_QUIET_AFTER_S,
-        cotenants=cotenants,
     )
 
 
@@ -2815,7 +2991,8 @@ def test_every_failed_read_is_unknown_and_unknown_never_reaps():
     thing used as a verdict about another, usually an ABSENCE read as a
     positive answer. Fixing them site by site converged on nothing. This
     pins the shape instead: whatever fails, the answer is UNKNOWN, and the
-    only way to YES is through three positive markers.
+    only way to YES is through the positive markers, ending in a POSITIVE
+    death proof from the probe (x-ad13).
     """
     row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo",
               origin="spawn", last_message_at=STALE_MESSAGE_STAMP)
@@ -2842,13 +3019,14 @@ def test_every_failed_read_is_unknown_and_unknown_never_reaps():
     answer, _ = _decide(row, facts=blind, nodes={"x-done": {"status": "done"}})
     assert answer == watchdog.REAP_UNKNOWN
 
-    # A shared worktree is not "mine to delete".
-    answer, _ = _decide(row, facts=quiet, nodes={"x-done": {"status": "done"}},
-                        cotenants=1)
-    assert answer == watchdog.REAP_UNKNOWN
-
-    # All three markers present, and only then.
+    # A silent probe is not death (x-ad13).
     answer, basis = _decide(row, facts=quiet, nodes={"x-done": {"status": "done"}})
+    assert answer == watchdog.REAP_UNKNOWN
+    assert "probe is silent" in basis
+
+    # All three markers present, plus a POSITIVE death proof, and only then.
+    answer, basis = _decide(row._replace(probe="dead"), facts=quiet,
+                            nodes={"x-done": {"status": "done"}})
     assert answer == watchdog.REAP_YES
     assert "quiet" in basis
 
@@ -2925,7 +3103,7 @@ def test_a_session_still_in_play_is_never_reaped():
     work is over. A worker parked on <watching>, one holding a question, and
     one waiting out a rate limit are all silent and all still in play."""
     row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo",
-              origin="spawn", last_message_at=STALE_MESSAGE_STAMP)
+              origin="spawn", last_message_at=STALE_MESSAGE_STAMP, probe="dead")
     nodes = {"x-done": {"status": "done"}}
 
     parked = _facts("<watching>ci</watching>", age_min=200)
@@ -3298,7 +3476,8 @@ def test_the_three_origin_values_reach_three_different_verdicts():
     }
     for origin, want in expected.items():
         row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo",
-                  origin=origin, last_message_at=STALE_MESSAGE_STAMP)
+                  origin=origin, last_message_at=STALE_MESSAGE_STAMP,
+                  probe="dead")
         answer, basis = _decide(
             row,
             facts=_facts(FINISHED_TAIL, age_min=200),
@@ -3348,8 +3527,10 @@ def test_the_unrecorded_origin_read_never_silences_a_more_specific_refusal():
     row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/shared",
               origin=None, last_message_at=STALE_MESSAGE_STAMP)
 
-    _, basis = _decide(row, facts=quiet, nodes=nodes, cotenants=1)
-    assert "share /wt/shared" in basis
+    # A silent probe still does not outrank the origin read (x-ad13): the
+    # probe is the LAST gate, so the ownership silence speaks first.
+    _, basis = _decide(row, facts=quiet, nodes=nodes)
+    assert "origin" in basis and "probe" not in basis
 
     _, basis = _decide(row, facts=_facts("<watching>ci</watching>", age_min=200),
                        nodes=nodes)
@@ -3410,11 +3591,13 @@ def test_the_recency_read_never_silences_a_more_specific_refusal():
     """
     quiet = _facts(FINISHED_TAIL, age_min=200)
     nodes = {"x-done": {"status": "done"}}
-    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/shared")
+    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/shared",
+              origin="spawn")
 
-    # Shared worktree still names the worktree.
-    _, basis = _decide(row, facts=quiet, nodes=nodes, cotenants=1)
-    assert "share /wt/shared" in basis
+    # A silent probe still does not outrank the recency read (x-ad13): the
+    # probe is the LAST gate, so the unreadable stamp speaks first.
+    _, basis = _decide(row, facts=quiet, nodes=nodes)
+    assert "recency is unproven" in basis and "probe" not in basis
 
     # A tail still in play still names the tail.
     _, basis = _decide(row, facts=_facts("<watching>ci</watching>", age_min=200),
