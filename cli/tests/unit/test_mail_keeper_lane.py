@@ -50,7 +50,13 @@ def mailbox(tmp_path, monkeypatch):
 
 
 def _send(monkeypatch, session, injector, capsys):
-    """Drive the name-lane choke point directly with a resolved recipient."""
+    """Drive the name-lane choke point directly with a resolved recipient.
+
+    The registry row behind the session id is a keeper THREAD row: a socket
+    under mux/threads, the predicate both the ladder guard and the verb read.
+    """
+    from types import SimpleNamespace
+
     from fno.mail import cli
 
     recorded: list[tuple] = []
@@ -67,6 +73,16 @@ def _send(monkeypatch, session, injector, capsys):
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", _wrong)
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", _wrong)
     monkeypatch.setattr("fno.agents.dispatch._mux_pane_send", _wrong)
+
+    def _resolve_agent(_sid):
+        return SimpleNamespace(
+            entry=SimpleNamespace(
+                status="live",
+                messaging_socket_path="/x/.fno/mux/threads/wk-9.sock",
+            )
+        )
+
+    monkeypatch.setattr("fno.agents.registry.resolve_agent", _resolve_agent)
 
     cli._name_lane_send("ping", from_name="web", resolved=session)
     return recorded, capsys.readouterr()
@@ -96,24 +112,69 @@ def test_a_keeper_miss_demotes_durably_naming_the_verb_reason(
     mailbox, monkeypatch, capsys
 ):
     """AC2: an unreachable keeper demotes honestly and states why. The roster
-    pane rung sits this out: the row hosts no pane by design, and a stale ref
-    would type into an unrelated pane and read as delivered."""
+    pane rung sits this out (asserted by _send's pane double raising): the
+    thread row hosts no pane by design, and a stale ref would type into an
+    unrelated pane and read as delivered."""
 
     def _miss(*_a, reason_out, **_k):
         if reason_out is not None:
             reason_out.append("no-keeper-listener")
         return False
 
-    def _resolve_agent(_sid):
-        raise AssertionError("the roster pane rung fired for a keeper recipient")
-
-    monkeypatch.setattr("fno.agents.registry.resolve_agent", _resolve_agent)
-
     _recorded, out = _send(monkeypatch, _keeper_session(), _miss, capsys)
 
     assert "delivered" not in out.out
     assert "queued (durable)" in out.out
     assert "[no-keeper-listener]" in out.out, "the receipt must name why it demoted"
+
+
+def test_a_pane_hosted_keeper_lane_harness_keeps_the_pane_rung(
+    mailbox, monkeypatch, capsys
+):
+    """A keeper-LANE harness in a live mux pane (opencode, agy) is NOT a
+    keeper thread: no mux/threads socket on the row. The ladder must leave it
+    on its pane rung - intercepting it stranded every pane-hosted opencode
+    worker on the durable queue with a live pane right there."""
+
+    def _wrong(_r, _t, **_k):
+        raise AssertionError("the keeper rung fired for a pane-hosted recipient")
+
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_keeper", _wrong)
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda *_a, **_k: False,
+    )
+    pane_entries: list = []
+
+    def _pane_send(entry, _text, **_k):
+        pane_entries.append(entry)
+        return True
+
+    monkeypatch.setattr("fno.agents.dispatch._mux_pane_send", _pane_send)
+
+    from types import SimpleNamespace
+
+    def _resolve_agent(_sid):
+        return SimpleNamespace(entry=SimpleNamespace(status="live"))
+
+    monkeypatch.setattr("fno.agents.registry.resolve_agent", _resolve_agent)
+    from fno.mail import cli
+
+    session = DiscoveredSession(
+        session_id="ses-opencode-1",
+        short_id="oc",
+        handle="oc",
+        pid=0,
+        cwd="/repo",
+        project=None,
+        status="live",
+        agent="opencode",
+    )
+    cli._name_lane_send("ping", from_name="web", resolved=session)
+    out = capsys.readouterr()
+    assert pane_entries, "the roster pane rung never ran for a pane-hosted row"
+    assert "delivered (hosted)" in out.out
+    assert "queued (durable)" not in out.out
 
 
 def test_lane_a_recipients_never_touch_the_keeper_verb(mailbox, monkeypatch, capsys):
