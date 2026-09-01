@@ -255,10 +255,34 @@ def test_self_review_invocation_is_the_lane_on_every_harness():
         assert rc.harness_can_self_review(harness) is True, harness
     # One recommendation for every harness: the fno lane with a level.
     for harness in ("claude", "codex", "opencode", "agy", "gemini", None, "unknown"):
-        assert rc.self_review_invocation(harness) == "/fno:review medium", harness
+        assert rc.self_review_invocation(harness) == "/fno:review medium --comment", harness
     # No native verb leaks into the recommendation from any harness.
     assert "/code-review" not in rc.self_review_invocation("claude")
-    assert rc.self_review_invocation("codex") == "/fno:review medium"
+    assert rc.self_review_invocation("codex") == "/fno:review medium --comment"
+
+
+def test_self_review_invocation_asks_for_comments_but_never_fixes():
+    """The two flags are not symmetric, and the asymmetry is the whole point.
+
+    `--fix` writes to the tree, moves HEAD, and voids the head-pinned
+    attestation the round just earned, so machinery must never issue it.
+    `--comment` writes to the PR and moves no commit, so it cannot void
+    anything - and without it a machinery-issued review leaves its findings in
+    a transcript nobody reads later, which is the silence x-c446 exists to end.
+    """
+    import fno.review_capability as rc
+
+    for level in (None, "low", "medium", "high", "xhigh", "max"):
+        rendered = rc.self_review_invocation("claude", level=level)
+        assert "--comment" in rendered, level
+        assert "--fix" not in rendered, level
+        # The router grammar is [level] [--comment] [--fix] [target], and the
+        # renderer appends the target AFTER this string. A flag that landed
+        # past the target would be read as part of the target.
+        assert rendered.endswith("--comment"), rendered
+        head, _, tail = rendered.partition(" ")
+        assert head == "/fno:review", rendered
+        assert tail.split()[0] == (level or "<level>"), rendered
 
 
 def test_render_self_review_invocation_sizes_from_the_diff_never_the_default(monkeypatch):
@@ -271,11 +295,11 @@ def test_render_self_review_invocation_sizes_from_the_diff_never_the_default(mon
     sized = rc.level_for_diff(30, 3000)
     monkeypatch.setattr(rc, "diff_review_level", lambda root: sized)
     rendered = rc.render_self_review_invocation("claude", project_root=None)
-    assert rendered == f"/fno:review {sized}"
+    assert rendered == f"/fno:review {sized} --comment"
     assert "<level>" not in rendered
 
     monkeypatch.setattr(rc, "diff_review_level", lambda root: None)
-    assert rc.render_self_review_invocation("claude") == "/fno:review <level>"
+    assert rc.render_self_review_invocation("claude") == "/fno:review <level> --comment"
 
     # Harness-less invocation resolves the ambient session; sizing still rides
     # the same path. A dead render never raises - it degrades to the placeholder.
@@ -293,7 +317,7 @@ def test_render_self_review_invocation_names_the_final_pr_head_and_base():
         head_sha="abc1234",
         base_branch="main",
     )
-    assert codex == "/fno:review <level> HEAD abc1234 of PR 123 against origin/main"
+    assert codex == "/fno:review <level> --comment HEAD abc1234 of PR 123 against origin/main"
 
     claude = rc.render_self_review_invocation(
         "claude",
@@ -303,7 +327,7 @@ def test_render_self_review_invocation_names_the_final_pr_head_and_base():
         base_branch="main",
     )
     assert claude == (
-        "/fno:review <level> HEAD abc1234 of PR 123 against origin/main"
+        "/fno:review <level> --comment HEAD abc1234 of PR 123 against origin/main"
     )
 
 
@@ -342,12 +366,12 @@ def test_ultra_is_structurally_unreachable():
 def test_self_review_invocation_takes_the_level():
     import fno.review_capability as rc
 
-    assert rc.self_review_invocation("claude", level="high") == "/fno:review high"
+    assert rc.self_review_invocation("claude", level="high") == "/fno:review high --comment"
     # No diff in hand yet: the placeholder survives for a pre-diff surface.
-    assert rc.self_review_invocation("claude", level=None) == "/fno:review <level>"
+    assert rc.self_review_invocation("claude", level=None) == "/fno:review <level> --comment"
     # The level travels on every harness alike.
-    assert rc.self_review_invocation("codex", level="high") == "/fno:review high"
-    assert rc.self_review_invocation("agy", level="low") == "/fno:review low"
+    assert rc.self_review_invocation("codex", level="high") == "/fno:review high --comment"
+    assert rc.self_review_invocation("agy", level="low") == "/fno:review low --comment"
 
 
 def test_satisfiable_verdict_names_the_lane():
@@ -404,12 +428,12 @@ def test_review_invocation_verb_prints_the_render(monkeypatch, tmp_path):
 
     out = CliRunner().invoke(target_app, ["review-invocation", "--harness", "claude"])
     assert out.exit_code == 0, out.output
-    assert out.output.strip() == f"/fno:review {sized}"
+    assert out.output.strip() == f"/fno:review {sized} --comment"
 
     bare = CliRunner().invoke(target_app, ["review-invocation", "--harness", "codex"])
     assert bare.exit_code == 0, bare.output
-    assert bare.output.strip() == f"/fno:review {sized}"
+    assert bare.output.strip() == f"/fno:review {sized} --comment"
 
     portable = CliRunner().invoke(target_app, ["review-invocation", "--harness", "agy"])
     assert portable.exit_code == 0, portable.output
-    assert portable.output.strip() == f"/fno:review {sized}"
+    assert portable.output.strip() == f"/fno:review {sized} --comment"
