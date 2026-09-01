@@ -201,14 +201,47 @@ def _spawn(monkeypatch, tmp_path, **kwargs):
     return result, runner
 
 
+def _build_real_mux_binaries(repo: Path, cargo: Path) -> tuple[Path, Path]:
+    """Build BOTH binaries a pane journey drives: the ``fno`` mux binary and
+    the ``fno-agents-worker`` keeper it execs.
+
+    The keeper lane resolves its worker through paired_bin (env override,
+    installed sibling, dev-tree target dir, PATH - crates/fno/src/server.rs
+    ``keeper_worker_bin``). A journey that builds only ``fno`` dies at pane
+    spawn with ENOENT on a checkout where the sibling crate was never built -
+    exactly the changed-packet CI job, which installs a toolchain but runs no
+    crate build step. Building both here and exporting
+    ``FNO_AGENTS_WORKER_BIN`` makes the journey self-contained on every host."""
+    build_env = {
+        **os.environ,
+        "CARGO_HOME": str(cargo.parent.parent),
+        "RUSTUP_HOME": str(cargo.parent.parent.parent / ".rustup"),
+    }
+    for manifest, bin_name in (
+        (repo / "crates" / "fno" / "Cargo.toml", "fno"),
+        (repo / "crates" / "fno-agents" / "Cargo.toml", "fno-agents-worker"),
+    ):
+        built = subprocess.run(
+            [str(cargo), "build", "--manifest-path", str(manifest), "--bin", bin_name],
+            cwd=repo,
+            env=build_env,
+            text=True,
+            capture_output=True,
+        )
+        assert built.returncode == 0, built.stderr
+    fno_bin = repo / "crates" / "fno" / "target" / "debug" / "fno"
+    worker_bin = (
+        repo / "crates" / "fno-agents" / "target" / "debug" / "fno-agents-worker"
+    )
+    return fno_bin, worker_bin
+
+
 def test_late_codex_identity_composes_across_every_peer_surface(
     tmp_path: Path, monkeypatch
 ) -> None:
     """One derived pane identity reaches every public peer surface unchanged."""
     use_tmpdir(monkeypatch, tmp_path)
     repo = Path(__file__).resolve().parents[3]
-    manifest = repo / "crates" / "fno" / "Cargo.toml"
-    fno_bin = repo / "crates" / "fno" / "target" / "debug" / "fno"
     cargo_path = shutil.which("cargo")
     if cargo_path is None:
         # This is the strongest test in the suite and it drives the real fno
@@ -217,26 +250,13 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         # this invariant, and a red that means "no rust here" trains people to
         # ignore reds.
         pytest.skip("cargo not on PATH; this journey drives the real fno binary")
-    cargo = Path(cargo_path)
-    cargo_home = cargo.parent.parent
-    build_env = {
-        **os.environ,
-        "CARGO_HOME": str(cargo_home),
-        "RUSTUP_HOME": str(cargo_home.parent / ".rustup"),
-    }
-    built = subprocess.run(
-        [str(cargo), "build", "--manifest-path", str(manifest), "--bin", "fno"],
-        cwd=repo,
-        env=build_env,
-        text=True,
-        capture_output=True,
-    )
-    assert built.returncode == 0, built.stderr
+    fno_bin, worker_bin = _build_real_mux_binaries(repo, Path(cargo_path))
 
     agents_home = tmp_path / ".fno" / "agents"
     mux_dir = Path("/tmp") / f"fno-i-{os.getpid()}-{uuid.uuid4().hex[:6]}"
     mux_dir.mkdir()
     monkeypatch.setenv("FNO_BIN", str(fno_bin))
+    monkeypatch.setenv("FNO_AGENTS_WORKER_BIN", str(worker_bin))
     monkeypatch.setenv("FNO_AGENTS_HOME", str(agents_home))
     monkeypatch.setenv("FNO_MUX_DIR", str(mux_dir))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claim-root"))
@@ -442,25 +462,10 @@ def test_codex_autonomous_pane_journey_completes_without_operator_input(
     """A fake Codex pane receives its task, exits, and leaves readable output."""
     use_tmpdir(monkeypatch, tmp_path)
     repo = Path(__file__).resolve().parents[3]
-    manifest = repo / "crates" / "fno" / "Cargo.toml"
-    fno_bin = repo / "crates" / "fno" / "target" / "debug" / "fno"
     cargo_path = shutil.which("cargo")
     if cargo_path is None:
         pytest.skip("cargo not on PATH; this journey drives the real fno binary")
-    cargo = Path(cargo_path)
-    cargo_home = cargo.parent.parent
-    built = subprocess.run(
-        [str(cargo), "build", "--manifest-path", str(manifest), "--bin", "fno"],
-        cwd=repo,
-        env={
-            **os.environ,
-            "CARGO_HOME": str(cargo_home),
-            "RUSTUP_HOME": str(cargo_home.parent / ".rustup"),
-        },
-        text=True,
-        capture_output=True,
-    )
-    assert built.returncode == 0, built.stderr
+    fno_bin, worker_bin = _build_real_mux_binaries(repo, Path(cargo_path))
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -485,6 +490,7 @@ sleep 5
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
         "FNO_BIN": str(fno_bin),
+        "FNO_AGENTS_WORKER_BIN": str(worker_bin),
         "FNO_AGENTS_HOME": str(agents_home),
         "FNO_MUX_DIR": str(mux_dir),
         "FNO_CLAIMS_ROOT": str(tmp_path / "claims"),
