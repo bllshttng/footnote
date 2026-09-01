@@ -59,7 +59,7 @@ def table(monkeypatch):
     """Substitute the process enumeration and neutralise the live probes, so a
     test scan sees exactly the rows it declares."""
     rows: list[dict] = []
-    monkeypatch.setattr(orphans, "_iter_processes", lambda *a, **k: iter(rows))
+    monkeypatch.setattr(orphans, "iter_processes", lambda *a, **k: iter(rows))
     monkeypatch.setattr(orphans, "_spawn_probe", lambda *a, **k: None)
     monkeypatch.setattr(orphans, "_await_orphaned", lambda *a, **k: None)
     monkeypatch.setattr(orphans, "_repo_roots", lambda: ["/repo"])

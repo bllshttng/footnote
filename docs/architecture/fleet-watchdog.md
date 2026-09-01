@@ -91,6 +91,26 @@ Reap ships OFF and the other three lanes ship on, because only reap is unrecover
 
 One predicate decides every reap, and it answers yes, no, or UNKNOWN. Eight review findings across three rounds turned out to be one defect wearing eight costumes. Each was a reading about one thing used as a verdict about another. Three of them read an ABSENCE as a positive answer. A missing transcript meant "finished". An unmapped state spelling meant "no lane". A raised schema error meant "event written". Fixing those where they were found converged on nothing, because the shape was the bug rather than the sites. So `reap_decision` takes the three positive markers a reap needs. Everything else is UNKNOWN, and UNKNOWN never reaps. That covers a read that raised, a read that returned nothing, and a reading this code does not recognise. A new spelling or an unreadable store cannot produce the marker, so it cannot reach the delete. The worst case is a row a human looks at.
 
+## The keeper lane
+
+A `--pane` or `--keeper` process of `fno-agents-worker` whose server died belongs to no shipped sweep. The orphan sweep declines it (`orphans.py` `OWN_DAEMONS`) because ppid 1 is a keeper's normal state. The registry-side sweep walks only the thread socket dir (`daemon.rs` `keeper_registry_sweep`). The pane sweep `KeeperAdopt` runs inside the mux server, which is exactly the thing that died. Measured 2026-09-01: seven live keepers at ppid 1, ages to 22.5h, every one a test fixture, zero socket directories, zero claiming rows. A socket walk reported a clean machine over seven live processes.
+
+The keeper lane discovers by PROCESS and joins through argv. Every keeper carries `--sock` and `--session` on its own command line. A `psutil` read yields pid, socket, session, cwd and age with no directory walk. The lane lives in `cli/src/fno/agents/keeper_lane.py`. It shares the orphan sweep's enumeration (`iter_processes` - one `psutil.process_iter` call site, or the sweeps drift) and adds a `--only keeper` filter to this verb.
+
+A reap verdict needs all three arms, each a positive reading:
+
+| Arm | REAP requires | Refusal names |
+|-----|---------------|---------------|
+| socket | `no_listener` (connect refused) or `absent` (file gone) | a live listener, silence, or no declared `--sock` |
+| claim | no registry row names the keeper's pid or any hosted child in `pid`/`keeper_child_pid` | the row that claims it |
+| age | older than `REAP_MIN_AGE_S` (600, the orphan sweep's grace) | a fresh keeper is a keeper |
+
+Silence never reaps. A keeper that accepts the probe and stays quiet past the 750ms bound (`daemon.rs`'s per-probe budget) is named and left. An unreadable registry fails the claim arm closed for every keeper at once.
+
+The kill rides `--apply-all`, never `--apply`. Killing a keeper destroys work, the line that flag's help text draws. The keeper calls `setsid`, so it is its own process-group leader. One group signal ends it and everything it hosts. The receipt counts keepers and hosted children separately. A broken lane (unreadable registry, failed enumeration) reaps nothing.
+
+The positive controls plant a real `fno-agents-worker` over a `bash while-read` child and assert the planted pid by number (`cli/tests/unit/test_keeper_lane.py`). One orphan is collected in dry run and under `--apply-all`. One live listener survives both. One registry-claimed keeper survives both. A count is not a marker - this machine has carried live orphans during development.
+
 ## The two protectors
 
 Two facts make a reap safe. Whether a human is sitting in the session, and whether anyone spoke to it recently. Neither reached the decision until this change, and the reason is worth stating. It was not a missing rule. Both rules were written down and neither was reachable.

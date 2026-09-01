@@ -4198,11 +4198,26 @@ def _run_unfinished_report(
     payload = uw.publish_report(
         snapshot, source="manual", now_s=now, mail_to=recipient or "", log=_note
     )
+    # The keeper lane rides the default report: each finding names its own
+    # clearing command, and the lane here is read-only whatever the flags -
+    # collection is `--only keeper --apply-all`, and the row lanes below never
+    # see a keeper.
+    lane_lines: list[str] = []
+    try:
+        from fno.agents import keeper_lane
+
+        lane_result = keeper_lane.discover()
+        lane_lines = keeper_lane.render(lane_result).splitlines()
+        payload["keepers"] = lane_result.to_json()
+    except Exception as exc:  # noqa: BLE001 - the report outlives one lane's crash
+        lane_lines = [f"keeper lane: crashed: {exc!r}"]
     if json_out:
         sys.stdout.write(json.dumps(payload) + "\n")
         sys.stdout.flush()
         return
     typer.echo(uw.snapshot_digest(snapshot))
+    for line in lane_lines:
+        typer.echo(line)
     for warning in payload["warnings"]:
         print(f"warning: {warning}", file=sys.stderr)
 
@@ -4225,16 +4240,18 @@ def cmd_watchdog(
         "--apply-all",
         help=(
             "Execute every lane: wake plus reap, reroute and retire, which all "
-            "stop a session. Only reap also deletes its worktree; retire is a "
-            "stop that `fno agents resume` undoes. Implies --apply."
+            "stop a session, plus keeper collection, which kills an orphaned "
+            "keeper process and its hosted children. Only reap also deletes "
+            "its worktree; retire is a stop that `fno agents resume` undoes. "
+            "Implies --apply."
         ),
     ),
     only: Optional[str] = typer.Option(
         None, "--only",
         help=(
             "DIAGNOSTIC: filter the internal session-verdict table to one "
-            "verdict (wake|reroute|reap|retire|ghost|stale|leave|recoverable). "
-            "Recovery internals, not the operator report."
+            "verdict (wake|reroute|reap|retire|ghost|stale|leave|recoverable|"
+            "keeper). Recovery internals, not the operator report."
         ),
     ),
     since: str = typer.Option(
@@ -4418,6 +4435,51 @@ def cmd_watchdog(
             )
         return
 
+    if only == wd.KEEPER:
+        # The keeper lane's own surface: keepers have no registry row, so the
+        # per-row sweep has nothing to classify. Dry run names every keeper
+        # with its verdict and reason; ONLY --apply-all collects, because
+        # killing a keeper destroys work - the bar --apply's help text
+        # promises the wake lane never crosses.
+        from fno.agents import keeper_lane
+
+        try:
+            lane_result = keeper_lane.discover()
+        except Exception as exc:  # noqa: BLE001 - a crashed lane withholds, never half-acts
+            print(f"fno agents watchdog: keeper lane crashed: {exc!r}", file=sys.stderr)
+            raise typer.Exit(code=3) from exc
+        if json_out:
+            from datetime import datetime, timezone
+
+            payload = {
+                "generated_at": datetime.fromtimestamp(
+                    now, tz=timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "lane": wd.KEEPER,
+                **lane_result.to_json(),
+            }
+            if apply_all:
+                keepers, children = keeper_lane.reap_keepers(lane_result)
+                payload["reaped_keepers"] = keepers
+                payload["reaped_children"] = children
+            sys.stdout.write(json.dumps(payload) + "\n")
+            sys.stdout.flush()
+            raise typer.Exit(code=3 if lane_result.broken else 0)
+        typer.echo(keeper_lane.render(lane_result))
+        if lane_result.broken:
+            raise typer.Exit(code=3)
+        if apply and not apply_all:
+            typer.echo(
+                "--apply never kills a keeper (wake lane only); "
+                "the collect flag is --apply-all"
+            )
+        elif apply_all:
+            keepers, children = keeper_lane.reap_keepers(lane_result)
+            typer.echo(
+                f"reaped {len(keepers)} keeper(s), {len(children)} hosted child(ren)"
+            )
+        return
+
     if only is None and not apply and not apply_all:
         # The default surface: the unfinished-work report. Session verdicts
         # (and their counts) are recovery internals behind --apply/--only,
@@ -4563,8 +4625,32 @@ def cmd_watchdog(
             {"row_id": v.row_id, "verdict": v.verdict, "detail": detail,
              "outcome": outcome},
         )
+    keeper_reaped: dict = {}
+    if apply_all and only is None:
+        # Keeper collection rides --apply-all, never --apply: killing a keeper
+        # destroys work, the bar the flag help draws. It also rides the FULL
+        # surface only: `--only <verdict>` is a diagnostic filter over the
+        # session table, and a filtered run must not widen its destructive
+        # scope to a lane the filter did not name. A crashed or broken lane is
+        # named, never silently skipped.
+        from fno.agents import keeper_lane
+
+        try:
+            lane_result = keeper_lane.discover()
+            keepers, children = keeper_lane.reap_keepers(lane_result)
+        except Exception as exc:  # noqa: BLE001 - one lane's crash never ends the sweep
+            print(f"keeper lane crashed: {exc!r}", file=sys.stderr)
+        else:
+            keeper_reaped = {"keepers": keepers, "keeper_children": children}
+            if lane_result.broken:
+                print(f"keeper lane: {lane_result.broken_reason}", file=sys.stderr)
+            elif keepers or children:
+                typer.echo(
+                    f"reaped {len(keepers)} keeper(s), "
+                    f"{len(children)} hosted child(ren)"
+                )
     if json_out:
-        sys.stdout.write(json.dumps({"results": results}) + "\n")
+        sys.stdout.write(json.dumps({"results": results, **keeper_reaped}) + "\n")
         sys.stdout.flush()
 
 

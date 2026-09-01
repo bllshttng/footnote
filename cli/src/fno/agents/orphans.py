@@ -177,9 +177,12 @@ def reaper_set(reaper: int) -> set[int]:
     return {reaper, 1}
 
 
-def _iter_processes(reaper: int = 1) -> Iterator[dict]:
+def iter_processes(reaper: int = 1) -> Iterator[dict]:
     """Every process this uid can read, as plain dicts.
 
+    Public since the keeper lane joined: a second
+    ``psutil.process_iter`` call site is how two sweeps drift apart, so both
+    the orphan sweep and the keeper lane enumerate through this one function.
     Isolated behind one function so the tests can substitute a fabricated table
     and exercise the arms the live probes cannot reach (foreign uid, census
     membership, the reap age gate).
@@ -495,7 +498,7 @@ def scan(reap: bool = False, skip_probe: Optional[str] = None) -> ScanResult:
             # of reporting nothing at all.
             result.broken_reason = "no probe reparented, so the reaper is unknown"
         reapers = reaper_set(reaper) if reaper is not None else set()
-        for info in _iter_processes(reaper) if reaper is not None else ():
+        for info in iter_processes(reaper) if reaper is not None else ():
             result.total += 1
             if info.get("ppid") not in reapers:
                 continue
