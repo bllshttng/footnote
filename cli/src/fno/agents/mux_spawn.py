@@ -1257,9 +1257,16 @@ def build_pane_argv(
     if message.strip().startswith(("/", "$fno:")):
         message = normalize_command(message, provider)
 
-    from fno.agents.harness_map import render_session_argv
+    from fno.agents.harness_map import is_declared, render_session_argv
 
-    identity = render_session_argv(provider, "interactive_create", session_uuid)
+    # An undeclared harness has no resume contract to render an identity from,
+    # and none is invented: the generic arm below is the bare binary. Any
+    # session pinning is a per-vendor flag shape this lane refuses to guess.
+    identity = (
+        render_session_argv(provider, "interactive_create", session_uuid)
+        if is_declared(provider)
+        else [provider]
+    )
 
     # x-b6e2: resolve the Tier-3 passthrough tokens once, up front, so an
     # unmappable (provider, flag) cell fails closed BEFORE any provider arm builds
@@ -1474,6 +1481,19 @@ def build_pane_argv(
             # no equal-form. fno's DRIVING lane is rpc, where the message rides
             # a JSON string field that no parser can read as a flag.
             argv += [message]
+        return argv
+    if not is_declared(provider):
+        # The undeclared lane: fno is the VIEWPORT, nothing more. No identity
+        # flag, no model, no effort, no permission mapping and no tier3 state
+        # grant - every one of those is a per-vendor spelling, and inventing one
+        # is the guess this lane exists to refuse. Whatever the binary needs
+        # rides the operator's own `-- <flags>` (x-1caa passthrough).
+        #
+        # The seed is deliberately NOT in argv: `seed_rode_in_argv` then answers
+        # False and `_submit_spawn_seed` types it after readiness, the same path
+        # agy already takes. Nothing new is written for it.
+        argv = [provider]
+        argv += pane_passthrough_tokens(passthrough, argv)
         return argv
     raise DispatchAskError(f"provider {provider!r} has no interactive pane form", exit_code=2)
 

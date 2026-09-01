@@ -1072,6 +1072,72 @@ def test_build_pane_argv_provider_forms(no_state_grant: None, tmp_path: Path) ->
     assert "run" not in opencode and "--session-id" not in opencode
 
 
+def test_generic_pane_arm_hosts_an_undeclared_harness(
+    no_state_grant: None, tmp_path: Path
+) -> None:
+    """AC4-HP: a harness with no capability row builds the VIEWPORT argv - the
+    bare binary plus the operator's own `--` passthrough. No identity flag, no
+    model, no effort, no permission mapping: each is a per-vendor spelling and
+    inventing one is the guess this lane exists to refuse. The seed stays OUT
+    of argv so `_submit_spawn_seed` types it after readiness (the agy path)."""
+    from fno.agents.mux_spawn import build_pane_argv, seed_rode_in_argv
+
+    argv = build_pane_argv(
+        "nanoclaw", "say ready", tmp_path, False, None, passthrough=["--foo", "bar"]
+    )
+    assert argv == ["nanoclaw", "--foo", "bar"]
+    assert argv[0] == "nanoclaw"
+    assert seed_rode_in_argv("say ready", argv) is False
+    assert build_pane_argv("nanoclaw", "", tmp_path, False, None) == ["nanoclaw"]
+    # yolo/model/effort/permission carry no invented spelling on this arm: the
+    # spawn gate refuses them upstream (AC6-ERR) and the builder never guesses.
+    quiet = build_pane_argv("nanoclaw", "", tmp_path, True, None, model="m", effort="high")
+    assert quiet == ["nanoclaw"]
+
+
+def test_declared_pane_argv_is_byte_identical_after_the_generic_arm(
+    no_state_grant: None, tmp_path: Path
+) -> None:
+    """AC8-EDGE: the generic arm sits BELOW every declared arm, so no declared
+    harness's argv changes. Byte-for-byte against the same arguments the
+    provider-forms test pins (this is the red-provable regression guard for
+    the arm's position, not a restatement of that test's semantic claims)."""
+    from fno.agents.mux_spawn import build_pane_argv
+
+    assert build_pane_argv("claude", "task", tmp_path, False, "uuid-1") == [
+        "claude", "--session-id", "uuid-1", "--", "task",
+    ]
+    agy = build_pane_argv("agy", "task", tmp_path, False, "ignored-uuid")
+    assert agy == ["agy", "--dangerously-skip-permissions"]
+    opencode = build_pane_argv("opencode", "task", tmp_path, False, "ignored")
+    assert opencode == ["opencode", "--prompt=task", "--model", "zai-coding-plan/glm-5.3"]
+
+
+def test_terminal_raise_keeps_meaning_for_a_declared_harness_with_no_arm(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC8-EDGE's complement: the generic arm sits ABOVE the terminal raise,
+    which stays and now means "declared, but declares no pane form" - still a
+    real condition, just no longer the one an undeclared harness hits."""
+    import fno.agents.harness_map as hm
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import build_pane_argv
+
+    monkeypatch.setitem(
+        hm._HARNESS_CAPS,
+        "declared-but-armless",
+        {
+            "resume_strategy": {
+                "forms": {
+                    "interactive_create": {"kind": "flag", "tokens": ["declared-but-armless"]}
+                }
+            }
+        },
+    )
+    with pytest.raises(DispatchAskError, match="no interactive pane form"):
+        build_pane_argv("declared-but-armless", "", tmp_path, False, None)
+
+
 def test_build_pane_argv_codex_hook_trust_bypass_on_bypass_posture_only(
     tmp_path: Path, monkeypatch
 ) -> None:
