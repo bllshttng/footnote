@@ -1858,6 +1858,106 @@ fn is_uuid_shaped(s: &str) -> bool {
         })
 }
 
+/// The shared liveness reader's answer (x-5d96). One stable vocabulary for
+/// every caller that has to know whether a registry row's WORKER is running,
+/// replacing per-caller liveness derivations that each read a different
+/// surface (the stored `status` field chief among them, which is a constant
+/// in practice: it read `live` on 26 of 26 rows while four of those rows
+/// carried an `exited_at`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowLiveness {
+    /// A positive marker fired: the worker is provably alive.
+    Alive,
+    /// A POSITIVE death proof was folded in by the caller (e.g. a recorded pid
+    /// whose start time no longer matches). The ladder itself never answers
+    /// this - silence is never a death proof.
+    Dead,
+    /// Silence on every positive marker. Not death: an absent transcript has
+    /// two explanations and only one of them is a dead worker (the rule
+    /// `transcript_fresh_probe` already states). `Unknown` never reaps.
+    Unknown,
+}
+
+/// The ladder of positive liveness markers (x-5d96), run in order:
+///
+/// 1. **Socket** (claude rows): a 250 ms in-process connect to the session's
+///    messaging socket. This is the same probe `claude_resume_argv_with_truth`
+///    runs, extracted so both reapers call one implementation. It shells out
+///    to nothing, so it cannot silently match nothing (the measured failure a
+///    shell-loop probe had here: a lost expansion globbed zero files and
+///    printed a clean plausible negative).
+/// 2. **Heartbeat** (the codex arm; harness-agnostic): an
+///    `inside_leg.received_at` STRICTLY LATER than `exited_at` proves the row
+///    advanced past its own exit stamp. This is the x-d3ad rule stated as a
+///    positive marker, not a preference between two fields: a heartbeat that
+///    advances past `exited_at` proves life, a quiet one proves nothing.
+///    Codex carries no claude socket, so without this rung a claude-only
+///    probe answered `Unknown` for the codex majority of the registry forever.
+/// 3. **Transcript truth state** (claude rows): `working`, `watching` or
+///    `your-move` is life. `done` is a TURN state, not a process state, and
+///    answers nothing here.
+///
+/// Silence on every rung is `Unknown`. The ladder NEVER returns `Dead`: only
+/// a positive death proof may, and absence never is one. A missing or
+/// unreadable transcript falls through the third rung and lands `Unknown`.
+///
+/// Resume keeps its own inline copy of rungs 1 and 3 because it must also
+/// read the truth VALUE (`done`/`stalled` route the relaunch arm, which the
+/// verdict type has no room for); its behavior is pinned identical by tests.
+pub fn row_liveness(entry: &crate::state::RegistryEntry, claude_home: &ClaudeHome) -> RowLiveness {
+    row_liveness_with(entry, claude_home, family1_truth_state)
+}
+
+/// [`row_liveness`] with the truth-state read injected, mirroring
+/// `claude_resume_argv_with_truth`'s seam so tests can stage transcript reads
+/// (including the read that FAILS - a `None` truth state is the unreadable
+/// transcript, and the answer must be `Unknown`, never `Dead`).
+pub(crate) fn row_liveness_with<F>(
+    entry: &crate::state::RegistryEntry,
+    claude_home: &ClaudeHome,
+    truth_fn: F,
+) -> RowLiveness
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let short_id = entry.short_id.trim();
+    if !short_id.is_empty()
+        && locate_session(claude_home, short_id)
+            .map(|loc| liveness_probe(&loc.messaging_socket_path))
+            .unwrap_or(false)
+    {
+        return RowLiveness::Alive;
+    }
+    if let (Some(beat), Some(exited)) = (
+        entry
+            .inside_leg
+            .as_ref()
+            .and_then(|r| crate::state::rfc3339_like_to_secs(&r.received_at)),
+        entry
+            .exited_at
+            .as_deref()
+            .and_then(crate::state::rfc3339_like_to_secs),
+    ) {
+        if beat > exited {
+            return RowLiveness::Alive;
+        }
+    }
+    if let Some(uuid) = entry
+        .claude_session_uuid
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        if matches!(
+            truth_fn(uuid).as_deref(),
+            Some("working" | "watching" | "your-move")
+        ) {
+            return RowLiveness::Alive;
+        }
+    }
+    RowLiveness::Unknown
+}
+
 /// The claude arm of `resume` (x-9844 Fix 1): liveness-probe first, then pick the
 /// argv. A live (incl. idle) supervisor -> `claude attach <short_id>` (today's
 /// behavior); a dead/absent one -> `claude --resume <uuid>` in the recorded cwd.
@@ -6352,6 +6452,7 @@ mod tests {
             harness_session_gone: None,
             dormant_done: false,
             worktree_clean: None,
+            probe: RowLiveness::Alive,
         };
         assert_eq!(
             crate::gc::gc_action(&row, 1000, 60),

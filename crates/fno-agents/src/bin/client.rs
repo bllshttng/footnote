@@ -1680,6 +1680,8 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
                 "kept_uncorroborated": summary.kept_uncorroborated,
                 "kept_no_receipt": no_receipt,
                 "kept_live": summary.kept_live,
+                "kept_contradicted": summary.kept_contradicted,
+                "cleared_contradiction": summary.cleared_contradiction,
                 "dormant_probes_escalated": summary.dormant_probes_escalated,
                 "dry_run": dry_run,
             })
@@ -1732,6 +1734,16 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
     for id in &summary.kept_live {
         out.push_str(&format!(
             "  kept {id} (live: liveness re-check reports it alive)\n"
+        ));
+    }
+    for id in &summary.kept_contradicted {
+        out.push_str(&format!(
+            "  kept {id} (contradicted: status reads live but an exited_at is on the row and the liveness ladder is silent)\n"
+        ));
+    }
+    for id in &summary.cleared_contradiction {
+        out.push_str(&format!(
+            "  cleared stale exited_at on {id} (the liveness ladder proves the row alive)\n"
         ));
     }
     if dry_run {

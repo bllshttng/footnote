@@ -10,6 +10,7 @@
 //! liveness re-check, the worktree-cleanliness probe, and the clock -- is done by
 //! the caller and passed in, so the policy is unit-testable in isolation.
 
+use crate::client_verbs::RowLiveness;
 use crate::AgentStatus;
 
 /// How many grace windows a row with nothing to corroborate is kept before the
@@ -173,6 +174,17 @@ pub struct GcRow {
     /// not determine it (fail closed -> keep). Ignored when `owns_worktree` is
     /// false, because then there is nothing for it to protect.
     pub worktree_clean: Option<bool>,
+    /// The shared liveness ladder's answer for this row (x-5d96), read on the
+    /// stamped-row arms only: `Alive` resolves the contradiction in favour of
+    /// life, so the sweep may drop the stale stamp and report the resolution;
+    /// `Unknown` (every positive marker silent while the stored status - or
+    /// the process surface - said live) surfaces as
+    /// [`KeepReason::Contradicted`] instead of resolving silently in favour
+    /// of either field. `Dead` is the caller's folded positive death proof;
+    /// the ladder itself never answers it, and this policy reads the field
+    /// only through the `Unknown` arm, so wiring it in here can never open a
+    /// removal path.
+    pub probe: RowLiveness,
 }
 
 /// The terminal status set, spelled ONCE: `gc_decide` and the sweep's probe
@@ -230,6 +242,11 @@ pub enum KeepReason {
     /// Earned a reap (or the backstop), but the worktree cleanliness probe
     /// could not answer (fail-closed).
     WorktreeUnprobed,
+    /// The row reads live AND carries an `exited_at`, and the shared liveness
+    /// ladder (x-5d96) answers `Unknown`: no positive marker proves the worker
+    /// is running, the stored status says it is. Surfaced instead of resolved
+    /// silently in favour of either field; the verdict stays `Keep`.
+    Contradicted,
 }
 
 impl KeepReason {
@@ -242,6 +259,7 @@ impl KeepReason {
             KeepReason::Uncorroborated => "uncorroborated",
             KeepReason::WorktreeDirty => "worktree-dirty",
             KeepReason::WorktreeUnprobed => "worktree-unprobed",
+            KeepReason::Contradicted => "contradicted",
         }
     }
 }
@@ -252,16 +270,42 @@ impl KeepReason {
 /// `Some` iff the action is `GcAction::Keep`.
 fn gc_decide(row: &GcRow, now: i64, grace_secs: i64) -> (GcAction, Option<KeepReason>) {
     // (AC1-FR) A live worker -- re-checked -- is never touched. The caller clears
-    // any stale `exited_at` on such a row separately.
+    // any stale `exited_at` on such a row separately -- but only when the probe
+    // positively answers Alive: an `Unknown` on a stamped row is the
+    // status/exited_at contradiction (x-5d96), surfaced as its own reason
+    // instead of resolving silently in favour of the live field. The verdict
+    // is `Keep` either way; this consult names the gate, it never opens one.
     if row.is_live {
         // The one live-row exit: a POSITIVE done reading (idle past grace,
         // transcript tail classifies `done`). That worker finished its turn;
         // the row leaves as `ReapDormant` with a resumable handle recorded by
         // the caller. Every other live row is untouched on death evidence.
         if !row.dormant_done {
+            if row.exited_at.is_some() && row.probe == RowLiveness::Unknown {
+                return (GcAction::Keep, Some(KeepReason::Contradicted));
+            }
             return (GcAction::Keep, Some(KeepReason::Live));
         }
         return apply_worktree_guard(row, GcAction::ReapDormant);
+    }
+    // The same consult for a row the process surface cannot vouch for (no
+    // live socket, no pid) whose STORED STATUS still reads live-ish: the
+    // status field is a constant in practice, so `NotTerminal` is exactly
+    // the blanket this group exists to break open. A stamped row the ladder
+    // answers Unknown on keeps - named as the contradiction it is - instead
+    // of silently resolving in favour of the status field.
+    if row.exited_at.is_some()
+        && row.probe == RowLiveness::Unknown
+        && matches!(
+            row.status,
+            AgentStatus::Live
+                | AgentStatus::Ready
+                | AgentStatus::Idle
+                | AgentStatus::Busy
+                | AgentStatus::Spawning
+        )
+    {
+        return (GcAction::Keep, Some(KeepReason::Contradicted));
     }
     // Reap condition #1: terminal status OR a confirmed-dead pid. A non-terminal
     // row with no confirmed-dead pid (e.g. `Spawning` with no pid recorded yet)
@@ -385,6 +429,7 @@ mod tests {
             harness_session_gone: None,
             dormant_done: false,
             worktree_clean: Some(true),
+            probe: RowLiveness::Alive,
         }
     }
 
@@ -542,6 +587,7 @@ mod tests {
             harness_session_gone: None,
             dormant_done: false,
             worktree_clean: Some(true),
+            probe: RowLiveness::Alive,
         };
         assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
     }
@@ -1140,6 +1186,91 @@ mod tests {
         );
     }
 
+    // -- The status/exited_at contradiction is its own state (x-5d96) --------
+
+    #[test]
+    fn a_live_row_with_a_stamp_and_a_silent_probe_is_contradicted() {
+        // The four-row specimen: `status` reads live, an `exited_at` sits on
+        // the row, and every positive liveness marker is silent. The verdict
+        // is STILL Keep - this group opens no removal path - but the gate is
+        // named instead of resolving silently in favour of either field.
+        let row = GcRow {
+            is_live: true,
+            exited_at: Some(NOW - 10 * 86_400),
+            probe: RowLiveness::Unknown,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+        assert_eq!(
+            keep_reason(&row, NOW, GRACE),
+            Some(KeepReason::Contradicted)
+        );
+    }
+
+    #[test]
+    fn a_status_live_row_without_process_surface_is_contradicted_too() {
+        // THE FOUR REAL ROWS (2026-08-31): status reads live, an exited_at
+        // sits on the row, and no process surface vouches for it - no live
+        // worker socket, no pid - so `is_live` is false and the blanket
+        // `NotTerminal` keep would name nothing. The probe consult reaches
+        // the row through its stored status instead, names the contradiction,
+        // and still reaps nothing. A positively-alive answer falls through to
+        // the ordinary non-terminal keep.
+        let mut row = GcRow {
+            status: AgentStatus::Live,
+            is_live: false,
+            pid_confirmed_dead: false,
+            exited_at: Some(NOW - 10 * 86_400),
+            probe: RowLiveness::Unknown,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+        assert_eq!(
+            keep_reason(&row, NOW, GRACE),
+            Some(KeepReason::Contradicted)
+        );
+
+        row.probe = RowLiveness::Alive;
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+        assert_eq!(keep_reason(&row, NOW, GRACE), Some(KeepReason::NotTerminal));
+
+        // A terminal status never takes this arm: exited rows age through
+        // grace and corroboration exactly as before.
+        row.status = AgentStatus::Exited;
+        row.probe = RowLiveness::Unknown;
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    #[test]
+    fn a_proven_alive_row_resolves_the_contradiction_as_live() {
+        // Same shape, but the ladder positively answers Alive (socket or an
+        // advancing heartbeat): the ordinary Keep(Live) reading, and the sweep
+        // may drop the stale stamp.
+        let row = GcRow {
+            is_live: true,
+            exited_at: Some(NOW - 10 * 86_400),
+            probe: RowLiveness::Alive,
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+        assert_eq!(keep_reason(&row, NOW, GRACE), Some(KeepReason::Live));
+    }
+
+    #[test]
+    fn the_contradiction_consult_never_opens_a_removal_path() {
+        // No probe answer turns a live stamped row into a removal. The probe
+        // field is read only to NAME the keep.
+        for probe in [RowLiveness::Alive, RowLiveness::Dead, RowLiveness::Unknown] {
+            let row = GcRow {
+                is_live: true,
+                exited_at: Some(NOW - 10 * 86_400),
+                probe,
+                ..reapable()
+            };
+            assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+        }
+    }
+
     #[test]
     fn keep_reason_as_str_is_pairwise_distinct() {
         // The CLI/JSON tag: every variant must read differently, or two
@@ -1152,6 +1283,7 @@ mod tests {
             KeepReason::Uncorroborated,
             KeepReason::WorktreeDirty,
             KeepReason::WorktreeUnprobed,
+            KeepReason::Contradicted,
         ];
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {
