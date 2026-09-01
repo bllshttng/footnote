@@ -442,17 +442,14 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
         # `do` row - is NOT done just because its children are, and rolling
         # `done` over that would drop the row off the board while its PR is
         # still open while every open-ness predicate (node_is_open, _is_live)
-        # still reads it open off the absent completed_at. Children decide a
-        # container that has no truth of its own; they never outvote one that has.
+        # still reads it open off the absent completed_at. A container is in
+        # progress when a child is in progress; finished work is not work in
+        # progress.
         own_work_live = parent.get("status") in {"in_review", "in_progress"}
         if child_statuses and all(status == "done" for status in child_statuses):
             if not own_work_live:
                 parent["status"] = "done"
-        elif any(
-            status in {"done", "in_review", "in_progress"}
-            or pending_supersession_reason(child)
-            for child, status in zip(children_by_parent[parent_id], child_statuses)
-        ):
+        elif any(status in {"in_review", "in_progress"} for status in child_statuses):
             parent["status"] = "in_progress"
 
     return entries

@@ -9446,6 +9446,38 @@ def _sweep_close_done_epics(entries: list[dict]) -> list[str]:
     return closed
 
 
+def _status_drift(path: Path) -> dict[str, tuple[str, str]]:
+    """Return rows whose persisted status differs from a fresh derivation.
+
+    The persisted side is read raw, not through ``read_graph``: the latter
+    overlays live dependency readiness as ``blocked``, while
+    ``recompute_statuses`` never persists that read-time value.
+    """
+    import copy
+
+    from fno.graph.statuses import recompute_statuses
+    from fno.graph.store import _read_json, read_graph
+
+    persisted: dict[str, str] = {}
+    for entry in _read_json(path):
+        node_id = entry.get("id") if isinstance(entry, dict) else None
+        status = entry.get("status") if isinstance(entry, dict) else None
+        if isinstance(node_id, str) and isinstance(status, str):
+            persisted[node_id] = status
+
+    derived: dict[str, str] = {}
+    for entry in recompute_statuses(copy.deepcopy(read_graph(path))):
+        node_id = entry.get("id") if isinstance(entry, dict) else None
+        status = entry.get("status") if isinstance(entry, dict) else None
+        if isinstance(node_id, str) and isinstance(status, str):
+            derived[node_id] = status
+    return {
+        node_id: (persisted[node_id], derived[node_id])
+        for node_id in sorted(persisted.keys() & derived.keys())
+        if persisted[node_id] != derived[node_id]
+    }
+
+
 def _stamp_and_graduate_plan(
     plan_path: str,
     *,
@@ -11433,6 +11465,7 @@ def cmd_reconcile(
                 entries = read_graph(_graph_path())  # real binds just persisted
             records = scan_merge_drift(entries, node_id=node)
 
+    status_drift = _status_drift(_graph_path()) if _full_sweep else {}
     closeable = [r for r in records if r.closeable]
     failures = [r for r in records if r.error is not None]
 
@@ -11558,7 +11591,9 @@ def cmd_reconcile(
     # ledger harvest below falls back to a fresh read when it stayed empty.
     post_entries: list[dict] = []
 
-    if not dry_run and (closeable or strandable or strandable_contained or owed_evidence):
+    if not dry_run and (
+        closeable or strandable or strandable_contained or owed_evidence or status_drift
+    ):
         # Apply every close in ONE locked mutation rather than locking once
         # per node: locked_mutate_graph acquires a file lock and rewrites the
         # whole graph, so a per-node loop is O(N) lock+rewrite cycles. The
@@ -11949,7 +11984,7 @@ def cmd_reconcile(
         healed_epics = sorted(_seen_parents)
         contained_closed = sorted(set(contained_closed_acc))
         contained_errors = list(contained_errors_acc)
-    elif dry_run and (closeable or strandable or strandable_contained):
+    elif dry_run and (closeable or strandable or strandable_contained or status_drift):
         # Accurate --dry-run preview (codex P2): the heal set is NOT just the
         # pre-close `strandable` epics - closing a closeable last child cascade-
         # closes its parent, and the sweep fixpoint reaches ancestors. Simulate
@@ -12213,6 +12248,10 @@ def cmd_reconcile(
             # Auto-closed container epics (cascade + self-heal sweep); on --dry-run
             # this is the simulated preview of what a real run would heal (codex P3).
             "healed_epics": healed_epics,
+            "reclaimed": [
+                {"node_id": node_id, "from": before, "to": after}
+                for node_id, (before, after) in status_drift.items()
+            ],
             # Nodes closed because they shipped inside a closed node's PR
             # (x-e957). Reported separately from `closed`, whose entries all
             # carry their own pr_number - a contained node has none.
@@ -12267,6 +12306,7 @@ def cmd_reconcile(
         and not promise_warnings
         and not owed_evidence_failures
         and not closure_claims
+        and not status_drift
     ):
         typer.echo("No merged-PR drift found. Backlog is in sync.")
         return
@@ -12289,6 +12329,8 @@ def cmd_reconcile(
             typer.echo(
                 f"Would self-heal {len(healed_epics)} container epic(s): " + ", ".join(healed_epics)
             )
+        for node_id, (before, after) in status_drift.items():
+            typer.echo(f"Would reclaim {node_id}: {before} -> {after}")
     else:
         # Suppressed ONLY on a heal-only sweep (no drift candidates at all),
         # where a bare "Closed 0 node(s):" sits above a line saying nodes were
@@ -12316,6 +12358,8 @@ def cmd_reconcile(
                 f"Auto-closed {len(healed_epics)} container epic(s) "
                 f"(all children complete): " + ", ".join(healed_epics)
             )
+        for node_id, (before, after) in status_drift.items():
+            typer.echo(f"reclaimed {node_id}: {before} -> {after}")
 
     if promise_unmet:
         # Held open, not failed: the PR merged but the plan promised more. The

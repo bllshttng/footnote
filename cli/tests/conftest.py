@@ -162,7 +162,9 @@ def _hermetic_claim_reap(monkeypatch):
     """
     import fno.claims.core as claims_core
 
-    def _noop_reap(*, roots=None, apply=False):
+    def _noop_reap(
+        *, roots=None, apply=False, abandonment_probe=None, node_settlement=None
+    ):
         return {
             "scanned": 0, "reaped": 0, "would_reap": 0, "kept_live": 0,
             "kept_suspect": 0, "kept_offhost": 0, "corrupted": 0, "vanished": 0,

@@ -3828,6 +3828,7 @@ def _node_obs(
     ahead=None,
     probes=(),
     cwd=None,
+    is_container=False,
 ):
     return uw.NodeObs(
         node_id=node_id,
@@ -3838,6 +3839,7 @@ def _node_obs(
         ahead_count=ahead,
         claim={"state": claim_state} if claim_state is not None else None,
         owner_probes=tuple(probes),
+        is_container=is_container,
     )
 
 
@@ -4001,6 +4003,31 @@ def test_ac3_started_free_claim_nodes_carry_target_verbs_and_idle_order():
     assert snap.findings[0].ahead_count == 8
     assert "origin/main" in snap.findings[0].basis
     assert snap.findings[1].basis.count("origin/main") == 1
+
+
+def test_ac3_container_is_not_reported_as_started_free_claim():
+    container = _node_obs("x-container", is_container=True)
+
+    snap = uw.classify(_uw_obs(nodes=[container]))
+
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_STARTED].state == uw.MEASURED
+
+
+def test_collect_observations_marks_graph_parents_as_containers():
+    observations = uw.collect_observations(
+        [],
+        graph_entries=[
+            {"id": "x-parent", "status": "in_progress"},
+            {"id": "x-child", "status": "done", "parent": "x-parent"},
+        ],
+        registry_rows=({}, True),
+        claim_status_fn=lambda _node_id: {"state": "free"},
+        pr_candidates=[],
+    )
+
+    containers = {node.node_id: node.is_container for node in observations.nodes}
+    assert containers == {"x-parent": True, "x-child": False}
 
 
 def test_ac3_non_free_claim_or_live_owner_excludes_the_node():
