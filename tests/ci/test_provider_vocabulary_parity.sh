@@ -19,8 +19,9 @@ write_match() {
     '#[cfg(test)]' > "$tmp/claude.rs"
   printf '%s\n' \
     'pub fn mint_adopted_entry' \
-    'provider: Some("anthropic".into()),' \
-    'pub fn upsert_adopted_row' > "$tmp/adopt.rs"
+    'provider: None,' \
+    'pub fn upsert_adopted_row' \
+    'provider_from_route_settings(Some(&model))' > "$tmp/adopt.rs"
   printf '%s\n' \
     'fn dispatch_create(' \
     'provider: Some("openai".to_string()),' \
@@ -87,6 +88,36 @@ if check >/dev/null 2>&1; then
   exit 1
 else
   echo "PASS: missing Claude provider stamp rejected"
+fi
+
+# The adopt mint must stamp NO provider: a vendor literal there is the retired
+# wrong-bill guess (adoption observed no route; the provider comes from the
+# route-settings match the fixture carries below the upsert marker).
+write_match
+printf '%s\n' \
+  'pub fn mint_adopted_entry' \
+  'provider: Some("anthropic".into()),' \
+  'pub fn upsert_adopted_row' \
+  'provider_from_route_settings(Some(&model))' > "$tmp/adopt.rs"
+if check >/dev/null 2>&1; then
+  echo "FAIL: adopt vendor literal accepted" >&2
+  exit 1
+else
+  echo "PASS: adopt vendor literal rejected"
+fi
+
+# The route-match lookup is the only provider source adopt may use; a mint
+# with no provider and no lookup would record none forever.
+write_match
+printf '%s\n' \
+  'pub fn mint_adopted_entry' \
+  'provider: None,' \
+  'pub fn upsert_adopted_row' > "$tmp/adopt.rs"
+if check >/dev/null 2>&1; then
+  echo "FAIL: adopt without a route-settings lookup accepted" >&2
+  exit 1
+else
+  echo "PASS: adopt without a route-settings lookup rejected"
 fi
 
 echo "provider vocabulary parity test: all cases passed"
