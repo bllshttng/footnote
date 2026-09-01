@@ -13,8 +13,11 @@ from __future__ import annotations
 import inspect
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -28,6 +31,7 @@ from fno.agents.harness_map import (
     resolve_dispatch,
     thread_lane,
 )
+from fno.agents.harnesses.pi import pi_model, pi_provider
 from fno.agents.registry import load_registry
 from fno.paths_testing import use_tmpdir
 
@@ -81,14 +85,27 @@ def lane_b_home(tmp_path, monkeypatch):
 # AC4-ERR: the public dispatch surface still refuses
 # ---------------------------------------------------------------------------
 
-def test_pi_thread_dispatch_still_refuses_at_the_gate(lane_b_home) -> None:
-    """pi's `thread` capability row stays false, so resolve_dispatch refuses
-    the thread substrate - the lane built here is not reachable through the
-    public dispatch surface."""
-    assert capabilities("pi")["thread"] is False
+def test_partial_lane_thread_dispatch_still_refuses_at_the_gate(lane_b_home) -> None:
+    """agy's `thread` capability row stays false until its own journey passes,
+    so resolve_dispatch refuses the thread substrate - the keeper lane built
+    here is not reachable through the public dispatch surface without one."""
+    assert capabilities("agy")["thread"] is False
     with pytest.raises(DispatchResolveError) as exc_info:
+        resolve_dispatch(harness="agy", substrate="thread")
+    assert "substrate 'thread' is unsupported on harness 'agy'" in str(exc_info.value)
+
+
+def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit() -> None:
+    """pi's `thread` row is true behind its passing restart journey
+    (test_thread_keeper_journey.py), so a one-shot dispatch resolves onto the
+    lane this file builds. The autonomous `/target` template still refuses at
+    the loop gate until pi's loop extension ships."""
+    assert capabilities("pi")["thread"] is True
+    resolved = resolve_dispatch(harness="pi", substrate="thread", command="pi --version")
+    assert resolved["substrate"] == "thread"
+    assert resolved["thread"] is True
+    with pytest.raises(DispatchResolveError, match="Dispatch a one-shot instead"):
         resolve_dispatch(harness="pi", substrate="thread")
-    assert "substrate 'thread' is unsupported on harness 'pi'" in str(exc_info.value)
 
 
 def test_lane_b_spawn_is_not_wired_into_dispatch_spawn() -> None:
@@ -136,8 +153,19 @@ def test_lane_b_spawn_renders_the_contract_argv_and_registers_the_row(
     assert argv[1] == "--keeper", "the pane-less spelling is canonical"
     worker_tail = argv[argv.index("--") + 1 :]
     session_id = receipt["session_id"]
-    assert worker_tail == render_session_argv("pi", "interactive_create", session_id), (
-        "the provider argv is the contract's render, never hand-assembled"
+    # The contract's render plus the provider+model completion the pane lane's
+    # build_pane_argv has always appended for pi (bare pi defaults to provider
+    # google, and `--provider` without `--model` falls to Bedrock).
+    expected_tail = [
+        *render_session_argv("pi", "interactive_create", session_id),
+        "--provider",
+        pi_provider(),
+        "--model",
+        pi_model(),
+    ]
+    assert worker_tail == expected_tail, (
+        "the provider argv is the contract's render plus the pinned "
+        "provider/model, never hand-assembled"
     )
     assert argv[argv.index("--pane-key") + 1] == session_id
     assert argv[argv.index("--sock") + 1] == receipt["keeper_socket"]
@@ -169,6 +197,26 @@ def test_lane_b_socket_follows_the_agents_home_the_sweep_derives_from(
     assert receipt["keeper_socket"] in recorded["argv"]
     row = load_registry()[0]
     assert row.messaging_socket_path == receipt["keeper_socket"]
+
+
+def test_lane_b_socket_keeps_a_symlinked_agents_home_spelling(
+    lane_b_home, monkeypatch, tmp_path
+) -> None:
+    """A symlinked FNO_AGENTS_HOME keeps its literal spelling in the socket
+    path: the Rust sweep matches the row's socket byte-for-byte against a
+    dir derived from the raw --home string, so resolving through the link
+    (macOS /var -> /private/var for every mkdtemp state root) would orphan
+    the socket and every restart rebind would silently find nothing."""
+    real = tmp_path / "realstate"
+    real.mkdir()
+    link = tmp_path / "linkstate"
+    link.symlink_to(real)
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(link / "agents"))
+    _fake_keeper(monkeypatch, lane_b_home)
+    receipt = _lane_b_thread_spawn(name="wk-link", harness="pi", cwd=lane_b_home)
+    assert receipt["keeper_socket"] == str(link / "mux" / "threads" / "wk-link.sock")
+    row = load_registry()[0]
+    assert row.messaging_socket_path == str(link / "mux" / "threads" / "wk-link.sock")
 
 
 def test_lane_b_spawn_records_the_child_pid_the_restart_sweep_asserts(
@@ -351,3 +399,215 @@ def test_lane_b_journey_real_keeper_hosts_the_thread(lane_b_home, monkeypatch) -
     row = next(e for e in load_registry() if e.name == "wk-journey")
     assert row.messaging_socket_path == receipt["keeper_socket"]
     shutil.rmtree(short_state, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# The stop path (PR 1332 review finding): a keeper row stops over its OWN
+# socket, never worker_sock("")
+# ---------------------------------------------------------------------------
+
+
+def _spawn_fake_keeper(sock: Path, seen: dict, *, honor_kill: bool) -> threading.Thread:
+    """A keeper stand-in with the real keeper's CONNECTION shape: every
+    connection is served on its own thread and every frame read from it, so a
+    liveness probe consuming one connection never eats another's Kill frame.
+    honor_kill=True models the Kill contract (unlink, stop serving);
+    honor_kill=False models a keeper that swallows Kill and stays up."""
+
+    stop = threading.Event()
+
+    def _serve_conn(conn: socket.socket) -> None:
+        try:
+            conn.settimeout(5)
+            buf = b""
+            while len(buf) < 5:
+                chunk = conn.recv(5 - len(buf))
+                if not chunk:
+                    return
+                buf += chunk
+            seen.setdefault("frames", []).append(buf)
+            if honor_kill and buf[0] == 3:
+                seen["kill_frame"] = buf
+                stop.set()
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def _serve() -> None:
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(sock))
+        server.listen(8)
+        server.settimeout(0.1)
+        seen["ready"] = True
+        try:
+            while not stop.is_set():
+                try:
+                    conn, _ = server.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                threading.Thread(target=_serve_conn, args=(conn,), daemon=True).start()
+        finally:
+            sock.unlink(missing_ok=True)
+            server.close()
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    return thread, stop
+
+
+def _keeper_row(name: str, sock: Path, tmp: Path) -> None:
+    from fno.agents.registry import AgentEntry, update_registry
+
+    entry = AgentEntry(
+        name=name,
+        cwd=str(tmp),
+        log_path=str(tmp / "keeper.log"),
+        harness="pi",
+        host_mode="interactive",
+        harness_session_id="sess-keeper-stop",
+        pid=4242,
+        keeper_child_pid=555,
+        messaging_socket_path=str(sock),
+        origin="spawn",
+    )
+    update_registry(lambda entries: entries + [entry])
+
+
+def test_stop_agent_kills_a_keeper_row_over_its_own_socket(lane_b_home) -> None:
+    """The verb-level contract: stop sends the Kill frame down the ROW's
+    socket, confirms it unreachable, and only then stamps the row Exited."""
+    from fno.agents.dispatch import stop_agent
+
+    # A keeper socket must fit AF_UNIX's 104-byte sun_path and the pytest
+    # basetemp does not (the same rewrite the journey test below makes).
+    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-"))
+    sock = short_state / "mux" / "threads" / "wk-stoppy.sock"
+    sock.parent.mkdir(parents=True, exist_ok=True)
+    seen: dict[str, object] = {}
+    thread, _stop = _spawn_fake_keeper(sock, seen, honor_kill=True)
+    deadline = time.monotonic() + 5
+    while "ready" not in seen and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    _keeper_row("wk-stoppy", sock, lane_b_home)
+    result = stop_agent("wk-stoppy")
+    thread.join(timeout=5)
+
+    assert result.name == "wk-stoppy"
+    assert seen.get("kill_frame") == b"\x03" + (0).to_bytes(4, "little"), seen.get(
+        "frames"
+    )
+    row = next(e for e in load_registry() if e.name == "wk-stoppy")
+    assert row.status == "exited", "the row goes terminal only after confirmation"
+    assert row.exited_at
+    assert not sock.exists()
+    shutil.rmtree(short_state, ignore_errors=True)
+
+
+def test_stop_agent_refuses_a_keeper_that_never_confirms(lane_b_home) -> None:
+    """A keeper that swallows the Kill frame leaves the row non-terminal and
+    the verb raises: reporting a stop over a live keeper is the zombie shape."""
+    from fno.agents.dispatch import DispatchAskError, _stop_keeper_thread
+    from fno.agents.registry import AgentEntry, load_registry, update_registry
+
+    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-"))
+    sock = short_state / "mux" / "threads" / "wk-stubborn.sock"
+    sock.parent.mkdir(parents=True, exist_ok=True)
+    seen: dict[str, object] = {}
+    thread, stop = _spawn_fake_keeper(sock, seen, honor_kill=False)
+    deadline = time.monotonic() + 5
+    while "ready" not in seen and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    entry = AgentEntry(
+        name="wk-stubborn",
+        cwd=str(lane_b_home),
+        log_path=str(lane_b_home / "keeper.log"),
+        harness="pi",
+        host_mode="interactive",
+        harness_session_id="sess-stubborn",
+        pid=4242,
+        keeper_child_pid=555,
+        messaging_socket_path=str(sock),
+        origin="spawn",
+    )
+    update_registry(lambda entries: entries + [entry])
+
+    try:
+        with pytest.raises(DispatchAskError) as exc_info:
+            _stop_keeper_thread("wk-stubborn", entry, str(sock), grace_s=0.5)
+        assert exc_info.value.exit_code == 1
+        assert "did not confirm shutdown" in str(exc_info.value)
+        row = next(e for e in load_registry() if e.name == "wk-stubborn")
+        assert row.status == "live", "a refused stop must not stamp the row terminal"
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        shutil.rmtree(short_state, ignore_errors=True)
+
+
+def test_stop_agent_stops_a_keeper_that_dies_between_probe_and_kill(lane_b_home) -> None:
+    """A keeper that answers the liveness probe and then dies (the SIGKILLed
+    mid-stop shape) is a clean stop, not an error: the unreachability poll
+    confirms the socket is gone before the row goes terminal."""
+    from fno.agents.dispatch import _stop_keeper_thread
+    from fno.agents.registry import AgentEntry, load_registry, update_registry
+
+    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-"))
+    sock = short_state / "mux" / "threads" / "wk-vanish.sock"
+    sock.parent.mkdir(parents=True, exist_ok=True)
+    seen: dict[str, object] = {}
+
+    # The vanishing keeper: serve exactly one connection (the probe), then die
+    # WITHOUT unlinking the socket path, the shape a SIGKILLed keeper leaves.
+    # Closing a listening AF_UNIX socket never unlinks its bound path.
+    def _serve() -> None:
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(sock))
+        server.listen(8)
+        server.settimeout(5)
+        seen["ready"] = True
+        try:
+            conn, _ = server.accept()
+            conn.close()
+        except OSError:
+            pass
+        finally:
+            server.close()
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while "ready" not in seen and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    entry = AgentEntry(
+        name="wk-vanish",
+        cwd=str(lane_b_home),
+        log_path=str(lane_b_home / "keeper.log"),
+        harness="pi",
+        host_mode="interactive",
+        harness_session_id="sess-vanish",
+        pid=4242,
+        keeper_child_pid=555,
+        messaging_socket_path=str(sock),
+        origin="spawn",
+    )
+    update_registry(lambda entries: entries + [entry])
+
+    try:
+        result = _stop_keeper_thread("wk-vanish", entry, str(sock), grace_s=5)
+        assert result.name == "wk-vanish"
+        row = next(e for e in load_registry() if e.name == "wk-vanish")
+        assert row.status == "exited", "a keeper that died mid-stop is gone, not refused"
+        assert row.exited_at
+        assert not sock.exists(), "the stale socket file is reaped on the clean stop"
+    finally:
+        thread.join(timeout=5)
+        shutil.rmtree(short_state, ignore_errors=True)

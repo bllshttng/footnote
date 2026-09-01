@@ -103,9 +103,16 @@ def test_pi_is_registered_at_every_seam_a_spawn_reads():
 
     from fno.agents.harness_map import capabilities
 
-    assert capabilities("pi")["thread"] is False, (
-        "the capability bit must agree with the roster: a true bit routes "
-        "autonomous dispatch onto a lane that does not exist"
+    # The bit and the roster now answer DIFFERENT questions, and both answers
+    # are asserted. The bit backs dispatch-resolve: pi's keeper-hosted thread
+    # lane is journey-proven (test_thread_keeper_journey.py), so resolving
+    # `--substrate thread` is honest. SPAWN_HARNESSES backs the dispatch_spawn
+    # seam, whose pi arm has not shipped - the journey spawned through the
+    # lane-B driver directly - so a `fno agents spawn --substrate thread` on pi
+    # still refuses. The roster widens only when that arm ships.
+    assert capabilities("pi")["thread"] is True, (
+        "the capability bit must agree with the journey: a false bit refuses a "
+        "restart-survival the keeper lane has already proven"
     )
 
 
