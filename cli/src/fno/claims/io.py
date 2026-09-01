@@ -113,9 +113,15 @@ def global_claims_dir() -> Path:
 # - update:fno     the machine-global installed tool env one `fno update`
 #                  reinstalls in place; every repo and session on the machine
 #                  executes from that env, so the guard must never be cwd-local.
+# - config-optout:<key> the merge-gating opt-out lease. The Rust gates
+#                  (loopcheck/finalize) resolve this prefix to the global root
+#                  too; a Python write landing anywhere else is a lease the
+#                  merge lane cannot see.
 # Keys whose identifier is a repo-local resource (walker:<repo_root>) embed
 # their own scope and are NOT listed here; they keep the cwd/env default.
-_GLOBAL_ID_PREFIXES = frozenset({"node", "dispatch", "reconcile", "session", "groom", "update"})
+_GLOBAL_ID_PREFIXES = frozenset(
+    {"node", "dispatch", "reconcile", "session", "groom", "update", "config-optout"}
+)
 
 
 def claims_root_for(key: str) -> Path | None:
