@@ -1008,7 +1008,11 @@ impl HarnessStoreIndex {
             let home = std::path::PathBuf::from(std::env::var("HOME").ok()?);
             match harness {
                 "claude" => Some(home.join(".claude").join("projects")),
-                _ => Some(home.join(".codex").join("sessions")),
+                // Resolve the codex home the way codex itself does, so a
+                // CODEX_HOME redirect never reads this reaper into a store
+                // the worker never wrote (an empty wrong-store read would
+                // read as "session gone" - death evidence from an absence).
+                _ => crate::client_verbs::codex_home().map(|h| h.join("sessions")),
             }
         })
     }
@@ -1053,7 +1057,7 @@ impl HarnessStoreIndex {
                     // them carries conversation is a content question this
                     // existence probe does not need to answer.
                     "claude" => name.starts_with(sid) && name.ends_with(".jsonl"),
-                    _ => name.starts_with("rollout-") && name.contains(sid),
+                    _ => crate::client_verbs::codex_rollout_matches(&name, sid),
                 })
                 .map(|(_, p)| p.clone())
                 .collect(),
@@ -1069,7 +1073,7 @@ impl HarnessStoreIndex {
 /// Bounded walk collecting `(filename, path)` for every regular file under
 /// `dir` (claude is two levels, codex four; depth 5 covers both). `Err` on any
 /// unreadable directory: an unreadable store answers nothing, fail closed.
-fn index_tree(
+pub(crate) fn index_tree(
     dir: &std::path::Path,
     depth: usize,
 ) -> Result<Vec<(String, std::path::PathBuf)>, ()> {
@@ -1822,6 +1826,8 @@ fn live_liveness_prober(
     let home = crate::claude_ask::ClaudeHome::from_env();
     let index: std::cell::RefCell<Option<std::collections::HashMap<String, String>>> =
         std::cell::RefCell::new(None);
+    let codex: std::cell::RefCell<Option<Option<Vec<(String, u64)>>>> =
+        std::cell::RefCell::new(None);
     move |e: &state::RegistryEntry| {
         if let Some(dead) = fold_positive_death(e) {
             return dead;
@@ -1830,9 +1836,17 @@ fn live_liveness_prober(
         if built.is_none() {
             *built = Some(crate::client_verbs::sessions_socket_index(&home));
         }
+        let mut codex_built = codex.borrow_mut();
+        if codex_built.is_none() {
+            // ONE store walk per closure (one sweep), however many codex rows
+            // probe - the same once-per-sweep shape the socket index above
+            // keeps. `None` reads as the rung going silent (fail closed).
+            *codex_built = Some(crate::client_verbs::codex_rollout_index(None));
+        }
         crate::client_verbs::row_liveness_with_indexed(
             e,
             built.as_ref().expect("just built"),
+            codex_built.as_ref().and_then(|c| c.as_deref()),
             |uuid: &str| truth.get(uuid).cloned(),
         )
     }
@@ -15516,6 +15530,192 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let answer = row_liveness(&e, &crate::claude_ask::ClaudeHome::at(home.root()));
         assert_eq!(answer, RowLiveness::Unknown);
         assert_ne!(answer, RowLiveness::Dead);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    // -- Rung 4: codex rollout freshness (x-798a) ----------------------------
+
+    fn codex_truth_none(_uuid: &str) -> Option<String> {
+        None
+    }
+
+    /// A codex registry row in the measured x-798a shape: live-ish status,
+    /// no claude surfaces, one harness session id, no exit stamp (no pid to
+    /// confirm dead, no reconcile to terminal - the row never gets one).
+    fn ladder_codex_row(name: &str, session_id: &str) -> RegistryEntry {
+        let mut e = rentry(name, AgentStatus::Live, None);
+        e.harness = Some("codex".into());
+        e.harness_session_id = Some(session_id.into());
+        e.claude_session_uuid = None;
+        e
+    }
+
+    /// The real codex store shape: nested date dirs, the session id embedded
+    /// in a `rollout-*.jsonl` filename - what `HarnessStoreIndex` resolves.
+    fn write_rollout(root: &Path, session_id: &str) -> std::path::PathBuf {
+        let dir = root.join("2026").join("09").join("01");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(format!("rollout-2026-09-01T10-00-00-{session_id}.jsonl"));
+        std::fs::write(&p, "{\"type\":\"session_meta\"}\n").unwrap();
+        p
+    }
+
+    #[test]
+    fn an_advancing_codex_rollout_answers_alive_and_the_sweep_names_it_live() {
+        // AC1-HP (x-798a): a rollout jsonl written within the window proves
+        // the worker is advancing. The heartbeat rung cannot fire here (no
+        // exited_at to advance past) and the claude rungs cannot see the row;
+        // without this rung the row is kept but never probeable.
+        let home = tmp_home("ladder-codex-alive");
+        let codex = tempfile::tempdir().unwrap();
+        write_rollout(codex.path(), "cdx-alive");
+        let e = ladder_codex_row("codex-live", "cdx-alive");
+        let answer = crate::client_verbs::row_liveness_with_codex_root(
+            &e,
+            &crate::claude_ask::ClaudeHome::at(home.root()),
+            codex.path(),
+            codex_truth_none,
+        );
+        assert_eq!(answer, RowLiveness::Alive);
+        // The sweep derives is_live from `probe == Alive` and the policy then
+        // names the row under the LIVE gate - not not-terminal. Assert the
+        // naming path, not just the enum.
+        let row = crate::gc::GcRow {
+            status: e.status,
+            is_live: answer == RowLiveness::Alive,
+            pid_confirmed_dead: false,
+            owns_worktree: false,
+            exited_at: None,
+            liveness_surface: true,
+            transcript_fresh: None,
+            harness_session_gone: None,
+            dormant_done: false,
+            worktree_clean: None,
+            probe: answer,
+        };
+        assert_eq!(
+            crate::gc::keep_reason(&row, now_epoch_secs(), 3600),
+            Some(crate::gc::KeepReason::Live),
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn a_codex_row_with_no_readable_rollout_stays_unknown_and_kept() {
+        // AC1-EDGE + AC2-EDGE: a missing rollout and an unreadable store both
+        // read Unknown (an absent store has two explanations and only one of
+        // them is a dead worker), and the policy names the row not-terminal.
+        // This IS the measured x-798a baseline: named, kept, never reaped.
+        let home = tmp_home("ladder-codex-absent");
+        let codex = tempfile::tempdir().unwrap();
+        let e = ladder_codex_row("codex-gone", "cdx-gone");
+        let answer = crate::client_verbs::row_liveness_with_codex_root(
+            &e,
+            &crate::claude_ask::ClaudeHome::at(home.root()),
+            codex.path(),
+            codex_truth_none,
+        );
+        assert_eq!(answer, RowLiveness::Unknown);
+        let answer = crate::client_verbs::row_liveness_with_codex_root(
+            &e,
+            &crate::claude_ask::ClaudeHome::at(home.root()),
+            &codex.path().join("does-not-exist"),
+            codex_truth_none,
+        );
+        assert_eq!(answer, RowLiveness::Unknown);
+        assert_ne!(answer, RowLiveness::Dead);
+        let row = crate::gc::GcRow {
+            status: e.status,
+            is_live: false,
+            pid_confirmed_dead: false,
+            owns_worktree: false,
+            exited_at: None,
+            liveness_surface: true,
+            transcript_fresh: None,
+            harness_session_gone: None,
+            dormant_done: false,
+            worktree_clean: None,
+            probe: answer,
+        };
+        assert_eq!(
+            crate::gc::keep_reason(&row, now_epoch_secs(), 3600),
+            Some(crate::gc::KeepReason::NotTerminal),
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn a_claude_row_is_never_judged_by_the_codex_store() {
+        // AC3 (harness keying): a claude row whose session id has a FRESH
+        // rollout in the codex store must still answer Unknown. The rung
+        // fires only for codex rows; keyed on session id alone, one fresh
+        // codex store would vouch for every claude row on the machine.
+        let home = tmp_home("ladder-codex-keying");
+        let codex = tempfile::tempdir().unwrap();
+        write_rollout(codex.path(), "shared-sess");
+        let mut e = ladder_claude_row("claude-row", "");
+        e.harness = Some("claude".into());
+        e.harness_session_id = Some("shared-sess".into());
+        e.claude_session_uuid = None;
+        let answer = crate::client_verbs::row_liveness_with_codex_root(
+            &e,
+            &crate::claude_ask::ClaudeHome::at(home.root()),
+            codex.path(),
+            codex_truth_none,
+        );
+        assert_eq!(answer, RowLiveness::Unknown);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn a_quiet_codex_rollout_proves_nothing() {
+        // AC4-EDGE: an mtime older than the window falls through to Unknown.
+        // Quiet is idle-or-dead and the ladder cannot say which - so it says
+        // neither, and the row is kept.
+        let home = tmp_home("ladder-codex-stale");
+        let codex = tempfile::tempdir().unwrap();
+        let p = write_rollout(codex.path(), "cdx-stale");
+        let mtime = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs((now_epoch_secs() - 2 * 3600) as u64);
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let e = ladder_codex_row("codex-stale", "cdx-stale");
+        let answer = crate::client_verbs::row_liveness_with_codex_root(
+            &e,
+            &crate::claude_ask::ClaudeHome::at(home.root()),
+            codex.path(),
+            codex_truth_none,
+        );
+        assert_eq!(answer, RowLiveness::Unknown);
+        assert_ne!(answer, RowLiveness::Dead);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn a_stamped_codex_row_is_never_resurrected_by_a_fresh_rollout() {
+        // The stop verb writes a POSITIVE exit stamp; the rollout it leaves
+        // behind stays fresh-written for the whole window. Rung 4 must go
+        // silent on a stamped row, or the sweep would clear the stamp and
+        // resurrect a deliberately stopped row on freshness alone (the codex
+        // review finding). The heartbeat rung draws the same line - only
+        // ADVANCEMENT past the stamp answers, never a quiet file.
+        let home = tmp_home("ladder-codex-stamped");
+        let codex = tempfile::tempdir().unwrap();
+        write_rollout(codex.path(), "cdx-stopped");
+        let mut e = ladder_codex_row("codex-stopped", "cdx-stopped");
+        e.exited_at = Some("2026-09-01T10:30:00Z".into());
+        let answer = crate::client_verbs::row_liveness_with_codex_root(
+            &e,
+            &crate::claude_ask::ClaudeHome::at(home.root()),
+            codex.path(),
+            codex_truth_none,
+        );
+        assert_eq!(answer, RowLiveness::Unknown);
+        assert_ne!(answer, RowLiveness::Alive);
         std::fs::remove_dir_all(home.root()).ok();
     }
 
