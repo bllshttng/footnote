@@ -72,11 +72,10 @@ def test_map_covers_current_surface_once():
     # x-665d adds `agents registry-repair`, the hidden recovery verb for a
     # registry a source-ahead process already poisoned: 536 -> 537.
     # Counted from the merged file: main carried 543, added `config history`
-    # and this branch adds `doctor plugin-file` -> 545.
-    # Counted from the merged file at this rebase: 549 lines minus the header
-    # = 548 rows (main's config history + doctor plugin-file, plus this
-    # branch's backfill-deferred-kind and stuck-epics).
-    assert len(mapped) == 548, (
+    # and `doctor plugin-file`, then `backfill-deferred-kind` and
+    # `stuck-epics` -> 548. This branch adds `agents history`, the advertised
+    # session-history reader: 549 lines minus the header = 548 + 1 = 549.
+    assert len(mapped) == 549, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
