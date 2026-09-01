@@ -3135,6 +3135,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                         "rebound": report.rebound.len(),
                                         "dead": report.dead.len(),
                                         "wedged": report.wedged.len(),
+                                        "superseded": report.superseded.len(),
                                     }),
                                 );
                             }
@@ -8736,6 +8737,11 @@ pub struct KeeperSweepReport {
     pub wedged: Vec<(String, String)>,
     /// Socket files unlinked (no listener behind them).
     pub unlinked: Vec<String>,
+    /// Rows whose verdict was DISCARDED at write time: the registry row under
+    /// that name changed identity between probe and write (removed and
+    /// re-spawned under the same name while the daemon already served), so the
+    /// probed verdict belongs to a row that no longer exists.
+    pub superseded: Vec<String>,
 }
 
 /// The keeper socket directory for pane-less lane-B threads:
@@ -8753,11 +8759,50 @@ fn lane_b_keeper_dir(home: &AgentsHome) -> PathBuf {
         .join("threads")
 }
 
-/// One planned row mutation out of the sweep.
+/// One planned row mutation out of the sweep. `bound_socket`/`bound_session`
+/// carry the probed row's immutable identity (the socket it was found by, and
+/// its session id at probe time) so the write can revalidate under the
+/// registry lock: probing runs up to the sweep budget while the daemon is
+/// already serving, and an operator can remove and re-spawn a row under the
+/// SAME name in that window. A name-only apply would stamp the old keeper's
+/// verdict (or child pid) onto the healthy replacement.
 struct KeeperSweepChange {
     name: String,
     status: Option<AgentStatus>,
     child_pid: Option<u32>,
+    /// `Some` when the row was bound by socket; `None` when the session-id
+    /// fallback found a row carrying no socket.
+    bound_socket: Option<String>,
+    bound_session: Option<String>,
+}
+
+/// Apply the sweep's planned changes under the registry lock, revalidating
+/// each row's identity first. Returns the names whose verdicts were discarded
+/// because the row changed identity between probe and write.
+fn apply_keeper_sweep_changes(
+    registry: &mut state::Registry,
+    changes: &[KeeperSweepChange],
+    now: &str,
+) -> Vec<String> {
+    let mut superseded = Vec::new();
+    for change in changes {
+        let Some(entry) = registry.find_mut(&change.name) else {
+            // The row was removed outright: the verdict dies with it.
+            superseded.push(change.name.clone());
+            continue;
+        };
+        let identity_holds = entry.messaging_socket_path == change.bound_socket
+            && entry.harness_session_id == change.bound_session;
+        if !identity_holds {
+            superseded.push(change.name.clone());
+            continue;
+        }
+        apply_reconcile_change(entry, change.status, now);
+        if let Some(pid) = change.child_pid {
+            entry.keeper_child_pid = Some(pid);
+        }
+    }
+    superseded
 }
 
 /// Re-bind surviving lane-B keeper threads to their registry rows at daemon
@@ -8840,6 +8885,8 @@ pub fn keeper_registry_sweep(
                         name: row.name.clone(),
                         status: Some(AgentStatus::Exited),
                         child_pid: None,
+                        bound_socket: Some(sock_str.clone()),
+                        bound_session: row.harness_session_id.clone(),
                     });
                     report.dead.push((row.name.clone(), "no listener".into()));
                 }
@@ -8872,6 +8919,7 @@ pub fn keeper_registry_sweep(
                     .and_then(serde_json::Value::as_u64)
                     .map(|p| p as u32);
                 let answered_cwd = str_field("cwd");
+                let bound_socket = row.is_some().then(|| sock_str.clone());
                 let row = row.or_else(|| {
                     // Session-id fallback: the reconciliation key the plan
                     // names. Only for a row with no socket of its own.
@@ -8894,29 +8942,30 @@ pub fn keeper_registry_sweep(
                 // Identity triple, each leg named on mismatch: session id
                 // (the reconciliation key), child pid (the respawn catcher),
                 // cwd (byte-equal, the same directory across the restart).
-                let mismatch = if row.harness_session_id != answered_session {
-                    Some(format!(
+                // Each leg evaluates INDEPENDENTLY - an else-if chain would
+                // skip the cwd check whenever both child pids are present and
+                // equal, re-binding a keeper that moved directories.
+                let session_mismatch = (row.harness_session_id != answered_session).then(|| {
+                    format!(
                         "keeper answers session id {answered_session:?}, row stores {:?}",
                         row.harness_session_id
-                    ))
-                } else if let (Some(recorded), Some(answered)) =
-                    (row.keeper_child_pid, answered_child)
-                {
-                    (recorded != answered).then(|| {
-                        format!(
-                            "child pid changed: row records {recorded}, keeper answers {answered}"
-                        )
-                    })
-                } else if let Some(answered_cwd) = answered_cwd.as_deref() {
+                    )
+                });
+                let pid_mismatch = match (row.keeper_child_pid, answered_child) {
+                    (Some(recorded), Some(answered)) if recorded != answered => Some(format!(
+                        "child pid changed: row records {recorded}, keeper answers {answered}"
+                    )),
+                    _ => None,
+                };
+                let cwd_mismatch = answered_cwd.as_deref().and_then(|answered_cwd| {
                     (!answered_cwd.is_empty() && answered_cwd != row.cwd).then(|| {
                         format!(
                             "keeper cwd {answered_cwd:?} differs from row cwd {:?}",
                             row.cwd
                         )
                     })
-                } else {
-                    None
-                };
+                });
+                let mismatch = session_mismatch.or(pid_mismatch).or(cwd_mismatch);
                 if let Some(reason) = mismatch {
                     let _ = emitter.emit(
                         "keeper_row_dead",
@@ -8926,6 +8975,8 @@ pub fn keeper_registry_sweep(
                         name: row.name.clone(),
                         status: Some(AgentStatus::Exited),
                         child_pid: None,
+                        bound_socket: bound_socket.clone(),
+                        bound_session: row.harness_session_id.clone(),
                     });
                     report.dead.push((row.name.clone(), reason));
                     continue;
@@ -8948,6 +8999,8 @@ pub fn keeper_registry_sweep(
                         name: row.name.clone(),
                         status: Some(AgentStatus::Live),
                         child_pid: answered_child,
+                        bound_socket: bound_socket.clone(),
+                        bound_session: row.harness_session_id.clone(),
                     });
                     report.rebound.push(row.name.clone());
                 } else {
@@ -8963,18 +9016,15 @@ pub fn keeper_registry_sweep(
         return Ok(report);
     }
     let now = now_rfc3339_like();
+    let mut superseded = Vec::new();
     state::update_registry(&home.registry_json(), |r| {
-        for change in &changes {
-            let Some(entry) = r.find_mut(&change.name) else {
-                continue;
-            };
-            apply_reconcile_change(entry, change.status, &now);
-            if let Some(pid) = change.child_pid {
-                entry.keeper_child_pid = Some(pid);
-            }
-        }
+        superseded = apply_keeper_sweep_changes(r, &changes, &now);
     })
     .map_err(|e| format!("keeper sweep registry write failed: {e}"))?;
+    if !superseded.is_empty() {
+        let _ = emitter.emit("keeper_row_superseded", &json!({"names": superseded}));
+        report.superseded = superseded;
+    }
     Ok(report)
 }
 
@@ -15762,6 +15812,101 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 }
             })
             .unwrap()
+    }
+
+    #[test]
+    fn keeper_sweep_apply_discards_a_verdict_when_the_row_changed_identity() {
+        // The P1 race: the sweep snapshots the registry, probes up to the
+        // budget while the daemon already serves, and an operator removes the
+        // row and re-spawns under the SAME name before the write. A name-only
+        // apply would stamp the old keeper's verdict onto the healthy
+        // replacement.
+        let mut registry = state::Registry::default();
+        registry.entries.push(lane_b_thread_row(
+            "wk-raced",
+            "sess-new",
+            "/tmp",
+            None,
+            Path::new("/tmp/mux/threads/wk-raced.sock"),
+        ));
+        let changes = vec![KeeperSweepChange {
+            name: "wk-raced".into(),
+            status: Some(AgentStatus::Exited),
+            child_pid: None,
+            bound_socket: Some("/tmp/mux/threads/wk-raced.sock".into()),
+            bound_session: Some("sess-old".into()),
+        }];
+        let superseded =
+            apply_keeper_sweep_changes(&mut registry, &changes, "2026-09-01T00:00:00Z");
+        assert_eq!(
+            superseded,
+            vec!["wk-raced"],
+            "the raced row is named superseded"
+        );
+        assert_eq!(
+            registry.entries[0].status,
+            AgentStatus::Live,
+            "the replacement row keeps its own status"
+        );
+        // The same change against the row it was probed from still applies.
+        let mut matching = state::Registry::default();
+        matching.entries.push(lane_b_thread_row(
+            "wk-raced",
+            "sess-old",
+            "/tmp",
+            None,
+            Path::new("/tmp/mux/threads/wk-raced.sock"),
+        ));
+        let superseded =
+            apply_keeper_sweep_changes(&mut matching, &changes, "2026-09-01T00:00:00Z");
+        assert!(superseded.is_empty(), "identity-held change applies");
+        assert_eq!(matching.entries[0].status, AgentStatus::Exited);
+    }
+
+    #[test]
+    fn keeper_registry_sweep_flags_a_moved_cwd_even_when_the_child_pid_matches() {
+        // The P2 chain bug: an else-if identity ladder skips the cwd leg
+        // whenever both child pids are present and equal, re-binding a keeper
+        // that answers from a different directory.
+        let home = keeper_sweep_home("cwd");
+        let threads = lane_b_keeper_dir(&home);
+        let recorded_cwd = home.root().parent().unwrap().to_string_lossy().into_owned();
+        let elsewhere = home.root().to_string_lossy().into_owned();
+        let sock = threads.join("wk-moved.sock");
+        let keeper = spawn_fake_keeper(
+            &sock,
+            json!({
+                "v": 1, "keeper_pid": 4242, "child_pid": 111,
+                "session_id": "sess-moved", "cwd": elsewhere, "argv": [],
+            }),
+        );
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(lane_b_thread_row(
+                "wk-moved",
+                "sess-moved",
+                &recorded_cwd,
+                Some(111),
+                &sock,
+            ));
+        })
+        .unwrap();
+
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let report = keeper_registry_sweep(&home, &emitter).expect("sweep ok");
+        assert!(report.rebound.is_empty(), "a moved cwd must not re-bind");
+        assert_eq!(report.dead.len(), 1, "the moved cwd is named dead");
+        assert!(
+            report.dead[0].1.contains("cwd"),
+            "the reason names the cwd mismatch: {}",
+            report.dead[0].1
+        );
+        let row = state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .remove(0);
+        assert_eq!(row.status, AgentStatus::Exited);
+        keeper.join().unwrap();
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }
 
     #[test]

@@ -4620,6 +4620,19 @@ event_types:
           type: integer
         wedged:
           type: integer
+        superseded:
+          type: integer
+
+  - name: keeper_row_superseded
+    description: "A sweep verdict was discarded at write time: the registry row under that name changed identity between probe and write, so the probed verdict belongs to a row that no longer exists."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        names:
+          type: array
+          items:
+            type: string
 
   - name: keeper_sweep_failed
     description: "The registry-side keeper sweep raised an error (unreadable registry, failed write); the daemon continues fail-open."

@@ -231,7 +231,14 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # a reap needs had no node to read off the row. None on rows whose writer
 # cannot know (adopt, daemon-hosted mints). Same additive-optional shape and
 # forward-compat rationale as v19/v20.
-SCHEMA_VERSION = 21
+# v22 (x-ac6b): additive `keeper_child_pid` - the process a lane-B keeper
+# hosts, the daemon's restart-sweep assertion (a changed pid means something
+# respawned under the row's name). The bump is for the WRITER, the same reason
+# v16 bumped for origin: a pre-v22 Rust daemon accepts the unknown key and its
+# next read-modify-write silently erases it, after which the respawn check has
+# no recorded pid and backfills whichever child answers. The bump makes that
+# erasure a loud version refusal instead.
+SCHEMA_VERSION = 22
 
 
 class RegistryVersionError(RuntimeError):
@@ -427,8 +434,8 @@ class AgentEntry:
     # keeper hosts. Stamped by the lane-B spawn from the Identify reply and
     # re-asserted unchanged by the Rust daemon's registry-side keeper sweep on
     # every start - a changed pid means something respawned under the row's
-    # name. Mirrors Rust ``RegistryEntry.keeper_child_pid`` (additive-optional,
-    # no schema bump): without this mirror the daemon's sweep write drops it.
+    # name. Mirrors Rust ``RegistryEntry.keeper_child_pid``; gated by the v22
+    # schema bump so an older writer refuses rather than silently erases it.
     keeper_child_pid: Optional[int] = None
     last_reconciled_at: Optional[str] = None
     # Latest inside-leg report for this row's claude pane (inside-out E3.1,

@@ -836,6 +836,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "keeper_row_dead",
     "keeper_row_wedged",
     "keeper_row_rebound",
+    "keeper_row_superseded",
     "keeper_row_terminal_socket_live",
     // Deliver (daemon-emitted, Task 2.2 US4)
     "agent_deliver_injected",
