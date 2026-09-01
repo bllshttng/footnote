@@ -622,6 +622,20 @@ def thread_lane(harness: str) -> str:
     return "none"
 
 
+def thread_lane_or_none(harness: str) -> Optional[str]:
+    """:func:`thread_lane` for a name the table may not know: ``None`` rather
+    than raising.
+
+    The mail send paths read this to route a recipient; a registry row whose
+    harness the capability table has dropped keeps its fall-through lanes
+    (daemon RPC, durable floor) instead of the send crashing on the way down.
+    """
+    try:
+        return thread_lane(harness)
+    except DispatchResolveError:
+        return None
+
+
 def effort_values(harness: str) -> list[str]:
     """Return no static catalog: effort values belong to the provider/model."""
     del harness
