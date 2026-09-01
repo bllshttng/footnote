@@ -1224,37 +1224,45 @@ def test_ac7_impossible_refuses_the_merge_with_its_own_name(
 
 
 def test_ac7_status_names_its_own_blocker(monkeypatch, tmp_path):
-    """`fno do pr status` renders the IMPOSSIBLE row as
+    """`fno do pr status` renders the IMPOSSIBLE chain as
     review_coverage_impossible, distinct from review_coverage_uncovered.
 
-    It reads `impossible`, never the raw `rounds_exhausted`: under the
-    operator's round-cap ruling an exhausted budget alone MERGES (the
-    remainder is filed), so naming the blocker off the budget flag would
-    hold every capped PR the law says should land."""
+    The conjunct is re-derived from the PR's own chain through cap_verdict,
+    never read off a stored flag: the row the status read returns carries
+    no `impossible` key at all on the recompute path, and reading that
+    absence as an acquittal is the defect this test guards against. It
+    still never reads the raw budget: under the operator's round-cap ruling
+    an exhausted budget alone MERGES (the remainder is filed), so a blocker
+    named off `rounds_exhausted` would hold every capped PR the law says
+    should land."""
     from fno.pr import _status
 
+    _seed_cap_chain(tmp_path, _cap_chain(6))
     blockers = _status._ready_blockers(
         True,
         "green",
         0,
-        {"coverage": "uncovered", "rounds_exhausted": True, "impossible": True},
+        {"coverage": "uncovered", "reviewed_count": 0, "head_sha": f"{5:040x}"},
         review_lane=True,
-        head="",
+        head=f"{5:040x}",
+        head_branch="feature/x-cap",
         code_review_required=False,
         repo=str(tmp_path),
     )
     assert "review_coverage_impossible" in blockers
     assert "review_coverage_uncovered" not in blockers
 
-    # The demotion, pinned: a spent budget with no hard finding is not a
+    # The demotion, pinned: a spent budget whose findings are SOFT is not a
     # blocker of its own - those findings are filed and the PR merges.
+    _seed_cap_chain(tmp_path, _cap_chain(6, category="nit"))
     soft = _status._ready_blockers(
         True,
         "green",
         0,
-        {"coverage": "uncovered", "rounds_exhausted": True, "impossible": False},
+        {"coverage": "uncovered", "reviewed_count": 0, "head_sha": f"{5:040x}"},
         review_lane=True,
-        head="",
+        head=f"{5:040x}",
+        head_branch="feature/x-cap",
         code_review_required=False,
         repo=str(tmp_path),
     )
@@ -2995,3 +3003,239 @@ def test_a_decline_at_head_blocks_the_waiver_on_the_attestation_branch_too(
 
     assert state == _coverage_gate.REFUSED
     assert "coverage-waive" not in refusal, refusal
+
+
+# ---- the shared cap computation (cap_verdict) ------------------------------
+#
+# Every fixture here is CONSTRUCTED. The two live PRs that measured this
+# defect are being cleared while this code lands, so no test may source its
+# chain from a live PR: a red test that expires the moment somebody fixes
+# the specimen is a test that guards nothing. The divergence fixture is the
+# load-bearing one - on both live specimens the two axes AGREE, so a
+# fixture where they agree proves the helper runs, never which axis it
+# reads (a green control aimed at the wrong symbol).
+
+
+def _cap_chain(rounds, *, first_verdict="fail", dispositions_at=None, category="correctness"):
+    """A constructed branch chain: `rounds` attestations, one per head.
+
+    Round 0 raises a CONFIRMED finding of `category`; every later round is
+    a findings-free pass unless `dispositions_at` names a round index whose
+    pass carries a `fixed` disposition for that finding.
+    """
+    dispositions_at = dispositions_at if dispositions_at is not None else -1
+    lines = []
+    for i in range(rounds):
+        data = {
+            "reviewer": "code-review",
+            "head_sha": f"{i:040x}",
+            "verdict": first_verdict if i == 0 else "pass",
+            "session_id": "s-cap",
+            "branch": "feature/x-cap",
+            "reviewed_base_sha": "a" * 40,
+            "reviewed_head_sha": f"{i:040x}",
+            "findings_blocking": 1 if i == 0 else 0,
+            "findings": (
+                [
+                    {
+                        "category": category,
+                        "verdict": "CONFIRMED",
+                        "blocking": True,
+                        "has_required_fields": True,
+                        "finding_key": f"cli/src/fake.py:779:{category}",
+                    }
+                ]
+                if i == 0
+                else []
+            ),
+        }
+        if i == dispositions_at:
+            data["dispositions"] = [
+                {
+                    "finding_key": f"cli/src/fake.py:779:{category}",
+                    "disposition": "fixed",
+                    "reason": "verified the fix delta",
+                }
+            ]
+        lines.append(
+            {"ts": f"2026-08-31T2{i:02d}:00:00Z", "type": "review_attestation",
+             "source": "hook", "data": data}
+        )
+    return lines
+
+
+def _seed_cap_chain(tmp_path, lines, *, extra_rows=()):
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    text = "\n".join(json.dumps(e) for e in lines) + "\n"
+    for row in extra_rows:
+        text += json.dumps(row) + "\n"
+    (tmp_path / ".fno" / "events.jsonl").write_text(text, encoding="utf-8")
+
+
+_CAP_HARD_KEY = "cli/src/fake.py:779:correctness"
+
+
+def _cap_cov_row():
+    return {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 1,
+            "head_sha": f"{5:040x}", "verdicts": []}
+
+
+def test_cap_verdict_agreement_chain_is_impossible_and_names_the_key(tmp_path):
+    """One fail raising a CONFIRMED correctness finding, then five
+    findings-free passes, at max_rounds 2: impossible True, the key named."""
+    _seed_cap_chain(tmp_path, _cap_chain(6))
+    cap = _coverage_gate.cap_verdict(
+        str(tmp_path), f"{5:040x}", "feature/x-cap", _cap_cov_row()
+    )
+    assert cap.impossible is True
+    assert cap.rounds_used == 6
+    assert cap.max_rounds == 2
+    assert cap.hard_keys == [_CAP_HARD_KEY]
+    assert _CAP_HARD_KEY in cap.nonterminal_keys
+
+
+def test_cap_verdict_a_fixed_disposition_clears_impossible(tmp_path):
+    """The same chain plus one more pass carrying a `fixed` disposition for
+    the finding: a later attestation reviewed the fix delta, so the finding
+    is terminal and no budget can make it impossible."""
+    _seed_cap_chain(tmp_path, _cap_chain(7, dispositions_at=6))
+    cap = _coverage_gate.cap_verdict(
+        str(tmp_path), f"{6:040x}", "feature/x-cap", _cap_cov_row()
+    )
+    assert cap.impossible is False
+    assert cap.hard_keys == []
+
+
+def test_cap_verdict_reads_the_events_axis_alone_for_impossible(tmp_path):
+    """The divergence fixture: 1 events-axis round, a reviews payload naming
+    5 distinct reviewed commits, max_rounds 2. The budget reports 5 (a bot
+    round IS a round) while `impossible` stays False - the unspent capacity
+    is local, and a local attestation carrying a `fixed` disposition still
+    clears the state, so "cannot be cleared by re-reviewing" would be a
+    false claim. This is the one case the pre-fix single-axis conjunct
+    answered impossible=True on."""
+    _seed_cap_chain(tmp_path, _cap_chain(1))
+    reviews = [
+        {"state": "APPROVED", "commit": {"oid": f"r{i:038x}"}} for i in range(5)
+    ]
+    cap = _coverage_gate.cap_verdict(
+        str(tmp_path), f"{0:040x}", "feature/x-cap", _cap_cov_row(), reviews=reviews
+    )
+    assert cap.rounds_used == 5
+    assert cap.impossible is False
+    # reviews=None (the status caller's setting) never WIDENS impossible:
+    # same chain, events axis alone, still not impossible at 1/2.
+    events_only = _coverage_gate.cap_verdict(
+        str(tmp_path), f"{0:040x}", "feature/x-cap", _cap_cov_row()
+    )
+    assert events_only.rounds_used == 1
+    assert events_only.impossible is False
+
+
+def test_cap_verdict_on_an_empty_chain_answers_zero_not_impossible(tmp_path):
+    """No chain at all: rounds 0, impossible False, nothing omitted."""
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    (tmp_path / ".fno" / "events.jsonl").write_text("", encoding="utf-8")
+    cap = _coverage_gate.cap_verdict(
+        str(tmp_path), f"{5:040x}", "feature/x-cap", _cap_cov_row()
+    )
+    assert cap.rounds_used == 0
+    assert cap.max_rounds == 2
+    assert cap.impossible is False
+    assert cap.hard_keys == []
+
+
+def _cap_gates(monkeypatch):
+    """The hermetic gate seams pointed at the constructed chain: live head,
+    matching branch, no override valve."""
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: f"{5:040x}")
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
+    monkeypatch.setattr(_merge, "_pr_base_head_refs", lambda pr, cwd: ("main", "feature/x-cap"))
+    monkeypatch.setattr(_reviews, "_override_label_actor", lambda pr, repo, r: (False, None))
+    monkeypatch.setattr(_reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: True)
+
+
+def test_status_and_merge_answer_one_word_on_one_constructed_chain(
+    monkeypatch, tmp_path
+):
+    """The deliverable's regression guard: one constructed chain, read by
+    BOTH surfaces, must yield the same verdict and name the same finding
+    key. The two surfaces disagreeing is the defect; a test that pins them
+    equal is the test."""
+    from fno.pr import _status
+
+    _cap_gates(monkeypatch)
+    row = dict(_cap_cov_row(), pr=42)
+    _seed_cap_chain(
+        tmp_path,
+        _cap_chain(6),
+        extra_rows=[
+            {
+                "ts": "2026-08-31T23:00:00Z",
+                "type": "review_coverage",
+                "source": "hook",
+                "data": row,
+            }
+        ],
+    )
+    # The merge side: the gate's own verdict on the same chain.
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.IMPOSSIBLE
+    assert _CAP_HARD_KEY in refusal
+    # The status side: the ready conjunct, re-derived from the same chain.
+    blockers = _status._ready_blockers(
+        True,
+        "green",
+        0,
+        dict(_cap_cov_row()),
+        True,
+        head=f"{5:040x}",
+        head_branch="feature/x-cap",
+        code_review_required=False,
+        repo=str(tmp_path),
+    )
+    assert "review_coverage_impossible" in blockers
+    assert "review_coverage_uncovered" not in blockers
+    # A row still carrying a stale impossible flag must NOT block on it:
+    # the re-derivation is the answer of record, never the stored flag.
+    flagged_row = dict(_cap_cov_row())
+    flagged_row["impossible"] = True
+    _seed_cap_chain(tmp_path, _cap_chain(7, dispositions_at=6))
+    clean = _status._ready_blockers(
+        True,
+        "green",
+        0,
+        flagged_row,
+        True,
+        head=f"{6:040x}",
+        head_branch="feature/x-cap",
+        code_review_required=False,
+        repo=str(tmp_path),
+    )
+    assert "review_coverage_impossible" not in clean
+
+
+def test_a_pr_without_a_head_branch_appends_no_impossible_blocker(tmp_path):
+    """No head branch -> the chain cannot be scoped -> no impossible blocker,
+    and the other coverage conjuncts are unchanged. Scoping by exact head
+    alone would narrow the chain to the current round and acquit the very
+    state the conjunct exists to name."""
+    from fno.pr import _status
+
+    _seed_cap_chain(tmp_path, _cap_chain(6))
+    blockers = _status._ready_blockers(
+        True,
+        "green",
+        0,
+        _cap_cov_row(),
+        True,
+        head=f"{5:040x}",
+        head_branch="",
+        code_review_required=False,
+        repo=str(tmp_path),
+    )
+    assert "review_coverage_impossible" not in blockers
+    assert blockers == []

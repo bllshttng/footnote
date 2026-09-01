@@ -585,3 +585,152 @@ def test_worktree_overlap_observed_rejects_observer_as_its_own_peer() -> None:
             repository_key="/repo/.git",
             worktree_key="/repo/.git/wt1",
         )
+
+
+# -- the review_attestation disposition obligation -----------------------------
+#
+# A findings-free pass attests nothing about EARLIER findings; emitting one
+# over a branch holding non-terminal blocking findings is the silent producer
+# half of the impossible-merge deadlock. The chokepoint enforces it, so every
+# writer (script, hook, manual emit) is covered with no new flags. Every chain
+# here is constructed into the tmp repo the cap helper reads.
+
+
+def _attestation_event(verdict: str, branch: str, *, dispositions=None) -> dict:
+    data = {
+        "reviewer": "code-review",
+        "head_sha": "0" * 39 + "1",
+        "verdict": verdict,
+        "session_id": "s-ob",
+        "branch": branch,
+        "reviewed_base_sha": "a" * 40,
+        "reviewed_head_sha": "0" * 39 + "1",
+        "reviewed_line_count": 10,
+        "reviewed_file_count": 2,
+    }
+    if dispositions is not None:
+        data["dispositions"] = dispositions
+    return {
+        "ts": "2026-08-31T19:00:00Z",
+        "type": "review_attestation",
+        "source": "target",
+        "data": data,
+    }
+
+
+def _obligation_chain_event(i: int, verdict: str, findings, dispositions=None) -> dict:
+    data = {
+        "reviewer": "code-review",
+        "head_sha": f"{i:040x}",
+        "verdict": verdict,
+        "session_id": "s-ob",
+        "branch": "feature/x-ob",
+        "reviewed_base_sha": "a" * 40,
+        "reviewed_head_sha": f"{i:040x}",
+        "findings_blocking": len(findings),
+        "findings": findings,
+    }
+    if dispositions:
+        data["dispositions"] = dispositions
+    return {"ts": f"2026-08-31T1{i:02d}:00:00Z", "type": "review_attestation",
+            "source": "target", "data": data}
+
+
+_OB_HARD = {
+    "category": "correctness",
+    "verdict": "CONFIRMED",
+    "blocking": True,
+    "has_required_fields": True,
+    "finding_key": "cli/src/fake.py:779:correctness",
+}
+
+
+def _seed_obligation_chain(tmp_path, events) -> None:
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    (tmp_path / ".fno" / "events.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8"
+    )
+
+
+def test_a_findings_free_pass_over_an_undisposed_fail_is_refused_by_key(
+    tmp_path, monkeypatch
+) -> None:
+    _seed_obligation_chain(tmp_path, [_obligation_chain_event(0, "fail", [_OB_HARD])])
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValidationError) as exc:
+        validate(_attestation_event("pass", "feature/x-ob"))
+    assert "cli/src/fake.py:779:correctness" in str(exc.value)
+    assert "disposition" in str(exc.value)
+
+
+def test_a_pass_carrying_the_fixed_disposition_is_emitted_unchanged(
+    tmp_path, monkeypatch
+) -> None:
+    _seed_obligation_chain(tmp_path, [_obligation_chain_event(0, "fail", [_OB_HARD])])
+    monkeypatch.chdir(tmp_path)
+    event = _attestation_event(
+        "pass",
+        "feature/x-ob",
+        dispositions=[
+            {
+                "finding_key": "cli/src/fake.py:779:correctness",
+                "disposition": "fixed",
+                "reason": "verified the fix delta",
+            }
+        ],
+    )
+    assert validate(event) is None
+
+
+def test_a_first_round_clean_pass_disposes_nothing(tmp_path, monkeypatch) -> None:
+    _seed_obligation_chain(tmp_path, [])
+    monkeypatch.chdir(tmp_path)
+    assert validate(_attestation_event("pass", "feature/x-ob")) is None
+
+
+def test_a_fail_verdict_and_a_branchless_reader_skip_the_obligation(
+    tmp_path, monkeypatch
+) -> None:
+    _seed_obligation_chain(tmp_path, [_obligation_chain_event(0, "fail", [_OB_HARD])])
+    monkeypatch.chdir(tmp_path)
+    assert validate(_attestation_event("fail", "feature/x-ob")) is None
+    assert validate(_attestation_event("pass", "")) is None
+
+
+def test_an_unreadable_event_log_produces_rather_than_refuses(
+    tmp_path, monkeypatch
+) -> None:
+    import fno.pr._coverage_gate as gate
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("instrument failure")
+
+    monkeypatch.setattr(gate, "attestation_chain", _boom)
+    monkeypatch.chdir(tmp_path)
+    assert validate(_attestation_event("pass", "feature/x-ob")) is None
+
+
+def test_a_nonblocking_or_declined_disposition_does_not_clear_the_key(
+    tmp_path, monkeypatch
+) -> None:
+    """Only `fixed` clears at emit: the gate keeps `nonblocking` and an
+    uncorroborated `declined` non-terminal by its own rules, so a producer
+    check that waved those through would emit a pass the gate still refuses."""
+    _seed_obligation_chain(tmp_path, [_obligation_chain_event(0, "fail", [_OB_HARD])])
+    monkeypatch.chdir(tmp_path)
+    for disposition in ("nonblocking", "declined"):
+        with pytest.raises(ValidationError) as exc:
+            validate(
+                _attestation_event(
+                    "pass",
+                    "feature/x-ob",
+                    dispositions=[
+                        {
+                            "finding_key": "cli/src/fake.py:779:correctness",
+                            "disposition": disposition,
+                            "reason": "attempted",
+                        }
+                    ],
+                )
+            )
+        assert "cli/src/fake.py:779:correctness" in str(exc.value), disposition
