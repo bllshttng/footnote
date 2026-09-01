@@ -30,6 +30,13 @@ MERGE_GATING_OPTOUT_DEFAULTS: dict[str, object] = {
 }
 
 
+def optout_release_command(key: str, scope_flag: str = "") -> str:
+    """The command a holder runs to release the opt-out at ``key``."""
+    if key == "review.optional_apps":
+        return f"fno config unset {key}{scope_flag}"
+    return f"fno config set {key} true{scope_flag}"
+
+
 def _raw_leaf(raw: dict[str, Any], key: str) -> tuple[bool, Any]:
     node: Any = raw
     for part in key.split("."):

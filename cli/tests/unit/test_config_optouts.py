@@ -81,6 +81,36 @@ def test_bare_writer_refuses_merge_gating_keys_fail_closed(tmp_path, monkeypatch
     assert not (tmp_path / "settings.yaml").exists()
 
 
+def test_mid_batch_refusal_releases_the_lease_acquired_earlier(
+    tmp_path, monkeypatch
+):
+    # A batch acquiring two opt-outs whose second claim is held by another
+    # session must not strand the first session's lease until TTL.
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "settings.yaml"))
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
+    acquire_claim(
+        "config-optout:review.optional_apps",
+        "session-b",
+        root=claims_root_for("config-optout:review.optional_apps"),
+    )
+    monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-a")
+
+    with pytest.raises(writer.ConfigSetError, match="session-b"):
+        optout_lease.set_config_values(
+            [
+                ("review.self_review_required", "false"),
+                ("review.optional_apps", "[]"),
+            ]
+        )
+
+    status = claim_status(
+        "config-optout:review.self_review_required",
+        root=claims_root_for("config-optout:review.self_review_required"),
+    )
+    assert status["state"] == "free"
+    assert not (tmp_path / "settings.yaml").exists()
+
+
 def test_owner_reset_releases_the_opt_out_claim(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "settings.yaml"))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))

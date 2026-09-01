@@ -178,6 +178,36 @@ def prepare_set_leases(
     leases: dict[str, dict[str, Any]] = {}
     newly_acquired: list[tuple[str, str]] = []
     releases: list[tuple[str, str]] = []
+    try:
+        _prepare_set_leases_locked(
+            order, parts_by_key, existing, data, target, scope,
+            leases, newly_acquired, releases,
+        )
+    except Exception:
+        # A mid-batch refusal must not strand the leases of the keys that
+        # already acquired; writer's own rollback only sees claims from a
+        # prepare that returned.
+        rollback_set_leases(newly_acquired)
+        raise
+    return {
+        "data": data,
+        "leases": leases,
+        "newly_acquired": newly_acquired,
+        "releases": releases,
+    }
+
+
+def _prepare_set_leases_locked(
+    order: list[str],
+    parts_by_key: dict[str, list[str]],
+    existing: dict[str, Any],
+    data: dict[str, Any],
+    target: Path,
+    scope: str,
+    leases: dict[str, dict[str, Any]],
+    newly_acquired: list[tuple[str, str]],
+    releases: list[tuple[str, str]],
+) -> None:
     for key in order:
         if key not in MERGE_GATING_OPTOUTS:
             continue
@@ -253,12 +283,6 @@ def prepare_set_leases(
                     1,
                 )
             releases.append((key, holder))
-    return {
-        "data": data,
-        "leases": leases,
-        "newly_acquired": newly_acquired,
-        "releases": releases,
-    }
 
 
 def rollback_set_leases(newly_acquired: list[tuple[str, str]]) -> None:

@@ -1022,6 +1022,7 @@ def set_cmd(
     import sys
 
     from fno.claims.optout_lease import ConfigSetError, set_config_values
+    from fno.config.optouts import optout_release_command
 
     scope = "project" if local else "global"
 
@@ -1089,11 +1090,7 @@ def set_cmd(
     for r in results:
         if r.lease:
             scope_flag = " --local" if r.scope == "project" else ""
-            release = (
-                f"fno config unset {r.key}{scope_flag}"
-                if r.key == "review.optional_apps"
-                else f"fno config set {r.key} true{scope_flag}"
-            )
+            release = optout_release_command(r.key, scope_flag)
             typer.echo(
                 f"lease: {r.key} held by {r.lease['holder']}, expires at "
                 f"{r.lease['expires_at']}; release: {release}"

@@ -1598,7 +1598,7 @@ def _merge_gating_optout_report() -> dict[str, Any]:
             config_read_candidates,
         )
         from fno.claims.optout_lease import _claim_state
-        from fno.config.optouts import MERGE_GATING_OPTOUTS, _raw_leaf
+        from fno.config.optouts import MERGE_GATING_OPTOUTS, _raw_leaf, optout_release_command
 
         residue: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
@@ -1622,11 +1622,7 @@ def _merge_gating_optout_report() -> dict[str, Any]:
                             "key": key,
                             "path": str(path),
                             "claim_state": state,
-                            "command": (
-                                f"fno config unset {key}"
-                                if key == "review.optional_apps"
-                                else f"fno config set {key} true"
-                            ),
+                            "command": optout_release_command(key),
                         }
                     )
         return {"residue": residue}
