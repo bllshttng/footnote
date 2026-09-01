@@ -513,6 +513,29 @@ impl HarnessContract {
         ))
     }
 
+    /// Which thread lane this harness needs, from the capability contract
+    /// alone - never from a name list, so a new row lands in its lane with
+    /// no code edit here. Kept identical to `thread_lane` in
+    /// `harness_map.py` so the two runtimes cannot disagree about lanes the
+    /// way LOOP_PARTICIPATION is pinned across them.
+    pub fn thread_lane(&self, harness: &str) -> Result<&'static str, ContractError> {
+        let caps = self.capabilities(harness)?;
+        let kind = |lane: &str| {
+            caps.resume_strategy
+                .forms
+                .get(lane)
+                .map(|form| form.kind.as_str())
+                .unwrap_or("unsupported")
+        };
+        if kind("interactive_attach") != "unsupported" {
+            return Ok("attach");
+        }
+        if kind("interactive_resume") != "unsupported" {
+            return Ok("keeper");
+        }
+        Ok("none")
+    }
+
     pub fn permission_response_keys(
         &self,
         harness: &str,
@@ -769,6 +792,22 @@ mod tests {
                 .kind,
             "menu_walk"
         );
+    }
+
+    /// The lane assignment, pinned per harness: lane A where the attach form
+    /// declares a kind, lane B where only the resume form does. The resolver
+    /// itself reads the contract; this table is the measured answer it must
+    /// keep producing.
+    #[test]
+    fn thread_lane_is_derived_from_the_attach_declaration() {
+        let contract = HarnessContract::packaged().unwrap();
+        let lane = |h: &str| contract.thread_lane(h).unwrap();
+        assert_eq!(lane("claude"), "attach");
+        assert_eq!(lane("codex"), "attach");
+        assert_eq!(lane("agy"), "keeper");
+        assert_eq!(lane("gemini"), "keeper");
+        assert_eq!(lane("opencode"), "keeper");
+        assert_eq!(lane("pi"), "keeper");
     }
 
     /// The measured answer, pinned per harness. `stop_hook` read "native" on
