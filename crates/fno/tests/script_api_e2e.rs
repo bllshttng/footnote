@@ -23,6 +23,19 @@ fn pane(scratch: &Scratch, args: &[&str]) -> Output {
         .expect("fno binary runs")
 }
 
+/// Run a pane verb with one explicit environment override inherited by a
+/// client-autospawned server.
+fn pane_with_env(scratch: &Scratch, args: &[&str], key: &str, value: &str) -> Output {
+    scratch
+        .command()
+        .args(["mux", "pane"])
+        .args(args)
+        .env("SHELL", "/bin/sh")
+        .env(key, value)
+        .output()
+        .expect("fno binary runs")
+}
+
 /// Run `fno mux tab <args...>` against `scratch`'s session, headless.
 fn tab(scratch: &Scratch, args: &[&str]) -> Output {
     scratch
@@ -795,4 +808,101 @@ fn sigterm_shutdown_kills_pane_children() {
         "pane child {child_pid} outlived the server's SIGTERM"
     );
     drop(scratch);
+}
+
+#[test]
+fn wedged_sigterm_reaps_plain_pane_children() {
+    // This is the real failure shape. The explicit companion marker asks the
+    // shipped server to wedge its core loop after pane registration;
+    // the test waits for that positive marker before sending SIGTERM, so a
+    // healthy-loop teardown cannot satisfy the assertion by accident.
+    let scratch = Scratch::new("wedged_sigterm_reaper");
+    let dir = scratch.0.to_str().unwrap();
+    let run = pane_with_env(
+        &scratch,
+        &[
+            "run",
+            "--cwd",
+            dir,
+            "--",
+            "/bin/sh",
+            "-c",
+            "echo $$ > child.pid; trap '' HUP; exec sleep 300",
+        ],
+        "FNO_E2E_CORE_WEDGE",
+        "1",
+    );
+    assert!(
+        run.status.success(),
+        "wedged pane run: stdout={:?} stderr={:?}",
+        stdout(&run),
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let log_path = scratch.0.join("main.log");
+    let marker = "core wedge armed";
+    let marker_deadline = Instant::now() + Duration::from_secs(10);
+    let log = loop {
+        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+        if log.contains(marker) {
+            break log;
+        }
+        if Instant::now() >= marker_deadline {
+            panic!("real core-wedge marker never appeared; log: {log}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let child_pid: i32 = {
+        let path = scratch.0.join("child.pid");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Ok(pid) = text.trim().parse() {
+                    break pid;
+                }
+            }
+            if Instant::now() >= deadline {
+                panic!("pane child pid file never became readable; log: {log}");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    };
+    let server_pid = common::sidecar_pid_field(
+        &std::fs::read_to_string(scratch.0.join("main.pid")).expect("server pid sidecar"),
+    )
+    .expect("server pid field");
+
+    assert_eq!(
+        unsafe { libc::kill(child_pid, 0) },
+        0,
+        "child live before SIGTERM"
+    );
+    assert_eq!(
+        unsafe { libc::kill(server_pid, 0) },
+        0,
+        "server live at wedge marker"
+    );
+
+    assert_eq!(
+        unsafe { libc::kill(server_pid, libc::SIGTERM) },
+        0,
+        "SIGTERM reaches wedged server"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline
+        && (unsafe { libc::kill(server_pid, 0) } == 0 || unsafe { libc::kill(child_pid, 0) } == 0)
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let server_alive = unsafe { libc::kill(server_pid, 0) } == 0;
+    let child_alive = unsafe { libc::kill(child_pid, 0) } == 0;
+    if server_alive || child_alive {
+        unsafe {
+            libc::kill(server_pid, libc::SIGKILL);
+            libc::kill(child_pid, libc::SIGKILL);
+        }
+        panic!(
+            "wedged SIGTERM left processes alive: server={server_alive} child={child_alive}; log: {log}"
+        );
+    }
 }
