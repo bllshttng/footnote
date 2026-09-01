@@ -2434,6 +2434,18 @@ def _stage_removal_receipt(
         argv = render_session_argv(harness, "interactive_resume", sid)
     except DispatchResolveError as exc:
         return False, f"row {entry.name!r}: {exc}"
+    # Same alphabet as the Rust writer's receipt_filename_part: ascii alnum
+    # plus . _ -, everything else underscored, so every writer lands on the
+    # same filename for the same session.
+    safe = "".join(c if (c.isascii() and c.isalnum()) or c in "._-" else "_" for c in sid)
+    dir_path = home / "reap-receipts"
+    path = dir_path / f"{harness}-{safe}.json"
+    # A receipt already on disk for this session was staged moments ago by
+    # the reap sweep (or the watchdog) BEFORE it dropped the rows - rewriting
+    # it would stamp removed_by onto a pure reap receipt and change the
+    # x-b150 shape. The record on disk is already the recovery path.
+    if path.exists():
+        return True, f"receipt already staged for this session at {path}"
     receipt: dict = {
         "row_name": entry.name,
         "short_id": entry.short_id or "",
@@ -2446,12 +2458,6 @@ def _stage_removal_receipt(
         "resume": " ".join(argv),
         "removed_by": removed_by,
     }
-    # Same alphabet as the Rust writer's receipt_filename_part: ascii alnum
-    # plus . _ -, everything else underscored, so every writer lands on the
-    # same filename for the same session.
-    safe = "".join(c if (c.isascii() and c.isalnum()) or c in "._-" else "_" for c in sid)
-    dir_path = home / "reap-receipts"
-    path = dir_path / f"{harness}-{safe}.json"
     try:
         dir_path.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")

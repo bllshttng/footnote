@@ -142,10 +142,19 @@ pub fn stage_removal_accounting(
 ) {
     let (receipt_staged, reason) = match build_reap_receipt(entry, None) {
         Ok(mut receipt) => {
-            receipt.removed_by = Some(remover.to_string());
-            match write_reap_receipt(home, &receipt) {
-                Ok(()) => (true, "removed by an update_registry write".to_string()),
-                Err(err) => (false, format!("receipt did not persist: {err}")),
+            // A receipt already on disk for this session was staged moments
+            // ago by the reap sweep (or the watchdog) BEFORE it dropped the
+            // rows - rewriting it would stamp `removed_by` onto a pure reap
+            // receipt and change the x-b150 shape. The record on disk is
+            // already the recovery path; leave it byte-identical.
+            if reap_receipt_path(home, &receipt).exists() {
+                (true, "receipt already staged for this session".to_string())
+            } else {
+                receipt.removed_by = Some(remover.to_string());
+                match write_reap_receipt(home, &receipt) {
+                    Ok(()) => (true, "removed by an update_registry write".to_string()),
+                    Err(err) => (false, format!("receipt did not persist: {err}")),
+                }
             }
         }
         Err(err) => (false, err),

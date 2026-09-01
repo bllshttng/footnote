@@ -1655,15 +1655,14 @@ where
     // and before `write_json_atomic`, for the reason the comment above already
     // argues: a racing writer must not slip past.
     refuse_source_ahead_schema_bump(path, registry.schema_version)?;
-    let before = registry
-        .entries
-        .iter()
-        .map(|entry| (entry.name.clone(), identity_signature(entry)))
-        .collect::<BTreeMap<_, _>>();
     // The rows themselves, not just their signatures: a receipt for a removed
     // row must be built from the row the closure is about to drop, and the
     // closure leaves no other copy (x-a879). The vector is small.
     let before_entries = registry.entries.clone();
+    let before = before_entries
+        .iter()
+        .map(|entry| (entry.name.clone(), identity_signature(entry)))
+        .collect::<BTreeMap<_, _>>();
     let out = f(&mut registry);
     // Write-path harness sync (x-880e, AC6-FR): a closure that mutated a legacy
     // session-id field (the stream-json adopt path writes claude_session_uuid on a
@@ -3422,6 +3421,47 @@ mod tests {
             !home.join("reap-receipts").exists(),
             "no receipt file for a row with nothing to resume"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_registry_keeps_a_receipt_the_sweep_already_staged() {
+        // The reap sweep writes its receipt BEFORE dropping the rows through
+        // this same choke point. The accounting must not rewrite that file
+        // with `removed_by`: a pure reap receipt keeps the x-b150 shape.
+        let dir = tmpdir("removal-keep-staged");
+        let home = dir.join("agents");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("registry.json");
+        std::fs::write(
+            &path,
+            seeded_registry_body(&[loss_shaped_row("swept", "claude", Some("swept-s"))]),
+        )
+        .unwrap();
+        let receipt_path = home.join("reap-receipts").join("claude-swept-s.json");
+        std::fs::create_dir_all(receipt_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &receipt_path,
+            r#"{"row_name":"swept","resume":"claude --resume swept-s"}"#,
+        )
+        .unwrap();
+
+        update_registry(&path, |r| {
+            r.entries.retain(|e| e.name != "swept");
+        })
+        .unwrap();
+
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&receipt_path).unwrap()).unwrap();
+        assert!(
+            on_disk.get("removed_by").is_none(),
+            "the sweep's receipt was rewritten: {on_disk}"
+        );
+        let events = std::fs::read_to_string(home.join("events.jsonl")).unwrap();
+        let event: serde_json::Value =
+            serde_json::from_str(events.lines().next().unwrap()).unwrap();
+        assert_eq!(event["data"]["receipt_staged"], true);
+        assert_eq!(event["data"]["name"], "swept");
         std::fs::remove_dir_all(&dir).ok();
     }
 

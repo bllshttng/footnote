@@ -2484,3 +2484,49 @@ def test_write_registry_has_exactly_one_production_caller() -> None:
 
     assert len(callers) == 1, f"write_registry grew a second caller: {callers}"
     assert callers[0].startswith("agents/registry.py:")
+
+
+def test_update_registry_keeps_a_receipt_the_sweep_already_staged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The watchdog staged the receipt before dropping rows through update_registry.
+
+    Rewriting it would stamp removed_by onto a pure reap receipt and change
+    the shape the Rust and Python writers share.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, update_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
+    _seed_rows(
+        registry_path,
+        [
+            AgentEntry(
+                name="swept",
+                harness="claude",
+                harness_session_id="swept-s",
+                cwd="/tmp",
+                log_path="/tmp/s.log",
+            )
+        ],
+    )
+    receipt_path = (
+        tmp_path / ".fno" / "agents" / "reap-receipts" / "claude-swept-s.json"
+    )
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(
+        json.dumps({"row_name": "swept", "resume": "claude --resume swept-s"}),
+        encoding="utf-8",
+    )
+
+    update_registry(
+        lambda es: [e for e in es if e.name != "swept"], path=registry_path
+    )
+
+    on_disk = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert "removed_by" not in on_disk, f"the sweep's receipt was rewritten: {on_disk}"
+    removals = _removal_events(events_path)
+    assert len(removals) == 1
+    assert removals[0]["data"]["receipt_staged"] is True
+    assert removals[0]["data"]["name"] == "swept"
