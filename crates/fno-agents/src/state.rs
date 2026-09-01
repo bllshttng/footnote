@@ -1699,12 +1699,13 @@ where
     // adding host_mode to an existing v3 registry would leave schema_version:3 and
     // a pre-host_mode reader would still accept it - defeating the forward-compat
     // bump for every store that predates it (the common case).
-    // Removal accounting (x-a879) runs just before the write, after every
-    // refusal point: a removal that is not about to persist never happened,
-    // so it must never be announced.
-    account_for_removed_rows(path, &before_entries, &registry.entries);
     registry.schema_version = REGISTRY_SCHEMA_VERSION;
     write_json_atomic(path, &registry)?;
+    // Removal accounting (x-a879) runs AFTER the write persisted: a removal
+    // that failed to persist never happened, and announcing it would be a
+    // false alarm. Within the accounting the receipt still precedes its own
+    // event.
+    account_for_removed_rows(path, &before_entries, &registry.entries);
     let _ = lock.unlock();
     Ok(out)
 }
@@ -1716,12 +1717,34 @@ where
 /// the registry path - `registry.json` sits at `<agents home>/registry.json`,
 /// and the event rides the SAME agent-lifecycle log the daemon writes
 /// `agent_row_reaped` to - so no caller threads a home or emitter argument.
+///
+/// A row counts as removed only when NO surviving row shares any of its
+/// identity tokens (session id, short id, name): a rename or a session-id
+/// backfill mutates one token while the row itself stays.
 fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[RegistryEntry]) {
+    let after_sids: std::collections::BTreeSet<&str> = after
+        .iter()
+        .filter_map(|e| e.harness_session_id.as_deref().filter(|s| !s.is_empty()))
+        .collect();
+    let after_short_ids: std::collections::BTreeSet<&str> = after
+        .iter()
+        .map(|e| e.short_id.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
     let after_names: std::collections::BTreeSet<&str> =
         after.iter().map(|e| e.name.as_str()).collect();
     let removed: Vec<&RegistryEntry> = before
         .iter()
-        .filter(|e| !after_names.contains(e.name.as_str()))
+        .filter(|e| {
+            let sid_matched = e
+                .harness_session_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .is_some_and(|s| after_sids.contains(s));
+            let short_matched =
+                !e.short_id.is_empty() && after_short_ids.contains(e.short_id.as_str());
+            !(sid_matched || short_matched || after_names.contains(e.name.as_str()))
+        })
         .collect();
     if removed.is_empty() {
         return;
@@ -3462,6 +3485,61 @@ mod tests {
             serde_json::from_str(events.lines().next().unwrap()).unwrap();
         assert_eq!(event["data"]["receipt_staged"], true);
         assert_eq!(event["data"]["name"], "swept");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_registry_does_not_announce_a_rename() {
+        // A rename mutates the name while the session stays: not a removal.
+        let dir = tmpdir("removal-rename");
+        let home = dir.join("agents");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("registry.json");
+        std::fs::write(
+            &path,
+            seeded_registry_body(&[loss_shaped_row("old-name", "claude", Some("rn-s"))]),
+        )
+        .unwrap();
+
+        update_registry(&path, |r| {
+            if let Some(e) = r.entries.iter_mut().find(|e| e.name == "old-name") {
+                e.name = "new-name".into();
+            }
+        })
+        .unwrap();
+
+        assert!(
+            !home.join("events.jsonl").exists(),
+            "a rename must not read as a removal"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_registry_does_not_announce_a_session_id_backfill() {
+        // The late-bind shape: a closure fills harness_session_id on an
+        // existing row. The row stays; only its identity token set grows.
+        let dir = tmpdir("removal-backfill");
+        let home = dir.join("agents");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("registry.json");
+        std::fs::write(
+            &path,
+            seeded_registry_body(&[loss_shaped_row("bound-later", "claude", None)]),
+        )
+        .unwrap();
+
+        update_registry(&path, |r| {
+            if let Some(e) = r.entries.iter_mut().find(|e| e.name == "bound-later") {
+                e.harness_session_id = Some("late-bound-s".into());
+            }
+        })
+        .unwrap();
+
+        assert!(
+            !home.join("events.jsonl").exists(),
+            "a session-id backfill must not read as a removal"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

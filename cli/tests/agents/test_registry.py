@@ -2530,3 +2530,64 @@ def test_update_registry_keeps_a_receipt_the_sweep_already_staged(
     assert len(removals) == 1
     assert removals[0]["data"]["receipt_staged"] is True
     assert removals[0]["data"]["name"] == "swept"
+
+
+def test_rename_agent_is_not_a_removal(tmp_path: Path, monkeypatch) -> None:
+    """A rename keeps the session; the accounting must not announce one."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, rename_agent, update_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
+    _seed_rows(
+        registry_path,
+        [
+            AgentEntry(
+                name="before-rename",
+                harness="claude",
+                harness_session_id="rn-s",
+                cwd="/tmp",
+                log_path="/tmp/r.log",
+            )
+        ],
+    )
+
+    rename_agent("before-rename", "after-rename", registry_path=registry_path)
+
+    assert not events_path.exists(), "a rename must not read as a removal"
+
+
+def test_a_failed_write_announces_nothing(tmp_path: Path, monkeypatch) -> None:
+    """When the registry write fails, the row stayed: no removal is announced."""
+    use_tmpdir(monkeypatch, tmp_path)
+    import fno.agents.registry as reg_module
+    from fno.agents.registry import AgentEntry, update_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
+    _seed_rows(
+        registry_path,
+        [
+            AgentEntry(
+                name="stays",
+                harness="claude",
+                harness_session_id="stays-s",
+                cwd="/tmp",
+                log_path="/tmp/st.log",
+            )
+        ],
+    )
+
+    def _explode(*args, **kwargs):
+        raise OSError("simulated disk full during rename")
+
+    monkeypatch.setattr(reg_module, "write_registry", _explode)
+    try:
+        update_registry(
+            lambda es: [e for e in es if e.name != "stays"], path=registry_path
+        )
+        raise AssertionError("the simulated write failure must propagate")
+    except OSError:
+        pass
+
+    assert not events_path.exists(), "an unpersisted removal must not be announced"

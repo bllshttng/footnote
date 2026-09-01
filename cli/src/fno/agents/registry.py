@@ -2479,14 +2479,27 @@ def _account_for_removed_rows(
     daemon writes agent_row_reaped to (``<agents home>/events.jsonl``) with
     ``source: "agents"``, and the recovery receipt staged FIRST, so an
     announced removal always has a recovery path beside it. Runs after the
-    identity validation and before the write, the same window as the Rust
-    choke point. Best-effort by contract: an accounting failure never fails
-    the write that triggered it.
+    write persisted: a removal that failed to persist never happened, and
+    announcing it would be a false alarm. A row counts as removed only when
+    NO surviving row shares any of its identity tokens (session id, short
+    id, name), so a rename or a session-id backfill is never a removal.
+    Best-effort by contract: an accounting failure never fails the write
+    that triggered it.
     """
     if not current:
         return
-    kept = {entry.name for entry in new_entries}
-    removed = [entry for entry in current if entry.name not in kept]
+    kept_sids = {
+        e.harness_session_id for e in new_entries if (e.harness_session_id or "").strip()
+    }
+    kept_short_ids = {e.short_id for e in new_entries if e.short_id}
+    kept_names = {e.name for e in new_entries}
+    removed = [
+        entry
+        for entry in current
+        if (entry.harness_session_id or "").strip() not in kept_sids
+        and entry.short_id not in kept_short_ids
+        and entry.name not in kept_names
+    ]
     if not removed:
         return
     from fno.events import append_event
@@ -2544,8 +2557,11 @@ def update_registry(
         before = {entry.name: _identity_signature(entry) for entry in current}
         new_entries = updater(list(current))
         _validate_changed_identities(before, new_entries)
-        _account_for_removed_rows(target, current, new_entries)
+        _validate_changed_identities(before, new_entries)
         write_registry(new_entries, path=target)
+        # After the write persisted: a removal that failed to persist never
+        # happened, and announcing it would be a false alarm.
+        _account_for_removed_rows(target, current, new_entries)
         return new_entries
 
 
