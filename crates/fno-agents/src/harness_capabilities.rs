@@ -536,6 +536,23 @@ impl HarnessContract {
         Ok("none")
     }
 
+    /// Whether this harness's attach lane needs a harness-owned server
+    /// started outside the spawn. `pre_exec` IS that declaration: it names
+    /// the process that keeps the session alive when no client holds it
+    /// (codex starts its app-server; claude's detached client is itself the
+    /// session, so its attach form declares none). Meaningful only on the
+    /// attach lane; never a name list. An unknown harness errors rather
+    /// than answering false: a false answer would route it to the wrong arm.
+    pub fn attach_needs_server(&self, harness: &str) -> Result<bool, ContractError> {
+        let caps = self.capabilities(harness)?;
+        Ok(caps
+            .resume_strategy
+            .forms
+            .get("interactive_attach")
+            .map(|form| !form.pre_exec.is_empty())
+            .unwrap_or(false))
+    }
+
     pub fn permission_response_keys(
         &self,
         harness: &str,
@@ -808,6 +825,26 @@ mod tests {
         assert_eq!(lane("gemini"), "keeper");
         assert_eq!(lane("opencode"), "keeper");
         assert_eq!(lane("pi"), "keeper");
+    }
+
+    /// The attach-split answer, pinned per attach-lane harness: the attach
+    /// form's `pre_exec` is the encoding of "a process outside this spawn
+    /// owns the session's life", and this is the measured split.
+    #[test]
+    fn attach_needs_server_is_derived_from_the_pre_exec_declaration() {
+        let contract = HarnessContract::packaged().unwrap();
+        assert!(
+            contract.attach_needs_server("codex").unwrap(),
+            "codex declares an app-server pre_exec"
+        );
+        assert!(
+            !contract.attach_needs_server("claude").unwrap(),
+            "claude's detached client is the session; no pre_exec declared"
+        );
+        assert!(
+            contract.attach_needs_server("no-such-harness").is_err(),
+            "an unknown harness must error, never answer false"
+        );
     }
 
     /// The measured answer, pinned per harness. `stop_hook` read "native" on
