@@ -2469,7 +2469,8 @@ def _account_for_removed_rows(
     """Removal accounting at the write choke point (x-a879).
 
     Every row the updater dropped is announced before the write lands: one
-    ``registry_row_removed`` event per row on the global stream with
+    ``registry_row_removed`` event per row on the agent-lifecycle log the
+    daemon writes agent_row_reaped to (``<agents home>/events.jsonl``) with
     ``source: "agents"``, and the recovery receipt staged FIRST, so an
     announced removal always has a recovery path beside it. Runs after the
     identity validation and before the write, the same window as the Rust
@@ -2485,7 +2486,7 @@ def _account_for_removed_rows(
     from fno.events import append_event
 
     home = target.parent
-    events_path = home.parent / "events.jsonl"
+    events_path = home / "events.jsonl"
     remover = Path(sys.argv[0]).name or "unknown"
     pid = os.getpid()
     for entry in removed:

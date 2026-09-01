@@ -1713,10 +1713,10 @@ where
 /// Removal accounting at the write choke point (x-a879): every row the
 /// closure dropped gets a recovery receipt staged first and a
 /// `registry_row_removed` event naming the row, the remover and the reason,
-/// whatever door dropped it. Both derivations come from the registry path -
-/// `registry.json` sits at `<agents home>/registry.json`, and the global
-/// events stream the daemon already writes sits at the home's parent - so no
-/// caller threads a home or emitter argument.
+/// whatever door dropped it. Both the home and the event stream derive from
+/// the registry path - `registry.json` sits at `<agents home>/registry.json`,
+/// and the event rides the SAME agent-lifecycle log the daemon writes
+/// `agent_row_reaped` to - so no caller threads a home or emitter argument.
 fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[RegistryEntry]) {
     let after_names: std::collections::BTreeSet<&str> =
         after.iter().map(|e| e.name.as_str()).collect();
@@ -1731,11 +1731,7 @@ fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[Regi
         return;
     };
     let home = crate::paths::AgentsHome::at(home_dir);
-    let events_path = match home_dir.parent() {
-        Some(root) => root.join("events.jsonl"),
-        None => home.events_jsonl(),
-    };
-    let emitter = crate::events::EventEmitter::new(events_path, "daemon");
+    let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
     let remover = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -3333,9 +3329,9 @@ mod tests {
         let reg = load_registry(&path).unwrap();
         assert_eq!(reg.entries.len(), 2);
 
-        // One event on the global stream, naming the row, the remover, and a
-        // staged receipt.
-        let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+        // One event on the agent-lifecycle log, naming the row, the remover,
+        // and a staged receipt.
+        let events = std::fs::read_to_string(home.join("events.jsonl")).unwrap();
         let lines: Vec<&str> = events.lines().collect();
         assert_eq!(lines.len(), 1, "exactly one removal event: {events}");
         let event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
@@ -3379,7 +3375,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            !dir.join("events.jsonl").exists(),
+            !home.join("events.jsonl").exists(),
             "a removal-free write must not open the events stream"
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -3409,7 +3405,7 @@ mod tests {
         // The write itself succeeds and the event still announces the removal.
         let reg = load_registry(&path).unwrap();
         assert_eq!(reg.entries.len(), 1);
-        let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+        let events = std::fs::read_to_string(home.join("events.jsonl")).unwrap();
         let event: serde_json::Value =
             serde_json::from_str(events.lines().next().unwrap()).unwrap();
         assert_eq!(event["data"]["name"], "identity-less");

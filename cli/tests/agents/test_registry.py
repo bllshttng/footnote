@@ -2341,7 +2341,7 @@ def test_update_registry_accounts_for_a_removed_row(
     from fno.agents.registry import AgentEntry, update_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    events_path = tmp_path / ".fno" / "events.jsonl"
+    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
     _seed_rows(
         registry_path,
         [
@@ -2395,7 +2395,7 @@ def test_update_registry_emits_nothing_when_nothing_is_removed(
     from fno.agents.registry import AgentEntry, update_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    events_path = tmp_path / ".fno" / "events.jsonl"
+    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
     _seed_rows(
         registry_path,
         [
@@ -2426,7 +2426,7 @@ def test_update_registry_announces_a_removal_it_cannot_build_a_receipt_for(
     from fno.agents.registry import AgentEntry, load_registry, update_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
-    events_path = tmp_path / ".fno" / "events.jsonl"
+    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
     _seed_rows(
         registry_path,
         [
