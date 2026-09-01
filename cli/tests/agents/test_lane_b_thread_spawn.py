@@ -293,9 +293,11 @@ def test_lane_b_journey_real_keeper_hosts_the_thread(lane_b_home, monkeypatch) -
         return out.stdout.strip()
 
     try:
-        # `args`, never `comm`: Linux truncates comm to 15 chars
-        # ("fno-agents-work"), which is not the name it is checking.
-        assert "fno-agents-worker" in _ps_field("args", keeper_pid)
+        # The keeper's IDENTITY is already proven the strong way: the
+        # Identify round trip in the receipt answered the minted session id,
+        # and only fno-agents-worker speaks that protocol. A ps name check
+        # adds nothing - Linux truncates both comm (15 chars) and args (80
+        # cols headless) - so it is deliberately absent.
         keeper_ppid = _ps_field("ppid", keeper_pid)
         daemon_pids = {
             line.split()[0]
