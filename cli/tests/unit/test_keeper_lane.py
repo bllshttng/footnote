@@ -550,6 +550,44 @@ def test_json_payload_carries_pid_lane_verdict_reason(tmp_path, monkeypatch) -> 
     assert row["reason"]
 
 
+def test_an_unprobed_keeper_never_reaps_when_the_sweep_budget_spends(
+    monkeypatch,
+) -> None:
+    """The whole-sweep budget bounds a fleet of wedged keepers. A keeper left
+    UNPROBED when it lapses is a named refusal, never a death reading."""
+    rows = [
+        _proc_row(4300, f"/tmp/fk-lane-{os.getpid()}-c{i}.sock") for i in range(3)
+    ]
+    # The files must EXIST or the cheap absent check answers without ever
+    # reaching the probe; the wedged shape is a file with a silent keeper.
+    for row in rows:
+        Path(row["cmdline"][3]).touch()
+
+    def slow_probe(sock):
+        time.sleep(0.05)
+        return kl.SILENT  # the wedged shape: real, and slow in aggregate
+
+    try:
+        monkeypatch.setattr(kl, "iter_processes", lambda *a, **k: iter(rows))
+        monkeypatch.setattr(kl, "sock_state_of", slow_probe)
+        monkeypatch.setattr(kl, "SWEEP_BUDGET_S", 0.01)
+        monkeypatch.setattr(kl, "REAP_MIN_AGE_S", 0.0)
+        result = kl.discover(now_s=time.time())
+    finally:
+        for row in rows:
+            Path(row["cmdline"][3]).unlink(missing_ok=True)
+        Path("--session").unlink(missing_ok=True)  # the index-4 mistake's litter
+    assert not result.broken
+    assert len(result.observations) == 3
+    unprobed = [o for o in result.observations if o.sock_state == kl.UNPROBED]
+    assert unprobed, "the budget must spend and leave late keepers unprobed"
+    for obs in unprobed:
+        verdict, reason = result.verdicts[obs.pid]
+        assert verdict == kl.LEAVE
+        assert "budget" in reason
+    assert result.reapable == []
+
+
 def test_a_filtered_apply_all_never_collects_keepers(monkeypatch) -> None:
     """`--only <verdict>` is a diagnostic filter over the SESSION table. The
     row-sweep apply-all must not widen a filtered run's destructive scope to

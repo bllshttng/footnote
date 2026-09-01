@@ -49,11 +49,18 @@ LANE_FLAGS = {"--pane": "pane", "--keeper": "thread"}
 #: wedge the sweep.
 PROBE_BUDGET_S = 0.75
 
+#: Whole-sweep probe budget, mirroring ``KEEPER_SWEEP_BUDGET`` (daemon.rs): a
+#: fleet of wedged keepers each burning the per-probe bound is still bounded
+#: work. Keepers left unprobed when it lapses read as a distinct never-reap
+#: state, never as a death reading.
+SWEEP_BUDGET_S = 10.0
+
 LISTENER = "listener"
 NO_LISTENER = "no_listener"
 ABSENT = "absent"
 SILENT = "silent"
 UNREADABLE = "unreadable"
+UNPROBED = "unprobed"
 
 REAP = "reap"
 LEAVE = "leave"
@@ -157,6 +164,8 @@ def keeper_verdict(obs: KeeperObs, *, grace_s: Optional[float] = None) -> tuple[
             )
         if obs.sock_state == UNREADABLE:
             return LEAVE, "argv declares no --sock, so the socket arm cannot read"
+        if obs.sock_state == UNPROBED:
+            return LEAVE, "sweep probe budget spent before this keeper was probed"
         return LEAVE, f"socket has a live listener ({obs.sock})"
     if not obs.registry_ok:
         return LEAVE, "registry unreadable, so the claim arm cannot read - no reap"
@@ -242,6 +251,9 @@ def discover(
     iter_fn = iter_fn or iter_processes
     probe = sock_probe_fn or sock_state_of
     result = KeeperLaneResult()
+    # monotonic, never now_s: the sweep budget bounds WORK TIME, and an
+    # injected epoch must not arm or spend it.
+    probe_deadline = time.monotonic() + SWEEP_BUDGET_S
 
     try:
         import psutil
@@ -306,6 +318,15 @@ def discover(
                     (name for child in children for name in [claimed.get(child)] if name),
                     None,
                 )
+            # A cheap local check first: an absent socket needs no probe at
+            # all, and spending the sweep budget on it would starve keepers
+            # whose state only a probe can read.
+            state = ABSENT if sock is not None and not sock.exists() else None
+            if state is None:
+                if time.monotonic() >= probe_deadline:
+                    state = UNPROBED
+                else:
+                    state = probe(sock)
             obs = KeeperObs(
                 pid=pid,
                 lane=lane,
@@ -314,7 +335,7 @@ def discover(
                 cwd=str(cwd) if cwd else None,
                 age_s=age_s,
                 child_pids=children,
-                sock_state=probe(sock),
+                sock_state=state,
                 claimed_by=claimed_by,
                 registry_ok=registry_ok,
             )
