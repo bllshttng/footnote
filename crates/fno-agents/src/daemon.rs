@@ -7161,10 +7161,7 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
             "agent_stopped",
             &json!({"name": name, "backend": "keeper-thread"}),
         );
-        return Response::ok(
-            req.id,
-            json!({"stopped": true, "backend": "keeper-thread"}),
-        );
+        return Response::ok(req.id, json!({"stopped": true, "backend": "keeper-thread"}));
     }
     // corrupting a Python-readable registry (Codex P1, PR #364).
     if entry.short_id.is_empty() {
@@ -15978,14 +15975,22 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let keeper = spawn_killable_keeper(&sock, Arc::clone(&stop));
         state::update_registry(&home.registry_json(), |r| {
-            r.entries
-                .push(lane_b_thread_row("wk-stop", "sess-1", "/repo", Some(555), &sock));
+            r.entries.push(lane_b_thread_row(
+                "wk-stop",
+                "sess-1",
+                "/repo",
+                Some(555),
+                &sock,
+            ));
         })
         .unwrap();
         let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
 
-        let response =
-            handle_stop(&ctx, &Request::new(1, "agent.stop", json!({"name": "wk-stop"}))).await;
+        let response = handle_stop(
+            &ctx,
+            &Request::new(1, "agent.stop", json!({"name": "wk-stop"})),
+        )
+        .await;
         let result = response.result().expect("stop errored");
         assert_eq!(result["stopped"], true, "{result:?}");
         assert_eq!(result["backend"], "keeper-thread", "{result:?}");
@@ -15995,7 +16000,10 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let registry = load_registry_offloaded(home.registry_json()).await.unwrap();
         let entry = registry.find("wk-stop").unwrap();
         assert_eq!(entry.status, AgentStatus::Exited);
-        assert!(entry.exited_at.is_some(), "the terminal stamp carries a time");
+        assert!(
+            entry.exited_at.is_some(),
+            "the terminal stamp carries a time"
+        );
         assert!(read_events(&home).iter().any(|event| {
             event.get("type").and_then(Value::as_str) == Some("agent_stopped")
                 && event
@@ -16016,8 +16024,13 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let _keeper = spawn_silent_keeper(&sock, Arc::clone(&stop));
         state::update_registry(&home.registry_json(), |r| {
-            r.entries
-                .push(lane_b_thread_row("wk-stubborn", "sess-2", "/repo", Some(555), &sock));
+            r.entries.push(lane_b_thread_row(
+                "wk-stubborn",
+                "sess-2",
+                "/repo",
+                Some(555),
+                &sock,
+            ));
         })
         .unwrap();
         let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
