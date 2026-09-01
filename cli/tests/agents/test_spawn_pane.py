@@ -1627,6 +1627,49 @@ def test_undeclared_pane_spawn_on_path_reaches_mux(
     assert [row.harness for row in rows] == ["nanoclaw"]
 
 
+def test_undeclared_spawn_journey_states_the_lane(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """AC1/AC9 journey, positive markers only: the registry row exists and
+    carries name+harness, the posture answers declared=False BY NAME, and the
+    receipt carries the UNDECLARED block - what the lane gives, what it
+    withholds, and submit_keys=enter named as an unmeasured default. AC3's
+    pane-to-Drive step (the [harness.<name>.attach] declaration reaching
+    thread_reach == Drive with no code change) is proven Rust-side by
+    crates/fno/tests/attach_override_ac1.rs against a made-up name; this
+    change must not touch crates/."""
+    _stub_harness_bin(monkeypatch, tmp_path, "nanoclaw")
+    result, runner = _spawn(monkeypatch, tmp_path, provider="nanoclaw", name="clawwork")
+    assert runner.calls[0][1:4] == ["mux", "pane", "run"]
+
+    from fno.agents.harness_map import capabilities_or_undeclared
+
+    assert capabilities_or_undeclared("nanoclaw")["declared"] is False
+
+    from fno.agents.registry import load_registry, resolve_agent_in
+
+    rows = load_registry()
+    assert len(rows) == 1
+    assert rows[0].name == "clawwork"
+    assert rows[0].harness == "nanoclaw"
+    # Addressable by name - the mail lane's resolution for a row with no
+    # canonical handle.
+    resolved = resolve_agent_in(rows, "clawwork")
+    assert resolved.entry.name == "clawwork"
+
+    receipt = capsys.readouterr().err
+    for marker in (
+        "nanoclaw",
+        "UNDECLARED",
+        "submit_keys=enter",
+        "[harness.nanoclaw.attach]",
+        "thread lane",
+        "steering",
+        "ask",
+    ):
+        assert marker in receipt, f"receipt must state {marker!r}:\n{receipt}"
+
+
 def test_ac1_host_pane_gate_admits_hosted_rejects_unhosted(
     tmp_path: Path, monkeypatch
 ) -> None:

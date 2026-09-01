@@ -4839,6 +4839,20 @@ def dispatch_spawn_pane(
     # the two agree, and a test pins that. gemini and agy bind no session at all
     # and resolve to None rather than to either lie.
     bound_val = _resolve_bound(session_uuid, provider)
+    if provider not in PANE_HOSTABLE_PROVIDERS:
+        # x-f579 AC9: the receipt STATES the lane, so a caller reading only it
+        # cannot infer a thread lane, steering, or `ask` that are not there, and
+        # knows submit_keys=enter is an unmeasured default rather than a row.
+        print(
+            f"harness {provider!r} is UNDECLARED: fno has no capability row for it.\n"
+            f"  gives    a mux pane, this registry row, mail by pane-send\n"
+            f"           (submit_keys=enter, an unmeasured default), and the Drive\n"
+            f"           viewport as soon as .fno/config.toml declares\n"
+            f"           [harness.{provider}.attach].\n"
+            f"  withholds a thread lane, steering, and `fno agents ask`. Those need the\n"
+            f"           vendor's own protocol and cannot be generic.",
+            file=sys.stderr,
+        )
     return MuxSpawnResult(
         name=name,
         provider=provider,
