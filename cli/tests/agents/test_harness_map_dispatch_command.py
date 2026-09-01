@@ -154,7 +154,7 @@ def test_malformed_trigger_fails_closed_on_capability_enabled_pane():
 
 
 def test_pane_capability_does_not_enable_opencode_bg():
-    with pytest.raises(DispatchResolveError, match="journey-proven driver"):
+    with pytest.raises(DispatchResolveError, match="keeper"):
         resolve_dispatch(
             harness="opencode",
             substrate="bg",
