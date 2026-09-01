@@ -109,7 +109,7 @@ Silence never reaps: a keeper that accepts the probe and stays quiet past the 75
 
 The kill rides `--apply-all`, never `--apply` - killing a keeper destroys work, the line that flag's help text draws. The keeper calls `setsid`, so it is its own process-group leader and one group signal ends it and everything it hosts; the receipt counts keepers and hosted children separately. A broken lane (unreadable registry, failed enumeration) reaps nothing.
 
-The positive controls plant a real `fno-agents-worker` over a `bash while-read` child and assert the planted pid by number (`cli/tests/unit/test_keeper_lane.py`): one orphan collected in dry run and under `--apply-all`, one live listener surviving both, one registry-claimed keeper surviving both. A count is not a marker; this machine has carried live orphans during development.
+The positive controls plant a real `fno-agents-worker` over a `bash while-read` child and assert the planted pid by number (`cli/tests/unit/test_keeper_lane.py`): one orphan collected in dry run and under `--apply-all`, one live listener surviving both, one registry-claimed keeper surviving both. A count is not a marker - this machine has carried live orphans during development.
 
 ## The two protectors
 
