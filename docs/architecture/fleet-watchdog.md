@@ -93,9 +93,9 @@ One predicate decides every reap, and it answers yes, no, or UNKNOWN. Eight revi
 
 ## The keeper lane
 
-A `--pane` or `--keeper` process of `fno-agents-worker` whose server died belongs to no shipped sweep. The orphan sweep declines it (`orphans.py` `OWN_DAEMONS`: keepers run detached at ppid 1 by design, so ppid 1 carries no signal), the registry-side sweep walks only the thread socket dir (`daemon.rs` `keeper_registry_sweep`), and the pane sweep `KeeperAdopt` runs inside the mux server, which is exactly the thing that died. Measured 2026-09-01: seven live keepers at ppid 1, ages to 22.5h, every one a test fixture, zero socket directories, zero claiming rows. A socket walk reported a clean machine over seven live processes.
+A `--pane` or `--keeper` process of `fno-agents-worker` whose server died belongs to no shipped sweep. The orphan sweep declines it (`orphans.py` `OWN_DAEMONS`) because ppid 1 is a keeper's normal state. The registry-side sweep walks only the thread socket dir (`daemon.rs` `keeper_registry_sweep`). The pane sweep `KeeperAdopt` runs inside the mux server, which is exactly the thing that died. Measured 2026-09-01: seven live keepers at ppid 1, ages to 22.5h, every one a test fixture, zero socket directories, zero claiming rows. A socket walk reported a clean machine over seven live processes.
 
-So the keeper lane discovers by PROCESS, joined through argv: every keeper carries `--sock` and `--session` on its own command line, and a `psutil` read yields pid, socket, session, cwd and age with no directory walk. It lives in `cli/src/fno/agents/keeper_lane.py`, shares the orphan sweep's enumeration (`iter_processes` - one `psutil.process_iter` call site, or the sweeps drift), and adds a `--only keeper` filter to this verb.
+The keeper lane discovers by PROCESS and joins through argv. Every keeper carries `--sock` and `--session` on its own command line. A `psutil` read yields pid, socket, session, cwd and age with no directory walk. The lane lives in `cli/src/fno/agents/keeper_lane.py`. It shares the orphan sweep's enumeration (`iter_processes` - one `psutil.process_iter` call site, or the sweeps drift) and adds a `--only keeper` filter to this verb.
 
 A reap verdict needs all three arms, each a positive reading:
 
@@ -105,11 +105,11 @@ A reap verdict needs all three arms, each a positive reading:
 | claim | no registry row names the keeper's pid or any hosted child in `pid`/`keeper_child_pid` | the row that claims it |
 | age | older than `REAP_MIN_AGE_S` (600, the orphan sweep's grace) | a fresh keeper is a keeper |
 
-Silence never reaps: a keeper that accepts the probe and stays quiet past the 750ms bound (`daemon.rs`'s own per-probe budget) is named and left. An unreadable registry fails the claim arm closed for every keeper at once.
+Silence never reaps. A keeper that accepts the probe and stays quiet past the 750ms bound (`daemon.rs`'s per-probe budget) is named and left. An unreadable registry fails the claim arm closed for every keeper at once.
 
-The kill rides `--apply-all`, never `--apply` - killing a keeper destroys work, the line that flag's help text draws. The keeper calls `setsid`, so it is its own process-group leader and one group signal ends it and everything it hosts; the receipt counts keepers and hosted children separately. A broken lane (unreadable registry, failed enumeration) reaps nothing.
+The kill rides `--apply-all`, never `--apply`. Killing a keeper destroys work, the line that flag's help text draws. The keeper calls `setsid`, so it is its own process-group leader. One group signal ends it and everything it hosts. The receipt counts keepers and hosted children separately. A broken lane (unreadable registry, failed enumeration) reaps nothing.
 
-The positive controls plant a real `fno-agents-worker` over a `bash while-read` child and assert the planted pid by number (`cli/tests/unit/test_keeper_lane.py`): one orphan collected in dry run and under `--apply-all`, one live listener surviving both, one registry-claimed keeper surviving both. A count is not a marker - this machine has carried live orphans during development.
+The positive controls plant a real `fno-agents-worker` over a `bash while-read` child and assert the planted pid by number (`cli/tests/unit/test_keeper_lane.py`). One orphan is collected in dry run and under `--apply-all`. One live listener survives both. One registry-claimed keeper survives both. A count is not a marker - this machine has carried live orphans during development.
 
 ## The two protectors
 
