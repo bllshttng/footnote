@@ -460,7 +460,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // A session can be switched mid-run; the LAST stated model is the one
-        // answering "what is this worker running now".
+        // answering what the worker is running now.
         let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
         let base = seed_transcript(
             "model-switch",
