@@ -294,6 +294,11 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check-mail-inject-callers.sh
 
+      - name: every spawn-gate refusal emits
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-gate-refusals-emit.sh
+
       - name: identity precedence-primitive caller ratchet
         if: ${{ !cancelled() }}
         timeout-minutes: 5
