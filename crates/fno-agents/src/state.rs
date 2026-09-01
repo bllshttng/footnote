@@ -130,7 +130,16 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // Python spawn seams from resolved provenance so a reap decision never parses
 // the node out of a name. Additive-optional passthrough: without this mirror a
 // daemon read-modify-write drops the Python stamp. Accepted set widens to 1..=21.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 21;
+//
+// v22 (x-ac6b) adds `keeper_child_pid` - the process a lane-B keeper hosts,
+// the daemon's restart-sweep assertion. The bump is not for the reader (an
+// absent key reads as None) but for the WRITER: a pre-v22 daemon accepts the
+// unknown key through serde and its next read-modify-write silently drops it,
+// after which the respawn-detection comparison has no recorded pid and
+// backfills whichever child currently answers. The bump turns that silent
+// erasure into a loud refusal, the same reason v16 bumped for origin.
+// Accepted set widens to 1..=22.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 22;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -594,6 +603,18 @@ pub struct RegistryEntry {
     /// field, mirrored in Python's `AgentEntry` (ab-b946b59c); skip when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_start_time: Option<u64>,
+    /// The KEEPER's child pid for a lane-B thread row (x-ac6b): the process
+    /// the keeper hosts, learned from the spawn Identify reply and re-asserted
+    /// unchanged by the registry-side keeper sweep on every daemon start. A
+    /// changed pid means something respawned and is wearing the row's name -
+    /// the exact failure that field exists to catch. Distinct from `pid`,
+    /// which for these rows is the KEEPER's own pid. Mirrors Python's
+    /// `AgentEntry.keeper_child_pid`; skip-when-absent so a pre-field row
+    /// reads as unknown, never as a mismatch. Gated by the v22 schema bump:
+    /// an older writer must refuse the store rather than silently erase the
+    /// assertion input on read-modify-write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keeper_child_pid: Option<u32>,
     #[serde(default)]
     pub log_path: Option<String>,
     /// Timestamp of the most recent reconcile probe (finding #1 High): the
@@ -1976,6 +1997,7 @@ mod tests {
             created_at: "2026-05-24T00:00:00Z".into(),
             pid: Some(1234),
             pid_start_time: None,
+            keeper_child_pid: None,
             log_path: None,
             last_reconciled_at: None,
             inside_leg: None,

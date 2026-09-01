@@ -3638,6 +3638,7 @@ fn create(
         created_at: now_iso(),
         pid: None,
         pid_start_time: None,
+        keeper_child_pid: None,
         log_path: log_file_created.then(|| log_path.to_string_lossy().to_string()),
         last_reconciled_at: None,
         inside_leg: None,

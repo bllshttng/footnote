@@ -1603,7 +1603,16 @@ def _lane_b_worker_binary() -> Optional[Path]:
 def _lane_b_keeper_socket(name: str) -> Path:
     """``<state-root>/mux/threads/<name>.sock``: the pane-less keeper's
     socket, session-keyed beside the pane keepers' ``mux/panes/`` (see
-    docs/state-root-inventory.md for the owner + lifetime row)."""
+    docs/state-root-inventory.md for the owner + lifetime row).
+
+    The state root follows the daemon's derivation, not just ``state_dir()``:
+    the Rust registry-side keeper sweep derives the threads dir from the
+    agents root's parent (``FNO_AGENTS_HOME``'s parent when set, else
+    ``state_dir()``), and the spawn must write the socket where that sweep
+    reads it or a restart rebind silently finds nothing."""
+    override = os.environ.get("FNO_AGENTS_HOME")
+    if override:
+        return Path(override).expanduser().resolve().parent / "mux" / "threads" / f"{name}.sock"
     return paths.state_dir() / "mux" / "threads" / f"{name}.sock"
 
 
@@ -1807,6 +1816,10 @@ def _lane_b_thread_spawn(
             host_mode="interactive",
             harness_session_id=session_id,
             pid=proc.pid,
+            # The child pid out of the same Identify reply that proved the
+            # keeper: the daemon's restart sweep asserts it unchanged, so a
+            # respawn wearing this row's name fails instead of recovering.
+            keeper_child_pid=reply.get("child_pid"),
             messaging_socket_path=str(sock),
             spawned_by_session=_cx_session,
             spawned_by_harness=_cx_harness,

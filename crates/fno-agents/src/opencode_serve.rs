@@ -829,6 +829,7 @@ fn dispatch_opencode_serve_inner(
         created_at: now_iso(),
         pid: Some(writer_pid),
         pid_start_time: crate::daemon::process_start_time(writer_pid),
+        keeper_child_pid: None,
         log_path: log_file_created.then(|| log_path.to_string_lossy().to_string()),
         last_reconciled_at: None,
         inside_leg: None,

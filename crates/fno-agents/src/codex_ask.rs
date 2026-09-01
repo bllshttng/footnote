@@ -1279,6 +1279,7 @@ fn dispatch_create(
         created_at: now_iso(),
         pid: None,
         pid_start_time: None,
+        keeper_child_pid: None,
         log_path: Some(output_path.to_string_lossy().to_string()),
         last_reconciled_at: None,
         inside_leg: None,

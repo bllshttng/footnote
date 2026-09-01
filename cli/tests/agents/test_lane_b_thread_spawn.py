@@ -155,6 +155,34 @@ def test_lane_b_spawn_renders_the_contract_argv_and_registers_the_row(
     assert row.origin == "spawn"
 
 
+def test_lane_b_socket_follows_the_agents_home_the_sweep_derives_from(
+    lane_b_home, monkeypatch, tmp_path
+) -> None:
+    """The socket lands where the Rust registry-side sweep reads it: with
+    FNO_AGENTS_HOME set, both sides derive the threads dir from its parent,
+    so a restart rebind cannot silently find nothing."""
+    alt_root = tmp_path / "altstate"
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(alt_root / "agents"))
+    recorded = _fake_keeper(monkeypatch, lane_b_home)
+    receipt = _lane_b_thread_spawn(name="wk-home", harness="pi", cwd=lane_b_home)
+    assert receipt["keeper_socket"] == str(alt_root / "mux" / "threads" / "wk-home.sock")
+    assert receipt["keeper_socket"] in recorded["argv"]
+    row = load_registry()[0]
+    assert row.messaging_socket_path == receipt["keeper_socket"]
+
+
+def test_lane_b_spawn_records_the_child_pid_the_restart_sweep_asserts(
+    lane_b_home, monkeypatch
+) -> None:
+    """The row carries the keeper's CHILD pid out of the Identify reply: the
+    daemon's registry-side keeper sweep asserts it unchanged across a restart,
+    so a respawn wearing this row's name fails instead of recovering."""
+    _fake_keeper(monkeypatch, lane_b_home)
+    _lane_b_thread_spawn(name="wk-pi", harness="pi", cwd=lane_b_home)
+    row = load_registry()[0]
+    assert row.keeper_child_pid == 555, "the child pid rides the row, not just the receipt"
+
+
 def test_lane_b_spawn_refuses_a_name_collision(lane_b_home, monkeypatch) -> None:
     """A second spawn under the same name is refused before any keeper
     launch - the collision check runs inside the per-agent flock."""
