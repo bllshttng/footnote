@@ -1650,7 +1650,7 @@ def reap_cmd(
         optout_sink=optout_sink,
     )
     if optout_sink:
-        from fno.config.writer import restore_reaped_optouts
+        from fno.claims.optout_lease import restore_reaped_optouts
 
         summary.setdefault("reap_failed", []).extend(
             restore_reaped_optouts(optout_sink)

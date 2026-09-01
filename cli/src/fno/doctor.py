@@ -1597,11 +1597,8 @@ def _merge_gating_optout_report() -> dict[str, Any]:
             _unwrap_config_dict,
             config_read_candidates,
         )
-        from fno.config.optouts import (
-            MERGE_GATING_OPTOUTS,
-            _claim_state,
-            _raw_leaf,
-        )
+        from fno.claims.optout_lease import _claim_state
+        from fno.config.optouts import MERGE_GATING_OPTOUTS, _raw_leaf
 
         residue: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()

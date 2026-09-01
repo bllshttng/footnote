@@ -11911,7 +11911,7 @@ def cmd_reconcile(
             optout_sink=_optout_sink,
         )
         if _optout_sink:
-            from fno.config.writer import restore_reaped_optouts
+            from fno.claims.optout_lease import restore_reaped_optouts
 
             _reap.setdefault("reap_failed", []).extend(
                 restore_reaped_optouts(_optout_sink)

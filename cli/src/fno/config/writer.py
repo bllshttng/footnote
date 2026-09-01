@@ -33,17 +33,6 @@ import tomli_w
 import yaml
 from pydantic import BaseModel, ValidationError
 
-from fno.claims import (
-    CLAIM_UNAVAILABLE,
-    ClaimCorrupted,
-    ClaimGoneAway,
-    ClaimHeldByOther,
-    ClaimValidationError,
-    acquire_claim,
-    claim_status,
-    release_claim,
-)
-from fno.claims.io import claims_root_for
 from fno.config import (
     SettingsModel,
     _global_settings_path,
@@ -51,7 +40,6 @@ from fno.config import (
     _strip_none,
 )
 from fno.config.optouts import MERGE_GATING_OPTOUTS
-from fno.harness_identity import resolve_attester_identity
 from fno.time_budget import validate_timeout_budget
 
 
@@ -82,23 +70,6 @@ class UnsetResult:
     scope: str  # "global" | "project"
 
 
-_OPT_OUT_CLAIM_PREFIX = "config-optout:"
-
-
-def _resolve_optout_holder() -> str:
-    """Return the session identity that is allowed to hold an opt-out lease."""
-    session_id, _witness = resolve_attester_identity()
-    if not session_id:
-        raise ConfigSetError(
-            "merge-gating opt-out requires a resolved attester session"
-        )
-    return session_id
-
-
-def _optout_claim_key(key: str) -> str:
-    return f"{_OPT_OUT_CLAIM_PREFIX}{key}"
-
-
 def _stored_leaf(data: dict[str, Any], parts: list[str]) -> tuple[bool, Any]:
     node: Any = data
     for part in parts:
@@ -110,91 +81,6 @@ def _stored_leaf(data: dict[str, Any], parts: list[str]) -> tuple[bool, Any]:
 
 def _is_optout_value(key: str, present: bool, value: Any) -> bool:
     return present and value == MERGE_GATING_OPTOUTS[key]
-
-
-def _optout_status(key: str) -> dict[str, Any]:
-    claim_key = _optout_claim_key(key)
-    return claim_status(claim_key, root=claims_root_for(claim_key))
-
-
-def _release_optout_claim(key: str, holder: str) -> None:
-    release_claim(
-        _optout_claim_key(key),
-        holder,
-        root=claims_root_for(_optout_claim_key(key)),
-    )
-
-
-def _optout_ttl_ms(data: dict[str, Any]) -> int:
-    present, value = _stored_leaf(data, ["review", "optout_ttl_minutes"])
-    minutes = value if present else 60
-    if isinstance(minutes, bool) or not isinstance(minutes, int):
-        raise ConfigSetError(
-            "review.optout_ttl_minutes must be an integer between 1 and 1440",
-            2,
-        )
-    return minutes * 60 * 1000
-
-
-def _lease_dict(claim: Any) -> dict[str, Any]:
-    return {
-        "holder": claim.holder,
-        "acquired_at": claim.acquired_at,
-        "expires_at": claim.expires_at,
-    }
-
-
-def _restore_reaped_optout(claim: Any) -> Optional[Path]:
-    """Restore the value recorded by a retired ``config-optout`` claim."""
-    key = str(getattr(claim, "key", ""))
-    if not key.startswith(_OPT_OUT_CLAIM_PREFIX):
-        return None
-    metadata = getattr(claim, "metadata", {})
-    if not isinstance(metadata, dict):
-        raise ConfigSetError(f"{key} has invalid restore metadata")
-    config_key = metadata.get("config_key")
-    config_path = metadata.get("config_path")
-    if not isinstance(config_key, str) or config_key not in MERGE_GATING_OPTOUTS:
-        raise ConfigSetError(f"{key} has invalid config_key restore metadata")
-    if not isinstance(config_path, str) or not config_path:
-        raise ConfigSetError(f"{key} has no config_path restore metadata")
-
-    target = Path(os.path.realpath(config_path))
-    parts = _storage_parts(config_key.split("."))
-    prior_present = bool(metadata.get("prior_present", False))
-    prior_value = metadata.get("prior_value")
-
-    def _restore(existing: dict[str, Any]) -> dict[str, Any]:
-        present, value = _stored_leaf(existing, parts)
-        if not _is_optout_value(config_key, present, value):
-            return existing
-        if prior_present:
-            return _deep_set(existing, parts, prior_value)
-        return _deep_unset(existing, parts)[0]
-
-    if not target.exists() and not prior_present:
-        return None
-    return _locked_update(target, _restore)
-
-
-def restore_reaped_optouts(sink: list[Any]) -> list[tuple[str, str]]:
-    """Restore every claim a reaper collected in ``optout_sink``.
-
-    The reaper stays config-free, so the callers that hold the sink call this
-    right after the sweep and fold the failures into their own ``reap_failed``
-    reporting. Read-time revocation is the safety guarantee; this is cleanup
-    for the human-facing file and must never be allowed to turn a failed
-    restore into an honored opt-out.
-    """
-    failures: list[tuple[str, str]] = []
-    for claim in sink:
-        try:
-            _restore_reaped_optout(claim)
-        except Exception as exc:  # noqa: BLE001 - keep restoring the rest
-            failures.append(
-                (str(getattr(claim, "key", "")), f"opt-out restore failed: {exc}")
-            )
-    return failures
 
 
 def _unwrap_optional(ann: Any) -> Any:
@@ -677,6 +563,7 @@ def set_config_values(
     scope: str = "global",
     repo_root: Optional[Path] = None,
     lock_timeout: Optional[float] = None,
+    lease_ops: Any = None,
 ) -> list[SetResult]:
     """Set one or more dotted keys in one atomic, lock-serialized pass (US2).
 
@@ -688,6 +575,11 @@ def set_config_values(
     The single-key ``set_config_value`` delegates here, so both share one
     read-modify-write path. Returns one ``SetResult`` per distinct key, in
     first-seen order.
+
+    ``lease_ops`` carries the claims-backed merge-gating lease operations
+    (implemented by ``fno.claims.optout_lease``); it is injected rather than
+    imported because this module may not import the claims layer. Without it,
+    a batch touching a merge-gating opt-out key is refused, fail-closed.
     """
     if not items:
         raise ConfigSetError("no key=value pairs given", 2)
@@ -699,6 +591,14 @@ def set_config_values(
         if key not in deduped:
             order.append(key)
         deduped[key] = value
+
+    touched_optouts = [key for key in order if key in MERGE_GATING_OPTOUTS]
+    if touched_optouts and lease_ops is None:
+        raise ConfigSetError(
+            "merge-gating opt-out keys require the claims lane; route through"
+            " fno.claims.optout_lease",
+            1,
+        )
 
     # Resolve every key up front (unknown -> exit 1) before taking the lock.
     parts_by_key: dict[str, list[str]] = {}
@@ -732,81 +632,19 @@ def set_config_values(
         for block_parts, parent_cls in blocks.items():
             _validate_block(data, block_parts, parent_cls)
 
-        for key in order:
-            if key not in MERGE_GATING_OPTOUTS:
-                continue
-            before_present, before = _stored_leaf(existing, parts_by_key[key])
-            after_present, after = _stored_leaf(data, parts_by_key[key])
-            before_active = _is_optout_value(key, before_present, before)
-            after_active = _is_optout_value(key, after_present, after)
-            status = _optout_status(key)
-            state = status.get("state")
-            claim_key = _optout_claim_key(key)
-            root = claims_root_for(claim_key)
-
-            if after_active:
-                holder = _resolve_optout_holder()
-                existing_holder = status.get("holder")
-                metadata = {
-                    "config_key": key,
-                    "config_path": str(
-                        Path(os.path.realpath(target)) if target.is_symlink() else target
-                    ),
-                    "scope": scope,
-                    "prior_present": before_present and not before_active,
-                    "prior_value": before if before_present and not before_active else None,
-                }
-                # An idempotent refresh must preserve the original value that
-                # the lease is responsible for restoring - but only when the
-                # old lease described THIS file. A takeover across a scope
-                # change must not point the future restore at the previous
-                # file and leave the new one's opt-out value unrestored.
-                old_metadata = status.get("metadata")
-                old_path = (
-                    old_metadata.get("config_path")
-                    if isinstance(old_metadata, dict)
-                    else None
-                )
-                if (
-                    isinstance(old_metadata, dict)
-                    and old_metadata.get("config_key") == key
-                    and old_path == metadata["config_path"]
-                ):
-                    if state in {"live", "suspect", "stale"}:
-                        metadata = old_metadata
-                try:
-                    claim = acquire_claim(
-                        claim_key,
-                        holder,
-                        reason="merge-gating opt-out",
-                        ttl_ms=_optout_ttl_ms(data),
-                        metadata=metadata,
-                        root=root,
-                    )
-                except ClaimHeldByOther as exc:
-                    raise ConfigSetError(str(exc), 1) from exc
-                except CLAIM_UNAVAILABLE as exc:
-                    raise ConfigSetError(
-                        f"cannot acquire {claim_key}: {exc}", 1
-                    ) from exc
-                except (ClaimCorrupted, ClaimGoneAway, ClaimValidationError, OSError) as exc:
-                    raise ConfigSetError(
-                        f"cannot acquire {claim_key}: {exc}", 1
-                    ) from exc
-                leases[key] = _lease_dict(claim)
-                if not (
-                    state in {"live", "suspect"} and existing_holder == holder
-                ):
-                    newly_acquired.append((key, holder))
-            elif state in {"live", "suspect"}:
-                holder = _resolve_optout_holder()
-                if status.get("holder") != holder:
-                    raise ConfigSetError(
-                        f"claim {claim_key!r} held by {status.get('holder')}; "
-                        "only its holder may release the opt-out",
-                        1,
-                    )
-                releases.append((key, holder))
+        if touched_optouts:
+            outcome = lease_ops.prepare_set_leases(
+                order=order,
+                parts_by_key=parts_by_key,
+                existing=existing,
+                data=data,
+                target=target,
+                scope=scope,
+            )
+            data = outcome["data"]
+            leases.update(outcome["leases"])
+            newly_acquired.extend(outcome["newly_acquired"])
+            releases.extend(outcome["releases"])
         return data
 
     try:
@@ -819,18 +657,18 @@ def set_config_values(
     except OSError as exc:
         # AC2-FR: the temp+rename already left the original intact; surface a
         # clean non-zero exit.
-        for key, holder in newly_acquired:
-            _release_optout_claim(key, holder)
+        if touched_optouts:
+            lease_ops.rollback_set_leases(newly_acquired)
         raise ConfigSetError(
             f"failed to write {target}: {exc} (settings left unchanged)", 1
         ) from exc
     except Exception:
-        for key, holder in newly_acquired:
-            _release_optout_claim(key, holder)
+        if touched_optouts:
+            lease_ops.rollback_set_leases(newly_acquired)
         raise
 
-    for key, holder in releases:
-        _release_optout_claim(key, holder)
+    if releases:
+        lease_ops.finalize_set_leases(releases)
     return [
         SetResult(
             key=key,
@@ -926,6 +764,7 @@ def unset_config_value(
     *,
     scope: str = "global",
     repo_root: Optional[Path] = None,
+    lease_ops: Any = None,
 ) -> UnsetResult:
     """Remove a dotted config key, reverting it to the model default.
 
@@ -933,6 +772,10 @@ def unset_config_value(
     confirmation. An unknown key exits 1 (same as ``set``); an absent key is a
     clean no-op (``present=False``, nothing written). Atomic + lock-serialized
     via the shared ``_locked_update``; a write failure leaves the file intact.
+
+    ``lease_ops`` is the claims-backed merge-gating lease lane (see
+    ``set_config_values``); unsetting a merge-gating opt-out key without it is
+    refused, fail-closed.
     """
     parts = key.split(".")
     if _resolve_parent_block(parts) is None:
@@ -953,21 +796,18 @@ def unset_config_value(
 
     release_holder: Optional[str] = None
     if key in MERGE_GATING_OPTOUTS:
-        status = _optout_status(key)
-        if status.get("state") in {"live", "suspect"}:
-            release_holder = _resolve_optout_holder()
-            claim_key = _optout_claim_key(key)
-            if status.get("holder") != release_holder:
-                raise ConfigSetError(
-                    f"claim {claim_key!r} held by {status.get('holder')}; "
-                    "only its holder may release the opt-out",
-                    1,
-                )
+        if lease_ops is None:
+            raise ConfigSetError(
+                "merge-gating opt-out keys require the claims lane; route through"
+                " fno.claims.optout_lease",
+                1,
+            )
+        release_holder = lease_ops.plan_unset_release(key)
 
     # No file -> nothing to remove; do not create an empty settings file.
     if not real_target.exists():
         if release_holder:
-            _release_optout_claim(key, release_holder)
+            lease_ops.release_optout(key, release_holder)
         return UnsetResult(
             key=key, was=None, present=False, default=default,
             path=real_target, scope=scope,
@@ -994,7 +834,7 @@ def unset_config_value(
         ) from exc
 
     if release_holder:
-        _release_optout_claim(key, release_holder)
+        lease_ops.release_optout(key, release_holder)
 
     return UnsetResult(
         key=key,

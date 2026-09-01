@@ -1021,7 +1021,7 @@ def set_cmd(
     """
     import sys
 
-    from fno.config.writer import ConfigSetError, set_config_values
+    from fno.claims.optout_lease import ConfigSetError, set_config_values
 
     scope = "project" if local else "global"
 
@@ -1233,7 +1233,7 @@ def unset_cmd(
     """
     import sys
 
-    from fno.config.writer import ConfigSetError, unset_config_value
+    from fno.claims.optout_lease import ConfigSetError, unset_config_value
 
     scope = "project" if local else "global"
     try:

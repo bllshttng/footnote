@@ -5136,16 +5136,18 @@ def _aliased_layers(
 def _revoke_unbacked_optouts(raw: dict[str, object]) -> dict[str, object]:
     """Apply the merge-gating opt-out revocation guard to raw config layers.
 
-    The opt-outs module is loaded via importlib, never a static import: paths
-    imports this package, and the claims layer imports paths, so a static
-    ``config -> optouts -> claims.io -> paths -> config`` cycle would pull the
-    whole import graph into one mypy SCC, where the lazy ``__getattr__`` re-exports
-    in ``graph._constants`` degrade to ``Optional[Path]`` and fail unrelated
+    The guard lives in ``fno.claims.optout_lease``: a config value whose
+    validity depends on a claim is a core-layer policy, and this package may
+    not import the claims layer. It is loaded via importlib, never a static
+    import, for two recorded reasons: the runtime cycle (paths imports this
+    package, and the claims layer imports paths), and the mypy SCC that a
+    static edge would form, where the lazy ``__getattr__`` re-exports in
+    ``graph._constants`` degrade to ``Optional[Path]`` and fail unrelated
     modules. The edge must stay invisible to the import graph, not to runtime.
     """
     import importlib
 
-    module = importlib.import_module("fno.config.optouts")
+    module = importlib.import_module("fno.claims.optout_lease")
     result = module.revoke_unbacked_optouts(raw)
     return result if isinstance(result, dict) else raw
 

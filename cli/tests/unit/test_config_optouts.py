@@ -9,9 +9,9 @@ import pytest
 import yaml
 
 from fno.config import settings_from_files
-from fno.config import optouts
 from fno.config import writer
 from fno.claims import Claim, acquire_claim, claim_status
+from fno.claims import optout_lease
 from fno.claims.core import reap_dead_claims
 from fno.claims.io import claim_path, claims_root_for
 
@@ -37,9 +37,9 @@ def test_unbacked_self_review_opt_out_reverts_to_default(
 def test_opt_out_write_acquires_global_claim_and_reports_lease(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "settings.yaml"))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
-    monkeypatch.setattr(writer, "_resolve_optout_holder", lambda: "session-a")
+    monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-a")
 
-    result = writer.set_config_value("review.self_review_required", "false")
+    result = optout_lease.set_config_value("review.self_review_required", "false")
 
     assert result.lease["holder"] == "session-a"
     assert result.lease["expires_at"] > result.lease["acquired_at"]
@@ -55,25 +55,39 @@ def test_opt_out_write_acquires_global_claim_and_reports_lease(tmp_path, monkeyp
 def test_second_holder_cannot_rewrite_a_live_opt_out(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "settings.yaml"))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
-    monkeypatch.setattr(writer, "_resolve_optout_holder", lambda: "session-a")
-    writer.set_config_value("review.self_review_required", "false")
+    monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-a")
+    optout_lease.set_config_value("review.self_review_required", "false")
 
-    monkeypatch.setattr(writer, "_resolve_optout_holder", lambda: "session-b")
+    monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-b")
     with pytest.raises(writer.ConfigSetError, match="session-a"):
-        writer.set_config_value("review.self_review_required", "false")
+        optout_lease.set_config_value("review.self_review_required", "false")
 
     assert "self_review_required = false" in (
         tmp_path / "config.toml"
     ).read_text(encoding="utf-8")
 
 
+def test_bare_writer_refuses_merge_gating_keys_fail_closed(tmp_path, monkeypatch):
+    # The lease lane lives in fno.claims.optout_lease; fno.config may not
+    # import the claims layer, so a plain writer set/unset without the
+    # injected ops must refuse the key instead of writing an unleased opt-out.
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "settings.yaml"))
+
+    with pytest.raises(writer.ConfigSetError, match="claims lane"):
+        writer.set_config_value("review.self_review_required", "false")
+    with pytest.raises(writer.ConfigSetError, match="claims lane"):
+        writer.unset_config_value("review.self_review_required")
+
+    assert not (tmp_path / "settings.yaml").exists()
+
+
 def test_owner_reset_releases_the_opt_out_claim(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "settings.yaml"))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
-    monkeypatch.setattr(writer, "_resolve_optout_holder", lambda: "session-a")
-    writer.set_config_value("review.self_review_required", "false")
+    monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-a")
+    optout_lease.set_config_value("review.self_review_required", "false")
 
-    writer.set_config_value("review.self_review_required", "true")
+    optout_lease.set_config_value("review.self_review_required", "true")
 
     status = claim_status(
         "config-optout:review.self_review_required",
@@ -112,7 +126,7 @@ def test_unreadable_claim_instrument_revokes_and_names_instrument(
     )
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
     monkeypatch.setattr(
-        optouts,
+        optout_lease,
         "claim_status",
         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("permission denied")),
     )
@@ -131,7 +145,7 @@ def test_config_set_output_names_the_opt_out_lease(tmp_path, monkeypatch, capsys
 
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "settings.yaml"))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
-    monkeypatch.setattr(writer, "_resolve_optout_holder", lambda: "session-a")
+    monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-a")
 
     result = CliRunner().invoke(
         app, ["set", "review.self_review_required", "false"]
@@ -180,7 +194,7 @@ def test_reaper_restores_the_recorded_prior_value(tmp_path, monkeypatch):
     summary = reap_dead_claims(roots=[root], apply=True, optout_sink=optout_sink)
 
     assert summary["reaped"] == 1
-    from fno.config.writer import restore_reaped_optouts
+    from fno.claims.optout_lease import restore_reaped_optouts
 
     assert restore_reaped_optouts(optout_sink) == []
     assert "self_review_required = false" not in config.read_text(encoding="utf-8")
@@ -221,8 +235,8 @@ def test_stale_claim_takeover_preserves_the_original_prior_value(tmp_path, monke
     )
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "settings.yaml"))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
-    monkeypatch.setattr(writer, "_resolve_optout_holder", lambda: "session-a")
-    writer.set_config_value("review.self_review_required", "false")
+    monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-a")
+    optout_lease.set_config_value("review.self_review_required", "false")
 
     path = claim_path(
         "config-optout:review.self_review_required",
@@ -239,8 +253,8 @@ def test_stale_claim_takeover_preserves_the_original_prior_value(tmp_path, monke
     )
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
-    monkeypatch.setattr(writer, "_resolve_optout_holder", lambda: "session-b")
-    writer.set_config_value("review.self_review_required", "false")
+    monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-b")
+    optout_lease.set_config_value("review.self_review_required", "false")
 
     replacement = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert replacement["metadata"]["prior_present"] is True
@@ -274,8 +288,8 @@ def test_scope_change_takeover_restores_the_new_file_not_the_old(
     (project_dir / ".fno").mkdir(parents=True)
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(global_dir / "settings.yaml"))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
-    monkeypatch.setattr(writer, "_resolve_optout_holder", lambda: "session-a")
-    writer.set_config_value("review.self_review_required", "false", scope="global")
+    monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-a")
+    optout_lease.set_config_value("review.self_review_required", "false", scope="global")
 
     key = "config-optout:review.self_review_required"
     path = claim_path(key, root=claims_root_for(key))
@@ -290,8 +304,8 @@ def test_scope_change_takeover_restores_the_new_file_not_the_old(
     )
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
-    monkeypatch.setattr(writer, "_resolve_optout_holder", lambda: "session-b")
-    writer.set_config_value(
+    monkeypatch.setattr(optout_lease, "_resolve_optout_holder", lambda: "session-b")
+    optout_lease.set_config_value(
         "review.self_review_required",
         "false",
         scope="project",
@@ -312,7 +326,7 @@ def test_scope_change_takeover_restores_the_new_file_not_the_old(
     summary = reap_dead_claims(
         roots=[claims_root_for(key)], apply=True, optout_sink=optout_sink
     )
-    from fno.config.writer import restore_reaped_optouts
+    from fno.claims.optout_lease import restore_reaped_optouts
 
     assert summary["reaped"] == 1
     assert restore_reaped_optouts(optout_sink) == []
