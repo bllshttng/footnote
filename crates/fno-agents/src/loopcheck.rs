@@ -3191,6 +3191,17 @@ fn read_pr_info(
                                     Some(reviews_arr),
                                 );
                                 tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
+                                // The impossible axis stays events-only: the
+                                // refresh widened the budget to both axes, and
+                                // recomputing the events count explicitly (not
+                                // reusing the pre-refresh value) keeps that
+                                // true even if a future caller refreshes twice.
+                                tiling.events_rounds_exhausted = rounds_since_last_pass(
+                                    &events_text,
+                                    &head_branch,
+                                    head_sha,
+                                    None,
+                                ) >= max_rounds.max(1);
                                 // The classification and the reviewer scan
                                 // above judged the pre-refresh budget; re-run
                                 // both so the in-classify spent-budget
@@ -3232,7 +3243,7 @@ fn read_pr_info(
             Vec::new(),
             Vec::new(),
             coverage,
-            blockers_impossible(&blockers, tiling.rounds_exhausted),
+            blockers_impossible(&blockers, tiling.events_rounds_exhausted),
             blockers.iter().any(|b| b.hard),
         )
     } else {
@@ -3440,6 +3451,10 @@ fn read_pr_info(
         tiling.rounds_used =
             rounds_since_last_pass(&events_text, &head_branch, head_sha, Some(reviews_arr));
         tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
+        // Same split as the no-external arm above: the budget widens to both
+        // axes, the impossible axis stays events-only.
+        tiling.events_rounds_exhausted =
+            rounds_since_last_pass(&events_text, &head_branch, head_sha, None) >= max_rounds.max(1);
         let comments_arr: &[Value] = reviews_json
             .get("comments")
             .and_then(|v| v.as_array())
@@ -3497,14 +3512,17 @@ fn read_pr_info(
             info.stale_bots,
             unaddressed,
             coverage,
-            blockers_impossible(&blockers, tiling.rounds_exhausted),
+            blockers_impossible(&blockers, tiling.events_rounds_exhausted),
             blockers.iter().any(|b| b.hard),
         )
     };
     // The IMPOSSIBLE predicate rides the row beside the raw budget flag, so
     // the status surface can name it without re-running the disposition scan.
     // The hard axis rides beside it: the standing waiver's condition is hard
-    // findings alone, independent of the budget.
+    // findings alone, independent of the budget. The predicate reads the
+    // events-only exhaustion: a bot-heavy PR whose local lane still has
+    // rounds is never impossible (the `cap_verdict` split on the Python
+    // side; held equal by the shared corpus).
     let mut tiling = tiling;
     tiling.impossible = impossible;
     tiling.hard_blocker = hard_finding_present;
@@ -6033,6 +6051,14 @@ pub struct RangeTiling {
     /// Advisory on this struct - the merge gate re-derives before refusing -
     /// but the status surface reads it to name its own blocker.
     pub rounds_exhausted: bool,
+    /// Whether the EVENTS axis alone exhausted the budget. `rounds_exhausted`
+    /// counts both axes (a bot round IS a round); the IMPOSSIBLE conjunct
+    /// reads this field instead, because only an attestation can carry the
+    /// `fixed` disposition that clears a hard finding - a chain with local
+    /// rounds left is never impossible, whatever the bot axis spent. Mirrors
+    /// `cap_verdict` in `_coverage_gate.py`; the two are held equal by the
+    /// shared corpus.
+    pub events_rounds_exhausted: bool,
     /// Whether the exhausted budget leaves a HARD non-terminal finding (a
     /// CONFIRMED correctness or security finding): only those keep the
     /// IMPOSSIBLE verdict. Every other non-terminal finding is filed at the
@@ -6474,6 +6500,10 @@ pub fn compute_range_tiling(
     // no-external arm behind the same gate the Python merge gate uses).
     tiling.rounds_used = rounds_since_last_pass(events_text, head_branch, head_sha, None);
     tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
+    // Events-only here by construction (no review objects in hand yet), so
+    // the impossible axis starts equal to the budget axis; each refresh
+    // below widens `rounds_used` to both axes and leaves this one alone.
+    tiling.events_rounds_exhausted = tiling.rounds_exhausted;
     // The merge base decides where coverage must start. An unresolvable one
     // answers the whole question fail-closed.
     let merge_out = git_bounded(git_bin, &["merge-base", head_sha, base_ref], cwd);
@@ -7543,11 +7573,14 @@ fn coverage_event_data_tiled(
         // The round budget, same chain, same scoping. Emitted beside the
         // tiling (not inside it) because it is a property of the review
         // loop, not of the ranges: a chain can tile perfectly and still have
-        // burned its rounds. `rounds_exhausted` is the advisory flag the
-        // status surface names its blocker from; the merge gate re-derives
-        // before refusing (Locked Decision 6: never trust a producer count).
+        // burned its rounds. Advisory: every gate surface re-derives before
+        // refusing or blocking (Locked Decision 6: never trust a producer
+        // count), so a stored flag here is an audit trail, never an input.
+        // `events_rounds_exhausted` rides along so the audit row shows the
+        // axis the impossible verdict actually read.
         data["rounds_used"] = serde_json::json!(t.rounds_used);
         data["rounds_exhausted"] = serde_json::json!(t.rounds_exhausted);
+        data["events_rounds_exhausted"] = serde_json::json!(t.events_rounds_exhausted);
         data["impossible"] = serde_json::json!(t.impossible);
     }
     data

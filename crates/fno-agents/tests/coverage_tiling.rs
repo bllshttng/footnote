@@ -1625,6 +1625,156 @@ fn cap_truncated_remainder_is_always_hard() {
     assert!(blockers_withhold(&blockers, true));
 }
 
+// --- the cap's two axes (shared corpus with the Python gate) -----------------
+//
+// The SAME constructed chain is asserted on the Python side by
+// `test_cap_verdict_reads_the_events_axis_alone_for_impossible` and
+// `test_cap_verdict_agreement_chain_is_impossible_and_names_the_key`
+// (cli/tests/unit/test_pr_coverage_check.py), to the SAME
+// (impossible, rounds_used) pair. No live PR sources this fixture: the
+// specimens that measured the divergence are being cleared while this
+// lands, and on both of them the two axes AGREE - a fixture where they
+// agree cannot show which axis the conjunct reads.
+
+const CAP_BRANCH: &str = "feature/x-cap";
+const CAP_KEY: &str = "cli/src/fake.py:779:correctness";
+
+fn cap_round(i: usize) -> String {
+    serde_json::json!({
+        "ts": format!("2026-08-31T2{i:02}:00:00Z"),
+        "type": "review_attestation",
+        "source": "hook",
+        "data": {
+            "reviewer": "code-review",
+            "head_sha": format!("{i:040x}"),
+            "verdict": if i == 0 { "fail" } else { "pass" },
+            "session_id": "s-cap",
+            "branch": CAP_BRANCH,
+            "reviewed_base_sha": format!("{}","a".repeat(40)),
+            "reviewed_head_sha": format!("{i:040x}"),
+            "findings_blocking": if i == 0 { 1 } else { 0 },
+            "findings": if i == 0 {
+                serde_json::json!([{
+                    "category": "correctness",
+                    "verdict": "CONFIRMED",
+                    "blocking": true,
+                    "has_required_fields": true,
+                    "finding_key": CAP_KEY,
+                }])
+            } else { serde_json::json!([]) },
+        },
+    })
+    .to_string()
+}
+
+#[test]
+fn cap_the_impossible_conjunct_reads_the_events_axis_alone() {
+    use fno_agents::loopcheck::{blockers_impossible, rounds_since_last_pass};
+    // One fail round raising a CONFIRMED correctness finding, plus a reviews
+    // payload naming five distinct reviewed commits, at max_rounds 2.
+    let events = cap_round(0);
+    let head = format!("{:040x}", 0);
+    let reviews: Vec<serde_json::Value> = (0..5)
+        .map(|i| serde_json::json!({"state": "APPROVED", "commit": {"oid": format!("r{i:038x}")}}))
+        .collect();
+    // The reported budget: max of both axes (a bot round IS a round). The
+    // Python side asserts rounds_used == 5 on this same chain.
+    assert_eq!(
+        rounds_since_last_pass(&events, CAP_BRANCH, &head, Some(&reviews)),
+        5
+    );
+    // The events axis alone: 1 of 2, not spent.
+    assert_eq!(rounds_since_last_pass(&events, CAP_BRANCH, &head, None), 1);
+    let blockers = disposition_blockers(&events, CAP_BRANCH, &head, true);
+    assert_eq!(blockers.len(), 1);
+    assert!(blockers[0].hard, "CONFIRMED correctness is hard");
+    // Budget axis spent, impossible axis not: the conjunct the gate applies
+    // reads the events axis, so this chain is NOT impossible - the unspent
+    // capacity is local and a disposition-carrying attestation clears it.
+    assert!(blockers_impossible(&blockers, true));
+    assert!(!blockers_impossible(&blockers, false));
+}
+
+#[test]
+fn cap_the_agreement_chain_is_impossible_on_both_gates() {
+    use fno_agents::loopcheck::{blockers_impossible, rounds_since_last_pass};
+    // One fail raising the CONFIRMED correctness finding, then five
+    // findings-free passes, each at its own head: six events-axis rounds
+    // against max_rounds 2. Both axes agree here, and the chain is
+    // impossible - the Python side asserts the same pair on the same chain.
+    let events: String = (0..6).map(cap_round).collect::<Vec<_>>().join("\n");
+    let head = format!("{:040x}", 5);
+    assert_eq!(rounds_since_last_pass(&events, CAP_BRANCH, &head, None), 6);
+    let blockers = disposition_blockers(&events, CAP_BRANCH, &head, true);
+    assert_eq!(blockers.len(), 1);
+    assert!(blockers[0].hard);
+    assert_eq!(blockers[0].finding_key, CAP_KEY);
+    assert!(blockers_impossible(&blockers, true));
+}
+
+#[test]
+fn cap_range_tiling_seeds_the_events_axis_off_the_events_count() {
+    use fno_agents::loopcheck::rounds_since_last_pass;
+    // compute_range_tiling holds no review objects, so both its budget and
+    // its impossible axis start as the events-only answer; the refresh sites
+    // inside read_pr_info widen the budget and leave the impossible axis.
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (_base, shas, head) = repo_with(repo, 2);
+    let events = [
+        serde_json::json!({
+            "ts": "2026-08-31T20:00:00Z",
+            "type": "review_attestation",
+            "source": "hook",
+            "data": {
+                "reviewer": "code-review",
+                "head_sha": &shas[0],
+                "verdict": "fail",
+                "session_id": "s-cap",
+                "branch": BRANCH,
+                "reviewed_base_sha": _base,
+                "reviewed_head_sha": &shas[0],
+                "findings_blocking": 1,
+                "findings": [{
+                    "category": "correctness",
+                    "verdict": "CONFIRMED",
+                    "blocking": true,
+                    "has_required_fields": true,
+                    "finding_key": CAP_KEY,
+                }],
+            },
+        })
+        .to_string(),
+        serde_json::json!({
+            "ts": "2026-08-31T21:00:00Z",
+            "type": "review_attestation",
+            "source": "hook",
+            "data": {
+                "reviewer": "code-review",
+                "head_sha": &head,
+                "verdict": "pass",
+                "session_id": "s-cap",
+                "branch": BRANCH,
+                "reviewed_base_sha": &shas[0],
+                "reviewed_head_sha": &head,
+                "findings_blocking": 0,
+                "findings": [],
+            },
+        })
+        .to_string(),
+    ]
+    .join("\n")
+        + "\n";
+    assert_eq!(rounds_since_last_pass(&events, BRANCH, &head, None), 2);
+    let tiling = tiling_for(repo, &events);
+    assert_eq!(tiling.rounds_used, 2);
+    assert!(tiling.rounds_exhausted, "2 of 2 spends the budget");
+    assert!(
+        tiling.events_rounds_exhausted,
+        "no review objects in hand: both axes are the events answer"
+    );
+}
+
 // --- x-aecc: declining must satisfy coverage ---------------------------------
 //
 // The tiling predicate is ANSWERED at this head, never clean at this head.
