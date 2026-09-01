@@ -770,6 +770,13 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // stays on the merge-triggered path. Emitted even when the counts are zero,
     // so a quiet repo cannot be mistaken for a sweep that never ran.
     "worktree_sweep",
+    // Stale-question reconcile (daemon-emitted): `fno agents stale-escalate`
+    // ran on its 6h floor and reconciled the durable [watchdog-stale:*]
+    // operator question to the measured fleet. Report-only: rows past the
+    // wake ceiling are the needs-human bucket no action lane may take.
+    // Emitted even on outcome none/duplicate, so a quiet run cannot be
+    // mistaken for a sweep that never ran.
+    "stale_sweep",
     // Dead-row GC also reconstructs the loop's canonical failure event when a
     // convention-named dispatch disappeared without a termination receipt.
     "node_failed",

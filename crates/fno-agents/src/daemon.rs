@@ -827,6 +827,95 @@ fn registry_repo_roots(home: &AgentsHome) -> Vec<String> {
 /// backstop for what the merge-triggered ritual missed, not a control loop.
 const WORKTREE_SWEEP_INTERVAL_SECS: u64 = 86_400;
 
+/// How long between stale-question reconciles. Stale rows are measured in
+/// hundreds of hours, so the interval bounds discovery lag, not freshness:
+/// a row that crosses the wake ceiling waits at most one interval before a
+/// human is told. Identity-keyed dedupe lives in the verb, so an eager run
+/// costs one sweep and changes nothing.
+const STALE_SWEEP_INTERVAL_SECS: i64 = 21_600;
+
+/// One fleet's stale-sweep reading, parsed from the verb's JSON line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleSweepReport {
+    pub stale: usize,
+    pub oldest_h: i64,
+    pub outcome: String,
+}
+
+/// Parse the JSON object `fno agents stale-escalate --json` prints on stdout.
+///
+/// The scheduled invocation passes `--json`, so stdout is ONE JSON line whose
+/// `summary` field happens to carry a `Summary: ...` string - the line itself
+/// never starts with it. Parse the object's fields, not that embedded text.
+///
+/// Returns `None` rather than a zeroed report when no readable object is
+/// present. A sweep that could not read its own output must not report
+/// "0 stale", which is indistinguishable from a clean machine: an absence has
+/// two explanations and a count must only ever come from a real reading. The
+/// outcome word rides along because on the refused path the count is NOT a
+/// real reading - the event must be able to say so rather than fabricate a
+/// measured zero.
+pub fn parse_stale_sweep(stdout: &str) -> Option<StaleSweepReport> {
+    let line = stdout
+        .lines()
+        .map(str::trim_start)
+        .find(|l| l.starts_with('{'))?;
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    Some(StaleSweepReport {
+        stale: usize::try_from(value.get("stale_count")?.as_u64()?).ok()?,
+        oldest_h: value.get("oldest_h")?.as_i64()?,
+        outcome: value.get("outcome")?.as_str()?.to_string(),
+    })
+}
+
+/// Stale-question reconcile on a 6h floor: report-only, no apply mode.
+///
+/// Rows past the wake ceiling are the watchdog's needs-human bucket - no
+/// action lane may take them - so the durable question channel is the only
+/// surface they reach. This sweep is its trigger; the verb inside reconciles
+/// one question to the measured set, so a re-run is a duplicate no-op unless
+/// the set changed. Removal stays everywhere it already was: this fn takes no
+/// apply flag and shells no action verb, and the run closure is injected so
+/// the policy is testable without shelling out.
+///
+/// Emits one `stale_sweep` event per run, INCLUDING on outcome `none` or
+/// `duplicate`: a tick that stays silent when it finds nothing cannot be told
+/// from a tick that never ran.
+pub fn stale_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    now: i64,
+    run: &dyn Fn() -> Option<String>,
+) -> usize {
+    let stamp = home.root().join("stale-escalate.stamp");
+    let last = std::fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    if now.saturating_sub(last) < STALE_SWEEP_INTERVAL_SECS {
+        return 0;
+    }
+    let outcome = match run().as_deref().and_then(parse_stale_sweep) {
+        Some(r) => {
+            let _ = emitter.emit(
+                "stale_sweep",
+                &json!({
+                    "stale_count": r.stale,
+                    "oldest_h": r.oldest_h,
+                    "outcome": r.outcome,
+                }),
+            );
+            1
+        }
+        None => {
+            let _ = emitter.emit("stale_sweep", &json!({"error": "unreadable-summary"}));
+            0
+        }
+    };
+    let _ = std::fs::write(&stamp, now.to_string());
+    outcome
+}
+
 /// One repo's worktree-sweep reading, parsed from the verb's `Summary:` line.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorktreeSweepReport {
@@ -3273,6 +3362,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // registry directly, with no daemon contact - the mtime is the one
     // positive marker of that). Anything stale is discarded unread.
     let idle_probe_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Stale-question reconcile: same one-in-flight discipline as the sweeps
+    // beside it. The verb dedupes on outcome identity, so an extra run is a
+    // no-op; the gate exists so a slow fleet probe never stacks.
+    let stale_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let idle_probe_verdict: Arc<
         std::sync::Mutex<Option<(bool, Instant, Option<std::time::SystemTime>)>>,
     > = Arc::new(std::sync::Mutex::new(None));
@@ -3429,6 +3522,30 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     tokio::spawn(async move {
                         let _gate = SweepGate(flag);
                         terminal_stop_sweep(&home, &emitter).await;
+                    });
+                }
+                // Stale-question reconcile: rows past the wake ceiling are the
+                // watchdog's needs-human bucket, and no lane acts on them, so
+                // the durable question channel is the only surface they reach.
+                // This arm is that channel's trigger. Its own 6h stamp bounds
+                // discovery lag; the verb inside dedupes on outcome identity,
+                // so an eager run costs one sweep and asks nothing. The verb
+                // never gets an apply form: this lane routes information and
+                // changes no removal path.
+                if !stale_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    let flag = Arc::clone(&stale_sweep_in_flight);
+                    let home = ctx.home.clone();
+                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
+                    tokio::task::spawn_blocking(move || {
+                        let _gate = SweepGate(flag);
+                        stale_sweep(&home, &emitter, now_epoch_secs(), &|| {
+                            std::process::Command::new("fno")
+                                .args(["agents", "stale-escalate", "--json"])
+                                .output()
+                                .ok()
+                                .filter(|o| o.status.success())
+                                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                        });
                     });
                 }
                 // An enabled active-backlog project keeps the daemon resident even
@@ -11652,6 +11769,117 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
         assert!(log.contains("unreadable-summary"));
         assert!(!log.contains("\"eligible\""));
+    }
+
+    #[test]
+    fn stale_summary_parses_the_asked_line() {
+        // The verb's ACTUAL --json output, embedded summary text and all -
+        // not a synthetic standalone Summary line the parser could never see.
+        let line = r#"{"outcome": "asked", "question_id": "q-37222570", "stale_count": 12, "oldest_h": 1829, "summary": "Summary: 12 stale, outcome asked, oldest 1829h"}"#;
+        let r = parse_stale_sweep(line).expect("parses");
+        assert_eq!(r.stale, 12);
+        assert_eq!(r.oldest_h, 1829);
+        assert_eq!(r.outcome, "asked");
+    }
+
+    #[test]
+    fn stale_summary_carries_the_refused_outcome_word() {
+        // On the refused path the count is NOT a real reading, so the event
+        // must carry the word that says so instead of a fabricated zero.
+        let line = r#"{"outcome": "refused", "question_id": "", "stale_count": 0, "oldest_h": 0, "summary": "Summary: 0 stale, outcome refused, oldest 0h"}"#;
+        let r = parse_stale_sweep(line).expect("parses");
+        assert_eq!(r.stale, 0);
+        assert_eq!(r.outcome, "refused");
+    }
+
+    #[test]
+    fn stale_summary_reads_duplicate_as_not_asked() {
+        // A duplicate no-op is a real reading, not silence: the event must
+        // carry the measured set even when the fold asked nothing.
+        let line = r#"{"outcome": "duplicate", "question_id": "q-37222570", "stale_count": 12, "oldest_h": 1830, "summary": "Summary: 12 stale, outcome duplicate, oldest 1830h"}"#;
+        let r = parse_stale_sweep(line).expect("parses");
+        assert_eq!(r.stale, 12);
+        assert_eq!(r.outcome, "duplicate");
+    }
+
+    #[test]
+    fn stale_parser_refuses_the_text_mode_line() {
+        // If the verb ever regresses to text-only output, the parser must
+        // answer None (loud error event), never misread the embedded
+        // summary text as a reading.
+        assert!(parse_stale_sweep("Summary: 12 stale, outcome asked, oldest 1829h\n").is_none());
+    }
+
+    #[test]
+    fn stale_summary_absent_is_none_not_zero() {
+        // A zeroed report is indistinguishable from a clean machine. An
+        // absence has two explanations and only a real reading produces a
+        // count.
+        assert!(parse_stale_sweep("").is_none());
+        assert!(parse_stale_sweep("some other output\n").is_none());
+    }
+
+    #[test]
+    fn stale_sweep_honours_its_own_6h_floor() {
+        let home = tmp_home("stale-sweep-floor");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let out = || {
+            Some(
+                r#"{"outcome": "asked", "question_id": "q-aa", "stale_count": 1, "oldest_h": 30, "summary": "Summary: 1 stale, outcome asked, oldest 30h"}"#
+                    .to_string(),
+            )
+        };
+        let now = 1_000_000;
+
+        assert_eq!(stale_sweep(&home, &emitter, now, &out), 1);
+        // Within the floor: skipped entirely, no second reading.
+        assert_eq!(stale_sweep(&home, &emitter, now + 60, &out), 0);
+        // Past the floor: fires again.
+        assert_eq!(
+            stale_sweep(&home, &emitter, now + STALE_SWEEP_INTERVAL_SECS + 1, &out),
+            1
+        );
+    }
+
+    #[test]
+    fn stale_sweep_emits_on_a_quiet_run() {
+        // A tick that stays silent when it finds nothing cannot be told from
+        // a tick that never ran, and this lane exists precisely to prove the
+        // sweep fires at all: outcome none still emits.
+        let home = tmp_home("stale-sweep-quiet");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let out = || {
+            Some(
+                r#"{"outcome": "none", "question_id": "", "stale_count": 0, "oldest_h": 0, "summary": "Summary: 0 stale, outcome none, oldest 0h"}"#
+                    .to_string(),
+            )
+        };
+
+        assert_eq!(stale_sweep(&home, &emitter, 1_000_000, &out), 1);
+        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(log.contains("stale_sweep"));
+        assert!(log.contains("\"stale_count\":0"));
+    }
+
+    #[test]
+    fn stale_sweep_records_an_unreadable_summary_rather_than_inventing_zeros() {
+        let home = tmp_home("stale-sweep-unreadable");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+
+        assert_eq!(stale_sweep(&home, &emitter, 1_000_000, &|| None), 0);
+        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(log.contains("unreadable-summary"));
+        assert!(!log.contains("\"stale_count\""));
+    }
+
+    #[test]
+    fn stale_sweep_takes_no_apply_form() {
+        // The lane routes information and changes no removal path: the fn
+        // body may not carry an apply decision at all.
+        let src = include_str!("daemon.rs");
+        let idx = src.find("fn stale_sweep(").expect("stale_sweep exists");
+        let body = &src[idx..idx + 2000.min(src.len() - idx)];
+        assert!(!body.contains("--apply"));
     }
 
     #[test]

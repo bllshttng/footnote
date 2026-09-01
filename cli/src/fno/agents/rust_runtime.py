@@ -350,6 +350,12 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # registry/graph joins; apply lanes shell out to fno verbs); no Rust client
     # port, so it must never auto-route to the daemon.
     "watchdog",
+    # The stale-question reconcile (`fno agents stale-escalate`). Pure Python:
+    # run_sweep's real seams (roster, transcripts, claims, graph) plus the
+    # durable-question fold in fno.agents.stale_lane; the DAEMON is its
+    # scheduled caller, so routing the verb back to the daemon would be a
+    # shell-out cycle. No Rust client port, never auto-routes.
+    "stale-escalate",
     # The citizen-yard read (folded under agents from the retired root verb).
     # Pure Python: reads the registry + graph archive; no Rust client port, so
     # it must never auto-route to the daemon.

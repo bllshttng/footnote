@@ -2202,6 +2202,21 @@ event_types:
         error:
           type: string
 
+  - name: stale_sweep
+    description: "The daemon's stale-question reconcile: `fno agents stale-escalate` ran on its 6h floor and reconciled the durable [watchdog-stale:*] operator question to the measured fleet. Report-only by construction: rows past the wake ceiling are the needs-human bucket no action lane may take, so the question channel is the only surface they reach. Emitted for every run including outcome none and duplicate, so a quiet run is never mistaken for a sweep that did not run. `outcome` carries the verb's own word verbatim - on `refused` the stale_count is NOT a real reading and must never be read as a measured zero. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        stale_count:
+          type: integer
+        oldest_h:
+          type: integer
+        outcome:
+          type: string
+        error:
+          type: string
+
   - name: bg_worker_terminal_stopped
     description: "A fire-and-forget `claude --bg` /target|/think worker that finalize marked terminal was `claude stop`ped by the daemon terminal-stop sweep, so its slot frees instead of parking at an idle prompt forever (x-fcbf)."
     sources: [daemon]
