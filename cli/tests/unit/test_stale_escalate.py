@@ -163,6 +163,31 @@ def test_duplicate_run_closes_straggler_asks_from_an_interrupted_supersede(
     assert [q.id for q in read_open_questions(tmp_path)] == [kept_id]
 
 
+def test_every_closed_ask_carries_a_decision_record(tmp_path: Path) -> None:
+    """Positive marker, not an absence: the stop gate holds a session whose
+    question was closed with an answer but left no operator_decision record,
+    and `fno backlog decide` refuses agent sessions - so the fold must write
+    its own record keyed on the question id, at agent authority."""
+    import json
+
+    from fno.outstanding.core import events_path
+
+    transcripts = {"dddd4444-0000": _tail("stopped mid turn", 61 * 1440 * 60)}
+    _outcome, asked_id = _stale_run(tmp_path, [_stale_row()], transcripts)
+    outcome, _closed = _stale_run(tmp_path, [_stale_row()], {})
+
+    assert outcome == "closed"
+    records = []
+    for line in events_path(tmp_path).read_text(encoding="utf-8").splitlines():
+        event = json.loads(line)
+        if event.get("type") == "operator_decision":
+            records.append(event["data"])
+    mine = [r for r in records if r.get("question_id") == asked_id]
+    assert len(mine) == 1
+    assert mine[0]["authority_source"] == "agent"
+    assert mine[0]["decided_by"] == "fno agents stale-escalate"
+
+
 def test_refused_sweep_escalates_and_closes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

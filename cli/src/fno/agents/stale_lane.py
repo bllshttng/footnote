@@ -42,7 +42,17 @@ def _open_stale_questions(root: Path):
 
 
 def _close_question(qid: str, answer: str, root: Path) -> None:
-    from fno.events import operator_question_closed
+    """Close one ask AND record the decision the close made.
+
+    The stop gate holds a session whose own question was closed with an
+    answer but carries no ``operator_decision`` record, and ``fno backlog
+    decide`` refuses agent sessions outright - so the fold writes its own
+    trail at the authority it actually holds: an agent mechanism,
+    mechanically superseding on the measured set, never an operator ruling.
+    """
+    import secrets
+
+    from fno.events import operator_decision, operator_question_closed
     from fno.outstanding.core import append_question_event
 
     append_question_event(
@@ -50,6 +60,20 @@ def _close_question(qid: str, answer: str, root: Path) -> None:
             question_id=qid,
             answer=answer,
             closed_by="stale-escalate",
+            source="daemon",
+        ),
+        root,
+    )
+    append_question_event(
+        operator_decision(
+            decision_id=f"d-{secrets.token_hex(4)}",
+            decision=answer,
+            subject=f"watchdog-stale:{qid}",
+            question_id=qid,
+            decided_by="fno agents stale-escalate",
+            origin="scheduler",
+            authority_source="agent",
+            rationale="mechanical supersede by reconcile_stale; not an operator ruling",
             source="daemon",
         ),
         root,
