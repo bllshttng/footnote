@@ -1295,8 +1295,14 @@ fn client_spawn_substrate_bg_opencode_routes_to_serve_lane() {
     );
 }
 
-/// The bg refusal still fires for a harness with no detached lane: agy joins
-/// codex/gemini on the claude + opencode only list.
+/// The bg refusal still fires for a harness whose spawn arm is unbuilt, and it
+/// now names the DERIVED lane instead of a provider list. agy's capability row
+/// declares `interactive_attach` unsupported, so its lane reads `keeper`.
+///
+/// The negative assertion is the load-bearing half. The old text listed
+/// "claude + codex + opencode", which told a reader that every other harness
+/// has no thread lane. That went stale the moment a keeper lane was built and
+/// journey-proven, and it then misdirected the reader it was written to help.
 #[test]
 fn client_spawn_substrate_bg_agy_hard_errors_pointing_to_headless() {
     let home_dir = tmpdir("cli-spawn-bg-agy-home");
@@ -1331,8 +1337,12 @@ fn client_spawn_substrate_bg_agy_hard_errors_pointing_to_headless() {
         "agy --substrate bg must exit 2; stderr: {stderr}"
     );
     assert!(
-        stderr.contains("claude + codex + opencode") && stderr.contains("headless"),
-        "agy --substrate bg error must name the supported detached-thread providers and headless: {stderr}"
+        stderr.contains("keeper lane spawn arm") && stderr.contains("headless"),
+        "agy --substrate bg error must name the derived lane and headless: {stderr}"
+    );
+    assert!(
+        !stderr.contains("claude + codex + opencode"),
+        "the refusal must not carry a provider name list: {stderr}"
     );
 }
 
