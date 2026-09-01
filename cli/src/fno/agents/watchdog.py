@@ -854,6 +854,36 @@ def _question_pending(facts: Optional[TailFacts]) -> bool:
     return any(_asks(text[: m.start()]) for m in _TERMINAL_TAG_START_RE.finditer(text))
 
 
+def _shipped_work_basis(
+    row: Row,
+    node_state_for: Optional[Callable[[str], Optional[dict]]],
+) -> str:
+    """The external half of the retire marker: proof the WORK landed.
+
+    Both halves are required - ``status == "done"`` AND ``merge_status ==
+    "merged"`` - because `done` alone is not a ship marker: on the reference
+    graph 460 nodes read `done` and 42 of those carry no merge_status, so a
+    done-only basis would stop rows whose work never shipped. The crowned
+    exclusion is the one `reap_decision` records: a king spans many nodes, so
+    resolving its row to ONE node's status mis-buckets it.
+
+    Every unreadable read answers ``""`` - the module's uniform rule that an
+    absence is never a verdict, and here never a stop. A row retires on
+    EITHER this basis OR its own closed promise; silence arms neither.
+    """
+    if not row.node or row.crowned or node_state_for is None:
+        return ""
+    try:
+        entry = node_state_for(row.node)
+    except Exception:  # noqa: BLE001 - a failed read is never a marker
+        return ""
+    if not isinstance(entry, dict):
+        return ""
+    if entry.get("status") != "done" or entry.get("merge_status") != "merged":
+        return ""
+    return f"node {row.node} done and its PR merged"
+
+
 def retire_decision(
     row: Row,
     *,
@@ -861,23 +891,28 @@ def retire_decision(
     now_s: float,
     grace_s: float,
     window: str = "none",
+    node_state_for: Optional[Callable[[str], Optional[dict]]] = None,
 ) -> tuple[bool, str]:
     """Should this row be stopped as finished? Returns ``(answer, basis)``.
 
     Every condition is a POSITIVE marker and every unreadable read answers no:
 
     1. the row is a footnote-spawned worker, never an operator's own session;
-    2. its tail says `done` - it declared itself finished, rather than merely
-       having gone quiet - and carries no question the operator owes;
+    2. the work is over, on EITHER marker: its tail says `done` - it declared
+       itself finished, rather than merely having gone quiet - or the graph
+       proves the deliverable landed, node `done` AND its PR `merged`
+       (`_shipped_work_basis`). Either way it carries no question the operator
+       owes;
     3. it has been quiet longer than the grace.
 
-    Unlike reap this does NOT require the node to be done, and does not require
-    the worktree to be this row's alone. Both are reap preconditions because
-    reap deletes a worktree. Retire runs a stop: the transcript, the worktree
-    and the registry row all survive and `fno agents resume` brings the session
-    back. That reversibility is why it can be armed where reap cannot, and it is
-    why a blueprint worker whose node is still `ready` is in scope here and out
-    of scope for reap.
+    The declared-done path, unlike reap, does not require the node to be done
+    and does not require the worktree to be this row's alone; the shipped-work
+    path is the opposite, decided BY the node being done and merged. Reap
+    needs both because reap deletes a worktree. Retire runs a stop: the
+    transcript, the worktree and the registry row all survive and `fno agents
+    resume` brings the session back. That reversibility is why it can be armed
+    where reap cannot, and it is why a blueprint worker whose node is still
+    `ready` is in scope here and out of scope for reap.
 
     The loop-driven exclusion `terminal_stop::should_mark` carries has no
     counterpart here, and does not need one: a `fno-agents loop run` child exits
@@ -942,25 +977,34 @@ def retire_decision(
     # the laxer one.
     if facts.last_kind == "tool":
         return False, ""
-    truth = classify_tail(facts.last_role, facts.last_text, age_s)
-    if truth != "done":
-        return False, ""
-    # `classify_tail` reaches `done` on any `<promise` in the turn, so the
-    # classifier alone cannot tell a declaration from a prose mention. This lane
-    # stops sessions, so it asks for the closed block rather than the loose read
-    # its siblings share - and asks it of the text the worker EMITTED, with
-    # anything it merely quoted removed first.
-    if _CLOSED_PROMISE_RE.search(_QUOTED_CODE_RE.sub("", facts.last_text or "")) is None:
-        return False, ""
+    # Either/or (x-2188): the closed promise and the shipped-work read are
+    # alternative POSITIVE markers for the same fact, the work being over. The
+    # graph read runs only when the tail cannot speak, so a promise-carrying
+    # row costs no graph call - and a shipped row needs no promise it was
+    # never going to emit, because a `<promise>` is a ship-phase artifact and
+    # a think or blueprint worker legitimately ends on a recap.
+    shipped_basis = _shipped_work_basis(row, node_state_for)
+    if not shipped_basis:
+        truth = classify_tail(facts.last_role, facts.last_text, age_s)
+        if truth != "done":
+            return False, ""
+        # `classify_tail` reaches `done` on any `<promise` in the turn, so the
+        # classifier alone cannot tell a declaration from a prose mention. This lane
+        # stops sessions, so it asks for the closed block rather than the loose read
+        # its siblings share - and asks it of the text the worker EMITTED, with
+        # anything it merely quoted removed first.
+        if _CLOSED_PROMISE_RE.search(_QUOTED_CODE_RE.sub("", facts.last_text or "")) is None:
+            return False, ""
     if _question_pending(facts):
         return (
             False,
             f"tail reads done but ends on a question the operator owes, "
             f"{int(age_s // 60)}m quiet",
         )
+    marker = shipped_basis or "worker declared itself done"
     return (
         True,
-        f"worker declared itself done and has been quiet {int(age_s // 60)}m "
+        f"{marker} and has been quiet {int(age_s // 60)}m "
         f"(grace {int(grace_s // 60)}m); stop only, worktree and row survive",
     )
 
@@ -1522,7 +1566,15 @@ def _verdict_one(
     # declines on its own (stricter) preconditions can still be stopped by this
     # (weaker, non-destructive) one.
     retire_yes, retire_basis = retire_decision(
-        row, facts=facts, now_s=now_s, grace_s=retire_grace_s_value, window=window
+        row,
+        facts=facts,
+        now_s=now_s,
+        grace_s=retire_grace_s_value,
+        window=window,
+        # The SAME callable reap read: run_sweep resolves _graph_index() once
+        # per sweep and graph_fn closes over it, so this is no second graph
+        # read and no new seam (x-2188).
+        node_state_for=node_state_for,
     )
     if retire_yes:
         return Verdict(row.row_id, row.name, row.state, RETIRE,
