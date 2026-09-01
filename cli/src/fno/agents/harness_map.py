@@ -503,6 +503,17 @@ def dispatch_command(harness: str, allow_merge: bool = False) -> str:
     The default is no-merge, and every error path must land on it: granting
     merge authority is the irreversible direction, so an unreadable config
     fails safe to withholding it, never to handing it out."""
+    if not is_declared(harness):
+        # The undeclared arm: without a row there is no command_surface to
+        # normalize and no refusal text that names the real condition. The
+        # deprecated-harness text names agy as a successor - a harness the
+        # operator never mentioned - so an undeclared harness must be refused
+        # HERE, by its own condition.
+        raise DispatchResolveError(
+            f"harness {harness!r} has no declared command surface: a native "
+            "footnote skill invocation for it must be measured (a row in "
+            "harness_capabilities.toml) before one can be generated"
+        )
     template = _AUTONOMOUS_COMMAND_MERGE if allow_merge else _AUTONOMOUS_COMMAND
     return normalize_command(template, harness)
 
@@ -539,6 +550,60 @@ def capabilities(harness: str) -> dict:
             f"(fno.agents.harness_map) knows: {', '.join(known_harnesses())}"
         )
     return caps
+
+
+# The posture for a harness with NO capability row. Every value is the
+# fail-closed one, chosen without reading any declared harness's row - the
+# whole point is that an unknown harness answers "undeclared" by NAME rather
+# than inheriting claude's defaults (the x-ea37 shape).
+UNDECLARED_POSTURE: dict = {
+    "declared": False,
+    "thread": False,
+    "autonomous_pane": False,
+    "route_on_pane": False,
+    "resume": "unsupported",
+    "ready_marker": "unsupported",
+    "ready_rule_ids": [],
+    "manifest_rules": [],
+    "loop_participation": "none",
+    "loop_extension": "",
+    "command_surface": "undeclared",
+    "slash_prefix": "",
+    "permission_bypass": [],
+    "permission_response": {},
+    "state_root_grant": {},
+    "resume_strategy": {"forms": {}},
+    "model_switch_strategy": {"kind": "unsupported"},
+    "session_binding": {"required": False},
+    "stop_strategy": "registry-noop",
+    "remove_strategy": "registry-only",
+    # The ONE value that is a default rather than a measurement. `unsupported`
+    # here would refuse mail by pane-send, which the undeclared pane lane is
+    # supposed to give, and a wrong enter produces a visibly unsubmitted pane
+    # (mux's `submitted` marker / exit 22 reports it) rather than a silently
+    # wrong answer attributed to the worker.
+    "submit_keys": ["enter"],
+    "send_keys_enter_delay_ms": 0,
+}
+
+
+def is_declared(harness: str) -> bool:
+    """True when ``harness`` carries a measured capability row. The declared/
+    undeclared split is a TABLE fact, never a name list, so a new row flips a
+    harness to declared with no code edit."""
+    return harness in _HARNESS_CAPS
+
+
+def capabilities_or_undeclared(harness: str) -> dict:
+    """Capabilities for ``harness``, or the explicit undeclared posture.
+
+    NOT a softer :func:`capabilities`. That one keeps raising for everyone,
+    because a caller that needs a measured value must not receive a guess.
+    Only the pane lane - the lane whose whole contract is "fno is the
+    viewport" - reads this one, and it branches on the ``declared`` key
+    rather than assuming."""
+    caps = _HARNESS_CAPS.get(harness)
+    return dict(UNDECLARED_POSTURE) if caps is None else caps
 
 
 def render_session_argv(
