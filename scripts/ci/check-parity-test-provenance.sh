@@ -58,6 +58,7 @@ refuse() { echo "FAIL: $*" >&2; fail=1; }
 # to come read this file to learn it.
 required_form() {
   {
+    echo "  see docs/architecture/dual-implementation-inventory.md"
     echo "  required header form, above the existing prose:"
     echo "    //! parity-stage: differential | characterization"
     echo "    //! parity-oracle: <repo-relative path> | <python.dotted.module>"
@@ -123,6 +124,7 @@ for file in "${files[@]}"; do
       refuse "$rel is characterization but its oracle is LIVE: $resolved"
       echo "  a characterization test stands in for a DELETED leg. This oracle" >&2
       echo "  still exists, so either the stage is wrong or the port is not done." >&2
+      echo "  See docs/architecture/dual-implementation-inventory.md." >&2
     else
       echo "ok   $rel  stage=characterization  oracle=$resolved (absent, as required)"
     fi
