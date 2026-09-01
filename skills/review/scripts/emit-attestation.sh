@@ -440,7 +440,7 @@ if [[ -n "$findings_file" ]]; then
     echo "emit-attestation: findings file not found: $findings_file; no event emitted" >&2
     exit 2
   fi
-  if ! classify_out="$("${FNO:-fno}" do review classify --findings-file "$findings_file" --emit-record)"; then
+  if ! classify_out="$("${FNO:-fno}" do review classify --findings-file "$findings_file" --emit-record --verdict "$verdict" --branch "$branch" --head "$head_sha")"; then
     echo "emit-attestation: classify refused the findings file $findings_file; no event emitted" >&2
     exit 2
   fi
