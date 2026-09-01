@@ -1902,7 +1902,10 @@ pub enum RowLiveness {
 ///    heartbeat rung cannot cover these rows - it needs `exited_at` to
 ///    advance past, and an unstamped codex row (no pid to confirm dead, no
 ///    reconcile to terminal) never gets one - so without this rung every
-///    codex row answered `Unknown` forever and could never be reaped.
+///    codex row answered `Unknown` forever and could never be reaped. The
+///    rung is silent on a row that carries an exit stamp: a rollout stays
+///    fresh-written past its worker's stop, so on a stamped row freshness
+///    would resurrect it - the stamp path owns that row instead.
 ///
 /// Silence on every rung is `Unknown`. The ladder NEVER returns `Dead`: only
 /// a positive death proof may, and absence never is one. A missing or
@@ -2137,7 +2140,15 @@ where
             return RowLiveness::Alive;
         }
     }
-    if entry.harness_name() == "codex" {
+    // A POSITIVE exit stamp outranks a fresh mtime: a rollout stays
+    // fresh-written for the whole window after its worker stops, and
+    // answering Alive from it would clear the stamp the stop verb wrote and
+    // resurrect a deliberately stopped row for the rest of the window. A
+    // stamped row keeps its stamp path (grace, then corroboration) - its
+    // freshness feeds that path as transcript_fresh, never this rung. The
+    // heartbeat rung makes the same trade: it answers only ADVANCEMENT past
+    // the stamp, never a quiet file.
+    if entry.harness_name() == "codex" && entry.exited_at.is_none() {
         if let Some(sid) = entry
             .harness_session_id
             .as_deref()

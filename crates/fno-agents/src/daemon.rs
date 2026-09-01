@@ -15649,6 +15649,30 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     }
 
     #[test]
+    fn a_stamped_codex_row_is_never_resurrected_by_a_fresh_rollout() {
+        // The stop verb writes a POSITIVE exit stamp; the rollout it leaves
+        // behind stays fresh-written for the whole window. Rung 4 must go
+        // silent on a stamped row, or the sweep would clear the stamp and
+        // resurrect a deliberately stopped row on freshness alone (the codex
+        // review finding). The heartbeat rung draws the same line - only
+        // ADVANCEMENT past the stamp answers, never a quiet file.
+        let home = tmp_home("ladder-codex-stamped");
+        let codex = tempfile::tempdir().unwrap();
+        write_rollout(codex.path(), "cdx-stopped");
+        let mut e = ladder_codex_row("codex-stopped", "cdx-stopped");
+        e.exited_at = Some("2026-09-01T10:30:00Z".into());
+        let answer = crate::client_verbs::row_liveness_with_codex_root(
+            &e,
+            &crate::claude_ask::ClaudeHome::at(home.root()),
+            codex.path(),
+            codex_truth_none,
+        );
+        assert_eq!(answer, RowLiveness::Unknown);
+        assert_ne!(answer, RowLiveness::Alive);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
     fn the_heartbeat_rung_is_the_codex_arm() {
         // The harness-agnostic rung: 14 of 26 rows are codex, and absence
         // from `fno agents top` is never a rung - but an advancing
