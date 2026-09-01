@@ -4389,3 +4389,78 @@ def test_apply_reap_refuses_when_the_receipt_cannot_be_staged(monkeypatch):
     outcome, detail = watchdog._apply_reap(v, cwd="/wt/x", runner=runner)
     assert outcome == "refused" and "no resumable identity" in detail
     assert ran == [], "nothing may run against a row the gate held"
+
+
+def test_reap_receipt_ignores_a_ledger_row_whose_sessions_is_a_string(
+    monkeypatch, tmp_path
+):
+    """`sid in "string"` is a substring test; only a real list of session ids
+    may match, or a malformed ledger row donates its node/pr to a receipt."""
+    import fno.agents.registry as registry_mod
+    import fno.paths as paths_mod
+
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(
+        json.dumps(
+            {"entries": [{"graph_node_id": "x-impostor", "sessions": "x-king-mux-sessions"}]}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(registry_mod, "load_registry", lambda path=None: [_receipt_row()])
+    monkeypatch.setattr(paths_mod, "agents_registry_path", lambda: tmp_path / "reg.json")
+    monkeypatch.setattr(paths_mod, "agents_home_dir", lambda: tmp_path)
+    monkeypatch.setattr(paths_mod, "ledger_json", lambda: ledger)
+
+    ok, detail = watchdog._persist_reap_receipt("king-mux")
+
+    assert ok, detail
+    receipt = json.loads(
+        (tmp_path / "reap-receipts" / detail.split("/")[-1]).read_text()
+    )
+    assert "ledger" not in receipt
+
+
+def test_apply_reap_restages_the_receipt_between_stop_and_rm(monkeypatch):
+    """rm removes the identity; the receipt written immediately before it must
+    describe the row as it is at rm time, not as it was at classification."""
+    monkeypatch.setattr(watchdog, "worktree_refusal", lambda cwd: None)
+    monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
+    order = []
+    monkeypatch.setattr(
+        watchdog,
+        "_persist_reap_receipt",
+        lambda rid: order.append("stage") or (True, "staged"),
+    )
+
+    def runner(argv, **kwargs):
+        order.append(argv[-2])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    v = Verdict("aaaa1111-0000", "w1", "working", REAP, "node x done", "stop+rm")
+    outcome, _ = watchdog._apply_reap(v, cwd="/wt/x", runner=runner)
+    assert outcome == "applied"
+    assert order == ["stage", "stop", "stage", "rm"]
+
+
+def test_apply_reap_holds_the_rm_when_the_restage_fails(monkeypatch):
+    """A receipt that cannot be re-staged after the stop is 'partial': the
+    row stays, and the detail says the session is already stopped."""
+    monkeypatch.setattr(watchdog, "worktree_refusal", lambda cwd: None)
+    monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
+    calls = {"n": 0}
+
+    def gate(rid):
+        calls["n"] += 1
+        return (calls["n"] == 1, "staged" if calls["n"] == 1 else "identity changed")
+
+    monkeypatch.setattr(watchdog, "_persist_reap_receipt", gate)
+    ran = []
+
+    def runner(argv, **kwargs):
+        ran.append(argv[-2])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    v = Verdict("aaaa1111-0000", "w1", "working", REAP, "node x done", "stop+rm")
+    outcome, detail = watchdog._apply_reap(v, cwd="/wt/x", runner=runner)
+    assert outcome == "partial" and "already stopped" in detail
+    assert ran == ["stop"], "a held rm must never run"

@@ -2801,7 +2801,9 @@ def _persist_reap_receipt(row_id: str) -> tuple[bool, str]:
             (
                 r
                 for r in load_ledger_rows(_paths.ledger_json())
-                if sid in (r.get("sessions") or [])
+                # Only a real list of session ids matches: a row carrying
+                # `sessions` as a string would turn `in` into a substring test.
+                if isinstance(r.get("sessions"), list) and sid in r["sessions"]
             ),
             None,
         )
@@ -2809,7 +2811,12 @@ def _persist_reap_receipt(row_id: str) -> tuple[bool, str]:
         match = None
     if match is not None:
         receipt["ledger"] = match
-    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in sid)
+    # Same alphabet as the Rust writer's receipt_filename_part: ascii alnum
+    # plus . _ -, everything else underscored, so both writers land on the
+    # same filename for the same session.
+    safe = "".join(
+        c if (c.isascii() and c.isalnum()) or c in "._-" else "_" for c in sid
+    )
     dir_path = _paths.agents_home_dir() / "reap-receipts"
     path = dir_path / f"{harness}-{safe}.json"
     try:
@@ -2998,6 +3005,18 @@ def _apply_reap(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
             else (stopped.stderr or "").strip()[:200]
         )
         return "refused", f"stop exit {stopped.returncode}: {why}"
+    # rm is the destructive step, so the receipt is re-staged here from the
+    # row AS IT IS NOW: a row recreated under the same name since the gate
+    # above read it must leave behind its own identity, not the old one's.
+    # Kept adjacent to the rm so the re-read can see almost no window.
+    restaged, restage_detail = _persist_reap_receipt(v.row_id)
+    if not restaged:
+        return (
+            "partial",
+            f"stopped, but the receipt re-stage held the rm "
+            f"({restage_detail}). The session is already stopped - remove "
+            f"the row by hand, never re-run this as a stop",
+        )
     removed = runner(
         [*_fno(), "agents", "rm", v.row_id],
         capture_output=True, text=True, timeout=60, check=False,

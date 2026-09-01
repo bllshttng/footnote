@@ -676,26 +676,29 @@ fn write_reap_receipt(home: &AgentsHome, receipt: &ReapReceipt) -> std::io::Resu
     Ok(())
 }
 
-/// The ledger row naming `session_id` in its `sessions`, read from the
-/// default global ledger. Best-effort by contract (x-b150 change 5): a
-/// missing or unreadable ledger answers None and the receipt stands on the
-/// row's own fields. (ponytail: `config.paths.*` overrides are not consulted
-/// here; the reader that owns overrides is the Python ledger reader, and the
-/// enrichment is a bonus, never the floor.)
-fn ledger_entry_for_session(session_id: &str, ledger_path: &std::path::Path) -> Option<Value> {
+/// The global ledger's rows, parsed ONCE per sweep. Best-effort by contract
+/// (x-b150 change 5): a missing or unreadable ledger answers None and every
+/// receipt stands on its row's own fields. (ponytail: `config.paths.*`
+/// overrides are not consulted here; the reader that owns overrides is the
+/// Python ledger reader, and the enrichment is a bonus, never the floor.)
+fn ledger_rows(ledger_path: &std::path::Path) -> Option<Vec<Value>> {
     let content = std::fs::read_to_string(ledger_path).ok()?;
     let data: Value = serde_json::from_str(&content).ok()?;
-    let rows = match data.get("entries").unwrap_or(&data) {
-        Value::Array(rows) => rows,
-        _ => return None,
-    };
-    rows.iter()
-        .find(|r| {
-            r.get("sessions")
-                .and_then(Value::as_array)
-                .is_some_and(|sessions| sessions.iter().any(|s| s.as_str() == Some(session_id)))
-        })
-        .cloned()
+    match data.get("entries").unwrap_or(&data) {
+        Value::Array(rows) => Some(rows.to_vec()),
+        _ => None,
+    }
+}
+
+/// The ledger row naming `session_id` in its `sessions`, if any. Only a real
+/// array of session ids matches; a row carrying `sessions` as anything else
+/// is never matched.
+fn ledger_entry_in<'a>(rows: &'a [Value], session_id: &str) -> Option<&'a Value> {
+    rows.iter().find(|r| {
+        r.get("sessions")
+            .and_then(Value::as_array)
+            .is_some_and(|sessions| sessions.iter().any(|s| s.as_str() == Some(session_id)))
+    })
 }
 
 /// Build the receipt from the row, or say exactly why it cannot be built.
@@ -740,18 +743,17 @@ fn build_reap_receipt(
 /// The receipt gate at the classification arms. Stages the receipt for a row
 /// the policy just classified reap-shaped; a row whose receipt cannot be
 /// staged is held and named in `kept_no_receipt`. Returns whether the row may
-/// proceed to `to_reap`.
+/// proceed to `to_reap`. `ledger_rows` is parsed ONCE per sweep, not per row.
 fn stage_reap_receipt(
     e: &state::RegistryEntry,
     id: &str,
+    ledger_rows: Option<&[Value]>,
     receipts: &mut std::collections::BTreeMap<String, ReapReceipt>,
     kept_no_receipt: &mut Vec<(String, String)>,
 ) -> bool {
-    let ledger = ledger_entry_for_session(
-        e.harness_session_id.as_deref().unwrap_or(""),
-        &default_ledger_path(),
-    );
-    match build_reap_receipt(e, ledger.as_ref()) {
+    let ledger = ledger_rows
+        .and_then(|rows| ledger_entry_in(rows, e.harness_session_id.as_deref().unwrap_or("")));
+    match build_reap_receipt(e, ledger) {
         Ok(receipt) => {
             receipts.insert(e.name.clone(), receipt);
             true
@@ -1781,6 +1783,9 @@ fn gc_sweep_impl_with_node_cascade(
     }
     let live_workers = home.scan_worker_sockets();
     let now = now_epoch_secs();
+    // One ledger parse per sweep: every receipt's enrichment reads these rows,
+    // and re-parsing the file per reaped row is wasted repeated I/O.
+    let ledger = ledger_rows(&default_ledger_path());
 
     // Keyed by row name -> the `created_at` we evaluated. Applied under the lock
     // ONLY when the row's current `created_at` still matches, so a same-name
@@ -2023,18 +2028,36 @@ fn gc_sweep_impl_with_node_cascade(
         }
         match crate::gc::gc_action(&row, now, grace_secs) {
             crate::gc::GcAction::Reap => {
-                if stage_reap_receipt(e, &id, &mut receipts, &mut summary.kept_no_receipt) {
+                if stage_reap_receipt(
+                    e,
+                    &id,
+                    ledger.as_deref(),
+                    &mut receipts,
+                    &mut summary.kept_no_receipt,
+                ) {
                     to_reap.insert(e.name.clone(), e.created_at.clone());
                 }
             }
             crate::gc::GcAction::ReapBackstop => {
-                if stage_reap_receipt(e, &id, &mut receipts, &mut summary.kept_no_receipt) {
+                if stage_reap_receipt(
+                    e,
+                    &id,
+                    ledger.as_deref(),
+                    &mut receipts,
+                    &mut summary.kept_no_receipt,
+                ) {
                     to_reap.insert(e.name.clone(), e.created_at.clone());
                     backstop_ids.insert(e.name.clone(), id.clone());
                 }
             }
             crate::gc::GcAction::ReapDormant => {
-                if stage_reap_receipt(e, &id, &mut receipts, &mut summary.kept_no_receipt) {
+                if stage_reap_receipt(
+                    e,
+                    &id,
+                    ledger.as_deref(),
+                    &mut receipts,
+                    &mut summary.kept_no_receipt,
+                ) {
                     to_reap.insert(e.name.clone(), e.created_at.clone());
                     dormant_ids.insert(e.name.clone(), id.clone());
                 }
@@ -11124,8 +11147,9 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
 
     /// The ledger entry wins the enrichment (change 5): when the session
     /// resolves there, the receipt carries node/pr/plan alongside the row's
-    /// own fields. The lookup itself answers None for a session the ledger
-    /// never recorded - the 12-of-26 population.
+    /// own fields. The lookup answers None for a session the ledger never
+    /// recorded (the 12-of-26 population), and a `sessions` field that is
+    /// not an array never matches.
     #[test]
     fn the_ledger_entry_enriches_the_receipt_when_one_exists() {
         let dir = tempfile::tempdir().unwrap();
@@ -11133,25 +11157,31 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         std::fs::write(
             &path,
             json!({
-                "entries": [{
-                    "graph_node_id": "x-abc1",
-                    "pr_number": 1325,
-                    "pr_url": "https://github.com/o/r/pull/1325",
-                    "plan_path": "/plans/x-abc1.md",
-                    "sessions": ["s-ledger"],
-                }]
+                "entries": [
+                    {
+                        "graph_node_id": "x-abc1",
+                        "pr_number": 1325,
+                        "pr_url": "https://github.com/o/r/pull/1325",
+                        "plan_path": "/plans/x-abc1.md",
+                        "sessions": ["s-ledger"],
+                    },
+                    {"sessions": "s-ledger-impostor"},
+                ]
             })
             .to_string(),
         )
         .unwrap();
 
-        let row = ledger_entry_for_session("s-ledger", &path).expect("the session resolves");
+        let rows = ledger_rows(&path).expect("ledger parses");
+        let row = ledger_entry_in(&rows, "s-ledger").expect("the session resolves");
         assert_eq!(row["graph_node_id"], "x-abc1");
-        assert!(ledger_entry_for_session("s-never-recorded", &path).is_none());
+        assert!(ledger_entry_in(&rows, "s-never-recorded").is_none());
+        // The impostor row carries `sessions` as a string: never matched.
+        assert_eq!(ledger_entry_in(&rows, "s-ledger-impostor"), None);
 
         let mut e = ask_row("shipped", None);
         e.harness_session_id = Some("s-ledger".into());
-        let receipt = build_reap_receipt(&e, Some(&row)).unwrap();
+        let receipt = build_reap_receipt(&e, Some(row)).unwrap();
         let led = receipt.ledger.expect("ledger enrichment present");
         assert_eq!(led["pr_number"], 1325);
     }
