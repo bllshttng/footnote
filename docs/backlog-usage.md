@@ -94,7 +94,7 @@ One voter votes once per node. Agent voters use their session identity. The oper
 
 `idea` and `add` accept optional `--evidence`. With it, the creator's encounter is recorded after the node is minted. Without it, the node has no `encounters` key. If identity cannot be proven or the best-effort encounter is refused, creation still succeeds. Stderr names the skipped vote. A new vote is never minted without evidence.
 
-The local `~/.fno/graph.html` board shows a vote pill for nodes with encounters. Click it to copy `fno backlog encounter <id> --operator --evidence "REPLACE: what it cost"`, then paste and replace the evidence. The page is a self-contained `file://` document and does not write `graph.json`. The `Demand` toggle filters to voted rows and sorts within each group by the same divergence score as the CLI read. Turning it off restores board order. Public projections do not carry vote data or the clipboard command.
+The local `~/.fno/graph.html` board shows a vote pill on EVERY row, reading `0` and muted where no encounter exists yet, so a first vote is one click rather than a trip to the CLI. Click it to copy `fno backlog encounter <id> --operator --evidence "REPLACE: what it cost"`, then paste and replace the evidence. The page is a self-contained `file://` document and does not write `graph.json`. The `Demand` toggle filters to voted rows and sorts within each group by the same divergence score as the CLI read. Turning it off restores board order. Public projections do not carry vote data or the clipboard command.
 
 `demand` is a READ. It never writes `rank`, never touches `_kanban_column`, and never reorders anything. The board stays the work order and demand is a column you rank FROM, by hand, with `fno backlog rank`.
 

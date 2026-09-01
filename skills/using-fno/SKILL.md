@@ -77,7 +77,7 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 
 **Fix what you find. Carve out only what is too big.** A problem you spot mid-task gets FIXED in this PR as its own commit, unrelated or not. SIZE is the only justification for filing instead: `fno backlog carveout add --kind deferred|oos-bug "<what + why>"`. Harvested at merge, cleared only by `fno backlog retro sweep-carveouts --apply`. Prefer a node. Applies in every pipeline.
 
-**Vote on what cost you, once per session.** `fno backlog encounter <id> --evidence "what it cost"` records one encounter with a node you hit while doing something else. Evidence is required and the cap is one per session. Read with `fno backlog demand`; never vote to seed a number.
+**Vote on what cost you, once per session.** `fno backlog encounter <id> --evidence "what it cost"` records one encounter with a node you hit while doing something else. Evidence is required, and one vote per node per session is the cap, so a session that hits three nodes files three. Read with `fno backlog demand`; never vote to seed a number.
 
 **Discovery:** `fno help` for the catalog, `fno help <verb>` for call shapes.
 

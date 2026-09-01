@@ -531,6 +531,7 @@ body[data-local="false"] .detail { padding-left:15px }
    one real vote look the same as none, which is the signal this pill exists
    to show. */
 .votes.z { color:var(--muted) }
+.votes.z:hover { background:var(--line) }
 .votes:hover { background:var(--accent-soft) }
 .haspl { color:var(--accent) }
 .haspr { color:var(--done) }

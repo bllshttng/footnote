@@ -1023,20 +1023,34 @@ def test_zero_encounter_row_still_renders_a_clickable_vote_pill(tmp_path: Path):
     assert row["en"] == 0
     assert row["eo"] == 0
 
+    # The row's emitted data is the fixture-dependent half: the zero fixture
+    # must actually carry the field the pill reads.
+    assert '"en":0' in local
+
     # The pill, its click listener, and the detail's Copy upvote button are
-    # three separately guarded surfaces. A guard that still reads the count
-    # leaves one of them dead on a zero-vote row.
-    assert "LOCAL && n.en ?" not in local
-    assert "if (LOCAL && n.en) { var votes" not in local
-    assert "if (LOCAL && n.en) h +=" not in local
-    assert 'class="votes' in local
-    assert "Copy upvote" in local
+    # three separately guarded surfaces; a guard that still reads the count
+    # leaves one of them dead on a zero-vote row. Each condition is PINNED to
+    # what it must be rather than checked for the absence of one spelling: an
+    # absence assertion passes on any respelling (`LOCAL && n.en > 0` reads the
+    # count again and trips no `not in` check), while an equality on the
+    # extracted condition fails on every count term there is.
+    for label, pattern in (
+        ("row pill", r"var votePill = (.*?) \? '<span"),
+        ("pill click listener", r"if \((.*?)\) \{ var votes = main\.querySelector"),
+        ("detail Copy upvote", r'if \((.*?)\) h \+= \'<div class="kv"><span><b>encounters</b>'),
+    ):
+        found = re.search(pattern, local)
+        assert found, f"{label}: guard not found, so nothing was checked"
+        assert found.group(1) == "LOCAL", f"{label} still reads the count: {found.group(1)}"
 
     # A zero is clickable but muted, so one real vote still reads as demand
-    # against 2389 rows that carry none.
+    # against the rows that carry none, hover included.
     assert ".votes.z { color:var(--muted) }" in local
+    assert ".votes.z:hover" in local
     assert "(n.en ? '' : ' z')" in local
 
     # The demand filter is the one place the count must still be read: that
     # view exists to show only nodes carrying a vote.
-    assert "state.demand && !n.en" in local
+    demand = re.search(r"if \((state\.demand [^)]*?)\) return false;", local)
+    assert demand, "demand predicate not found, so nothing was checked"
+    assert demand.group(1) == "state.demand && !n.en"
