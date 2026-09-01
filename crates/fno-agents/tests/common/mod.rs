@@ -32,13 +32,16 @@ pub fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
 pub const DAEMON_BIN: &str = env!("CARGO_BIN_EXE_fno-agents-daemon");
 
 /// Short home root (Unix-socket `sun_path` is ~104 bytes), pid+counter keyed
-/// so parallel tests never share a tree.
+/// so parallel tests never share a tree. The `fnoec` prefix is disjoint from
+/// daemon_e2e's `fnoe` homes: this module's counter is independent of that
+/// file's, and same-binary same-path collisions (a schema-24 seed landing in
+/// another test's home) are exactly what the prefix prevents.
 pub fn short_home() -> fno_agents::paths::AgentsHome {
     use std::sync::atomic::{AtomicU32, Ordering};
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     fno_agents::paths::AgentsHome::at(std::path::PathBuf::from(format!(
-        "/tmp/fnoe{}_{}",
+        "/tmp/fnoec{}_{}",
         std::process::id(),
         n
     )))
