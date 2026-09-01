@@ -1240,6 +1240,15 @@ fn dispatch_create(
         provider: Some("openai".to_string()),
         model: None,
         model_basis: None,
+        // v23 (x-2019): the request beside the effect. The codex lane resolves
+        // no vendor flag, so the provider request stays None; model and
+        // reasoning effort ride through verbatim even though the observed
+        // `model` axis stays unset until a verified read stamps it.
+        requested_model: model.filter(|m| !m.is_empty()).map(str::to_string),
+        requested_provider: None,
+        requested_effort: reasoning_effort
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
         effort: reasoning_effort.map(str::to_string),
         harness: Some("codex".to_string()),
         harness_session_id: Some(session_id.clone()),

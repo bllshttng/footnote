@@ -4143,7 +4143,14 @@ def dispatch_spawn_pane(
                 if session_uuid is not None
                 else None
             )
-            if actual_model is not None and requested_model != actual_model:
+            # Same verdict the row projection uses, not a bare != : a bare
+            # vs [1m]-suffixed spelling of one family is a match, so this
+            # lane cannot cry wolf on a route's own suffix spelling.
+            from fno.agents.row_contradiction import model_substitution as _sub_verdict
+
+            if actual_model is not None and _sub_verdict(
+                requested_model, {"kind": "observed", "model": actual_model}
+            ) == "substituted":
                 from fno.agents import events as _events
 
                 _events.emit(
@@ -4522,6 +4529,13 @@ def dispatch_spawn_pane(
                     model=actual_model or route_model,
                     model_basis="requested" if (actual_model or route_model) else None,
                     effort=effort,
+                    # v23 (x-2019): the REQUEST verbatim beside the effect.
+                    # Note the deliberate asymmetry with `model` above: the
+                    # observed half may land on actual_model, the request
+                    # never does - it is what the flags spelled.
+                    requested_model=model or route_model,
+                    requested_provider=resolved_lane_provider,
+                    requested_effort=effort,
                     cwd=str(cwd),
                     # Written in the SAME registry transaction as the status, so
                     # a concurrent reconcile cannot land one without the other

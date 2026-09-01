@@ -3615,6 +3615,12 @@ fn create(
             .filter(|m| !m.is_empty())
             .map(|_| "requested".to_string()),
         effort: None,
+        // v23 (x-2019): the request beside the effect. This lane never
+        // resolves a vendor (the binary refuses --provider), so the provider
+        // request stays None; model and effort ride through verbatim.
+        requested_model: model.filter(|m| !m.is_empty()).map(str::to_string),
+        requested_provider: None,
+        requested_effort: effort.filter(|v| !v.is_empty()).map(str::to_string),
         // Canonical identity at birth (x-ec59); harness_session_id mirrors the
         // resolved uuid. A bounded miss stays a named spawning row below.
         harness: Some("claude".to_string()),

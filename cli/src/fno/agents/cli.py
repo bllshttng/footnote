@@ -2449,7 +2449,12 @@ def cmd_spawn(
                 receipt_obj["provider"] = route_provider
             receipt_model = model or route_model
             if receipt_model is not None:
+                # v23 (x-2019): the label is the point. At receipt time this
+                # token is the REQUEST - the pane's first turn has not landed,
+                # so no observation exists yet to print instead. An unlabeled
+                # token here is how the request passed for the effect.
                 receipt_obj["model"] = receipt_model
+                receipt_obj["model_basis"] = "requested"
             if pane_result.session_uuid is not None:
                 receipt_obj["session_id"] = pane_result.session_uuid
             effective_message = getattr(pane_result, "effective_message", None)
@@ -2705,7 +2710,25 @@ def cmd_spawn(
             f", \"provider\": {json.dumps(route_provider)}" if route_provider else ""
         )
         receipt_model = model or route_model
-        model_field = f", \"model\": {json.dumps(receipt_model)}" if receipt_model else ""
+        # v23 (x-2019): a receipt that prints `model` labels it - the request
+        # is not the effect, and an unlabeled token reads as an observation.
+        # When the spawn-time check caught a substitution, the receipt carries
+        # the marker naming both values (the stderr line and the row already
+        # carry them; this is the machine-readable copy).
+        substitution = getattr(result, "model_substituted", None)
+        if receipt_model and substitution:
+            model_field = (
+                f", \"model\": {json.dumps(substitution['observed'])}"
+                ', "model_basis": "verified"'
+                f", \"model_substituted\": {json.dumps(substitution)}"
+            )
+        elif receipt_model:
+            model_field = (
+                f", \"model\": {json.dumps(receipt_model)}"
+                ', "model_basis": "requested"'
+            )
+        else:
+            model_field = ""
         receipt = (
             f'{{"name": "{safe_name}", "short_id": "{result.short_id}", '
             f'"harness": "{result.provider}"{provider_field}{model_field}, "status": "live"'

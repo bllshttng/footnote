@@ -2249,6 +2249,7 @@ mod tests {
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            ..Default::default()
         }
     }
 

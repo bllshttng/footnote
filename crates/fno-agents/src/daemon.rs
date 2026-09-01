@@ -4241,6 +4241,24 @@ fn claude_stream_worker_args(
 /// settling it `exited` like a one-shot) + the FULL `claude_session_uuid` (the
 /// resume key, finally populated here -- the field G1 added is set by the front
 /// door). Pure so the row shape is asserted without a live spawn.
+/// The agent-list row's substitution marker (x-2019): the object naming BOTH
+/// values on a substituted verdict, null on match-or-unknown. Null is the
+/// unknown shape too - a row whose probe has not answered must never read as
+/// clean. Mirrors `format._model_substitution_marker` in the Python emitter.
+fn model_substitution_marker(
+    requested: Option<&str>,
+    observed: &serde_json::Value,
+) -> serde_json::Value {
+    if crate::state::model_substitution(requested, Some(observed)) == "substituted" {
+        json!({
+            "requested": requested,
+            "observed": observed.get("model"),
+        })
+    } else {
+        serde_json::Value::Null
+    }
+}
+
 fn build_claude_stream_entry(
     name: &str,
     short_id: &str,
@@ -4275,6 +4293,11 @@ fn build_claude_stream_entry(
         model: None,
         model_basis: None,
         effort: None,
+        // v23 (x-2019): adoption - the daemon observed no spawn request, so
+        // the requested axis stays unknown rather than a guess.
+        requested_model: None,
+        requested_provider: None,
+        requested_effort: None,
         harness: Some("claude".into()),
         harness_session_id: Some(uuid.into()),
         predecessor_session_ids: Vec::new(),
@@ -4725,6 +4748,10 @@ fn build_codex_thread_entry(
         // the field no longer reads unpopulated on this mint.
         model_basis: model.map(|_| "requested".to_string()),
         effort: effort.map(str::to_string),
+        // v23 (x-2019): the request beside the effect; verbatim as typed.
+        requested_model: model.filter(|m| !m.is_empty()).map(str::to_string),
+        requested_provider: None,
+        requested_effort: effort.filter(|v| !v.is_empty()).map(str::to_string),
         harness: Some("codex".into()),
         harness_session_id: Some(session_id.clone()),
         predecessor_session_ids: Vec::new(),
@@ -7001,6 +7028,16 @@ where
                     // never grows a second transcript reader that could disagree
                     // with the truth verb about the same session.
                     "observed_model": observed_model,
+                    // v23 (x-2019): the stored REQUEST beside the observation,
+                    // plus the substitution marker derived from the payload
+                    // above - the same two keys, computed the same way, as
+                    // Python's serialize_entry. Null marker is match-or-
+                    // unknown; it never reads as a clean bill on its own.
+                    "requested_model": e.requested_model,
+                    "model_substituted": model_substitution_marker(
+                        e.requested_model.as_deref(),
+                        &observed_model,
+                    ),
                     // Architecture C (plan ab-70faa65b): additive keys, never removing
                     // live_status (Locked #4 back-compat). `pid` is the worker pid for
                     // a PTY agent, null for a one-shot ask (no managed process). The
@@ -10522,6 +10559,7 @@ mod tests {
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            ..Default::default()
         }
     }
 
@@ -13697,6 +13735,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 fno_id: None,
                 delivery_policy: None,
                 sandbox_posture: None,
+                ..Default::default()
             });
         })
         .unwrap();
@@ -13787,6 +13826,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 fno_id: None,
                 delivery_policy: None,
                 sandbox_posture: None,
+                ..Default::default()
             });
         })
         .unwrap();
@@ -13946,6 +13986,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 fno_id: None,
                 delivery_policy: None,
                 sandbox_posture: None,
+                ..Default::default()
             });
         })
         .unwrap();
@@ -14421,6 +14462,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 fno_id: None,
                 delivery_policy: None,
                 sandbox_posture: None,
+                ..Default::default()
             });
         })
         .unwrap();
@@ -14651,6 +14693,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            ..Default::default()
         });
         assert_eq!(derive_short_id("worker-A", &reg), "workerA1");
     }
@@ -14709,6 +14752,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            ..Default::default()
         }
     }
 
@@ -16198,6 +16242,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            ..Default::default()
         }
     }
 
@@ -17922,6 +17967,7 @@ done
                 fno_id: None,
                 delivery_policy: None,
                 sandbox_posture: None,
+                ..Default::default()
             });
         })
         .unwrap();
@@ -17988,6 +18034,7 @@ done
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            ..Default::default()
         }
     }
 
@@ -18069,6 +18116,39 @@ done
             result["fields_omitted"], contract["projection_omissions"],
             "list envelope omissions drifted from contract"
         );
+
+        // v23 (x-2019), by VALUE and not merely by presence: a substituted
+        // row names both values; an unknown request renders null, never a
+        // fabricated match. The seeded row carries no request and the probe
+        // answers no model, so both keys ride null on the baseline read.
+        assert_eq!(row["requested_model"], Value::Null);
+        assert_eq!(row["model_substituted"], Value::Null);
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries[0].requested_model = Some("glm-5.3[1m]".into());
+        })
+        .unwrap();
+        let mut contradicting = probe("working").unwrap();
+        contradicting.observed_model = json!({"kind": "observed", "model": "glm-5.3-flash"});
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|_handle| Some(contradicting.clone())),
+        );
+        let row = &response.result().unwrap()["agents"][0];
+        assert_eq!(row["requested_model"], "glm-5.3[1m]");
+        assert_eq!(
+            row["model_substituted"],
+            json!({"requested": "glm-5.3[1m]", "observed": "glm-5.3-flash"})
+        );
+        // Suffix-only difference is a MATCH: the marker stays null. The
+        // operator's specimen table calls glm-5.3[1m] vs glm-5.3 ok.
+        let mut agreeing = probe("working").unwrap();
+        agreeing.observed_model = json!({"kind": "observed", "model": "glm-5.3"});
+        let response =
+            handle_list_with_truth(&ctx, &req, per_handle(|_handle| Some(agreeing.clone())));
+        let row = &response.result().unwrap()["agents"][0];
+        assert_eq!(row["requested_model"], "glm-5.3[1m]");
+        assert_eq!(row["model_substituted"], Value::Null);
 
         // Presence in the key set is not the bug being guarded: a key that is
         // always null is the same lie in a different shape. Assert the values

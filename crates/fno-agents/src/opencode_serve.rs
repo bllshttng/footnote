@@ -808,6 +808,10 @@ fn dispatch_opencode_serve_inner(
             .filter(|m| !m.is_empty())
             .map(|_| "requested".to_string()),
         effort: effort.map(str::to_string),
+        // v23 (x-2019): the request beside the effect; verbatim as typed.
+        requested_model: model.filter(|m| !m.is_empty()).map(str::to_string),
+        requested_provider: None,
+        requested_effort: effort.filter(|v| !v.is_empty()).map(str::to_string),
         harness: Some("opencode".to_string()),
         harness_session_id: Some(session_id.clone()),
         predecessor_session_ids: Vec::new(),

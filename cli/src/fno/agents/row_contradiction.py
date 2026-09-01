@@ -186,3 +186,53 @@ def _spawning_outlived_by_a_live_pid(
     if now_dt is None:
         return False
     return (now_dt - created_at) > timedelta(seconds=SPAWN_TIMEOUT_S)
+
+
+def _model_family(token: str) -> str:
+    """The model token with one trailing bracketed suffix removed, lowercased.
+
+    A request spelled `glm-5.3[1m]` served by a session answering as
+    `glm-5.3` is the SAME model to the operator's eye - the suffix names the
+    context window the caller asked for, not a different model - so the
+    comparison strips exactly one trailing bracket group from each side
+    first. Line-for-line the Rust twin (`state.rs` `model_family`); a
+    divergence here would make the two languages disagree on whether a row
+    is substituted, so any change lands on both sides together.
+    """
+    trimmed = token.strip()
+    idx = trimmed.rfind("[")
+    if idx > 0 and trimmed.endswith("]"):
+        return trimmed[:idx].lower()
+    return trimmed.lower()
+
+
+def model_substitution(
+    requested: Any,
+    observed: Any,
+) -> str:
+    """Compare a row's REQUESTED model with its OBSERVED model (x-2019).
+
+    Returns one of three words. ``substituted`` - the observed family differs
+    from the requested family, the silent replacement x-2019 exists to name.
+    ``match`` - same family after suffix normalization. ``unknown`` - either
+    side is absent/unreadable: an unanswered probe is not a verdict, and
+    neither is a row whose mint never saw a request.
+
+    ``observed`` is the transcript probe's payload (``{"kind": "observed",
+    "model": ...}``) or a bare model string; anything else (``None``, the
+    ``no-transcript`` sentinel, an empty dict) reads as unknown, never as a
+    match.
+    """
+    if isinstance(observed, Mapping):
+        if observed.get("kind") != "observed":
+            return "unknown"
+        observed_token = observed.get("model")
+    else:
+        observed_token = observed
+    if not isinstance(requested, str) or not requested.strip():
+        return "unknown"
+    if not isinstance(observed_token, str) or not observed_token.strip():
+        return "unknown"
+    if _model_family(requested) == _model_family(observed_token):
+        return "match"
+    return "substituted"

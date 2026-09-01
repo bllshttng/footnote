@@ -1079,6 +1079,11 @@ fn dispatch_create(
         model: None,
         model_basis: None,
         effort: None,
+        // v23 (x-2019): the request beside the effect; the observed axes stay
+        // unset, the request rides through verbatim.
+        requested_model: model.filter(|m| !m.is_empty()).map(str::to_string),
+        requested_provider: None,
+        requested_effort: None,
         harness: Some("gemini".to_string()),
         harness_session_id: Some(session_id.clone()),
         predecessor_session_ids: Vec::new(),

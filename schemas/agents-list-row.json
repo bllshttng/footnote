@@ -38,9 +38,14 @@
     "origin",
     "delivery_policy",
     "liveness_origin",
-    "liveness_origin_basis"
+    "liveness_origin_basis",
+    "requested_model",
+    "model_substituted"
   ],
-  "projection_omissions": ["model", "model_basis"],
+  "projection_omissions": [
+    "model",
+    "model_basis"
+  ],
   "stored": {
     "thread_id": "The row's stable `fno_id` (v13): one worker keeps it across session-id succession. It is the THREAD key, never the current harness address - a renderer that presented it as the current session would resurrect a retired id, which is why it is emitted beside `current_session_id` rather than instead of it.",
     "current_session_id": "The row's `harness_session_id`: the address delivery (mail, inject, pane send) follows NOW. Emitted as its own positive key so the succession contract is assertable - after A->B succession this is B and never A, the `fno_id`, or a predecessor.",
@@ -62,7 +67,9 @@
     "last_message": "The flattened text of the transcript's LAST turn (assistant or user - the same turn `classify_tail` reads), with claude/codex content blocks compacted (`[tool_use: name]` markers inline), whitespace collapsed, capped at 200 chars. Comes from the same truth probe as `last_event_at`. Distinct from `last_message_at`, which is registry metadata and is null on many rows while the worker is mid-sentence; a table column named LAST MESSAGE that renders a timestamp or a dash was the bug this key retires. Null when the probe never answered - never a fabricated message and never a health claim.",
     "observed_model": "What the worker is ACTUALLY answering as, read from its own transcript by fno.agents.session_truth.observed_model - never from anything the spawn recorded, which reports the INTENDED model in exactly the case an operator suspects a silent fallback. A discriminated object: {kind: observed, model, samples} | {kind: no-transcript} | {kind: not-file-backed} | {kind: no-model-yet} | {kind: unreadable, reason}. The five never collapse into one unknown: no-model-yet is a worker that came up and never processed a turn, not-file-backed is a harness that keeps no per-session file at all, and neither is the same thing as a worker whose transcript has not appeared yet. Both serializers derive it from the same Python resolver (the Rust daemon shells out to `fno agents truth --json`, one probe per row, the one it already ran for `status`), so the two cannot report different models for the same worker.",
     "liveness_origin": "Whether the pid on this row started with the session (`survivor`) or after it (`resumed`), from a 600 second band between `created_at` and `pid_start_time`. `liveness_origin_basis` is the evidence, and the two travel together the same way `reachability`/`basis` do: a bare null cannot separate `no pid on this row` from `a start token this parser cannot read`, and callers acted on that null as though it meant the first. Null verdict always carries a basis (pid-absent | created-at-absent | created-at-unreadable | pid-start-absent | pid-start-unreadable); a non-null verdict carries a null basis, because the value is its own evidence. Both producers derive it from one rule asserted by the shared corpus at schemas/agents-row-contradiction.json. That corpus binds the RULE, not its callers: every case supplies `pid` by hand, so a serializer that omits it reads pid-absent forever while the corpus stays green. Assert the field on the serializer too.",
-    "liveness_origin_basis": "See `liveness_origin` above; the two travel together."
+    "liveness_origin_basis": "See `liveness_origin` above; the two travel together.",
+    "requested_model": "The spawn REQUEST verbatim as typed (any [1m] suffix included), stored on the row at birth beside the observed axes. Null when the mint never saw a request - absence means unknown, never a default. Unlike `observed_model` this never changes after birth. (x-2019)",
+    "model_substituted": "Computed at emission by model_substitution(requested_model, observed_model): the object {requested, observed} when the families disagree, null on match or unknown. An unanswered probe is never a match, so a row whose check has not answered yet reads null, not clean. (x-2019)"
   },
   "rust_only": {
     "$comment": "Keys the Rust daemon projection emits on top of `required`. A harmless superset: the Python list surface has no equivalent source field.",

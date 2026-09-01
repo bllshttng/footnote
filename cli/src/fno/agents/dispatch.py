@@ -254,6 +254,9 @@ class DispatchAskResult:
     short_id: str
     reply: Optional[str] = None
     duration_ms: Optional[int] = None
+    # v23 (x-2019): the create path's substitution verdict, passed through to
+    # the caller's receipt. None means unknown-or-match.
+    model_substituted: Optional[dict] = None
 
     def __post_init__(self) -> None:
         if self.kind not in ("create", "followup"):
@@ -2149,6 +2152,44 @@ def _claude_create_path(
         resume_session_id if revive else claude_mod.resolve_session_uuid_at_spawn(short_id)
     )
 
+    # v23 (x-2019): reconcile the REQUEST with the session's observed model,
+    # so a silent substitution is named here instead of living in the
+    # operator's memory. One best-effort transcript read; a session with no
+    # model sample yet (a fresh spawn whose first turn has not landed) probes
+    # as `no-model-yet` and the verdict is `unknown` - an unanswered probe is
+    # not a verdict, so the spawn says nothing and the list-row marker picks
+    # the comparison up once a sample exists. A REVIVE reads history, so its
+    # answer is deterministic at this line.
+    requested_token = model or route_model
+    substitution: Optional[dict] = None
+    verified_model: Optional[str] = None
+    if requested_token and session_uuid:
+        from fno.agents.row_contradiction import model_substitution
+        from fno.provenance.observed import observed_model_for_session
+
+        probe = observed_model_for_session("claude", session_uuid, str(cwd))
+        if model_substitution(requested_token, probe) == "substituted":
+            observed_token = str(probe.get("model"))
+            print(
+                f"spawn: model substituted for {name}: requested "
+                f"{requested_token!r}, session {short_id} runs "
+                f"{observed_token!r}; the request was not honored",
+                file=sys.stderr,
+            )
+            events.emit(
+                "model_substituted",
+                harness="claude",
+                name=name,
+                provider=chosen,
+                session_id=session_uuid,
+                requested_model=requested_token,
+                actual_model=observed_token,
+            )
+            substitution = {"requested": requested_token, "observed": observed_token}
+            # The observed side lands on the observed axes with its basis; the
+            # requested_* stamps above keep the verbatim request.
+            verified_model = observed_token
+
     # A revival continues one conversation under a NEW handle, which is the
     # invariant directly above -- but it was never printed, so an operator
     # watching the old handle heard nothing while the new one did the work.
@@ -2198,9 +2239,22 @@ def _claude_create_path(
         # The route's model is in hand at this mint and was dropped (the
         # receipt named it while the row read None). Explicit --model wins the
         # argv, so it wins the row; the route's token records otherwise.
-        model=model or route_model,
-        model_basis="requested" if (model or route_model) else None,
+        # v23 (x-2019): a verified substitution beats the request on the
+        # observed axes - the row then carries BOTH readings, which is the
+        # whole point. No verified reading: the request stays (labeled).
+        model=verified_model or model or route_model,
+        model_basis=(
+            "verified"
+            if verified_model
+            else ("requested" if (model or route_model) else None)
+        ),
         effort=effort,
+        # v23 (x-2019): the REQUEST verbatim beside the effect, including any
+        # [1m] suffix. `model` flips to a verified observation later; these
+        # three never do, so a silent substitution stays diffable.
+        requested_model=model or route_model,
+        requested_provider=route_provider or lane_provider,
+        requested_effort=effort,
         harness_session_id=session_uuid,
         spawned_by_session=spawned_by_session,
         spawned_by_harness=spawned_by_harness,
@@ -2458,6 +2512,7 @@ def _claude_create_path(
         kind="create",
         short_id=short_id,
         duration_ms=result.duration_ms,
+        model_substituted=substitution,
     )
 
 
@@ -2723,6 +2778,12 @@ class SpawnResult:
     short_id: str
     reply: Optional[str] = None
     effective_message: Optional[str] = None
+    # v23 (x-2019): the requested-vs-observed verdict, carried to the receipt.
+    # ``{"requested": ..., "observed": ...}`` when the spawn-time check found
+    # the session running something else; None means unknown-or-match, never a
+    # fabricated negative (a fresh spawn whose transcript has no sample yet
+    # says nothing).
+    model_substituted: Optional[dict] = None
 
     def __post_init__(self) -> None:
         # Convert the prose contract into a runtime trip-wire (sigma-review
@@ -3635,6 +3696,9 @@ def dispatch_spawn(
                         provider="claude",
                         short_id=created.short_id,
                         effective_message=effective_message,
+                        # getattr: `created` is any ask-path result, including
+                        # duck-typed stubs minted before the field existed.
+                        model_substituted=getattr(created, "model_substituted", None),
                     )
 
                 # 4b2. opencode bg: delegate to the Rust serve lane. This arm

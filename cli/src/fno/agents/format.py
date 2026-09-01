@@ -28,7 +28,11 @@ from fno.agents.session_truth import STALE_ATTENTION_S
 # spawn-stamped model vendor (see the `stored` note in
 # schemas/agents-list-row.json).
 # v4 (x-3587): adds the stored reasoning-effort axis.
-JSON_SCHEMA_VERSION = 4
+# v5 (x-2019): adds `requested_model` (the stored spawn request, verbatim) and
+# `model_substituted` (the emission-time marker naming both values when the
+# request and the observation disagree family-wise). Both always present; null
+# means unknown, never a clean bill.
+JSON_SCHEMA_VERSION = 5
 
 # Basis values that are falsifiers rather than evidence: a positive
 # measurement that the worker is gone, which no other reading outranks.
@@ -125,6 +129,26 @@ def _dnd_label(entry: AgentEntry) -> Optional[str]:
         # flowing to a session whose flag says it is held. An instrument that
         # declines to answer must not answer anyway.
         return "?"
+
+
+def _model_substitution_marker(
+    requested: Optional[str], observed_model: Optional[dict]
+) -> Optional[dict]:
+    """The row's substitution marker, or None on match-or-unknown (x-2019).
+
+    One shared verdict (`row_contradiction.model_substitution`) decides; this
+    wrapper only shapes the positive marker the contract wants: BOTH values,
+    or nothing. None is deliberately the unknown shape too - a row whose
+    check has not answered must not read as clean.
+    """
+    from fno.agents.row_contradiction import model_substitution
+
+    if model_substitution(requested, observed_model) == "substituted":
+        return {
+            "requested": requested,
+            "observed": observed_model.get("model") if observed_model else None,
+        }
+    return None
 
 
 def serialize_entry(
@@ -230,6 +254,18 @@ def serialize_entry(
         # spawn-recorded route would report the INTENDED model in exactly the
         # case an operator suspects a silent fallback; this cannot.
         "observed_model": observed_model or {"kind": "no-transcript"},
+        # v23 (x-2019): the REQUEST verbatim beside the observation, so a
+        # silent substitution is a one-line diff a reader makes from the list
+        # alone. `requested_model` is write-once at birth; `model_substituted`
+        # is derived HERE from the same observed payload this row already
+        # carries, so a substitution that surfaces minutes after spawn is
+        # visible on the next list read with no new probe. Unknown (either
+        # side absent/unreadable) renders null - never a fabricated "match",
+        # which is how silence passes for health.
+        "requested_model": getattr(entry, "requested_model", None),
+        "model_substituted": _model_substitution_marker(
+            getattr(entry, "requested_model", None), observed_model
+        ),
         # x-481e: a field fno already modelled, consumed internally, and never
         # showed. `delivery_policy` (registry.py, schema v14) decides whether
         # mail to this row may ever paste into its prompt line - readable by

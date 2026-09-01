@@ -393,7 +393,7 @@ const KNOWN_STATUSES: &[&str] = &[
 /// field. v10 (x-880e) removes the on-disk `provider` + per-provider session-id
 /// trio; a legacy v1..=v9 row still carries `provider`, read leniently below.
 const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
 ];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
@@ -1586,6 +1586,12 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         model: None,
         model_basis: None,
         effort: None,
+        // v23 (x-2019): synthesized from an identity that arrived without a
+        // row - no spawn request was observed, so the requested axis stays
+        // unknown.
+        requested_model: None,
+        requested_provider: None,
+        requested_effort: None,
         harness: Some(harness),
         harness_session_id: Some(session.clone()),
         predecessor_session_ids: Vec::new(),

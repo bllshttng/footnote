@@ -148,7 +148,16 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // rationale as v22: the stamp is written once and read much later, so an
 // erasure on read-modify-write is unrecoverable rather than self-healing.
 // Accepted set widens to 1..=23.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 23;
+//
+// v24 (x-2019) adds the requested axis - `requested_model` /
+// `requested_provider` / `requested_effort`, the spawn REQUEST verbatim as
+// typed beside the observed axes, so a silent substitution is a one-line diff.
+// Same writer-protection rationale as v22/v23: a pre-v24 writer accepts the
+// unknown keys and erases them on its next read-modify-write. Measured live
+// 2026-09-01: a writer without the fields erased the stamps at an EQUAL
+// version number, so this takes the next free number instead of reusing 23.
+// Accepted set widens to 1..=24.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 24;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -450,7 +459,7 @@ pub struct MuxRef {
 /// `spawn_trigger` sat outside the struct that way until x-944f and read
 /// 0-of-37 populated on the live fleet as a result. Adding a Python-only field
 /// means mirroring it here in the same commit.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RegistryEntry {
     pub name: String,
     /// Daemon-set PTY field. Python's `AgentEntry` now mirrors it as
@@ -564,6 +573,18 @@ pub struct RegistryEntry {
     /// re-serializes must keep the stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
+    /// v23 (x-2019): the spawn REQUEST, verbatim as the flags spelled it (any
+    /// `[1m]` suffix included), stamped once at birth beside the observed
+    /// axes. `model`/`model_basis` flip to a verified observation; these never
+    /// do, so requested-vs-observed stays a one-line diff. Absence means
+    /// unknown, the `node`/`origin` discipline - never a default. Mirrors
+    /// Python's `AgentEntry.requested_*`; same X3 passthrough duty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_effort: Option<String>,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` (ab-b946b59c):
     /// skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2032,6 +2053,7 @@ mod tests {
             origin: None,
             spawn_trigger: None,
             legacy_claude_short_id: None,
+            ..Default::default()
         }
     }
 
@@ -4047,5 +4069,114 @@ mod tests {
         assert_eq!(reg.entries.len(), 1, "the representable row still decodes");
         assert_eq!(raw, 2, "the raw count says what was dropped");
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v23 (x-2019): the substitution verdict. The Rust twin of
+// fno.agents.row_contradiction.model_substitution - one comparison, two
+// languages, so the daemon's list rows and Python's emitters cannot disagree
+// about which row substituted.
+// ---------------------------------------------------------------------------
+
+/// The bracketed capacity suffix a model token may carry: a request spelled
+/// `glm-5.3[1m]` served by a session answering as `glm-5.3` is the SAME model
+/// to the operator's eye - the suffix names the context window requested, not
+/// a different model - so the comparison strips exactly one trailing suffix
+/// from each side before comparing.
+fn model_family(token: &str) -> String {
+    let trimmed = token.trim();
+    match trimmed.rfind('[') {
+        Some(idx) if trimmed.ends_with(']') && idx > 0 => trimmed[..idx].to_lowercase(),
+        _ => trimmed.to_lowercase(),
+    }
+}
+
+/// The three-word comparison: `substituted` names the silent replacement,
+/// `match` is same-family after suffix normalization, `unknown` covers every
+/// missing or unreadable side - an unanswered probe is not a verdict, and
+/// neither is a row whose mint never saw a request.
+pub fn model_substitution(
+    requested: Option<&str>,
+    observed: Option<&serde_json::Value>,
+) -> &'static str {
+    let observed_token = match observed {
+        Some(v) if v.get("kind").and_then(serde_json::Value::as_str) == Some("observed") => {
+            v.get("model").and_then(serde_json::Value::as_str)
+        }
+        Some(v) if v.is_string() => v.as_str(),
+        _ => None,
+    };
+    let (Some(req), Some(obs)) = (requested, observed_token) else {
+        return "unknown";
+    };
+    if req.trim().is_empty() || obs.trim().is_empty() {
+        return "unknown";
+    }
+    if model_family(req) == model_family(obs) {
+        "match"
+    } else {
+        "substituted"
+    }
+}
+
+#[cfg(test)]
+mod substitution_tests {
+    use super::*;
+
+    #[test]
+    fn specimen_table_matches_the_node() {
+        let obs = |m: &str| serde_json::json!({"kind": "observed", "model": m});
+        // The operator's specimen trio, verbatim.
+        assert_eq!(
+            model_substitution(Some("glm-5.3[1m]"), Some(&obs("glm-5.3"))),
+            "match"
+        );
+        assert_eq!(
+            model_substitution(Some("glm-5.3-flash[1m]"), Some(&obs("glm-5.3-flash"))),
+            "match"
+        );
+        assert_eq!(
+            model_substitution(Some("glm-5.3[1m]"), Some(&obs("glm-5.3-flash"))),
+            "substituted"
+        );
+        // Family change reads the same in either direction.
+        assert_eq!(
+            model_substitution(Some("glm-5.3-flash"), Some(&obs("glm-5.3"))),
+            "substituted"
+        );
+        // Missing / unreadable sides are UNKNOWN, never a match.
+        assert_eq!(model_substitution(None, Some(&obs("glm-5.3"))), "unknown");
+        assert_eq!(
+            model_substitution(
+                Some("glm-5.3[1m]"),
+                Some(&serde_json::json!({"kind": "no-transcript"}))
+            ),
+            "unknown"
+        );
+        assert_eq!(model_substitution(Some("glm-5.3[1m]"), None), "unknown");
+        assert_eq!(
+            model_substitution(Some(""), Some(&obs("glm-5.3"))),
+            "unknown"
+        );
+        assert_eq!(
+            model_substitution(
+                Some("glm-5.3[1m]"),
+                Some(&serde_json::json!({"kind": "observed", "model": null}))
+            ),
+            "unknown"
+        );
+        // A bare observed string (the direct-call shape) still compares.
+        assert_eq!(
+            model_substitution(Some("glm-5.3[1m]"), Some(&serde_json::json!("glm-5.3"))),
+            "match"
+        );
+        assert_eq!(
+            model_substitution(
+                Some("glm-5.3[1m]"),
+                Some(&serde_json::json!("glm-5.3-flash"))
+            ),
+            "substituted"
+        );
     }
 }

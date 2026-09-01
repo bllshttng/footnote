@@ -245,7 +245,15 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # ABSENCE MEANS UNKNOWN, never "pane". Same writer-refusal rationale as v22:
 # the stamp is written once and read much later, so an erasure on
 # read-modify-write is unrecoverable rather than self-healing.
-SCHEMA_VERSION = 23
+# v24 (x-2019): additive `requested_model`/`requested_provider`/`requested_effort`
+# - the spawn REQUEST verbatim as typed (any [1m] suffix included), stamped at
+# birth beside the observed `model`/`provider`/`effort` axes so a silent
+# substitution is a one-line diff instead of an operator's memory. The bump is
+# the same writer-protection rationale as v22/v23: a pre-v24 writer would accept
+# the unknown keys and erase them on its next read-modify-write. Measured live
+# 2026-09-01: a writer without the fields erased the stamps at an EQUAL version
+# number, which is why this takes the next free number instead of reusing 23.
+SCHEMA_VERSION = 24
 
 
 class RegistryVersionError(RuntimeError):
@@ -568,6 +576,17 @@ class AgentEntry:
     # the same discipline as `origin`. Rust's RegistryEntry mirrors it as
     # additive-optional passthrough so a daemon write-back preserves the stamp.
     node: Optional[str] = None
+    # v23 (x-2019): the spawn REQUEST, verbatim as the flags spelled it (any
+    # [1m] suffix included), stamped once at birth beside the observed axes.
+    # `model`/`model_basis` flip to a verified observation; these three never
+    # do, so requested-vs-observed stays a one-line diff instead of an
+    # operator's memory. ABSENCE MEANS UNKNOWN, the `origin` discipline: a
+    # mint that never saw a request (adopt, daemon-hosted) stamps None, never
+    # a default. Rust's RegistryEntry mirrors them as additive-optional
+    # passthrough so a daemon write-back preserves the stamps.
+    requested_model: Optional[str] = None
+    requested_provider: Optional[str] = None
+    requested_effort: Optional[str] = None
 
     @property
     def session_id(self) -> Optional[str]:

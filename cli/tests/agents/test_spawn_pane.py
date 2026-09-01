@@ -687,6 +687,50 @@ def test_opencode_model_substitution_records_actual_model(
     )
 
 
+def test_opencode_model_suffix_match_does_not_fire_substitution(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Same family, suffix-only spelling difference: a match, never an event.
+
+    The route spells the model with an effort suffix (`[1m]`) and the store
+    reads it back bare. The exact-!= comparison this lane once used fired
+    `model_substituted` there; the shared verdict both lanes now share reads
+    that as a match, so a route's own suffix cannot cry wolf.
+    """
+    ses = "ses_09679f284ffeJv7NdBAoLQLnLZ"
+
+    class SuffixRunner(FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.db_calls = 0
+
+        def __call__(self, argv, **kwargs):
+            if argv[:2] == ["opencode", "db"]:
+                self.db_calls += 1
+                stdout = (
+                    f"id\n{ses}\n"
+                    if self.db_calls == 1
+                    else '{"providerID":"zai-coding-plan","modelID":"glm-5.3"}\n'
+                )
+                return subprocess.CompletedProcess(argv, 0, stdout, "")
+            return super().__call__(argv, **kwargs)
+
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "fno.agents.events.emit",
+        lambda kind, **data: emitted.append((kind, data)),
+    )
+    _spawn(
+        monkeypatch, tmp_path,
+        provider=OPENCODE_HARNESS, runner=SuffixRunner(),
+        model="zai-coding-plan/glm-5.3[1m]",
+    )
+
+    assert not [
+        kind for kind, _ in emitted if kind == "model_substituted"
+    ]
+
+
 def test_opencode_spawn_never_claims_another_rows_session_id(
     tmp_path: Path, monkeypatch
 ) -> None:
