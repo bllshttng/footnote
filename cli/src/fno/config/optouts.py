@@ -25,7 +25,7 @@ MERGE_GATING_OPTOUTS: dict[str, object] = {
 # expands an absent value to its built-in optional reviewer list.
 MERGE_GATING_OPTOUT_DEFAULTS: dict[str, object] = {
     "review.self_review_required": True,
-    "review.optional_apps": None,
+    "review.optional_apps": "built-in optional reviewer list",
     "auto_merge.require_checks_pass": True,
 }
 
@@ -63,7 +63,13 @@ def _claim_state(key: str) -> str:
     root = claims_root_for(f"config-optout:{key}")
     try:
         directory = claims_dir(root)
-        if directory.exists():
+        try:
+            directory.stat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return "unreadable"
+        else:
             try:
                 with os.scandir(directory):
                     pass
