@@ -830,8 +830,13 @@ def _ordinary_verdict(
         # The failing conjunct is a code-review local pass, so only a stale
         # code-review answers it. Any-stale-verdict would attach the waiver
         # here on an unrelated producer's old row while the reviewer whose
-        # absence caused this refusal never reviewed at any sha.
-        stale_caused_it = _has_stale_verdict(cov, "code-review")
+        # absence caused this refusal never reviewed at any sha. The same
+        # decline exclusion as below: an active refusal at HEAD is not a head
+        # that moved, and `covered_conjuncts` answers reviewer_refused before
+        # this conjunct, so `failed` names it whenever a decline stands.
+        stale_caused_it = failed != "reviewer_refused" and _has_stale_verdict(
+            cov, "code-review"
+        )
     else:
         refusal = _merge._coverage_refused_reason(
             cov,
@@ -867,13 +872,20 @@ def _has_stale_verdict(cov, name: Optional[str] = None) -> bool:
     refusal it answers. `_stale_verdicts` collects EVERY producer, so an
     unnamed check says only "something once reviewed", which is not the same
     claim as "the evidence this conjunct wanted exists but went stale".
+    Names normalize the way `_coverage_has_local_pass` does, so a
+    slash-spelled attestation still matches its bare reviewer.
     """
     if not isinstance(cov, dict):
         return False
     stale = cov.get("stale_verdicts") or []
     if name is None:
         return bool(stale)
-    return any(isinstance(v, dict) and v.get("name") == name for v in stale)
+    target = str(name).strip().lstrip("/")
+    return any(
+        isinstance(v, dict)
+        and str(v.get("name") or "").strip().lstrip("/") == target
+        for v in stale
+    )
 
 
 def _with_stale_waiver_guidance(refusal: str, pr_number: int) -> str:

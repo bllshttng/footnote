@@ -2886,6 +2886,11 @@ def test_a_stale_verdict_is_matched_by_NAME_not_by_existence():
     cov2 = {"stale_verdicts": [{"name": "code-review", "producer": "local"}]}
     assert _coverage_gate._has_stale_verdict(cov2, "code-review") is True
 
+    # Slash-spelled, the way _coverage_has_local_pass's sibling normalizer
+    # expects some stored attestations to read.
+    cov3 = {"stale_verdicts": [{"name": "/code-review", "producer": "local_attestation"}]}
+    assert _coverage_gate._has_stale_verdict(cov3, "code-review") is True
+
     for empty in ({"stale_verdicts": []}, {}, None, "not-a-dict"):
         assert _coverage_gate._has_stale_verdict(empty) is False, empty
         assert _coverage_gate._has_stale_verdict(empty, "code-review") is False, empty
@@ -2951,6 +2956,39 @@ def test_a_decline_at_head_is_not_offered_a_merge_lever(
         _coverage_gate, "covered_conjuncts", lambda cov, head, req: (False, "reviewer_refused")
     )
     _seed_row(tmp_path, coverage="uncovered", count=0, head=HEAD)
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+
+    assert state == _coverage_gate.REFUSED
+    assert "coverage-waive" not in refusal, refusal
+
+
+def test_a_decline_at_head_blocks_the_waiver_on_the_attestation_branch_too(
+    enabled, live_head, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """Same decline exclusion, attestation-refusal branch.
+
+    `covered_conjuncts` answers reviewer_refused before the local-pass
+    conjunct, so a row holding an active decline reaches the no-local-pass
+    branch with `failed == "reviewer_refused"` - and the seeded stale
+    code-review row is genuinely stale, no spy, so the waiver sentence
+    appears here only if that branch skipped the exclusion the other branch
+    has always had.
+    """
+    from fno.pr import _coverage_gate
+
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: True)
+    monkeypatch.setattr(
+        _coverage_gate, "covered_conjuncts", lambda cov, head, req: (False, "reviewer_refused")
+    )
+    _seed_row(
+        tmp_path,
+        coverage="uncovered",
+        count=0,
+        head=HEAD,
+        verdicts=[{"name": "code-review", "producer": "local_attestation", "verdict": "stale"}],
+    )
     state, refusal, _head, _note = _coverage_gate.coverage_verdict(
         42, str(tmp_path), recompute=False
     )
