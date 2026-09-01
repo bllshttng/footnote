@@ -1008,7 +1008,11 @@ impl HarnessStoreIndex {
             let home = std::path::PathBuf::from(std::env::var("HOME").ok()?);
             match harness {
                 "claude" => Some(home.join(".claude").join("projects")),
-                _ => Some(home.join(".codex").join("sessions")),
+                // Resolve the codex home the way codex itself does, so a
+                // CODEX_HOME redirect never reads this reaper into a store
+                // the worker never wrote (an empty wrong-store read would
+                // read as "session gone" - death evidence from an absence).
+                _ => crate::client_verbs::codex_home().map(|h| h.join("sessions")),
             }
         })
     }
@@ -1053,7 +1057,7 @@ impl HarnessStoreIndex {
                     // them carries conversation is a content question this
                     // existence probe does not need to answer.
                     "claude" => name.starts_with(sid) && name.ends_with(".jsonl"),
-                    _ => name.starts_with("rollout-") && name.contains(sid),
+                    _ => crate::client_verbs::codex_rollout_matches(&name, sid),
                 })
                 .map(|(_, p)| p.clone())
                 .collect(),
@@ -1069,7 +1073,7 @@ impl HarnessStoreIndex {
 /// Bounded walk collecting `(filename, path)` for every regular file under
 /// `dir` (claude is two levels, codex four; depth 5 covers both). `Err` on any
 /// unreadable directory: an unreadable store answers nothing, fail closed.
-fn index_tree(
+pub(crate) fn index_tree(
     dir: &std::path::Path,
     depth: usize,
 ) -> Result<Vec<(String, std::path::PathBuf)>, ()> {
@@ -1822,6 +1826,8 @@ fn live_liveness_prober(
     let home = crate::claude_ask::ClaudeHome::from_env();
     let index: std::cell::RefCell<Option<std::collections::HashMap<String, String>>> =
         std::cell::RefCell::new(None);
+    let codex: std::cell::RefCell<Option<Option<Vec<(String, u64)>>>> =
+        std::cell::RefCell::new(None);
     move |e: &state::RegistryEntry| {
         if let Some(dead) = fold_positive_death(e) {
             return dead;
@@ -1830,9 +1836,17 @@ fn live_liveness_prober(
         if built.is_none() {
             *built = Some(crate::client_verbs::sessions_socket_index(&home));
         }
+        let mut codex_built = codex.borrow_mut();
+        if codex_built.is_none() {
+            // ONE store walk per closure (one sweep), however many codex rows
+            // probe - the same once-per-sweep shape the socket index above
+            // keeps. `None` reads as the rung going silent (fail closed).
+            *codex_built = Some(crate::client_verbs::codex_rollout_index(None));
+        }
         crate::client_verbs::row_liveness_with_indexed(
             e,
             built.as_ref().expect("just built"),
+            codex_built.as_ref().and_then(|c| c.as_deref()),
             |uuid: &str| truth.get(uuid).cloned(),
         )
     }

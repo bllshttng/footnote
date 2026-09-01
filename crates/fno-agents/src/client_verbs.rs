@@ -1961,7 +1961,7 @@ pub(crate) fn row_liveness_indexed(
     entry: &crate::state::RegistryEntry,
     sockets: &std::collections::HashMap<String, String>,
 ) -> RowLiveness {
-    row_liveness_with_indexed(entry, sockets, family1_truth_state)
+    row_liveness_with_indexed(entry, sockets, None, family1_truth_state)
 }
 
 /// Rung 4's freshness window (x-798a): a codex rollout jsonl written within
@@ -1971,42 +1971,66 @@ pub(crate) fn row_liveness_indexed(
 /// authorizes a reap, so no value here can open a removal path.
 const CODEX_ROLLOUT_FRESH_SECS: u64 = 1800;
 
-/// Rung 4 (x-798a): is any rollout jsonl for `session_id` under the codex
-/// store fresh? A codex session writes `rollout-*.jsonl` (session id in the
-/// filename, nested date dirs) for as long as it advances - the same store
-/// shape `HarnessStoreIndex` resolves in daemon.rs. Fail closed on the whole
-/// subtree: an absent or unreadable directory reads as not-fresh, and
-/// not-fresh is `Unknown`, which keeps. Fires only when the CALLER keyed it
-/// on a codex row; a claude row is never judged by this store.
-fn codex_rollout_fresh(codex_root: &std::path::Path, session_id: &str, now: u64) -> bool {
-    let mut stack = vec![codex_root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            // Absent or unreadable store: fail closed, never fresh.
-            return false;
-        };
-        for entry in rd.flatten() {
-            let Ok(ft) = entry.file_type() else { continue };
-            let path = entry.path();
-            if ft.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if !name.starts_with("rollout-") || !name.contains(session_id) {
-                continue;
-            }
-            if let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) {
-                if let Ok(secs) = modified.duration_since(std::time::UNIX_EPOCH) {
-                    if now.saturating_sub(secs.as_secs()) <= CODEX_ROLLOUT_FRESH_SECS {
-                        return true;
-                    }
-                }
-            }
+/// The codex home the way codex itself resolves it: `$CODEX_HOME` when set,
+/// else `~/.codex` (the `codex_app_server_socket_path` convention). Both codex
+/// store readers - rung 4's freshness index and `HarnessStoreIndex`'s
+/// existence index - must resolve the same home, or one of them reads a store
+/// the worker never writes.
+pub(crate) fn codex_home() -> Option<std::path::PathBuf> {
+    if let Ok(h) = std::env::var("CODEX_HOME") {
+        if !h.is_empty() {
+            return Some(std::path::PathBuf::from(h));
         }
     }
-    false
+    std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".codex"))
+}
+
+/// THE codex rollout filename predicate, spelled once: `HarnessStoreIndex`
+/// (existence for the death-corroboration side) and rung 4 (freshness for
+/// the liveness side) must agree on what a rollout file is, or a store-layout
+/// change fixed in one walker silently strands the other. (name, session id)
+pub(crate) fn codex_rollout_matches(name: &str, session_id: &str) -> bool {
+    name.starts_with("rollout-") && name.contains(session_id)
+}
+
+/// One walk of the codex store, as `(filename, mtime secs)` for every rollout
+/// file - the sweep-shaped input to rung 4, built ONCE per sweep by
+/// `live_liveness_prober` the same way the claude socket index is. `None`
+/// root resolves `$HOME/.codex/sessions`. An unreadable store answers `None`
+/// (fail closed: the rung goes silent, `Unknown`, which keeps).
+pub(crate) fn codex_rollout_index(root: Option<&std::path::Path>) -> Option<Vec<(String, u64)>> {
+    let root = root
+        .map(std::borrow::Cow::Borrowed)
+        .or_else(|| codex_home().map(|h| std::borrow::Cow::Owned(h.join("sessions"))))?;
+    crate::daemon::index_tree(root.as_ref(), 0)
+        .ok()
+        .map(|files| {
+            files
+                .into_iter()
+                .filter(|(name, _)| name.starts_with("rollout-"))
+                .filter_map(|(name, path)| {
+                    let secs = std::fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())?
+                        .as_secs();
+                    Some((name, secs))
+                })
+                .collect()
+        })
+}
+
+/// Rung 4's freshness read against a prebuilt [`codex_rollout_index`]: any
+/// rollout for `session_id` written within the window proves the worker is
+/// advancing. Fail closed: an absent or unreadable store built no index, and
+/// a miss inside one is not-fresh - both read `Unknown`, which keeps.
+pub(crate) fn codex_rollout_fresh(index: &[(String, u64)], session_id: &str, now: u64) -> bool {
+    index.iter().any(|(name, mtime)| {
+        codex_rollout_matches(name, session_id)
+            && now.saturating_sub(*mtime) <= CODEX_ROLLOUT_FRESH_SECS
+    })
 }
 
 /// [`row_liveness`] with the truth-state read injected, mirroring
@@ -2023,7 +2047,7 @@ where
     F: Fn(&str) -> Option<String>,
 {
     let sockets = sessions_socket_index(claude_home);
-    row_liveness_with_indexed(entry, &sockets, truth_fn)
+    row_liveness_with_indexed(entry, &sockets, None, truth_fn)
 }
 
 /// Like [`row_liveness_with`] but with the codex store root pinned too, so a
@@ -2039,31 +2063,34 @@ where
     F: Fn(&str) -> Option<String>,
 {
     let sockets = sessions_socket_index(claude_home);
-    row_liveness_full(entry, &sockets, Some(codex_root), truth_fn)
+    let codex = codex_rollout_index(Some(codex_root));
+    row_liveness_full(entry, &sockets, codex.as_deref(), truth_fn)
 }
 
 /// The ladder core: socket rung answered from a prebuilt index, heartbeat and
-/// truth rungs as documented on [`row_liveness`].
+/// truth rungs as documented on [`row_liveness`]. `codex_index` is the
+/// sweep-shaped store read for rung 4 (`None` resolves and walks the store
+/// per call - the shape one-off callers keep).
 pub(crate) fn row_liveness_with_indexed<F>(
     entry: &crate::state::RegistryEntry,
     sockets: &std::collections::HashMap<String, String>,
+    codex_index: Option<&[(String, u64)]>,
     truth_fn: F,
 ) -> RowLiveness
 where
     F: Fn(&str) -> Option<String>,
 {
-    row_liveness_full(entry, sockets, None, truth_fn)
+    row_liveness_full(entry, sockets, codex_index, truth_fn)
 }
 
-/// [`row_liveness_with_indexed`] with the codex store root injectable (`None`
-/// resolves `$HOME/.codex/sessions`, the production shape). Keying stays the
-/// caller's rule to keep: rung 4 fires ONLY for codex rows, so a claude row
-/// is never judged by the codex store (the AC3 rule `HarnessStoreIndex`
-/// already states).
+/// [`row_liveness_with_indexed`] with every input resolvable per call. Keying
+/// stays the caller's rule to keep: rung 4 fires ONLY for codex rows, so a
+/// claude row is never judged by the codex store (the AC3 rule
+/// `HarnessStoreIndex` already states).
 fn row_liveness_full<F>(
     entry: &crate::state::RegistryEntry,
     sockets: &std::collections::HashMap<String, String>,
-    codex_root: Option<&std::path::Path>,
+    codex_index: Option<&[(String, u64)]>,
     truth_fn: F,
 ) -> RowLiveness
 where
@@ -2117,17 +2144,14 @@ where
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            let resolved = codex_root.map(std::borrow::Cow::Borrowed).or_else(|| {
-                std::env::var("HOME").ok().map(|h| {
-                    std::borrow::Cow::Owned(
-                        std::path::PathBuf::from(h).join(".codex").join("sessions"),
-                    )
-                })
-            });
-            if let Some(root) = resolved.as_deref() {
-                if codex_rollout_fresh(root, sid, crate::claude_ask::now_epoch_secs()) {
-                    return RowLiveness::Alive;
-                }
+            let fresh = match codex_index {
+                Some(index) => codex_rollout_fresh(index, sid, crate::claude_ask::now_epoch_secs()),
+                None => codex_rollout_index(None).is_some_and(|index| {
+                    codex_rollout_fresh(&index, sid, crate::claude_ask::now_epoch_secs())
+                }),
+            };
+            if fresh {
+                return RowLiveness::Alive;
             }
         }
     }
