@@ -202,6 +202,33 @@ def test_a_damaged_registry_breaks_the_lane_loudly(monkeypatch) -> None:
     assert result.verdicts[4105][0] == kl.LEAVE
 
 
+def test_an_incomplete_registry_read_fails_the_claim_arm_closed(monkeypatch) -> None:
+    """A forward read skips rows it cannot represent and marks the result
+    incomplete. Treating the retained rows as a whole census would read an
+    omitted claiming row as unclaimed and hand a live keeper to the kill."""
+    monkeypatch.setattr(
+        kl, "iter_processes", lambda *a, **k: iter([_proc_row(4106, "/tmp/e.sock")])
+    )
+    monkeypatch.setattr(kl, "sock_state_of", lambda sock: kl.ABSENT)
+    monkeypatch.setattr(kl, "REAP_MIN_AGE_S", 0.0)
+
+    class Row:
+        name = "claimed-elsewhere"
+        pid = 4106
+        keeper_child_pid = None
+
+    import fno.agents.registry as registry
+
+    incomplete = registry.LoadedRegistry([Row()], complete=False)
+    monkeypatch.setattr(registry, "load_registry", lambda path=None: incomplete)
+    result = kl.discover(now_s=time.time())
+    assert result.broken
+    assert "incomplete" in result.broken_reason
+    assert result.observations[0].registry_ok is False
+    assert result.verdicts[4106][0] == kl.LEAVE
+    assert result.reapable == []
+
+
 def test_enumeration_failure_withholds(monkeypatch) -> None:
     def boom(*a, **k):
         raise RuntimeError("psutil exploded")
@@ -236,6 +263,26 @@ def test_probe_states_off_the_filesystem(tmp_path) -> None:
         assert kl.sock_state_of(short) == kl.NO_LISTENER
     finally:
         short.unlink(missing_ok=True)
+
+
+def test_a_permission_denied_connect_is_not_a_death_certificate(tmp_path) -> None:
+    """EACCES on connect proves nothing about the listener: a keeper behind a
+    socket this uid cannot reach is UNREACHABLE, never reapable."""
+    locked = Path(tempfile.gettempdir()) / f"fk-lane-{os.getpid()}-c.sock"
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(locked))
+    srv.listen(1)
+    os.chmod(locked, 0o000)
+    try:
+        state = kl.sock_state_of(locked)
+        assert state == kl.UNREACHABLE
+        verdict, reason = kl.keeper_verdict(_obs(sock=locked, sock_state=state))
+        assert verdict == kl.LEAVE
+        assert "unproven" in reason
+    finally:
+        os.chmod(locked, 0o644)
+        srv.close()
+        locked.unlink(missing_ok=True)
 
 
 def test_a_nonspeaking_listener_reads_silent(tmp_path) -> None:

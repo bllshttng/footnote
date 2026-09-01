@@ -28,6 +28,7 @@ death, and that rule is inherited, not relaxed.
 """
 from __future__ import annotations
 
+import errno as _errno
 import socket
 import time
 from dataclasses import dataclass, field
@@ -61,6 +62,10 @@ ABSENT = "absent"
 SILENT = "silent"
 UNREADABLE = "unreadable"
 UNPROBED = "unprobed"
+#: connect() failed with an errno that is not a refusal (EACCES, resource
+#: exhaustion, ...). The listener is UNPROVEN, not dead: only a refused or
+#: vanished endpoint may reap.
+UNREACHABLE = "unreachable"
 
 REAP = "reap"
 LEAVE = "leave"
@@ -112,8 +117,16 @@ def sock_state_of(sock: Optional[Path]) -> str:
     s.settimeout(PROBE_BUDGET_S)
     try:
         s.connect(str(sock))
-    except OSError:
-        return NO_LISTENER
+    except OSError as exc:
+        # Triage by errno: ECONNREFUSED is the one error that PROVES nothing
+        # accepts; ENOENT here means the file vanished after the exists()
+        # check, which is the absent shape. Any other errno - permission,
+        # resource exhaustion - leaves the listener unproven.
+        if exc.errno == _errno.ECONNREFUSED:
+            return NO_LISTENER
+        if exc.errno == _errno.ENOENT:
+            return ABSENT
+        return UNREACHABLE
     # Everything AFTER a successful connect is the conversation, and every
     # way it can fail - recv timeout, reset, close, garbage - is SILENT.
     # ``socket.timeout`` is an OSError subclass; reading the whole block as
@@ -166,6 +179,10 @@ def keeper_verdict(obs: KeeperObs, *, grace_s: Optional[float] = None) -> tuple[
             return LEAVE, "argv declares no --sock, so the socket arm cannot read"
         if obs.sock_state == UNPROBED:
             return LEAVE, "sweep probe budget spent before this keeper was probed"
+        if obs.sock_state == UNREACHABLE:
+            return LEAVE, (
+                "connect failed without refusing - the listener is unproven, not dead"
+            )
         return LEAVE, f"socket has a live listener ({obs.sock})"
     if not obs.registry_ok:
         return LEAVE, "registry unreadable, so the claim arm cannot read - no reap"
@@ -271,10 +288,22 @@ def discover(
     try:
         from fno.agents.registry import load_registry
 
-        for row in load_registry(registry_path):
+        loaded = load_registry(registry_path)
+        for row in loaded:
             for pid in (getattr(row, "pid", None), getattr(row, "keeper_child_pid", None)):
                 if isinstance(pid, int):
                     claimed[pid] = row.name
+        # A forward read SKIPS rows it cannot represent and announces them via
+        # ``complete=False`` (``LoadedRegistry``). Treating the retained rows
+        # as a whole census would read an omitted claiming row as "unclaimed"
+        # and hand a live keeper to the kill - the fail-closed arm covers this
+        # exactly as it covers a raised read.
+        if not getattr(loaded, "complete", True):
+            registry_ok = False
+            registry_error = (
+                "registry read is incomplete: row(s) were skipped this fno "
+                "cannot represent, so the claim census is not whole"
+            )
     except Exception as exc:  # noqa: BLE001 - a damaged registry must not read as empty
         registry_ok = False
         registry_error = str(exc)
