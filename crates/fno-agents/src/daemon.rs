@@ -10530,6 +10530,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rm_warns_that_forcing_orphans_a_live_process_and_the_text_is_pinned() {
+        // x-ad13 ships the row/worktree guard split; the epic pins rm's own
+        // live-process warning as a refusal that must survive it unchanged.
+        // This is the non-claude arm's wording (the claude arm is pinned by
+        // `rm_refuses_a_row_the_roster_still_carries_and_names_no_force`):
+        // the refusal warns what forcing would do and never suggests it.
+        let home = short_home("rmorphancodex");
+        let mut row = ask_row("live-codex", Some("2020-01-01T00:00:00Z"));
+        row.harness = Some("codex".into());
+        row.status = AgentStatus::Live;
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "live-codex"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| panic!("a non-claude row never reads the claude roster"),
+            &|_| panic!("a live row must not reach claude rm"),
+            &|_, _| panic!("a live row must not reach mux kill"),
+            &|_, _| PaneProbe::Unknown,
+        )
+        .await;
+
+        let message = &response.error().unwrap().message;
+        assert!(
+            message.contains("Forcing it through orphans a live process"),
+            "{}",
+            message
+        );
+        assert!(
+            message.contains("fno agents stop live-codex"),
+            "{}",
+            message
+        );
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
     async fn rm_refusal_on_a_claude_row_without_a_row_id_names_stop_not_force() {
         // x-d19e: the no-row-id arm cannot check the roster, but the refusal
         // still owes the reader the safe verb and the cost of forcing through,
