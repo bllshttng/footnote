@@ -901,7 +901,9 @@ def retire_decision(
     2. the work is over, on EITHER marker: its tail says `done` - it declared
        itself finished, rather than merely having gone quiet - or the graph
        proves the deliverable landed, node `done` AND its PR `merged`
-       (`_shipped_work_basis`). Either way it carries no question the operator
+       (`_shipped_work_basis`). The shipped marker reads only a turn the
+       worker itself ended: a trailing user turn is an operator re-task the
+       row owes a move on. Either way it carries no question the operator
        owes;
     3. it has been quiet longer than the grace.
 
@@ -977,13 +979,17 @@ def retire_decision(
     # the laxer one.
     if facts.last_kind == "tool":
         return False, ""
-    # Either/or (x-2188): the closed promise and the shipped-work read are
-    # alternative POSITIVE markers for the same fact, the work being over. The
-    # graph read runs only when the tail cannot speak, so a promise-carrying
-    # row costs no graph call - and a shipped row needs no promise it was
-    # never going to emit, because a `<promise>` is a ship-phase artifact and
-    # a think or blueprint worker legitimately ends on a recap.
-    shipped_basis = _shipped_work_basis(row, node_state_for)
+    # Either/or: the closed promise and the shipped-work read are alternative
+    # POSITIVE markers for the same fact, the work being over. A shipped row
+    # needs no promise it was never going to emit, because a `<promise>` is a
+    # ship-phase artifact and a think or blueprint worker legitimately ends on
+    # a recap. The shipped read is gated on the last turn still being the
+    # WORKER's: a trailing user turn is an operator re-task or answer, which
+    # clears any stale assistant marker - the row owes its next move, and the
+    # tail branch below refuses it exactly as the promise path always did.
+    shipped_basis = ""
+    if facts.last_role == "assistant":
+        shipped_basis = _shipped_work_basis(row, node_state_for)
     if not shipped_basis:
         truth = classify_tail(facts.last_role, facts.last_text, age_s)
         if truth != "done":
@@ -1573,7 +1579,7 @@ def _verdict_one(
         window=window,
         # The SAME callable reap read: run_sweep resolves _graph_index() once
         # per sweep and graph_fn closes over it, so this is no second graph
-        # read and no new seam (x-2188).
+        # read and no new seam.
         node_state_for=node_state_for,
     )
     if retire_yes:

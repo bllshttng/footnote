@@ -771,7 +771,7 @@ def _retire_run(rows, transcripts, *, now_s=NOW_1840, grace=RETIRE_GRACE, node_s
     """The classifier with an EXPLICIT grace: reading the machine's real config
     inside a unit test makes the verdict depend on the developer's settings.
     ``node_state`` injects the graph read; None keeps the empty graph every
-    pre-x-2188 caller saw."""
+    pre-change caller saw."""
     return verdicts(
         rows,
         transcript_for=lambda sid: transcripts.get(sid),
@@ -1322,18 +1322,17 @@ def test_reap_outranks_retire_on_the_same_row():
 
 
 # ---------------------------------------------------------------------------
-# x-2188: retire on EITHER the worker's own closed promise OR external proof
-# the work landed (node done AND its PR merged). Both halves of the external
-# marker are required, and silence is still never a marker.
+# Retire on EITHER the worker's own closed promise OR external proof the work
+# landed (node done AND its PR merged). Both halves of the external marker are
+# required, and silence is still never a marker.
 # ---------------------------------------------------------------------------
 
 #: A finished think/blueprint worker ends on a recap, never a <promise>: the
 #: promise is a ship-phase artifact. Textually that recap is indistinguishable
 #: from a session that died mid-stream, which is the whole defect.
 RECAP_TAIL = (
-    "Plan written to internal/fno/plans/20260901-retire.md and the node moved "
-    "to ready. Discovery read four seams; the graph seam was the only one the "
-    "predicate needed."
+    "Plan written and the node moved to ready. Discovery read four seams; the "
+    "graph seam was the only one the predicate needed."
 )
 
 MERGED_NODE = {"status": "done", "merge_status": "merged"}
@@ -1341,13 +1340,14 @@ MERGED_NODE = {"status": "done", "merge_status": "merged"}
 
 def _shipped_row(row_id="dddd4444-0000", name="think-worker"):
     """A spawned row bound to a node whose PR has merged - the population the
-    twelve hand-reaped rows of 2026-09-01 came from."""
-    return Row(row_id, name, "idle", "x-b7d6", "/tmp/bp", "spawn")
+    twelve hand-reaped rows of 2026-09-01 came from. The node id is the
+    allowlisted synthetic token, never a real one."""
+    return Row(row_id, name, "idle", "x-aaaa", "/tmp/bp", "spawn")
 
 
 def test_shipped_work_basis_requires_both_done_and_merged():
     basis = watchdog._shipped_work_basis(_shipped_row(), lambda n: dict(MERGED_NODE))
-    assert basis == "node x-b7d6 done and its PR merged"
+    assert basis == "node x-aaaa done and its PR merged"
 
 
 def test_shipped_work_basis_refuses_done_without_merge_status():
@@ -1373,16 +1373,16 @@ def test_shipped_work_basis_refuses_a_crowned_row():
     """The same exclusion reap_decision records: a king spans many nodes, so
     resolving its row to ONE node's status mis-buckets it."""
     row = Row(
-        "dddd4444-0000", "king", "idle", "x-b7d6", "/tmp/bp", "spawn", crowned=True
+        "dddd4444-0000", "king", "idle", "x-aaaa", "/tmp/bp", "spawn", crowned=True
     )
     assert watchdog._shipped_work_basis(row, lambda n: dict(MERGED_NODE)) == ""
 
 
 def test_shipped_work_retires_without_a_promise():
     """THE REPRO: a think/blueprint worker whose node is done and whose PR is
-    merged ends on a recap with no <promise>, so before x-2188 it fell through
-    both lanes and held a live slot forever. The graph is the positive marker
-    about the WORK that the tail cannot speak."""
+    merged ends on a recap with no <promise>, so it fell through both lanes
+    and held a live slot forever (twelve rows reaped by hand, 2026-09-01). The
+    graph is the positive marker about the WORK that the tail cannot speak."""
     row = _shipped_row()
     [v] = _retire_run(
         [row],
@@ -1391,7 +1391,21 @@ def test_shipped_work_retires_without_a_promise():
     )
     assert v.verdict == watchdog.RETIRE
     assert v.action == "stop"
-    assert "x-b7d6" in v.basis and "merged" in v.basis
+    assert "x-aaaa" in v.basis and "merged" in v.basis
+
+
+def test_a_shipped_row_retasked_by_the_operator_never_retires():
+    """A trailing USER turn is an operator re-task or answer: it clears any
+    stale assistant marker, and the row owes its next move. The shipped marker
+    reads only a turn the worker itself ended, so a re-tasked row refuses
+    exactly as the promise path always did."""
+    row = _shipped_row()
+    [v] = _retire_run(
+        [row],
+        {row.row_id: _facts("Archive the worktree when you can.", age_min=20, role="user")},
+        node_state=lambda n: dict(MERGED_NODE),
+    )
+    assert v.verdict != watchdog.RETIRE
 
 
 def test_shipped_without_merge_status_keeps_todays_refusal():
@@ -1411,7 +1425,7 @@ def test_a_shipped_row_ending_on_a_question_still_holds():
     """A worker whose PR merged and who then asked the operator something still
     owes an answer; stopping it strands the question."""
     facts = _facts(
-        "Node x-b7d6 shipped. Should I also archive the worktree?", age_min=20
+        "Node x-aaaa shipped. Should I also archive the worktree?", age_min=20
     )
     answer, basis = watchdog.retire_decision(
         _shipped_row(),
