@@ -37,7 +37,7 @@ envelope:
       # daemon.rs). Per-agent worker sources (worker:<id>, stream-worker:<id>) are
       # pattern sources, validated by both the Python and bash validators via the
       # `patterns` list below (previously only the parity-script layer checked them).
-      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff, active-backlog, approvals, bash, config]
+      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, agents, observer, skill_diff, active-backlog, approvals, bash, config]
       patterns:
         - '^(worker|stream-worker):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
@@ -1396,6 +1396,35 @@ event_types:
         age_ms:
           type: integer
           description: "Milliseconds between acquired_at and reap time."
+    consumers: [operator]
+
+  - name: registry_row_removed
+    description: "One row left the agents registry through ANY write path. Emitted at the write choke point once the removal is about to persist, with the recovery receipt staged first, so no door - enumerated or not - removes a row silently."
+    sources: [daemon, agents]
+    data:
+      required: [name, short_id, harness, harness_session_id, remover, reason, receipt_staged]
+      properties:
+        name:
+          type: string
+        short_id:
+          type: string
+        harness:
+          type: string
+        harness_session_id:
+          type: string
+          description: "Empty string when the removed row carried no session identity."
+        remover:
+          type: string
+          description: "The process that ran the removing write (its binary name); pid carries the process id."
+        reason:
+          type: string
+          description: "The removal's stated reason; the receipt-build error when receipt_staged is false."
+        receipt_staged:
+          type: boolean
+          description: "Whether a recovery receipt was written under <agents home>/reap-receipts/ before this event."
+        pid:
+          type: [integer, "null"]
+          description: "Process id of the remover, when the emitter knows it."
     consumers: [operator]
 
   - name: claim_reap_swept

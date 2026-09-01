@@ -98,6 +98,7 @@ pub mod pi;
 pub mod protocol;
 pub mod provider;
 pub mod readiness;
+pub mod receipt;
 pub mod reentry;
 pub mod roster_progress;
 pub mod run_outcome;
@@ -765,6 +766,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // `fno agents reap`. Distinct from `agent_orphan_reaped` (which flips a
     // live-but-unowned PID to exited); this REMOVES the row entirely.
     "agent_row_reaped",
+    // Choke-point removal accounting (x-a879): ANY write path that drops a
+    // registry row emits one of these, receipt staged first. Distinct from
+    // `agent_row_reaped` (the GC door's own event); this fires for every
+    // door, including ones nobody has enumerated yet.
+    "registry_row_removed",
     // Worktree report sweep (daemon-emitted, x-5a30): one line per repo per 24h
     // saying what `fno agents workspace worktree cleanup --merged` WOULD archive. Report-only by
     // construction, because a timer tick is not proof that work landed; removal
@@ -938,7 +944,7 @@ pub fn emit_schema_json() -> serde_json::Value {
                 "source": {
                     "type": "string",
                     "anyOf": [
-                        { "enum": ["active-backlog", "approvals", "backlog", "bash", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "skill_diff", "subagent", "target", "test"] },
+                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "skill_diff", "subagent", "target", "test"] },
                         { "pattern": "^(worker|stream-worker):.+$" }
                     ],
                     "description": "Producer identity: a fixed-string source or a per-agent worker (worker:<id> / stream-worker:<id>)"

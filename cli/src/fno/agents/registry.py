@@ -2409,6 +2409,128 @@ def record_session_observation(
     return observed[0], outcome
 
 
+def _stage_removal_receipt(
+    entry: AgentEntry, *, home: Path, removed_by: str
+) -> tuple[bool, str]:
+    """Build and durably write the removal receipt from the in-hand row (x-a879).
+
+    Same keys, same ``<agents home>/reap-receipts/`` directory, same filename
+    alphabet as the watchdog reap receipt and the Rust writer, so one
+    directory holds every removal receipt regardless of which writer took the
+    row. Takes the entry already held under the registry lock instead of
+    re-reading the file; ``removed_by`` says who took the row, a key a reap
+    receipt omits.
+    """
+    from fno.agents.harness_map import DispatchResolveError, render_session_argv
+
+    harness = (entry.harness or "").strip()
+    sid = (entry.harness_session_id or "").strip()
+    if not harness or not sid:
+        return False, (
+            f"row {entry.name!r} carries no resumable identity "
+            f"(harness={harness!r}, session={bool(sid)})"
+        )
+    try:
+        argv = render_session_argv(harness, "interactive_resume", sid)
+    except DispatchResolveError as exc:
+        return False, f"row {entry.name!r}: {exc}"
+    # Same alphabet as the Rust writer's receipt_filename_part: ascii alnum
+    # plus . _ -, everything else underscored, so every writer lands on the
+    # same filename for the same session.
+    safe = "".join(c if (c.isascii() and c.isalnum()) or c in "._-" else "_" for c in sid)
+    dir_path = home / "reap-receipts"
+    path = dir_path / f"{harness}-{safe}.json"
+    # A receipt already on disk for this session was staged moments ago by
+    # the reap sweep (or the watchdog) BEFORE it dropped the rows - rewriting
+    # it would stamp removed_by onto a pure reap receipt and change the
+    # x-b150 shape. The record on disk is already the recovery path.
+    if path.exists():
+        return True, f"receipt already staged for this session at {path}"
+    receipt: dict = {
+        "row_name": entry.name,
+        "short_id": entry.short_id or "",
+        "harness": harness,
+        "harness_session_id": sid,
+        "cwd": entry.cwd,
+        "log_path": (entry.log_path or None),
+        "created_at": entry.created_at,
+        "reaped_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "resume": " ".join(argv),
+        "removed_by": removed_by,
+    }
+    try:
+        dir_path.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+        path.chmod(0o600)
+    except OSError as exc:
+        return False, f"receipt did not persist for {entry.name!r}: {exc}"
+    return True, str(path)
+
+
+def _account_for_removed_rows(
+    target: Path,
+    current: list[AgentEntry],
+    new_entries: list[AgentEntry],
+) -> None:
+    """Removal accounting at the write choke point (x-a879).
+
+    Every row the updater dropped is announced before the write lands: one
+    ``registry_row_removed`` event per row on the agent-lifecycle log the
+    daemon writes agent_row_reaped to (``<agents home>/events.jsonl``) with
+    ``source: "agents"``, and the recovery receipt staged FIRST, so an
+    announced removal always has a recovery path beside it. Runs after the
+    write persisted: a removal that failed to persist never happened, and
+    announcing it would be a false alarm. A row counts as removed only when
+    NO surviving row shares any of its identity tokens (session id, short
+    id, name), so a rename or a session-id backfill is never a removal.
+    Best-effort by contract: an accounting failure never fails the write
+    that triggered it.
+    """
+    if not current:
+        return
+    kept_sids = {
+        e.harness_session_id for e in new_entries if (e.harness_session_id or "").strip()
+    }
+    kept_short_ids = {e.short_id for e in new_entries if e.short_id}
+    kept_names = {e.name for e in new_entries}
+    removed = [
+        entry
+        for entry in current
+        if (entry.harness_session_id or "").strip() not in kept_sids
+        and entry.short_id not in kept_short_ids
+        and entry.name not in kept_names
+    ]
+    if not removed:
+        return
+    from fno.events import append_event
+
+    home = target.parent
+    events_path = home / "events.jsonl"
+    remover = Path(sys.argv[0]).name or "unknown"
+    pid = os.getpid()
+    for entry in removed:
+        staged, detail = _stage_removal_receipt(entry, home=home, removed_by=remover)
+        event = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "type": "registry_row_removed",
+            "source": "agents",
+            "data": {
+                "name": entry.name,
+                "short_id": entry.short_id or "",
+                "harness": (entry.harness or "").strip(),
+                "harness_session_id": (entry.harness_session_id or "").strip(),
+                "remover": remover,
+                "reason": detail if not staged else "removed by an update_registry write",
+                "receipt_staged": staged,
+                "pid": pid,
+            },
+        }
+        try:
+            append_event(event, events_path=events_path)
+        except Exception:  # noqa: BLE001 - an audit gap must not fail the write
+            pass
+
+
 def update_registry(
     updater: Callable[[list[AgentEntry]], list[AgentEntry]],
     path: Optional[Path] = None,
@@ -2435,7 +2557,11 @@ def update_registry(
         before = {entry.name: _identity_signature(entry) for entry in current}
         new_entries = updater(list(current))
         _validate_changed_identities(before, new_entries)
+        _validate_changed_identities(before, new_entries)
         write_registry(new_entries, path=target)
+        # After the write persisted: a removal that failed to persist never
+        # happened, and announcing it would be a false alarm.
+        _account_for_removed_rows(target, current, new_entries)
         return new_entries
 
 

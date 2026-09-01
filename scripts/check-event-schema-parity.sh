@@ -340,10 +340,18 @@ else:
     rust_kinds = set()
 
 collisions = python_types & rust_kinds
+# Deliberately dual-owned names: emitted at the same semantic boundary by
+# BOTH languages, one schema.yaml entry documenting the shared payload.
+# Everything else that lands in both sets is an accidental name reuse and
+# still fails below. x-a879: the registry removal instrument fires at the
+# Rust and Python write choke points by design.
+dual_owner_kinds = {"registry_row_removed"}
+collisions -= dual_owner_kinds
 if collisions:
     print("COLLISION: the following event names appear in both Python and Rust:")
     for name in sorted(collisions):
         print(f"  {name}")
+    print("  (deliberately dual-owned names live in dual_owner_kinds above)")
     sys.exit(1)
 print("  no collisions")
 PYEOF

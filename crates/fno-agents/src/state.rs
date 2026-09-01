@@ -1655,8 +1655,11 @@ where
     // and before `write_json_atomic`, for the reason the comment above already
     // argues: a racing writer must not slip past.
     refuse_source_ahead_schema_bump(path, registry.schema_version)?;
-    let before = registry
-        .entries
+    // The rows themselves, not just their signatures: a receipt for a removed
+    // row must be built from the row the closure is about to drop, and the
+    // closure leaves no other copy (x-a879). The vector is small.
+    let before_entries = registry.entries.clone();
+    let before = before_entries
         .iter()
         .map(|entry| (entry.name.clone(), identity_signature(entry)))
         .collect::<BTreeMap<_, _>>();
@@ -1698,8 +1701,66 @@ where
     // bump for every store that predates it (the common case).
     registry.schema_version = REGISTRY_SCHEMA_VERSION;
     write_json_atomic(path, &registry)?;
+    // Removal accounting (x-a879) runs AFTER the write persisted: a removal
+    // that failed to persist never happened, and announcing it would be a
+    // false alarm. Within the accounting the receipt still precedes its own
+    // event.
+    account_for_removed_rows(path, &before_entries, &registry.entries);
     let _ = lock.unlock();
     Ok(out)
+}
+
+/// Removal accounting at the write choke point (x-a879): every row the
+/// closure dropped gets a recovery receipt staged first and a
+/// `registry_row_removed` event naming the row, the remover and the reason,
+/// whatever door dropped it. Both the home and the event stream derive from
+/// the registry path - `registry.json` sits at `<agents home>/registry.json`,
+/// and the event rides the SAME agent-lifecycle log the daemon writes
+/// `agent_row_reaped` to - so no caller threads a home or emitter argument.
+///
+/// A row counts as removed only when NO surviving row shares any of its
+/// identity tokens (session id, short id, name): a rename or a session-id
+/// backfill mutates one token while the row itself stays.
+fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[RegistryEntry]) {
+    let after_sids: std::collections::BTreeSet<&str> = after
+        .iter()
+        .filter_map(|e| e.harness_session_id.as_deref().filter(|s| !s.is_empty()))
+        .collect();
+    let after_short_ids: std::collections::BTreeSet<&str> = after
+        .iter()
+        .map(|e| e.short_id.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let after_names: std::collections::BTreeSet<&str> =
+        after.iter().map(|e| e.name.as_str()).collect();
+    let removed: Vec<&RegistryEntry> = before
+        .iter()
+        .filter(|e| {
+            let sid_matched = e
+                .harness_session_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .is_some_and(|s| after_sids.contains(s));
+            let short_matched =
+                !e.short_id.is_empty() && after_short_ids.contains(e.short_id.as_str());
+            !(sid_matched || short_matched || after_names.contains(e.name.as_str()))
+        })
+        .collect();
+    if removed.is_empty() {
+        return;
+    }
+    let Some(home_dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return;
+    };
+    let home = crate::paths::AgentsHome::at(home_dir);
+    let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
+    let remover = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "unknown".to_string());
+    for entry in removed {
+        crate::receipt::stage_removal_accounting(&home, entry, &remover, &emitter);
+    }
 }
 
 type IdentitySignature = (String, String, String, String);
@@ -3239,6 +3300,245 @@ mod tests {
         assert_eq!(
             on_disk["schema_version"], REGISTRY_SCHEMA_VERSION,
             "Rust write must upgrade the on-disk schema_version"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A row-shaped raw registry body, the shape the x-a879 loss took from
+    /// disk: real fields, no test-side struct construction.
+    fn seeded_registry_body(rows: &[String]) -> String {
+        format!(
+            r#"{{"schema_version":{},"agents":[{}]}}"#,
+            REGISTRY_SCHEMA_VERSION,
+            rows.join(",")
+        )
+    }
+
+    fn loss_shaped_row(name: &str, harness: &str, sid: Option<&str>) -> String {
+        let sid_json = match sid {
+            Some(s) => format!(r#""{s}""#),
+            None => "null".to_string(),
+        };
+        format!(
+            r#"{{"name":"{name}","short_id":"{name}-id","harness":"{harness}","harness_session_id":{sid_json},"cwd":"/tmp/{name}","created_at":"2026-09-01T10:00:00Z","status":"live"}}"#
+        )
+    }
+
+    #[test]
+    fn update_registry_accounts_for_a_removed_row() {
+        // x-a879: a closure that drops a row leaves a receipt and an event,
+        // whatever door the closure belongs to.
+        let dir = tmpdir("removal-accounting");
+        let home = dir.join("agents");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("registry.json");
+        std::fs::write(
+            &path,
+            seeded_registry_body(&[
+                loss_shaped_row("kept-a", "claude", Some("a-s")),
+                loss_shaped_row("dropped", "claude", Some("dropped-s")),
+                loss_shaped_row("kept-b", "codex", Some("b-s")),
+            ]),
+        )
+        .unwrap();
+
+        update_registry(&path, |r| {
+            r.entries.retain(|e| e.name != "dropped");
+        })
+        .unwrap();
+
+        // The write persisted the two survivors.
+        let reg = load_registry(&path).unwrap();
+        assert_eq!(reg.entries.len(), 2);
+
+        // One event on the agent-lifecycle log, naming the row, the remover,
+        // and a staged receipt.
+        let events = std::fs::read_to_string(home.join("events.jsonl")).unwrap();
+        let lines: Vec<&str> = events.lines().collect();
+        assert_eq!(lines.len(), 1, "exactly one removal event: {events}");
+        let event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(event["type"], "registry_row_removed");
+        assert_eq!(event["source"], "daemon");
+        assert_eq!(event["data"]["name"], "dropped");
+        assert_eq!(event["data"]["harness"], "claude");
+        assert_eq!(event["data"]["harness_session_id"], "dropped-s");
+        assert_eq!(event["data"]["receipt_staged"], true);
+        assert_eq!(event["data"]["pid"], std::process::id());
+        assert!(
+            event["data"]["remover"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "the remover is named, not blank: {event}"
+        );
+
+        // The receipt sits beside the reap-path ones and says who took the row.
+        let receipt_path = home.join("reap-receipts").join("claude-dropped-s.json");
+        let receipt: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&receipt_path).unwrap()).unwrap();
+        assert_eq!(receipt["row_name"], "dropped");
+        assert_eq!(receipt["removed_by"], event["data"]["remover"]);
+        assert!(receipt["resume"].as_str().is_some_and(|s| !s.is_empty()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_registry_emits_nothing_when_nothing_is_removed() {
+        let dir = tmpdir("removal-quiet");
+        let home = dir.join("agents");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("registry.json");
+        std::fs::write(
+            &path,
+            seeded_registry_body(&[loss_shaped_row("solo", "claude", Some("solo-s"))]),
+        )
+        .unwrap();
+
+        update_registry(&path, |r| {
+            r.entries.push(sample_entry("added"));
+        })
+        .unwrap();
+
+        assert!(
+            !home.join("events.jsonl").exists(),
+            "a removal-free write must not open the events stream"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_registry_announces_a_removal_it_cannot_build_a_receipt_for() {
+        let dir = tmpdir("removal-no-receipt");
+        let home = dir.join("agents");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("registry.json");
+        std::fs::write(
+            &path,
+            seeded_registry_body(&[
+                loss_shaped_row("kept", "claude", Some("kept-s")),
+                // No session identity: no resume record is renderable.
+                loss_shaped_row("identity-less", "claude", None),
+            ]),
+        )
+        .unwrap();
+
+        update_registry(&path, |r| {
+            r.entries.retain(|e| e.name != "identity-less");
+        })
+        .unwrap();
+
+        // The write itself succeeds and the event still announces the removal.
+        let reg = load_registry(&path).unwrap();
+        assert_eq!(reg.entries.len(), 1);
+        let events = std::fs::read_to_string(home.join("events.jsonl")).unwrap();
+        let event: serde_json::Value =
+            serde_json::from_str(events.lines().next().unwrap()).unwrap();
+        assert_eq!(event["data"]["name"], "identity-less");
+        assert_eq!(event["data"]["receipt_staged"], false);
+        assert!(
+            event["data"]["reason"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "the announce carries the receipt-build failure: {event}"
+        );
+        assert!(
+            !home.join("reap-receipts").exists(),
+            "no receipt file for a row with nothing to resume"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_registry_keeps_a_receipt_the_sweep_already_staged() {
+        // The reap sweep writes its receipt BEFORE dropping the rows through
+        // this same choke point. The accounting must not rewrite that file
+        // with `removed_by`: a pure reap receipt keeps the x-b150 shape.
+        let dir = tmpdir("removal-keep-staged");
+        let home = dir.join("agents");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("registry.json");
+        std::fs::write(
+            &path,
+            seeded_registry_body(&[loss_shaped_row("swept", "claude", Some("swept-s"))]),
+        )
+        .unwrap();
+        let receipt_path = home.join("reap-receipts").join("claude-swept-s.json");
+        std::fs::create_dir_all(receipt_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &receipt_path,
+            r#"{"row_name":"swept","resume":"claude --resume swept-s"}"#,
+        )
+        .unwrap();
+
+        update_registry(&path, |r| {
+            r.entries.retain(|e| e.name != "swept");
+        })
+        .unwrap();
+
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&receipt_path).unwrap()).unwrap();
+        assert!(
+            on_disk.get("removed_by").is_none(),
+            "the sweep's receipt was rewritten: {on_disk}"
+        );
+        let events = std::fs::read_to_string(home.join("events.jsonl")).unwrap();
+        let event: serde_json::Value =
+            serde_json::from_str(events.lines().next().unwrap()).unwrap();
+        assert_eq!(event["data"]["receipt_staged"], true);
+        assert_eq!(event["data"]["name"], "swept");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_registry_does_not_announce_a_rename() {
+        // A rename mutates the name while the session stays: not a removal.
+        let dir = tmpdir("removal-rename");
+        let home = dir.join("agents");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("registry.json");
+        std::fs::write(
+            &path,
+            seeded_registry_body(&[loss_shaped_row("old-name", "claude", Some("rn-s"))]),
+        )
+        .unwrap();
+
+        update_registry(&path, |r| {
+            if let Some(e) = r.entries.iter_mut().find(|e| e.name == "old-name") {
+                e.name = "new-name".into();
+            }
+        })
+        .unwrap();
+
+        assert!(
+            !home.join("events.jsonl").exists(),
+            "a rename must not read as a removal"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn update_registry_does_not_announce_a_session_id_backfill() {
+        // The late-bind shape: a closure fills harness_session_id on an
+        // existing row. The row stays; only its identity token set grows.
+        let dir = tmpdir("removal-backfill");
+        let home = dir.join("agents");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("registry.json");
+        std::fs::write(
+            &path,
+            seeded_registry_body(&[loss_shaped_row("bound-later", "claude", None)]),
+        )
+        .unwrap();
+
+        update_registry(&path, |r| {
+            if let Some(e) = r.entries.iter_mut().find(|e| e.name == "bound-later") {
+                e.harness_session_id = Some("late-bound-s".into());
+            }
+        })
+        .unwrap();
+
+        assert!(
+            !home.join("events.jsonl").exists(),
+            "a session-id backfill must not read as a removal"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
