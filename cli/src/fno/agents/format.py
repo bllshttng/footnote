@@ -146,7 +146,7 @@ def _model_substitution_marker(
     if model_substitution(requested, observed_model) == "substituted":
         return {
             "requested": requested,
-            "observed": observed_model.get("model"),
+            "observed": observed_model.get("model") if observed_model else None,
         }
     return None
 

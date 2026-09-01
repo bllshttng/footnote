@@ -2715,11 +2715,12 @@ def cmd_spawn(
         # When the spawn-time check caught a substitution, the receipt carries
         # the marker naming both values (the stderr line and the row already
         # carry them; this is the machine-readable copy).
-        if receipt_model and getattr(result, "model_substituted", None):
+        substitution = getattr(result, "model_substituted", None)
+        if receipt_model and substitution:
             model_field = (
-                f", \"model\": {json.dumps(result.model_substituted['observed'])}"
+                f", \"model\": {json.dumps(substitution['observed'])}"
                 ', "model_basis": "verified"'
-                f", \"model_substituted\": {json.dumps(result.model_substituted)}"
+                f", \"model_substituted\": {json.dumps(substitution)}"
             )
         elif receipt_model:
             model_field = (
