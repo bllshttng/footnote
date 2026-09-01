@@ -2450,7 +2450,7 @@ fn is_provably_live_report(
     inside_leg.is_some_and(|r| r.received_within(now_secs, PROVABLY_LIVE_WINDOW_SECS))
 }
 
-fn now_epoch_secs() -> u64 {
+pub(crate) fn now_epoch_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

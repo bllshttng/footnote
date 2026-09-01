@@ -95,6 +95,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         harness_session_gone: Some(true),
         dormant_done: false,
         worktree_clean: Some(true),
+        probe: fno_agents::client_verbs::RowLiveness::Alive,
     };
     assert_eq!(gc_action(&live, 10_000, 1), GcAction::Keep);
     assert_eq!(
