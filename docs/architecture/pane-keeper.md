@@ -10,6 +10,20 @@ A worker pane's pty master does not live in the mux server. It lives in a keeper
 - The server holds one unix socket to the keeper. Attach, detach, restart, or SIGKILL of the server never touches the child's controlling terminal. No SIGHUP reaches the child.
 - Admission counts and `pane ls` report the CHILD's pid, never the keeper's. The Identify reply names it. A fleet count and any later kill aim at the process the user sees.
 
+## Why a separate process
+
+**The tier split is not ours.** Claude Code ships the same shape: a daemon that holds the roster and hosts no ptys, plus one PTY host process per background session. While background sessions run, look for `claude bg-pty-host` processes, one per session. fno's keeper is that middle tier. The roster lives in one place, and every live pty lives in its own small process beside it.
+
+**`attach` is a vendor feature, not a capability grade.** Only claude and codex declare an `interactive_attach` resume form in `cli/src/fno/agents/harness_capabilities.toml`, because only they built a session multiplexer into their binary. pi, agy and opencode declare `unsupported`. That is not weakness. One binary means one terminal means one session. A row reading `unsupported` records the absence of a vendor multiplexer, and the keeper is fno being that multiplexer for everyone else.
+
+**Why not the daemon.** One process holding N ptys is one failure domain for N sessions. A pty master fd belongs to the process that opened it, so a restarted daemon cannot recover the dead one's masters without `SCM_RIGHTS` fd passing. With a keeper the new server just reconnects to a socket, which is what the re-adoption scan does today.
+
+**It is not a cache argument.** The provider prompt cache is server side, keyed on the prompt-prefix bytes, with a TTL. An idle keeper makes no requests, so its cache expires on the same clock as a dead session's. Holding a process changes no prompt bytes. Keeping a cache warm means resuming the conversation and sending traffic on a schedule, which is what the cache-keepalive skill does. The keeper buys a live session, not a warm cache.
+
+**The cost, honestly.** One pid per live session. A keeper is a pty pair, a socket and a bounded ring; the daemon is the roster, the registry and the HTTP surface, so a keeper costs far less memory than the daemon it outlives. Process count binds long before memory does, and [the reaper contract](#the-reaper-contract) is what keeps that count honest.
+
+**What the keeper does not replace.** `fno mux workspace restore` rebuilds cold sessions from registry metadata for any harness with a resume form, at zero idle cost. The keeper is for tabbing between LIVE sessions and for surviving a mid-turn kill. Different failures. Both are wanted.
+
 ## Protocol
 
 Frames are `u8 tag | u32 LE length | payload`. The shape is mirrored between `crates/fno-agents/src/pane_keeper.rs` and `crates/fno/src/pty.rs`. Client to keeper: `Input`, `Resize`, `Kill`, `Identify`. Keeper to client: `IdentifyReply(json)`, `Output`, `Exited(i32)`. A protocol version rides the IdentifyReply. A newer keeper meeting an older client refuses loudly instead of decoding garbage.
