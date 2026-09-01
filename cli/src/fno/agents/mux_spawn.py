@@ -458,6 +458,12 @@ PANE_HOSTABLE_PROVIDERS: tuple[str, ...] = (
     "pi",
 )
 
+#: x-f579: the token shape an UNDECLARED harness name must match before the
+#: pane lane will even look it up on PATH. Checked first, so a shell-hostile
+#: string never reaches shutil.which() or an argv. Undeclared names name CLI
+#: binaries, and this is the shape of one; declared harnesses never hit it.
+_UNDECLARED_HARNESS_TOKEN = re.compile(r"[a-z][a-z0-9._-]{0,31}")
+
 
 def permission_pane_tokens(provider: str, mode: str) -> list[str]:
     """Map a ``--permission-mode`` value to provider-native pane argv tokens.
@@ -602,6 +608,20 @@ def effort_tokens(harness: str, value: str) -> list[str]:
         # xhigh, max. Exact passthrough, like claude's - pi validates the
         # vocabulary itself, and fno does not keep a second copy of it.
         return ["--thinking", value]
+    from fno.agents.harness_map import is_declared
+
+    if not is_declared(harness):
+        # x-f579: the CLI seam validates --effort before routing, so an
+        # undeclared harness reaches THIS raise first. The advice names the
+        # undeclared lane's own escape (the operator's `--` passthrough), not
+        # "omit the flag" - the vendor's spelling is real, just unmeasured.
+        raise DispatchAskError(
+            f"--effort is not available for harness {harness!r}: fno has no "
+            "capability row for it, so there is no measured mapping to the "
+            "vendor's own flag spelling. Pass the vendor's own flag after "
+            "'--' instead.",
+            exit_code=2,
+        )
     raise DispatchAskError(
         f"harness {harness!r} has no reasoning-effort surface; omit --effort",
         exit_code=2,
@@ -3520,17 +3540,42 @@ def dispatch_spawn_pane(
     # approvals, so warn on every reachable path, not just the CLI seam.
     emit_env_scrub_warning(provider, permission_pinned=bool(permission_mode or yolo))
     validate_spawn_name(name)
-    # x-8f7f: gate the PANE path on PANE_HOSTABLE_PROVIDERS, not KNOWN_PROVIDERS.
-    # A pane host only needs an interactive argv (build_pane_argv) - not a full
-    # Python dispatch adapter. agy is exactly that case (Rust-only provider, no
-    # Python adapter, but pane-hostable), so widening the global KNOWN_PROVIDERS
-    # would leak it into headless/bg Python dispatch that has no agy codepath.
+    # x-f579: PANE_HOSTABLE_PROVIDERS is the DECLARED pane roster, not the gate.
+    # A harness outside it is undeclared, and undeclared has a lane: fno hosts
+    # the binary as a pane and is the viewport (x-8f7f's agy observation - a
+    # pane host needs only an interactive argv, not a Python adapter - taken to
+    # its conclusion). Three named refusals replace the membership raise, each
+    # fail-closed before any pane exists; a declared harness skips all three
+    # and keeps today's path. The roster itself gains no member here.
     if provider not in PANE_HOSTABLE_PROVIDERS:
-        raise DispatchAskError(
-            f"unknown provider {provider!r}; pane-hostable providers: "
-            f"{', '.join(PANE_HOSTABLE_PROVIDERS)}",
-            exit_code=2,
-        )
+        if _UNDECLARED_HARNESS_TOKEN.fullmatch(provider) is None:
+            raise DispatchAskError(
+                f"harness {provider!r} is not a spawnable CLI binary name: it "
+                "must match ^[a-z][a-z0-9._-]{0,31}$ (a lowercase letter, then "
+                "lowercase letters, digits, dots, underscores or hyphens). "
+                "Refused before any PATH lookup or argv is composed.",
+                exit_code=2,
+            )
+        if shutil.which(provider) is None:
+            raise DispatchAskError(
+                f"harness {provider!r} resolved to no binary on PATH; a pane "
+                "spawn execs the CLI binary itself, so there is nothing to host",
+                exit_code=2,
+            )
+        for flag, value in (
+            ("--model", model),
+            ("--effort", effort),
+            ("--permission-mode", permission_mode),
+            ("--yolo", yolo),
+        ):
+            if value:
+                raise DispatchAskError(
+                    f"{flag} is not available for harness {provider!r}: fno has "
+                    "no capability row for it, so there is no measured mapping "
+                    "to the vendor's own flag spelling. Pass the vendor's own "
+                    "flag after '--' instead.",
+                    exit_code=2,
+                )
 
     codex_route = None
     if provider == "codex" and role is not None:

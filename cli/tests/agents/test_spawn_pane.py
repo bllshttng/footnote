@@ -1504,6 +1504,102 @@ def test_pane_hostable_set_stays_in_sync_with_build_pane_argv(tmp_path: Path) ->
                 build_pane_argv(readable, "", tmp_path, False, None)
 
 
+def _stub_harness_bin(monkeypatch, tmp_path: Path, name: str) -> Path:
+    """A stub CLI binary on a tmp PATH under a name no roster knows."""
+    bin_dir = tmp_path / "stub-bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / name
+    stub.write_text("#!/bin/sh\nsleep 60\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    return stub
+
+
+def test_undeclared_token_shape_refused_before_any_path_lookup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC10-ERR: a malformed harness token refuses naming the token, before
+    shutil.which and before any argv is composed - a shell-hostile string never
+    reaches a PATH lookup."""
+    import shutil
+
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    def _boom(_name):
+        raise AssertionError("shutil.which ran for a malformed harness token")
+
+    monkeypatch.setattr(shutil, "which", _boom)
+    for bad in ("", "9goose", "Goose", "bad name", "bad/name", "a" * 33):
+        with pytest.raises(DispatchAskError) as caught:
+            dispatch_spawn_pane(
+                name="peer", message="", provider=bad, cwd=tmp_path, runner=FakeRunner()
+            )
+        assert caught.value.exit_code == 2, bad
+        assert bad in str(caught.value) or not bad, bad
+        assert "PATH lookup" in str(caught.value), bad
+
+
+def test_undeclared_harness_not_on_path_refused_naming_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC7-ERR: a well-formed name with no binary on PATH refuses naming PATH
+    and the resolved name, exit 2, before any mux pane is created."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError) as caught:
+        dispatch_spawn_pane(
+            name="peer", message="", provider="notonpath", cwd=tmp_path, runner=runner
+        )
+    msg = str(caught.value)
+    assert caught.value.exit_code == 2
+    assert "notonpath" in msg and "PATH" in msg
+    assert runner.calls == [], "the refusal must fire before any pane exists"
+
+
+@pytest.mark.parametrize(
+    "flag_kwargs",
+    [
+        {"model": "gpt-x"},
+        {"effort": "high"},
+        {"permission_mode": "acceptEdits"},
+        {"yolo": True},
+    ],
+)
+def test_undeclared_capability_flags_refused_with_dashed_advice(
+    tmp_path: Path, monkeypatch, flag_kwargs
+) -> None:
+    """AC6-ERR: capability-keyed flags refuse naming the flag and the harness,
+    advising the vendor's own flag after `--`. No value is inferred and no
+    declared harness's mapping is borrowed."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    _stub_harness_bin(monkeypatch, tmp_path, "nanoclaw")
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError) as caught:
+        dispatch_spawn_pane(
+            name="peer", message="", provider="nanoclaw", cwd=tmp_path,
+            runner=runner, **flag_kwargs,
+        )
+    msg = str(caught.value)
+    assert caught.value.exit_code == 2
+    assert "nanoclaw" in msg
+    expected_flag = "--" + next(iter(flag_kwargs)).replace("_", "-")
+    assert expected_flag in msg, msg
+    assert "capability row" in msg
+    assert "'--'" in msg
+    assert runner.calls == []
+
+
 def test_ac1_host_pane_gate_admits_hosted_rejects_unhosted(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1538,9 +1634,15 @@ def test_ac1_host_pane_gate_admits_hosted_rejects_unhosted(
     assert oc_row.mux == {"session": "main", "pane_id": 7}
     assert oc_row.status == "live"
 
-    # goose is not pane-hostable -> refused before any mux subprocess.
-    with pytest.raises(DispatchAskError, match="unknown provider 'goose'"):
+    # goose is undeclared -> still refused before any mux subprocess, now by the
+    # PATH refusal (host-independent: PATH points at an empty dir).
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    with pytest.raises(DispatchAskError) as goose_info:
         _spawn(monkeypatch, tmp_path, provider="goose", name="ai")
+    assert "goose" in str(goose_info.value)
+    assert "PATH" in str(goose_info.value)
 
 
 def test_unparseable_pane_id_is_a_loud_error(tmp_path: Path, monkeypatch) -> None:

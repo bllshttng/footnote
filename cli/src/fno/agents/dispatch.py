@@ -481,6 +481,23 @@ def _check_spawn_harness(name: str) -> None:
     """Validate a harness at the thread/headless spawn seam."""
     if name in SPAWN_HARNESSES:
         return
+    from fno.agents.harness_map import is_declared
+
+    if not is_declared(name):
+        # x-f579: an undeclared harness HAS a lane - the pane - so this refusal
+        # must name that lane rather than the accept set. It must not fall into
+        # the deprecated-harness text below either: that one names agy as a
+        # successor, a harness the operator never mentioned (the same trap the
+        # SPAWN_HARNESSES comment records for pi).
+        raise DispatchAskError(
+            f"harness {name!r} declares no capability row (no entry in "
+            "harness_capabilities.toml); --substrate pane is the only substrate "
+            f"available to it ('fno agents spawn -H {name} --substrate pane' "
+            "hosts the binary with fno as the viewport). A thread or headless "
+            "lane needs the vendor's own protocol and must be measured first.\n"
+            "If you meant a model VENDOR, that is -P/--provider.",
+            exit_code=2,
+        )
     accepted = ", ".join(SPAWN_HARNESSES)
     raise DispatchAskError(
         f"unknown harness {name!r} on the thread substrate (--harness names "
