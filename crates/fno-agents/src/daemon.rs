@@ -1690,6 +1690,7 @@ pub fn gc_sweep(
 ) -> GcSummary {
     let store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
+    let prober = live_liveness_prober();
     gc_sweep_impl_with_node_cascade(
         home,
         emitter,
@@ -1697,7 +1698,7 @@ pub fn gc_sweep(
         false,
         &live_truth_tail_states,
         &|e| store.borrow_mut().matches(e),
-        &live_row_liveness,
+        &prober,
         Some(&|e, node_id, harness, session_id| reap_node_session(e, node_id, harness, session_id)),
         &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
     )
@@ -1719,6 +1720,7 @@ pub fn gc_sweep_dry_run(
     let emitter = EventEmitter::new(std::path::PathBuf::new(), "daemon");
     let store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
+    let prober = live_liveness_prober();
     gc_sweep_impl_with_node_cascade(
         home,
         &emitter,
@@ -1726,7 +1728,7 @@ pub fn gc_sweep_dry_run(
         true,
         &live_truth_tail_states,
         &|e| store.borrow_mut().matches(e),
-        &live_row_liveness,
+        &prober,
         None,
         &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
     )
@@ -1744,21 +1746,37 @@ fn live_truth_tail_states(handles: &[String]) -> std::collections::HashMap<Strin
         .collect()
 }
 
-/// The shared liveness ladder as production runs it (x-5d96): the reader
-/// extracted from `claude_resume_argv_with_truth`, now called by the reaper
-/// instead of a per-caller derivation. A recorded pid whose start time no
-/// longer matches is the one POSITIVE death proof the sweep holds itself, so
-/// it is folded into the answer type here; the ladder never answers `Dead`
-/// from absence. Injected like `store_matches` so a sweep-level test never
-/// depends on what lives in the developer's real `~/.claude`.
-fn live_row_liveness(e: &state::RegistryEntry) -> crate::client_verbs::RowLiveness {
-    if e.pid
+/// The one POSITIVE death proof the sweep holds itself: a recorded pid whose
+/// start time no longer matches provably ended. Folded into the answer type
+/// so the reapers read one vocabulary; the ladder never answers `Dead` from
+/// absence.
+fn fold_positive_death(e: &state::RegistryEntry) -> Option<crate::client_verbs::RowLiveness> {
+    e.pid
         .map(|p| !pid_is_ours(p, e.pid_start_time))
         .unwrap_or(false)
-    {
-        return crate::client_verbs::RowLiveness::Dead;
+        .then_some(crate::client_verbs::RowLiveness::Dead)
+}
+
+/// The shared liveness ladder as production runs it (x-5d96): the reader
+/// extracted from `claude_resume_argv_with_truth`, now called by the reaper
+/// instead of a per-caller derivation. The sessions-dir index is built ONCE
+/// per closure (one sweep), however many rows probe. Injected like
+/// `store_matches` so a sweep-level test never depends on what lives in the
+/// developer's real `~/.claude`.
+fn live_liveness_prober() -> impl Fn(&state::RegistryEntry) -> crate::client_verbs::RowLiveness {
+    let home = crate::claude_ask::ClaudeHome::from_env();
+    let index: std::cell::RefCell<Option<std::collections::HashMap<String, String>>> =
+        std::cell::RefCell::new(None);
+    move |e: &state::RegistryEntry| {
+        if let Some(dead) = fold_positive_death(e) {
+            return dead;
+        }
+        let mut built = index.borrow_mut();
+        if built.is_none() {
+            *built = Some(crate::client_verbs::sessions_socket_index(&home));
+        }
+        crate::client_verbs::row_liveness_indexed(e, built.as_ref().expect("just built"))
     }
-    crate::client_verbs::row_liveness(e, &crate::claude_ask::ClaudeHome::from_env())
 }
 
 #[allow(dead_code)]
@@ -8628,6 +8646,7 @@ fn run_reconcile_sweep(
             .map(Path::new)
             .is_some_and(Path::is_file)
     };
+    let prober = live_liveness_prober();
     let (changes, outcome) = plan_reconcile(
         &entries,
         probe,
@@ -8636,7 +8655,7 @@ fn run_reconcile_sweep(
         bg_live,
         thread_hosted,
         rollout_exists,
-        live_row_liveness,
+        prober,
     );
 
     // Ordered exit teardown (E3.3, AC-X2-4): for every row transitioning to
@@ -15060,6 +15079,14 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
 
     use crate::client_verbs::row_liveness;
 
+    /// A per-row prober mirroring [`fn@live_liveness_prober`] for the staged
+    /// answer: same positive-death fold, index built per call.
+    fn live_row_liveness(e: &state::RegistryEntry) -> crate::client_verbs::RowLiveness {
+        fold_positive_death(e).unwrap_or_else(|| {
+            crate::client_verbs::row_liveness(e, &crate::claude_ask::ClaudeHome::from_env())
+        })
+    }
+
     fn ladder_claude_row(name: &str, short_id: &str) -> RegistryEntry {
         let mut e = bg_claude_row(name, short_id);
         e.status = AgentStatus::Live;
@@ -15199,6 +15226,26 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &crate::claude_ask::ClaudeHome::at(home.root()),
             |_| None,
         );
+        assert_eq!(answer, RowLiveness::Unknown);
+        assert_ne!(answer, RowLiveness::Dead);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn an_expired_ttl_heartbeat_is_not_a_marker() {
+        // The report's own trust contract ages a TTL'd stamp out
+        // (InsideLegReport::is_live_at), so an expired beat answers nothing:
+        // Unknown, never Dead, and never a forever-Alive pinning the row
+        // against every later guard.
+        let home = tmp_home("ladder-ttl");
+        let mut e = ladder_claude_row("ttl", "ttls0001");
+        e.exited_at = Some("2026-06-01T00:00:00Z".into());
+        e.inside_leg = Some(heartbeat(
+            state::InsideLegState::Working,
+            "2026-06-01T00:00:30Z",
+        ));
+        e.inside_leg.as_mut().unwrap().ttl_ms = Some(60_000); // expired long ago
+        let answer = row_liveness(&e, &crate::claude_ask::ClaudeHome::at(home.root()));
         assert_eq!(answer, RowLiveness::Unknown);
         assert_ne!(answer, RowLiveness::Dead);
         std::fs::remove_dir_all(home.root()).ok();

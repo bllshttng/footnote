@@ -1905,13 +1905,63 @@ pub enum RowLiveness {
 /// read the truth VALUE (`done`/`stalled` route the relaunch arm, which the
 /// verdict type has no room for); its behavior is pinned identical by tests.
 pub fn row_liveness(entry: &crate::state::RegistryEntry, claude_home: &ClaudeHome) -> RowLiveness {
-    row_liveness_with(entry, claude_home, family1_truth_state)
+    let sockets = sessions_socket_index(claude_home);
+    row_liveness_indexed(entry, &sockets)
+}
+
+/// One scan of claude's sessions dir: `jobId -> messagingSocketPath` for
+/// every live-shaped bg session file, first-sorted-wins (the same pick
+/// `locate_session` makes). The socket rung's cost is this walk, so a sweep
+/// probing N rows pays it once, not N times.
+pub fn sessions_socket_index(
+    claude_home: &ClaudeHome,
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let dir = claude_home.sessions_dir();
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    let mut paths: Vec<std::path::PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for path in paths {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        if v.get("kind").and_then(Value::as_str) != Some("bg") {
+            continue;
+        }
+        let (Some(job), Some(sock)) = (
+            v.get("jobId").and_then(Value::as_str),
+            v.get("messagingSocketPath").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        if job.is_empty() || sock.is_empty() || out.contains_key(job) {
+            continue;
+        }
+        out.insert(job.to_string(), sock.to_string());
+    }
+    out
+}
+
+/// [`row_liveness`] against a prebuilt [`sessions_socket_index`] - the form
+/// a sweep uses, so N probed rows cost one dir scan. The truth read is the
+/// production one.
+pub(crate) fn row_liveness_indexed(
+    entry: &crate::state::RegistryEntry,
+    sockets: &std::collections::HashMap<String, String>,
+) -> RowLiveness {
+    row_liveness_with_indexed(entry, sockets, family1_truth_state)
 }
 
 /// [`row_liveness`] with the truth-state read injected, mirroring
 /// `claude_resume_argv_with_truth`'s seam so tests can stage transcript reads
 /// (including the read that FAILS - a `None` truth state is the unreadable
 /// transcript, and the answer must be `Unknown`, never `Dead`).
+#[cfg(test)]
 pub(crate) fn row_liveness_with<F>(
     entry: &crate::state::RegistryEntry,
     claude_home: &ClaudeHome,
@@ -1920,19 +1970,39 @@ pub(crate) fn row_liveness_with<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
+    let sockets = sessions_socket_index(claude_home);
+    row_liveness_with_indexed(entry, &sockets, truth_fn)
+}
+
+/// The ladder core: socket rung answered from a prebuilt index, heartbeat and
+/// truth rungs as documented on [`row_liveness`].
+pub(crate) fn row_liveness_with_indexed<F>(
+    entry: &crate::state::RegistryEntry,
+    sockets: &std::collections::HashMap<String, String>,
+    truth_fn: F,
+) -> RowLiveness
+where
+    F: Fn(&str) -> Option<String>,
+{
     let short_id = entry.short_id.trim();
     if !short_id.is_empty()
-        && locate_session(claude_home, short_id)
-            .map(|loc| liveness_probe(&loc.messaging_socket_path))
+        && sockets
+            .get(short_id)
+            .map(|sock| liveness_probe(sock))
             .unwrap_or(false)
     {
         return RowLiveness::Alive;
     }
+    // A TTL'd heartbeat that has EXPIRED is not a marker: the report's own
+    // trust contract (InsideLegReport::is_live_at) ages it out, so a
+    // three-week-old stamp cannot prove life forever. No ttl_ms never
+    // self-ages - the existing contract.
+    let beat_report = entry
+        .inside_leg
+        .as_ref()
+        .filter(|r| r.is_live_at(crate::claude_ask::now_epoch_secs()));
     if let (Some(beat), Some(exited)) = (
-        entry
-            .inside_leg
-            .as_ref()
-            .and_then(|r| crate::state::rfc3339_like_to_secs(&r.received_at)),
+        beat_report.and_then(|r| crate::state::rfc3339_like_to_secs(&r.received_at)),
         entry
             .exited_at
             .as_deref()
