@@ -602,6 +602,14 @@ pub struct GcSummary {
     /// fully-live fleet name ZERO of the 26 rows it kept. A sweep that names
     /// nothing it kept is indistinguishable from a sweep that never ran.
     pub kept_live: Vec<String>,
+    /// Rows no gate has ruled on yet: the stored status is not terminal and
+    /// no pid is confirmed dead (x-91f3). This is the blanket that held the
+    /// measured registry - most rows carry no `short_id` and no `pid`, so
+    /// `is_live` could never vouch for them and this arm swallowed them
+    /// silently: the same zero-named-rows failure `kept_live` was added for,
+    /// one arm over. Reported like `kept_live` because an ordinary keep is
+    /// still a keep.
+    pub kept_not_terminal: Vec<String>,
     /// Rows that read live AND carry an `exited_at` while the shared liveness
     /// ladder (x-5d96) answers `Unknown`. Before this field the sweep resolved
     /// that contradiction silently by dropping the stamp; now the row is
@@ -1945,10 +1953,22 @@ fn gc_sweep_impl_with_node_cascade(
 
     for e in &registry.entries {
         let grace_secs = grace_for_harness(e.harness_name()).as_secs() as i64;
+        // x-91f3: the ladder answers for EVERY row, not only the stamped
+        // live-ish rows the consult below used to gate it to. `short_id` is
+        // present on 12 of 26 rows of the measured registry and `pid` on
+        // none - structural for codex, whose sessions a shared app-server
+        // hosts - so an `is_live` keyed on those two surfaces alone left
+        // every pid-less row reading not-live forever. The ladder's positive
+        // markers (claude socket, advancing heartbeat, truth state) are what
+        // such a row is judged by. The two process votes stay: the ladder
+        // never answers Alive from a pid, and a worker-sock hit is evidence
+        // it does not read.
+        let probe = row_liveness(e);
         let is_live = live_workers.contains(&e.short_id)
             || e.pid
                 .map(|p| pid_is_ours(p, e.pid_start_time))
-                .unwrap_or(false);
+                .unwrap_or(false)
+            || probe == RowLiveness::Alive;
         let pid_confirmed_dead = e
             .pid
             .map(|p| !pid_is_ours(p, e.pid_start_time))
@@ -2048,30 +2068,6 @@ fn gc_sweep_impl_with_node_cascade(
         // spared, or one the probe did not answer for, keeps `false`: only a
         // positive `done` reading evicts.
         let dormant_done = false;
-        // The liveness ladder is spent only on rows the sweep cannot already
-        // vouch for: an `is_live` row has POSITIVE process evidence (worker
-        // socket or owned pid), so its stale stamp clears unconditionally
-        // below (the pre-x-5d96 resurrected contract - keeping the stamp
-        // would let gc reuse an old clock and skip grace at the row's real
-        // death, codex P2 on PR 1329). The ladder is for the rows with no
-        // process surface whose STORED STATUS still reads live-ish: the
-        // status field is a constant in practice, and a stamped row it still
-        // calls live is exactly the contradiction x-5d96 surfaces.
-        let probe = if !is_live
-            && matches!(
-                e.status,
-                AgentStatus::Live
-                    | AgentStatus::Ready
-                    | AgentStatus::Idle
-                    | AgentStatus::Busy
-                    | AgentStatus::Spawning
-            )
-            && exited_at.is_some()
-        {
-            row_liveness(e)
-        } else {
-            crate::client_verbs::RowLiveness::Alive
-        };
         // Built with `worktree_clean` unset so the probe decision can ask the
         // policy itself. Filled in below, before any verdict is read from it.
         let mut row = crate::gc::GcRow {
@@ -2203,26 +2199,14 @@ fn gc_sweep_impl_with_node_cascade(
             crate::gc::GcAction::Keep => {
                 // Resurrected: drop the stale exit stamp so a later death
                 // starts a fresh grace clock. An `is_live` row clears on its
-                // positive process evidence alone (the pre-x-5d96 contract);
-                // a row the ladder POSITIVELY answers Alive on clears too -
-                // on the measured registry those are exactly the status-live
-                // rows carrying a false exited_at with no process surface.
+                // positive process evidence (the pre-x-5d96 contract), and
+                // since x-91f3 a ladder-Alive answer is one of `is_live`'s
+                // three votes, so every positively-proven row clears here.
                 // An `Unknown` on a non-is_live row is the contradiction: the
                 // stamp is PRESERVED as evidence and the row is named below.
                 // Either way the disagreement resolves by evidence and gets
                 // reported - never silently in favour of either field.
-                if e.exited_at.is_some()
-                    && (row.is_live
-                        || (row.probe == RowLiveness::Alive
-                            && matches!(
-                                e.status,
-                                AgentStatus::Live
-                                    | AgentStatus::Ready
-                                    | AgentStatus::Idle
-                                    | AgentStatus::Busy
-                                    | AgentStatus::Spawning
-                            )))
-                {
+                if e.exited_at.is_some() && row.is_live {
                     to_clear.insert(e.name.clone(), e.created_at.clone());
                     summary.cleared_contradiction.push(id);
                 } else {
@@ -2247,11 +2231,21 @@ fn gc_sweep_impl_with_node_cascade(
                         Some(crate::gc::KeepReason::Live) => {
                             summary.kept_live.push(id);
                         }
+                        // x-91f3: the NotTerminal keep is the OTHER ordinary
+                        // keep, and on a registry of pid-less rows it is the
+                        // majority verdict. Reported like `kept_live` so a
+                        // pass names every row it held and the gate that held
+                        // it.
+                        Some(crate::gc::KeepReason::NotTerminal) => {
+                            summary.kept_not_terminal.push(id);
+                        }
                         Some(crate::gc::KeepReason::Contradicted) => {
                             summary.kept_contradicted.push(id);
                         }
-                        // NotTerminal / WithinGrace: mid-flight states on the
-                        // way to a verdict, not what task 5 exists to surface.
+                        // WithinGrace: transient by construction - the row
+                        // leaves this arm when the window closes - unlike the
+                        // NotTerminal blanket, which never resolves on its
+                        // own.
                         _ => {}
                     }
                 }
@@ -11236,6 +11230,139 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         // The row itself is untouched (still on disk, unstamped-differently).
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert!(reg.entries.iter().any(|e| e.name == "stuck"));
+    }
+
+    // ── x-91f3: is_live from the ladder, and every keep is named ────────────
+
+    /// The acceptance, against a fixture registry shaped like the real one:
+    /// most rows carry neither `short_id` nor `pid` (structural for codex,
+    /// whose sessions a shared app-server hosts), their stored status is
+    /// live-ish, and two rows only the ladder can vouch for - an unstamped
+    /// claude row whose transcript truth state reads `working` (named LIVE),
+    /// and a stamped codex row whose heartbeat advanced past its own exit
+    /// stamp (resolved as live: the false stamp is cleared and the clear is
+    /// reported). Before x-91f3 every row here read not-live and landed in
+    /// the silent `_ => {}` arm: `fno agents reap --dry-run` named zero of
+    /// the rows it kept. This test cannot pass with `is_live` wrong: the
+    /// truth-alive row must be named LIVE, the surface-less rows NOT
+    /// TERMINAL, the named set must cover every row, and the sweep must
+    /// still reap NOTHING - the fix is a classification-and-reporting
+    /// change, never a removal.
+    #[test]
+    fn gc_sweep_names_every_kept_row_on_a_real_shaped_registry() {
+        let home = tmp_home("gc-names-kept");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        let (y2, mo2, d2, h2, mi2, s2) = civil(now - 3600);
+        let beat_at = format!("{y2:04}-{mo2:02}-{d2:02}T{h2:02}:{mi2:02}:{s2:02}Z");
+        state::update_registry(&home.registry_json(), |r| {
+            // The majority shape on the measured registry: live-ish status,
+            // no short_id, no pid, nothing for a process surface to vouch
+            // with.
+            for name in ["idle-a", "idle-b", "idle-c"] {
+                let mut e = ask_row(name, None);
+                e.status = AgentStatus::Idle;
+                r.entries.push(e);
+            }
+            // Unstamped, surface-less, alive only through the truth rung: a
+            // claude row whose transcript says the session is working. The
+            // persisted session id is harness_session_id; the ladder reads
+            // the claude uuid backfilled from it on load. The old derivation
+            // called this row not-live; the ladder calls it live.
+            let mut truth_live = ask_row("truth-live", None);
+            truth_live.status = AgentStatus::Idle;
+            truth_live.harness = Some("claude".into());
+            r.entries.push(truth_live);
+            // Stamped, surface-less, alive only through the heartbeat rung:
+            // received strictly later than the row's own exit stamp.
+            let mut heartbeat_live = codex_thread_row("cx-live", Some(exited_at.as_str()));
+            heartbeat_live.status = AgentStatus::Idle;
+            heartbeat_live.inside_leg = Some(state::InsideLegReport {
+                state: state::InsideLegState::Working,
+                seq: 1,
+                reason: None,
+                received_at: beat_at,
+                ttl_ms: None,
+            });
+            r.entries.push(heartbeat_live);
+        })
+        .unwrap();
+
+        // The ladder as production folds it, hermetic: positive death from a
+        // recorded pid, then the ladder with an EMPTY socket index and truth
+        // answers staged only for the one uuid this test owns - so the only
+        // markers that can fire are the truth rung and the heartbeat rung,
+        // the markers pid-less rows are judged by.
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &no_tails,
+            &|_| None,
+            &|e: &state::RegistryEntry| {
+                fold_positive_death(e).unwrap_or_else(|| {
+                    crate::client_verbs::row_liveness_with_indexed(
+                        e,
+                        &std::collections::HashMap::new(),
+                        |uuid: &str| (uuid == "truth-live-sess").then(|| "working".to_string()),
+                    )
+                })
+            },
+            &|_| None,
+        );
+
+        assert!(summary.reaped.is_empty(), "{:?}", summary.reaped);
+        assert!(summary.reaped_backstop.is_empty());
+        assert!(summary.reaped_dormant.is_empty());
+        // NON-ZERO, per gate: the truth-alive row reads live through the
+        // ladder, the surface-less rows keep as not-terminal - each named.
+        assert_eq!(summary.kept_live, vec!["truth-live".to_string()]);
+        assert_eq!(
+            summary.kept_not_terminal,
+            vec![
+                "idle-a".to_string(),
+                "idle-b".to_string(),
+                "idle-c".to_string()
+            ]
+        );
+        // The heartbeat row's stale stamp is CLEARED on the ladder's positive
+        // answer (the x-5d96 resolution, reported - never a reap): a kept
+        // stamp would hand gc an old clock that skips grace at the row's
+        // real death.
+        assert_eq!(summary.cleared_contradiction, vec!["cx-live".to_string()]);
+        // And the named set covers EVERY row: no silent keep survives.
+        let named: std::collections::BTreeSet<String> = summary
+            .kept_live
+            .iter()
+            .chain(summary.kept_not_terminal.iter())
+            .chain(summary.kept_contradicted.iter())
+            .chain(summary.cleared_contradiction.iter())
+            .chain(summary.kept_uncorroborated.iter())
+            .chain(summary.kept_dirty.iter().map(|(id, _)| id))
+            .chain(summary.kept_no_receipt.iter().map(|(id, _)| id))
+            .cloned()
+            .collect();
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let live_row = reg.entries.iter().find(|e| e.name == "cx-live").unwrap();
+        assert!(
+            live_row.exited_at.is_none(),
+            "the false stamp is gone from the proven-alive row"
+        );
+        assert_eq!(
+            named.len(),
+            reg.entries.len(),
+            "a kept row the report does not name: named={named:?}"
+        );
+        assert!(
+            reg.entries.iter().all(|e| named.contains(e.name.as_str())),
+            "every row still on disk, each one named"
+        );
     }
 
     // ── x-b150: the reap receipt gate ────────────────────────────────────────
