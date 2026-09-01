@@ -1112,7 +1112,7 @@ def _probe_liveness(entry: Any) -> str:
     try:
         import psutil
     except Exception:  # noqa: BLE001 - a missing prober is silence, not death
-        psutil = None
+        psutil = None  # type: ignore[assignment]
     pid = getattr(entry, "pid", None)
     start = getattr(entry, "pid_start_time", None)
     if psutil is not None and pid is not None and start is not None:
