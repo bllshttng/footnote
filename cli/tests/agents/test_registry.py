@@ -713,8 +713,8 @@ def test_us2_schema_version_is_three() -> None:
     """
     from fno.agents.registry import SCHEMA_VERSION
 
-    # v22 (x-ac6b): additive `keeper_child_pid` - the restart-sweep assertion.
-    assert SCHEMA_VERSION == 22
+    # v23 (x-3837): additive `substrate` - the lane a row was spawned on.
+    assert SCHEMA_VERSION == 23
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
@@ -2151,7 +2151,7 @@ def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):
         write_registry,
     )
 
-    assert SCHEMA_VERSION == 22
+    assert SCHEMA_VERSION == 23
     use_tmpdir(monkeypatch, tmp_path)
     entry = register_existing_session(
         provider=CLAUDE_HARNESS,
