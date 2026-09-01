@@ -103,3 +103,5 @@ The claim classifier first, because it is the only dual implementation with no p
 The ask adapters second. They are already at step 1 with both harnesses passing, so the work is steps 2 through 4 plus moving one caller.
 
 Nothing third. Do not open a `kill_criteria` port under this sequence: the table above removed it from the dual set, and filing one would re-import the error this page corrects.
+
+One deferred item sits in the family without joining the sequence, and the reason generalizes. The tier-remap refusal exists in the Python spawn launcher and not in the Rust spawn binary. That is a guard MISSING from a second implementation, not a second implementation to retire, and writing it a second time in the second language would commit the exact pattern this page exists to remove. It closes for free when the spawn entry point collapses to one implementation. A missing guard on a duplicated entry point is an argument for finishing the port, never for duplicating the guard.
