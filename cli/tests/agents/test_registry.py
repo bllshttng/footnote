@@ -2201,3 +2201,105 @@ def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):
         node="x-other",
     )
     assert changed.node == "x-98ab", "a refresh must never change a stamped node"
+
+
+# ---------------------------------------------------------------------------
+# v24 (x-2019): requested_* stamps - the REQUEST verbatim beside the effect
+# ---------------------------------------------------------------------------
+
+
+def test_v24_requested_axis_round_trips_verbatim(tmp_path: Path, monkeypatch) -> None:
+    """The requested model/provider/effort survive a write+read byte-for-byte.
+
+    Verbatim means the [1m] suffix rides through untouched: normalizing the
+    token is how a stored request stops being evidence of what was typed.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, SCHEMA_VERSION, load_registry, write_registry
+
+    assert SCHEMA_VERSION == 24
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    entry = AgentEntry(
+        name="requested-axis",
+        harness="claude",
+        provider="zai",
+        model="glm-5.3[1m]",
+        model_basis="requested",
+        effort="high",
+        requested_model="glm-5.3[1m]",
+        requested_provider="zai",
+        requested_effort="high",
+        cwd="/tmp",
+        log_path="/tmp/requested-axis.log",
+    )
+    write_registry([entry], path=registry_path)
+
+    raw = json.loads(registry_path.read_text())["agents"][0]
+    assert raw["requested_model"] == "glm-5.3[1m]"
+    assert raw["requested_provider"] == "zai"
+    assert raw["requested_effort"] == "high"
+
+    loaded = load_registry(path=registry_path)[0]
+    assert loaded.requested_model == "glm-5.3[1m]"
+    assert loaded.requested_provider == "zai"
+    assert loaded.requested_effort == "high"
+
+
+def test_v24_requested_axis_defaults_to_none_and_absence_reads_none(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Unset on a new entry; a pre-v24 row without the keys reads None, never a guess."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    entry = AgentEntry(
+        name="no-request",
+        harness="claude",
+        cwd="/tmp",
+        log_path="/tmp/no-request.log",
+    )
+    assert entry.requested_model is None
+    assert entry.requested_provider is None
+    assert entry.requested_effort is None
+    write_registry([entry], path=registry_path)
+    loaded = load_registry(path=registry_path)[0]
+    assert loaded.requested_model is None
+    assert loaded.requested_provider is None
+    assert loaded.requested_effort is None
+
+
+def test_v24_pre_v24_row_without_requested_keys_reads_none(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A legacy row hand-shaped without the new keys still loads, axis None."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 23,
+                "agents": [
+                    {
+                        "name": "legacy-row",
+                        "harness": "claude",
+                        "provider": "zai",
+                        "model": "glm-5.3[1m]",
+                        "model_basis": "requested",
+                        "cwd": "/tmp",
+                        "log_path": "/tmp/legacy.log",
+                        "origin": "spawn",
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_registry(path=registry_path)[0]
+    assert loaded.requested_model is None
+    assert loaded.requested_provider is None
+    assert loaded.requested_effort is None

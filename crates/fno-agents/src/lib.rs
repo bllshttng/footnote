@@ -160,10 +160,11 @@ impl std::fmt::Display for ShortId {
 /// Agent lifecycle status. `state.status` is canonical; `registry.status` is a
 /// denormalized projection of it (LD10). Serialized snake_case for the JSON
 /// state files and the cross-language schemas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     /// PTY spawned, not yet confirmed ready for input.
+    #[default]
     Spawning,
     /// Confirmed ready for input (readiness_detector reported ready).
     Ready,

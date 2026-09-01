@@ -1289,3 +1289,77 @@ def test_a_restored_route_composes_under_managed_marker(
             provider_gate=_admitted_zai(monkeypatch),
         )
     assert "ANTHROPIC_BASE_URL" in str(exc.value), "the restored route reaches the launch"
+
+
+# --- v23 (x-2019): the requested axis, verbatim beside the effect ------------
+
+
+def test_routed_bg_row_stamps_the_request_verbatim(tmp_path, monkeypatch) -> None:
+    """requested_* carries the request as typed - [1m] suffix included.
+
+    The observed `model` axis may later flip to a verified reading; the
+    requested stamps never do, so requested-vs-observed stays diffable.
+    """
+    from fno.agents.registry import load_registry
+
+    _spawn_routed_bg(
+        monkeypatch,
+        tmp_path,
+        "requester-bg",
+        model="glm-5.3[1m]",
+        effort="high",
+        route_model="glm-5.3-flash[1m]",
+    )
+    row = next(r for r in load_registry() if r.name == "requester-bg")
+    assert row.requested_model == "glm-5.3[1m]"
+    assert row.requested_provider == "zai"
+    assert row.requested_effort == "high"
+    # The explicit --model won the argv and the observed axis; the request
+    # records the SAME value here, verbatim - not the route's token.
+    assert row.model == "glm-5.3[1m]"
+
+
+def test_routed_pane_row_stamps_the_request_verbatim(tmp_path, monkeypatch) -> None:
+    """The pane seam stamps the same three requested fields."""
+    from fno.agents.registry import load_registry
+
+    _spawn_pane(
+        monkeypatch,
+        tmp_path,
+        route_env=dict(ROUTE_ENV),
+        route_provider="zai",
+        route_model="glm-5.3[1m]",
+        model="glm-5.3[1m]",
+        effort="high",
+    )
+    row = load_registry()[0]
+    assert row.requested_model == "glm-5.3[1m]"
+    assert row.requested_provider == "zai"
+    assert row.requested_effort == "high"
+
+
+def test_unrouted_bg_row_leaves_the_request_unknown(tmp_path, monkeypatch) -> None:
+    """No flags named, no request invented: the axis stays None, never default."""
+    from fno.agents.registry import load_registry
+
+    from tests.agents._fake_claude import install_fake_claude
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.spawn_gate import run_gate
+
+    use_tmpdir(monkeypatch, tmp_path)
+    bin_dir = tmp_path / "bin"
+    install_fake_claude(bin_dir)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    for var in ("FNO_SESSION", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+    dispatch_mod.dispatch_spawn(
+        name="plain-bg",
+        message="go",
+        harness="claude",
+        cwd=tmp_path,
+        provider_gate=run_gate("plain-bg", "bg"),
+    )
+    row = next(r for r in load_registry() if r.name == "plain-bg")
+    assert row.requested_model is None
+    assert row.requested_effort is None

@@ -533,6 +533,7 @@ mod tests {
             launch_account: None,
             related_session_id: None,
             sandbox_posture: None,
+            ..Default::default()
         }
     }
 

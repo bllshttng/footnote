@@ -186,6 +186,12 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         model: None,
         model_basis: None,
         effort: None,
+        // v23 (x-2019): adoption observed no spawn request, so the requested
+        // axis stays unknown - never a guess from the transcript model, which
+        // is the OBSERVED side and lands in `model` at `adopt`.
+        requested_model: None,
+        requested_provider: None,
+        requested_effort: None,
         harness: Some("claude".into()),
         harness_session_id: Some(w.session_id.clone()),
         predecessor_session_ids: Vec::new(),

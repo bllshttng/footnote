@@ -2185,6 +2185,12 @@ def _claude_create_path(
         model=model or route_model,
         model_basis="requested" if (model or route_model) else None,
         effort=effort,
+        # v23 (x-2019): the REQUEST verbatim beside the effect, including any
+        # [1m] suffix. `model` flips to a verified observation later; these
+        # three never do, so a silent substitution stays diffable.
+        requested_model=model or route_model,
+        requested_provider=route_provider or lane_provider,
+        requested_effort=effort,
         harness_session_id=session_uuid,
         spawned_by_session=spawned_by_session,
         spawned_by_harness=spawned_by_harness,

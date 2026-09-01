@@ -406,6 +406,7 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            ..Default::default()
         });
     })
     .unwrap();
@@ -974,6 +975,7 @@ fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agen
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            ..Default::default()
         });
     })
     .unwrap();
@@ -1134,6 +1136,7 @@ fn seed_pane_row(home: &AgentsHome, name: &str) {
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            ..Default::default()
         });
     })
     .unwrap();
@@ -2220,6 +2223,7 @@ async fn cold_start_settles_a_failed_codex_thread_resume_to_orphaned() {
             sandbox_posture: Some("workspace-write".into()),
             launch_account: None,
             related_session_id: None,
+            ..Default::default()
         });
     })
     .unwrap();

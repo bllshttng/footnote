@@ -4275,6 +4275,11 @@ fn build_claude_stream_entry(
         model: None,
         model_basis: None,
         effort: None,
+        // v23 (x-2019): adoption - the daemon observed no spawn request, so
+        // the requested axis stays unknown rather than a guess.
+        requested_model: None,
+        requested_provider: None,
+        requested_effort: None,
         harness: Some("claude".into()),
         harness_session_id: Some(uuid.into()),
         predecessor_session_ids: Vec::new(),
@@ -4725,6 +4730,10 @@ fn build_codex_thread_entry(
         // the field no longer reads unpopulated on this mint.
         model_basis: model.map(|_| "requested".to_string()),
         effort: effort.map(str::to_string),
+        // v23 (x-2019): the request beside the effect; verbatim as typed.
+        requested_model: model.filter(|m| !m.is_empty()).map(str::to_string),
+        requested_provider: None,
+        requested_effort: effort.filter(|v| !v.is_empty()).map(str::to_string),
         harness: Some("codex".into()),
         harness_session_id: Some(session_id.clone()),
         predecessor_session_ids: Vec::new(),
@@ -10444,6 +10453,7 @@ mod tests {
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            ..Default::default()
         }
     }
 
@@ -13619,6 +13629,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 fno_id: None,
                 delivery_policy: None,
                 sandbox_posture: None,
+                ..Default::default()
             });
         })
         .unwrap();
@@ -13709,6 +13720,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 fno_id: None,
                 delivery_policy: None,
                 sandbox_posture: None,
+                ..Default::default()
             });
         })
         .unwrap();
@@ -13868,6 +13880,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 fno_id: None,
                 delivery_policy: None,
                 sandbox_posture: None,
+                ..Default::default()
             });
         })
         .unwrap();
@@ -14343,6 +14356,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 fno_id: None,
                 delivery_policy: None,
                 sandbox_posture: None,
+                ..Default::default()
             });
         })
         .unwrap();
@@ -14573,6 +14587,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            ..Default::default()
         });
         assert_eq!(derive_short_id("worker-A", &reg), "workerA1");
     }
@@ -14631,6 +14646,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            ..Default::default()
         }
     }
 
@@ -16120,6 +16136,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            ..Default::default()
         }
     }
 
@@ -17672,6 +17689,7 @@ done
                 fno_id: None,
                 delivery_policy: None,
                 sandbox_posture: None,
+                ..Default::default()
             });
         })
         .unwrap();
@@ -17738,6 +17756,7 @@ done
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: None,
+            ..Default::default()
         }
     }
 

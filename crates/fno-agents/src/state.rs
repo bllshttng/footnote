@@ -148,7 +148,16 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // rationale as v22: the stamp is written once and read much later, so an
 // erasure on read-modify-write is unrecoverable rather than self-healing.
 // Accepted set widens to 1..=23.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 23;
+//
+// v24 (x-2019) adds the requested axis - `requested_model` /
+// `requested_provider` / `requested_effort`, the spawn REQUEST verbatim as
+// typed beside the observed axes, so a silent substitution is a one-line diff.
+// Same writer-protection rationale as v22/v23: a pre-v24 writer accepts the
+// unknown keys and erases them on its next read-modify-write. Measured live
+// 2026-09-01: a writer without the fields erased the stamps at an EQUAL
+// version number, so this takes the next free number instead of reusing 23.
+// Accepted set widens to 1..=24.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 24;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -450,7 +459,7 @@ pub struct MuxRef {
 /// `spawn_trigger` sat outside the struct that way until x-944f and read
 /// 0-of-37 populated on the live fleet as a result. Adding a Python-only field
 /// means mirroring it here in the same commit.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RegistryEntry {
     pub name: String,
     /// Daemon-set PTY field. Python's `AgentEntry` now mirrors it as
@@ -564,6 +573,18 @@ pub struct RegistryEntry {
     /// re-serializes must keep the stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
+    /// v23 (x-2019): the spawn REQUEST, verbatim as the flags spelled it (any
+    /// `[1m]` suffix included), stamped once at birth beside the observed
+    /// axes. `model`/`model_basis` flip to a verified observation; these never
+    /// do, so requested-vs-observed stays a one-line diff. Absence means
+    /// unknown, the `node`/`origin` discipline - never a default. Mirrors
+    /// Python's `AgentEntry.requested_*`; same X3 passthrough duty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_effort: Option<String>,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` (ab-b946b59c):
     /// skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2032,6 +2053,7 @@ mod tests {
             origin: None,
             spawn_trigger: None,
             legacy_claude_short_id: None,
+            ..Default::default()
         }
     }
 
