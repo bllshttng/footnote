@@ -103,13 +103,18 @@ LEAVE = "leave"
 #: notices a live worker on a node no claim covers.
 UNCLAIMED = "unclaimed"
 RECOVERABLE = "recoverable"
+#: The keeper lane (x-1f8a): a `--only keeper` filter value, not a row
+#: verdict - keepers have no registry row by definition (a claimed keeper is
+#: LEAVE), so the keeper findings never appear in the per-row table. Discovery
+#: and the verdict live in :mod:`fno.agents.keeper_lane`.
+KEEPER = "keeper"
 
 #: Every verdict this module can return. `--only` validates against THIS, not
 #: against a hand-copied tuple in the CLI: the copy went stale the moment a
 #: verdict was added, and `--only unclaimed` exited 2 on a verdict the sweep
 #: had been producing all along.
 VERDICTS = frozenset({
-    GHOST, REAP, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED, RECOVERABLE,
+    GHOST, REAP, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED, RECOVERABLE, KEEPER,
 })
 
 _RECOVERY_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhd])$", re.IGNORECASE)
