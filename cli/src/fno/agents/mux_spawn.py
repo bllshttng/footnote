@@ -4542,6 +4542,9 @@ def dispatch_spawn_pane(
                     # one a worker row stayed ABSENT, and absent is the value
                     # that cannot be told apart from never-recorded (x-944f).
                     origin="spawn",
+                    # The mux pane back half: this row's PTY is a pane in
+                    # mux.session (the mux ref stamped below).
+                    substrate="pane",
                     crown_level=crown_level,
                     crown_scope=crown_scope,
                     crown_grantor=crown_grantor_val,

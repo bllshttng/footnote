@@ -792,6 +792,10 @@ fn dispatch_opencode_serve_inner(
         // session's env, so the exported FNO_NODE names the node THIS spawn
         // is for.
         node: std::env::var("FNO_NODE").ok().filter(|v| !v.is_empty()),
+        // The serve-hosted worker lane (a detached run --attach writer behind
+        // a shared serve): the public "thread" name for the local bg
+        // selector.
+        substrate: Some("thread".into()),
         name: name.to_string(),
         short_id: session_id.clone(),
         legacy_provider: String::new(),

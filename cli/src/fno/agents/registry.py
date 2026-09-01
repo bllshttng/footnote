@@ -238,7 +238,14 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # next read-modify-write silently erases it, after which the respawn check has
 # no recorded pid and backfills whichever child answers. The bump makes that
 # erasure a loud version refusal instead.
-SCHEMA_VERSION = 22
+# v23 (x-3837): additive `substrate` - the lane a row was spawned on ("pane",
+# "thread", "headless"), stamped once at birth by the writer that resolved the
+# lane so a later restore reads the lane instead of guessing it off a mux ref
+# or a pid. None on rows whose writer cannot know (adopt, manifest synthesis);
+# ABSENCE MEANS UNKNOWN, never "pane". Same writer-refusal rationale as v22:
+# the stamp is written once and read much later, so an erasure on
+# read-modify-write is unrecoverable rather than self-healing.
+SCHEMA_VERSION = 23
 
 
 class RegistryVersionError(RuntimeError):
@@ -437,6 +444,16 @@ class AgentEntry:
     # name. Mirrors Rust ``RegistryEntry.keeper_child_pid``; gated by the v22
     # schema bump so an older writer refuses rather than silently erases it.
     keeper_child_pid: Optional[int] = None
+    # The substrate this row was spawned on (v23, x-3837): "pane", "thread" or
+    # "headless", stored under the public names the capability table keys on
+    # (never "bg", the deprecated alias for thread). Stamped once at birth by
+    # the writer that resolved the lane. None on rows whose writer cannot know
+    # (adopt, manifest synthesis) - ABSENCE MEANS UNKNOWN, never "pane",
+    # because a silent default would tell restore to resurrect a session that
+    # exited on purpose. Mirrors Rust ``RegistryEntry.substrate``; gated by the
+    # v23 schema bump so an older writer refuses rather than silently erases
+    # the stamp on read-modify-write.
+    substrate: Optional[str] = None
     last_reconciled_at: Optional[str] = None
     # Latest inside-leg report for this row's claude pane (inside-out E3.1,
     # "contract v2"; mirrors the Rust `RegistryEntry.inside_leg` /
@@ -1946,6 +1963,10 @@ def register_existing_session(
             # x-98ab: the SessionStart caller passes the session's own exported
             # FNO_NODE; a caller that cannot know leaves None.
             node=node,
+            # Registration observes a session that already exists; the lane it
+            # runs on is unobserved, so the substrate stays unknown (never
+            # "pane").
+            substrate=None,
             spawned_by_session=_sb_session,
             spawned_by_harness=_sb_harness,
             spawned_by_cwd=_sb_cwd,

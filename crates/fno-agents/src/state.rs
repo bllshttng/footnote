@@ -139,7 +139,16 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // backfills whichever child currently answers. The bump turns that silent
 // erasure into a loud refusal, the same reason v16 bumped for origin.
 // Accepted set widens to 1..=22.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 22;
+//
+// v23 (x-3837) adds `substrate` - the lane a row was spawned on ("pane",
+// "thread", "headless"), stamped once at birth by the writer that resolved the
+// lane so a later restore reads the lane instead of guessing it off a mux ref
+// or a pid. `None` on rows whose writer cannot know (adopt, manifest
+// synthesis); ABSENCE MEANS UNKNOWN, never "pane". Same writer-refusal
+// rationale as v22: the stamp is written once and read much later, so an
+// erasure on read-modify-write is unrecoverable rather than self-healing.
+// Accepted set widens to 1..=23.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 23;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -615,6 +624,14 @@ pub struct RegistryEntry {
     /// assertion input on read-modify-write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keeper_child_pid: Option<u32>,
+    /// The substrate this row was spawned on: "pane", "thread" or "headless".
+    /// `None` on a row whose writer cannot know (adopt, manifest synthesis) -
+    /// ABSENCE MEANS UNKNOWN, never "pane", because a silent default would tell
+    /// restore to resurrect a session that exited on purpose. Mirrors Python's
+    /// `AgentEntry.substrate`; gated by the v23 schema bump so an older writer
+    /// refuses the store rather than erasing a stamp on read-modify-write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substrate: Option<String>,
     #[serde(default)]
     pub log_path: Option<String>,
     /// Timestamp of the most recent reconcile probe (finding #1 High): the
@@ -1965,6 +1982,7 @@ mod tests {
 
     fn sample_entry(name: &str) -> RegistryEntry {
         RegistryEntry {
+            substrate: None,
             node: None,
             spawned_by_session: None,
             spawned_by_harness: None,
@@ -2015,6 +2033,48 @@ mod tests {
             spawn_trigger: None,
             legacy_claude_short_id: None,
         }
+    }
+
+    #[test]
+    fn state_substrate_roundtrips_and_absence_reads_none() {
+        // v23: the lane stamp survives the FILE round-trip through the same
+        // load/save pair the daemon uses, and a row without one reads None -
+        // absence means unknown, never "pane".
+        let dir = tmpdir("substrate");
+        let path = dir.join("registry.json");
+        let mut stamped = sample_entry("thread-worker");
+        stamped.substrate = Some("thread".into());
+        let mut old_row = sample_entry("old-row");
+        // Distinct session identity: the write path backfills
+        // harness_session_id from codex_session_id, and two rows sharing
+        // "uuid-1" refuse the store on an identity collision.
+        old_row.codex_session_id = Some("uuid-2".into());
+        update_registry(&path, |r| {
+            r.entries.push(stamped);
+            r.entries.push(old_row);
+        })
+        .unwrap();
+        let reg = load_registry(&path).unwrap();
+        let thread_row = reg
+            .entries
+            .iter()
+            .find(|e| e.name == "thread-worker")
+            .unwrap();
+        assert_eq!(thread_row.substrate.as_deref(), Some("thread"));
+        let old_row = reg.entries.iter().find(|e| e.name == "old-row").unwrap();
+        assert_eq!(old_row.substrate, None);
+
+        // skip-when-None keeps an unstamped row's key off disk entirely.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let old_obj = raw.split("old-row").nth(1).unwrap();
+        assert!(!old_obj.contains("substrate"));
+
+        // Python-authored shape (the key present) parses into the same value.
+        let python_row = r#"{"name":"m","provider":"claude","cwd":"/p","log_path":null,
+            "created_at":"2026-07-02T00:00:00Z","status":"live",
+            "substrate":"headless"}"#;
+        let row: RegistryEntry = serde_json::from_str(python_row).unwrap();
+        assert_eq!(row.substrate.as_deref(), Some("headless"));
     }
 
     #[test]

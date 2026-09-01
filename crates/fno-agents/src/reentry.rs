@@ -483,6 +483,7 @@ mod tests {
 
     fn row(name: &str) -> RegistryEntry {
         RegistryEntry {
+            substrate: None,
             node: None,
             name: name.into(),
             short_id: String::new(),

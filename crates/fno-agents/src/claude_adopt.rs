@@ -167,6 +167,9 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         // x-98ab: adoption observed nothing about the session's node, so the
         // axis stays unknown - never parsed out of the name.
         node: None,
+        // The adopter was not at the spawn, so the substrate axis stays
+        // unknown rather than guessed.
+        substrate: None,
         // x-d285: adopted, not launched here - HOW this session got its
         // account is unobserved, so the account axis stays unknown (never
         // "default").

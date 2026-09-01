@@ -1067,6 +1067,8 @@ fn dispatch_create(
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     let new_entry = RegistryEntry {
         node: None,
+        // The one-shot gemini -p lane: non-interactive by construction.
+        substrate: Some("headless".into()),
         name: name.to_string(),
         short_id: String::new(),
         legacy_provider: String::new(),

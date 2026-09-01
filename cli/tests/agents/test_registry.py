@@ -713,8 +713,8 @@ def test_us2_schema_version_is_three() -> None:
     """
     from fno.agents.registry import SCHEMA_VERSION
 
-    # v22 (x-ac6b): additive `keeper_child_pid` - the restart-sweep assertion.
-    assert SCHEMA_VERSION == 22
+    # v23 (x-3837): additive `substrate` - the lane a row was spawned on.
+    assert SCHEMA_VERSION == 23
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
@@ -742,6 +742,41 @@ def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
     loaded = load_registry()[0]
     assert loaded.predecessor_session_ids == ["session-a"]
     assert loaded.forked_from_session_id == "session-root"
+
+
+def test_substrate_round_trips_and_absence_stays_unknown(tmp_path: Path, monkeypatch) -> None:
+    # v23: the lane stamp survives a Python write-read cycle, and a row that
+    # never carried one reads None - never "pane", the silent default the
+    # field exists to replace.
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    stamped = AgentEntry(
+        name="thread-worker",
+        cwd="/tmp",
+        log_path="",
+        harness="claude",
+        harness_session_id="session-t",
+        substrate="thread",
+    )
+    write_registry([stamped])
+
+    loaded = load_registry()
+    assert loaded[0].substrate == "thread"
+    # A row written before the field existed carries no key and reads unknown.
+    write_registry(
+        [
+            AgentEntry(
+                name="old-row",
+                cwd="/tmp",
+                log_path="",
+                harness="claude",
+                harness_session_id="session-old",
+            )
+        ]
+    )
+    assert load_registry()[0].substrate is None
 
 
 def test_session_transition_classifies_liveness_truth() -> None:
@@ -2116,7 +2151,7 @@ def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):
         write_registry,
     )
 
-    assert SCHEMA_VERSION == 22
+    assert SCHEMA_VERSION == 23
     use_tmpdir(monkeypatch, tmp_path)
     entry = register_existing_session(
         provider=CLAUDE_HARNESS,
