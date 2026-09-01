@@ -80,7 +80,37 @@ mkdir -p "$BIN"
 EMITTED="$TMP/emitted.jsonl"
 CLASSIFY_MARKER="$TMP/classify.ran"
 export CLASSIFY_PYTHONPATH="$REPO_ROOT/cli/src"
-export CLASSIFY_PYTHON="$REPO_ROOT/cli/.venv/bin/python"
+# The interpreter that can import the real classifier, chosen POSITIVELY and
+# proven before any case runs.
+#
+# This was pinned to `$REPO_ROOT/cli/.venv/bin/python`, which exists in the
+# canonical checkout and in NO fresh worktree. Every positive case then failed
+# with "NO attestation emitted" - a missing interpreter wearing the exact
+# costume of the defect this suite guards, inside the suite that guards it. A
+# red that means "the harness could not run" must never be spelled the same as
+# a red that means "the hook stayed silent".
+#
+# So: try the candidates, keep the first that can actually import the module,
+# and if none can, exit 77 (the runner's skip) naming the reason. Never fall
+# through to a run that scores the hook against an interpreter it never had.
+CLASSIFY_PYTHON=""
+for candidate in \
+  "$REPO_ROOT/cli/.venv/bin/python" \
+  "$REPO_ROOT/../../../cli/.venv/bin/python" \
+  "$(command -v python3 || true)"; do
+  [[ -x "$candidate" ]] || continue
+  if PYTHONPATH="$CLASSIFY_PYTHONPATH" "$candidate" -c 'import fno.review.cli' 2>/dev/null; then
+    CLASSIFY_PYTHON="$candidate"
+    break
+  fi
+done
+if [[ -z "$CLASSIFY_PYTHON" ]]; then
+  echo "SKIP: no interpreter can import fno.review.cli from $CLASSIFY_PYTHONPATH" >&2
+  echo "  tried the worktree venv, the canonical venv, and python3 on PATH." >&2
+  echo "  Run 'uv sync --project cli' (or scripts/setup/setup-worktree.sh) first." >&2
+  exit 77
+fi
+export CLASSIFY_PYTHON
 cat > "$BIN/fno-stub" <<STUB
 #!/usr/bin/env bash
 if [[ "\${1:-}" == "doctor" && "\${2:-}" == "event" && "\${3:-}" == "emit" ]]; then
@@ -374,18 +404,37 @@ jq -nc '{forkedSkill:true, skillName:"code-review"}' \
   > "$CORPUS_DIR/agent-c0rpu5.forked-skill.marker.json"
 
 echo "== The verdict corpus: every measured shape, ruled by filename =="
-for fixture in "$FIXTURES"/*.attest "$FIXTURES"/*.silent; do
+for fixture in "$FIXTURES"/*.attest "$FIXTURES"/*.unparseable "$FIXTURES"/*.silent; do
   [[ -f "$fixture" ]] || continue
   name="$(basename "$fixture")"
   payload="$(jq -nc --arg cwd "$WORK" --arg tp "$CORPUS_TX" --rawfile msg "$fixture" \
     '{hook_event_name:"SubagentStop", cwd:$cwd, agent_type:"general-purpose",
       agent_id:"c0rpu5", agent_transcript_path:$tp, last_assistant_message:$msg}')"
   run_hook "$payload"
-  if [[ "$name" == *.attest ]]; then
-    if attested; then pass "corpus $name: attested"; else fail "corpus $name: NO attestation (ruled attest)"; fi
-  else
-    if attested; then fail "corpus $name: attested (ruled silent)"; else pass "corpus $name: silent"; fi
-  fi
+  case "$name" in
+    *.attest)
+      if attested; then pass "corpus $name: attested"; else fail "corpus $name: NO attestation (ruled attest)"; fi
+      ;;
+    *.unparseable)
+      # The x-c446 class. Asserting "a row exists" is not enough here: a row
+      # carrying a PASS would clear coverage on output nobody could read,
+      # which is worse than the silence this replaced. So the assertion is on
+      # both halves of the ruled state, and on the contract value that names
+      # it - the one field that tells a later reader WHY the round failed.
+      if ! attested; then
+        fail "corpus $name: NO attestation (ruled unparseable)"
+      elif ! grep -q '"verdict":"fail' "$EMITTED"; then
+        fail "corpus $name: attested without verdict=fail: $(cat "$EMITTED")"
+      elif ! grep -q 'prose_unparseable' "$EMITTED"; then
+        fail "corpus $name: attested without output_contract=prose_unparseable: $(cat "$EMITTED")"
+      else
+        pass "corpus $name: attested fail/prose_unparseable"
+      fi
+      ;;
+    *)
+      if attested; then fail "corpus $name: attested (ruled silent)"; else pass "corpus $name: silent"; fi
+      ;;
+  esac
 done
 
 echo "== SubagentStop: the header identity lane (payload from the corpus) =="
