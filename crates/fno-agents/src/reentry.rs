@@ -431,13 +431,20 @@ pub fn resolve_reentry_with(
             argv.push(short_id.clone());
         }
     }
-    if let Some(path) = entry
-        .route_settings_path
-        .as_deref()
-        .filter(|p| !p.is_empty())
-    {
-        argv.push("--settings".into());
-        argv.push(path.to_string());
+    // The route rides `--settings` only on the ATTACH arm. `claude respawn`
+    // restarts the job from its own saved launch, ignores extra arguments with
+    // a warning (measured: "extra arguments ignored: --settings ..."), and the
+    // job's saved launch already carries the route the original spawn applied
+    // - appending the flag here would teach a route story the binary drops.
+    if mechanism == "attach" {
+        if let Some(path) = entry
+            .route_settings_path
+            .as_deref()
+            .filter(|p| !p.is_empty())
+        {
+            argv.push("--settings".into());
+            argv.push(path.to_string());
+        }
     }
 
     Ok(ReentryPlan {
@@ -692,19 +699,55 @@ mod tests {
             plan.route_settings_path.as_deref(),
             Some(want_path.as_str())
         );
+        // Respawn argv stays bare: `claude respawn` restarts the job from its
+        // own saved launch and IGNORES extra arguments (measured warning), so
+        // the recorded route rides the job state, not this argv. The route
+        // file is still recorded on the plan for consumers that need it.
         assert_eq!(
             plan.argv,
             vec![
                 "claude".to_string(),
                 "respawn".to_string(),
-                "aaaaaaaa".to_string(),
-                "--settings".to_string(),
-                dir.to_string_lossy().to_string(),
+                "aaaaaaaa".to_string()
             ]
+        );
+        assert_eq!(
+            plan.route_settings_path.as_deref(),
+            Some(dir.to_string_lossy().to_string()).as_deref()
         );
         assert_eq!(
             plan.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
             Some("/acct/makers/cfg")
+        );
+
+        // The ATTACH arm is a fresh interactive launch: there the recorded
+        // route DOES ride the argv as --settings.
+        let mut e2 = row("glm");
+        e2.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e2.short_id = "aaaaaaaa".into();
+        e2.provider = Some("zai".into());
+        e2.launch_account = Some("makers".into());
+        e2.route_settings_path = Some(dir.to_string_lossy().to_string());
+        e2.cwd = std::env::temp_dir().to_string_lossy().to_string();
+        let attach = resolve_reentry_with(
+            &reg(vec![e2]),
+            "glm",
+            ReentryTransition::Attach,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            attach.argv,
+            vec![
+                "claude".to_string(),
+                "attach".to_string(),
+                "aaaaaaaa".to_string(),
+                "--settings".to_string(),
+                dir.to_string_lossy().to_string(),
+            ]
         );
         // Secrets never cross the boundary: the token lives in the 0600 file
         // the plan only NAMES.

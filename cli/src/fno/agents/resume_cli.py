@@ -44,8 +44,9 @@ Exit codes:
 - 13  - name not in registry / missing cwd / missing session_id /
   unsupported provider.
 - 14  - provider CLI not on ``$PATH``.
-- 16  - claude wake attempts ran but the live state never reached
-  Working.
+- 16  - claude wake attempts ran but the wake never landed: the live state
+  never reached Working AND the message never appeared in the transcript
+  after the pre-wake marker.
 """
 from __future__ import annotations
 
