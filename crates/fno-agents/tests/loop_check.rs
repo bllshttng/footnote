@@ -10074,3 +10074,199 @@ fn operator_waiver_no_law_is_a_clean_no() {
     assert_eq!(waiver, None);
     assert!(!unknown, "a verdict of none is an answer, not a failure");
 }
+
+// ── review.posture (x-f324): the coverage row carries the resolved rung ────
+//
+// The Rust producer resolves review.posture (explicit, legacy-inferred, or the
+// shipped default), evaluates it against the same verdicts coverage used, and
+// emits `review_posture` on the row. Python reads the fields verbatim; these
+// tests pin the wire contract the receipt consumes.
+
+use serde_json::Value;
+
+fn last_review_coverage_row(project: &Path) -> Value {
+    let text = fs::read_to_string(project).unwrap();
+    let mut row: Option<Value> = None;
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) == Some("review_coverage") {
+            row = Some(v);
+        }
+    }
+    row.expect("a review_coverage row was emitted")
+}
+
+/// Bare install (no review config at all): the posture resolves to the shipped
+/// DEFAULT floor self_review (rung 3), and with no review evidence the row
+/// reports unsatisfied with the exact self gap.
+#[test]
+fn review_posture_defaults_to_self_review_and_reports_gaps() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().join("proj");
+    pub_fixture(&cwd, "");
+    let project = cwd.join(".fno/events.jsonl");
+    let global = tmp.path().join("global.jsonl");
+    let bins = TempDir::new().unwrap();
+    let gh = recording_green_gh(bins.path(), &tmp.path().join("rec"), false);
+    let git = pub_git(bins.path());
+
+    let (code, json) = fire_verb(&cwd, &gh, &git, &project, &global);
+    assert_eq!(code, 0, "{json}");
+    let p = last_review_coverage_row(&project)["data"]["review_posture"].clone();
+    assert_eq!(p["posture"], "self_review");
+    assert_eq!(p["rank"], 3);
+    assert_eq!(p["source"], "default");
+    assert_eq!(p["cost"], "one review");
+    assert_eq!(p["posture_satisfied"], false);
+    let gaps = p["posture_gaps"].as_array().unwrap();
+    assert_eq!(gaps.len(), 1, "{p}");
+    assert!(gaps[0].as_str().unwrap().starts_with("self:"), "{p}");
+}
+
+/// Explicit github_review plus a required bot that reviewed at the head: the
+/// rung is satisfied with no gaps, and the source records the explicit leaf.
+#[test]
+fn review_posture_explicit_github_rung_is_satisfied_by_app_review() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().join("proj");
+    pub_fixture(
+        &cwd,
+        "[review]\nposture = \"github_review\"\nrequired_bots = [\"chatgpt-codex-connector\"]\n",
+    );
+    let project = cwd.join(".fno/events.jsonl");
+    let global = tmp.path().join("global.jsonl");
+    let bins = TempDir::new().unwrap();
+    let gh = recording_green_gh(bins.path(), &tmp.path().join("rec"), true);
+    let git = pub_git(bins.path());
+
+    let (code, json) = fire_verb(&cwd, &gh, &git, &project, &global);
+    assert_eq!(code, 0, "{json}");
+    let p = last_review_coverage_row(&project)["data"]["review_posture"].clone();
+    assert_eq!(p["posture"], "github_review");
+    assert_eq!(p["rank"], 5);
+    assert_eq!(p["source"], "explicit");
+    assert_eq!(p["posture_satisfied"], true);
+    assert_eq!(
+        p["posture_gaps"].as_array().unwrap().len(),
+        0,
+        "gaps must be empty when satisfied: {p}"
+    );
+}
+
+/// Posture unset with a legacy github_apps gate: one visible legacy rung,
+/// self_and_github (the shipped floor composes with the App gate), and the
+/// satisfaction is false because the self lane has no evidence.
+#[test]
+fn review_posture_legacy_inference_names_self_and_github() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().join("proj");
+    pub_fixture(
+        &cwd,
+        "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n",
+    );
+    let project = cwd.join(".fno/events.jsonl");
+    let global = tmp.path().join("global.jsonl");
+    let bins = TempDir::new().unwrap();
+    let gh = recording_green_gh(bins.path(), &tmp.path().join("rec"), true);
+    let git = pub_git(bins.path());
+
+    let (code, json) = fire_verb(&cwd, &gh, &git, &project, &global);
+    assert_eq!(code, 0, "{json}");
+    let p = last_review_coverage_row(&project)["data"]["review_posture"].clone();
+    assert_eq!(p["posture"], "self_and_github");
+    assert_eq!(p["rank"], 7);
+    assert_eq!(p["source"], "legacy");
+    assert_eq!(p["posture_satisfied"], false);
+    let gaps = p["posture_gaps"].as_array().unwrap();
+    assert_eq!(
+        gaps.len(),
+        1,
+        "the github lane is covered, self is not: {p}"
+    );
+    assert!(gaps[0].as_str().unwrap().starts_with("self:"), "{p}");
+}
+
+/// independent_review: other evidence without the fresh-context marker never
+/// satisfies rung 4 (AC4-ERR); adding a pass attestation that carries
+/// reviewer_context=fresh at the same head does.
+#[test]
+fn review_posture_independent_rung_requires_fresh_context_marker() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().join("proj");
+    pub_fixture(
+        &cwd,
+        "[review]\nposture = \"independent_review\"\nreviewers = [\"code-review\"]\n",
+    );
+    let project = cwd.join(".fno/events.jsonl");
+    let global = tmp.path().join("global.jsonl");
+    let bins = TempDir::new().unwrap();
+    let gh = recording_green_gh(bins.path(), &tmp.path().join("rec"), false);
+    let git = pub_git(bins.path());
+
+    // A head-pinned pass with NO context marker (the whole pre-landing
+    // cohort): the rung stays unsatisfied.
+    fs::write(
+        &project,
+        format!(
+            "{{\"type\":\"review_attestation\",\"data\":{{\"reviewer\":\"code-review\",\"head_sha\":\"{PUB_HEAD}\",\"verdict\":\"pass\",\"session_id\":\"run-a\",\"attester_session_id\":\"sess-other\",\"branch\":\"main\"}}}}\n"
+        ),
+    )
+    .unwrap();
+    let (code, json) = fire_verb(&cwd, &gh, &git, &project, &global);
+    assert_eq!(code, 0, "{json}");
+    let p = last_review_coverage_row(&project)["data"]["review_posture"].clone();
+    assert_eq!(p["posture"], "independent_review");
+    assert_eq!(p["posture_satisfied"], false, "{p}");
+
+    // The same reviewer re-attests at the same head WITH the positive fresh
+    // marker: the marker, not the session identity, is what rung 4 reads.
+    let mut seeded = fs::read_to_string(&project).unwrap();
+    seeded.push_str(&format!(
+        "{{\"type\":\"review_attestation\",\"data\":{{\"reviewer\":\"code-review\",\"head_sha\":\"{PUB_HEAD}\",\"verdict\":\"pass\",\"session_id\":\"run-a\",\"attester_session_id\":\"sess-fresh\",\"branch\":\"main\",\"reviewer_context\":\"fresh\"}}}}\n"
+    ));
+    fs::write(&project, seeded).unwrap();
+    let (code, json) = fire_verb(&cwd, &gh, &git, &project, &global);
+    assert_eq!(code, 0, "{json}");
+    let p = last_review_coverage_row(&project)["data"]["review_posture"].clone();
+    assert_eq!(p["posture_satisfied"], true, "{p}");
+    assert_eq!(
+        p["posture_gaps"].as_array().unwrap().len(),
+        0,
+        "gaps must be empty when satisfied: {p}"
+    );
+}
+
+/// declare and sigma never satisfy the self component: a self-cert and a
+/// retired panel cannot make a posture look reviewed (Locked Decision 4 and
+/// the declare scoping).
+#[test]
+fn review_posture_declare_and_sigma_never_satisfy_the_self_component() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().join("proj");
+    pub_fixture(
+        &cwd,
+        "[review]\nposture = \"self_review\"\nreviewers = [\"declare\", \"sigma\"]\n",
+    );
+    let project = cwd.join(".fno/events.jsonl");
+    let global = tmp.path().join("global.jsonl");
+    let bins = TempDir::new().unwrap();
+    let gh = recording_green_gh(bins.path(), &tmp.path().join("rec"), false);
+    let git = pub_git(bins.path());
+
+    fs::write(
+        &project,
+        format!(
+            "{{\"type\":\"review_attestation\",\"data\":{{\"reviewer\":\"declare\",\"head_sha\":\"{PUB_HEAD}\",\"verdict\":\"pass\",\"session_id\":\"run-a\",\"attester_session_id\":\"sess-x\",\"branch\":\"main\"}}}}\n{{\"type\":\"review_attestation\",\"data\":{{\"reviewer\":\"sigma\",\"head_sha\":\"{PUB_HEAD}\",\"verdict\":\"pass\",\"session_id\":\"run-a\",\"attester_session_id\":\"sess-x\",\"branch\":\"main\"}}}}\n"
+        ),
+    )
+    .unwrap();
+    let (code, json) = fire_verb(&cwd, &gh, &git, &project, &global);
+    assert_eq!(code, 0, "{json}");
+    let p = last_review_coverage_row(&project)["data"]["review_posture"].clone();
+    assert_eq!(p["posture_satisfied"], false, "{p}");
+    let gaps = p["posture_gaps"].as_array().unwrap();
+    assert_eq!(gaps.len(), 1, "{p}");
+    assert!(gaps[0].as_str().unwrap().starts_with("self:"), "{p}");
+}

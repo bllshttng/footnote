@@ -483,6 +483,10 @@ event_types:
                 type: string
                 enum: [self_attested, other_session, unknown]
                 description: "Authorship of a local_attestation review, computed from attester_session_id vs the authoring session's harness_session_id. self_attested = emitted by the authoring session; other_session = emitted by a different session (NOT 'independent' - a self-handoff successor or a second agent in a shared worktree is a different session and still not independent); unknown = attester empty/absent or the author session is unknown (the entire pre-landed backlog). Meaningful only on local_attestation verdicts; github_app/human approvals omit it. Recorded, never gating: reviewed_count does not read this field, so a self_attested verdict counts toward coverage exactly like any other and a green PR whose only attestation is self_attested is covered and may merge. Whether that should stay true is a later gate decision, not this field."
+              reviewer_context:
+                type: string
+                enum: [fresh, shared, unknown]
+                description: "Positive evidence about the reviewing context, mirrored verbatim from the review_attestation event that produced the verdict (x-f324). fresh = a harness-recorded forked review context; shared = a same-context review tool result; unknown = no positive marker. Read ONLY by the review_posture verdict's independent component (AC4-ERR: other_session or unknown never satisfies rung 4); the coverage count never reads it, and invoker identity is not an input to it. Omitted when the event predates the field."
         head_sha:
           type: string
           description: "The HEAD the coverage was computed against (coverage is a snapshot). This is the EVAL head, not the head any reviewer read - that is per-verdict `reviewed_sha`. Conflating the two is x-5b99: the merge gate compared this field against the current head and correctly refused a stale eval, but a FRESH eval carrying a stale bot verdict walked straight through it."
@@ -520,6 +524,38 @@ event_types:
         impossible:
           type: boolean
           description: "events_rounds_exhausted AND a hard non-terminal finding remains: a CONFIRMED correctness or security finding, or a truncated remainder. Only this shape keeps the IMPOSSIBLE verdict (exit 5) at the cap; every other non-terminal finding is filed by the merge gate and the PR merges. Advisory on the row - every gate surface re-derives before answering (the merge gate through coverage_verdict, fno do pr status through cap_verdict) - so this flag is an audit trail, never a gate input."
+        review_posture:
+          type: object
+          description: "The authoritative resolved review-posture verdict (x-f324), computed by the Rust producer against the same verdicts coverage used and carried verbatim by every Python reader (AC6-HP: Python never reclassifies). Resolved from config.review.posture - explicit, or inferred from the legacy settings with the source naming which - and satisfied only when every component the rung names is evidenced at the evaluated head. OPTIONAL: absent on rows produced before this field existed and on unknown/failure rows, where absence reads 'no posture resolved here', never 'unsatisfied'."
+          properties:
+            posture:
+              type: string
+              enum: [no_review, tests_pass, self_review, independent_review, github_review, peer_review, self_and_github, self_and_peer, self_github_and_peer]
+              description: "The resolved rung."
+            rank:
+              type: integer
+              description: "Ladder position, 1 (no_review) to 9 (self_github_and_peer). Auto-merge refuses below 3."
+            source:
+              type: string
+              enum: [explicit, legacy, default]
+              description: "How the rung was resolved: the config leaf, inferred from legacy settings, or the shipped floor."
+            cost:
+              type: string
+              description: "What the rung costs (zero reviews | one review | one fresh reviewer | one App review | one peer review | two reviews | three reviews)."
+            freshness:
+              type: string
+              description: "The reviewer-context requirement the rung carries."
+            diversity:
+              type: string
+              description: "The model-diversity requirement the rung carries."
+            posture_satisfied:
+              type: boolean
+              description: "Whether every component the rung names is evidenced at the evaluated head."
+            posture_gaps:
+              type: array
+              items:
+                type: string
+              description: "One exact gap per unsatisfied component, in the component order the rung declares. Empty iff posture_satisfied."
         repo:
           type: string
           description: "Full repository identity `host/owner/repo`, lowercased, from the git remote (x-f43c). This event is written to BOTH the project log and the cross-project global log, and `pr` is a bare integer, so a reader scanning ~/.fno/events.jsonl needs this to tell repo A's PR 781 from repo B's. It is the FULL identity, never the last path segment: `org-a/widget` and `org-b/widget` would otherwise share a key, and since this gates auto-merge one repo's coverage could clear the other's guard (a fork shares head SHAs, so the staleness check would not catch it). Omitted (never null) when no remote resolves or it has fewer than two path segments; a reader must then decline to match the event in the global log rather than guess. Stable across a repo's worktrees, which is the property that lets a merge run from canonical see coverage attested inside a worktree. Producer: crates/fno-agents/src/finalize.rs `repo_identity_from_remote_url`; reader: fno/paths.py `repo_identity_from_remote_url`. The two must agree."

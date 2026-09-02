@@ -304,6 +304,12 @@ pub(crate) struct Settings {
     /// an other_session attestation is still not "independent", but it is a
     /// SECOND session, which is what this key demands.
     require_corroboration: Option<bool>,
+    /// config.review.posture (x-f324): the named rung of the review ladder.
+    /// None = unset, which resolves through the legacy inference (mirroring
+    /// `fno.config.resolve_review_posture`) or the shipped self_review floor.
+    /// A value the ladder does not carry stays None here: the Python loader
+    /// rejects the same config, so nothing that loads can disagree.
+    posture: Option<String>,
     /// config.review.github_approval_satisfies (default true): a non-author
     /// human GitHub APPROVED review counts toward coverage on its own and
     /// satisfies the corroboration term. GitHub refuses an author's approval
@@ -760,6 +766,18 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
             // so no config can load green on one side and parse false on the
             // other.
             s.require_corroboration = lax_bool(v);
+        }
+        if let Some(v) = review.get("posture") {
+            // Only a name the ladder carries is kept; anything else (a typo,
+            // a non-string) stays None so the legacy inference decides. The
+            // Python loader rejects a bad value outright, so a config that
+            // loads on one side can never parse differently on the other.
+            if let Some(raw) = v.as_str() {
+                let trimmed = raw.trim();
+                if posture_components(trimmed).is_some() {
+                    s.posture = Some(trimmed.to_string());
+                }
+            }
         }
         if let Some(v) = review.get("github_approval_satisfies") {
             // Same lax-bool contract as require_corroboration: one coercion
@@ -1399,6 +1417,10 @@ struct PrInfo {
     /// report `DonePRGreen` at coverage 0/Unknown reports `DoneUnreviewed`
     /// instead (x-0eaf). Never cached, never inferred from `reviewed`.
     coverage: CoverageReport,
+    /// The resolved review-posture verdict (x-f324), computed alongside
+    /// coverage when the caller supplied a resolved `review.posture`. None on
+    /// the no-PR early return and on callers without settings context.
+    posture: Option<PostureVerdict>,
     /// The attestation-chain range tiling computed for this read, carried so
     /// the standalone verb's stdout payload equals the row read_pr_info
     /// emitted, field for field (payload parity). Default on every early
@@ -2877,6 +2899,12 @@ fn read_pr_info(
     require_corroboration: bool,
     github_approval_satisfies: bool,
     max_rounds: i64,
+    // The resolved `review.posture` (x-f324), computed by the caller from the
+    // parsed settings. None on callers that have no settings context.
+    posture: Option<&PostureConfig>,
+    // The local reviewer names allowed to satisfy the peer posture component
+    // (the cross-model-resolved set; the same-model sentinel never matches).
+    peer_reviewers: &[String],
 ) -> Result<PrInfo, GhReadError> {
     let rest_adapter = internal_gh_adapter(gh_bin);
     let checks_read = if rest_adapter {
@@ -2924,6 +2952,7 @@ fn read_pr_info(
             review_skipped: false,
             unattested_reviewers: Vec::new(),
             malformed_attestations: 0,
+            posture: None,
             coverage: CoverageReport {
                 github_approval_satisfies: false,
                 coverage: Coverage::Covered(0),
@@ -3024,6 +3053,7 @@ fn read_pr_info(
             review_skipped: true,
             unattested_reviewers: Vec::new(),
             malformed_attestations: 0,
+            posture: None,
             coverage: CoverageReport {
                 github_approval_satisfies: false,
                 coverage: Coverage::Covered(0),
@@ -3554,18 +3584,23 @@ fn read_pr_info(
     // gate reading as an unsatisfiable one, silently, with a refusal that
     // named a count and not a location. The global log is the one file both
     // stand in; `repo` in the payload keeps it scoped (x-f43c).
+    // The posture verdict rides the same emit: coverage computed the verdicts,
+    // so satisfaction against the resolved rung is one predicate here rather
+    // than a reclassification on the Python side (AC6-HP).
+    let posture_v = posture.map(|pc| posture_verdict(pc, &coverage, peer_reviewers));
     if number > 0 {
         emit_to_both(
             events_path,
             global_events_path,
             "review_coverage",
-            coverage_event_data_tiled(
+            coverage_event_data_full(
                 number,
                 &coverage,
                 head_sha,
                 repo_slug,
                 author_session,
                 Some(&tiling),
+                posture_v.as_ref(),
             ),
         );
     }
@@ -3591,6 +3626,7 @@ fn read_pr_info(
         review_skipped: login_skipped && reviewers.is_empty(),
         unattested_reviewers: unattested,
         malformed_attestations,
+        posture: posture_v,
         coverage,
     })
 }
@@ -4859,6 +4895,251 @@ const DEFAULT_REQUIRED_BOTS: &[&str] = &[];
 
 /// Stable reviewer key emitted by every identity-free peer. Multiple configured
 /// peer harnesses are alternatives for one composite gate, not N required votes.
+// ── review.posture (x-f324) ──────────────────────────────────────────────────
+//
+// The nine-rung ladder, mirrored from `fno.config.REVIEW_POSTURES`. One leaf
+// names how much review a code PR must have; coverage resolves the rung and
+// reports satisfaction against the verdicts it already computed. Python reads
+// the emitted fields and never reclassifies them (the Ownership rule).
+
+/// Component vocabulary -> (rank, cost, freshness, diversity) per rung. The
+/// component strings are the shared vocabulary: `self`, `independent`,
+/// `github`, `peer`. `check-reviewer-descriptor-parity.sh` pins ranks and
+/// costs against the Python table.
+fn posture_rung(
+    value: &str,
+) -> Option<(
+    &'static [&'static str],
+    i64,
+    &'static str,
+    &'static str,
+    &'static str,
+)> {
+    match value {
+        "no_review" => Some((&[], 1, "zero reviews", "none", "none")),
+        "tests_pass" => Some((&[], 2, "zero reviews", "none", "none")),
+        "self_review" => Some((
+            &["self"],
+            3,
+            "one review",
+            "same context sufficient",
+            "same model allowed",
+        )),
+        "independent_review" => Some((
+            &["independent"],
+            4,
+            "one fresh reviewer",
+            "fresh reviewer context required",
+            "same model allowed",
+        )),
+        "github_review" => Some((
+            &["github"],
+            5,
+            "one App review",
+            "external",
+            "configured App",
+        )),
+        "peer_review" => Some((
+            &["peer"],
+            6,
+            "one peer review",
+            "fresh reviewer context required",
+            "different model family required",
+        )),
+        "self_and_github" => Some((&["self", "github"], 7, "two reviews", "mixed", "mixed")),
+        "self_and_peer" => Some((&["self", "peer"], 8, "two reviews", "mixed", "mixed")),
+        "self_github_and_peer" => Some((
+            &["self", "github", "peer"],
+            9,
+            "three reviews",
+            "mixed",
+            "mixed",
+        )),
+        _ => None,
+    }
+}
+
+/// Lookup used by the settings parser: value -> components only.
+fn posture_components(value: &str) -> Option<&'static [&'static str]> {
+    posture_rung(value).map(|(c, _, _, _, _)| c)
+}
+
+/// The resolved posture carried into read_pr_info. Computed once by the
+/// caller (which owns the parsed settings), evaluated against verdicts there.
+#[derive(Debug, Clone, Serialize)]
+pub struct PostureConfig {
+    pub value: String,
+    pub rank: i64,
+    pub components: &'static [&'static str],
+    /// explicit | legacy | default - how the rung was resolved.
+    pub source: &'static str,
+    pub cost: &'static str,
+    pub freshness: &'static str,
+    pub diversity: &'static str,
+}
+
+/// The authoritative posture verdict serialized on every `review_coverage`
+/// row that carries a resolved posture. Python reads these fields verbatim.
+#[derive(Debug, Clone, Serialize)]
+pub struct PostureVerdict {
+    pub posture: String,
+    pub rank: i64,
+    pub source: String,
+    pub cost: String,
+    pub freshness: String,
+    pub diversity: String,
+    pub posture_satisfied: bool,
+    pub posture_gaps: Vec<String>,
+}
+
+/// Resolve the one posture a settings block names, mirroring
+/// `fno.config.resolve_review_posture` signal for signal. Explicit wins;
+/// absent infers from the legacy settings (preserving an explicit
+/// `self_review_required=false` opt-out and a declared-empty gate); a bare
+/// install is the shipped DEFAULT floor (rung 3), never an inference.
+///
+/// One deliberate divergence, inherited from the gate itself: Rust honors an
+/// explicit `self_review_required=false` only behind a LIVE opt-out claim, so
+/// `floor_off` reads the EFFECTIVE value. A config carrying an unclaimed
+/// false reads floor-on here, which errs toward holding the gate - never
+/// toward clearing it.
+fn resolve_posture_config(settings: &Settings) -> PostureConfig {
+    if let Some(p) = settings.posture.as_deref() {
+        if let Some((components, rank, cost, freshness, diversity)) = posture_rung(p) {
+            return PostureConfig {
+                value: p.to_string(),
+                rank,
+                components,
+                source: "explicit",
+                cost,
+                freshness,
+                diversity,
+            };
+        }
+    }
+    // Legacy inference. github_apps wins over the required_bots alias when
+    // both are set, the same way resolved_required_bots_for_author resolves.
+    let resolved_gate = settings
+        .github_apps
+        .as_ref()
+        .or(settings.required_bots.as_ref());
+    let github = matches!(resolved_gate, Some(l) if !l.is_empty());
+    let declared_none = matches!(resolved_gate, Some(l) if l.is_empty());
+    let peers = !settings.peers.is_empty();
+    let floor_off = settings.self_review_required == Some(false);
+    let self_named = settings.reviewers.iter().any(|r| {
+        let n = r.trim_start_matches('/');
+        n != "declare" && n != "sigma"
+    });
+    let corroboration = settings.require_corroboration.unwrap_or(false);
+    let any_signal = github || declared_none || peers || corroboration || floor_off || self_named;
+    let value = if declared_none && !github && !peers {
+        "tests_pass"
+    } else if github && peers {
+        if floor_off {
+            "github_review"
+        } else {
+            "self_github_and_peer"
+        }
+    } else if github {
+        if floor_off {
+            "github_review"
+        } else {
+            "self_and_github"
+        }
+    } else if peers {
+        if floor_off {
+            "peer_review"
+        } else {
+            "self_and_peer"
+        }
+    } else if corroboration {
+        // The author's own attestation reads uncovered under corroboration,
+        // so the honest legacy reading is the rung demanding non-self evidence.
+        "independent_review"
+    } else if self_named {
+        "self_review"
+    } else if floor_off {
+        // An explicit (claim-backed) opt-out with no other lane.
+        "no_review"
+    } else {
+        "self_review"
+    };
+    let source = if any_signal { "legacy" } else { "default" };
+    let (components, rank, cost, freshness, diversity) = posture_rung(value).expect("ladder value");
+    PostureConfig {
+        value: value.to_string(),
+        rank,
+        components,
+        source,
+        cost,
+        freshness,
+        diversity,
+    }
+}
+
+/// Evaluate the resolved posture against the coverage verdicts. Every
+/// unsatisfied component names its exact gap; `declare` and `sigma` never
+/// satisfy the self lane (a self-cert and a retired panel, respectively), and
+/// the peer lane counts only verdicts the cross-model resolver admits (the
+/// same-model sentinel never matches a real reviewer name).
+fn posture_verdict(
+    config: &PostureConfig,
+    rep: &CoverageReport,
+    peer_reviewers: &[String],
+) -> PostureVerdict {
+    let satisfies = |component: &str| match component {
+        "self" => rep.verdicts.iter().any(|v| {
+            v.producer == CoverageProducer::LocalAttestation
+                && v.verdict == CoverageVerdict::Reviewed
+                && v.name != "declare"
+                && v.name != "sigma"
+        }),
+        "independent" => rep.verdicts.iter().any(|v| {
+            v.producer == CoverageProducer::LocalAttestation
+                && v.verdict == CoverageVerdict::Reviewed
+                && v.name != "declare"
+                && v.name != "sigma"
+                && v.reviewer_context.as_deref() == Some("fresh")
+        }),
+        "github" => rep.verdicts.iter().any(|v| {
+            v.producer == CoverageProducer::GithubApp && v.verdict == CoverageVerdict::Reviewed
+        }),
+        "peer" => rep.verdicts.iter().any(|v| {
+            v.producer == CoverageProducer::LocalAttestation
+                && v.verdict == CoverageVerdict::Reviewed
+                && peer_reviewers.iter().any(|p| p == &v.name)
+        }),
+        _ => false,
+    };
+    let gaps: Vec<String> = config
+        .components
+        .iter()
+        .filter(|c| !satisfies(*c))
+        .map(|c| match *c {
+            "self" => {
+                "self: no real final-head review at this head (declare/sigma excluded)".to_string()
+            }
+            "independent" => {
+                "independent: no review with positive fresh-context provenance (reviewer_context=fresh) at this head".to_string()
+            }
+            "github" => "github: no configured GitHub App review at this head".to_string(),
+            "peer" => "peer: no cross-model peer verdict at this head".to_string(),
+            other => format!("{other}: unsatisfied"),
+        })
+        .collect();
+    PostureVerdict {
+        posture: config.value.clone(),
+        rank: config.rank,
+        source: config.source.to_string(),
+        cost: config.cost.to_string(),
+        freshness: config.freshness.to_string(),
+        diversity: config.diversity.to_string(),
+        posture_satisfied: gaps.is_empty(),
+        posture_gaps: gaps,
+    }
+}
+
 const LOCAL_PEER_REVIEWER: &str = "peer";
 
 /// An unmatchable reviewer key used when every identity-free peer is the
@@ -5849,6 +6130,14 @@ pub struct ReviewerVerdict {
     /// for both classes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal_reason: Option<String>,
+    /// Positive fresh-context provenance from the attestation
+    /// (`reviewer_context`: fresh | shared | unknown); None when the event
+    /// predates the field. Measures context independence, never who invoked
+    /// the verb. The coverage count never reads it; the posture verdict's
+    /// `independent` component does (x-f324 AC4-ERR: only a positive fresh
+    /// marker satisfies rung 4 - `other_session` or unknown never does).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer_context: Option<String>,
 }
 
 /// The one counting rule for human GitHub approvals: a `reviewed` verdict
@@ -6039,6 +6328,11 @@ struct LocalPass {
     /// (`retracts_attester`): it revokes, it never covers - the answered-fail
     /// arm must not resurrect the pass it killed (x-aecc review, finding 1).
     is_retraction: bool,
+    /// Positive fresh-context provenance from the attestation
+    /// (`reviewer_context`: fresh | shared | unknown). None on events that
+    /// predate the field. Read only by the posture verdict (rung 4); the
+    /// coverage count never reads it.
+    reviewer_context: Option<String>,
 }
 
 /// The union-of-ranges coverage answer over a branch's attestations: whether
@@ -6773,6 +7067,7 @@ fn local_refused_verdicts(events_text: &str, head_sha: &str) -> Vec<ReviewerVerd
             freshness: None,
             scope: None,
             refusal_reason,
+            reviewer_context: None,
         });
     }
     out
@@ -6794,7 +7089,7 @@ fn local_latest_attestations(
     // every non-matching line here is what made a rebase destroy a review.
     let mut latest: std::collections::HashMap<
         (String, Option<String>),
-        (String, String, bool, String, bool),
+        (String, String, bool, String, bool, Option<String>),
     > = std::collections::HashMap::new();
     let mut raised_findings: std::collections::HashSet<(String, Option<String>)> =
         std::collections::HashSet::new();
@@ -6877,7 +7172,7 @@ fn local_latest_attestations(
             .map(|s| !s.is_empty())
             .unwrap_or(false);
         if is_retraction {
-            if let Some((existing_head, _, _, _, _)) = latest.get(&pair_key) {
+            if let Some((existing_head, _, _, _, _, _)) = latest.get(&pair_key) {
                 if existing_head != line_head {
                     continue;
                 }
@@ -6891,6 +7186,12 @@ fn local_latest_attestations(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        // Positive context provenance rides with the pair's latest line, so a
+        // re-attest replaces the marker with the newest evidence.
+        let reviewer_context = val
+            .pointer("/data/reviewer_context")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         // x-aecc: a fail that RAISED keyed findings marks its own pair as
         // answer-capable. Per-pair, never chain-global: a bystander's
         // findings-free fail must not ride another reviewer's dispositions
@@ -6911,13 +7212,17 @@ fn local_latest_attestations(
                 is_pass,
                 reviewed_base,
                 is_retraction,
+                reviewer_context,
             ),
         );
     }
     let mut out: Vec<LocalPass> = latest
         .into_iter()
         .map(
-            |((reviewer, attester), (head, branch, is_pass, reviewed_base, is_retraction))| {
+            |(
+                (reviewer, attester),
+                (head, branch, is_pass, reviewed_base, is_retraction, reviewer_context),
+            )| {
                 LocalPass {
                     reviewer,
                     attester,
@@ -6926,6 +7231,7 @@ fn local_latest_attestations(
                     reviewed_base,
                     is_pass,
                     is_retraction,
+                    reviewer_context,
                 }
             },
         )
@@ -6980,6 +7286,7 @@ fn local_attestation_verdict(
         attestation_origin: classify_attestation_origin(lp.attester.as_deref(), author_session),
         reviewed_sha: lp.head.clone(),
         freshness: Some(fresh),
+        reviewer_context: lp.reviewer_context.clone(),
         // In-scope guarantees one of exactly two shapes: a line admitted
         // while scope lasts (branch match, or the exact head sha - both of
         // which keep the carry reachable on later head moves), or a legacy
@@ -7163,6 +7470,7 @@ pub fn classify_coverage_tiled(
                 freshness: fresh,
                 scope: None,
                 refusal_reason: None,
+                reviewer_context: None,
             });
         }
         // (3) Known-App reviewers NOT in the configured list still count
@@ -7184,6 +7492,7 @@ pub fn classify_coverage_tiled(
                     freshness: Some(*fresh),
                     scope: None,
                     refusal_reason: None,
+                    reviewer_context: None,
                 });
             }
         }
@@ -7240,6 +7549,7 @@ pub fn classify_coverage_tiled(
                     freshness: Some(fresh),
                     scope: None,
                     refusal_reason: None,
+                    reviewer_context: None,
                 });
             }
         }
@@ -7406,6 +7716,7 @@ pub fn classify_coverage_tiled(
                         // above rather than recording them as covering.
                         is_pass: false,
                         is_retraction: false,
+                        reviewer_context: None,
                     });
                 }
             }
@@ -7442,6 +7753,7 @@ pub fn classify_coverage_tiled(
                         AttestationScope::AttestedBranch
                     }),
                     refusal_reason: None,
+                    reviewer_context: lp.reviewer_context.clone(),
                 });
             }
         }
@@ -7532,6 +7844,21 @@ fn coverage_event_data_tiled(
     author_session: Option<&str>,
     tiling: Option<&RangeTiling>,
 ) -> serde_json::Value {
+    coverage_event_data_full(pr, rep, head_sha, repo, author_session, tiling, None)
+}
+
+/// The full serializer: `posture` rides only on rows that resolved one (the
+/// unknown/failure rows constructed ad hoc carry None and omit the object, so
+/// absence reads "no posture resolved here", never "posture unsatisfied").
+fn coverage_event_data_full(
+    pr: i64,
+    rep: &CoverageReport,
+    head_sha: &str,
+    repo: &str,
+    author_session: Option<&str>,
+    tiling: Option<&RangeTiling>,
+    posture: Option<&PostureVerdict>,
+) -> serde_json::Value {
     // Three states, not two. `Covered(0)` is a real known zero and
     // `Coverage::is_covered()` has always returned false for it, but the
     // serializer rendered every `Covered(n)` as the string "covered" - so
@@ -7609,6 +7936,18 @@ fn coverage_event_data_tiled(
         data["rounds_exhausted"] = serde_json::json!(t.rounds_exhausted);
         data["events_rounds_exhausted"] = serde_json::json!(t.events_rounds_exhausted);
         data["impossible"] = serde_json::json!(t.impossible);
+    }
+    if let Some(p) = posture {
+        data["review_posture"] = serde_json::json!({
+            "posture": p.posture,
+            "rank": p.rank,
+            "source": p.source,
+            "cost": p.cost,
+            "freshness": p.freshness,
+            "diversity": p.diversity,
+            "posture_satisfied": p.posture_satisfied,
+            "posture_gaps": p.posture_gaps,
+        });
     }
     data
 }
@@ -8800,6 +9139,13 @@ pub(crate) fn resolve_review_inputs(
                 // side, so omitting it here made the loop gate read the global
                 // file only and the two surfaces split on one config (round 3).
                 merged.require_corroboration = local.require_corroboration;
+            }
+            if local.posture.is_some() {
+                // Same presence rule (x-f324): the rung is a project policy
+                // leaf like corroboration, so a local explicit posture must
+                // override the global file and the inference must not silently
+                // read the global-only view.
+                merged.posture = local.posture;
             }
             if !local.nudge_overrides.is_empty() {
                 // Without this line a project-local `[review.nudge]` (including
@@ -10010,6 +10356,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             settings.require_corroboration.unwrap_or(false),
             settings.github_approval_satisfies.unwrap_or(true),
             settings.max_rounds.unwrap_or(2).max(1),
+            Some(&resolve_posture_config(&settings)),
+            &resolved_local_peer_reviewers_for_author(&settings, author_harness.as_deref()),
         );
 
         match done_result {
@@ -10946,6 +11294,8 @@ fn run_done(
     require_corroboration: bool,
     github_approval_satisfies: bool,
     max_rounds: i64,
+    posture: Option<&PostureConfig>,
+    peer_reviewers: &[String],
 ) -> Result<PrInfo, GhReadError> {
     let info = read_pr_info(
         gh_bin,
@@ -10969,6 +11319,8 @@ fn run_done(
         require_corroboration,
         github_approval_satisfies,
         max_rounds,
+        posture,
+        peer_reviewers,
     )?;
     // read_pr_info stays read-only against GitHub; the CALLER owns
     // the write. A row was just emitted for this PR, so the publisher has the
@@ -13854,6 +14206,11 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         inputs.settings.require_corroboration.unwrap_or(false),
         inputs.settings.github_approval_satisfies.unwrap_or(true),
         inputs.settings.max_rounds.unwrap_or(2).max(1),
+        Some(&resolve_posture_config(&inputs.settings)),
+        &resolved_local_peer_reviewers_for_author(
+            &inputs.settings,
+            inputs.author_harness.as_deref(),
+        ),
     ) {
         Ok(pr_info) => {
             if pr_info.number == 0 {
@@ -13887,13 +14244,14 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             }
             (
                 0,
-                coverage_event_data_tiled(
+                coverage_event_data_full(
                     pr_info.number,
                     &pr_info.coverage,
                     &head_sha,
                     &inputs.repo_slug,
                     author_session.as_deref(),
                     Some(&pr_info.range_tiling),
+                    pr_info.posture.as_ref(),
                 )
                 .to_string(),
             )
@@ -17370,6 +17728,7 @@ mod tests {
             review_skipped: false,
             unattested_reviewers: vec![],
             malformed_attestations: 0,
+            posture: None,
             coverage: CoverageReport {
                 github_approval_satisfies: false,
                 coverage: Coverage::Covered(0),
@@ -17586,6 +17945,7 @@ git_bounded();";
             review_skipped: false,
             unattested_reviewers: vec![],
             malformed_attestations: 0,
+            posture: None,
             coverage: CoverageReport {
                 github_approval_satisfies: false,
                 coverage: Coverage::Covered(0),
@@ -17616,6 +17976,7 @@ git_bounded();";
                     freshness: None,
                     scope: None,
                     refusal_reason: None,
+                    reviewer_context: None,
                 }],
             };
             pr
