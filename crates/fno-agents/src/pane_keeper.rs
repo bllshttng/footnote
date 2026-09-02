@@ -790,10 +790,15 @@ mod tests {
 
     #[test]
     fn keeper_lane_reads_the_cursor_resume_shape_as_a_full_uuid_only() {
-        let cursor_shape = ["cursor-agent", "--resume", "0f9e63ed-861d-4f9f-8efa-3e40c5e01266", "--trust"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        let cursor_shape = [
+            "cursor-agent",
+            "--resume",
+            "0f9e63ed-861d-4f9f-8efa-3e40c5e01266",
+            "--trust",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
         assert_eq!(
             session_id_from_argv(&cursor_shape),
             Some("0f9e63ed-861d-4f9f-8efa-3e40c5e01266".to_string()),

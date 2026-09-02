@@ -36,8 +36,8 @@ use std::time::Duration;
 
 use crate::claude_attach::{perform_attach, AttachRequest, UnixControlTransport};
 use crate::claude_drive::{contains_detach_sentinel, find_transcript, transcript_len, DriveError};
-use std::sync::Arc;
 use crate::claude_roster::{read_control_key, ClaudeRoster};
+use std::sync::Arc;
 
 /// Default transcript-growth poll budget: 40 * 250ms = 10s. A live blocked
 /// session echoes the injected turn well within this; a miss demotes to durable.
@@ -815,20 +815,14 @@ fn deliver_via_keeper_socket_in(
                 // composer-wide prefix: the TUI wraps long lines in the
                 // composer, and a newline mid-marker would break a full-line
                 // match even after the escape strip.
-                if let (Some(stream), Ok(mut acc)) =
-                    (confirm_stream.as_ref(), pty_seen.lock())
-                {
+                if let (Some(stream), Ok(mut acc)) = (confirm_stream.as_ref(), pty_seen.lock()) {
                     let mut buf = [0u8; 8192];
                     let mut reader = stream;
                     loop {
                         match std::io::Read::read(&mut reader, &mut buf) {
                             Ok(0) => break,
                             Ok(n) => acc.extend_from_slice(&buf[..n]),
-                            Err(ref e)
-                                if e.kind() == io::ErrorKind::WouldBlock =>
-                            {
-                                break
-                            }
+                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
                             Err(_) => break,
                         }
                     }
