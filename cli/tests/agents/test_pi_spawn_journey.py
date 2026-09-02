@@ -24,8 +24,11 @@ markers only:
      loop-check is the sole completion authority, and what it decides about
      this synthetic manifest is its own business.
 
-RUN OF RECORD, 2026-09-02, pi 0.84.2 on a live openai-codex subscription,
-worktree debug builds: **GREEN** - see the PR description for x-43bd.
+RUN OF RECORD: **PENDING.** First attempt 2026-09-02 was blocked before
+spawn: the worktree carried no fno-agents debug build and the spawn gate
+refused at 1-min load 389 against a 96 trigger. This line is updated with
+the date, pid and session id the journey asserts when it first runs
+green - a pass with no named pid is not a pass.
 
 The live test is opt-in (``FNO_PI_LIVE=1``) because it spends real
 subscription tokens and needs this machine's pi credentials. It installs
