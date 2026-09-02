@@ -30,6 +30,7 @@ pub mod pty;
 pub mod server;
 pub mod sprites;
 pub mod squad;
+pub mod sideline_color;
 pub mod squad_store;
 pub mod templates;
 pub mod theme;
