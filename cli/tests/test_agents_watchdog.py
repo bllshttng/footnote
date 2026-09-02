@@ -2567,6 +2567,84 @@ def test_production_pane_occupancy_answers_at_capacity_when_unreadable(tmp_path,
     assert watchdog._production_pane_occupancy("claude") == 4
 
 
+def test_ac6_edge_one_transcript_read_per_tick(monkeypatch, tmp_path):
+    """x-581b AC6-EDGE: one tick reads and parses each transcript at most once.
+
+    The default sweep path shares one parsed tail between the outage
+    evidence collector and the tail classifier; before the sharing, both
+    legs opened and parsed the same file. The counting fake sits at the read
+    seam (tail_entries), not a timing measurement, and both consumers must
+    have run: the provider report is measured from that parse and the
+    verdicts are classified from it.
+    """
+    from fno.agents import provider_outage as po
+    from fno.agents import registry as registry_mod
+
+    rows = [
+        Row("aaaa1111-0000", "w1", "working", None, str(tmp_path)),
+        Row("bbbb2222-0000", "w2", "working", None, str(tmp_path)),
+    ]
+    monkeypatch.setattr(watchdog, "fleet_rows", lambda timeout=None: (rows, []))
+
+    def record(text, *, is_error=False, status=None):
+        return {
+            "type": "assistant",
+            "timestamp": "2026-08-16T18:39:00Z",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+            "isApiErrorMessage": is_error,
+            "apiErrorStatus": status,
+        }
+
+    entries_by_sid = {
+        "aaaa1111-0000": [
+            record("429 quota", is_error=True, status=429),
+            record("continuing"),
+        ],
+        "bbbb2222-0000": [record("healthy")],
+    }
+    reads: list[str] = []
+
+    def counting_tail_entries(sid, cwd, *, agent="claude"):
+        reads.append(sid)
+        return entries_by_sid.get(sid)
+
+    monkeypatch.setattr(watchdog, "tail_entries", counting_tail_entries)
+    monkeypatch.setattr(
+        registry_mod,
+        "load_registry",
+        lambda: [
+            SimpleNamespace(
+                harness="claude", harness_session_id="aaaa1111-0000",
+                route_provider_id="zai", account_record_id="acct-a",
+                cwd=str(tmp_path), mux=None,
+            ),
+            SimpleNamespace(
+                harness="claude", harness_session_id="bbbb2222-0000",
+                route_provider_id="zai", account_record_id="acct-a",
+                cwd=str(tmp_path), mux=None,
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        po, "journal_path", lambda: tmp_path / "provider-outages.json"
+    )
+
+    payload, _out_rows = watchdog.run_sweep(
+        now_s=NOW_1840,
+        claim_fn=lambda key: {},
+        graph_fn=lambda: {},
+    )
+
+    # The AC itself: each transcript read exactly once, not once per consumer.
+    assert reads == ["aaaa1111-0000", "bbbb2222-0000"]
+    # The outage leg actually consumed the shared parse: the 429 record and
+    # both healthy records were accepted as evidence from it.
+    assert payload["provider_outages"]["instrument"] == "measured"
+    assert payload["provider_outages"]["counts"]["accepted"] == 3
+    # The classifier leg ran off the same entries, not a second read.
+    assert len(payload["verdicts"]) == 2
+
+
 def test_ac5_hlth_production_candidate_canaries_configured_route_without_registry_row(
     tmp_path, monkeypatch,
 ):

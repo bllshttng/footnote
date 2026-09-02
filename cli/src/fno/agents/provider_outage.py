@@ -171,13 +171,19 @@ def collect_transcript_evidence(
     identities: Iterable[EvidenceIdentity], *, now_s: float,
     transcript_path_for: Callable[[EvidenceIdentity], Path | None] | None = None,
     evidence_freshness_s: float = 600,
+    entries_for: Callable[[str], "list[dict] | None"] | None = None,
 ) -> tuple[list["OutageEvidence"], list[dict[str, Any]]]:
     """Read raw assistant records without consulting liveness projections.
 
     Dispatches on harness: only shapes with a parser here are read. A harness
     whose transcript shape has no parser is a NAMED refusal carrying the
     harness and the resolved path - never an empty result that reads as a
-    quiet, healthy fleet."""
+    quiet, healthy fleet.
+
+    ``entries_for(row_id)`` hands in an already-parsed transcript tail (the
+    sweep tick reads each transcript ONCE and shares the parse between this
+    collector and the tail classifier), so the file is never opened here.
+    None from it means unreadable and refuses exactly like a failed read."""
     if transcript_path_for is None:
         from fno.provenance.observed import resolve_transcript_path
 
@@ -217,6 +223,29 @@ def collect_transcript_evidence(
                 "count": 1,
             })
             continue
+        if entries_for is not None:
+            # The shared-parse path: no file is opened here. The unreadable
+            # refusal keeps the same shape (and the resolved path, for the
+            # operator) as the read-it-here path below.
+            try:
+                path = transcript_path_for(identity)
+            except Exception:  # noqa: BLE001 - the path read must not mask the refusal
+                path = None
+            parsed = entries_for(identity.row_id)
+            if parsed is None:
+                refusals.append({
+                    "row_id": identity.row_id,
+                    "reason": "transcript_unreadable",
+                    "harness": identity.harness,
+                    "path": str(path) if path is not None else None,
+                    "count": 1,
+                })
+                continue
+            records.extend(_outage_records_from_parsed(
+                parsed, identity, now_s=now_s,
+                evidence_freshness_s=evidence_freshness_s,
+            ))
+            continue
         try:
             path = transcript_path_for(identity)
             if path is None:
@@ -240,42 +269,59 @@ def collect_transcript_evidence(
                 "count": 1,
             })
             continue
+        parsed: list[dict] = []
         for line in lines:
             try:
                 raw = json.loads(line)
             except (TypeError, ValueError):
                 continue
-            if not isinstance(raw, dict) or raw.get("type") != "assistant":
-                continue
-            message = raw.get("message")
-            if not isinstance(message, dict) or message.get("role") != "assistant":
-                continue
-            observed_at = _record_epoch(raw.get("timestamp"))
-            if observed_at is None:
-                continue
-            age = now_s - observed_at
-            if age < 0 or age > evidence_freshness_s:
-                continue
-            content = _message_text(message.get("content"))
-            if not content:
-                continue
-            is_error = raw.get("isApiErrorMessage") is True
-            raw_status = raw.get("apiErrorStatus") if is_error else None
-            if is_error and not isinstance(raw_status, int):
-                continue
-            records.append(OutageEvidence(
-                source="transcript",
-                observed_at=observed_at,
-                row_id=identity.row_id,
-                harness=identity.harness,
-                provider=identity.provider,
-                account=identity.account,
-                role="assistant",
-                raw_status=raw_status,
-                raw_kind="api_error" if is_error else "content",
-                content=content,
-            ))
+            if isinstance(raw, dict):
+                parsed.append(raw)
+        records.extend(_outage_records_from_parsed(
+            parsed, identity, now_s=now_s,
+            evidence_freshness_s=evidence_freshness_s,
+        ))
     return records, refusals
+
+
+def _outage_records_from_parsed(
+    parsed: "list[dict]", identity: EvidenceIdentity, *, now_s: float,
+    evidence_freshness_s: float,
+) -> "list[OutageEvidence]":
+    """Filter one row's parsed transcript records down to outage evidence."""
+    out: list[OutageEvidence] = []
+    for raw in parsed:
+        if not isinstance(raw, dict) or raw.get("type") != "assistant":
+            continue
+        message = raw.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        observed_at = _record_epoch(raw.get("timestamp"))
+        if observed_at is None:
+            continue
+        age = now_s - observed_at
+        if age < 0 or age > evidence_freshness_s:
+            continue
+        content = _message_text(message.get("content"))
+        if not content:
+            continue
+        is_error = raw.get("isApiErrorMessage") is True
+        raw_status = raw.get("apiErrorStatus") if is_error else None
+        if is_error and not isinstance(raw_status, int):
+            continue
+        out.append(OutageEvidence(
+            source="transcript",
+            observed_at=observed_at,
+            row_id=identity.row_id,
+            harness=identity.harness,
+            provider=identity.provider,
+            account=identity.account,
+            role="assistant",
+            raw_status=raw_status,
+            raw_kind="api_error" if is_error else "content",
+            content=content,
+        ))
+    return out
 
 
 def _pane_status(content: str) -> int | None:

@@ -613,7 +613,6 @@ REAP_QUIET_AFTER_S = 900
 # classifies leave, never wake.
 _RESET_STAMP_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})\s*(?:SGT|UTC\+8)")
 _SGT_OFFSET_S = 8 * 3600
-_TAIL_BYTES = 64 * 1024
 #: 60, not 15: a chatty attach (restore markers, compaction lines) must not
 #: push a still-live 429 out of the window the wake gate reads - the burned
 #: turn inside a closed window is the module's measured failure, and a
@@ -1810,20 +1809,33 @@ def _holder_session(holder: Optional[str]) -> Optional[str]:
 # Real I/O seams (every one injectable; the classifier above stays pure)
 # ---------------------------------------------------------------------------
 
-def tail_facts(
+#: The per-tick transcript tail read. One size serves both consumers of a
+#: tick's single read+parse: the outage evidence collector's freshness window
+#: (it read 256KB before the sharing) and the tail classifier's record window
+#: (which read 64KB - now derived from the same parse, so a chatty transcript
+#: can no longer truncate the classifier's 60-record window below what the
+#: file actually holds).
+_TICK_TAIL_BYTES = 256 * 1024
+
+
+def tail_entries(
     session_id: str,
     cwd: str,
     *,
     agent: str = "claude",
-    max_records: int = _TAIL_RECORDS,
-) -> Optional[TailFacts]:
-    """Resolve a session's transcript and tail-read it. Never raises.
+) -> Optional[list[dict]]:
+    """Resolve a session's transcript and return its parsed tail records.
 
-    Reuses the provenance resolver (content-aware across every project dir -
-    the dir name is the LAUNCH cwd, never derivable from a repo or worktree
-    name). A missing transcript is None, which the classifier renders as a
-    fact (ghost / unknown-age), never as fresh. A 64KB tail read costs ~0.9ms
-    per row measured over 130 rows, so sweeping the fleet is cheap.
+    THE one transcript read per tick: the tail classifier and the
+    provider-outage evidence collector both derive their views from this
+    single parse instead of each opening and parsing the same file (measured
+    defect: every transcript was read and parsed twice per tick). Callers
+    keep their own windows; this function only reads and parses.
+
+    None means the transcript could not be resolved, read, or decoded - the
+    caller renders that downstream (the classifier as ghost facts, the
+    outage lane as a named ``transcript_unreadable`` refusal feeding the
+    pane fallback). A torn or foreign JSONL line is skipped, not fatal.
     """
     from fno.provenance.observed import resolve_transcript_path
 
@@ -1836,38 +1848,52 @@ def tail_facts(
     try:
         size = path.stat().st_size
         with path.open("rb") as fh:
-            fh.seek(max(0, size - _TAIL_BYTES))
+            fh.seek(max(0, size - _TICK_TAIL_BYTES))
             chunk = fh.read()
-    except OSError:
+        lines = chunk.decode("utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
         return None
-    lines = chunk.decode("utf-8", "replace").splitlines()
-    if size > _TAIL_BYTES and lines:
+    if size > _TICK_TAIL_BYTES and lines:
         lines = lines[1:]  # a mid-file seek lands inside a line; drop it
-    entries: list[tuple[Optional[float], str, Optional[str], Optional[str]]] = []
+    parsed: list[dict] = []
     for line in lines:
         try:
-            e = json.loads(line)
+            record = json.loads(line)
         except Exception:  # noqa: BLE001 - a torn/foreign line is not data
             continue
-        epoch: Optional[float] = None
-        ts = e.get("timestamp")
-        if ts:
-            try:
-                epoch = datetime.fromisoformat(
-                    str(ts).replace("Z", "+00:00")
-                ).timestamp()
-            except ValueError:
-                epoch = None
-        text = _record_text(e)
-        msg = e.get("message")
+        if isinstance(record, dict):
+            parsed.append(record)
+    return parsed
+
+
+def _record_epoch(record: dict) -> Optional[float]:
+    ts = record.get("timestamp")
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _facts_from_entries(
+    entries: Optional[list[dict]], max_records: int
+) -> Optional[TailFacts]:
+    """Pure derivation of :class:`TailFacts` from a parsed transcript tail."""
+    if entries is None:
+        return None
+    windowed: list[tuple[Optional[float], str, Optional[str], Optional[str]]] = []
+    for record in entries:
+        text = _record_text(record)
+        msg = record.get("message")
         role = msg.get("role") if isinstance(msg, dict) else None
-        kind = ("tool" if _has_tool_use(e) else "text") if role else None
-        entries.append((epoch, text, str(role) if role else None, kind))
+        kind = ("tool" if _has_tool_use(record) else "text") if role else None
+        windowed.append((_record_epoch(record), text, str(role) if role else None, kind))
     # The window bounds EVERYTHING downstream, the (role, text, kind) triple
     # included: a triple read from a record older than max_records would pair
     # a stale text with the fresh age and window inputs it is classified
     # against.
-    window = entries[-max_records:]
+    window = windowed[-max_records:]
     records = [(epoch, text) for epoch, text, _role, _kind in window]
     last_epoch = next((t for t, _ in reversed(records) if t is not None), None)
     last_role: Optional[str] = None
@@ -1884,6 +1910,27 @@ def tail_facts(
         records, last_epoch, " ".join(t for _, t in records),
         last_role, last_text, last_kind,
     )
+
+
+def tail_facts(
+    session_id: str,
+    cwd: str,
+    *,
+    agent: str = "claude",
+    max_records: int = _TAIL_RECORDS,
+) -> Optional[TailFacts]:
+    """Resolve a session's transcript and tail-read it. Never raises.
+
+    Reuses the provenance resolver (content-aware across every project dir -
+    the dir name is the LAUNCH cwd, never derivable from a repo or worktree
+    name). A missing transcript is None, which the classifier renders as a
+    fact (ghost / unknown-age), never as fresh. The read goes through
+    :func:`tail_entries`, so a caller holding its entries already (the sweep
+    tick shares one read between the classifier and the outage collector)
+    should derive facts with :func:`_facts_from_entries` instead of reading
+    again.
+    """
+    return _facts_from_entries(tail_entries(session_id, cwd, agent=agent), max_records)
 
 
 def _has_tool_use(e: dict) -> bool:
@@ -2239,8 +2286,12 @@ def measure_provider_outages(
     pane_read_fn: Optional[Callable[[str, Any], str]] = None,
     pane_snapshot_dir: Optional[Path] = None,
     journal: Optional[Path] = None,
+    entries_for: Optional[Callable[[str], Optional[list[dict]]]] = None,
 ) -> dict[str, Any]:
-    """Collect durable transcript records, then persist exact pane fallbacks."""
+    """Collect durable transcript records, then persist exact pane fallbacks.
+
+    ``entries_for(row_id)`` supplies the tick's shared transcript parse (see
+    :func:`tail_entries`); with it, no transcript file is opened here."""
     from fno.agents.provider_outage import (
         EvidenceIdentity,
         OutagePolicy,
@@ -2293,6 +2344,7 @@ def measure_provider_outages(
         now_s=now_s,
         transcript_path_for=transcript_path_for,
         evidence_freshness_s=policy.evidence_freshness_s,
+        entries_for=entries_for,
     )
     # Rows whose transcript cannot be read fall back to the pane buffer: both
     # a MISSING transcript and an UNSUPPORTED transcript SHAPE leave the pane
@@ -2855,8 +2907,21 @@ def run_sweep(
         rows_provider() if rows_provider is not None
         else fleet_rows(timeout=roster_timeout)
     )
+    # ONE transcript read per row per tick: the shared parse below feeds both
+    # the outage evidence collector and the tail classifier. The defect this
+    # replaces read and parsed every transcript twice per tick - once per
+    # consumer - which was pure cost on the hottest path in the sweep.
+    entries_by_row: dict[str, Optional[list[dict]]] = {}
     if provider_outage_fn is None and rows_provider is None:
-        provider_outages = measure_provider_outages(rows, now_s=now_s)
+        for row in rows:
+            try:
+                entries_by_row[row.row_id] = tail_entries(row.row_id, row.cwd)
+            except Exception:  # noqa: BLE001 - a failed read is never a verdict
+                entries_by_row[row.row_id] = None
+        provider_outages = measure_provider_outages(
+            rows, now_s=now_s,
+            entries_for=lambda row_id: entries_by_row.get(row_id),
+        )
     elif provider_outage_fn is None:
         provider_outages = _unknown_provider_report("provider_outage_collector_missing")
     else:
@@ -2883,6 +2948,8 @@ def run_sweep(
     cwd_by_sid = {r.row_id: r.cwd for r in rows}
     if transcript_fn is None:
         def transcript_fn(sid: str) -> Optional[TailFacts]:
+            if sid in entries_by_row:
+                return _facts_from_entries(entries_by_row[sid], _TAIL_RECORDS)
             return tail_facts(sid, cwd_by_sid.get(sid, ""))
     claim_fn = claim_fn or _claim_view
     if graph_fn is None:
