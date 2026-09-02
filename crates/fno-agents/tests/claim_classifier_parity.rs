@@ -29,6 +29,10 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::Command;
 
+use common::{assert_golden as assert_golden_common, capture_mode, Golden};
+
+mod common;
+
 /// A pid no OS can have assigned: above every platform's pid ceiling (macOS
 /// caps at 99998, Linux pid_max at 2^22), so both legs read it as unreported.
 const ABSENT_PID: i64 = 2_000_000_000;
@@ -449,9 +453,30 @@ json.dump(rows, sys.stdout)
     serde_json::from_slice(&out.stdout).expect("python returned a JSON object")
 }
 
+/// Classify the corpus with the Rust leg and return the same JSON shape as the
+/// Python oracle. Keeping the whole corpus in one golden makes the frozen
+/// contract include every case's state and basis.
+fn rust_classify_all(cases: &[Case], now: i64) -> Value {
+    let mut rows = serde_json::Map::new();
+    for c in cases {
+        let probe: &dyn Fn(i32) -> fno_agents::claims::PidProbe = match c.probe {
+            ProbeSpec::Real => &|pid| fno_agents::claims::probe_pid(pid),
+            ProbeSpec::Absent => &|_| fno_agents::claims::PidProbe::Absent,
+            ProbeSpec::Refused => &|_| fno_agents::claims::PidProbe::Refused,
+        };
+        let (state, basis) =
+            fno_agents::claims::classify_with_basis(&record(c), Some(now), probe);
+        rows.insert(
+            c.label.to_string(),
+            json!({"state": state.as_str(), "basis": basis}),
+        );
+    }
+    Value::Object(rows)
+}
+
 #[test]
 fn classify_state_and_basis_parity_with_real_python() {
-    if !python_available() {
+    if capture_mode() && !python_available() {
         eprintln!(
             "SKIP: no python3 with fno.claims.staleness importable; parity not verified here"
         );
@@ -462,40 +487,21 @@ fn classify_state_and_basis_parity_with_real_python() {
     let cases = corpus(now, self_pid, &local_identity());
     let cases_json =
         serde_json::to_string(&cases.iter().map(|c| to_json(c, now)).collect::<Vec<_>>()).unwrap();
-    let py = py_classify_all(&cases_json);
-
-    let mut compared = 0;
-    for c in &cases {
-        let py_row = &py[c.label];
-        let py_state = py_row["state"]
-            .as_str()
-            .unwrap_or_else(|| panic!("python leg returned no state for case {}", c.label));
-        let py_basis = py_row["basis"]
-            .as_str()
-            .unwrap_or_else(|| panic!("python leg returned no basis for case {}", c.label));
-        let probe: &dyn Fn(i32) -> fno_agents::claims::PidProbe = match c.probe {
-            ProbeSpec::Real => &|pid| fno_agents::claims::probe_pid(pid),
-            ProbeSpec::Absent => &|_| fno_agents::claims::PidProbe::Absent,
-            ProbeSpec::Refused => &|_| fno_agents::claims::PidProbe::Refused,
-        };
-        let (rust_state, rust_basis) =
-            fno_agents::claims::classify_with_basis(&record(c), Some(now), probe);
-        assert_eq!(
-            py_state,
-            rust_state.as_str(),
-            "state drift for corpus case {}",
-            c.label
-        );
-        assert_eq!(
-            py_basis, rust_basis,
-            "basis drift for corpus case {}",
-            c.label
-        );
-        compared += 1;
-    }
+    let rust = rust_classify_all(&cases, now);
+    let oracle = capture_mode().then(|| {
+        let py = py_classify_all(&cases_json);
+        Golden {
+            exit: None,
+            streams: vec![serde_json::to_string(&py).unwrap()],
+        }
+    });
+    let rust_golden = Golden {
+        exit: None,
+        streams: vec![serde_json::to_string(&rust).unwrap()],
+    };
+    assert_golden_common("claim_classifier", "corpus", &rust_golden, oracle);
     // A zero-case pass is an absence, not a verdict: the corpus must actually
-    // have driven both legs, state AND basis. The compared count is the run's
-    // positive marker - a silent skip above prints SKIP and returns early.
-    assert!(compared >= 10, "corpus compared only {compared} cases");
-    eprintln!("claim classifier parity: {compared} corpus cases compared across both legs");
+    // carry every state and basis into the frozen contract.
+    assert!(cases.len() >= 10, "corpus contains only {} cases", cases.len());
+    eprintln!("claim classifier corpus: {} cases frozen or verified", cases.len());
 }
