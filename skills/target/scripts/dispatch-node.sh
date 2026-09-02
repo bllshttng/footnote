@@ -239,9 +239,9 @@ DISPATCH_SUBSTRATE="$(printf '%s' "$resolve_json" | jq -r '.substrate | select(.
 # --allow-merge), so a missing template only matters for the non-claude lanes.
 DISPATCH_COMMAND="$(printf '%s' "$resolve_json" | jq -r '.command | select(. != null and . != "")' 2>/dev/null)"
 if [[ "$resolve_rc" -ne 0 || -z "$DISPATCH_PROVIDER" || -z "$DISPATCH_SUBSTRATE" ]]; then
-  reason="no autonomous substrate resolved (rc=$resolve_rc); set config.dispatch.harness to a harness with an autonomous substrate (run fno agents dispatch resolve --harness <name> to see what each supports)"
+  reason="no autonomous substrate resolved (rc=$resolve_rc); set config.agents.profiles.target.provider to a harness with an autonomous substrate (deprecated config.dispatch.harness still reads for one release; run fno agents dispatch resolve --harness <name> to see what each supports)"
   fno doctor event emit -t dispatch_no_autonomous_substrate -s backlog \
-    -d "{\"reason\":\"dispatch resolve rc=$resolve_rc\",\"config_key\":\"config.dispatch.harness\"}" >/dev/null 2>&1 || true
+    -d "{\"reason\":\"dispatch resolve rc=$resolve_rc\",\"config_key\":\"config.agents.profiles.target.provider\"}" >/dev/null 2>&1 || true
   for id in "${NODES[@]}"; do echo "failed $id reason=\"$reason\""; done
   echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=${#NODES[@]} capped=0"
   exit 1

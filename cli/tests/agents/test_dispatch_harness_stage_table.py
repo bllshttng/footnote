@@ -90,6 +90,16 @@ def test_resolver_names_the_losing_spelling_when_keys_disagree() -> None:
     assert "codex" in note
 
 
+def test_resolver_agreeing_keys_emit_no_note() -> None:
+    """Both keys set to the same harness: the stage table answers and nothing
+    is named as shadowed (nothing was)."""
+    harness, note = configured_dispatch_harness(
+        _settings(profile_provider="codex", legacy_harness="codex")
+    )
+    assert harness == "codex"
+    assert note is None
+
+
 def test_resolver_unset_everywhere_answers_none() -> None:
     assert configured_dispatch_harness(_settings()) == (None, None)
 
