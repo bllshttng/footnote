@@ -33,6 +33,7 @@ from fno.claims.core import (
     reap_dead_claims,
     refresh_claim,
     release_claim,
+    _clear_lock_mirror_for_reaped,
 )
 from fno.claims.io import archive_claim, claim_path, claims_dir, read_claim_file, serialize_claim
 from fno.claims.staleness import classify_for_sweep, is_provably_dead, now_ms
@@ -325,7 +326,45 @@ class TestReapDeadClaims:
         after = json.loads(graph_path.read_text())["entries"][0]
         assert after["locked_by"] is None
         assert after["session_id"] is None
-        assert after["claimed_at"] is None
+        assert after["locked_at"] is None
+        assert "claimed_at" not in after
+
+    def test_AC4_ERR_reacquired_node_claim_keeps_graph_mirror(self, tmp_path, monkeypatch):
+        """The exact claim-path recheck wins when a fresh owner is present."""
+        node_id = "x-reacquired-mirror"
+        holder = "target-session:reacquired-mirror"
+        graph_path = tmp_path / "configured-graph.json"
+        graph_path.write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "id": node_id,
+                            "title": "Reacquired mirror",
+                            "plan_path": "plans/reacquired-mirror.md",
+                            "locked_by": holder,
+                            "session_id": holder,
+                            "locked_at": "2026-01-01T00:00:00+00:00",
+                            "status": "in_progress",
+                        }
+                    ]
+                }
+            )
+            + "\n"
+        )
+        monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
+        monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
+        claim = acquire_claim(f"node:{node_id}", holder, pid=os.getpid(), root=tmp_path)
+        try:
+            assert claim_status(claim.key, root=tmp_path)["state"] == "live"
+            assert _clear_lock_mirror_for_reaped(
+                [node_id], claim_roots=[tmp_path]
+            ) == 0
+            row = json.loads(graph_path.read_text())["entries"][0]
+            assert row["locked_by"] == holder
+            assert row["session_id"] == holder
+        finally:
+            assert release_claim(claim.key, holder, root=tmp_path) is not None
 
     def test_AC2_FR_both_roots_swept_in_one_run(self, tmp_path):
         root_a = tmp_path / "a"

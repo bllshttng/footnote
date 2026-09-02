@@ -229,6 +229,18 @@ def test_legacy_graph_lock_timestamp_migrates_once_without_nested_rename(tmp_pat
     assert raw["sessions"] == [{"claimed_at": timestamp}]
 
 
+def test_authority_census_keeps_wait_and_graph_status_sources_single_owner():
+    """The wait and graph status callers must not grow duplicate provers."""
+    repo_root = Path(__file__).resolve().parents[3]
+    wait_source = (repo_root / "crates/fno-agents/src/wait.rs").read_text()
+    statuses_source = (repo_root / "cli/src/fno/graph/statuses.py").read_text()
+
+    assert "family1_truth_probe" in wait_source
+    for forbidden in ("resolve_transcript", "tail_facts", "fleet_rows", "psutil"):
+        assert forbidden not in wait_source
+        assert forbidden not in statuses_source
+
+
 def test_rank_backfilled_null_on_next_mutation(tmp_path):
     """A node with no ``rank`` key gets ``rank: null`` written on the next
     mutation -- self-healing backfill, like the status-forward migration."""
