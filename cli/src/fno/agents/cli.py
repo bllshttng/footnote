@@ -2022,6 +2022,19 @@ def cmd_spawn(
         overlay = resolve_account_overlay_or_exit(account)
         account_env = overlay.env if overlay else None
 
+    # The proven-credential carrier (outage handoff) is claimed unconditionally:
+    # it carries real credential values, so a spawn that somehow sets it without
+    # --dispatch-account must refuse here rather than let the child inherit the
+    # carrier verbatim (a leak outside the one staged overlay that was proved).
+    proven_env_raw = os.environ.pop("FNO_DISPATCH_ACCOUNT_ENV", None)
+    if proven_env_raw is not None and dispatch_account is None:
+        print(
+            "refusing: the proven-credential carrier is set but no "
+            "--dispatch-account was given; no worker launched",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
     # The autonomous-cutover carrier. Same fail-closed posture as --account, and
     # deliberately a separate flag: --account's claude-only refusal is an operator
     # contract, while a cutover's whole point is landing on another harness.
@@ -2037,7 +2050,6 @@ def cmd_spawn(
         # proved, which is the exact disconnect that made the canary's proof
         # decorative. The record still must exist and match the harness: the
         # env proves the values, this check proves the target.
-        proven_env_raw = os.environ.pop("FNO_DISPATCH_ACCOUNT_ENV", None)
         proven_env: dict[str, str] | None = None
         if proven_env_raw:
             try:

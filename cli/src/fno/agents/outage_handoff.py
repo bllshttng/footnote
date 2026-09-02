@@ -449,7 +449,13 @@ def _revalidate_persisted_and_raw_evidence(
             bounded = content.encode("utf-8")[-64 * 1024:].decode(
                 "utf-8", errors="ignore"
             ).strip()
-            if bounded != str(persisted.get("content") or "").strip():
+            # The evidence stands while the pane still SHOWS the outage text,
+            # not while the screen is byte-frozen: requiring byte identity
+            # refused on any repaint (a spinner frame, a trailing status line)
+            # between the measurement and this revalidation, and a pane that
+            # repaints routinely could never commit a real outage handoff.
+            persisted_content = str(persisted.get("content") or "").strip()
+            if not persisted_content or persisted_content not in bounded:
                 return EvidenceProof(False, len(verified), "source pane content drifted")
             receipt = {
                 "fingerprint": fingerprint, "row_id": request.source_row_id,
@@ -497,7 +503,7 @@ def production_handoff_dependencies(
     from fno.claims.io import claims_root_for
     from fno.graph.store import read_graph
     from fno.agents.provider_outage import journal_path as provider_outage_journal_path
-    from fno.agents.provider_outage import OutagePolicy
+    from fno.agents.provider_outage import OutagePolicy, pane_read_via_mux
     from fno.state.outage_handoff import (
         ManifestAuthority,
         inspect_target_manifest,
@@ -514,17 +520,8 @@ def production_handoff_dependencies(
                 settings = None
         policy = OutagePolicy.from_settings(settings) if settings is not None else OutagePolicy()
     if pane_read_fn is None:
-        from fno import _subprocess_util
-
         def pane_read_fn(session: str, pane_id: Any) -> str:
-            proc = pane_runner(
-                [*_subprocess_util.fno_py_cmd(), "mux", "pane", "read",
-                 "--session", session, str(pane_id), "--lines", "80"],
-                capture_output=True, text=True, timeout=10, check=False,
-            )
-            if getattr(proc, "returncode", 1) != 0:
-                raise RuntimeError(str(getattr(proc, "stderr", "") or "mux pane read failed"))
-            return str(getattr(proc, "stdout", "") or "")
+            return pane_read_via_mux(session, pane_id, runner=pane_runner)
     resolved_pane_snapshot_dir = pane_snapshot_dir or (
         paths.state_dir() / "recovery" / "provider-pane-revalidations"
     )

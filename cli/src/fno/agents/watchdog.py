@@ -2299,6 +2299,7 @@ def measure_provider_outages(
         collect_transcript_evidence,
         journal_path as provider_journal_path,
         measure_and_persist,
+        pane_read_via_mux,
     )
 
     if entries_provider is None:
@@ -2359,17 +2360,7 @@ def measure_provider_outages(
     }
     if unreadable_rows:
         if pane_read_fn is None:
-            from fno import _subprocess_util
-
-            def pane_read_fn(session: str, pane_id: Any) -> str:
-                proc = subprocess.run(
-                    [*_subprocess_util.fno_py_cmd(), "mux", "pane", "read",
-                     "--session", session, str(pane_id), "--lines", "80"],
-                    capture_output=True, text=True, timeout=10, check=False,
-                )
-                if proc.returncode != 0:
-                    raise RuntimeError((proc.stderr or proc.stdout or "mux pane read failed").strip())
-                return proc.stdout
+            pane_read_fn = pane_read_via_mux
 
         target = journal or provider_journal_path()
         snapshot_root = pane_snapshot_dir or target.parent / "provider-pane-snapshots"

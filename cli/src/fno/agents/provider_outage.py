@@ -308,7 +308,12 @@ def _outage_records_from_parsed(
         is_error = raw.get("isApiErrorMessage") is True
         raw_status = raw.get("apiErrorStatus") if is_error else None
         if is_error and not isinstance(raw_status, int):
-            continue
+            # A client that writes error rows without the int status field is
+            # still evidence: classify the visible text the same way the pane
+            # path does, instead of dropping the row into a silent zero.
+            raw_status = _pane_status(content)
+            if raw_status is None:
+                continue
         out.append(OutageEvidence(
             source="transcript",
             observed_at=observed_at,
@@ -322,6 +327,32 @@ def _outage_records_from_parsed(
             content=content,
         ))
     return out
+
+
+def pane_read_via_mux(
+    session: str, pane_id: Any, *, lines: int = 80, timeout_s: float = 10.0,
+    runner: Callable[..., Any] | None = None,
+) -> str:
+    """Read one mux pane's visible buffer through the CLI subprocess.
+
+    THE shared default pane reader: the outage measurement lane and the
+    handoff revalidation lane must read panes with the same window and the
+    same error shape, or one lane's measurement is not what the other
+    revalidates."""
+    import subprocess
+
+    from fno import _subprocess_util
+
+    proc = (runner or subprocess.run)(
+        [*_subprocess_util.fno_py_cmd(), "mux", "pane", "read",
+         "--session", session, str(pane_id), "--lines", str(lines)],
+        capture_output=True, text=True, timeout=timeout_s, check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            (proc.stderr or proc.stdout or "mux pane read failed").strip()
+        )
+    return proc.stdout
 
 
 def _pane_status(content: str) -> int | None:
@@ -849,12 +880,34 @@ def fold_provider_outages(
         "refusals": refusals,
         "sessions": sessions,
     }
+    # A pane snapshot older than the freshness window can never vote or
+    # revalidate again, so carrying it (up to 64KB of screen content each)
+    # only grows the journal this fold rewrites every tick. Keep the fresh
+    # set, newest first, bounded to the same cap as the on-disk snapshot dir.
+    def _snapshot_age(item: dict[str, Any]) -> float | None:
+        anchor = item.get("snapshot_at")
+        if not isinstance(anchor, (int, float)):
+            anchor = item.get("observed_at")
+        return float(anchor) if isinstance(anchor, (int, float)) else None
+
+    fresh_snapshots = [item for item in pane_snapshots.values() if (
+        (age := _snapshot_age(item)) is not None
+        and 0 <= now_s - age <= effective_policy.pane_freshness_s
+    )]
+    fresh_snapshots.sort(
+        key=lambda item: (_snapshot_age(item) or 0.0, item.get("fingerprint") or ""),
+        reverse=True,
+    )
+    kept_snapshots = sorted(
+        fresh_snapshots[:_MAX_PANE_SNAPSHOTS],
+        key=lambda item: item.get("fingerprint") or "",
+    )
     next_state = {
         "version": _JOURNAL_VERSION,
         "fingerprints": sorted(record.fingerprint for record in accepted),
         "evidence": [asdict(record) for record in accepted],
         "breakers": breakers,
-        "pane_snapshots": sorted(pane_snapshots.values(), key=lambda item: item["fingerprint"]),
+        "pane_snapshots": kept_snapshots,
     }
     return report, next_state
 
