@@ -1054,6 +1054,75 @@ def test_strip_flags_keep_foreign_name_with_different_session_id():
     ]
 
 
+def test_strip_flags_skip_companion_path_embedding_keep_session_id():
+    """A transcript PATH names this session by embedding its id (x-a0cd).
+
+    The claude-side codex plugin exports CODEX_COMPANION_TRANSCRIPT_PATH
+    pointing at THIS session's transcript under claude's own store. x-38c6's
+    full-value equality missed it because the path embeds the id as a
+    substring rather than equaling it, so whoami read a companion pointer as
+    foreign lineage and prescribed a remedy that breaks the plugin's pointer.
+    """
+    from fno.harness_identity import ambient_identity_strip_flags
+
+    env = {
+        "CLAUDE_CODE_SESSION_ID": "own-session",
+        "CODEX_COMPANION_SESSION_ID": "own-session",
+        "CODEX_COMPANION_TRANSCRIPT_PATH": (
+            "/Users/x/.claude/projects/-Users-x-repo/own-session.jsonl"
+        ),
+    }
+
+    assert ambient_identity_strip_flags("claude", env) == []
+
+
+def test_strip_flags_keep_companion_path_naming_a_foreign_session():
+    """A companion path embedding a DIFFERENT session's id is foreign evidence."""
+    from fno.harness_identity import ambient_identity_strip_flags
+
+    env = {
+        "CLAUDE_CODE_SESSION_ID": "own-session",
+        "CODEX_COMPANION_TRANSCRIPT_PATH": (
+            "/Users/x/.claude/projects/-Users-x-repo/foreign-session.jsonl"
+        ),
+    }
+
+    assert ambient_identity_strip_flags("claude", env) == [
+        "-u",
+        "CODEX_COMPANION_TRANSCRIPT_PATH",
+    ]
+
+
+def test_strip_flags_still_reports_foreign_value_without_keep_session_id():
+    """No proven keep id: nothing reads as self-referential (fail closed)."""
+    from fno.harness_identity import ambient_identity_strip_flags
+
+    env = {
+        "CODEX_COMPANION_SESSION_ID": "own-session-is-embedded-here",
+    }
+
+    assert ambient_identity_strip_flags("claude", env) == [
+        "-u",
+        "CODEX_COMPANION_SESSION_ID",
+    ]
+
+
+def test_strip_flags_resolver_marker_embedding_keep_id_stays_removable():
+    """A resolver marker is removable even when its value embeds the keep id.
+
+    Cross-family resolver markers leave the resolver ambiguous whatever their
+    value shape, so the remedy must still offer them (the x-38c6 carve-out,
+    extended to the embedding form the substring rule now covers)."""
+    from fno.harness_identity import ambient_identity_strip_flags
+
+    env = {
+        "CLAUDE_CODE_SESSION_ID": "own-session",
+        "CODEX_SESSION_ID": "prefix-own-session-suffix",
+    }
+
+    assert ambient_identity_strip_flags("claude", env) == ["-u", "CODEX_SESSION_ID"]
+
+
 # --- attester identity: bound to the emitting process -------------------------
 
 
