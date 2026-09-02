@@ -354,6 +354,7 @@ def census() -> LiveCensus:
             f"spawn-gate: fno registry unreadable ({exc}); registry rows omitted from the census"
         )
         rows = []
+    claim_live_cache: dict[str, bool] = {}
     for row in rows:
         if row.status not in LIVE_STATUSES:
             continue
@@ -381,7 +382,21 @@ def census() -> LiveCensus:
             and row.short_id in roster_live_short_ids
         )
         if not (pid_alive or bg_alive):
-            continue
+            # The pid gate is process-shaped; a codex thread lane has no local
+            # process (the codex app-server hosts it) and no claude roster row,
+            # so both arms above are blind to it. Its live worker:<name> slot
+            # claim is the liveness oracle - the same evidence the provider
+            # count adds at its tail. Admitting the row here moves it from the
+            # slot-claim bucket into the row table WITHOUT changing
+            # slot_count: the claims walk at the end skips live_registry_names.
+            # Without this arm the LANES block reported codex lanes above a
+            # table that showed none (measured 2026-09-01: top 23 rows, list
+            # 25, every missing id a codex session).
+            if not _worker_claim_live(row.name, claim_live_cache):
+                continue
+            claim_alive = True
+        else:
+            claim_alive = False
         # A live fno row is fno work: it holds a slot regardless of the display
         # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,
         # but its registry row is the slot, matching the registry-only Rust gate).
@@ -438,7 +453,8 @@ def census() -> LiveCensus:
                 # rendezvous case this disjunct exists for is the one where no
                 # pid was recorded and the socket map supplied it.
                 "pid_alive": pid_state is True
-                or (row.pid is None and session_pid is not None),
+                or (row.pid is None and session_pid is not None)
+                or claim_alive,
             }
         )
         status_basis = projected.get("basis") if projected.get(
@@ -686,6 +702,29 @@ def _gate_claims_root() -> Path:
     from fno.claims.io import global_claims_root
 
     return global_claims_root()
+
+
+def _worker_claim_live(name: str, cache: dict[str, bool]) -> bool:
+    """Is the ``worker:<name>`` slot claim live? One claim read per name per call.
+
+    The display union's pid gate is process-shaped, and a codex thread lane has
+    no local process at all - the codex app-server hosts the session, so the
+    row records no pid and the claude-roster arm cannot see it either. The
+    live slot claim is the liveness oracle for such rows, the same evidence the
+    provider count adds at its tail. ``cache`` dedups the claim reads across
+    one census walk; callers seed it with ``{}``.
+    """
+    if name in cache:
+        return cache[name]
+    try:
+        from fno.claims.core import claim_status
+
+        state = claim_status(f"worker:{name}", root=_gate_claims_root()).get("state")
+        live = state in ("live", "suspect")
+    except Exception:  # noqa: BLE001 - an unreadable claim proves nothing
+        live = False
+    cache[name] = live
+    return live
 
 
 def _live_worker_slot_claims(
