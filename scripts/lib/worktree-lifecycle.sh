@@ -669,7 +669,7 @@ case "${1:-status}" in
                         fi
                         N_UNPUSHED=$((N_UNPUSHED + 1)); continue
                     fi
-                elif ! git -C "$wt" merge-base --is-ancestor "$head" origin/main 2>/dev/null; then
+                elif ! wt_head_reachable_from_origin_main "$wt"; then
                     # Not in main. Local-only commits (data loss) = unpushed;
                     # pushed to its own remote but not in main = unmerged (safe).
                     up="$(git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"

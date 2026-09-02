@@ -1366,8 +1366,17 @@ exit 2
         data.get("harness_session_id"),
         Some(&json!("e6f78b98-e594-47ed-ad81-84f8a78b8bb7"))
     );
-    for field in ["actor", "reason", "request_id", "worktree_touched", "reclaimed_bytes"] {
-        assert!(data.get(field).is_some(), "audit event missing {field}: {data}");
+    for field in [
+        "actor",
+        "reason",
+        "request_id",
+        "worktree_touched",
+        "reclaimed_bytes",
+    ] {
+        assert!(
+            data.get(field).is_some(),
+            "audit event missing {field}: {data}"
+        );
     }
 
     unsafe {

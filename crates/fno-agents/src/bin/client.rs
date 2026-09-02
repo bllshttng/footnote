@@ -2008,6 +2008,10 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--permission-mode",
         "--effort",
         "--add-dir",
+        "--audit-actor",
+        "--audit-reason",
+        "--audit-request-id",
+        "--audit-reclaimed-bytes",
         "--agent",
         "--tools",
         "--deny-tools",
@@ -2204,6 +2208,29 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 // an account spawn re-execs the Python CLI on EVERY substrate (see
                 // the spawn intercept) rather than duplicating the resolver here.
                 params.insert("account".into(), str_arg(&mut it, "--account")?);
+            }
+            "--audit-actor" => {
+                params.insert("audit_actor".into(), str_arg(&mut it, "--audit-actor")?);
+            }
+            "--audit-reason" => {
+                params.insert("audit_reason".into(), str_arg(&mut it, "--audit-reason")?);
+            }
+            "--audit-request-id" => {
+                params.insert(
+                    "audit_request_id".into(),
+                    str_arg(&mut it, "--audit-request-id")?,
+                );
+            }
+            "--audit-reclaimed-bytes" => {
+                let value = str_arg(&mut it, "--audit-reclaimed-bytes")?;
+                let bytes = value
+                    .as_str()
+                    .and_then(|raw| raw.parse::<u64>().ok())
+                    .ok_or("--audit-reclaimed-bytes needs a non-negative integer")?;
+                params.insert("audit_reclaimed_bytes".into(), Value::from(bytes));
+            }
+            "--audit-worktree-touched" => {
+                params.insert("audit_worktree_touched".into(), Value::Bool(true));
             }
             "--substrate" => {
                 // The session-substrate selector (x-2c27): pane (owned-PTY,
@@ -2732,6 +2759,15 @@ fn format_success(
                     .and_then(Value::as_str)
                     .unwrap_or("unknown error");
                 notes.push(format!("event record not written: {reason}"));
+            }
+            if result.get("worktree_outcome").and_then(Value::as_str) == Some("removed") {
+                let bytes = result
+                    .get("reclaimed_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                notes.push(format!(
+                    "WARNING: worktree removed by guarded cleanup (reclaimed_bytes={bytes})"
+                ));
             }
             if removed.len() == 1
                 && notes.is_empty()
@@ -3400,7 +3436,10 @@ mod tests {
     #[test]
     fn rm_usage_names_the_claude_cascade_and_worktree() {
         let usage = verb_usage("rm").expect("rm usage line");
-        assert!(usage.contains("claude rm"), "rm help must name the cascade verb");
+        assert!(
+            usage.contains("claude rm"),
+            "rm help must name the cascade verb"
+        );
         assert!(usage.contains("short_id"), "rm help must name the join key");
         assert!(
             usage.to_ascii_lowercase().contains("worktree"),
@@ -3413,6 +3452,33 @@ mod tests {
         assert!(warns_on_daemon_drift("list"));
         assert!(warns_on_daemon_drift("rm"));
         assert!(!warns_on_daemon_drift("spawn"));
+    }
+
+    #[test]
+    fn rm_preserves_internal_audit_context_flags() {
+        let (method, params) = build_request(
+            "rm",
+            &[
+                "worker".into(),
+                "--audit-actor".into(),
+                "post-merge".into(),
+                "--audit-reason".into(),
+                "pr-merged".into(),
+                "--audit-request-id".into(),
+                "merge-cleanup-1".into(),
+                "--audit-worktree-touched".into(),
+                "--audit-reclaimed-bytes".into(),
+                "42".into(),
+            ],
+        )
+        .expect("audit flags parse");
+        assert_eq!(method, "agent.rm");
+        assert_eq!(params["name"], "worker");
+        assert_eq!(params["audit_actor"], "post-merge");
+        assert_eq!(params["audit_reason"], "pr-merged");
+        assert_eq!(params["audit_request_id"], "merge-cleanup-1");
+        assert_eq!(params["audit_worktree_touched"], true);
+        assert_eq!(params["audit_reclaimed_bytes"], 42);
     }
 
     // -----------------------------------------------------------------------
@@ -3755,6 +3821,26 @@ mod tests {
         });
         let out = format_success("rm", "bar-agent", &result, false, true, false);
         assert_eq!(out, Some("removed: bar-agent (fno + claude)".to_string()));
+    }
+
+    #[test]
+    fn format_success_rm_warns_when_a_worktree_was_removed() {
+        let result = json!({
+            "removed": true,
+            "registry_removed": true,
+            "harness": "claude",
+            "harness_removed": true,
+            "worktree_touched": true,
+            "worktree_outcome": "removed",
+            "reclaimed_bytes": 4096
+        });
+        let out = format_success("rm", "bar-agent", &result, false, true, false)
+            .expect("rm renders a receipt");
+        assert!(
+            out.contains("WARNING"),
+            "worktree deletion must be visible: {out}"
+        );
+        assert!(out.to_ascii_lowercase().contains("worktree"), "{out}");
     }
 
     /// A reap that really removed a harness row names the verb that puts it

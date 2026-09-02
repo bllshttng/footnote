@@ -5104,11 +5104,20 @@ def cmd_rm(
             "Drop the registry entry even when the row is LIVE or the harness "
             "teardown fails or refuses (e.g. uncommitted worktree changes). "
             "The Rust route (the default) kills a mux-hosted pane with it, "
-            "but still refuses a live pane worker it cannot stop; the Python "
-            "route drops the row only. The process survives for bg and "
-            "headless rows. WARNING: leaves an orphan session record in that "
+            "but still refuses a live pane worker it cannot stop. A Claude "
+            "row also removes its harness session and worktree under Claude's "
+            "guards; non-Claude bg and headless processes survive. WARNING: leaves an orphan session record in that "
             "harness's own store, named on stderr, for you to clean manually."
         ),
+    ),
+    audit_actor: str | None = typer.Option(None, "--audit-actor", hidden=True),
+    audit_reason: str = typer.Option("operator-requested", "--audit-reason", hidden=True),
+    audit_request_id: str | None = typer.Option(None, "--audit-request-id", hidden=True),
+    audit_worktree_touched: bool = typer.Option(
+        False, "--audit-worktree-touched", hidden=True
+    ),
+    audit_reclaimed_bytes: int | None = typer.Option(
+        None, "--audit-reclaimed-bytes", hidden=True
     ),
 ) -> None:
     """Remove an agent: harness or mux session first, registry row after.
@@ -5148,14 +5157,22 @@ def cmd_rm(
     ``fno agents adopt``. A short id is only a best-effort lookup while durable
     harness evidence still resolves it.
 
-    Worktrees are NOT removed here (the harness row does not prove that its
-    cwd is disposable). Reap them with
-    ``fno agents workspace worktree cleanup --merged --apply``.
+    A linked worktree is removed only when the shared guarded predicate says it
+    is clean, merged, and unowned; otherwise the row is removed and the
+    worktree receipt names the refusal.
     """
     from fno.agents.dispatch import DispatchAskError, rm_agent
 
     try:
-        rm_agent(name, force=force)
+        rm_agent(
+            name,
+            force=force,
+            audit_actor=audit_actor,
+            audit_reason=audit_reason,
+            audit_request_id=audit_request_id,
+            audit_worktree_touched=True if audit_worktree_touched else None,
+            audit_reclaimed_bytes=audit_reclaimed_bytes,
+        )
     except DispatchAskError as exc:
         print(str(exc), file=sys.stderr)
         raise typer.Exit(code=exc.exit_code) from exc

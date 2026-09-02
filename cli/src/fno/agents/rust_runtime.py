@@ -648,6 +648,30 @@ def _has_flag(
     return False
 
 
+_RM_AUDIT_VALUE_FLAGS = frozenset(
+    {"--audit-actor", "--audit-reason", "--audit-request-id", "--audit-reclaimed-bytes"}
+)
+
+
+def _rm_target_name(args: Sequence[str]) -> Optional[str]:
+    """Find rm's name without mistaking an internal audit value for it."""
+    tokens = list(_args_before_argv(args))
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _RM_AUDIT_VALUE_FLAGS:
+            index += 2
+            continue
+        if any(token.startswith(flag + "=") for flag in _RM_AUDIT_VALUE_FLAGS):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token
+    return None
+
+
 def _gate_rm_at_seam(args: Sequence[str]) -> bool:
     """Warn that ``rm`` forfeits a resume handle; return False only on a declined prompt.
 
@@ -661,9 +685,7 @@ def _gate_rm_at_seam(args: Sequence[str]) -> bool:
     happen would be noise. Any failure inside the notice degrades to True -- an
     advisory must never be what stops a reap.
     """
-    name = next(
-        (a for a in _args_before_argv(args[1:]) if not a.startswith("-")), None
-    )
+    name = _rm_target_name(args[1:])
     if name is None or _has_flag(args[1:], "", ("--help",)) or "-h" in args[1:]:
         return True
     try:

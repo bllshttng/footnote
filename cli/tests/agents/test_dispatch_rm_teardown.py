@@ -15,6 +15,7 @@ ACs:
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -62,6 +63,15 @@ def _names() -> list[str]:
     return [e.name for e in load_registry()]
 
 
+def _agent_removed_events() -> list[dict]:
+    from fno import paths
+
+    path = paths.state_dir() / "events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
 def _write_index(home: Path, ids: list[str]) -> Path:
     path = home / ".codex" / "session_index.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +100,13 @@ def test_codex_rm_drops_index_entry_and_spares_the_rest(isolated_state, capsys):
     assert remaining == f'{{"id":"{KEEP_ID}","cwd":"/tmp"}}\n'
     assert _names() == []
     assert transcript.read_text(encoding="utf-8") == "rollout", "transcripts must survive"
+    removed = [event for event in _agent_removed_events() if event["kind"] == "agent_removed"]
+    assert len(removed) == 1
+    assert removed[0]["registry_changed"] is True
+    assert removed[0]["harness"] == "codex"
+    assert removed[0]["harness_session_id"] == GONE_ID
+    for field in ("actor", "reason", "request_id", "worktree_touched", "reclaimed_bytes"):
+        assert field in removed[0], f"audit event missing {field}: {removed[0]}"
 
 
 def test_codex_rm_is_idempotent_when_entry_already_gone(isolated_state):
@@ -243,6 +260,22 @@ def test_forced_teardown_failure_emits_exactly_one_truthful_event(
     assert len(removed) == 1, f"expected one agent_removed, got {len(removed)}"
     assert removed[0]["registry_changed"] is True
     assert "boom" in (removed[0].get("teardown_error") or "")
+
+
+def test_rm_warns_when_the_worktree_is_removed(isolated_state, monkeypatch, capsys):
+    _write_index(Path.home(), [GONE_ID])
+    _seed("worker", harness="codex", session_id=GONE_ID, cwd=isolated_state)
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_prune_row_worktree",
+        lambda _entry: "worktree removed: /tmp/reaped-worktree",
+    )
+
+    rm_agent("worker", audit_worktree_touched=True)
+
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "worktree" in captured.out.lower()
 
 
 def test_codex_malformed_stored_id_preserves_row(isolated_state):

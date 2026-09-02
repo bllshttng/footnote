@@ -51,6 +51,16 @@ wt_refresh_remote_refs() {
     return 1
 }
 
+# Automatic merge cleanup has one stricter reachability answer than the
+# report-only sweep: the worktree HEAD must be reachable from the refreshed
+# default branch, not merely from any remote or its own upstream branch.
+wt_head_reachable_from_origin_main() {
+    local path="${1:-}"
+    [[ -n "$path" && -d "$path" ]] || return 1
+    git -C "$path" rev-parse --verify --quiet origin/main >/dev/null 2>&1 || return 1
+    git -C "$path" merge-base --is-ancestor HEAD origin/main >/dev/null 2>&1
+}
+
 wt_unpushed_count() {
     local path="${1:-}" out=""
     if [[ -z "$path" || ! -d "$path" ]]; then

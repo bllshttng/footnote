@@ -372,6 +372,22 @@ def test_apply_reaps_merged_and_preserves_branch(repo: Path):
     assert "feature/reapme" in branches, "branch must be preserved"
 
 
+def test_merge_triggered_archive_refuses_pushed_but_unmerged_head(repo: Path):
+    wt = repo / "wt-unmerged-archive"
+    _git(repo, "worktree", "add", str(wt), "-b", "feature/unmerged-archive", "main")
+    _commit(wt, "unmerged.txt")
+    _git(wt, "push", "-u", "origin", "feature/unmerged-archive")
+
+    result = subprocess.run(
+        ["bash", str(ARCHIVE_SRC), str(wt), "--merge-triggered"],
+        cwd=str(repo), capture_output=True, text=True,
+    )
+
+    assert result.returncode == 2, result.stderr
+    assert "origin/main" in result.stderr
+    assert wt.exists(), "merge-triggered cleanup must keep an unmerged worktree"
+
+
 # ── x-60de: every removal emits one attributable event row ─────────────────
 def test_apply_removal_emits_event_row(repo: Path, tmp_path: Path, monkeypatch):
     """A removal without a row is unattributable: live trees lost on
@@ -420,6 +436,7 @@ def test_apply_removal_emits_event_row(repo: Path, tmp_path: Path, monkeypatch):
     assert data["claim"], "the row must carry the claim state read at decision time"
     assert data["reason"], "the row must carry why the tree was judged safe"
     assert data["branch"] == "feature/reapme", diag
+    assert data["reclaimed_bytes"] > 0, diag
 
     global_rows = _rows(sandbox_state / "events.jsonl")
     assert any(row.get("type") == "worktree_removed" for row in global_rows), \

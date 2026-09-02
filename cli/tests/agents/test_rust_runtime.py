@@ -68,6 +68,18 @@ def test_runtime_disabled_when_unset(monkeypatch) -> None:
     assert rr.rust_runtime_enabled() is False
 
 
+def test_rm_target_name_skips_internal_audit_values() -> None:
+    assert rr._rm_target_name(
+        [
+            "--audit-actor",
+            "post-merge",
+            "--audit-reason=pr-merged",
+            "worker",
+            "--audit-worktree-touched",
+        ]
+    ) == "worker"
+
+
 # --------------------------------------------------------------------------- #
 # runtime_mode: rust | python | auto
 # --------------------------------------------------------------------------- #

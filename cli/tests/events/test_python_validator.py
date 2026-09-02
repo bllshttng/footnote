@@ -28,6 +28,40 @@ from fno.events import (
 )
 
 
+def test_agent_removed_and_merge_cleanup_events_validate() -> None:
+    removed = {
+        "ts": "2026-09-02T00:00:00Z",
+        "type": "agent_removed",
+        "source": "daemon",
+        "data": {
+            "name": "worker",
+            "registry_changed": True,
+            "harness": "claude",
+            "harness_session_id": "session-1",
+            "actor": "session:operator-1",
+            "reason": "operator-requested",
+            "request_id": "agent-rm-1",
+            "worktree_touched": False,
+            "reclaimed_bytes": 0,
+        },
+    }
+    request = {
+        "ts": "2026-09-02T00:00:00Z",
+        "type": "merge_cleanup_requested",
+        "source": "python",
+        "data": {
+            "request_id": "merge-cleanup-1",
+            "repo": "/repo",
+            "pr": 42,
+            "branch": "feature/session",
+            "worktree": "/repo/worktree",
+            "node_ids": ["x-90ee"],
+        },
+    }
+    validate(removed)
+    validate(request)
+
+
 # -- AC1-HP: happy path --
 
 def test_validate_happy_path() -> None:

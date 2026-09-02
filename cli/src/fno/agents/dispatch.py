@@ -3647,6 +3647,23 @@ class RmResult:
     force: bool = False
     registry_changed: bool = False
     worktree_receipt: Optional[str] = None
+    actor: str = "operator"
+    reason: str = "operator-requested"
+    request_id: Optional[str] = None
+    worktree_touched: bool = False
+    reclaimed_bytes: int = 0
+
+
+def _directory_bytes(path: str) -> Optional[int]:
+    total = 0
+    try:
+        for root, dirs, files in os.walk(path, followlinks=False):
+            dirs[:] = [name for name in dirs if not os.path.islink(os.path.join(root, name))]
+            for name in files:
+                total += os.lstat(os.path.join(root, name)).st_size
+    except OSError:
+        return None
+    return total
 
 
 def _prune_row_worktree(entry: Any) -> Optional[str]:
@@ -4672,6 +4689,11 @@ def rm_agent(
     force: bool = False,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
     shellout_timeout: float = _DEFAULT_CLAUDE_SHELLOUT_TIMEOUT,
+    audit_actor: Optional[str] = None,
+    audit_reason: str = "operator-requested",
+    audit_request_id: Optional[str] = None,
+    audit_worktree_touched: Optional[bool] = None,
+    audit_reclaimed_bytes: Optional[int] = None,
 ) -> RmResult:
     """Remove an agent from the registry, and from claude's supervisor too.
 
@@ -4722,6 +4744,18 @@ def rm_agent(
             # Non-None only when --force swallowed a teardown failure; rides
             # the terminal event so the forensic stream stays single and true.
             teardown_error: Optional[str] = None
+            from fno.worktree_reapable import is_linked_worktree
+
+            detected_worktree = bool(existing.cwd and is_linked_worktree(existing.cwd))
+            worktree_touched = (
+                audit_worktree_touched
+                if audit_worktree_touched is not None
+                else detected_worktree
+            )
+            worktree_bytes = _directory_bytes(existing.cwd) if detected_worktree else None
+            actor = audit_actor or "operator"
+            reason = audit_reason or "operator-requested"
+            request_id = audit_request_id or f"agent-rm:{existing.name}:{existing.created_at}"
 
             # The teardown below destroys the harness session record, which IS
             # the resume handle. Name it and name the verb that reverses it,
@@ -4936,6 +4970,29 @@ def rm_agent(
             worktree_receipt = _prune_row_worktree(existing)
             if worktree_receipt:
                 print(worktree_receipt, flush=True)
+            worktree_removed = worktree_touched and (
+                not Path(existing.cwd).exists()
+                or (worktree_receipt or "").startswith("worktree removed:")
+            )
+            reclaimed_bytes = (
+                audit_reclaimed_bytes
+                if audit_reclaimed_bytes is not None
+                else worktree_bytes if worktree_removed and worktree_bytes is not None else 0
+            )
+            worktree_outcome = (
+                "not-touched"
+                if not worktree_touched
+                else "removed"
+                if worktree_removed
+                else "kept"
+            )
+            if worktree_removed:
+                print(
+                    f"WARNING: worktree removed by guarded cleanup "
+                    f"(reclaimed_bytes={reclaimed_bytes})",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             # Stdout "removed:" prints come AFTER update_registry succeeds so
             # a write failure cannot leave the operator with a misleading
@@ -4952,11 +5009,20 @@ def rm_agent(
                 "agent_removed",
                 name=name,
                 provider=existing.harness,
+                harness=existing.harness,
+                harness_session_id=existing.harness_session_id,
+                short_id=existing.short_id,
                 claude_exit=claude_exit,
                 force=force,
                 registry_changed=True,
                 teardown_error=teardown_error,
                 worktree_receipt=worktree_receipt,
+                actor=actor,
+                reason=reason,
+                request_id=request_id,
+                worktree_touched=worktree_touched,
+                worktree_outcome=worktree_outcome,
+                reclaimed_bytes=reclaimed_bytes,
             )
             return RmResult(
                 name=name,
@@ -4965,6 +5031,11 @@ def rm_agent(
                 force=force,
                 registry_changed=True,
                 worktree_receipt=worktree_receipt,
+                actor=actor,
+                reason=reason,
+                request_id=request_id,
+                worktree_touched=worktree_touched,
+                reclaimed_bytes=reclaimed_bytes,
             )
     except AgentLockTimeout as exc:
         # Symmetric with stop_agent's lock-timeout emit so forensics can
