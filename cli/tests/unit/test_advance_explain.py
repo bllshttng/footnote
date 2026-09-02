@@ -321,3 +321,19 @@ def test_advance_explain_epic_routes_to_the_fill_not_the_next_cascade(monkeypatc
     assert result.exit_code == 0, result.output
     assert "LANE FILL" in result.output
     assert calls["lane_fill"] == 1 and calls["next"] == 0
+
+
+def test_overall_max_bounds_the_epic_explain_decision(monkeypatch):
+    """A live `--max 1` dispatches one lane; the dry run must say the same."""
+    _lane_fill_world(
+        monkeypatch,
+        [_ready_node("x-a"), _ready_node("x-b"), _ready_node("x-c")],
+        max_lanes=5,
+    )
+    from fno.backlog.explain import build_lane_fill_report, render_lane_fill_report
+
+    report = build_lane_fill_report(epic="x-epic", max_dispatch=1)
+    assert len(report["selection"]["would_fill"]) == 1
+    assert report["decision"]["would_dispatch"] == ["x-a"]
+    assert report["selection"]["stop"] == "max-dispatch"
+    assert "overall --max 1" in render_lane_fill_report(report)

@@ -761,6 +761,7 @@ def build_lane_fill_report(
     project: Optional[str] = None,
     node_id: Optional[str] = None,
     top: int = 5,
+    max_dispatch: Optional[int] = None,
 ) -> dict:
     """``--explain --epic``: the fill the daemon's cascade would make, as a READ.
 
@@ -837,6 +838,12 @@ def build_lane_fill_report(
     if cap_denied:
         counts["lane-slot"] = cap_denied
 
+    # The live run's overall --max binds after the spawn-gate width does, so a
+    # dry run that ignored it would promise more dispatches than the run makes.
+    if max_dispatch is not None and len(selected) > max_dispatch:
+        selected = selected[:max_dispatch]
+        fill_report["stop"] = "max-dispatch"
+
     ordered_names = list(_LANE_FILL_FILTER_ORDER) + [
         n for n in counts if n not in _LANE_FILL_FILTER_ORDER
     ]
@@ -902,6 +909,7 @@ def build_lane_fill_report(
         "routing": routing,
         "decision": {
             "would_dispatch": selected_ids,
+            "max_dispatch": max_dispatch,
             "armed": armed,
             "armed_rank": rank_source,
             "note": (
@@ -960,6 +968,8 @@ def render_lane_fill_report(report: dict) -> str:
                    f"{', '.join(d['would_dispatch'])}")
     else:
         out.append("  would dispatch: nothing (fill selected no node)")
+    if d.get("max_dispatch") is not None:
+        out.append(f"  overall --max {d['max_dispatch']} honored")
     out.append(f"  armed: {d['armed']} (rank={d['armed_rank']})")
     if d.get("note"):
         out.append(f"  {d['note']}")

@@ -10894,7 +10894,8 @@ def cmd_advance(
 
             try:
                 report = build_lane_fill_report(
-                    epic=epic, project=project, node_id=explain_node, top=explain_top
+                    epic=epic, project=project, node_id=explain_node, top=explain_top,
+                    max_dispatch=max_dispatch,
                 )
             except Exception as exc:  # noqa: BLE001 - never a partial verdict
                 typer.echo(f"advance --explain --epic: {exc}", err=True)
