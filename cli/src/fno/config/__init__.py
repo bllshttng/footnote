@@ -1856,6 +1856,12 @@ class RoutingModelBlock(BaseModel):
     effort: str = ""
     cost_per_mtok_in: Optional[float] = None
     context: Optional[int] = None
+    # (x-1b35) The sideline lane color when this row matches an agent. The
+    # most specific key of the lane-color cascade - an empty value (the
+    # default) keeps the row out of color resolution entirely. Parsed by the
+    # mux's Rust reader (crates/fno/src/sideline_color.rs); declared here so
+    # a typo surfaces at config validation, not only at render time.
+    color: str = ""
 
 
 class RoutingBlock(BaseModel):
@@ -1895,6 +1901,40 @@ class RoutingBlock(BaseModel):
         return v if v in ("cheapest-that-clears", "best-available", "prefer-harness") else (
             "cheapest-that-clears"
         )
+
+
+class SidelineColorsBlock(BaseModel):
+    """Lane-color tables for the mux sideline (nested under 'config.sideline.colors').
+
+    (x-1b35) Every key names its axis explicitly - ``harness.<name>``,
+    ``route.<name>``, ``model."<model string>"``, ``row.<routing-row name>`` -
+    because a bare key is ambiguous between account, route and model, and an
+    axis is never inferred from a value. ``extra='forbid'`` is the refusal: a
+    bare ``zai = "green"`` under this table is a config ERROR naming the four
+    legal axis tables, not a silently ignored guess.
+
+    Values are color names the Rust reader parses (ANSI-16 names,
+    ``indexed(<n>)``, ``#rrggbb``). Resolution happens in
+    ``crates/fno/src/sideline_color.rs`` through one fixed cascade - routing
+    row, then model, then route, then harness, then the built-in table - and
+    an unknown color name falls THROUGH the cascade rather than blanking a
+    row, so a typo here can never mis-color the sideline.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    harness: dict[str, str] = Field(default_factory=dict)
+    route: dict[str, str] = Field(default_factory=dict)
+    model: dict[str, str] = Field(default_factory=dict)
+    row: dict[str, str] = Field(default_factory=dict)
+
+
+class SidelineBlock(BaseModel):
+    """Sideline render config (nested under 'config.sideline')."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    colors: SidelineColorsBlock = Field(default_factory=SidelineColorsBlock)
 
 
 class DispatchBlock(BaseModel):
@@ -4287,6 +4327,7 @@ class ConfigBlock(BaseModel):
     )
     dispatch: DispatchBlock = Field(default_factory=DispatchBlock)
     routing: RoutingBlock = Field(default_factory=RoutingBlock)
+    sideline: SidelineBlock = Field(default_factory=SidelineBlock)
     autonomy: AutonomyBlock = Field(default_factory=AutonomyBlock)
     auto_continue: AutoContinueBlock = Field(default_factory=AutoContinueBlock)
     keep_going: KeepGoingBlock = Field(default_factory=KeepGoingBlock)
