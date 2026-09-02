@@ -3888,14 +3888,11 @@ def _prune_row_worktree(entry: Any) -> Optional[str]:
     cwd = entry.cwd or ""
     if not cwd:
         return None
-    try:
-        owns_worktree = (Path(cwd) / ".git").is_file()
-    except OSError:
-        owns_worktree = False
-    if not owns_worktree:
-        return None
 
-    from fno.worktree_reapable import reapable as classify_reapable
+    from fno.worktree_reapable import is_linked_worktree, reapable as classify_reapable
+
+    if not is_linked_worktree(cwd):
+        return None
 
     verdict = classify_reapable(cwd)
     if not verdict.reapable:
@@ -3911,6 +3908,10 @@ def _prune_row_worktree(entry: Any) -> Optional[str]:
             capture_output=True,
             text=True,
             timeout=60.0,
+            # Run git FROM the worktree: git discovers the repository from
+            # the process cwd, and the caller's cwd is often not the row's
+            # repo. A forced self-removal from inside the leaf is allowed.
+            cwd=cwd,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return f"worktree kept: {cwd} (git worktree remove failed: {exc})"

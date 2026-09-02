@@ -1494,16 +1494,39 @@ enum WorktreeGate {
     Unanswerable(String),
 }
 
+/// Per-subprocess budget for the rm worktree path, matching the Python
+/// runtime's remove bound (`subprocess.run(..., timeout=60.0)`).
+const RM_SUBPROCESS_TIMEOUT_SECS: u64 = 60;
+
+/// One subprocess read under a wall-clock budget: `std` has no
+/// `Command::output` timeout, and a git stalled on a wedged filesystem must
+/// not park the daemon's rm handler forever. On timeout the reader thread
+/// drains in the background and the child is left for the OS to reap - the
+/// caller answers "kept", the fail-closed direction.
+fn output_with_timeout(mut cmd: std::process::Command, secs: u64) -> Option<std::process::Output> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(cmd.output());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(secs))
+        .ok()
+        .and_then(|res| res.ok())
+}
+
 /// Ask `fno agents workspace worktree reapable` - the same verb the `--merged`
 /// sweep, `archive-worktree.sh` and the GC probe ask - and read BOTH the
 /// literal marker and the reason, so a kept tree's receipt can name why.
 fn worktree_gate(cwd: &str) -> WorktreeGate {
-    let out = match std::process::Command::new("fno")
-        .args(["agents", "workspace", "worktree", "reapable", cwd])
-        .output()
-    {
-        Ok(out) => out,
-        Err(_) => {
+    let out = match output_with_timeout(
+        {
+            let mut cmd = std::process::Command::new("fno");
+            cmd.args(["agents", "workspace", "worktree", "reapable", cwd]);
+            cmd
+        },
+        RM_SUBPROCESS_TIMEOUT_SECS,
+    ) {
+        Some(out) => out,
+        None => {
             return WorktreeGate::Unanswerable("the reapable probe could not run".into());
         }
     };
@@ -1562,11 +1585,11 @@ fn rm_take_worktree(entry: &state::RegistryEntry) -> Option<String> {
         // Run git FROM the worktree: the daemon's own cwd is usually not a
         // repository, and `git worktree remove` needs one to resolve against.
         // A forced self-removal from inside the leaf is allowed by git.
-        std::process::Command::new("git")
-            .current_dir(cwd)
-            .args(["worktree", "remove", "--force", cwd])
-            .output()
-            .map_err(|e| e.to_string())
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(cwd)
+            .args(["worktree", "remove", "--force", cwd]);
+        output_with_timeout(cmd, RM_SUBPROCESS_TIMEOUT_SECS)
+            .ok_or_else(|| "the removal timed out".to_string())
             .and_then(|out| {
                 if out.status.success() {
                     Ok(())
@@ -11069,6 +11092,30 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(".git"), "gitdir: /elsewhere/worktrees/x.git\n").unwrap();
         dir
+    }
+
+    #[test]
+    fn output_with_timeout_bounds_a_stalled_subprocess() {
+        // The rm path's budget: a fast child answers, a stalled one is
+        // bounded instead of parking the daemon's rm handler.
+        let fast = output_with_timeout(
+            {
+                let mut c = std::process::Command::new("echo");
+                c.arg("ok");
+                c
+            },
+            10,
+        );
+        assert!(fast.is_some(), "a fast child answers");
+        let stalled = output_with_timeout(
+            {
+                let mut c = std::process::Command::new("sleep");
+                c.arg("30");
+                c
+            },
+            1,
+        );
+        assert!(stalled.is_none(), "a stalled child is bounded");
     }
 
     #[test]

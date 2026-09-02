@@ -83,9 +83,11 @@ def test_rm_removes_a_gate_clean_worktree(isolated_state, claude_available, caps
 
     wr.reapable = fake_reapable
     git_calls: list[list[str]] = []
+    git_kwds: list[dict] = []
 
     def fake_run(cmd, **kwargs):
         git_calls.append(list(cmd))
+        git_kwds.append(kwargs)
         return type("R", (), {"returncode": 0, "stderr": ""})()
 
     original_run = dispatch_mod.subprocess.run
@@ -100,6 +102,7 @@ def test_rm_removes_a_gate_clean_worktree(isolated_state, claude_available, caps
     assert result.worktree_receipt == f"worktree removed: {wt}"
     assert monkey_clean["called"], "the gate was consulted"
     assert git_calls and git_calls[0][:3] == ["git", "worktree", "remove"]
+    assert git_kwds[0].get("cwd") == str(wt), "git ran from the leaf, not the caller's cwd"
     out = capsys.readouterr().out
     assert f"worktree removed: {wt}" in out
 

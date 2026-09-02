@@ -68,6 +68,20 @@ def _path_of(entry: str) -> str:
     return entry[3:].strip() if len(entry) > 3 else entry.strip()
 
 
+def is_linked_worktree(path: Union[str, Path]) -> bool:
+    """A linked worktree's ``.git`` is a FILE pointing at its admin dir.
+
+    A main checkout's ``.git`` is a directory and a plain directory has none,
+    so both read False: only a linked leaf owns something
+    ``git worktree remove`` could take. Lives here because this module is the
+    single answer for worktree-removal questions.
+    """
+    try:
+        return (Path(path) / ".git").is_file()
+    except OSError:
+        return False
+
+
 def classify(porcelain: str) -> Verdict:
     """Classify `git status --porcelain` output. Pure: no clock, no disk.
 
