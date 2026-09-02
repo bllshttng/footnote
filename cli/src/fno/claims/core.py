@@ -997,6 +997,10 @@ def release_claim(
         (then raise HolderMismatch). Releases are idempotent in the common
         case; strict mode is for explicit "this MUST be ours" callers.
       - File present but corrupted: silent success (treat as released).
+      - The recovery-dir mutex cannot be acquired within the wait window:
+        ``None`` in non-strict mode (indistinguishable from the three cases
+        above - nothing was released, but WHY is not answerable from the
+        return value alone), ``ClaimContended`` in strict mode.
 
     The duration_held_ms field in the audit event is best-effort: read from
     acquired_at minus now. If the file disappears between read and unlink,
@@ -1004,8 +1008,10 @@ def release_claim(
 
     Returns the released ``Claim`` (carrying ``acquired_at``) on a real
     release, or ``None`` when nothing was released (already gone, holder
-    mismatch, corrupted) - so a caller can stamp a window bounded by the
-    claim's own acquire time without re-reading the file.
+    mismatch, corrupted, mutex lost) - so a caller can stamp a window bounded
+    by the claim's own acquire time without re-reading the file. A caller
+    that must TELL those cases apart needs strict mode, not this return
+    value.
     """
     if not key or not holder:
         raise ClaimValidationError("key and holder must be non-empty")

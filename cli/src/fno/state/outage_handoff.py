@@ -298,16 +298,18 @@ def _main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--holder", required=True)
     args = parser.parse_args(argv)
 
-    def release_via_cli(key: str, holder: str) -> object:
-        proc = subprocess.run(
-            ["fno", "claim", "release", key, "--holder", holder],
-            capture_output=True,
-            text=True,
-            check=False,
+    # In-process strict release, matching the daemon half: a holder mismatch
+    # must RAISE, not exit 0 having released nothing. The subprocess spelling
+    # this replaces ran behind a retired `fno claim` shim with no --strict, so
+    # claims/core.py's documented silent-success path reported a release that
+    # never happened - after the irreversible archive step above it.
+    from fno.claims.core import release_claim
+    from fno.claims.io import claims_root_for
+
+    def release_exact(key: str, holder: str) -> object:
+        return release_claim(
+            key, holder=holder, root=claims_root_for(key), strict=True
         )
-        if proc.returncode != 0:
-            raise RuntimeError((proc.stderr or proc.stdout or "claim release failed").strip())
-        return True
 
     try:
         receipt = prepare_manifest_and_release(
@@ -315,7 +317,7 @@ def _main(argv: list[str] | None = None) -> int:
             args.archive,
             claim_key=args.claim_key,
             holder=args.holder,
-            release_exact=release_via_cli,
+            release_exact=release_exact,
         )
     except ManifestPrepareError as exc:
         print(json.dumps({

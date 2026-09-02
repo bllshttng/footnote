@@ -29,6 +29,7 @@ from fno.state.outage_handoff import (
     ManifestAuthority,
     ManifestArchiveCollision,
     ManifestPrepareError,
+    _main,
     archive_target_manifest,
     prepare_target_handoff,
 )
@@ -702,3 +703,87 @@ def test_ac11_ui_live_registry_status_is_not_executability_proof():
     assert registry_entry_executable(entry, pane_probe=lambda _mux: None) is False
     assert registry_entry_executable(entry, pane_probe=lambda _mux: False) is False
     assert registry_entry_executable(entry, pane_probe=lambda _mux: True) is True
+
+
+def _prepare_argv(state: Path, plan: Path) -> list[str]:
+    return [
+        "prepare",
+        "--state", str(state),
+        "--archive", str(Path(str(plan) + ".artifacts") / "target-state-attempt-a.md"),
+        "--claim-key", "node:x-abcd",
+        "--holder", "target-session:source-session",
+    ]
+
+
+def test_ac1_err_main_foreign_holder_restores_manifest_and_names_live_holder(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """The module CLI path handoff.sh runs, against a REAL claims store.
+
+    The claim is held by a foreign holder, so the strict in-process release
+    must raise, the manifest archive must be restored, and the receipt must
+    name the live holder. The subprocess release this replaces passed no
+    --strict, so this exact input exited 0 having released nothing - after
+    the irreversible archive step - and the shell read that as success."""
+    _repo, worktree, head = _linked_worktree(tmp_path)
+    plan = tmp_path / "plan.md"
+    plan.write_text("plan\n", encoding="utf-8")
+    authority = _write_manifest(worktree, plan, head)
+    state = worktree / ".fno" / "target-state.md"
+    before = state.read_bytes()
+
+    claims_root = tmp_path / "claims"
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
+    from fno.claims.core import acquire_claim
+
+    acquire_claim("node:x-abcd", "target-session:other", root=claims_root)
+
+    rc = _main(_prepare_argv(state, plan))
+
+    assert rc == 10  # parked with custody restored, never 0
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["ok"] is False
+    assert payload["restored"] is True
+    assert payload["live_holder"] == "target-session:other"
+    assert state.read_bytes() == before
+
+
+def test_ac1_hp_main_exact_holder_releases_and_archives(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """The holder named by the manifest really holds the claim: the release
+    positively confirms, the manifest stays archived, and the receipt names
+    what happened."""
+    _repo, worktree, head = _linked_worktree(tmp_path)
+    plan = tmp_path / "plan.md"
+    plan.write_text("plan\n", encoding="utf-8")
+    authority = _write_manifest(worktree, plan, head)
+    state = worktree / ".fno" / "target-state.md"
+    before = state.read_bytes()
+
+    claims_root = tmp_path / "claims"
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
+    from fno.claims.core import acquire_claim
+
+    acquire_claim("node:x-abcd", "target-session:source-session", root=claims_root)
+
+    rc = _main(_prepare_argv(state, plan))
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["ok"] is True
+    assert payload["claim_released"] is True
+    assert Path(payload["path"]).read_bytes() == before
+    assert not state.exists()
+
+
+def test_ac1_err_subsystem_never_shells_out_to_retired_claim_spelling():
+    """No code path in this subsystem invokes the retired `fno claim` form."""
+    for path in (
+        Path(__file__).parents[1] / "src" / "fno" / "state" / "outage_handoff.py",
+        Path(__file__).parents[2] / "skills" / "target" / "scripts" / "handoff.sh",
+        Path(__file__).parents[1] / "src" / "fno" / "agents" / "outage_handoff.py",
+    ):
+        text = path.read_text(encoding="utf-8")
+        for retired in ('"fno", "claim"', '"fno", "agents", "claim", "release"', "fno claim release"):
+            assert retired not in text, f"{path} still carries retired spelling {retired!r}"
