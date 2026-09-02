@@ -137,6 +137,22 @@ class TestExplicitIntentWins:
         )
         assert ar.launch_is_pinned({}) is True
 
+    def test_stage_table_harness_pins(self, monkeypatch) -> None:
+        # The stage table is the home for the harness axis, so a launch routed
+        # by agents.profiles.<verb>.provider pins exactly like the legacy key
+        # does - quota policy must not silently replace either.
+        import fno.config as cfg
+
+        agents = SimpleNamespace(
+            profiles={"target": SimpleNamespace(provider="codex")}
+        )
+        monkeypatch.setattr(
+            cfg,
+            "load_settings",
+            lambda *a, **k: SimpleNamespace(agents=agents, dispatch=None),
+        )
+        assert ar.launch_is_pinned({}) is True
+
     def test_unreadable_config_pins_nothing(self, monkeypatch) -> None:
         import fno.config as cfg
 
