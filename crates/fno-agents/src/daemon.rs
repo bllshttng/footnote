@@ -898,17 +898,6 @@ pub struct WorktreeSweepOutput {
     pub stderr: String,
 }
 
-#[cfg(test)]
-impl WorktreeSweepOutput {
-    fn success(stdout: impl Into<String>) -> Self {
-        Self {
-            exit_code: Some(0),
-            stdout: stdout.into(),
-            stderr: String::new(),
-        }
-    }
-}
-
 /// Parse `fno agents workspace worktree cleanup --merged`'s summary line.
 ///
 /// Returns `None` rather than a zeroed report when the line is absent. A sweep
@@ -11899,7 +11888,11 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             1_000_000,
             &["/repo/a".into(), "/repo/b".into()],
             &|| false,
-            &|_, _| WorktreeSweepOutput::success(quiet),
+            &|_, _| WorktreeSweepOutput {
+                exit_code: Some(0),
+                stdout: quiet.into(),
+                stderr: String::new(),
+            },
         );
 
         assert_eq!(swept, 2, "a tick that finds nothing must still report");
@@ -11926,7 +11919,11 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &|| true,
             &|_, apply| {
                 assert!(apply, "a standing order must reach the verb as --apply");
-                WorktreeSweepOutput::success(quiet)
+                WorktreeSweepOutput {
+                    exit_code: Some(0),
+                    stdout: quiet.into(),
+                    stderr: String::new(),
+                }
             },
         );
 
@@ -11940,7 +11937,11 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     fn sweep_honours_its_own_6h_floor() {
         let home = tmp_home("wt-sweep-floor");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let out = |_: &str, _: bool| WorktreeSweepOutput::success(REAL_SUMMARY);
+        let out = |_: &str, _: bool| WorktreeSweepOutput {
+            exit_code: Some(0),
+            stdout: REAL_SUMMARY.into(),
+            stderr: String::new(),
+        };
         let now = 1_000_000;
 
         assert_eq!(
