@@ -642,7 +642,7 @@ def _review_owner_guidance(coverage: dict, worktree: dict) -> Optional[dict]:
 
 
 def _merge_authority(repo: str) -> dict:
-    """The resolved merge-authority axes for this repo (x-f324 AC7-HP).
+    """The resolved merge-authority axes for this repo.
 
     Three keys, all fail-open to None on an unreadable settings load: a
     status receipt that cannot read config says so rather than asserting
@@ -667,6 +667,27 @@ def _merge_authority(repo: str) -> dict:
             "auto_merge_enabled": None,
             "grant": None,
             "mergeable_autonomously": None,
+        }
+
+
+def _merge_execution_projection(repo: str, pr: str) -> dict:
+    """The durable-grant execution state, through the ONE resolver.
+
+    Answers "if the worker parked, would the watcher merge this now": the
+    newest recorded receipt, the node claim's liveness, and the standing
+    config, fail-closed in the resolver's every arm. A projection only - it
+    never widens the merge verb's own gates.
+    """
+    try:
+        from fno.pr._merge_grant import resolve_durable_grant
+
+        return resolve_durable_grant(int(pr), repo).as_projection()
+    except Exception as exc:  # noqa: BLE001 - a receipt never lies by crashing
+        return {
+            "state": "unknown",
+            "reason": f"durable-grant resolve failed: {type(exc).__name__}: {exc}",
+            "node_id": None,
+            "claim_state": None,
         }
 
 
@@ -1002,6 +1023,16 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # the config validator use, so a king asking "can this merge" gets the
         # authority from the receipt rather than from memory.
         "merge_authority": _merge_authority(cwd or os.getcwd()),
+        # The execution axis (AC7-HP): whether a parked granted worker's PR
+        # would be merged by the watcher right now - receipt, claim liveness,
+        # and standing config through the one durable-grant resolver. None on
+        # a terminal PR: nothing would execute, the same exemption the
+        # coverage conjunct takes above.
+        "merge_execution": (
+            None
+            if is_terminal
+            else _merge_execution_projection(cwd or os.getcwd(), pr)
+        ),
         # The round budget, from the same cap helper the blocker read, so a
         # worker sees the budget BEFORE spending the round that trips it.
         # reviews=None buys a zero-gh read, so the count is the events axis

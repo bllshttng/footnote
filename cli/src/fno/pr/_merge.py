@@ -1566,7 +1566,20 @@ def _overlaps(base_paths: List[str], pr_paths: List[str]) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
+def run_merge(
+    argv: Sequence[str], cwd: Optional[str] = None, *, authority: str = "manifest"
+) -> int:
+    """Merge one PR through the canonical guard chain.
+
+    ``authority`` selects where step (1) reads the merge posture from:
+    ``"manifest"`` (default) reads the calling session's ``target-state.md``
+    exactly as before; ``"durable_grant"`` reads the typed durable-grant
+    resolver (``_merge_grant``) instead - the path the PR watcher drives for a
+    worker that parked. It swaps ONLY the authority arm: the hold, in-flight
+    review, incarnation fence, stub-manifest, coverage, posture, and CI gates
+    below run identically for both callers, so a granted watcher lane can
+    never merge a PR the interactive lane would refuse (AC11-EDGE).
+    """
     repo = cwd or os.getcwd()
     pr_raw = ""
     for arg in argv:
@@ -1716,7 +1729,31 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     auto_merge = _load_auto_merge()
     state_file = os.path.join(_repo_state_dir(repo), "target-state.md")
     approved = _read_state_field(state_file, "auto_merge_approved")
-    if approved and not _approved_true(approved):
+    if authority == "durable_grant":
+        # The watcher's authority arm: the parked worker's
+        # manifest is gone, so posture reads from the durable receipt instead.
+        # The resolver is fail-closed in every arm (absence, malformed,
+        # ambiguity, a live holder, a flipped config switch all refuse), and
+        # it re-checks the standing config itself, so arm B below is a
+        # no-op on this path and is left shared rather than forked.
+        from fno.pr._merge_grant import resolve_durable_grant
+
+        verdict = resolve_durable_grant(pr_number, repo)
+        if not verdict.merge_eligible:
+            word = {
+                "refused": "skipped",
+                "absent": "skipped",
+                "held": "held",
+            }.get(verdict.state, "blocked")
+            _emit(
+                pr_number,
+                word,
+                f"durable-grant merge not executable: {verdict.reason}",
+                "none",
+                err=(word == "blocked"),
+            )
+            return 2
+    elif approved and not _approved_true(approved):
         # Name WHICH input set the posture (x-9d11): the operator's first
         # question on this refusal is "what layer said no". A pre-provenance
         # manifest carries no source; that reads as unknown, never a guess.

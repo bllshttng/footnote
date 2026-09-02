@@ -810,6 +810,18 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
     )
     monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
+    # The durable-grant projection is stubbed to its own documented no-node
+    # answer; the resolver's real arms are pinned in test_pr_merge_grant.py.
+    monkeypatch.setattr(
+        _status,
+        "_merge_execution_projection",
+        lambda repo, pr: {
+            "state": "absent",
+            "reason": "no graph-linked node carries this PR",
+            "node_id": None,
+            "claim_state": None,
+        },
+    )
     code = _status.run_status("42")
     assert code == 0
     import json
@@ -846,6 +858,12 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
             "auto_merge_enabled": False,
             "grant": "none",
             "mergeable_autonomously": False,
+        },
+        "merge_execution": {
+            "state": "absent",
+            "reason": "no graph-linked node carries this PR",
+            "node_id": None,
+            "claim_state": None,
         },
         "review_activity": {
             "blocker": "",
