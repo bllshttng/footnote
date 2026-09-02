@@ -94,6 +94,93 @@ def _violation(field: str, message: str) -> ExecutionViolation:
     return ExecutionViolation(field=field, message=message)
 
 
+def _total_chain_warning(tasks: list) -> ExecutionViolation | None:
+    """Warn when every task declares one blocker and the graph is a total order.
+
+    Per-task ``blocked_by`` shipped as a precision tool and became an authoring
+    reflex. Twenty plans have used it and twelve lose parallelism to it: four
+    measure width 1 where they would measure 2 or 3 with the declarations
+    removed, and eight are narrowed, costing 13 joiner slots in a fortnight.
+    The specimen chains 1.1 -> 1.2 -> 1.3 -> 2.1 -> 3.1 -> 3.2 across all six
+    tasks and every wave boundary; strip the six lines and nothing else and it
+    measures width 3, while the second task's own notes describe an
+    independent measurement and name no artifact of the first that it consumes.
+
+    A declared blocker wins outright over wave inheritance, so a reflex chain
+    is not merely redundant with the waves - it overrides them.
+
+    WARN, never refuse. This shape fires on 4 plans in a fortnight. A refusal
+    on any multi-file plan without waves would fire on 172 and teach authors to
+    skip the validator, which costs more than the chains do. The message asks
+    for the artifact each edge consumes, because that is the question whose
+    answer either justifies the edge or deletes it.
+    """
+    edges: dict[str, str] = {}
+    ids: list[str] = []
+    unblocked: list[str] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            return None
+        tid = str(task.get("id", "")).strip()
+        if not tid:
+            return None
+        ids.append(tid)
+        declared = task.get("blocked_by")
+        # An absent key inherits the previous wave and is the shape this check
+        # exists to preserve, so only an EXPLICIT list counts. The head of a
+        # real chain declares `blocked_by: []` (the live specimen does exactly
+        # that), so an empty list is the chain's start, not a disqualifier -
+        # demanding one blocker from every task rejects the very head that
+        # makes the order total.
+        if not isinstance(declared, list):
+            return None
+        if not declared:
+            unblocked.append(tid)
+            continue
+        if len(declared) != 1:
+            return None
+        blocker = str(declared[0]).strip()
+        if not blocker:
+            return None
+        edges[tid] = blocker
+    # Two tasks and one edge is a pair, not a reflex; the signal starts where a
+    # chain spans a wave boundary it could not have inherited.
+    if len(ids) < 3 or len(set(ids)) != len(ids):
+        return None
+    # Exactly one head, and every other task on a single-blocker edge.
+    if len(unblocked) != 1 or len(edges) != len(ids) - 1:
+        return None
+    known = set(ids)
+    if any(blocker not in known for blocker in edges.values()):
+        return None
+    # A total order starts at the one head and, following the edges, visits
+    # every task exactly once.
+    heads = unblocked
+    reverse: dict[str, str] = {}
+    for tid, blocker in edges.items():
+        if blocker in reverse:
+            return None  # a fan-out: two tasks share one blocker, not a chain
+        reverse[blocker] = tid
+    order = [heads[0]]
+    while order[-1] in reverse:
+        nxt = reverse[order[-1]]
+        if nxt in order:
+            return None  # a cycle; validate_task_edges already refuses it
+        order.append(nxt)
+    if len(order) != len(ids):
+        return None
+    return _violation(
+        "tasks.blocked_by",
+        "every task declares exactly one blocker and the chain is total ("
+        + " -> ".join(order)
+        + "), so this plan measures width 1 and `fno backlog join` has nothing "
+        "to hand a second worker. A declared blocker wins outright over wave "
+        "inheritance, so these lines override the waves rather than restate "
+        "them. Name the artifact each edge consumes; delete the edges whose "
+        "artifact you cannot name.",
+    )
+
+
 def _is_placeholder_verify(value: str) -> bool:
     normalized = value.strip().lower()
     return (
@@ -404,6 +491,11 @@ def validate_execution(
     for edge_error in validate_task_edges(strategy):
         violations.append(_violation("tasks.blocked_by", edge_error))
 
+    warnings: list[ExecutionViolation] = []
+    chain_warning = _total_chain_warning(tasks)
+    if chain_warning is not None:
+        warnings.append(chain_warning)
+
     # compiled-v1: every task acceptance reference must resolve to exactly one
     # compiled criterion (AC5-ERR). Unstamped plans skip this (AC3-COMPAT).
     contract = acceptance_contract
@@ -416,7 +508,7 @@ def validate_execution(
     waves = strategy.get("waves", [])
     if not isinstance(waves, list) or not waves:
         violations.append(_violation("waves", "Execution Strategy must declare at least one wave"))
-        return ExecutionValidationResult(violations)
+        return ExecutionValidationResult(violations, warnings=warnings)
 
     wave_ids = [
         str(wave.get("wave"))
@@ -567,4 +659,4 @@ def validate_execution(
     if any(_has_cycle(wave_id) for wave_id in sorted(dependency_graph)):
         violations.append(_violation("waves.depends_on", "wave dependency cycle detected"))
 
-    return ExecutionValidationResult(violations)
+    return ExecutionValidationResult(violations, warnings=warnings)
