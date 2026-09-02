@@ -436,6 +436,15 @@ fn apply_row_overrides(rows: &mut std::collections::BTreeMap<String, toml::Value
                     continue;
                 }
                 merge_field(&mut candidate, &toml::Value::Table(normalized));
+                if let Err(error) = lane_forms_still_parse(&candidate) {
+                    if let Ok(mut w) = warnings_slot().lock() {
+                        w.push(format!(
+                            "{}: harness {name:?} override rejected: {error}",
+                            path.display()
+                        ));
+                    }
+                    continue;
+                }
                 rows.insert(name.clone(), candidate);
             } else {
                 // A name with no bundled row is the x-296f teach path: the
@@ -460,6 +469,36 @@ fn apply_row_overrides(rows: &mut std::collections::BTreeMap<String, toml::Value
             overridden.insert(name.clone());
         }
     }
+}
+
+/// AC5-ERR: after a merge, a working harness must still attach and resume.
+/// Each interactive lane block on the merged row must parse into a form the
+/// renderer can exec ([`parse_form`]), or declare `unsupported`. A merge
+/// that breaks a lane is refused whole - the bundled row stays, the refusal
+/// is named - because a typo cannot un-attach a working harness.
+fn lane_forms_still_parse(candidate: &toml::Value) -> Result<(), String> {
+    let Some(forms) = candidate
+        .get("resume_strategy")
+        .and_then(|s| s.get("forms"))
+        .and_then(|f| f.as_table())
+    else {
+        return Ok(());
+    };
+    for (lane_key, lane) in [
+        ("interactive_attach", FormLane::Attach),
+        ("interactive_resume", FormLane::Resume),
+    ] {
+        let Some(block) = forms.get(lane_key) else {
+            continue;
+        };
+        if block.get("kind").and_then(|k| k.as_str()) == Some("unsupported") {
+            continue;
+        }
+        if parse_form(lane, block).is_none() {
+            return Err(format!("the merged {lane_key} form no longer parses"));
+        }
+    }
+    Ok(())
 }
 
 /// The whole-row override gate for a bundled row: every top-level key the
