@@ -50,7 +50,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, NamedTuple, Optional
+from typing import Any, Literal, NamedTuple, Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
@@ -861,6 +861,30 @@ _SAME_DOMAIN_ANNOTATION = "+same-domain:"
 # Same reasoning for the file-overlap token: the producer builds it and
 # select_lane_fill matches it to decide how loudly to log the skip.
 _HIGH_COLLISION_PREFIX = "high-collision:"
+
+
+def lane_fill_filter_name(reason: Optional[str]) -> str:
+    """Map one classifier reason token to its canonical lane-fill filter name.
+
+    The canonical names the ``--explain --epic`` SELECTION section reports.
+    Living HERE, beside the tokens, keeps the explainer's vocabulary from
+    drifting from the selector's: both derive from the classifier's stable
+    tokens, never from a second hand-written list. An unmapped token maps to
+    itself (its head up to the first colon), so a future token shows up in
+    the report under its own name instead of vanishing into a bucket that
+    no longer matches.
+    """
+    if not reason:
+        return ""
+    if reason == "peer-lane":
+        return "live-lane"
+    if reason.startswith(_HIGH_COLLISION_PREFIX):
+        return "in-flight-collision"
+    if _SAME_DOMAIN_ANNOTATION in reason:
+        return "live-lane-domain"
+    if reason.startswith(_UNEVALUATED_PREFIX):
+        return "unevaluated"
+    return reason.split(":", 1)[0]
 
 
 def _classify_lane_candidate(
@@ -2007,6 +2031,20 @@ class JoinRefuse(Exception):
         self.message = message
 
 
+def _emit_join_event(kind: str, **data: Any) -> None:
+    """Best-effort join telemetry through the agents journal. Never raises.
+
+    Same posture as the spawn gate's ``_emit_gate_event``: telemetry can
+    never change a join outcome.
+    """
+    try:
+        from fno.agents import events
+
+        events.emit(kind, **data)
+    except Exception:  # noqa: BLE001 - telemetry never changes a join outcome
+        pass
+
+
 _BAND_RANK = {"low": 0, "medium": 1, "high": 2}
 
 
@@ -2416,6 +2454,37 @@ def _sandbox_block(worktree: Path, policy: JoinWritePolicy) -> dict:
 
 
 def join_node(
+    node_id: str, workers: Optional[int] = None, *, model: Optional[str] = None
+) -> dict:
+    """Join with a trace: emit ``join_dispatched`` / ``join_refused`` around it.
+
+    The event carries the brief inputs already in hand (node, width,
+    requested, spawned names, band map, lead) so an orchestration pass can
+    read what join did without archaeology; the refusal carries node, exit
+    code and reason. Emission is best-effort. See :func:`_join_node` for the
+    join contract itself. ``requested`` records the resolved ask: the
+    operator's ``--workers``, or the derived count when it was omitted.
+    """
+    try:
+        receipt = _join_node(node_id, workers, model=model)
+    except JoinRefuse as exc:
+        _emit_join_event(
+            "join_refused", node=node_id, code=exc.code, reason=exc.message
+        )
+        raise
+    _emit_join_event(
+        "join_dispatched",
+        node=node_id,
+        width=receipt["width"],
+        requested=workers if workers is not None else len(receipt["spawned"]),
+        spawned=receipt["spawned"],
+        bands={name: lane.get("band", "") for name, lane in receipt["lanes"].items()},
+        lead=receipt["lead"],
+    )
+    return receipt
+
+
+def _join_node(
     node_id: str, workers: Optional[int] = None, *, model: Optional[str] = None
 ) -> dict:
     """Spawn width-bounded joiners into a held node's worktree (x-8d1d).
@@ -3687,18 +3756,87 @@ def _live_workers_by_project() -> dict[str, int]:
     return counts
 
 
-def _max_lanes() -> int:
-    """Per-project concurrency cap for the epic advance, from ``config.parallel.max_lanes``.
+def _binding_provider() -> Optional[str]:
+    """The configured provider with the least lane headroom, or None.
 
-    Default 1 (the conservative single lane). A seam so the cap read is
-    patchable in tests without stubbing the whole settings object. Fail-safe: any
-    read fault degrades to 1.
+    The unpinned epic advance could route anywhere, so the most constrained
+    CONFIGURED provider is the one whose cap binds the next spawn. One walk,
+    shared by :func:`_spawn_headroom` (the width) and the explain surfaces
+    (the row that explains the width).
+    """
+    from fno.agents import spawn_gate
+    from fno.config import load_settings
+
+    binding: Optional[str] = None
+    binding_remaining: Optional[int] = None
+    for name, budget in dict(load_settings().agents.provider_limits).items():
+        cap = spawn_gate.provider_lanes_cap(budget)
+        if cap is None:
+            continue  # an uncapped provider cannot bind anything
+        remaining = cap - spawn_gate.provider_live_count(name)
+        if binding_remaining is None or remaining < binding_remaining:
+            binding, binding_remaining = name, remaining
+    return binding
+
+
+def _spawn_headroom(provider: Optional[str] = None) -> int:
+    """Dispatch width from the spawn gate's own counters.
+
+    ``config.parallel.max_lanes`` once gated the epic advance here, but it was
+    a second concurrency authority beside the real one: a spawn is refused by
+    the spawn gate's ``max_live`` and per-provider ``lanes``, and those are the
+    caps that actually bind. The knob is retired (the deletion ruling stands;
+    the key stays parseable for one release with a deprecation line), and the
+    width now derives from the gate's own counters through the SAME functions
+    ``fno agents top`` and ``advance --explain`` read, so no surface can
+    disagree with the refusal that follows it:
+
+    - fleet: ``agents.max_live`` minus the live census slot count
+    - provider: ``lanes`` minus the live count for ``provider``; with no pin,
+      the most-constrained CONFIGURED provider bounds the next spawn, because
+      the grid may route it anywhere
+
+    The number is advisory width, not the refusal - the gate still refuses at
+    spawn time. Fleet or provider headroom at or below zero returns 0: the
+    fleet is full, and dispatching would only manufacture refusals. A failed
+    reading degrades to 1 (the conservative single lane the retired config
+    default carried) with a warning naming what could not be read.
     """
     try:
+        from fno.agents import spawn_gate
         from fno.config import load_settings
 
-        return int(load_settings().parallel.max_lanes)
-    except Exception:  # noqa: BLE001 - fail-safe to the conservative single lane
+        agents_cfg = load_settings().agents
+        fleet_remaining = int(agents_cfg.max_live) - spawn_gate.census().slot_count
+        limits = dict(agents_cfg.provider_limits)
+        if provider is not None:
+            from fno.agents.spawn_defaults import resolve_lane_vendor
+
+            # The pin is a HARNESS (`--provider` resolves on the harness axis);
+            # provider_limits is keyed by VENDOR. Map through the shipped
+            # resolver and fall back to the raw pin, which may already be a
+            # vendor. A harness pin read against this vendor-keyed table
+            # directly would miss (`codex` is not a key) and silently drop the
+            # one cap that binds.
+            pin_vendor = resolve_lane_vendor([], harness=provider) or provider
+            budgets = {pin_vendor: limits.get(pin_vendor)}
+        else:
+            binding = _binding_provider()
+            budgets = {} if binding is None else {binding: limits.get(binding)}
+        provider_remaining: Optional[int] = None
+        for name, budget in budgets.items():
+            cap = spawn_gate.provider_lanes_cap(budget)
+            if cap is None:
+                continue  # an uncapped provider cannot bound the width
+            remaining = cap - spawn_gate.provider_live_count(name)
+            if provider_remaining is None or remaining < provider_remaining:
+                provider_remaining = remaining
+        bound = [fleet_remaining]
+        if provider_remaining is not None:
+            bound.append(provider_remaining)
+        return max(0, min(bound))
+    except Exception as exc:  # noqa: BLE001 - degrade to the conservative lane, loudly
+        _LOG.warning("spawn headroom unreadable, degrading to 1 lane: %s", exc)
         return 1
 
 
@@ -3851,11 +3989,13 @@ def advance_epic(
             child_results=(AdvanceResult("skipped", EVENT_SKIPPED, reason="children-error"),),
         )
 
-    # Per-project cap: config.parallel.max_lanes (default 1), seeded with the
-    # project's already-live workers so the cap counts total concurrency, not just
-    # this pass. An overall --max caps total dispatches this run.
-    max_lanes = _max_lanes()
-    per_project = _live_workers_by_project()
+    # Width: spawn-gate headroom (fleet + provider). Live workers already
+    # consumed their capacity inside the read (the census and provider counts
+    # subtract them), so the bound here is how many MORE spawns this pass may
+    # make - not a per-project threshold. A --provider pin reads that
+    # provider's lanes; unpinned, the most constrained configured provider
+    # bounds it. An overall --max caps total dispatches this run.
+    max_lanes = _spawn_headroom(provider)
 
     results: list[AdvanceResult] = []
     dispatched: list[str] = []
@@ -3887,13 +4027,15 @@ def advance_epic(
         if not root:
             results.append(_converge_skip_unmapped(child, proj, canon, ev_path, rank=rank))
             continue
-        # Per-project max_lanes cap (0 = paused project; skip). Counts live workers
-        # + this pass's dispatches.
-        if max_lanes >= 0 and per_project.get(proj, 0) >= max_lanes:
+        # Spawn-gate headroom exhausted this pass (0 = the fleet or the
+        # binding provider is already full). The remaining ready children wait
+        # for a drain / re-run; the gate itself still refuses at spawn time if
+        # the world changed since the read.
+        if total >= max_lanes:
             _emit(
                 EVENT_SKIPPED,
                 {"reason": "lane-cap", "node_id": child["id"], "mission": canon,
-                 "detail": f"{proj}: max_lanes={max_lanes}", "rank": rank},
+                 "detail": f"{proj}: headroom={max_lanes} (spawn gate)", "rank": rank},
                 ev_path,
             )
             results.append(
@@ -3907,7 +4049,6 @@ def advance_epic(
         results.append(res)
         if res.decision == "dispatched":
             dispatched.append(res.node_id or child["id"])
-            per_project[proj] = per_project.get(proj, 0) + 1
             total += 1
 
     return AdvanceEpicResult(

@@ -136,3 +136,48 @@ def test_run_gate_passes_under_cap_despite_large_roster(tmp_path, monkeypatch, c
     guard = spawn_gate.run_gate("newcomer", "bg")
     assert capsys.readouterr().err == "", "no queue line: slot 2 < cap 15"
     guard.release()
+
+
+def test_codex_claim_alive_row_renders_and_holds_its_slot(tmp_path, monkeypatch):
+    """A pid-less codex thread row with a live worker: claim shows in the union.
+
+    Measured 2026-09-01: ``fno agents top`` showed 23 rows beside a LANES block
+    reporting live codex lanes, because the pid gate dropped every codex row -
+    the codex app-server hosts the session, so there is no local process and no
+    claude roster row. The live worker:<name> slot claim is the liveness oracle
+    (the same evidence the provider count adds), and admitting the row moves it
+    between display buckets without moving slot_count.
+    """
+    from fno.agents.registry import AgentEntry as _E
+    from fno.claims.core import acquire_claim
+
+    rows = [
+        _E(name="t-codex-lane", harness="codex", cwd="/tmp", log_path="/l",
+           status="busy", pid=None, short_id="", provider="openai"),
+    ]
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+    acquire_claim("worker:t-codex-lane", "holder-1", ttl_ms=60_000,
+                  root=spawn_gate._gate_claims_root())
+
+    c = spawn_gate.census()
+
+    names = [w.name for w in c.workers]
+    assert "t-codex-lane" in names
+    assert c.slot_count == 1, "the row holds its slot either way; the bucket moved"
+    shown = next(w for w in c.workers if w.name == "t-codex-lane")
+    assert shown.source == "fno"
+    assert shown.status == "busy", "claim-proven liveness must not read as parked"
+
+
+def test_codex_row_without_a_live_claim_stays_dropped(tmp_path, monkeypatch):
+    """The claim arm proves liveness; it never admits an unproven row."""
+    rows = [
+        AgentEntry(name="t-codex-dead", harness="codex", cwd="/tmp", log_path="/l",
+                   status="busy", pid=None, short_id="", provider="openai"),
+    ]
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+
+    c = spawn_gate.census()
+
+    assert c.workers == []
+    assert c.slot_count == 0

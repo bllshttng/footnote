@@ -76,7 +76,11 @@ def test_the_refusal_leaves_a_machine_readable_trail(
         spawn_gate._check_registry_schema()
 
     rows = [json.loads(line) for line in events.read_text().splitlines() if line]
-    assert [r["kind"] for r in rows] == ["registry_schema_ahead"]
+    # ONE event, not two. This branch once emitted a bespoke
+    # `registry_schema_ahead` beside the refusal; every gate refusal now exits
+    # through the same `_refuse` seam, and `reason` still isolates this case.
+    assert [r["kind"] for r in rows] == ["spawn_gate_refused"]
+    assert rows[0]["reason"] == "registry_schema"
     assert rows[0]["on_disk"] == reg.SCHEMA_VERSION + 1
     assert rows[0]["understood"] == reg.SCHEMA_VERSION
 

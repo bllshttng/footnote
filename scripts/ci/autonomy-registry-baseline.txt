@@ -13,7 +13,7 @@
 # Forgetting a gate is refused at runtime by config.autonomy.enabled.
 # Forgetting to REGISTER a new spawner is refused here, at CI.
 cli/src/fno/backlog/advance.py::_spawn_worker  # advance / dispatch_lanes / epic converge (config.auto_continue.enabled)
-cli/src/fno/backlog/advance.py::join_node  # NOT autonomy: explicit operator command (`fno backlog join <node>`); spawns only what the operator asked for
+cli/src/fno/backlog/advance.py::_join_node  # NOT autonomy: explicit operator command (`fno backlog join <node>`); spawns only what the operator asked for
 cli/src/fno/backlog/groom.py::_spawn_groom_worker  # groom (config.groom.enabled)
 cli/src/fno/cli.py::  # NOT a spawn site: LAZY_SUBCOMMANDS declares "agents" as a command group
 cli/src/fno/evals/runner.py::_default_spawn  # evals runner (config.evals.enabled)

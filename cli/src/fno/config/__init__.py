@@ -4548,7 +4548,23 @@ class ConfigBlock(BaseModel):
         block; fall back to the default (sequential) rather than raising out of
         the whole settings load. A dict passes through so ``_coerce_max_lanes``
         still runs.
+
+        An explicitly configured ``parallel.max_lanes`` also earns its one
+        deprecation line here: the epic advance no longer consults it (width
+        derives from spawn-gate headroom), but the key stays parseable for one
+        release so an old config does not fail to load. Deleting it from the
+        config is the operator's lever; this warning is the pointer.
         """
+        if isinstance(v, dict) and "max_lanes" in v:
+            from fno.config import _warn_legacy_once
+
+            _warn_legacy_once(
+                "parallel.max_lanes",
+                "fno config: parallel.max_lanes is deprecated and ignored; "
+                "dispatch width derives from spawn-gate headroom "
+                "(agents.max_live, agents.provider_limits.<provider>.lanes). "
+                "Delete the key from config.",
+            )
         if isinstance(v, (dict, ParallelBlock)):
             return v
         return {}

@@ -153,7 +153,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `active_backlog.failure_limit` | int | `3` | advanced | Consecutive dispatch failures before a node is parked. |
 | `active_backlog.max_concurrent` | int | `1` | never | In-flight nodes per project per tick (v1 == 1). |
 | `active_backlog.mission` | str (optional) | _(none)_ | never | Scope the drain daemon to a single mission's nodes. |
-| `parallel.max_lanes` | int | `1` | advanced | Max concurrent parallel-mode lanes (0/1 = sequential, >=2 opts in). |
+| `parallel.max_lanes` | int | `1` | advanced | Deprecated and ignored: the epic advance's width derives from spawn-gate headroom (agents.max_live, provider lanes). The key stays parseable for one release; delete it from config. |
 | `auto_merge.enabled` | bool | `false` | always | Auto-merge a PR once external review passes. |
 | `auto_merge.grant` | str | `none` | advanced | WHO may merge once enabled passes (actor scope): 'none' = humans only via `fno do pr merge`; 'dispatch' = autonomously dispatched /target workers may merge too. Replaces the deprecated dispatch.auto_merge bool. Any unknown value degrades to 'none'. |
 | `auto_merge.merge_strategy` | str | `merge` | advanced | Merge strategy: merge \| squash \| rebase. |

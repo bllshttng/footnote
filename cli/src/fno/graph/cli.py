@@ -489,9 +489,83 @@ def _latest_receipt(node_id: str, events: list[dict]) -> Optional[str]:
     return _format_receipt(latest["type"], latest["data"])
 
 
+def _merge_unconfirmed(child: dict) -> bool:
+    """True when a done child carries a PR that GitHub never confirmed merged.
+
+    A child reads ``done`` the moment ``/target`` finalizes, not when the PR
+    merges, so at a wave gate the graph can say a dependency landed while its
+    branch is still open. ``merge_status`` is written only by
+    :func:`_apply_completion_fields` when a caller resolved MERGED from gh, so
+    its absence is exactly "nobody confirmed this".
+
+    Deliberately NOT called "unmerged". The absence has two explanations - the
+    PR is genuinely open, or it merged through a path that never stamped the
+    field - and asserting the first from the absence of the second is the
+    absence-as-evidence trap. The caller's wording, and ``--verify-merges``,
+    keep that distinction. Measured 2026-09-01: 16 of 444 done nodes carrying a
+    PR were in this state, spanning 2026-04-28 to 2026-08-26.
+    """
+    return (
+        child.get("status") == "done"
+        and bool(child.get("pr_number"))
+        and child.get("merge_status") != "merged"
+    )
+
+
+def _verify_merge(child: dict) -> Optional[str]:
+    """Ask GitHub what actually happened to a flagged child's PR.
+
+    Only ever called for rows :func:`_merge_unconfirmed` already flagged, so
+    the probe is bounded by that set (16 rows fleet-wide on 2026-09-01), never
+    by the child count. Scoped to the child's own checkout because the graph is
+    cross-project and one global ``--repo`` would mis-scope a sibling's PR.
+
+    Returns the resolved note, or None when the probe could not answer. None is
+    the important case: the caller leaves the row FLAGGED. A probe that failed
+    is not evidence that the PR merged, and downgrading the row on a network
+    blip would turn this instrument into the thing it exists to catch.
+    """
+    import subprocess
+
+    from fno.graph._reconcile import GH_QUERY_TIMEOUT_S
+    from fno.graph._intake import project_root_from_settings
+
+    proj = child.get("project")
+    cwd = (
+        (project_root_from_settings(proj) if proj else None)
+        or child.get("_resolved_cwd")
+        or child.get("cwd")
+    )
+    if not cwd:
+        return None
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "view", str(child["pr_number"]), "--json", "state,mergedAt"],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=GH_QUERY_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not (proc.stdout or "").strip():
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    if payload.get("mergedAt") or payload.get("state") == "MERGED":
+        # Merged, but nothing ever stamped merge_status. The graph was right
+        # about the outcome and wrong about the evidence.
+        return f"merged (unstamped) #{child['pr_number']}"
+    state = payload.get("state") or "UNKNOWN"
+    return f"{state} #{child['pr_number']}"
+
+
 def _child_note(child: dict, events: list[dict], worker: Optional[str]) -> str:
     """The inline note for a child row: streak (deferred), receipt (idle ready),
-    or ``-`` (working / done). Never blank for an idle ready child."""
+    merge-unconfirmed (done with an unstamped PR), or ``-``. Never blank for an
+    idle ready child."""
     from fno.graph import failure
 
     node_id = child["id"]
@@ -500,6 +574,8 @@ def _child_note(child: dict, events: list[dict], worker: Optional[str]) -> str:
         return f"streak {failure.consecutive_failures(node_id, events)}"
     if status == "ready" and not worker:
         return _latest_receipt(node_id, events) or "no receipt found"
+    if _merge_unconfirmed(child):
+        return f"merge unconfirmed #{child['pr_number']}"
     return "-"
 
 
@@ -530,10 +606,24 @@ def cmd_epic_status(
     ctx: typer.Context,
     epic: str = typer.Argument(..., help="Epic node id or slug."),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON."),
+    verify_merges: bool = typer.Option(
+        False,
+        "--verify-merges",
+        help=(
+            "Ask GitHub what happened to each merge-unconfirmed child's PR "
+            "(one `gh pr view` per FLAGGED row only). Off by default: the "
+            "table is a local read."
+        ),
+    ),
 ) -> None:
     """One table over an epic's children: status, worker, PR, and an inline
     dispatch receipt (or breaker streak) so an idle/deferred child is never a
-    silent blank. Refuses a non-container node by name."""
+    silent blank. Refuses a non-container node by name.
+
+    A child reads `done` at finalize, not at merge, so a done child whose PR
+    GitHub never confirmed merged is flagged `merge unconfirmed` - the state in
+    which the graph lies at a wave gate. `--verify-merges` resolves those rows
+    against GitHub; without it the whole table is local and needs no network."""
     from fno.graph.fuzzy import resolve_node
     from fno.handoff.output import merge_json_flag, json_mode
 
@@ -575,6 +665,12 @@ def cmd_epic_status(
         node_id = c["id"]
         worker = _live_worker(node_id)
         pr = c.get("pr_number")
+        unconfirmed = _merge_unconfirmed(c)
+        note = _child_note(c, events, worker)
+        if unconfirmed and verify_merges:
+            # A probe that could not answer leaves the row flagged; only a real
+            # answer replaces the note.
+            note = _verify_merge(c) or note
         rows.append(
             {
                 "id": node_id,
@@ -583,9 +679,12 @@ def cmd_epic_status(
                 "status": _status_of(c) or "",
                 "worker": worker,
                 "pr_number": pr,
-                "receipt": _child_note(c, events, worker),
+                "merge_unconfirmed": unconfirmed,
+                "receipt": note,
             }
         )
+
+    unconfirmed_total = sum(1 for r in rows if r["merge_unconfirmed"])
 
     from fno.graph.rollup import scope_growth
     from fno.graph.store import entries_with_archive
@@ -606,6 +705,11 @@ def cmd_epic_status(
                     "slug": epic_node.get("slug"),
                     "children_total": total,
                     "children_done": done,
+                    # Done children whose PR GitHub never confirmed merged. A
+                    # subset of children_done, not a separate bucket: the point
+                    # is that some of that "done" is unevidenced.
+                    "children_merge_unconfirmed": unconfirmed_total,
+                    "merges_verified": verify_merges,
                     "children": rows,
                     # follow_ups is reported only when coverage clears the floor; the
                     # coverage block ships regardless so a suppressed figure explains
@@ -633,7 +737,13 @@ def cmd_epic_status(
         )
         return
 
-    typer.echo(f"epic: {epic_id} ({epic_node.get('slug') or ''})  {done}/{total} done")
+    header = f"epic: {epic_id} ({epic_node.get('slug') or ''})  {done}/{total} done"
+    if unconfirmed_total:
+        # Qualifies the done count in the same breath rather than a line below
+        # it: "3/5 done" beside an unqualified number is what let the graph
+        # read as landed at a wave gate.
+        header += f"  ({unconfirmed_total} merge unconfirmed)"
+    typer.echo(header)
     typer.echo("  " + _scope_growth_line(growth))
     if not rows:
         typer.echo("  (no children)")
@@ -4761,7 +4871,6 @@ def cmd_next(
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import (
         detect_project,
-        filter_by_project,
         make_selection_sort_key,
         descendants_of,
         _find_node,
@@ -4832,66 +4941,39 @@ def cmd_next(
             for e in entries
             if (e.get("status") in allowed or is_cold_dispatchable(e)) and not e.get("completed_at")
         ]
-        if roadmap_id:
-            candidates = [e for e in candidates if e.get("roadmap_id") == roadmap_id]
-        if mission:
-            candidates = [e for e in candidates if e.get("mission_id") == mission]
-        if parent_target_id is not None:
-            scope = descendants_of(entries, parent_target_id)
-            candidates = [e for e in candidates if e.get("id") in scope]
-        candidates = filter_by_project(candidates, project_filter, all_)
-        # Selection-time claim enforcement (ab-fcf9cec5): drop nodes a live
-        # session already holds so a second pickup is impossible.
-        claimed = _require_live_claimed_node_ids("backlog selection")
-        if claimed:
-            candidates = [e for e in candidates if e.get("id") not in claimed]
-        # Drop READY nodes that already carry an unmerged open PR so a successor
-        # dispatch (advance / megawalk, both shelling `fno backlog next`) never
-        # re-builds already-PR'd work (ab-372130f6). The PID-based node claim
-        # is gone once the builder session exits, so this PR-state guard is the
-        # only in-flight signal left during the review window.
-        #
-        # Scoped to status "ready": a deferred/idea row only appears here when
-        # an operator explicitly asked for it via --include-deferred /
-        # --include-ideas, and the defer contract says those resurface on
-        # request. The guard is about AUTO re-selection of fresh ready work, not
-        # explicit re-engagement, so it must not suppress an explicitly-included
-        # paused PR-bearing node (codex PR #516 P2). The auto paths only ever
-        # pass bare `next` (allowed == {"ready"}), so this scoping is a no-op
-        # for them and the originally-observed bug node (ready + open PR) is
-        # still caught.
-        candidates = [
-            e for e in candidates if e.get("status") != "ready" or not _has_unmerged_open_pr(e)
-        ]
-        # Containers are never directly buildable (x-33b2): an epic's work lives
-        # in its decomposed children, so `next` must never return it - it
-        # otherwise ranks first among its siblings (make_selection_sort_key) and
-        # is repeatedly re-selected as the head, starving the genuinely-ready leaf
-        # below it. Build the leaves, not the box; the epic closes itself via
-        # _cascade_close_parents when its last child lands. Computed from the FULL
-        # graph so a parent already filtered out of `candidates` still suppresses
-        # correctly. Shared with cmd_ready.
-        container_ids = _container_ids(entries)
-        candidates = [e for e in candidates if e.get("id") not in container_ids]
-        # Batch-lane Wave 2: a node already committed to an open batch ships via
-        # the batch PR, so drop it from the dispatch pool (else a second worker
-        # rebuilds work already on the shared branch). Cleared on abandon so a
-        # requeued member resurfaces. Shared with cmd_ready.
-        candidates = [e for e in candidates if not _is_batched_member(e)]
-        # G1 guards (x-3236): dead-ancestor + stale-ready quarantine. The single
-        # narrowing choke point shared with the converge path
-        # (advance._direct_dependents), so a leaf under a killed epic or a
-        # long-abandoned ready node is never dispatched. Fail-open per guard.
-        from fno.backlog.advance import selection_guards, _guard_staleness_days
+        # The narrowing cascade lives in `fno.backlog.explain` and is shared
+        # with `fno backlog advance --explain`, so the explanation of a
+        # selection can never drift from the selection. Order is unchanged; each
+        # step's own reasoning now rides on the filter it belongs to:
+        #   roadmap / mission / parent-scope - explicit scoping flags.
+        #   project - detects from the candidate list, so it narrows a LIST.
+        #   live-claim (ab-fcf9cec5) - a live session already holds the node.
+        #   unmerged-open-pr (ab-372130f6) - the only in-flight signal left once
+        #     the builder session's pid claim dies; scoped to `ready` so an
+        #     explicitly --include-deferred/--include-ideas row still surfaces.
+        #   container (x-33b2) - build the leaves, not the box.
+        #   batched - ships via the batch PR.
+        #   selection-guard (x-3236) - dead ancestor / stale-ready quarantine.
+        from fno.backlog.explain import build_selection_filters, run_cascade
 
-        guard_now = datetime.now(timezone.utc)
-        guard_stale = _guard_staleness_days()
-        guard_by_id = {e.get("id"): e for e in entries if e.get("id")}
-        candidates = [
-            e
-            for e in candidates
-            if not selection_guards(e, guard_by_id, guard_now, staleness_days=guard_stale)
-        ]
+        # Selection-time claim enforcement (ab-fcf9cec5) and the container set
+        # are read ONCE here, under this call's graph read, and handed to the
+        # cascade: recomputing inside it would read a different instant.
+        claimed = _require_live_claimed_node_ids("backlog selection")
+        container_ids = _container_ids(entries)
+        candidates = run_cascade(
+            candidates,
+            build_selection_filters(
+                entries,
+                roadmap_id=roadmap_id,
+                mission=mission,
+                parent_target_id=parent_target_id,
+                project_filter=project_filter,
+                all_=all_,
+                claimed=claimed,
+                container_ids=container_ids,
+            ),
+        ).survivors
         # Epics-first, then flat priority (C3, Locked Decision 7). Build the
         # key from the FULL graph so epic parents resolve even when filtered
         # out of the candidate set.
@@ -10738,10 +10820,28 @@ def cmd_advance(
     max_dispatch: Optional[int] = typer.Option(
         None,
         "--max",
-        help="With --epic: cap the total workers this epic advance dispatches (per-project cap is config.parallel.max_lanes).",
+        help="With --epic: cap the total workers this epic advance dispatches (width derives from spawn-gate headroom).",
     ),
     project: Optional[str] = typer.Option(
         None, "--project", "-p", help="Restrict next-node selection to this project."
+    ),
+    explain: bool = typer.Option(
+        False,
+        "--explain",
+        help=(
+            "Dry run: report why this node and not another, which gate or cap "
+            "would refuse it with its measured value against its threshold, and "
+            "what the capacity grid resolves. Dispatches nothing, claims "
+            "nothing, and ignores config.auto_continue."
+        ),
+    ),
+    explain_node: Optional[str] = typer.Option(
+        None,
+        "--explain-node",
+        help="With --explain: answer for THIS node - the filter that dropped it, or its rank.",
+    ),
+    explain_top: int = typer.Option(
+        5, "--explain-top", help="With --explain: how many ranked candidates to show."
     ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the decision as JSON."),
     verbose: bool = typer.Option(False, "--verbose", help="Print the dispatch decision to stderr."),
@@ -10767,8 +10867,9 @@ def cmd_advance(
 
     ``--epic <id>`` switches to the epic advance / converge path (x-9608 K1):
     mark the epic's mission active and fan out every currently-ready LEAF child
-    across all projects. Idempotent; respects config.parallel.max_lanes per
-    project + ``--max`` overall. ``--stop`` deactivates instead.
+    across all projects. Idempotent; the width derives from spawn-gate headroom
+    (fleet max_live and provider lanes) + ``--max`` overall. ``--stop``
+    deactivates instead.
     """
     from fno.dispatch_flags import (
         DispatchFlagError,
@@ -10777,6 +10878,46 @@ def cmd_advance(
     )
     from fno.backlog.advance import advance as _advance
     from fno.backlog.advance import advance_dependents as _advance_deps
+
+    # --explain returns BEFORE every dispatch path, including the pin validation
+    # below: it is a read, so an unparseable --model must not stop it from
+    # reporting why a node did not launch. A graph read that fails exits
+    # non-zero naming the read rather than printing a partial verdict.
+    if explain:
+        from fno.backlog.explain import build_report, render_report
+
+        # --explain --epic models the DAEMON's cascade (select_lane_fill), never
+        # the next cascade: two selectors, and an answer about the wrong one is
+        # the lie the dry run exists to prevent.
+        if epic is not None:
+            from fno.backlog.explain import build_lane_fill_report, render_lane_fill_report
+
+            try:
+                report = build_lane_fill_report(
+                    epic=epic, project=project, node_id=explain_node, top=explain_top,
+                    max_dispatch=max_dispatch,
+                )
+            except Exception as exc:  # noqa: BLE001 - never a partial verdict
+                typer.echo(f"advance --explain --epic: {exc}", err=True)
+                raise typer.Exit(code=1)
+            typer.echo(
+                json.dumps(report, indent=2, default=str)
+                if json_out
+                else render_lane_fill_report(report)
+            )
+            return
+        try:
+            report = build_report(
+                project=project, node_id=explain_node, top=explain_top
+            )
+        except Exception as exc:  # noqa: BLE001 - never a partial verdict
+            typer.echo(f"advance --explain: {exc}", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(json.dumps(report, indent=2, default=str) if json_out else render_report(report))
+        return
+    if explain_node is not None or explain_top != 5:
+        typer.echo("advance: --explain-node / --explain-top require --explain", err=True)
+        raise typer.Exit(code=2)
 
     # Validate the dispatch pins before any spawn; the pin is resolved only when
     # given so an absent pin lets the spawn path keep its per-node/default choice.

@@ -417,7 +417,9 @@ FIELD_META: dict[str, Meta] = {
     # --- config.parallel.* ---
     "parallel.max_lanes": Meta(
         "advanced",
-        "Max concurrent parallel-mode lanes (0/1 = sequential, >=2 opts in).",
+        "Deprecated and ignored: the epic advance's width derives from "
+        "spawn-gate headroom (agents.max_live, provider lanes). The key stays "
+        "parseable for one release; delete it from config.",
     ),
     # --- config.auto_merge.* ---
     "auto_merge.enabled": Meta(
