@@ -715,7 +715,7 @@ def run_retask(
     def rename(new_name: str) -> Optional[str]:
         try:
             renamed_name[0] = rename_agent(
-                entry.name, new_name, registry_path=registry_path
+                entry.name, new_name, node=node, registry_path=registry_path
             ).name
             return renamed_name[0]
         except (AgentResolutionError, ValueError):

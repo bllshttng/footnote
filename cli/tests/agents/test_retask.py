@@ -393,7 +393,13 @@ def test_run_retask_parses_codex_clear_receipt_before_accepting_successor(monkey
     monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
     monkeypatch.setattr(retask, "_source_preflight", lambda _entry: {"status": "ready"})
     monkeypatch.setattr(retask, "load_registry", lambda **_kwargs: [successor])
-    monkeypatch.setattr(retask, "rename_agent", lambda *_args, **_kwargs: SimpleNamespace(name="target-x-bdb9"))
+    renamed: list[dict] = []
+    monkeypatch.setattr(
+        retask,
+        "rename_agent",
+        lambda *_args, **kwargs: renamed.append(kwargs)
+        or SimpleNamespace(name="target-x-bdb9"),
+    )
     monkeypatch.setattr("fno.agents.registry.project_verified_tier", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("fno.agents.mux_spawn._pane_osc_title", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
@@ -415,6 +421,7 @@ def test_run_retask_parses_codex_clear_receipt_before_accepting_successor(monkey
     assert receipt["current_session_id"] == "new-session"
     assert receipt["transition"] == "succession"
     assert receipt["registry_rows"] == 1
+    assert renamed == [{"node": "x-bdb9", "registry_path": None}]
 
 
 def test_run_retask_succession_verdict_rides_the_shared_classifier(monkeypatch):

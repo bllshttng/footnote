@@ -2618,14 +2618,19 @@ def rename_agent(
     token: str,
     new_name: str,
     *,
+    node: Optional[str] = None,
     registry_path: Optional[Path] = None,
 ) -> AgentEntry:
-    """Change only a row's mutable display label, preserving all identities."""
+    """Change a row's label and, for retask, its node in one transaction."""
     new_name = new_name.strip()
     if not _REGISTRY_NAME_RE.fullmatch(new_name):
         raise ValueError(
             "registry name must be 1-64 letters, numbers, underscores, or hyphens"
         )
+    if node is not None:
+        node = node.strip()
+        if not node:
+            raise ValueError("registry node must be non-empty when provided")
     resolved = resolve_agent(token, path=registry_path)
     source = resolved.entry
     identity = (source.harness, source.harness_session_id, source.short_id)
@@ -2650,6 +2655,8 @@ def rename_agent(
         if source.name != new_name and source.name not in target.aliases:
             target.aliases.append(source.name)
         target.name = new_name
+        if node is not None:
+            target.node = node
         result.append(target)
         return entries
 
