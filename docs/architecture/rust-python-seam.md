@@ -8,7 +8,7 @@ Where the boundary between the Rust runtime and the Python CLI belongs, what a c
 
 The measured evidence: the tree contains zero FFI. No `pyo3`, no `maturin`, no `cpython`, no `cbindgen` appears in either crate manifest or in `cli/pyproject.toml`. Every crossing in both directions is a process boundary today, and this ruling keeps it that way.
 
-The reasoning. A `maturin` build step couples the Python wheel to a compiled artifact on every platform, and the install contract of a pure-Python package becomes a build matrix. The repo already ships one generated cross-language artifact, `harness_capabilities.toml`, and its freshness needs its own CI tripwire. Adding an ABI to that surface buys fine-grained ownership at the price of a per-platform build. The seam's traffic does not pay for it: the crossing sites are low-frequency verb shells and bounded reads, not hot in-process calls.
+The reasoning. A `maturin` build step couples the Python wheel to a compiled artifact on every platform. The install contract of a pure-Python package becomes a build matrix. The repo already ships one generated cross-language artifact, `harness_capabilities.toml`, and its freshness needs its own CI tripwire. Adding an ABI to that surface buys fine-grained ownership at the price of a per-platform build. The seam's traffic does not pay for it: the crossing sites are low-frequency verb shells and bounded reads, not hot in-process calls.
 
 The consequence, and it is arithmetic, not preference. A subprocess has no cheap call, so a port must carry a decision's whole fact set or it adds a spawn. Moving half a decision across a process boundary trades one crossing for another and splits the fact set in two. Every later port proposal that splits a decision from its facts is refused by this paragraph, without re-arguing the build matrix.
 
@@ -16,11 +16,11 @@ The consequence, and it is arithmetic, not preference. A subprocess has no cheap
 
 Reproduce every number below on a clean checkout with `cd cli && uv run fno-py doctor lint seam-crossings`. It prints, for each baselined set, the measured count beside the baseline count.
 
-Rust reaches the `fno` porcelain through **56 crossing sites across 18 files in both crates**. The lint also ratchets **16 resolver functions**, every function whose body resolves the porcelain path. The Python direction runs through one door: `cli/src/fno/rust_binary.py` is the only production Python file allowed to exec the literal `fno-agents` binary, and 15 production files import it.
+Rust reaches the `fno` porcelain through **56 crossing sites across 18 files in both crates**. The lint also ratchets **16 resolver functions**, every function whose body resolves the porcelain path. The Python direction runs through one door. `cli/src/fno/rust_binary.py` is the only production Python file allowed to exec the literal `fno-agents` binary. 15 production files import it.
 
-The counting rule, in words, so a reader can audit it without reading the lint. A crossing site is a production Rust line that launches `Command::new("fno")` or calls a baselined resolver helper name. A resolver function is a production Rust function with a line reading the `FNO_BIN` or `FNO_LOOPCHECK_FNO_BIN` env key, or constructing the porcelain path with `join("fno")`. Inline test modules, `crates/*/tests/`, and comment lines are out of scope. The baseline keys on `(rule, path, line content)` as a multiset, never on the line number, so a moved line does not churn it and a removed site still fails.
+The counting rule, in words, so a reader can audit it without reading the lint. A crossing site is a production Rust line that launches `Command::new("fno")` or calls a baselined resolver helper name. A resolver function is a production Rust function with a line reading the `FNO_BIN` or `FNO_LOOPCHECK_FNO_BIN` env key, or constructing the porcelain path with `join("fno")`. Inline test modules, `crates/*/tests/`, and comment lines are out of scope. The baseline keys on `(rule, path, line content)` as a multiset, never on the line number. A moved line does not churn it. A removed site still fails.
 
-A resolver is detected by shape, never by name. Four helpers carry obvious spellings: `fno_bin` in `crates/fno/src/server.rs:2843`, `fno_bin` in `crates/fno/src/yard_overlay.rs:49`, `fno_bin` in `crates/fno-agents/src/scrape.rs:174`, and `loopcheck_fno_bin` in `crates/fno-agents/src/loopcheck.rs:3934`. Twelve more functions resolve the porcelain inline, among them `fno_cmd` in `loop_dispatch.rs:136`, `durable_session_pid` in `claims.rs:2138`, and `best_effort_notify` in `loopcheck.rs:3942`. A first count that grepped one literal and four helper names reported 29 sites across 10 files. The real number is 56 across 18. That 48 percent shortfall is the worked example of a single-literal grep, and it is why the resolver rule matches the env-key shape instead of a name list.
+A resolver is detected by shape, never by name. Four helpers carry obvious spellings: `fno_bin` in `crates/fno/src/server.rs:2843`, `fno_bin` in `crates/fno/src/yard_overlay.rs:49`, `fno_bin` in `crates/fno-agents/src/scrape.rs:174`, and `loopcheck_fno_bin` in `crates/fno-agents/src/loopcheck.rs:3934`. Twelve more functions resolve the porcelain inline, among them `fno_cmd` in `loop_dispatch.rs:136`, `durable_session_pid` in `claims.rs:2138`, and `best_effort_notify` in `loopcheck.rs:3942`. A first count that grepped one literal and four helper names reported 29 sites across 10 files. The real number is 56 across 18. That 48 percent shortfall is the worked example of a single-literal grep. It is why the resolver rule matches the env-key shape instead of a name list.
 
 The write path is the asymmetry that matters. `server.rs:3104` states it: the `fno` porcelain is the ONLY writer of `graph.json`, and the mux shells it and reads the verdict. Reads are duplicated across `cli/src/fno/graph/` and, since `backlog_view.rs`, in Rust too. The seam is not reader versus caller. It is reads duplicated in both languages and writes monopolised by Python behind a subprocess.
 
@@ -28,7 +28,7 @@ The write path is the asymmetry that matters. `server.rs:3104` states it: the `f
 
 Rust owns what must not stop: the daemon, the PTY, the loop, liveness, and the claim protocol its own decisions read. Python owns what a user types and what reads the graph: the CLI verb surface, `graph.json`, and config resolution.
 
-A crossing is legitimate only when the caller does not own the decision the answer feeds. `finalize` shelling `fno backlog` to record an outcome is legitimate: it writes a Python-owned record through the single writer. The daemon shelling `claim list` to decide its own sweep is not: the caller owns the decision, so the fact set belongs on the caller's side of the seam.
+When the caller does not own the decision the answer feeds, the crossing is legitimate. When the caller owns it, the crossing is not. `finalize` shelling `fno backlog` to record an outcome is legitimate: it writes a Python-owned record through the single writer. The daemon shelling `claim list` to decide its own sweep is not. The caller owns the decision. The fact set belongs on the caller's side of the seam.
 
 ## The classification
 
@@ -112,7 +112,7 @@ The gaming path is real, and the tree already holds the specimen. `crates/fno/sr
 
 ## Sequencing
 
-Order ports topologically over the crossing dependency graph, not by risk. Risk ranks the claim classifier first on the inventory page because nothing pins it. Dependency decides when a port is safe, and the two orders disagree.
+Order ports topologically over the crossing dependency graph, not by risk. Risk ranks the claim classifier first on the inventory page because nothing pins it. Dependency says which port can land first, and the two orders disagree.
 
 The first real edge: `claim list` becomes Rust-owned before the daemon's reap decision can be. Porting the decision first makes the daemon shell for the facts it no longer owns, which adds a crossing. Port the fact set, then the decision, in that order, and the crossing count falls instead of rotating.
 
