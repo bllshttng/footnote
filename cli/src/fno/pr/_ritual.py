@@ -634,11 +634,12 @@ class Ritual:
             self._emit("archive", _SKIPPED, "no-branch")
             return
         order = self._register_reap_order("merged-pr")
+        order_written = not order.startswith("reap-order-unwritten")
         wt = self._find_worktree(branch)
         if not wt:
             self._emit(
                 "archive",
-                _DEFERRED,
+                _DEFERRED if order_written else _FAILED,
                 f"no worktree for {branch}; sweep-will-reap; {order}",
             )
             return
@@ -650,13 +651,17 @@ class Ritual:
             # in the detail line read as done and nobody ever ran it. The
             # order makes "later" a fact in the world: the daemon's sweep pays
             # this debt instead of a human remembering to.
-            self._emit("archive", _DEFERRED, f"worktree={wt}; sweep-will-reap; {order}")
+            self._emit(
+                "archive",
+                _DEFERRED if order_written else _FAILED,
+                f"worktree={wt}; sweep-will-reap; {order}",
+            )
             return
         script = self.canon / "scripts" / "setup" / "archive-worktree.sh"
         if not script.exists():
             self._emit(
                 "archive",
-                _DEFERRED,
+                _DEFERRED if order_written else _FAILED,
                 f"worktree={wt}; archive-worktree.sh missing; {order}",
             )
             return
@@ -675,7 +680,11 @@ class Ritual:
             )
             return
         if r.ok:
-            self._emit("archive", _OK, f"worktree={wt}; archived; {order}")
+            self._emit(
+                "archive",
+                _OK if order_written else _FAILED,
+                f"worktree={wt}; archived; {order}",
+            )
             return
         # A guarded refusal (live session in the tree, salvage, confirmation)
         # leaves the tree in place: the work is still owed, so the order

@@ -863,6 +863,18 @@ def test_archive_without_a_worktree_still_mints_the_reap_order(tmp_path, capsys,
     assert any("reap:pr-7" in " ".join(call) for call in runner.calls)
 
 
+def test_archive_without_a_written_order_fails_loudly(tmp_path, capsys, monkeypatch):
+    runner = FakeRunner(branch="feature/x", claim_rc=2)
+    r = _bare(tmp_path, runner)
+    monkeypatch.setattr(r, "_find_worktree", lambda branch: None)
+
+    r.leg_archive()
+
+    out = capsys.readouterr().out
+    assert "step=archive status=failed" in out
+    assert "reap-order-unwritten" in out
+
+
 def test_archive_receipt_is_written_to_the_daemon_journal(
     tmp_path, monkeypatch
 ):

@@ -928,13 +928,13 @@ pub fn parse_worktree_sweep(stdout: &str) -> Option<WorktreeSweepReport> {
 ///
 /// A timer tick proves nothing on its own, so an unearned tick still only
 /// REPORTS. Removal stays on the merge-triggered path: the post-merge ritual
-/// mints a `reap:pr-<n>` claim (TTL-bounded) whenever its archive leg defers
-/// or is guard-refused, and while any such order stands (`orders` injects that
-/// read) the pass runs with `--apply` and the sweep's own guards - reapable,
-/// live claim, rooted processes - decide tree by tree. A tree that stays
-/// protected expires its order rather than being forced. There is no config
-/// knob, because two off-switches for one decision strand whoever flips the
-/// wrong one.
+/// mints a `reap:pr-<n>` claim (TTL-bounded) before archive lookup, and while
+/// any such order stands in a repository (`orders` injects that scoped read)
+/// that repository's pass runs with `--apply`. The sweep's own guards -
+/// reapable, live claim, rooted processes - decide tree by tree. A tree that
+/// stays protected expires its order rather than being forced. There is no
+/// config knob, because two off-switches for one decision strand whoever
+/// flips the wrong one.
 ///
 /// `orders` and `run` are injected so the policy is testable without shelling
 /// out.
@@ -943,7 +943,7 @@ pub fn worktree_sweep(
     emitter: &EventEmitter,
     now: i64,
     roots: &[String],
-    orders: &dyn Fn() -> bool,
+    orders: &dyn Fn(&str) -> bool,
     run: &dyn Fn(&str, bool) -> WorktreeSweepOutput,
 ) -> usize {
     let stamp = home.root().join("worktree-sweep.stamp");
@@ -954,10 +954,10 @@ pub fn worktree_sweep(
     if now.saturating_sub(last) < WORKTREE_SWEEP_INTERVAL_SECS as i64 {
         return 0;
     }
-    let apply = orders();
-    let mode = if apply { "apply-orders" } else { "report-only" };
     let mut swept = 0;
     for root in roots {
+        let apply = orders(root);
+        let mode = if apply { "apply-orders" } else { "report-only" };
         // Emit for EVERY repo, including the ones that read zero. A tick that
         // stays silent when it finds nothing cannot be told from a tick that
         // never ran, and this sweep exists precisely to surface what the
@@ -3487,12 +3487,13 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         let _gate = SweepGate(flag);
                         let roots = registry_repo_roots(&home);
                         let now = now_epoch_secs();
-                        worktree_sweep(&home, &emitter, now, &roots, &|| {
+                        worktree_sweep(&home, &emitter, now, &roots, &|root| {
                             // Live reap orders anywhere (both claim roots are
                             // read by `list`): each is minted only by a ritual
                             // that gh-confirmed MERGED, so its standing is the
                             // merge-trigger for this tick's apply pass.
-                            std::process::Command::new("fno")
+                            let mut cmd = std::process::Command::new("fno");
+                            cmd.current_dir(root)
                                 .args(["agents", "claim", "list", "--prefix", "reap:", "-J"])
                                 .output()
                                 .ok()
@@ -11887,7 +11888,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &emitter,
             1_000_000,
             &["/repo/a".into(), "/repo/b".into()],
-            &|| false,
+            &|_| false,
             &|_, _| WorktreeSweepOutput {
                 exit_code: Some(0),
                 stdout: quiet.into(),
@@ -11916,7 +11917,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &emitter,
             1_000_000,
             &["/repo/a".into()],
-            &|| true,
+            &|_| true,
             &|_, apply| {
                 assert!(apply, "a standing order must reach the verb as --apply");
                 WorktreeSweepOutput {
@@ -11934,6 +11935,37 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     }
 
     #[test]
+    fn sweep_reads_reap_orders_in_each_repository_scope() {
+        let home = tmp_home("wt-sweep-repo-orders");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let seen = std::sync::Mutex::new(Vec::new());
+        let quiet =
+            "Summary: 0 would archive, 0 kept (0 unmerged, 0 unpushed, 0 dirty), 0 failed\n";
+
+        let swept = worktree_sweep(
+            &home,
+            &emitter,
+            1_000_000,
+            &["/repo/a".into(), "/repo/b".into()],
+            &|root| root == "/repo/b",
+            &|root, apply| {
+                seen.lock().unwrap().push((root.to_string(), apply));
+                WorktreeSweepOutput {
+                    exit_code: Some(0),
+                    stdout: quiet.into(),
+                    stderr: String::new(),
+                }
+            },
+        );
+
+        assert_eq!(swept, 2);
+        assert_eq!(
+            seen.into_inner().unwrap(),
+            vec![("/repo/a".into(), false), ("/repo/b".into(), true)]
+        );
+    }
+
+    #[test]
     fn sweep_honours_its_own_6h_floor() {
         let home = tmp_home("wt-sweep-floor");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
@@ -11945,7 +11977,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let now = 1_000_000;
 
         assert_eq!(
-            worktree_sweep(&home, &emitter, now, &["/repo/a".into()], &|| false, &out),
+            worktree_sweep(&home, &emitter, now, &["/repo/a".into()], &|_| false, &out),
             1
         );
         // Same window: skipped entirely, no second reading.
@@ -11955,7 +11987,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 &emitter,
                 now + 60,
                 &["/repo/a".into()],
-                &|| false,
+                &|_| false,
                 &out
             ),
             0
@@ -11967,7 +11999,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 &emitter,
                 now + 21_601,
                 &["/repo/a".into()],
-                &|| false,
+                &|_| false,
                 &out
             ),
             1
@@ -11997,7 +12029,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &emitter,
             1_000_000,
             &["/repo/a".into()],
-            &|| false,
+            &|_| false,
             &|_, _| WorktreeSweepOutput {
                 exit_code: None,
                 stdout: String::new(),
@@ -12026,7 +12058,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &emitter,
             1_000_000,
             &["/repo/a".into()],
-            &|| false,
+            &|_| false,
             &|_, _| output.clone(),
         );
 
@@ -12047,7 +12079,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &emitter,
             1_000_000,
             &["/repo/a".into()],
-            &|| false,
+            &|_| false,
             &|_, _| WorktreeSweepOutput {
                 exit_code: Some(0),
                 stdout: "no summary here\n".into(),
