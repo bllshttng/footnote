@@ -1213,14 +1213,14 @@ def test_start_untiered_node_forwards_no_model(monkeypatch, tmp_path):
 
 
 def test_resolve_node_model_degrades_on_error(monkeypatch):
-    """AC1-ERR: any load/resolve error -> (None, provider-default), never raises."""
+    """AC1-ERR: any load/resolve error -> no-difficulty provider default, never raises."""
 
     def _raise(_p):
         raise RuntimeError("snapshot unreadable")
 
     monkeypatch.setattr("fno.graph.load.load_graph", _raise)
     monkeypatch.setattr("fno.paths.graph_json", lambda: "ignored")
-    assert target_cli._resolve_node_model("x-d7a7") == (None, "provider-default")
+    assert target_cli._resolve_node_model("x-d7a7") == (None, "provider-default(no-difficulty)")
 
 
 def test_resolve_node_model_error_preserves_explicit(monkeypatch):
