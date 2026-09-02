@@ -31,8 +31,13 @@ def _last_json(out: str) -> dict:
 
 def _route_to(monkeypatch, root):
     # Route every claim key (node:/dispatch:) to an isolated tmp root so the real
-    # acquire/claim_status machinery runs hermetically.
+    # acquire/claim_status machinery runs hermetically. Two doors, deliberately:
+    # the monkeypatch covers callers that import claims_root_for directly, and
+    # FNO_CLAIMS_ROOT (the documented global-root override) covers anything that
+    # resolves through the env at call time, so a module-identity or import-order
+    # pathology can never route a CLI acquire to the real shared root.
     monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: root)
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(root))
 
 
 def test_spawn_guard_serializes_two_callers(monkeypatch, tmp_path):
