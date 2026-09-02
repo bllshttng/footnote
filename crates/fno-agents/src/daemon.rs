@@ -1546,9 +1546,82 @@ fn output_with_timeout(mut cmd: std::process::Command, secs: u64) -> Option<std:
     })
 }
 
+/// Is the worktree's branch merged into the repo's main line? The rm door's
+/// half of the third bucket: the `--merged` sweep merge-filters BEFORE its
+/// gate, and this caller has no such pre-filter, so it asks here. `None`:
+/// nothing names the work or the main line (detached HEAD, no main ref, git
+/// error) - the caller keeps the tree. Mirrors
+/// `fno.worktree_reapable.branch_merged`, the Python door's same question.
+fn branch_merged(cwd: &str) -> Option<bool> {
+    let mut bases = vec!["origin/main".to_string(), "main".to_string()];
+    if let Some(out) = output_with_timeout(
+        {
+            let mut cmd = std::process::Command::new("git");
+            cmd.current_dir(cwd)
+                .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+            cmd
+        },
+        RM_SUBPROCESS_TIMEOUT_SECS,
+    ) {
+        let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if out.status.success() && !head.is_empty() {
+            bases.insert(0, head);
+        }
+    }
+    let mut base: Option<String> = None;
+    for candidate in &bases {
+        let known = output_with_timeout(
+            {
+                let mut cmd = std::process::Command::new("git");
+                cmd.current_dir(cwd)
+                    .args(["rev-parse", "--verify", "--quiet", candidate]);
+                cmd
+            },
+            RM_SUBPROCESS_TIMEOUT_SECS,
+        );
+        if known.is_some_and(|out| out.status.success()) {
+            base = Some(candidate.clone());
+            break;
+        }
+    }
+    let base = base?;
+    let branch = output_with_timeout(
+        {
+            let mut cmd = std::process::Command::new("git");
+            cmd.current_dir(cwd).args(["branch", "--show-current"]);
+            cmd
+        },
+        RM_SUBPROCESS_TIMEOUT_SECS,
+    )?;
+    if !branch.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
+    if branch.is_empty() {
+        return None;
+    }
+    let merged = output_with_timeout(
+        {
+            let mut cmd = std::process::Command::new("git");
+            cmd.current_dir(cwd)
+                .args(["merge-base", "--is-ancestor", &branch, &base]);
+            cmd
+        },
+        RM_SUBPROCESS_TIMEOUT_SECS,
+    )?;
+    match merged.status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
 /// Ask `fno agents workspace worktree reapable` - the same verb the `--merged`
 /// sweep, `archive-worktree.sh` and the GC probe ask - and read BOTH the
-/// literal marker and the reason, so a kept tree's receipt can name why.
+/// literal marker and the reason, so a kept tree's receipt can name why. A
+/// `yes` then meets the merge check, because this door has no sweep-style
+/// pre-filter: a clean-but-unmerged branch is exactly where abandoned-but-real
+/// work lives, and the contract keeps it for a human.
 fn worktree_gate(cwd: &str) -> WorktreeGate {
     let out = match output_with_timeout(
         {
@@ -1574,7 +1647,11 @@ fn worktree_gate(cwd: &str) -> WorktreeGate {
     // The literal marker, never a bare exit code a shim could swallow - the
     // same double permission `worktree_clean_probe` needs.
     if out.status.success() && text.contains("reapable=yes") {
-        return WorktreeGate::Reapable;
+        return match branch_merged(cwd) {
+            Some(true) => WorktreeGate::Reapable,
+            Some(false) => WorktreeGate::Blocked("clean but the branch is not merged".into()),
+            None => WorktreeGate::Unanswerable("the merged-branch probe could not answer".into()),
+        };
     }
     if text.contains("reapable=no") {
         return WorktreeGate::Blocked(reason("blocked"));
@@ -1583,13 +1660,13 @@ fn worktree_gate(cwd: &str) -> WorktreeGate {
 }
 
 /// (x-d545) A human removed ONE named row: its worktree goes with it, but
-/// only through the reapable gate - the same three buckets the `--merged`
-/// sweep and the watchdog honor (DIRTY untouched, clean-and-unmerged never
-/// auto-pruned, clean loses the TREE and keeps the BRANCH: `git worktree
-/// remove` never deletes branches). A gate that cannot answer keeps the
-/// tree - removal never guesses. The row is removed either way; a protected
-/// worktree must not wedge the row on the sideline. `None`: the row owned no
-/// linked worktree, a clean no-op.
+/// only through the reapable gate plus the merge check - the same three
+/// buckets the `--merged` sweep and the watchdog honor (DIRTY untouched,
+/// clean-and-unmerged never auto-pruned, clean-and-MERGED loses the TREE and
+/// keeps the BRANCH: `git worktree remove` never deletes branches). A gate
+/// that cannot answer keeps the tree - removal never guesses. The row is
+/// removed either way; a protected worktree must not wedge the row on the
+/// sideline. `None`: the row owned no linked worktree, a clean no-op.
 fn rm_take_worktree_with(
     entry: &state::RegistryEntry,
     gate: &dyn Fn(&str) -> WorktreeGate,
@@ -11153,6 +11230,64 @@ mod tests {
             !stalled.status.success(),
             "the killed child reads as a failed call"
         );
+    }
+
+    #[test]
+    fn branch_merged_answers_real_repos() {
+        // The rm door's half of the third bucket: a fresh branch is
+        // unmerged; a fast-forward into the main line flips it.
+        let root = std::env::temp_dir().join(format!("fno-rm-mg-{}", std::process::id()));
+        let repo = root.join("repo");
+        let wt = root.join("leaf");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str], cwd: &std::path::Path| {
+            std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let commit_args = [
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "seed",
+        ];
+        assert!(git(&["init", "-q", "-b", "main"], &repo).status.success());
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        assert!(git(&["add", "-A"], &repo).status.success());
+        assert!(git(&commit_args, &repo).status.success());
+        let worktree_add = [
+            "worktree",
+            "add",
+            "-q",
+            wt.to_str().unwrap(),
+            "-b",
+            "feature",
+        ];
+        assert!(git(&worktree_add, &repo).status.success());
+        std::fs::write(wt.join("b.txt"), "b\n").unwrap();
+        assert!(git(&["add", "-A"], &wt).status.success());
+        assert!(git(&commit_args, &wt).status.success());
+
+        assert_eq!(
+            branch_merged(wt.to_str().unwrap()),
+            Some(false),
+            "an unmerged branch blocks the rm door"
+        );
+
+        assert!(git(&["merge", "-q", "feature"], &repo).status.success());
+        assert_eq!(
+            branch_merged(wt.to_str().unwrap()),
+            Some(true),
+            "a merged branch passes"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

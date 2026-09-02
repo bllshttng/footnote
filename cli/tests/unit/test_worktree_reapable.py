@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.worktree_reapable import classify, reapable
+from fno.worktree_reapable import branch_merged, classify, reapable
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -213,3 +213,43 @@ def test_classify_is_pure_over_porcelain_text() -> None:
 def test_classify_empty_is_clean() -> None:
     assert classify("").reapable is True
     assert classify("").recoverable_deletions == 0
+
+
+# -- The merge check: the rm door's half of the third bucket ------------------
+#
+# `reapable()` stays a CONTENT answer (the sweep merge-filters before asking;
+# the equivalence corpus pins that). `branch_merged` is the separate question
+# a caller without a merge pre-filter must ask, so a row removal can never be
+# the fourth door around "clean-and-unmerged is never auto-pruned".
+
+
+def _linked_wt(tmp_path: Path, repo: Path, name: str, branch: str) -> Path:
+    wt = tmp_path / name
+    _git(repo, "worktree", "add", "-q", str(wt), "-b", branch)
+    return wt
+
+
+def test_clean_but_unmerged_branch_blocks_the_rm_question(
+    repo: Path, tmp_path: Path
+) -> None:
+    wt = _linked_wt(tmp_path, repo, "leaf", "feature")
+    (wt / "new.py").write_text("n = 1\n")
+    _git(wt, "add", "-A")
+    _git(wt, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "work")
+
+    assert branch_merged(wt) is False
+
+
+def test_a_fast_forwarded_branch_reads_merged(repo: Path, tmp_path: Path) -> None:
+    wt = _linked_wt(tmp_path, repo, "leaf2", "done")
+    _git(wt, "commit", "--allow-empty", "-qm", "w")
+    _git(repo, "merge", "-q", "done")
+
+    assert branch_merged(wt) is True
+
+
+def test_detached_head_answers_unknown(repo: Path, tmp_path: Path) -> None:
+    wt = _linked_wt(tmp_path, repo, "leaf3", "scratch")
+    _git(wt, "checkout", "-q", "--detach")
+
+    assert branch_merged(wt) is None

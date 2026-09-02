@@ -7,10 +7,12 @@ removal must never become a fourth door around the three buckets in
 reapable`` serves), and the row is removed either way.
 
 ACs:
-- AC5-HP : a gate-clean worktree is removed; the receipt names it.
+- AC5-HP : a gate-clean AND merged worktree is removed; the receipt names it.
 - AC6-EDGE: a gate-refused worktree survives untouched, the receipt names the
            path and the gate's reason, and the ROW is still removed.
 - AC7-ERR: a probe that cannot answer keeps the tree; the receipt says so.
+- AC8-BKT: a clean-but-unmerged tree is kept (the third bucket; the branch is
+           where its work lives) - rm is never the fourth door around it.
 - AC2-HP : a row with no linked worktree prunes nothing and rm succeeds.
 """
 from __future__ import annotations
@@ -82,6 +84,8 @@ def test_rm_removes_a_gate_clean_worktree(isolated_state, claude_available, caps
         return Verdict(reapable=True, reason="clean", recoverable_deletions=0)
 
     wr.reapable = fake_reapable
+    original_merged = wr.branch_merged
+    wr.branch_merged = lambda path: True
     git_calls: list[list[str]] = []
     git_kwds: list[dict] = []
 
@@ -97,6 +101,7 @@ def test_rm_removes_a_gate_clean_worktree(isolated_state, claude_available, caps
     finally:
         dispatch_mod.subprocess.run = original_run
         wr.reapable = original
+        wr.branch_merged = original_merged
 
     assert result.registry_changed is True
     assert result.worktree_receipt == f"worktree removed: {wt}"
@@ -162,6 +167,46 @@ def test_rm_keeps_the_tree_when_the_probe_cannot_answer(
         f"worktree kept: {wt} (the reapable probe could not answer: git-error: boom)"
     )
     assert f"could not answer" in capsys.readouterr().out
+
+
+def test_rm_keeps_a_clean_but_unmerged_tree(
+    isolated_state, claude_available, capsys, monkeypatch
+):
+    """AC8-BKT: content-clean is not enough at this door.
+
+    The third bucket: the branch is where an unmerged tree's work lives, so
+    rm keeps the tree for a human exactly as the ``--merged`` sweep's
+    pre-filter does - a row removal is never the fourth door around it.
+    """
+    tmp_path = isolated_state
+    wt = _linked_worktree(tmp_path, "unmerged")
+    update_registry(lambda entries: entries + [_entry("w5", wt, tmp_path)])
+
+    import fno.worktree_reapable as wr
+
+    monkeypatch.setattr(
+        wr,
+        "reapable",
+        lambda path: Verdict(reapable=True, reason="clean", recoverable_deletions=0),
+    )
+    monkeypatch.setattr(wr, "branch_merged", lambda path: False)
+    removed: list[list[str]] = []
+    monkeypatch.setattr(
+        dispatch_mod.subprocess,
+        "run",
+        lambda cmd, **kwargs: removed.append(list(cmd))
+        or type("R", (), {"returncode": 0, "stderr": ""})(),
+    )
+
+    result = rm_agent("w5")
+
+    assert result.registry_changed is True, "the row is removed either way"
+    assert result.worktree_receipt == (
+        f"worktree kept: {wt} "
+        "(clean but the branch is not merged; the contract keeps it for a human)"
+    )
+    assert removed == [], "an unmerged tree is never removed"
+    assert f"worktree kept: {wt}" in capsys.readouterr().out
 
 
 def test_rm_without_a_worktree_is_a_clean_noop(isolated_state, claude_available, capsys):

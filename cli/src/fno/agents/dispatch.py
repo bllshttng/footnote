@@ -3874,10 +3874,12 @@ def _prune_row_worktree(entry: Any) -> Optional[str]:
     row removal must never become a fourth door around the three buckets in
     ``.claude/rules/worktrees.md``. Every decision routes through
     :func:`fno.worktree_reapable.reapable` (the classifier behind
-    ``fno agents workspace worktree reapable``): DIRTY is never touched,
-    clean-and-unmerged is never auto-pruned, and clean loses the TREE while
-    the branch stays (``git worktree remove`` never deletes branches, the
-    ``--merged`` sweep's own command with the gate already passed).
+    ``fno agents workspace worktree reapable``) PLUS the merge check the
+    ``--merged`` sweep applies as its own pre-filter: DIRTY is never
+    touched, clean-and-unmerged is never auto-pruned (the branch is where
+    its work lives; a human judges), and clean-and-MERGED loses the TREE
+    while the branch stays (``git worktree remove`` never deletes
+    branches).
 
     A gate that cannot answer keeps the tree - removal never guesses. A
     refusal prints a receipt naming the path and the gate's reason, and the
@@ -3889,7 +3891,11 @@ def _prune_row_worktree(entry: Any) -> Optional[str]:
     if not cwd:
         return None
 
-    from fno.worktree_reapable import is_linked_worktree, reapable as classify_reapable
+    from fno.worktree_reapable import (
+        branch_merged,
+        is_linked_worktree,
+        reapable as classify_reapable,
+    )
 
     if not is_linked_worktree(cwd):
         return None
@@ -3902,6 +3908,11 @@ def _prune_row_worktree(entry: Any) -> Optional[str]:
                 f"(the reapable probe could not answer: {verdict.detail or verdict.reason})"
             )
         return f"worktree kept: {cwd} (the gate said no: {verdict.reason})"
+    if branch_merged(cwd) is not True:
+        return (
+            f"worktree kept: {cwd} "
+            "(clean but the branch is not merged; the contract keeps it for a human)"
+        )
     try:
         removed = subprocess.run(
             ["git", "worktree", "remove", "--force", cwd],

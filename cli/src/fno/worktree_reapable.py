@@ -27,7 +27,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 # Unmerged (conflict) codes, per `git status` docs. These matter because two of
 # them carry only `D` and `A` letters: reading `DD` ("both deleted") as two
@@ -80,6 +80,66 @@ def is_linked_worktree(path: Union[str, Path]) -> bool:
         return (Path(path) / ".git").is_file()
     except OSError:
         return False
+
+
+def branch_merged(path: Union[str, Path]) -> Optional[bool]:
+    """Is the worktree's branch merged into the repo's main line?
+
+    The worktree contract's third bucket: content-clean is not enough for an
+    automatic prune, because a clean-and-unmerged branch is exactly where
+    abandoned-but-real work lives, and a human judges that (the
+    ``--merged`` sweep merge-filters BEFORE asking the gate; a caller without
+    that pre-filter must ask here). ``None``: nothing names the work or the
+    main line - detached HEAD, no main ref, git error - and the caller keeps
+    the tree.
+    """
+    target = Path(path)
+    bases = ["origin/main", "main"]
+    try:
+        head = subprocess.run(
+            ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            cwd=str(target),
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+        if head.returncode == 0 and head.stdout.strip():
+            bases.insert(0, head.stdout.strip())
+        for base in bases:
+            known = subprocess.run(
+                ["git", "rev-parse", "--verify", "--quiet", base],
+                cwd=str(target),
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+            )
+            if known.returncode == 0:
+                break
+        else:
+            return None
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=str(target),
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+        if branch.returncode != 0 or not branch.stdout.strip():
+            return None
+        merged = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", branch.stdout.strip(), base],
+            cwd=str(target),
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if merged.returncode == 0:
+        return True
+    if merged.returncode == 1:
+        return False
+    return None
 
 
 def classify(porcelain: str) -> Verdict:
