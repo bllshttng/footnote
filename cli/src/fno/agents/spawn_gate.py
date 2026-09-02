@@ -957,14 +957,14 @@ def _refuse(
     telemetry can never change a gate outcome.
     """
     spawn_name, substrate = _CURRENT_SPAWN.get()
-    _emit_gate_event(
-        "spawn_gate_refused",
-        exit_code=exit_code,
-        name=spawn_name,
-        substrate=substrate,
-        gate="python",
-        **{**(receipt or {}), **event},
+    event_data = {**(receipt or {}), **event}
+    # The seam-owned fields win on collision: a future receipt carrying `name`
+    # or `gate` must not silently rewrite the identity this journal entry is
+    # attributed by.
+    event_data.update(
+        exit_code=exit_code, name=spawn_name, substrate=substrate, gate="python"
     )
+    _emit_gate_event("spawn_gate_refused", **event_data)
     refusal = GateRefused(exit_code, receipt)
     if cause_stated:
         refusal.cause_stated = True  # type: ignore[attr-defined]

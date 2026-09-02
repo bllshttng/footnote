@@ -83,9 +83,11 @@ def test_a_provider_pin_reads_only_that_provider(monkeypatch):
         monkeypatch,
         max_live=30,
         slots=0,
-        limits={"zai": 7, "claude": 20},
-        live={"zai": 7, "claude": 4},
+        limits={"zai": 7, "anthropic": 20},
+        live={"zai": 7, "anthropic": 4},
     )
+    # Harness pin "claude" resolves to the vendor "anthropic" and reads that
+    # budget; a vendor pin ("zai") falls through unchanged.
     assert _spawn_headroom("claude") == 16
     assert _spawn_headroom("zai") == 0
 
@@ -121,3 +123,21 @@ def test_parallel_max_lanes_warns_once_and_is_ignored(monkeypatch):
     warned_before = len(_DEPRECATED_WARNED)
     SettingsModel.model_validate({"parallel": {"max_lanes": 3}})
     assert len(_DEPRECATED_WARNED) == warned_before
+
+
+def test_a_harness_pin_reads_the_vendor_keyed_table(monkeypatch):
+    """`--provider` resolves on the HARNESS axis; provider_limits is keyed by
+    VENDOR. Pinning codex must read the openai budget, not miss on `codex`
+    and silently drop the one cap that binds."""
+    _wire(monkeypatch, max_live=30, slots=0, limits={"openai": 7}, live={"openai": 7})
+    assert _spawn_headroom("codex") == 0
+    assert _spawn_headroom("claude") == 30  # claude budget absent: fleet only
+
+
+def test_an_unpinned_read_names_the_binding_provider(monkeypatch):
+    _wire(monkeypatch, max_live=30, slots=0, limits={"openai": 7, "zai": 9},
+          live={"openai": 7, "zai": 1})
+    from fno.backlog.advance import _binding_provider
+
+    assert _binding_provider() == "openai"  # 0 remaining beats zai's 8
+    assert _spawn_headroom() == 0

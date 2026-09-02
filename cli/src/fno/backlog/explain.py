@@ -330,6 +330,17 @@ def gates_for(node: Optional[dict], grid_harness: Optional[str] = None) -> list[
 
     # Provider lanes: the cap that was actually binding on 2026-09-01.
     provider = _resolved_vendor(node, grid_harness)
+    if provider is None and node is None:
+        # No subject to resolve a vendor from (the epic explain with an empty
+        # fill): the binding configured provider is the one whose cap explains
+        # a width of 0. Without this row the report shows width 0 and no gate
+        # naming why. Fails open to no row, never to a fake pass.
+        from fno.backlog import advance as adv
+
+        try:
+            provider = adv._binding_provider()
+        except Exception:  # noqa: BLE001 - an unreadable read names no provider
+            provider = None
     if provider:
         try:
             from fno.config import load_settings, provider_limits_table

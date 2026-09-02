@@ -3756,6 +3756,29 @@ def _live_workers_by_project() -> dict[str, int]:
     return counts
 
 
+def _binding_provider() -> Optional[str]:
+    """The configured provider with the least lane headroom, or None.
+
+    The unpinned epic advance could route anywhere, so the most constrained
+    CONFIGURED provider is the one whose cap binds the next spawn. One walk,
+    shared by :func:`_spawn_headroom` (the width) and the explain surfaces
+    (the row that explains the width).
+    """
+    from fno.agents import spawn_gate
+    from fno.config import load_settings
+
+    binding: Optional[str] = None
+    binding_remaining: Optional[int] = None
+    for name, budget in dict(load_settings().agents.provider_limits).items():
+        cap = spawn_gate.provider_lanes_cap(budget)
+        if cap is None:
+            continue  # an uncapped provider cannot bind anything
+        remaining = cap - spawn_gate.provider_live_count(name)
+        if binding_remaining is None or remaining < binding_remaining:
+            binding, binding_remaining = name, remaining
+    return binding
+
+
 def _spawn_headroom(provider: Optional[str] = None) -> int:
     """Dispatch width from the spawn gate's own counters.
 
@@ -3786,9 +3809,20 @@ def _spawn_headroom(provider: Optional[str] = None) -> int:
         agents_cfg = load_settings().agents
         fleet_remaining = int(agents_cfg.max_live) - spawn_gate.census().slot_count
         limits = dict(agents_cfg.provider_limits)
-        budgets = (
-            {provider: limits.get(provider)} if provider is not None else limits
-        )
+        if provider is not None:
+            from fno.agents.spawn_defaults import resolve_lane_vendor
+
+            # The pin is a HARNESS (`--provider` resolves on the harness axis);
+            # provider_limits is keyed by VENDOR. Map through the shipped
+            # resolver and fall back to the raw pin, which may already be a
+            # vendor. A harness pin read against this vendor-keyed table
+            # directly would miss (`codex` is not a key) and silently drop the
+            # one cap that binds.
+            pin_vendor = resolve_lane_vendor([], harness=provider) or provider
+            budgets = {pin_vendor: limits.get(pin_vendor)}
+        else:
+            binding = _binding_provider()
+            budgets = {} if binding is None else {binding: limits.get(binding)}
         provider_remaining: Optional[int] = None
         for name, budget in budgets.items():
             cap = spawn_gate.provider_lanes_cap(budget)
