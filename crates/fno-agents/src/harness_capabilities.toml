@@ -4,7 +4,7 @@
 # resync BOTH copies, not just the first:
 #   bash scripts/ci/check-harness-capabilities-fresh.sh --write
 # scripts/ci/check-harness-capabilities-fresh.sh fails CI when any copy differs.
-map_version = 14
+map_version = 15
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -845,3 +845,128 @@ marker = "the resumed conversation's store record gains the token planted in the
 [probe.send_keys_enter_delay_ms]
 kind = "unprobeable"
 reason = "measured over 5 delays x 3 trials on a live pane; no one-shot probe recovers it"
+
+# grok joins on the same keeper lane pi and cursor-agent use (x-fd31). Its
+# drive transports (leader daemon on a unix socket, WebSocket listener, ACP
+# stdio) are built and unit-tested in the Python driver
+# (fno.agents.harnesses.grok), but the lane dispatch resolves onto is the
+# keeper-hosted TUI, and the row is a statement about THAT lane.
+[harness.grok]
+permission_bypass = ["--always-approve"]
+resume = "native-session"
+# TRUE, and the live measurement is the evidence (2026-09-02, grok 1.0.13
+# [stable], worktree pty sessions): `grok --session-id <uuid>` adopted the
+# caller-assigned id, a seeded turn landed, SIGKILL ended the process, and
+# `grok --resume <uuid>` on a fresh process recalled the seed's codeword -
+# the cross-process recall the caller-assigned binding claims. The keeper
+# machinery itself (survive both supervisors, restart re-bind) is pi's
+# wk-x61bc journey and is not re-proven per harness.
+thread = true
+autonomous_pane = false
+route_on_pane = false
+# grok HAS a lifecycle hook surface - the live TUI fires `session_start` and
+# `user_prompt_submit` hooks it reads from config - but no fno loop extension
+# exists for it. "" keeps looping dispatch refused until that boundary is
+# proven, exactly as the cursor-agent row does.
+loop_participation = "extension"
+loop_extension = ""
+command_surface = "slash"
+slash_prefix = ""
+# Read off a live grok TUI (2026-09-02): the idle composer carries the status
+# bar `Shift+Tab:mode | Ctrl+x:shortcuts` and the footer
+# `Grok 4.6 (high) · always-approve`; while a turn runs the mode hint is
+# replaced by `Esc:cancel`, so the pair is idle-only. These are the PANE
+# lane's rules, pinned in manifests/grok.toml against that same live TUI.
+ready_marker = "idle_status_bar"
+ready_rule_ids = ["idle_status_bar"]
+manifest_rules = [{ id = "idle_status_bar", state = "idle" }]
+# Measured 2026-09-02 against live grok 1.0.13, the exact shape that broke
+# codex in x-4b0b: a 9,340-byte / 42-line paste followed immediately by
+# Enter, no settle time, landed (submitted, marker reply painted); the
+# single-line control landed in the same session family. This 0 is MEASURED.
+send_keys_enter_delay_ms = 0
+submit_keys = ["enter"]
+stop_strategy = "registry-noop"
+remove_strategy = "registry-only"
+# `-s/--session-id` is documented as "Use a specific session UUID for a new
+# conversation (must be a valid UUID and must not already exist under the
+# target session directory)" and measured that way: the create adopted the
+# id and `--resume <id>` from a second process recalled the first process's
+# turn. The session directory is per-cwd, so the identity is the PAIR -
+# pi's strategy, not bare "preassigned".
+session_binding = { strategy = "caller-assigned-cwd-scoped", required = true, timeout_ms = 60000 }
+
+[harness.grok.state_root_grant]
+# grok maps NO additive directory flag: `grok --help` on 1.0.13 carries no
+# --add-dir shape (explicit operator --add-dir on a grok spawn refuses
+# fail-closed in the token builders). The stance is still unsandboxed, and it
+# is MEASURED rather than inherited: with default flags - no --sandbox, no
+# bypass - a one-shot grok wrote a file outside its cwd. The --sandbox
+# <PROFILE> axis exists but is opt-in (env GROK_SANDBOX unset on this
+# machine), so the keeper child is an ordinary user process with the
+# operator's own reach. headless stays unmeasured: one -p probe ran, but no
+# fno one-shot lane is built and nothing has ever spawned there.
+pane = "unsandboxed"
+thread = "unsandboxed"
+headless = "unmeasured"
+
+# grok HAS approval prompts in its default permission mode, but the lanes
+# this row opens always launch --always-approve (the argv bypass), so no
+# keystroke answer is ever composed. Measured answer vocabulary: none.
+[harness.grok.permission_response.allow_once]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.grok.permission_response.allow_always]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.grok.permission_response.deny]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.grok.resume_strategy.forms.interactive_create]
+kind = "flag"
+tokens = ["grok", "--session-id", "{session_id}"]
+# The identity carrier only. The bypass (--always-approve), the one model
+# axis (--model) and the effort axis (--reasoning-effort) ride the dispatch
+# arms, cursor-agent-style: the form stays the same across pane and keeper.
+
+[harness.grok.resume_strategy.forms.interactive_resume]
+kind = "flag"
+tokens = ["grok", "--resume", "{session_id}"]
+# Create and resume differ by one flag and both adopt the same id space;
+# `--resume` with a UUID-shaped value always means id (the help's own rule),
+# which is what the recall measurement leaned on.
+
+# Attach is UNSUPPORTED, and that is what makes this a keeper-lane row, the
+# same reading cursor-agent's row carries: lane A's attach means a client
+# JOINS the harness's live session, and a second grok process on the same
+# session id is a rival TUI, not a join. fno holds the pty.
+[harness.grok.resume_strategy.forms.interactive_attach]
+kind = "unsupported"
+tokens = []
+
+# `grok -p` runs one prompt and prints (exercised once on 2026-09-02), but
+# no fno one-shot lane is built on it; the forms stay unsupported until that
+# lane ships and state_root_grant.headless stops reading unmeasured.
+[harness.grok.resume_strategy.forms.headless_create]
+kind = "unsupported"
+tokens = []
+
+[harness.grok.resume_strategy.forms.headless_resume]
+kind = "unsupported"
+tokens = []
+
+[harness.grok.model_switch_strategy]
+# The argv carries --model/--reasoning-effort at launch (the dispatch arms
+# append them); no mid-session switch is measured, so this stays
+# unsupported - the same split cursor-agent records.
+kind = "unsupported"
+tokens = []
+effort_labels = {}
+status_command = ""
+status_pattern = ""
