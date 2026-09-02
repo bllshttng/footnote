@@ -206,9 +206,9 @@ def _machine_cpu_arm(sample: Optional[dict], reason: Optional[str]) -> ArmReadin
         return ArmReading("whole-machine cpu", DARK, reason="macmon cpu_usage_pct unreadable")
     from fno.doctor_footprint import _cpu_capacity_cores
 
+    # macmon's measured contract is a 0-1 fraction; a value above 1.0 is the
+    # sensor lying, not a percent spelling to rescue.
     busy = float(pct)
-    if busy > 1.0:  # percent spelling; normalize to a fraction
-        busy /= 100.0
     return ArmReading(
         "whole-machine cpu",
         MEASURED,

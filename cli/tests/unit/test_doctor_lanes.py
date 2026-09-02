@@ -219,11 +219,12 @@ def test_refusal_exits_nonzero_and_prints_no_number(monkeypatch) -> None:
     assert "more fit" not in result.stdout
 
 
-def test_a_macmon_percent_spelling_normalizes(monkeypatch) -> None:
-    """Some macmon builds spell cpu_usage_pct as 0-100. The arm normalizes
-    instead of reading 45 percent as 45x the machine."""
+def test_a_macmon_fraction_passes_through_unrescaled(monkeypatch) -> None:
+    """macmon's measured contract is a 0-1 fraction, and the arm does not
+    guess about hypothetical percent-spelling builds: 45 means 45x the
+    machine there, so no normalization sits in the way."""
     _pin_load(monkeypatch)
-    sample = _macmon_sample(cpu_usage_pct=45.0)
+    sample = _macmon_sample(cpu_usage_pct=0.45)
     monkeypatch.setattr(dl, "read_macmon", lambda **k: (sample, None))
     monkeypatch.setattr(dl, "read_memory_pressure", lambda **k: (0.84, None))
     reading = dl.read_lanes()

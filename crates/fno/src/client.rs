@@ -1424,7 +1424,9 @@ fn parse_macmon_sample(raw: &[u8]) -> Option<String> {
     let mem = value.get("memory")?;
     let total = mem.get("ram_total")?.as_f64()?;
     let usage = mem.get("ram_usage")?.as_f64()?;
-    let cpu_pct = if cpu > 1.0 { cpu } else { cpu * 100.0 };
+    // macmon's measured contract is a 0-1 fraction; no percent spelling to
+    // rescue (the lanes arm pins the same contract).
+    let cpu_pct = cpu * 100.0;
     let mut line = format!(
         "cpu {cpu_pct:.0}% mem {:.0}G/{:.0}G",
         usage / 1e9,
