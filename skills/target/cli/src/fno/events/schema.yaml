@@ -1834,6 +1834,70 @@ event_types:
           description: "process when a readable ancestor corroborates the session id, env_only when nothing does, conflict when an ancestor carries a different value. Recorded, never gating."
     consumers: [fno config history]
 
+  - name: plan_stamped
+    retention: durable
+    description: "A plan stamp was applied or found to be an idempotent no-op. Emitted after the plan write so the journal never claims a stamp that did not land."
+    sources: [target, backlog, hook, test]
+    data:
+      required: [plan_path, session_id, outcome]
+      properties:
+        plan_path:
+          type: string
+          description: "Resolved plan document path that was stamped."
+        session_id:
+          type: string
+          description: "Session that applied or repeated the stamp."
+        node_id:
+          type: string
+          description: "Optional graph node claim carried by the plan."
+        outcome:
+          type: string
+          enum: [stamped, idempotent_noop]
+        status_from:
+          type: string
+        status_to:
+          type: string
+        urls:
+          type: array
+          items: { type: string }
+        expected_url_count:
+          type: integer
+        reason:
+          type: string
+          description: "Optional reason when the stamp was not a new write."
+    consumers: [fno doctor event]
+
+  - name: plan_graduated
+    retention: durable
+    description: "A plan graduate decision was applied, declined because its URL denominator was not met, or repeated as an idempotent no-op."
+    sources: [target, backlog, hook, test]
+    data:
+      required: [plan_path, outcome]
+      properties:
+        plan_path:
+          type: string
+        session_id:
+          type: string
+          description: "Optional latest session recorded on the plan."
+        node_id:
+          type: string
+        outcome:
+          type: string
+          enum: [graduated, idempotent_noop, not_met]
+        status_from:
+          type: string
+        status_to:
+          type: string
+        urls:
+          type: array
+          items: { type: string }
+        expected_url_count:
+          type: integer
+        reason:
+          type: string
+          description: "Reason for a not-met or no-op graduate decision."
+    consumers: [fno doctor event]
+
 # ---------------------------------------------------------------------------
 # W7 additive: Rust fno-agents supervisor event kinds.
 # These are emitted by the Rust daemon/workers to events.jsonl with kind
@@ -2911,6 +2975,12 @@ event_types:
         origin:
           type: string
           description: "Optional. The classified mail origin carried by the sender before the raw transport removed the envelope."
+        verb:
+          type: [string, "null"]
+          description: "The leading slash token when the raw payload starts with '/', otherwise null."
+        self_send:
+          type: boolean
+          description: "True when the caller explicitly addressed its own session with --to-self."
     consumers: [operator]
 
   - name: mail_origin_classified
