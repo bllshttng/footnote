@@ -2837,11 +2837,11 @@ fn format_success(
 /// Render agents list as Python-matching JSON (Task 3.1; discovered lane
 /// ab-098967b4; provider key restored x-f273).
 ///
-/// Shape (schema_version 4): `{"agents": [...], "count": N,
+/// Shape (schema_version 6): `{"agents": [...], "count": N,
 /// "discovered_sessions": [...], "discovered_count": M, "fields_omitted":
-/// [...], "filters_applied": {...}, "schema_version": 4}`. Stays
+/// [...], "filters_applied": {...}, "schema_version": 6}`. Stays
 /// byte-shape-aligned with Python's `format.render_json`.
-const LIST_JSON_SCHEMA_VERSION: u32 = 4;
+const LIST_JSON_SCHEMA_VERSION: u32 = 6;
 
 fn render_list_json(
     agents: &Value,
@@ -5272,7 +5272,7 @@ mod tests {
             "missing 'discovered_sessions' key"
         );
         assert_eq!(parsed["discovered_count"], 0);
-        assert_eq!(parsed["schema_version"], 4);
+        assert_eq!(parsed["schema_version"], 6);
         assert_eq!(parsed["count"], 1);
         assert_eq!(
             parsed["fields_omitted"], result["fields_omitted"],
@@ -5345,7 +5345,7 @@ mod tests {
         let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(parsed["discovered_count"], 1);
         assert_eq!(parsed["discovered_sessions"][0]["handle"], "fno-aaaa1111");
-        assert_eq!(parsed["schema_version"], 4);
+        assert_eq!(parsed["schema_version"], 6);
 
         let table = render_list_table(&agents, &discovered);
         assert!(table.contains("DISCOVERED LIVE SESSIONS (1, host-local)"));

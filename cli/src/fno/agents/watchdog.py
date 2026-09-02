@@ -1922,9 +1922,10 @@ def _ledger_nodes() -> dict[str, str]:
 
 def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]]:
     """Enumerate the fleet from ``claude agents --json --all`` joined to the
-    registry for recorded identity. Node identity is the worktree MANIFEST
-    first (runtime-recorded), then the execution LEDGER for rows with no
-    manifest of their own - both machine-written. Never a name regex."""
+    registry for recorded identity. Node identity is the registry's spawn-time
+    stamp first, then a linked-worktree manifest, then the session-keyed ledger
+    for legacy or unstamped rows. All three are machine-written; never parse a
+    node from the row name."""
     from fno.agents.harnesses.claude import claude_agents_rows
     from fno.agents.registry import load_registry
     from fno.recovery import _node_id_from_worktree
@@ -1983,16 +1984,18 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
         match: Any = by_sid.get(sid)
         name = str(getattr(match, "name", None) or r.get("name") or sid)
         cwd = str(r.get("cwd") or getattr(match, "cwd", "") or "")
-        # The manifest is per-ROW identity only when the cwd is that row's own
-        # linked worktree. On a shared checkout (worktree.policy = "never", or
-        # any row launched in the canonical root) every session reads the SAME
-        # graph_node_id, so a done node would make every quiet sibling reapable.
-        # There the ledger's session-keyed join is the only honest answer, and
-        # a miss leaves node None, which condemns nothing.
+        # For an unstamped legacy row, the manifest is per-ROW identity only
+        # when the cwd is that row's own linked worktree. On a shared checkout
+        # every session reads the SAME graph_node_id, so only the session-keyed
+        # ledger is a truthful fallback; a miss condemns nothing.
         state, state_warning = _row_state(r)
         if state_warning:
             unmapped_states.add(state_warning)
-        node = _node_id_from_worktree(cwd) if _is_linked_worktree(cwd) else None
+        # The registry stamp is the spawn-time identity for this exact row.
+        # Manifest and ledger reads remain fallbacks for legacy/unstamped rows.
+        node = getattr(match, "node", None)
+        if node is None and _is_linked_worktree(cwd):
+            node = _node_id_from_worktree(cwd)
         if node is None:
             if ledger_nodes is None:
                 ledger_nodes = _ledger_nodes()

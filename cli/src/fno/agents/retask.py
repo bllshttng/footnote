@@ -38,6 +38,21 @@ class RetaskCoordinate:
     account: Optional[str]
 
 
+def _resolve_retask_node(node: str) -> str:
+    """Return the canonical graph id for a retask destination or refuse."""
+    from fno.graph._constants import is_wellformed_node_id
+
+    if is_wellformed_node_id(node):
+        return node
+    from fno.graph.fuzzy import resolve_node
+    from fno.graph.load import load_graph
+
+    match = resolve_node(node, load_graph())
+    if match.kind != "exact" or not match.id:
+        raise ValueError(f"retask node {node!r} does not resolve to a graph id")
+    return match.id
+
+
 def _source_node_for_entry(entry: AgentEntry) -> tuple[Optional[dict], Optional[str]]:
     """Join a live registry row to exactly one graph node.
 
@@ -567,6 +582,7 @@ def run_retask(
     registry_path: Optional[Path] = None,
 ) -> dict:
     """Resolve live seams and execute one retask transaction."""
+    node = _resolve_retask_node(node)
     entry = resolve_agent(worker, path=registry_path).entry
     target = resolve_target_coordinate(
         node,
@@ -715,7 +731,7 @@ def run_retask(
     def rename(new_name: str) -> Optional[str]:
         try:
             renamed_name[0] = rename_agent(
-                entry.name, new_name, registry_path=registry_path
+                entry.name, new_name, node=node, registry_path=registry_path
             ).name
             return renamed_name[0]
         except (AgentResolutionError, ValueError):
@@ -785,6 +801,7 @@ def plan_retask(
     env: Optional[Mapping[str, str]] = None,
     registry_path: Optional[Path] = None,
 ) -> dict:
+    node = _resolve_retask_node(node)
     entry = resolve_agent(worker, path=registry_path).entry
     target = resolve_target_coordinate(
         node,

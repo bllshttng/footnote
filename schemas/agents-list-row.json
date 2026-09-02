@@ -8,6 +8,7 @@
     "harness_session_id",
     "thread_id",
     "current_session_id",
+    "node",
     "predecessor_session_ids",
     "forked_from_session_id",
     "short_id",
@@ -49,6 +50,7 @@
   "stored": {
     "thread_id": "The row's stable `fno_id` (v13): one worker keeps it across session-id succession. It is the THREAD key, never the current harness address - a renderer that presented it as the current session would resurrect a retired id, which is why it is emitted beside `current_session_id` rather than instead of it.",
     "current_session_id": "The row's `harness_session_id`: the address delivery (mail, inject, pane send) follows NOW. Emitted as its own positive key so the succession contract is assertable - after A->B succession this is B and never A, the `fno_id`, or a predecessor.",
+    "node": "The backlog node this registry row works, stamped at spawn from resolved provenance and never inferred from the row name. Null means the mint could not know; the key remains present so declared-but-unwritten and projection-dropped are distinguishable. Both serializers emit it or the parity asserts fail.",
     "predecessor_session_ids": "Ordered, deduplicated succession history (v18): every retired id the current session succeeded, oldest first. Empty for a worker never re-minted. A predecessor id still ADDRESSES the row (mail naming A lands on the row that now answers as B), but only a full-id resume may consume it exactly.",
     "forked_from_session_id": "The immediate origin of a BRANCH row (v18): the live session this parallel fork split from. None on every non-branch row, including a succession successor - succession is one row plus a chain, never a fork edge. A branch renders as its own row; this key is the visible edge between the two live workers.",
     "provider": "The registry's spawn-stamped model vendor (v15+ axis), never inferred from `harness`. Restored to the projection by x-f273: the pre-v15 alias that carried the HARNESS value under this name was removed for lying, and that removal kept hiding the real vendor axis the rename had just created, so `fno agents list` answered null for a field the writer stored (30 of 31 live rows lost, 2026-08-22). `observed_model` remains the transcript-derived reading of what actually answered; this key answers which vendor's lane the row was minted for. Both serializers emit it or the parity asserts fail.",

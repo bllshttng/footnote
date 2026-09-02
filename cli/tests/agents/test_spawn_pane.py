@@ -1888,6 +1888,45 @@ def test_provenance_vars_ride_wrapper_for_node_driven(
     assert "FNO_PLAN=p.md" in tail
 
 
+def test_node_spawn_persists_projects_and_supplies_watchdog_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The production pane mint proves the node beyond constructed rows."""
+    from fno import paths
+    from fno.agents import watchdog
+    from fno.agents.format import serialize_entry
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.registry import load_registry
+
+    result, _ = _spawn(
+        monkeypatch,
+        tmp_path,
+        name="node-projection-journey",
+        provenance={"FNO_NODE": "x-cafe", "FNO_SLUG": "node-projection"},
+    )
+
+    persisted = json.loads(paths.agents_registry_path().read_text(encoding="utf-8"))
+    persisted_row = persisted["agents"][0]
+    assert persisted_row["node"] == "x-cafe"
+
+    entry = load_registry()[0]
+    projected = serialize_entry(entry, live_status=None)
+    assert projected["node"] == persisted_row["node"]
+
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_agents_rows",
+        lambda **_kwargs: ([{
+            "sessionId": result.session_uuid,
+            "state": "done",
+            "cwd": str(tmp_path),
+        }], []),
+    )
+    [watchdog_row], warnings = watchdog.fleet_rows()
+    assert warnings == []
+    assert watchdog_row.node == persisted_row["node"]
+
+
 def test_ad_hoc_spawn_exports_no_provenance(tmp_path: Path, monkeypatch) -> None:
     """x-84a8 AC(edge): an ad-hoc spawn (no node) exports no FNO_NODE/SLUG/PLAN,
     and no empty-string variants.

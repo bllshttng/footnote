@@ -6979,6 +6979,10 @@ where
                     // so a renderer cannot present a retired id as current.
                     "thread_id": e.fno_id,
                     "current_session_id": e.harness_session_id,
+                    // The node this row works, already stamped in registry
+                    // storage from resolved spawn provenance. Never infer it
+                    // from the row name.
+                    "node": e.node,
                     "predecessor_session_ids": e.predecessor_session_ids,
                     "forked_from_session_id": e.forked_from_session_id,
                     "short_id": short_id,
@@ -18216,6 +18220,7 @@ done
             // alias lied about by carrying "claude" here.
             e.provider = Some("zai".into());
             e.effort = Some("xhigh".into());
+            e.node = Some("x-cafe".into());
         })
         .unwrap();
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
@@ -18278,6 +18283,7 @@ done
         assert_ne!(row["provider"], row["harness"]);
         assert!(row.get("effort").is_some(), "effort key must be emitted");
         assert_eq!(row["effort"], "xhigh");
+        assert_eq!(row["node"], "x-cafe");
         assert!(row.get("model").is_none());
         assert_eq!(
             row["harness_session_id"],

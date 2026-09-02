@@ -48,6 +48,33 @@ def test_rename_refuses_a_label_collision(tmp_path):
         rename_agent("one", "two", registry_path=registry)
 
 
+def test_retask_rename_updates_the_row_node_in_the_same_transaction(tmp_path):
+    from fno.agents.registry import rename_agent
+
+    registry = tmp_path / "agents.json"
+    write_registry([
+        AgentEntry(
+            name="blueprint-worker",
+            cwd="/repo",
+            log_path="",
+            harness="codex",
+            harness_session_id="session-2",
+            node="x-old1",
+        )
+    ], path=registry)
+
+    renamed = rename_agent(
+        "blueprint-worker",
+        "target-worker",
+        node="x-new1",
+        registry_path=registry,
+    )
+
+    assert renamed.name == "target-worker"
+    assert renamed.node == "x-new1"
+    assert resolve_agent("session-2", path=registry).entry.node == "x-new1"
+
+
 def test_verified_tier_projection_updates_the_restamped_row_atomically(tmp_path):
     from fno.agents.registry import project_verified_tier
 

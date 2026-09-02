@@ -1596,6 +1596,52 @@ def test_shared_checkout_rows_never_inherit_one_manifest_node(
     assert by_id["cccc3333-0000"].node == "x-mine"
 
 
+def test_persisted_registry_node_precedes_manifest_and_ledger_fallbacks(
+    monkeypatch, tmp_path
+):
+    """A spawn-stamped node is row identity, not a name-derived fallback."""
+    from fno.agents import registry as registry_mod
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.registry import AgentEntry
+    import fno.paths as paths_mod
+
+    shared = tmp_path / "canonical"
+    (shared / ".git").mkdir(parents=True)
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"entries": []}))
+    monkeypatch.setattr(paths_mod, "ledger_json", lambda: ledger)
+    monkeypatch.setattr(
+        registry_mod,
+        "load_registry",
+        lambda: [
+            AgentEntry(
+                name="spawned-worker",
+                harness="claude",
+                harness_session_id="dddd4444-0000",
+                cwd=str(shared),
+                log_path="",
+                created_at="2026-09-01T00:00:00Z",
+                status="exited",
+                origin="spawn",
+                node="x-cafe",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_agents_rows",
+        lambda **k: ([{
+            "sessionId": "dddd4444-0000",
+            "state": "done",
+            "cwd": str(shared),
+        }], []),
+    )
+
+    rows, _warnings = watchdog.fleet_rows()
+
+    assert rows[0].node == "x-cafe"
+
+
 def test_a_manual_sweep_never_certifies_the_cadence(monkeypatch, tmp_path):
     """A hand-run sweep refreshes the file but proves nothing about the
     launchd cadence, and the cadence is what the staleness read measures."""
