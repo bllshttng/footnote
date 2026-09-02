@@ -68,6 +68,10 @@ record_review_subagent_marker() {
 reviewer_context="unknown"
 execution_context="inline"
 output_contract="json_block"
+# Set by the SubagentStop prose branch only. Initialized here with its siblings
+# because the verdict block below is shared by all three arms, and a default
+# stated once beats three arms each relying on `${unparseable:-}` meaning no.
+unparseable=0
 case "$event" in
   PostToolUse)
     tool_name="$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null || true)"
@@ -215,6 +219,28 @@ else:
       # Multiple fences remain ambiguous because an exclusion or later example can
       # otherwise be mistaken for the review's findings.
       findings_payload="$findings"
+    elif [[ -n "${message//[[:space:]]/}" ]]; then
+      # The fork ANSWERED, and its answer is not machine-readable (x-c446).
+      #
+      # Falling through to silence here made a review that found real bugs
+      # byte-identical at the gate to a review that never ran, and four
+      # mechanisms downstream all read the resulting zero: the events-axis
+      # round counter, the stop-hook receipt, the tiling chain, and
+      # fno/review-coverage. Measured on three live forks whose final texts
+      # were 3497, 2531 and 3357 bytes of prose.
+      #
+      # `[]` is a well-formed payload for the classifier, NOT a clean verdict:
+      # zero blocking findings would otherwise derive `verdict=pass` below and
+      # clear coverage on output nobody could read, which is worse than the
+      # silence it replaces. So the verdict is FORCED to fail at the
+      # derivation, and `output_contract` says which state this is rather than
+      # leaving it to read as an ordinary failed review.
+      #
+      # Guarded on a non-empty message: a fork that said NOTHING is a
+      # different condition and keeps today's silence.
+      findings_payload="[]"
+      output_contract="prose_unparseable"
+      unparseable=1
     fi
     ;;
   Stop)
@@ -294,14 +320,23 @@ total="$(jq -r '(.findings | length) // 0' <<<"$record" 2>/dev/null || echo 0)"
 case "$blocking" in
   ''|*[!0-9]*) blocking=1 ;;  # an unreadable count is not zero findings
 esac
-if [[ "$blocking" == "0" ]]; then
+if [[ "$unparseable" == "1" ]]; then
+  # An unreadable answer is never a pass. The `[]` payload above classifies to
+  # zero blocking findings, so without this arm the count would derive `pass`
+  # and the row would clear the very coverage it exists to withhold.
+  verdict="fail"
+elif [[ "$blocking" == "0" ]]; then
   verdict="pass"
 else
   verdict="fail"
 fi
 # The one positive line naming what was classified: a run where the
 # classifier never fired is visibly different from one that classified zero.
-echo "code-review-attest: classified $total finding(s): $blocking blocking, $nonblocking non-blocking; reviewed head $reviewed_head; findings held"
+if [[ "$unparseable" == "1" ]]; then
+  echo "code-review-attest: review output was not machine-readable (no json fence, not \"(none)\"); attesting verdict=fail output_contract=prose_unparseable; reviewed head $reviewed_head"
+else
+  echo "code-review-attest: classified $total finding(s): $blocking blocking, $nonblocking non-blocking; reviewed head $reviewed_head; findings held"
+fi
 
 if bash "$script_dir/../skills/review/scripts/emit-attestation.sh" code-review "$verdict" \
   "$reviewer_context" "$execution_context" "$output_contract" --findings-file "$payload_file"; then

@@ -33,8 +33,12 @@
 #   [reviewer_context]  fresh | shared | unknown (default unknown); positive
 #                       context evidence only, never inferred from the sender
 #   [execution_context] inline (default) | fork; where the review ran
-#   [output_contract]   json_block (default) | report_findings; the contract
-#                       the review's result surfaced under
+#   [output_contract]   json_block (default) | report_findings | prose_unparseable;
+#                       the contract the review's result surfaced under.
+#                       prose_unparseable means the review ANSWERED and its
+#                       answer was not machine-readable; it always rides a
+#                       fail verdict, because an unreadable answer must leave
+#                       a row without clearing coverage (x-c446).
 #   [--findings-file <path>]  a JSON findings payload; classified by `fno do
 #               review classify` and carried on the event as the finding record.
 #               A malformed or unreadable file is a refusal, never an empty record.
@@ -112,8 +116,8 @@ case "$execution_context" in
   *) echo "emit-attestation: execution_context must be inline or fork (got '$execution_context')" >&2; exit 2 ;;
 esac
 case "$output_contract" in
-  report_findings|json_block) ;;
-  *) echo "emit-attestation: output_contract must be report_findings or json_block (got '$output_contract')" >&2; exit 2 ;;
+  report_findings|json_block|prose_unparseable) ;;
+  *) echo "emit-attestation: output_contract must be report_findings, json_block or prose_unparseable (got '$output_contract')" >&2; exit 2 ;;
 esac
 while [[ "$reviewer" == /* ]]; do reviewer="${reviewer#/}"; done # strip ALL leading slashes (parity with both parsers' lstrip / trim_start_matches)
 

@@ -1,18 +1,24 @@
 {
-  "rule": "strict structured output: one JSON array is a review verdict, including non-empty findings; multiple, malformed, or absent verdict shapes stay silent",
+  "rule": "one JSON array is a review verdict, including non-empty findings; a whole-message (none) is the low-level protocol's clean verdict; every other non-empty shape is UNPARSEABLE and attests verdict=fail output_contract=prose_unparseable; only an empty message stays silent",
   "context": "every payload is delivered as a SubagentStop under a forked-skill marker sidecar (forkedSkill true, skillName code-review); only the text varies",
+  "suffixes": {
+    ".attest": "a row is written and the verdict is derived from the blocking count",
+    ".unparseable": "a row is written carrying verdict=fail and output_contract=prose_unparseable",
+    ".silent": "no row is written and the classifier never runs"
+  },
   "shapes": {
     "bare-none-marker.attest": "the low-level protocol's whole-verdict marker",
     "headered-json-clean.attest": "the two live self-review shapes: header, empty fence, closing sentence",
     "bare-fence-clean.attest": "a fork ending in a fenced empty array with no header",
     "fence-nonempty.attest": "one valid findings array is a failed review verdict",
-    "none-buried-in-prose.silent": "the marker inside longer output is not the marker",
-    "none-after-failure-note.silent": "an excuse line above the marker",
-    "live-specimen-scope-note.silent": "measured live 2026-08: marker, blank line, scope sentence naming the excluded file, em dash byte-exact",
-    "later-fence-carries-findings.silent": "the LAST fence is the verdict",
-    "findings-then-exclusion-fence.silent": "real findings first, later empty exclusion fence",
-    "unparseable-prose.silent": "no verdict shape at all",
-    "empty-message.silent": "no message"
+    "none-buried-in-prose.unparseable": "the marker inside longer output is not the marker, so it is not a clean verdict; it is also not silence",
+    "none-after-failure-note.unparseable": "an excuse line above the marker: the reviewer said it could not inspect the diff, which is the shape that must never read as clean",
+    "live-specimen-scope-note.unparseable": "measured live 2026-08: marker, blank line, scope sentence naming the excluded file, em dash byte-exact",
+    "later-fence-carries-findings.unparseable": "two fences disagree, so the hook cannot tell which is the verdict",
+    "findings-then-exclusion-fence.unparseable": "real findings first, later empty exclusion fence: same ambiguity, opposite order",
+    "unparseable-prose.unparseable": "no verdict shape at all - the case x-c446 was filed for",
+    "empty-message.silent": "no message: the fork said nothing, which is a different condition from saying something unreadable"
   },
-  "byte_exactness_note": "The payloads are RECORDED data, not authored prose: they reproduce the fork's final text byte for byte, and live-specimen-scope-note.silent deliberately carries a real U+2014 em dash in a tracked file under the recorded-data exemption to the no-em-dash authoring rule. Rewriting it as a hyphen is the exact drift (green on the wrong bytes) this corpus exists to catch."
+  "why_unparseable_is_not_silent": "x-c446. A review that ran and answered unreadably used to leave no row, which is byte-identical at the gate to a review that never ran. Four mechanisms read that row and all read zero. The unparseable rows below now attest verdict=fail, so the round is counted and the PR is not cleared; they never attest a pass, so nothing is cleared on evidence that did not arrive.",
+  "byte_exactness_note": "The payloads are RECORDED data, not authored prose: they reproduce the fork's final text byte for byte, and live-specimen-scope-note.unparseable deliberately carries a real U+2014 em dash in a tracked file under the recorded-data exemption to the no-em-dash authoring rule. Rewriting it as a hyphen is the exact drift (green on the wrong bytes) this corpus exists to catch."
 }

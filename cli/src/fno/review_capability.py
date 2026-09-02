@@ -525,6 +525,24 @@ def self_review_invocation(harness: Optional[str], level: Optional[str] = "mediu
     telling a worker how to clear a head-pinned gate, and a fix pass moves
     HEAD, which voids the attestation the round just earned.
 
+    `--comment` IS appended, and the distinction is the reason above rather
+    than a preference. `--fix` writes to the tree; `--comment` writes to the
+    PR, moves no commit, and so cannot void the attestation the round earns.
+    Without it a machinery-issued review keeps its findings in the transcript,
+    which is the same defect x-c446 fixed one layer down: a review that ran
+    and left no durable record reads exactly like a review that never ran.
+    Measured at the time: all 18 machinery uses of `--comment` attached to
+    native verbs, none to this lane.
+
+    What it buys is bounded, and the bound is worth stating. The router
+    resolves the target from the first non-flag token, and
+    `render_self_review_invocation` appends a prose target (`HEAD <sha> of PR
+    <n> ...`) whose first token is a ref, not a PR number. A strict parser
+    therefore reads a branch target and the lane notes the flag as ignored.
+    The lane's executor is a model reading a payload that names the PR
+    outright, so in practice the findings land on it. Narrowing that gap is a
+    target-resolution change, not this one.
+
     `level` is validated against `ALLOWED_REVIEW_LEVELS` - anything outside it
     (`ultra` included) raises. `None` leaves the `<level>` placeholder in
     place for a pre-diff surface that has no diff to size from yet. `harness`
@@ -539,7 +557,10 @@ def self_review_invocation(harness: Optional[str], level: Optional[str] = "mediu
 
     desc = _RESOLVABLE_REVIEWERS.get("code-review")
     base = desc.invocation if desc else "/fno:review"
-    return f"{base} <level>" if level is None else f"{base} {level}"
+    # Flag order follows the router grammar: [level] [--comment] [--fix]
+    # [target]. `render_self_review_invocation` appends the target after this,
+    # so the flag must sit here rather than at the end.
+    return f"{base} <level> --comment" if level is None else f"{base} {level} --comment"
 
 
 def _git_out(cwd: Path, *args: str) -> Optional[str]:

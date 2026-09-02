@@ -394,7 +394,7 @@ event_types:
           enum: [inline, fork]
         output_contract:
           type: string
-          enum: [report_findings, json_block]
+          enum: [report_findings, json_block, prose_unparseable]
         subagent_count:
           type: integer
         band:

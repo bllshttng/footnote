@@ -14,16 +14,22 @@
 #   - a fork ending in a fenced json block, WITH the header
 #   - a fork ending in a fenced json block, NO header
 #   - a fork whose entire final text is the literal "(none)"
-# plus the negative half, which matters more: every non-review and every
-# unrecognized shape must emit nothing AND never call the classifier, so the
-# gate holds rather than clearing on evidence that never arrived.
+# plus the negative half, which matters more: every NON-REVIEW shape must emit
+# nothing AND never call the classifier, so the gate holds rather than clearing
+# on evidence that never arrived.
 #
-# One live specimen is deliberately in the NEGATIVE half: a real fork ended
-# with the marker, a blank line, then a sentence naming the file it skipped.
-# A review that excluded the only file in the diff read nothing, so its text
-# appears below as the byte-exact fixture of a must-stay-silent case. The
-# bare-marker protocol shape is the positive; the marker plus trailing prose
-# is not.
+# Since x-c446 the negative half has two floors, not one, and the difference is
+# what the row is allowed to CLAIM. A payload that is not a review at all still
+# emits nothing. A payload that IS a review whose answer nobody can parse emits
+# verdict=fail with output_contract=prose_unparseable. Silence there made a
+# review that found real bugs byte-identical at the gate to a review that never
+# ran. A fail row counts the round and clears nothing, so the gate still holds.
+#
+# One live specimen sits in that second floor: a real fork ended with the
+# marker, a blank line, then a sentence naming the file it skipped. A review
+# that excluded the only file in the diff read nothing. Its text appears below
+# as the byte-exact fixture of a must-not-read-as-clean case. The bare-marker
+# protocol shape is the clean positive; the marker plus trailing prose is not.
 #
 # The hook is driven with FNO pointed at a stub that records `doctor event
 # emit` argv AND serves `do review classify` through the REAL classifier from
@@ -80,7 +86,37 @@ mkdir -p "$BIN"
 EMITTED="$TMP/emitted.jsonl"
 CLASSIFY_MARKER="$TMP/classify.ran"
 export CLASSIFY_PYTHONPATH="$REPO_ROOT/cli/src"
-export CLASSIFY_PYTHON="$REPO_ROOT/cli/.venv/bin/python"
+# The interpreter that can import the real classifier, chosen POSITIVELY and
+# proven before any case runs.
+#
+# This was pinned to `$REPO_ROOT/cli/.venv/bin/python`, which exists in the
+# canonical checkout and in NO fresh worktree. Every positive case then failed
+# with "NO attestation emitted" - a missing interpreter wearing the exact
+# costume of the defect this suite guards, inside the suite that guards it. A
+# red that means "the harness could not run" must never be spelled the same as
+# a red that means "the hook stayed silent".
+#
+# So: try the candidates, keep the first that can actually import the module,
+# and if none can, exit 77 (the runner's skip) naming the reason. Never fall
+# through to a run that scores the hook against an interpreter it never had.
+CLASSIFY_PYTHON=""
+for candidate in \
+  "$REPO_ROOT/cli/.venv/bin/python" \
+  "$REPO_ROOT/../../../cli/.venv/bin/python" \
+  "$(command -v python3 || true)"; do
+  [[ -x "$candidate" ]] || continue
+  if PYTHONPATH="$CLASSIFY_PYTHONPATH" "$candidate" -c 'import fno.review.cli' 2>/dev/null; then
+    CLASSIFY_PYTHON="$candidate"
+    break
+  fi
+done
+if [[ -z "$CLASSIFY_PYTHON" ]]; then
+  echo "SKIP: no interpreter can import fno.review.cli from $CLASSIFY_PYTHONPATH" >&2
+  echo "  tried the worktree venv, the canonical venv, and python3 on PATH." >&2
+  echo "  Run 'uv sync --project cli' (or scripts/setup/setup-worktree.sh) first." >&2
+  exit 77
+fi
+export CLASSIFY_PYTHON
 cat > "$BIN/fno-stub" <<STUB
 #!/usr/bin/env bash
 if [[ "\${1:-}" == "doctor" && "\${2:-}" == "event" && "\${3:-}" == "emit" ]]; then
@@ -358,7 +394,7 @@ expect_silent "codex-stop-prose-without-structured-review"
 
 # --- THE VERDICT CORPUS (tests/hooks/fixtures/code-review-attest) ----------
 # One byte-exact file per measured final-text shape, the ruled verdict encoded
-# in the filename suffix (.attest / .silent). The walker below drives the hook
+# in the filename suffix (.attest / .unparseable / .silent). The walker drives
 # over every file, so the suite is pinned to the MEASURED PAYLOADS rather than
 # to the predicate: flipping the hook's rule without re-measuring the corpus
 # goes red here (the negative control: flip the rule, watch this walk go red,
@@ -374,19 +410,68 @@ jq -nc '{forkedSkill:true, skillName:"code-review"}' \
   > "$CORPUS_DIR/agent-c0rpu5.forked-skill.marker.json"
 
 echo "== The verdict corpus: every measured shape, ruled by filename =="
-for fixture in "$FIXTURES"/*.attest "$FIXTURES"/*.silent; do
+for fixture in "$FIXTURES"/*.attest "$FIXTURES"/*.unparseable "$FIXTURES"/*.silent; do
   [[ -f "$fixture" ]] || continue
   name="$(basename "$fixture")"
   payload="$(jq -nc --arg cwd "$WORK" --arg tp "$CORPUS_TX" --rawfile msg "$fixture" \
     '{hook_event_name:"SubagentStop", cwd:$cwd, agent_type:"general-purpose",
       agent_id:"c0rpu5", agent_transcript_path:$tp, last_assistant_message:$msg}')"
   run_hook "$payload"
-  if [[ "$name" == *.attest ]]; then
-    if attested; then pass "corpus $name: attested"; else fail "corpus $name: NO attestation (ruled attest)"; fi
-  else
-    if attested; then fail "corpus $name: attested (ruled silent)"; else pass "corpus $name: silent"; fi
-  fi
+  case "$name" in
+    *.attest)
+      if attested; then pass "corpus $name: attested"; else fail "corpus $name: NO attestation (ruled attest)"; fi
+      ;;
+    *.unparseable)
+      # The x-c446 class. Asserting "a row exists" is not enough here: a row
+      # carrying a PASS would clear coverage on output nobody could read,
+      # which is worse than the silence this replaced. So the assertion is on
+      # both halves of the ruled state, and on the contract value that names
+      # it - the one field that tells a later reader WHY the round failed.
+      if ! attested; then
+        fail "corpus $name: NO attestation (ruled unparseable)"
+      elif ! grep -q '"verdict":"fail' "$EMITTED"; then
+        fail "corpus $name: attested without verdict=fail: $(cat "$EMITTED")"
+      elif ! grep -q 'prose_unparseable' "$EMITTED"; then
+        fail "corpus $name: attested without output_contract=prose_unparseable: $(cat "$EMITTED")"
+      else
+        pass "corpus $name: attested fail/prose_unparseable"
+      fi
+      ;;
+    *)
+      if attested; then fail "corpus $name: attested (ruled silent)"; else pass "corpus $name: silent"; fi
+      ;;
+  esac
 done
+
+echo "== A prose review the SIZE of the measured ones still attests =="
+# The three live forks that motivated x-c446 ended in 3497, 2531 and 3357
+# bytes of prose. Those transcripts are no longer on disk, and the corpus is
+# RECORDED data by rule, so this case is deliberately SYNTHETIC and lives
+# here rather than in the fixtures directory: authoring a file that claims to
+# be a measured specimen is the drift the manifest's byte-exactness note
+# forbids.
+#
+# What it asserts is the one thing the small fixtures cannot: that size is not
+# a discriminator. The message crosses the measured range and travels through
+# a python pipe, a bash regex, and an argv, any of which could behave
+# differently on a few thousand bytes than on twenty-six.
+BIG_PROSE="$(python3 -c '
+line = "The diff changes the retry path and I could not confirm the timeout is honored.\n"
+print(line * 45, end="")
+')"
+[[ ${#BIG_PROSE} -gt 3000 ]] \
+  && pass "big-prose fixture is $((${#BIG_PROSE})) bytes, past the measured range" \
+  || fail "big-prose fixture is only ${#BIG_PROSE} bytes, below the measured range"
+run_hook "$(forked_skill_stop "$BIG_PROSE" "code-review")"
+if ! attested; then
+  fail "big-prose: NO attestation (a few thousand bytes of prose is the motivating case)"
+elif ! grep -q '"verdict":"fail' "$EMITTED"; then
+  fail "big-prose: attested without verdict=fail: $(cat "$EMITTED")"
+elif ! grep -q 'prose_unparseable' "$EMITTED"; then
+  fail "big-prose: attested without output_contract=prose_unparseable: $(cat "$EMITTED")"
+else
+  pass "big-prose: attested fail/prose_unparseable"
+fi
 
 echo "== SubagentStop: the header identity lane (payload from the corpus) =="
 run_hook "$(subagent_stop "" "## Review findings"$'\n\n'"$(<"$FIXTURES/headered-json-clean.attest")")"
@@ -506,10 +591,30 @@ expect_silent_noclassify "unknown-event"
 run_hook 'not json at all'
 expect_silent_noclassify "garbage-input"
 
-echo "== AC3-INV: a second non-empty fence never reaches the classifier =="
+echo "== AC3-INV: a second non-empty fence never becomes the verdict =="
+# The invariant is about WHAT the second fence may become, not about whether
+# the round leaves a trace. It used to be spelled "stays silent", because
+# silence was the only other outcome the hook had. Since x-c446 there is a
+# third: the ambiguity attests as unparseable, which counts the round and
+# withholds coverage without ever reading the later fence as findings.
+#
+# So the assertion moved to the half that carries the safety. The emitted row
+# must not contain the second fence's content - if `excluded` ever appears in
+# an emitted payload, a later fence was read as the review's verdict, which is
+# the defect this case was written for and is still forbidden.
 TWO_FENCES=$'## Review findings\n\n```json\n[]\n```\n\n```json\n[{"file":"a.py","summary":"excluded","failure_scenario":"f"}]\n```'
 run_hook "$(forked_skill_stop "$TWO_FENCES" "code-review")"
-expect_silent_noclassify "second-fence-nonempty"
+if ! attested; then
+  fail "second-fence-nonempty: NO attestation (ambiguity must attest unparseable, not vanish)"
+elif grep -q "excluded" "$EMITTED"; then
+  fail "second-fence-nonempty: the later fence reached the payload: $(cat "$EMITTED")"
+elif ! grep -q '"verdict":"fail' "$EMITTED"; then
+  fail "second-fence-nonempty: attested without verdict=fail: $(cat "$EMITTED")"
+elif ! grep -q 'prose_unparseable' "$EMITTED"; then
+  fail "second-fence-nonempty: attested without output_contract=prose_unparseable: $(cat "$EMITTED")"
+else
+  pass "second-fence-nonempty: attested fail/prose_unparseable, later fence never read as findings"
+fi
 
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"
