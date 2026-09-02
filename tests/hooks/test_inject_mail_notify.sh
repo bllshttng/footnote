@@ -139,6 +139,10 @@ else
   mkdir -p "$TMP/real-bin"
   cat > "$TMP/real-bin/fno" <<'REAL_FNO'
 #!/usr/bin/env bash
+if [[ "$*" == "agents mail notify-self" && -n "${FNO_TEST_SESSION_HARNESS:-}" ]]; then
+  exec "$FNO_TEST_UV" run --project "$FNO_TEST_CLI_PROJECT" python -c \
+    'import os; from unittest.mock import patch; from fno.mail.cli import cmd_notify_self; p = patch("fno.claims.session_pid.resolve_session_harness", return_value=os.environ["FNO_TEST_SESSION_HARNESS"]); p.start(); cmd_notify_self()'
+fi
 exec "$FNO_TEST_UV" run --project "$FNO_TEST_CLI_PROJECT" fno-py "$@"
 REAL_FNO
   chmod +x "$TMP/real-bin/fno"
@@ -157,10 +161,10 @@ REAL_FNO
       "$UV_BIN" run --project "$REPO_ROOT/cli" python -c \
       'import os; from fno.bus.log import Envelope, append; append(Envelope.new(from_="sender", to=os.environ["SEED_TO"], kind="send", body=os.environ["SEED_BODY"]))'
 
-    output="$(env -u CODEX_THREAD_ID -u CODEX_SESSION_ID -u CLAUDE_CODE_SESSION_ID -u GEMINI_SESSION_ID \
+    output="$(env -u CODEX_THREAD_ID -u CODEX_SESSION_ID -u CODEX_CI -u CLAUDE_CODE_SESSION_ID -u GEMINI_SESSION_ID \
       "$identity_var=$session_id" FNO_CONFIG="$settings" FNO_TEST_UV="$UV_BIN" \
-      FNO_TEST_CLI_PROJECT="$REPO_ROOT/cli" PATH="$TMP/real-bin:$PATH" \
-      bash "$HOOK" </dev/null 2>/dev/null)"
+      FNO_TEST_CLI_PROJECT="$REPO_ROOT/cli" FNO_TEST_SESSION_HARNESS="$label" \
+      PATH="$TMP/real-bin:$PATH" bash "$HOOK" </dev/null 2>/dev/null)"
     if context="$(printf '%s\n' "$output" | jq -er '.hookSpecificOutput.additionalContext' 2>/dev/null)"; then
       pass "journey $label: exact hook emits valid UserPromptSubmit JSON"
     else
@@ -177,14 +181,14 @@ REAL_FNO
       && pass "journey $label: untrusted close is defanged without a manual-drain nudge" \
       || fail "journey $label: frame escape or manual-drain text remains: $context"
 
-    second="$(env -u CODEX_THREAD_ID -u CODEX_SESSION_ID -u CLAUDE_CODE_SESSION_ID -u GEMINI_SESSION_ID \
+    second="$(env -u CODEX_THREAD_ID -u CODEX_SESSION_ID -u CODEX_CI -u CLAUDE_CODE_SESSION_ID -u GEMINI_SESSION_ID \
       "$identity_var=$session_id" FNO_CONFIG="$settings" FNO_TEST_UV="$UV_BIN" \
-      FNO_TEST_CLI_PROJECT="$REPO_ROOT/cli" PATH="$TMP/real-bin:$PATH" \
-      bash "$HOOK" </dev/null 2>/dev/null)"
-    session_start="$(env -u CODEX_THREAD_ID -u CODEX_SESSION_ID -u CLAUDE_CODE_SESSION_ID -u GEMINI_SESSION_ID \
+      FNO_TEST_CLI_PROJECT="$REPO_ROOT/cli" FNO_TEST_SESSION_HARNESS="$label" \
+      PATH="$TMP/real-bin:$PATH" bash "$HOOK" </dev/null 2>/dev/null)"
+    session_start="$(env -u CODEX_THREAD_ID -u CODEX_SESSION_ID -u CODEX_CI -u CLAUDE_CODE_SESSION_ID -u GEMINI_SESSION_ID \
       "$identity_var=$session_id" FNO_CONFIG="$settings" FNO_TEST_UV="$UV_BIN" \
-      FNO_TEST_CLI_PROJECT="$REPO_ROOT/cli" PATH="$TMP/real-bin:$PATH" \
-      bash "$REPO_ROOT/hooks/inject-mail-drain-session-start.sh" </dev/null 2>/dev/null)"
+      FNO_TEST_CLI_PROJECT="$REPO_ROOT/cli" FNO_TEST_SESSION_HARNESS="$label" \
+      PATH="$TMP/real-bin:$PATH" bash "$REPO_ROOT/hooks/inject-mail-drain-session-start.sh" </dev/null 2>/dev/null)"
     [[ -z "$second" && -z "$session_start" ]] \
       && pass "journey $label: active-turn and SessionStart share the consumed cursor" \
       || fail "journey $label: mail repeated after acknowledgement: turn=$second start=$session_start"
