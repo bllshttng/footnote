@@ -8114,11 +8114,17 @@ async fn handle_rm_with(
     // its own fail-closed posture. A claude row absent from the `claude agents
     // --json --all` roster is provably gone, whoever removed it (claude-only;
     // `claude_row_provably_absent` is unconditionally false elsewhere). A pane
-    // row whose pane the probe cannot find is provably gone, because the pane
-    // is that row's ONE live ref. Anything less than proof keeps refusing, and
-    // `--force` remains the only escape for a row that cannot prove either.
-    let provably_gone =
-        claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref())
+    // row whose terminal state is explicit is finished even though Claude
+    // keeps it in the roster, and a pane row whose pane the probe cannot find
+    // is provably gone because the pane is that row's ONE live ref. Anything
+    // less than proof keeps refusing, and `--force` remains the only escape.
+    let row_state_terminal = claude_agents
+        .as_ref()
+        .and_then(|snapshot| harness_row_id.as_deref().and_then(|id| snapshot.find(id)))
+        .and_then(|row| row.state.as_deref())
+        .is_some_and(|state| matches!(state, "done" | "stopped" | "failed"));
+    let provably_gone = row_state_terminal
+        || claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref())
             || pane_provably_absent(entry.mux.as_ref(), mux_pane_probe);
     if entry.status == AgentStatus::Live && !force && !provably_gone {
         let row = harness_row_id
@@ -11108,6 +11114,86 @@ mod tests {
         let message = &response.error().unwrap().message;
         assert!(message.contains("rotate"));
         assert!(!message.contains("--force"));
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_accepts_terminal_claude_rows_that_remain_in_the_roster() {
+        for (index, state) in ["done", "stopped", "failed"].into_iter().enumerate() {
+            let home = short_home(&format!("rmterminal{state}"));
+            let short_id = format!("dead{index:04}");
+            let session_id = format!("{short_id}-1111-2222-3333-444444444444");
+            let mut row = claude_rm_row("finished-worker", &short_id, &session_id);
+            row.status = AgentStatus::Live;
+            state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+                .unwrap();
+            let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+            let request = Request::new(1, "agent.rm", json!({"name": "finished-worker"}));
+            let first = std::sync::atomic::AtomicBool::new(true);
+
+            let response = handle_rm_with(
+                &ctx,
+                &request,
+                &|| {
+                    if first.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                            crate::claude_roster::ClaudeAgentRow::new(&short_id, Some(state)),
+                        ])
+                    } else {
+                        crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new())
+                    }
+                },
+                &|_| Ok(()),
+                &|_, _| Ok(true),
+                &|_, _| PaneProbe::Unknown,
+            )
+            .await;
+
+            assert_eq!(response.result().unwrap()["removed"], true, "state={state}");
+            assert!(state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .is_empty());
+            std::fs::remove_dir_all(home.root()).ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn rm_still_refuses_an_idle_claude_row() {
+        let home = short_home("rmidle");
+        let mut row = claude_rm_row(
+            "idle-worker",
+            "1d1e0001",
+            "1d1e0001-1111-2222-3333-444444444444",
+        );
+        row.status = AgentStatus::Live;
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "idle-worker"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new("1d1e0001", Some("idle")),
+                ])
+            },
+            &|_| panic!("an idle row must not reach claude rm"),
+            &|_, _| panic!("an idle row must not reach mux kill"),
+            &|_, _| PaneProbe::Unknown,
+        )
+        .await;
+
+        assert!(response.error().unwrap().message.contains("still live"));
         assert_eq!(
             state::load_registry(&home.registry_json())
                 .unwrap()
