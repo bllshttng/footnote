@@ -472,11 +472,11 @@ def normalize_command(command: str, harness: str) -> str:
     native codex verbs (``/review``, ``/model``, ...) pass through untouched.
     The plugin-qualified ``/fno:verb`` spelling is unambiguous by namespace and
     always rewrites. Pure string transform; no config or IO."""
+    caps = capabilities(harness)  # loud on an unknown harness, before anything
     cmd = command.strip()
     first_word = cmd.split(maxsplit=1)[0] if cmd else ""
     if first_word.startswith("/") and "/" in first_word[1:]:
         return cmd
-    caps = capabilities(harness)
     surface = caps["command_surface"]
     if surface == _REFUSED:
         raise DispatchResolveError(_refused_reason(harness))
