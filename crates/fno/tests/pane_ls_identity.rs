@@ -52,7 +52,10 @@ fn spawned_name_without_id_never_shares_the_sentinel() {
 fn worker_name_in_the_id_column_reads_unresolved_not_as_an_id() {
     // Live specimen: `fno_id=t-b783-verb-prefix-agy` beside two session UUIDs
     // in one listing. The column must not carry two kinds of identifier.
-    let (state, cell) = pane_identity_cell(&pane(Some("t-b783-verb-prefix-agy"), Some("t-b783-verb-prefix-agy")));
+    let (state, cell) = pane_identity_cell(&pane(
+        Some("t-b783-verb-prefix-agy"),
+        Some("t-b783-verb-prefix-agy"),
+    ));
     assert_eq!(state, "unresolved:name-as-id");
     assert!(cell.starts_with("unresolved:"), "{cell}");
     assert!(!cell.contains("t-b783"), "{cell}");

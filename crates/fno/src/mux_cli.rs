@@ -5584,10 +5584,7 @@ pub fn pane_identity_cell(p: &proto::PaneInfo) -> (&'static str, String) {
         Some(id) if session_id_shaped(id) => ("resolved", id.to_string()),
         Some(_) => ("unresolved:name-as-id", "unresolved:name-as-id".into()),
         None => match p.name.as_deref() {
-            Some(_) => (
-                "unresolved:spawned-name",
-                "unresolved:spawned-name".into(),
-            ),
+            Some(_) => ("unresolved:spawned-name", "unresolved:spawned-name".into()),
             None => ("untracked", "-".into()),
         },
     }
@@ -5614,8 +5611,7 @@ fn render_reply(
                 let rows: Vec<serde_json::Value> = panes
                     .iter()
                     .map(|p| {
-                        let mut obj =
-                            serde_json::to_value(p).unwrap_or(serde_json::Value::Null);
+                        let mut obj = serde_json::to_value(p).unwrap_or(serde_json::Value::Null);
                         if let Some(o) = obj.as_object_mut() {
                             o.insert(
                                 "fno_id_state".into(),
