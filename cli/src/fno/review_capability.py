@@ -535,13 +535,14 @@ def self_review_invocation(harness: Optional[str], level: Optional[str] = "mediu
     native verbs, none to this lane.
 
     What it buys is bounded, and the bound is worth stating. The router
-    resolves the target from the first non-flag token, and
-    `render_self_review_invocation` appends a prose target (`HEAD <sha> of PR
-    <n> ...`) whose first token is a ref, not a PR number. A strict parser
-    therefore reads a branch target and the lane notes the flag as ignored.
-    The lane's executor is a model reading a payload that names the PR
-    outright, so in practice the findings land on it. Narrowing that gap is a
-    target-resolution change, not this one.
+    resolves the target from the first non-flag token, so
+    `render_self_review_invocation` emits the bare PR number as that token
+    and rides the HEAD sha and base branch behind it as trailing context no
+    reader mistakes for the target. An earlier render led with the HEAD ref
+    and worked only because the lane's executor is a model that read the
+    prose and found the PR number mid-string; a strict parser read a branch
+    target, classified `--comment` as ignored, and printed without posting.
+    The parser dependency is removed, not narrowed.
 
     Two questions live in this string, and they answer differently. WHICH
     reviewer to recommend is harness-independent: the fno lane on every
@@ -673,7 +674,12 @@ def render_self_review_invocation(
                 base = base[len("origin/") :]
             if not base or any(char.isspace() for char in base) or base.startswith("-"):
                 raise ValueError("explicit self-review target requires a branch name")
-            rendered = f"{rendered} HEAD {head_sha} of PR {pr_number} against origin/{base}"
+            # Target slot first: the bare PR number is the first non-flag
+            # token after the level, so a strict reader resolves the target to
+            # the PR. HEAD and base ride behind it as trailing context; the
+            # earlier "HEAD <sha> of PR <n>" order made a strict reader see a
+            # branch target and silently ignore --comment.
+            rendered = f"{rendered} {pr_number} HEAD {head_sha} against origin/{base}"
         return rendered
     except Exception:  # noqa: BLE001 - advisory text; the gate stays the gate
         if any(value is not None for value in (pr_number, head_sha, base_branch)):

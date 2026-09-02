@@ -331,7 +331,7 @@ def test_render_self_review_invocation_names_the_final_pr_head_and_base():
         head_sha="abc1234",
         base_branch="main",
     )
-    assert codex == "$fno:review <level> --comment HEAD abc1234 of PR 123 against origin/main"
+    assert codex == "$fno:review <level> --comment 123 HEAD abc1234 against origin/main"
 
     claude = rc.render_self_review_invocation(
         "claude",
@@ -341,7 +341,7 @@ def test_render_self_review_invocation_names_the_final_pr_head_and_base():
         base_branch="main",
     )
     assert claude == (
-        "/fno:review <level> --comment HEAD abc1234 of PR 123 against origin/main"
+        "/fno:review <level> --comment 123 HEAD abc1234 against origin/main"
     )
 
 
