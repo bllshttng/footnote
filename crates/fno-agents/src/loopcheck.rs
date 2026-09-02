@@ -4185,7 +4185,24 @@ fn current_law_status(fno_bin: &str, cwd: &Path, subject: &str) -> LawStatus {
                         .and_then(|v| v.pointer("/decisions/0/decision"))
                         .and_then(|s| s.as_str())
                     {
-                        Some(d) if d == WAIVER_DECISION => LawStatus::Single,
+                        Some(d) if d == WAIVER_DECISION => {
+                            // A waiver asserts a person at a terminal read the
+                            // diff, and only `operator` authority carries that
+                            // fact: any harness-identified session records
+                            // `chat_attested` through the law door. Mirrors
+                            // `law_authority`'s operator-row filter; a row
+                            // without the field reads as no, the way the
+                            // Python filter drops it (malformed rows die
+                            // upstream at the damaged-index check).
+                            match parsed
+                                .as_ref()
+                                .and_then(|v| v.pointer("/decisions/0/authority_source"))
+                                .and_then(|s| s.as_str())
+                            {
+                                Some("operator") => LawStatus::Single,
+                                _ => LawStatus::NoLaw,
+                            }
+                        }
                         Some(_) => LawStatus::NoLaw,
                         None => LawStatus::Unknown,
                     }

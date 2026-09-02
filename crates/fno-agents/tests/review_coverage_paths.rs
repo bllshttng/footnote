@@ -566,4 +566,18 @@ fn operator_waiver_law_surface_is_pinned_across_both_gates() {
         python.contains("list_decisions(subject, lane=\"law\", state=\"live\")"),
         "the Python gate grew a second law reader"
     );
+    // Only operator authority counts as waiver evidence: a chat_attested row
+    // cannot carry the person-at-a-terminal fact a waiver asserts, and the
+    // law door is open to any harness-descended process. Python filters rows
+    // to operator before counting; Rust checks the one row's authority. The
+    // write path refuses non-operator rows at these subjects outright
+    // (WaiverAuthorityRefusedError), so this pin is the reader half.
+    assert!(
+        rust.contains("/decisions/0/authority_source"),
+        "the Rust reader stopped checking the row's authority"
+    );
+    assert!(
+        python.contains("row.get(\"authority_source\") or \"\") == \"operator\""),
+        "the Python gate stopped filtering waiver rows to operator authority"
+    );
 }

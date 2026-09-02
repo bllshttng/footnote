@@ -9882,7 +9882,7 @@ fn law_stub_with(dir: &Path, name: &str, single_pattern: &str, row_decision: &st
         name,
         &format!(
             r#"case "$3" in
-{single_pattern}) echo '{{"canonical_subject":"s","current_law":{{"status":"single","decision_ids":["d-1"],"decision_id":"d-1"}},"decisions":[{{"decision_id":"d-1","decision":"{row_decision}"}}]}}'; exit 0 ;;
+{single_pattern}) echo '{{"canonical_subject":"s","current_law":{{"status":"single","decision_ids":["d-1"],"decision_id":"d-1"}},"decisions":[{{"decision_id":"d-1","decision":"{row_decision}","authority_source":"operator"}}]}}'; exit 0 ;;
 *) echo '{{"canonical_subject":"s","current_law":{{"status":"none"}}}}'; exit 0 ;;
 esac"#
         ),
@@ -9978,6 +9978,36 @@ fn operator_waiver_never_reads_a_negative_row_as_a_waiver() {
     );
     assert_eq!(waiver, None);
     assert!(!unknown, "a different decision is a no, not a failed probe");
+}
+
+#[test]
+fn operator_waiver_never_reads_a_chat_attested_row_as_a_waiver() {
+    let dir = TempDir::new().unwrap();
+    // A chat_attested row is law-lane but not operator evidence: the law door
+    // is open to any harness-descended process, so the exact affirmative
+    // decision value recorded under chat_attested is a clean no, never a
+    // waiver and never a failed probe.
+    let fno = make_script(
+        dir.path(),
+        "fno",
+        r#"case "$3" in
+review-coverage-waiver*) echo '{"canonical_subject":"s","current_law":{"status":"single","decision_ids":["d-1"],"decision_id":"d-1"},"decisions":[{"decision_id":"d-1","decision":"review coverage waived for this head","authority_source":"chat_attested"}]}'; exit 0 ;;
+*) echo '{"canonical_subject":"s","current_law":{"status":"none"}}'; exit 0 ;;
+esac"#,
+    );
+    let (waiver, unknown) = operator_waiver(
+        fno.to_str().unwrap(),
+        dir.path(),
+        "acme/widgets",
+        42,
+        HEAD40,
+        false,
+    );
+    assert_eq!(waiver, None);
+    assert!(
+        !unknown,
+        "a readable non-operator row is a clean no, not a failed probe"
+    );
 }
 
 #[test]
