@@ -46,6 +46,10 @@ CAUSE_PID_UNAVAILABLE = "pid-unavailable"
 CAUSE_PID_ABSENT = "pid-absent"
 CAUSE_ACCESS_DENIED = "access-denied"
 CAUSE_PID_REUSE = "pid-reuse"
+# Verdict-side causes: they name why the arm that fired chose its state,
+# beyond what the pid probe saw.
+CAUSE_TTL_EXPIRED = "ttl-expired"
+CAUSE_PID_SHARED = "pid-shared"
 
 
 def _probe_create_time(pid: Optional[int]) -> tuple[Optional[int], str]:
@@ -186,6 +190,39 @@ def classify(
     cannot be denied on a pid that is gone), so it is not a proof of death and
     must never free the claim on pid evidence.
     """
+    return classify_with_basis(claim, now=now, pid_exclusive=pid_exclusive)[0]
+
+
+def classify_with_basis(
+    claim: Claim,
+    now: Optional[int] = None,
+    *,
+    pid_exclusive: Optional[bool] = None,
+) -> tuple[ClaimState, str]:
+    """:class:`classify` with the cause of the verdict beside it.
+
+    Mirrors ``claims.rs::classify_with_basis``; the parity harness pins the
+    vocabulary, so the basis cannot drift the way the state once could.
+
+    The basis names WHY, one cause per way a verdict can arise:
+
+      * ``live`` - the holder passed the pid check (this is also the basis
+        of the hybrid arm's LIVE: same measurement, corroborated).
+      * ``ttl-expired`` - an expired clock decided it (the expired arm that
+        found no corroboration).
+      * ``pid-shared`` - the pid is live but names more than one holder, so
+        it can neither corroborate a lease nor prove death (``pid_exclusive
+        is False``).
+      * otherwise, the liveness cause that failed: ``offhost``,
+        ``pid-unavailable``, ``pid-absent``, ``access-denied`` or
+        ``pid-reuse``. State and cause together carry the disposition: the
+        same absent pid reads STALE on a pid-liveness claim (provably dead)
+        and SUSPECT inside a TTL window (still protected).
+
+    The five holder-failure causes exist because the probe names which one
+    it hit; before the probe split, ``access-denied`` and ``pid-absent``
+    were one None and a live-but-unreadable holder read as dead.
+    """
     live, cause = _liveness_reading(claim)
     if is_expired(claim, now=now):
         # HYBRID, corroborated: an expired clock does NOT imply a dead session,
@@ -198,20 +235,20 @@ def classify(
         # so the sweep's secondary instruments settle it.
         if claim.pid_provenance == "session-prover" and live:
             if pid_exclusive is False:
-                return ClaimState.SUSPECT
-            return ClaimState.LIVE
-        return ClaimState.STALE
+                return ClaimState.SUSPECT, CAUSE_PID_SHARED
+            return ClaimState.LIVE, cause
+        return ClaimState.STALE, CAUSE_TTL_EXPIRED
     if claim.expires_at is None:
         if live:
-            return ClaimState.LIVE
+            return ClaimState.LIVE, cause
         # Unreadable is not provably dead: never free a claim on pid evidence
         # we were refused.
         if cause == CAUSE_ACCESS_DENIED:
-            return ClaimState.SUSPECT
-        return ClaimState.STALE
+            return ClaimState.SUSPECT, cause
+        return ClaimState.STALE, cause
     # TTL claim, not yet expired: live pid => LIVE, dead/replaced pid => SUSPECT
     # (TTL-protected, not stealable).
-    return ClaimState.LIVE if live else ClaimState.SUSPECT
+    return (ClaimState.LIVE, cause) if live else (ClaimState.SUSPECT, cause)
 
 
 def classify_for_sweep(

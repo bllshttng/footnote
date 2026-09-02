@@ -587,6 +587,48 @@ class TestStatus:
         assert result["state"] == ClaimState.CORRUPTED.value
         assert "error" in result
 
+    def test_status_carries_basis_and_offhost_differs_from_pid_reuse(
+        self, tmp_path
+    ):
+        """Both claims read stale, but the basis tells the causes apart
+        without a source read - the whole point of verdict-beside-basis."""
+        offhost = Claim(
+            key="k-offhost",
+            holder=HOLDER_A,
+            acquired_at=now_ms(),
+            pid=os.getpid(),
+            host="somewhere-else.invalid",
+            machine_id="some-other-machine-0000",
+        )
+        path = claim_path("k-offhost", root=tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(serialize_claim(offhost))
+
+        reused = Claim(
+            key="k-reuse",
+            holder=HOLDER_A,
+            acquired_at=0,
+            pid=os.getpid(),
+            host=socket.gethostname(),
+        )
+        path = claim_path("k-reuse", root=tmp_path)
+        path.write_text(serialize_claim(reused))
+
+        a = claim_status("k-offhost", root=tmp_path)
+        b = claim_status("k-reuse", root=tmp_path)
+        assert a["state"] == ClaimState.STALE.value
+        assert b["state"] == ClaimState.STALE.value
+        assert a["basis"] == "offhost"
+        assert b["basis"] == "pid-reuse"
+        assert a["basis"] != b["basis"]
+
+    def test_status_live_basis_and_free_have_no_basis(self, tmp_path):
+        acquire_claim("k-live", HOLDER_A, root=tmp_path)
+        result = claim_status("k-live", root=tmp_path)
+        assert result["basis"] == "live"
+        free = claim_status("never-existed", root=tmp_path)
+        assert "basis" not in free
+
 
 # ---------------------------------------------------------------------------
 # list
