@@ -82,6 +82,36 @@ _SERIAL_TEST_FILES = frozenset(
 )
 
 
+def _parse_pytest_shard(spec: str) -> tuple[int, int]:
+    try:
+        index_text, total_text = spec.split("/", 1)
+        index, total = int(index_text), int(total_text)
+    except (ValueError, TypeError):
+        raise pytest.UsageError(
+            f"FNO_PYTEST_SHARD must be I/N with 1 <= I <= N, got {spec!r}"
+        ) from None
+    if total < 1 or index < 1 or index > total:
+        raise pytest.UsageError(
+            f"FNO_PYTEST_SHARD must be I/N with 1 <= I <= N, got {spec!r}"
+        )
+    return index, total
+
+
+def partition_pytest_nodeids(nodeids: list[str], spec: str) -> list[str]:
+    """Return the sorted nodeids assigned to one ``I/N`` pytest shard."""
+    index, total = _parse_pytest_shard(spec)
+    ordered = sorted(nodeids)
+    selected = [
+        nodeid for position, nodeid in enumerate(ordered)
+        if position % total == index - 1
+    ]
+    if not selected:
+        raise pytest.UsageError(
+            f"FNO_PYTEST_SHARD={spec} selected no tests from {len(nodeids)} collected"
+        )
+    return selected
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Keep filed parallel racers on one worker without skipping them."""
@@ -93,6 +123,15 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         ):
             item.add_marker(pytest.mark.serial)
             item.add_marker(pytest.mark.xdist_group(name="serial"))
+    spec = os.environ.get("FNO_PYTEST_SHARD", "").strip()
+    if spec:
+        items[:] = [
+            item for nodeid in partition_pytest_nodeids(
+                [item.nodeid for item in items], spec
+            )
+            for item in items
+            if item.nodeid == nodeid
+        ]
 
 
 @pytest.fixture(autouse=True, scope="session")
