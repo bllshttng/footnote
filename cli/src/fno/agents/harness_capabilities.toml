@@ -143,6 +143,17 @@ route_on_pane = false
 loop_participation = "native"
 loop_extension = ""
 command_surface = "codex-skill"
+# The codex TUI's own slash verbs, measured 2026-09-01. The verb normalizer
+# rewrites a leading-slash token on this surface only when it names a shipped
+# footnote verb AND is not one of these, so a native verb driven through a
+# spawn or dispatch reaches the TUI verb instead of a footnote skill that does
+# not exist. `review` is the collision case - it is both, and the bare
+# spelling stays native; the fno lane is reached namespaced, as /fno:review.
+native_verbs = ["/review", "/code-review", "/model", "/status", "/compact"]
+# The subset the shared app-server daemon maps to its review/start RPC. Every
+# other native verb has no prompt line on a daemon thread, and the mail lane
+# refuses it by name.
+review_verbs = ["/review", "/code-review"]
 ready_marker = "idle_prompt"
 ready_rule_ids = ["idle_prompt"]
 manifest_rules = [

@@ -56,15 +56,17 @@ def test_config_command_overrides_the_per_harness_builtin():
 
 def test_explicit_command_wins_over_config_and_builtin():
     # The explicit slash template is canonical claude syntax, normalized on the
-    # chosen harness (x-f0e2): `/custom` -> `$fno:custom` on codex. Precedence is
-    # unchanged - explicit still beats the config `$fno:execute`.
+    # chosen harness (x-f0e2). Precedence is unchanged - explicit still beats
+    # the config `$fno:execute`. `custom` names no shipped footnote verb, so
+    # the codex normalizer leaves the token literal instead of capturing it
+    # into a phantom `$fno:custom` skill.
     out = resolve_dispatch(
         harness="codex",
         node_id="x-abcd",
         command="/custom {id}",
         dispatch_cfg={"command": "$fno:execute {id}"},
     )
-    assert out["command"] == "$fno:custom x-abcd"
+    assert out["command"] == "/custom x-abcd"
 
 
 def test_qualified_dispatch_verb_canonicalizes_before_the_allowlist():

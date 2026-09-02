@@ -54,6 +54,7 @@ from typing import Optional, TypedDict
 
 import typer
 
+from fno.agents.harness_map import capabilities as _harness_capabilities
 from fno.inbox.store import (
     DEPRECATED_KINDS,
     ProjectIdentificationError,
@@ -3069,7 +3070,10 @@ def _escalate_to_human(
     return "escalated" if code == 0 else "notifier-unavailable"
 
 
-_CODEX_REVIEW_VERBS = frozenset({"/review", "/code-review"})
+# Single-sourced from the capability table (the codex row's review_verbs, the
+# same place the verb normalizer reads native_verbs): a second hand-written
+# enumeration would drift the first time a verb is added.
+_CODEX_REVIEW_VERBS = frozenset(_harness_capabilities("codex")["review_verbs"])
 _COMMIT_SHA = re.compile(r"[0-9a-fA-F]{7,64}")
 _EXPLICIT_PR_REVIEW = re.compile(
     r"^HEAD (?P<head>[0-9a-fA-F]{7,64}) of PR (?P<pr>[1-9][0-9]*) "

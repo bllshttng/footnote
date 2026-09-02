@@ -36,6 +36,7 @@ from __future__ import annotations
 import re
 import tomllib
 from copy import deepcopy
+from functools import cache
 from importlib.resources import files
 from typing import Mapping, Optional
 
@@ -69,6 +70,34 @@ _AUTONOMOUS_COMMAND_MERGE = "/target {id}"
 # args of another slash verb would mutate its instruction text, and prose is
 # not a control input (x-9d11).
 _TARGET_FAMILY = ("/target", "/fno:target", "$fno:target")
+
+
+@cache
+def footnote_verbs() -> frozenset:
+    """The shipped footnote verb roster: every ``skills/<name>/SKILL.md`` and
+    every ``commands/<name>.md`` the plugin ships.
+
+    Read from the shipped plugin surface, never a retyped literal: a literal
+    copy goes stale the first time a verb ships, and the failure is silent -
+    the new verb simply stops normalizing on codex and nothing notices.
+    Cached once per process. Empty on any resolution or read failure, which
+    on the codex surface leaves every bare ``/verb`` literal - pass-through is
+    the safe direction - while the plugin-qualified ``/fno:verb`` spelling
+    keeps working, since its namespace alone proves it is a footnote verb."""
+    from fno.paths import resolve_plugin_script
+
+    verbs: set[str] = set()
+    try:
+        skills = resolve_plugin_script("skills")
+        verbs.update(p.name for p in skills.iterdir() if (p / "SKILL.md").is_file())
+    except OSError:
+        pass
+    try:
+        commands = resolve_plugin_script("commands")
+        verbs.update(p.stem for p in commands.glob("*.md") if p.is_file())
+    except OSError:
+        pass
+    return frozenset(verbs)
 
 
 def normalize_legacy_no_merge(command: str) -> str:
@@ -431,10 +460,24 @@ def normalize_command(command: str, harness: str) -> str:
 
     ``command`` is expected to lead with ``/`` (a footnote slash command); a
     non-slash string is returned unchanged for the slash/codex surfaces (nothing
-    to rewrite). Pure string transform; no config or IO."""
-    caps = capabilities(harness)
-    surface = caps["command_surface"]
+    to rewrite). So is a slash token with an INTERNAL slash (``/usr/bin/script
+    {id}``): an absolute path is nobody's footnote verb, and the guard lives
+    HERE rather than at one call site so every caller inherits it - it used to
+    live in ``resolve_dispatch`` alone, and the direct callers bypassed it and
+    captured an absolute path into a phantom ``$fno:usr/bin/script`` skill.
+
+    On the codex surface a bare ``/verb`` is rewritten only when it names a
+    shipped footnote verb (:func:`footnote_verbs`) that is not also a declared
+    native verb of the harness (``native_verbs`` in the capability table) -
+    native codex verbs (``/review``, ``/model``, ...) pass through untouched.
+    The plugin-qualified ``/fno:verb`` spelling is unambiguous by namespace and
+    always rewrites. Pure string transform; no config or IO."""
+    caps = capabilities(harness)  # loud on an unknown harness, before anything
     cmd = command.strip()
+    first_word = cmd.split(maxsplit=1)[0] if cmd else ""
+    if first_word.startswith("/") and "/" in first_word[1:]:
+        return cmd
+    surface = caps["command_surface"]
     if surface == _REFUSED:
         raise DispatchResolveError(_refused_reason(harness))
     if surface == _CODEX_SKILL and cmd.startswith("/"):
@@ -443,8 +486,19 @@ def normalize_command(command: str, harness: str) -> str:
         # skill surface is ``$fno:target`` in both cases. Strip the optional
         # slash namespace before swapping the surface marker so repeated
         # normalization at independent dispatch choke points is idempotent.
-        verb = cmd[len("/fno:") :] if cmd.startswith("/fno:") else cmd[1:]
-        return "$fno:" + verb
+        if cmd.startswith("/fno:"):
+            return "$fno:" + cmd[len("/fno:") :]
+        verb = first_word[1:]
+        # A bare ``/verb`` is rewritten only when it names a shipped footnote
+        # verb that is not also a declared native verb of this harness: an
+        # unknown or native verb stays literal instead of being captured into
+        # a phantom ``$fno:`` skill. ``review`` is the collision case - bare
+        # ``/review`` on codex is the NATIVE verb, and the fno lane is reached
+        # namespaced, as ``/fno:review``.
+        native = {v for v in caps.get("native_verbs") or () if isinstance(v, str)}
+        if "/" + verb in native or verb not in footnote_verbs():
+            return cmd
+        return "$fno:" + verb + cmd[len(first_word):]
     if surface == _SLASH and cmd.startswith("/"):
         # Plugin-namespace prefix swap only (never re-tokenize): claude/agy inject
         # the skill natively (""), opencode's fno plugin exposes it as `/fno:verb`.
@@ -901,15 +955,14 @@ def resolve_dispatch(
     # is canonical claude syntax on EVERY rung - normalize it once here, per the
     # chosen harness, before `{id}` substitution. This stops the config and
     # explicit rungs handing a codex worker a raw `/target` (or opencode an
-    # un-namespaced `/target` instead of `/fno:target`). Gate on the FIRST word
-    # being a single slash-led token with no internal slash: that admits
-    # `/target`/`/think`/`/custom` but NOT an absolute-path template like
-    # `/usr/bin/script {id}`, which must pass through literally. Non-slash
-    # templates (`$fno:...`) also pass through, and the call is idempotent over
-    # the builtin/verb rungs' output.
-    first_word = template.split(maxsplit=1)[0]
-    if first_word.startswith("/") and "/" not in first_word[1:]:
-        template = normalize_command(template, chosen_harness)
+    # un-namespaced `/target` instead of `/fno:target`). The first-word guard
+    # (absolute paths pass through) lives INSIDE normalize_command, so this
+    # call is unguarded by design and every caller shares one implementation.
+    # Non-slash templates (`$fno:...`) pass through unchanged, and the call is
+    # idempotent over the builtin/verb rungs' output.
+    normalized_cmd = normalize_command(template, chosen_harness)
+    if normalized_cmd != template:
+        template = normalized_cmd
         decision.append(f"command=normalized({chosen_harness})")
     # The loop gate, at the same choke point every spawn surface resolves
     # through. It reads a CAPABILITY, never a harness name, and it fires after

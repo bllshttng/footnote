@@ -228,3 +228,69 @@ def test_doctor_explicitly_reports_no_lost_attempt_after_attestation(tmp_path) -
     )
 
     assert any("none lost" in line for line in lines)
+
+
+# --- flag vocabulary: one normalizer serves the router prose and telemetry ---
+
+def test_canonical_flag_accepts_three_spellings() -> None:
+    from fno.review.invocation import canonical_flag
+
+    for spelling in ("--comment", "comment", "—comment"):
+        assert canonical_flag(spelling) == "--comment", spelling
+    for spelling in ("--fix", "fix", "—fix"):
+        assert canonical_flag(spelling) == "--fix", spelling
+
+
+def test_canonical_flag_rejects_every_other_dash() -> None:
+    """The em-dash alias is exactly one character. An en dash, a minus sign,
+    or a horizontal bar leading the same name is NOT a flag: no legitimate
+    target begins with an em dash, but those characters do begin other text,
+    and widening the class would capture real targets."""
+    from fno.review.invocation import canonical_flag
+
+    for token in ("–comment", "−comment", "―comment", "–fix"):
+        assert canonical_flag(token) is None, repr(token)
+
+
+def test_canonical_flag_rejects_unknown_and_partial_names() -> None:
+    from fno.review.invocation import canonical_flag
+
+    assert canonical_flag("commentx") is None
+    assert canonical_flag("--verbose") is None
+    # one em dash then an UNKNOWN name is prose, not a flag attempt
+    assert canonical_flag("—verbose") is None
+
+
+def test_parse_records_canonical_flags_for_every_spelling() -> None:
+    from fno.review.invocation import parse_review_invocation
+
+    bare = parse_review_invocation("/fno:review medium comment fix")
+    assert bare is not None
+    assert bare["flags"] == ["--comment", "--fix"]
+    assert bare["level"] == "medium"
+
+    em = parse_review_invocation("/fno:review medium —comment")
+    assert em is not None
+    assert em["flags"] == ["--comment"]
+
+    canonical = parse_review_invocation("/fno:review medium --comment")
+    assert canonical is not None
+    assert canonical["flags"] == ["--comment"]
+
+
+def test_parse_keeps_unknown_double_hyphen_tokens_verbatim() -> None:
+    from fno.review.invocation import parse_review_invocation
+
+    parsed = parse_review_invocation("/fno:review high --verbose")
+    assert parsed is not None
+    assert parsed["flags"] == ["--verbose"]
+
+
+def test_parse_emits_a_react_to_em_dash_without_flag_name() -> None:
+    """An em dash followed by a non-flag word is left entirely alone: it is
+    prose punctuation, and the flags list records nothing."""
+    from fno.review.invocation import parse_review_invocation
+
+    parsed = parse_review_invocation("/fno:review high — quick pass")
+    assert parsed is not None
+    assert parsed["flags"] == []
