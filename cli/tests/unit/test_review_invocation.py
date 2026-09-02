@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fno.doctor import _review_invocation_report
 from fno.events import validate
@@ -141,7 +141,7 @@ def test_doctor_survives_a_tz_naive_row_and_names_it_lost(tmp_path) -> None:
     path.write_text(
         json.dumps(
             {
-                "ts": "2026-08-25T00:00:00",
+                "ts": "2026-08-25T23:44:00",
                 "type": "review_invocation",
                 "source": "daemon",
                 "data": {
@@ -175,7 +175,7 @@ def test_doctor_names_an_old_sent_attempt_with_transport_and_receipt(tmp_path) -
     path.write_text(
         json.dumps(
             {
-                "ts": "2026-08-25T00:00:00Z",
+                "ts": "2026-08-25T23:44:00Z",
                 "type": "review_invocation",
                 "source": "daemon",
                 "data": {
@@ -202,6 +202,32 @@ def test_doctor_names_an_old_sent_attempt_with_transport_and_receipt(tmp_path) -
         and "submission unconfirmed" in line
         for line in lines
     )
+
+
+def test_doctor_ignores_sent_attempt_older_than_bounded_window(tmp_path) -> None:
+    path = tmp_path / "events.jsonl"
+    now = datetime(2026, 8, 26, tzinfo=timezone.utc)
+    path.write_text(
+        json.dumps(
+            {
+                "ts": (now - timedelta(minutes=31)).isoformat().replace("+00:00", "Z"),
+                "type": "review_invocation",
+                "source": "daemon",
+                "data": {
+                    "invocation_id": "ri-too-old",
+                    "stage": "sent",
+                    "verb": "/review",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    lines = _review_invocation_report(path, now=now)
+
+    assert any("none lost in the last 15m" in line for line in lines)
+    assert all("ri-too-old" not in line for line in lines)
 
 
 def test_doctor_explicitly_reports_no_lost_attempt_after_attestation(tmp_path) -> None:

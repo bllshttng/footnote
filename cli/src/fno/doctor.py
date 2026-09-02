@@ -1994,6 +1994,7 @@ def _review_invocation_report(
         events_path = project_events_json()
     observed_at = now or datetime.now(timezone.utc)
     cutoff = observed_at - timedelta(seconds=window_seconds)
+    window_start = observed_at - timedelta(seconds=2 * window_seconds)
     sent: dict[str, tuple[datetime, dict[str, Any]]] = {}
     attested: set[str] = set()
     try:
@@ -2039,7 +2040,7 @@ def _review_invocation_report(
     lost = [
         (invocation_id, event_time, data)
         for invocation_id, (event_time, data) in sent.items()
-        if event_time <= cutoff and invocation_id not in attested
+        if window_start <= event_time <= cutoff and invocation_id not in attested
     ]
     if not lost:
         return [
