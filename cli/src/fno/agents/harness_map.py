@@ -431,10 +431,24 @@ def normalize_command(command: str, harness: str) -> str:
 
     ``command`` is expected to lead with ``/`` (a footnote slash command); a
     non-slash string is returned unchanged for the slash/codex surfaces (nothing
-    to rewrite). Pure string transform; no config or IO."""
+    to rewrite). So is a slash token with an INTERNAL slash (``/usr/bin/script
+    {id}``): an absolute path is nobody's footnote verb, and the guard lives
+    HERE rather than at one call site so every caller inherits it - it used to
+    live in ``resolve_dispatch`` alone, and the direct callers bypassed it and
+    captured an absolute path into a phantom ``$fno:usr/bin/script`` skill.
+
+    On the codex surface a bare ``/verb`` is rewritten only when it names a
+    shipped footnote verb (:func:`footnote_verbs`) that is not also a declared
+    native verb of the harness (``native_verbs`` in the capability table) -
+    native codex verbs (``/review``, ``/model``, ...) pass through untouched.
+    The plugin-qualified ``/fno:verb`` spelling is unambiguous by namespace and
+    always rewrites. Pure string transform; no config or IO."""
+    cmd = command.strip()
+    first_word = cmd.split(maxsplit=1)[0] if cmd else ""
+    if first_word.startswith("/") and "/" in first_word[1:]:
+        return cmd
     caps = capabilities(harness)
     surface = caps["command_surface"]
-    cmd = command.strip()
     if surface == _REFUSED:
         raise DispatchResolveError(_refused_reason(harness))
     if surface == _CODEX_SKILL and cmd.startswith("/"):
@@ -901,15 +915,14 @@ def resolve_dispatch(
     # is canonical claude syntax on EVERY rung - normalize it once here, per the
     # chosen harness, before `{id}` substitution. This stops the config and
     # explicit rungs handing a codex worker a raw `/target` (or opencode an
-    # un-namespaced `/target` instead of `/fno:target`). Gate on the FIRST word
-    # being a single slash-led token with no internal slash: that admits
-    # `/target`/`/think`/`/custom` but NOT an absolute-path template like
-    # `/usr/bin/script {id}`, which must pass through literally. Non-slash
-    # templates (`$fno:...`) also pass through, and the call is idempotent over
-    # the builtin/verb rungs' output.
-    first_word = template.split(maxsplit=1)[0]
-    if first_word.startswith("/") and "/" not in first_word[1:]:
-        template = normalize_command(template, chosen_harness)
+    # un-namespaced `/target` instead of `/fno:target`). The first-word guard
+    # (absolute paths pass through) lives INSIDE normalize_command, so this
+    # call is unguarded by design and every caller shares one implementation.
+    # Non-slash templates (`$fno:...`) pass through unchanged, and the call is
+    # idempotent over the builtin/verb rungs' output.
+    normalized_cmd = normalize_command(template, chosen_harness)
+    if normalized_cmd != template:
+        template = normalized_cmd
         decision.append(f"command=normalized({chosen_harness})")
     # The loop gate, at the same choke point every spawn surface resolves
     # through. It reads a CAPABILITY, never a harness name, and it fires after

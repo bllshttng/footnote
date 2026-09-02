@@ -1020,3 +1020,41 @@ def test_submit_refusal_names_the_table_and_the_key():
     assert "harness_capabilities.toml" in err
     assert "submit_keys" in err
     assert "capability declaration, not a transport failure" in err
+
+
+def test_normalize_passes_absolute_path_through_on_every_surface():
+    """An absolute path is nobody's footnote verb: it passes through literally
+    on every surface, at every caller - the guard lives inside the normalizer,
+    not at one call site."""
+    from fno.agents.harness_map import normalize_command
+
+    for harness in ("codex", "claude", "opencode"):
+        assert normalize_command("/usr/bin/script {id}", harness) == "/usr/bin/script {id}"
+
+
+def test_resolve_dispatch_keeps_absolute_path_template_literal():
+    """The dispatch seam inherits the same guard: an absolute-path template is
+    substituted verbatim, never captured into a phantom `$fno:usr/...` skill."""
+    out = resolve_dispatch(
+        harness="codex",
+        command="/usr/bin/script {id}",
+        node_id="abc123",
+        dispatch_cfg=_NO_CFG,
+    )
+    assert out["command"] == "/usr/bin/script abc123"
+
+
+def test_internal_slash_guard_lives_inside_normalize_command():
+    """One implementation of the absolute-path guard, inside the normalizer.
+
+    It used to live in resolve_dispatch, whose three direct normalize_command
+    call sites bypassed it. If the inline test reappears in resolve_dispatch,
+    a future caller split re-opens the capture hole."""
+    import inspect
+
+    from fno.agents import harness_map
+
+    norm_src = inspect.getsource(harness_map.normalize_command)
+    assert '"/" in first_word[1:]' in norm_src
+    resolve_src = inspect.getsource(harness_map.resolve_dispatch)
+    assert "'/' not in first_word[1:]" not in resolve_src
