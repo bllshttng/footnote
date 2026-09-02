@@ -30,6 +30,7 @@ from fno.claims.io import claim_path, claims_dir, serialize_claim
 from fno.claims.types import Claim, now_ms
 
 _PROCESS_START_TIMEOUT_SECONDS = 30.0
+_RACE_HOLD_SECONDS = 2.0
 
 
 def _try_acquire(root_str: str, key: str, holder: str, result_queue, hold_secs: float = 0.0) -> None:
@@ -53,12 +54,14 @@ def _try_acquire(root_str: str, key: str, holder: str, result_queue, hold_secs: 
         result_queue.put(("error", holder, repr(exc)))
 
 
-def _run_race(root: Path, key: str, n_workers: int, hold_secs: float = 0.5) -> list[tuple]:
+def _run_race(
+    root: Path, key: str, n_workers: int, hold_secs: float = _RACE_HOLD_SECONDS
+) -> list[tuple]:
     """Spawn n_workers processes racing on (key); return list of outcomes.
 
-    hold_secs keeps the winner's process alive past the join so siblings
-    can't validly stale-recover. Losers report their outcome and exit
-    immediately - their PID dying does not affect the assertion.
+    hold_secs keeps the winner's process alive through the native verdict
+    subprocess so siblings cannot validly stale-recover. Losers report their
+    outcome and exit immediately - their PID dying does not affect the assertion.
     """
     ctx = mp.get_context("spawn")
     queue = ctx.Queue()
