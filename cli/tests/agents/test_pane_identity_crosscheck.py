@@ -226,6 +226,19 @@ def test_every_signature_flag_alone_raises_the_mismatch(flag) -> None:
     assert len(out["pane_mismatches"]) == 1
 
 
+def test_direction_2_reference_is_session_scoped() -> None:
+    """Pane ids are session-local: a row of ANOTHER session naming the same
+    numeric pane id must not spare this session's unregistered pane."""
+    panes = [_pane(9, child_pid=11258)]
+    rows = [_Row("elsewhere", mux={"session": "other", "pane_id": 9}, harness_session_id="y")]
+    out = pane_identity_crosscheck(panes, rows, "main", argv_of=lambda pid: SIG_ARGV)
+    assert len(out["pane_mismatches"]) == 1
+    # A same-session row with the same id does spare it.
+    rows_same = [_Row("here", mux={"session": "main", "pane_id": 9}, harness_session_id="y")]
+    out = pane_identity_crosscheck(panes, rows_same, "main", argv_of=lambda pid: SIG_ARGV)
+    assert out["pane_mismatches"] == []
+
+
 def test_process_tree_walks_transitive_descendants(monkeypatch) -> None:
     """The snapshot joins a pane's whole descendant subtree, not just direct
     children: shell -> launcher -> codex must still carry the signature."""

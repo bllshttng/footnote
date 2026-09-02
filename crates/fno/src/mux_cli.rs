@@ -5550,10 +5550,15 @@ fn tab_location_lines(
     out
 }
 
-/// (x-b029) True for the hyphenated 36-char hex form both harness session ids
-/// take (claude UUIDv4, codex UUIDv7). A populated `fno_id` of any other shape
-/// is a worker NAME the registry's identity slot holds, never an id.
+/// (x-b029) True for the session-id shapes harnesses mint: the hyphenated
+/// 36-char hex form (claude UUIDv4, codex UUIDv7) and opencode's
+/// `ses_` + alphanumerics (`harnesses/opencode.py:is_session_id` is the
+/// Python twin). A populated `fno_id` of any other shape is a worker NAME
+/// the registry's identity slot holds, never an id.
 pub fn session_id_shaped(value: &str) -> bool {
+    if let Some(tail) = value.strip_prefix("ses_") {
+        return !tail.is_empty() && tail.bytes().all(|c| c.is_ascii_alphanumeric());
+    }
     let b = value.as_bytes();
     if b.len() != 36 {
         return false;

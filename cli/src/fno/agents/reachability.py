@@ -559,11 +559,13 @@ def pane_identity_crosscheck(
             )
 
     # Direction 2: every pane whose process tree carries fno's spawn
-    # signature is referenced by SOME row. A resolved pane needs no signature
-    # check. The probe reads argv ONLY to raise a mismatch; it never mints
-    # an identity from argv.
+    # signature is referenced by a row of THIS session. Pane ids are
+    # session-local, so a row of ANOTHER session naming the same numeric id
+    # must not spare the pane. A resolved pane needs no signature check. The
+    # probe reads argv ONLY to raise a mismatch; it never mints an identity
+    # from argv.
     pane_mismatches: list[dict] = []
-    referenced = {(r.mux or {}).get("pane_id") for r in rows_with_mux}
+    referenced = {(r.mux or {}).get("pane_id") for r in rows_this_session}
     for p in panes:
         pane_id = p.get("pane_id")
         # A listing from an older daemon carries no fno_id_state; derive it

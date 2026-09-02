@@ -79,6 +79,10 @@ fn claude_and_codex_session_uuids_resolve() {
 fn session_id_shape_rejects_names_and_short_ids() {
     assert!(session_id_shaped("01a05fce-1234-5678-9abc-def012345678"));
     assert!(session_id_shaped("119E3C52-A4B3-4F7E-8A1C-2D3E4F5A6B7C"));
+    // opencode mints `ses_` + alphanumerics, a third session-id shape.
+    assert!(session_id_shaped("ses_9f2AbZ01"));
+    assert!(!session_id_shaped("ses_"));
+    assert!(!session_id_shaped("ses_needs-no-dashes"));
     assert!(!session_id_shaped("t-6021-roster-gate-gpt"));
     assert!(!session_id_shaped("119e3c52"));
     assert!(!session_id_shaped(""));
