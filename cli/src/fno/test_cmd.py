@@ -1356,6 +1356,7 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
 # build; selection has to carry it along.
 _RUST_BIN_MARKER = "target/debug/fno-agents"
 _RUST_BUILD_STEP = "Build fno-agents debug binary (for journey tests)"
+_CLAIM_DOOR_NAME = "fno-agents-claim-door"
 
 
 def _needs_rust_binary(root: Path, rel: str) -> bool:
@@ -1411,6 +1412,35 @@ def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, st
             continue  # every harness it wraps is already selected directly
         steps.append(step)
     return steps
+
+
+def _preserve_claim_door(root: Path, env: dict[str, str]) -> None:
+    """Keep the native claim reader available after the Rust-marker scrub."""
+    candidates = []
+    for value in (env.get("FNO_AGENTS_BIN"), env.get("FNO_AGENTS_FRONT")):
+        if value:
+            candidates.append(Path(value))
+    candidates.extend(
+        root / rel
+        for rel in (
+            "crates/fno-agents/target/debug/fno-agents",
+            "crates/fno-agents/target/release/fno-agents",
+        )
+    )
+    source = next(
+        (
+            candidate
+            for candidate in candidates
+            if candidate.is_file() and os.access(candidate, os.X_OK)
+        ),
+        None,
+    )
+    if source is None:
+        return
+    preserved = _sandbox() / _CLAIM_DOOR_NAME
+    shutil.copyfile(source, preserved)
+    preserved.chmod(source.stat().st_mode & 0o777)
+    env["FNO_AGENTS_BIN"] = str(preserved)
 
 
 def _write_changed_receipt(path: str, payload: dict) -> None:
@@ -1534,12 +1564,12 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
         return CHANGED_RC_PREREQ
 
     # Same faithful-ordering guard the full run applies: the pytest step must
-    # see NO fno-agents binary so the @requires_rust parity tests skip, as they
-    # do in CI. preflight deliberately preserves target/ across runs, so without
-    # this the packet runs ~15 tests the full gate skips - and a failure there
-    # aborts preflight on a discrepancy the gate would never report. Any journey
-    # harness that needs the binary is preceded by its build step (above).
+    # see NO checkout fno-agents binary so the @requires_rust parity tests skip,
+    # as they do in CI. The native claim door is copied outside target/ first:
+    # claim consumers are ordinary Python tests now, and cannot fall through to
+    # an older PATH binary after this scrub.
     if any(n.startswith("Pytest (changed subset") for n, _, _ in steps):
+        _preserve_claim_door(root, env)
         for rel in ("crates/fno-agents/target/debug/fno-agents",
                     "crates/fno-agents/target/release/fno-agents"):
             try:
@@ -1903,6 +1933,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     # keeps using whatever binary is already on disk.
     _DELETE_TRIGGERS = {"Pytest (unit + integration)", _RUST_BUILD_STEP}
     if _DELETE_TRIGGERS & {names[i] for i in selected}:
+        _preserve_claim_door(root, env)
         for rel in ("crates/fno-agents/target/debug/fno-agents",
                     "crates/fno-agents/target/release/fno-agents"):
             try:

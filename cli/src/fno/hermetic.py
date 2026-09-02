@@ -194,6 +194,7 @@ _RUNNER_PASSTHROUGH = (
     # this explicit runner channel, hermetic test children resolve an older
     # PATH binary and silently exercise the pre-port flag surface.
     "FNO_AGENTS_BIN",
+    "FNO_AGENTS_FRONT",  # .github/actions/smoke-setup/action.yml
     "FNO_REAL_CODEX_PLUGIN_TEST",  # .github/workflows/cli-ci.yml
     "FNO_RUST_FRONT",  # .github/workflows/cli-ci.yml, via $GITHUB_ENV
     # The smoke workflow sets this on the pytest step so each matrix leg keeps
