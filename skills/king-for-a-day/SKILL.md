@@ -152,6 +152,8 @@ Reach for these by need, not by reflex; most passes touch only the first group.
 `fno agents spawn --name <n> "<payload>" --model <m> --substrate pane|bg|headless` starts a worker.
 The payload decides what it does: free text is a verbatim **seed** (it opens a session, it does NOT build), a resolved node id is a **build**, a leading `/verb` is **passthrough**, and `--handoff <doc>` hands an in-flight thread to a fresh context.
 `fno backlog advance --epic <id>` is the graph-driven fan-out and needs `config.auto_continue.enabled`.
+`fno backlog join <node>` hands a held node's remaining waves to joiners in its worktree.
+It refuses with a named exit code when it cannot, and [step 4](#4-kick-off) reads those codes.
 
 **Placement is a pane-only concern, and it applies to both shapes.**
 `--workspace <name>` (short `-s`) sends a new pane into a named mux workspace, and `--split left|right|up|down` tiles it there.
@@ -337,6 +339,51 @@ Confirm with `fno config get auto_continue.enabled` and arm it if the track is m
 
 The verb is idempotent and respects `config.parallel.max_lanes` per project, but it dispatches real workers.
 Cap it when the wave is wider than you meant to fund.
+
+**Hand out a held node's remaining waves.**
+`fno backlog advance --epic <id>` fans out ready leaves across the epic.
+`fno backlog join <node>` does the other half.
+It spawns joiners into the worktree of a node a worker already holds.
+One plan's parallel waves then run as a team, not as a queue.
+
+A plan carrying `join: auto` fires this itself at `fno do target init`.
+A plan carrying `join: manual` waits for you, and `manual` is the default.
+Every plan written before the key reads as `manual`, so the wait is the normal case.
+That wait is your job, not a gap in the machinery.
+
+```bash
+fno backlog join <node>              # measure the width, then hand the remainder out
+fno backlog join <node> --workers 2  # cap the ask; the width still bounds it
+```
+
+Join measures the width itself, so a bare call is safe.
+The width counts the tasks that can run at once.
+The holder is one of them, so a width of 1 leaves nothing to hand out.
+
+To read the width before you dispatch, run the same probe init uses:
+
+```bash
+python -m fno.backlog.join_trigger width <plan-path>
+```
+
+It prints the int and exits 0.
+It exits 1 with no output when the plan does not measure.
+Run it under the interpreter that resolves `fno`, because a bare python without the fno dependencies exits 1 for the wrong reason.
+When the probe exits 1, the plan is unmeasured, not narrow.
+Never read that silence as a width of one.
+
+Join refuses by exit code, and each code is a different answer.
+
+| Exit | Meaning | What you do |
+|---|---|---|
+| 2 | no live node claim | Nobody holds the node. Dispatch a worker first, then join. |
+| 3 | width 1 | A second worker has nothing to pull. This is correct, not a failure. |
+| 4 | no usable bound plan | The node has no plan, or the plan does not parse. Fix the plan. |
+| 5 | already joined | Live `j-<node>-*` workers exist. The team is already out. |
+
+A refusal is an answer, so record it and move on.
+Do not re-run join against the same code and expect a different one.
+The joiner half of this contract is the joiner posture in [/execute waves](../execute/references/waves.md).
 
 ### 5. Exit
 
