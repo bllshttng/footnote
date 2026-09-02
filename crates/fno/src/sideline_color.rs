@@ -674,10 +674,7 @@ mod tests {
         // prime, invalidate, re-prime: the observable contract the settings
         // save path depends on (write config, reload, resolve sees it).
         let _ = palette();
-        assert!(
-            PAL.read().unwrap().is_some(),
-            "palette() primes the cache"
-        );
+        assert!(PAL.read().unwrap().is_some(), "palette() primes the cache");
         reload_palette();
         assert!(
             PAL.read().unwrap().is_none(),

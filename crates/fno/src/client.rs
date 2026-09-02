@@ -1232,6 +1232,10 @@ struct View {
     /// EMPTY buffer still sends (blank = clear back to the derived label),
     /// unlike `create`.
     rename: Option<(RenameTarget, String)>,
+    /// (x-e4f1) The lane-colors drill + text-entry state for the settings
+    /// Colors tab. Client-local ephemera like `create`/`rename`; dormant while
+    /// another tab or no popup is front, reset on tab switch away from Colors.
+    lane: LaneColorsUi,
     /// Pending escape bytes in rename-overlay mode (same split-arrow safety
     /// as [`View::create_esc`]).
     rename_esc: Vec<u8>,
@@ -2348,8 +2352,19 @@ enum AuxAction {
     /// persist via `fno config set mux.theme`. The picker lists the shipped
     /// names, so this carries one of them.
     ApplyTheme(String),
-    /// Apply a validated mux prefix now, then persist it through the CLI.
+    /// Apply a validated mux prefix change now, then persist it through the CLI.
     ApplyPrefix(String),
+    /// (x-e4f1) Open the color picker for one `[sideline.colors]` axis key
+    /// (existing or just typed). The axis names its table
+    /// (`harness` / `route` / `model` / `row`).
+    LaneColorEdit(String, String),
+    /// Open the text entry for naming a NEW key on an axis.
+    LaneColorAdd(String),
+    /// From the picker, open the free-form color entry (indexed(n) / #rrggbb).
+    LaneColorCustom(String, String),
+    /// Persist one lane color through `fno config set` block-replace, then
+    /// restart-free via `reload_palette`.
+    LaneColorSet(String, String, String),
     /// (x-1d91) Jump the sideline selector to this Backlog card and close the
     /// mini-kanban - the overlay is a scanning surface, so acting on a card
     /// hands you back to the row where its full menu lives.
@@ -2362,6 +2377,7 @@ enum SettingsTab {
     General,
     Theme,
     Keys,
+    Colors,
 }
 
 const PREFIX_PICKS: [&str; 4] = ["C-a", "C-b", "C-x", "C-t"];
@@ -2386,14 +2402,230 @@ fn build_prefix_settings_rows(live_prefix: &str) -> (Vec<PopupRow>, Vec<AuxActio
     (rows, actions)
 }
 
+/// (x-e4f1) The four `[sideline.colors]` axis tables, in display order.
+const LANE_AXES: [&str; 4] = ["harness", "route", "model", "row"];
+
+/// (x-e4f1) The named colors the picker offers: exactly `parse_color`'s
+/// accepted set (the picker-drift test asserts every entry parses, so the two
+/// lists cannot drift silently).
+const LANE_COLOR_NAMES: [&str; 16] = [
+    "black",
+    "red",
+    "green",
+    "yellow",
+    "blue",
+    "magenta",
+    "cyan",
+    "white",
+    "gray",
+    "light_red",
+    "light_green",
+    "light_yellow",
+    "light_blue",
+    "light_magenta",
+    "light_cyan",
+    "light_white",
+];
+
+/// (x-e4f1) The lane-colors drill state for the settings Colors tab: which
+/// level the operator is on (axis list -> key list -> picker) and any open
+/// text entry. Client-local ephemera, the `create`/`rename` class.
+#[derive(Debug, Default)]
+struct LaneColorsUi {
+    /// `Some(axis)` = the key list for that axis; `None` = the four-axis list.
+    axis: Option<String>,
+    /// `Some((axis, key))` = the color picker is open for that mapping.
+    pick: Option<(String, String)>,
+    /// `Some((axis, buffer))` = naming a NEW key for that axis.
+    key_entry: Option<(String, String)>,
+    /// `Some(buffer)` = free-form color entry for the key being picked
+    /// (`pick` carries the (axis, key) context).
+    custom_entry: Option<String>,
+    /// Split-arrow safety for the text entries, same as `create_esc`.
+    entry_esc: Vec<u8>,
+}
+
+impl LaneColorsUi {
+    fn is_entry(&self) -> bool {
+        self.key_entry.is_some() || self.custom_entry.is_some()
+    }
+    /// Drop text-entry buffers, keeping the drill level.
+    fn clear_entry(&mut self) {
+        self.key_entry = None;
+        self.custom_entry = None;
+        self.entry_esc.clear();
+    }
+    /// Drop the drill entirely (tab switch away from Colors).
+    fn reset(&mut self) {
+        self.axis = None;
+        self.pick = None;
+        self.clear_entry();
+    }
+}
+
+/// (x-e4f1) The palette entries for one axis name, in config order.
+fn lane_axis_entries(
+    pal: &crate::sideline_color::SidelinePalette,
+    axis: &str,
+) -> Vec<(String, String)> {
+    match axis {
+        "harness" => pal.harness.clone(),
+        "route" => pal.route.clone(),
+        "model" => pal.model.clone(),
+        _ => pal.row.clone(),
+    }
+}
+
+/// (x-e4f1) The color currently configured for one (axis, key), if any.
+fn current_lane_color(
+    pal: &crate::sideline_color::SidelinePalette,
+    axis: &str,
+    key: &str,
+) -> Option<String> {
+    lane_axis_entries(pal, axis)
+        .into_iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v)
+}
+
+/// (x-e4f1) Merge one (key, color) into an axis block and serialize the WHOLE
+/// block as a JSON object. `fno config set` refuses per-key dotted writes
+/// inside dict fields, so the picker replaces the whole block (REPLACE
+/// semantics) with the one key updated - the merge source is re-read fresh
+/// by the caller right before this runs.
+fn merged_axis_json(entries: &[(String, String)], key: &str, color: &str) -> String {
+    let mut map = serde_json::Map::new();
+    for (k, v) in entries {
+        if k != key {
+            map.insert(k.clone(), serde_json::Value::String(v.clone()));
+        }
+    }
+    map.insert(
+        key.to_string(),
+        serde_json::Value::String(color.to_string()),
+    );
+    serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_default()
+}
+
+/// (x-e4f1) Build the settings Colors tab rows for the current drill level:
+/// axis list -> key list -> picker -> (replacing the picker) the free-form
+/// color entry. The free function is the testable seam: `palette()` is a
+/// process-global cache, so tests pass a literal palette instead of seeding
+/// the cache.
+fn build_lane_color_rows(
+    pal: &crate::sideline_color::SidelinePalette,
+    ui: &LaneColorsUi,
+) -> (Vec<PopupRow>, Vec<AuxAction>) {
+    let mut rows = Vec::new();
+    let mut actions = Vec::new();
+    if let Some((axis, key)) = &ui.pick {
+        if ui.custom_entry.is_some() {
+            // Free-form entry replaces the picker view; Enter is handled by
+            // the key divert, so the rows are display-only context.
+            let buf = ui.custom_entry.as_deref().unwrap_or("");
+            rows.push(PopupRow::Header(format!("{axis}.{key}: {buf}")));
+            rows.push(PopupRow::Rule);
+            rows.push(PopupRow::Entry {
+                glyph: " ".into(),
+                label: "enter: name | indexed(n) | #rrggbb".into(),
+                hint: String::new(),
+                enabled: false,
+            });
+            return (rows, actions);
+        }
+        // Picker level: the named colors, the current value marked.
+        rows.push(PopupRow::Header(format!("{axis}.{key}")));
+        rows.push(PopupRow::Rule);
+        let current = current_lane_color(pal, axis, key);
+        for name in LANE_COLOR_NAMES {
+            let active = current.as_deref() == Some(name);
+            rows.push(PopupRow::Entry {
+                glyph: if active { "●" } else { "○" }.into(),
+                label: name.into(),
+                hint: if active { "current" } else { "" }.into(),
+                enabled: true,
+            });
+            actions.push(AuxAction::LaneColorSet(
+                axis.clone(),
+                key.clone(),
+                (*name).into(),
+            ));
+        }
+        rows.push(PopupRow::Rule);
+        rows.push(PopupRow::Entry {
+            glyph: "✎".into(),
+            label: "custom…".into(),
+            hint: "indexed(n), #rrggbb".into(),
+            enabled: true,
+        });
+        actions.push(AuxAction::LaneColorCustom(axis.clone(), key.clone()));
+        return (rows, actions);
+    }
+    if let Some((axis, buf)) = &ui.key_entry {
+        // Key-naming entry: live echo + the keys already on this axis.
+        rows.push(PopupRow::Header(format!("{axis} key: {buf}")));
+        rows.push(PopupRow::Rule);
+        for (k, v) in lane_axis_entries(pal, axis) {
+            rows.push(PopupRow::Entry {
+                glyph: "○".into(),
+                label: format!("{k} = {v}"),
+                hint: String::new(),
+                enabled: true,
+            });
+            actions.push(AuxAction::LaneColorEdit(axis.clone(), k));
+        }
+        return (rows, actions);
+    }
+    if let Some(axis) = &ui.axis {
+        // Key list: this axis's mappings + the add-key row.
+        rows.push(PopupRow::Header(axis.clone()));
+        rows.push(PopupRow::Rule);
+        for (k, v) in lane_axis_entries(pal, axis) {
+            rows.push(PopupRow::Entry {
+                glyph: "○".into(),
+                label: format!("{k} = {v}"),
+                hint: String::new(),
+                enabled: true,
+            });
+            actions.push(AuxAction::LaneColorEdit(axis.clone(), k));
+        }
+        rows.push(PopupRow::Entry {
+            glyph: "＋".into(),
+            label: "add key".into(),
+            hint: String::new(),
+            enabled: true,
+        });
+        actions.push(AuxAction::LaneColorAdd(axis.clone()));
+        return (rows, actions);
+    }
+    // Axis list: every axis's mappings grouped under its header, each group
+    // followed by its add-key row.
+    rows.push(PopupRow::Header("colors".into()));
+    rows.push(PopupRow::Rule);
+    for axis in LANE_AXES {
+        rows.push(PopupRow::Header((*axis).into()));
+        for (k, v) in lane_axis_entries(pal, axis) {
+            rows.push(PopupRow::Entry {
+                glyph: "○".into(),
+                label: format!("{k} = {v}"),
+                hint: String::new(),
+                enabled: true,
+            });
+            actions.push(AuxAction::LaneColorEdit((*axis).into(), k));
+        }
+        rows.push(PopupRow::Entry {
+            glyph: "＋".into(),
+            label: format!("add {axis} key"),
+            hint: String::new(),
+            enabled: true,
+        });
+        actions.push(AuxAction::LaneColorAdd((*axis).into()));
+    }
+    (rows, actions)
+}
+
 /// (x-1d91) Build the mini-kanban: the Backlog's lanes as collapsed columns, each
 /// a header carrying its TRUE count over the cards the feed is holding.
-///
-/// Read-mostly and renders from the same `BacklogCard` feed as the section - no
-/// second data source, so a verb's effect appears here on the same refresh tick
-/// it appears in the sideline. Lanes come from `_kanban_column` (the sole column
-/// authority), never from rank, which is why floating a card reorders WITHIN a
-/// lane and never moves it across one.
 ///
 /// It is the QUEUE's lanes, not the whole board's. The feed carries only
 /// actionable work (ready / blocked / in-flight), so done and idea nodes never
@@ -2846,6 +3078,7 @@ impl View {
             show_backlog: true,
             theme: Theme::default_theme(),
             settings_tab: SettingsTab::General,
+            lane: LaneColorsUi::default(),
             hover_pending: None,
             link_hover: LinkHoverState::default(),
             hover_row: None,
@@ -4043,6 +4276,10 @@ impl View {
             SettingsTab::Keys => {
                 (rows, actions) = build_prefix_settings_rows(&crate::keys::prefix_display());
             }
+            SettingsTab::Colors => {
+                (rows, actions) =
+                    build_lane_color_rows(crate::sideline_color::palette(), &self.lane);
+            }
         }
         let popup = Popup::new(rows, Anchor::Center)
             .title("settings")
@@ -4050,6 +4287,7 @@ impl View {
                 ("general".to_string(), tab == SettingsTab::General),
                 ("theme".to_string(), tab == SettingsTab::Theme),
                 ("keys".to_string(), tab == SettingsTab::Keys),
+                ("colors".to_string(), tab == SettingsTab::Colors),
             ])
             .footer("tab switches section · esc close");
         AuxPopup { popup, actions }
@@ -14481,6 +14719,25 @@ async fn execute_aux_action(
             view.set_notice(notice);
             view.reopen_settings_keeping_sel();
         }
+        AuxAction::LaneColorEdit(axis, key) => {
+            view.lane.axis = Some(axis.clone());
+            view.lane.pick = Some((axis, key));
+            view.reopen_settings_keeping_sel();
+        }
+        AuxAction::LaneColorAdd(axis) => {
+            view.lane.axis = Some(axis.clone());
+            view.lane.key_entry = Some((axis, String::new()));
+            view.reopen_settings_keeping_sel();
+        }
+        AuxAction::LaneColorCustom(axis, key) => {
+            view.lane.pick = Some((axis.clone(), key.clone()));
+            view.lane.custom_entry = Some(String::new());
+            view.reopen_settings_keeping_sel();
+        }
+        AuxAction::LaneColorSet(axis, key, color) => {
+            view.lane.pick = None;
+            lane_color_save(view, &axis, &key, &color).await?;
+        }
     }
     Ok(DispatchFlow::Continue)
 }
@@ -14554,6 +14811,11 @@ async fn aux_keys(
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
+    // (x-e4f1) A lane-colors text entry (naming a key / typing a free-form
+    // color) consumes the chunk, same precedence shape as create_keys.
+    if view.lane.is_entry() {
+        return lane_entry_keys(view, bytes, sock_w).await;
+    }
     let trows = view.term.0 as usize;
     let mut esc = std::mem::take(&mut view.aux_esc);
     let toks = fold_modal_keys(&mut esc, bytes);
@@ -14618,8 +14880,12 @@ async fn aux_keys(
                     view.settings_tab = match view.settings_tab {
                         SettingsTab::General => SettingsTab::Theme,
                         SettingsTab::Theme => SettingsTab::Keys,
-                        SettingsTab::Keys => SettingsTab::General,
+                        SettingsTab::Keys => SettingsTab::Colors,
+                        SettingsTab::Colors => SettingsTab::General,
                     };
+                    // (x-e4f1) A section switch drops the colors drill so a
+                    // return to Colors always opens at the top level.
+                    view.lane.reset();
                     view.reopen_settings_keeping_sel();
                 } else {
                     view.aux = None;
@@ -14630,6 +14896,111 @@ async fn aux_keys(
         }
     }
     Ok(StdinFlow::Continue)
+}
+
+/// (x-e4f1) Keys while a lane-colors text entry is open: printable/Backspace
+/// edit the buffer, Enter submits, Esc cancels back to the underlying drill
+/// level. Modeled on [`create_keys`] (`fold_search_input` + per-key re-check),
+/// with the settings modal staying open underneath. Enter on an EMPTY buffer
+/// keeps the entry open; Enter on a custom entry validates through
+/// `parse_color` and saves or refuses with a notice.
+async fn lane_entry_keys(
+    view: &mut View,
+    bytes: &[u8],
+    _sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    let mut esc = std::mem::take(&mut view.lane.entry_esc);
+    let keys = fold_search_input(&mut esc, bytes);
+    view.lane.entry_esc = esc;
+    for key in keys {
+        // Re-read the mode each key: a submit or Esc mid-chunk closes it, and
+        // the rest of the chunk must be swallowed, never forwarded.
+        if !view.lane.is_entry() {
+            break;
+        }
+        match key {
+            SearchKey::Esc => {
+                view.lane.clear_entry();
+                view.reopen_settings_keeping_sel();
+                break;
+            }
+            SearchKey::Byte(b) => match b {
+                b'\r' | b'\n' => {
+                    if let Some((axis, buf)) = view.lane.key_entry.clone() {
+                        // Naming a NEW key: an empty buffer keeps the entry
+                        // open (the create_keys shape); a typed name opens the
+                        // picker for it.
+                        let name = buf.trim().to_string();
+                        if name.is_empty() {
+                            continue;
+                        }
+                        view.lane.clear_entry();
+                        view.lane.pick = Some((axis, name));
+                        view.reopen_settings_keeping_sel();
+                    } else if let Some(buf) = view.lane.custom_entry.clone() {
+                        // Free-form color: validate, then save through the
+                        // same path the picker rows use.
+                        let text = buf.trim().to_string();
+                        if let Some((axis, key)) = view.lane.pick.clone() {
+                            view.lane.clear_entry();
+                            if crate::sideline_color::parse_color(&text).is_some() {
+                                lane_color_save(view, &axis, &key, &text).await?;
+                            } else {
+                                view.set_notice(format!(
+                                    "{axis}.{key}: invalid color (name, indexed(n), #rrggbb)"
+                                ));
+                                view.reopen_settings_keeping_sel();
+                            }
+                        }
+                    }
+                }
+                0x7f | 0x08 => {
+                    if let Some((_, buf)) = view.lane.key_entry.as_mut() {
+                        buf.pop();
+                    } else if let Some(buf) = view.lane.custom_entry.as_mut() {
+                        buf.pop();
+                    }
+                }
+                0x20..=0x7e => {
+                    if let Some((_, buf)) = view.lane.key_entry.as_mut() {
+                        buf.push(b as char);
+                    } else if let Some(buf) = view.lane.custom_entry.as_mut() {
+                        buf.push(b as char);
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// (x-e4f1) Persist one lane color through the CLI block-replace form and
+/// reload the palette so it goes live without a restart. The merge source is
+/// re-read fresh first, so a config change written by another process since
+/// the palette loaded is not clobbered by the whole-block replace.
+async fn lane_color_save(
+    view: &mut View,
+    axis: &str,
+    key: &str,
+    color: &str,
+) -> Result<(), String> {
+    crate::sideline_color::reload_palette();
+    let json = merged_axis_json(
+        &lane_axis_entries(crate::sideline_color::palette(), axis),
+        key,
+        color,
+    );
+    let notice = match spawn_config_set(&format!("sideline.colors.{axis}"), &json).await {
+        Ok(()) => {
+            crate::sideline_color::reload_palette();
+            format!("{axis}.{key}: {color}")
+        }
+        Err(_) => format!("{axis}.{key}: save failed"),
+    };
+    view.set_notice(notice);
+    view.reopen_settings_keeping_sel();
+    Ok(())
 }
 
 /// One mouse report while an aux popup is open (US4/US5): hover selects, a left
@@ -25733,7 +26104,7 @@ mod tests {
             "active theme is marked"
         );
         // The chrome carries all section tabs (positive marker it framed).
-        assert_eq!(modal.popup.chrome.tabs.len(), 3);
+        assert_eq!(modal.popup.chrome.tabs.len(), 4);
     }
 
     #[test]
@@ -25776,7 +26147,212 @@ mod tests {
         aux_keys(&mut v, b"\t", &mut buf).await.unwrap();
         assert_eq!(v.settings_tab, SettingsTab::Keys);
         aux_keys(&mut v, b"\t", &mut buf).await.unwrap();
+        assert_eq!(v.settings_tab, SettingsTab::Colors);
+        aux_keys(&mut v, b"\t", &mut buf).await.unwrap();
         assert_eq!(v.settings_tab, SettingsTab::General);
+    }
+
+    // (x-e4f1) A literal palette for the lane-colors tests; the process
+    // palette() cache cannot be seeded per-test, so every builder test passes
+    // the literal through the free-function seam.
+    fn lane_pal(route: &[(&str, &str)]) -> crate::sideline_color::SidelinePalette {
+        crate::sideline_color::SidelinePalette {
+            route: route
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lane_colors_axis_list_groups_every_axis_under_its_header() {
+        let pal = lane_pal(&[("zai", "green")]);
+        let (rows, actions) = build_lane_color_rows(&pal, &LaneColorsUi::default());
+        // One header per axis, in display order.
+        let headers: Vec<&str> = LANE_AXES.to_vec();
+        let mut seen_headers = rows.iter().filter_map(|r| match r {
+            PopupRow::Header(h) if LANE_AXES.contains(&h.as_str()) => Some(h.as_str()),
+            _ => None,
+        });
+        for h in headers {
+            assert_eq!(
+                seen_headers.next(),
+                Some(h),
+                "axis {h} header present in order"
+            );
+        }
+        // The one configured mapping renders as `key = color` and opens the picker.
+        assert!(rows
+            .iter()
+            .any(|r| matches!(r, PopupRow::Entry { label, .. } if label == "zai = green")));
+        assert!(actions.iter().any(
+            |a| matches!(a, AuxAction::LaneColorEdit(axis, key) if axis == "route" && key == "zai")
+        ));
+        // Every axis offers its add-key row (positive marker per axis).
+        for axis in LANE_AXES {
+            assert!(
+                actions
+                    .iter()
+                    .any(|a| matches!(a, AuxAction::LaneColorAdd(a_axis) if a_axis == axis)),
+                "add row present for axis {axis}"
+            );
+        }
+    }
+
+    #[test]
+    fn lane_color_picker_lists_the_parser_vocabulary_and_marks_the_current() {
+        let pal = lane_pal(&[("zai", "green")]);
+        let ui = LaneColorsUi {
+            pick: Some(("route".into(), "zai".into())),
+            ..Default::default()
+        };
+        let (rows, actions) = build_lane_color_rows(&pal, &ui);
+        // Drift guard: every picker name must satisfy parse_color, so a name
+        // added without parser support fails here instead of refusing at save.
+        let names: Vec<&str> = actions
+            .iter()
+            .filter_map(|a| match a {
+                AuxAction::LaneColorSet(_, _, color) => Some(color.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, LANE_COLOR_NAMES.to_vec());
+        for name in &names {
+            assert!(
+                crate::sideline_color::parse_color(name).is_some(),
+                "picker name {name} must parse"
+            );
+        }
+        // The current value is marked, not just listed.
+        assert!(rows.iter().any(|r| matches!(
+            r,
+            PopupRow::Entry { glyph, hint, .. } if glyph == "●" && hint == "current"
+        )));
+        // The free-form entry is offered beside the names.
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, AuxAction::LaneColorCustom(axis, key) if axis == "route" && key == "zai")));
+    }
+
+    #[test]
+    fn lane_color_custom_entry_is_display_only_with_a_live_echo() {
+        let pal = lane_pal(&[]);
+        let ui = LaneColorsUi {
+            pick: Some(("route".into(), "zai".into())),
+            custom_entry: Some("#12abF0".into()),
+            ..Default::default()
+        };
+        let (rows, actions) = build_lane_color_rows(&pal, &ui);
+        // The typed buffer echoes in the header.
+        assert!(matches!(
+            rows.first(),
+            Some(PopupRow::Header(h)) if h.contains("#12abF0")
+        ));
+        // No save action is reachable from a display-only entry; submit goes
+        // through the key divert, never a row.
+        assert!(actions.is_empty());
+        assert!(rows
+            .iter()
+            .any(|r| matches!(r, PopupRow::Entry { enabled: false, .. })));
+    }
+
+    #[test]
+    fn lane_color_key_entry_echoes_the_buffer_and_lists_existing_keys() {
+        let pal = lane_pal(&[("zai", "green"), ("openai", "blue")]);
+        let ui = LaneColorsUi {
+            key_entry: Some(("route".into(), "o".into())),
+            ..Default::default()
+        };
+        let (rows, actions) = build_lane_color_rows(&pal, &ui);
+        assert!(matches!(
+            rows.first(),
+            Some(PopupRow::Header(h)) if h == "route key: o"
+        ));
+        // Existing keys are listed so an existing mapping is pickable.
+        assert!(rows
+            .iter()
+            .any(|r| matches!(r, PopupRow::Entry { label, .. } if label == "openai = blue")));
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|a| matches!(a, AuxAction::LaneColorEdit(_, _)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn merged_axis_json_replaces_one_key_and_keeps_the_rest() {
+        let entries = vec![
+            ("zai".to_string(), "green".to_string()),
+            ("openai".to_string(), "blue".to_string()),
+        ];
+        let out = merged_axis_json(&entries, "zai", "magenta");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["zai"], "magenta", "existing key replaced");
+        assert_eq!(v["openai"], "blue", "untouched key kept");
+        let out = merged_axis_json(&entries, "openrouter", "magenta");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["openrouter"], "magenta", "new key inserted");
+        assert_eq!(v["zai"], "green", "existing key kept");
+    }
+
+    #[tokio::test]
+    async fn lane_key_entry_enter_opens_the_picker_for_the_typed_key() {
+        let mut v = two_pane_view();
+        v.settings_tab = SettingsTab::Colors;
+        v.aux = Some(v.build_settings_modal());
+        v.lane.axis = Some("route".into());
+        v.lane.key_entry = Some(("route".into(), String::new()));
+        v.reopen_settings_keeping_sel();
+        let mut buf: Vec<u8> = Vec::new();
+        aux_keys(&mut v, b"zai\r", &mut buf).await.unwrap();
+        assert!(v.lane.key_entry.is_none(), "entry closed on submit");
+        assert_eq!(
+            v.lane.pick,
+            Some(("route".into(), "zai".into())),
+            "the picker opens for the typed key"
+        );
+    }
+
+    #[tokio::test]
+    async fn lane_custom_entry_enter_refuses_an_invalid_color_without_saving() {
+        let mut v = two_pane_view();
+        v.settings_tab = SettingsTab::Colors;
+        v.aux = Some(v.build_settings_modal());
+        v.lane.pick = Some(("route".into(), "zai".into()));
+        v.lane.custom_entry = Some("#12a".into());
+        v.reopen_settings_keeping_sel();
+        let mut buf: Vec<u8> = Vec::new();
+        aux_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        // The refusal is a notice; the drill returns to the picker.
+        assert!(
+            v.notice
+                .as_ref()
+                .is_some_and(|(text, _)| text.contains("invalid color")),
+            "the refusal names the accepted shapes: {:?}",
+            v.notice
+        );
+        assert!(v.lane.custom_entry.is_none(), "entry closed");
+        assert_eq!(v.lane.pick, Some(("route".into(), "zai".into())));
+    }
+
+    #[tokio::test]
+    async fn lane_entry_esc_cancels_the_entry_and_keeps_the_drill() {
+        let mut v = two_pane_view();
+        v.settings_tab = SettingsTab::Colors;
+        v.aux = Some(v.build_settings_modal());
+        v.lane.pick = Some(("route".into(), "zai".into()));
+        v.lane.custom_entry = Some("#12".into());
+        v.reopen_settings_keeping_sel();
+        let mut buf: Vec<u8> = Vec::new();
+        // A lone ESC press is buffered by fold_search_input (split-arrow
+        // safety); a following non-'[' byte is what surfaces it, exactly as a
+        // real terminal's next chunk would.
+        aux_keys(&mut v, b"\x1bx", &mut buf).await.unwrap();
+        assert!(v.lane.custom_entry.is_none(), "entry cancelled");
+        assert_eq!(v.lane.pick, Some(("route".into(), "zai".into())));
     }
 
     #[tokio::test]
