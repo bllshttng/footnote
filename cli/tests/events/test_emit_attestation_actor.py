@@ -76,6 +76,70 @@ def test_attestation_records_session_and_harness(tmp_path: Path) -> None:
     assert ev["data"]["harness"] == "claude"
 
 
+def test_attestation_adopts_sidecar_by_harness_session_id(tmp_path: Path) -> None:
+    """The sidecar filename key is the manifest harness session id."""
+    manifest = (
+        "session_id: target-run\n"
+        "harness_session_id: harness-run\n"
+        "harness: claude\n"
+    )
+    repo = _temp_git_repo(tmp_path, manifest)
+    home = tmp_path / "home"
+    sidecar_dir = home / "review-invocations"
+    sidecar_dir.mkdir(parents=True)
+    expected = "ri-" + "a" * 32
+    (sidecar_dir / "harness-run.json").write_text(
+        json.dumps({"invocation_id": expected, "target_session_id": "harness-run"}),
+        encoding="utf-8",
+    )
+    env = {**os.environ, "FNO": "fno-py", "FNO_HOME": str(home)}
+    r = subprocess.run(
+        ["bash", str(_SCRIPT), "code-review", "pass"],
+        cwd=repo, env=env, capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    events = [
+        json.loads(line)
+        for line in (repo / ".fno" / "events.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    started = [
+        event for event in events
+        if event["type"] == "review_invocation"
+        and event["data"].get("stage") == "started"
+    ][-1]
+    assert started["data"]["invocation_id"] == expected
+    assert _last_event(repo)["data"]["invocation_id"] == expected
+
+
+def test_attestation_marks_missing_sidecar_unjoined(tmp_path: Path) -> None:
+    """A missing bridge is explicit, never a plausible local id."""
+    manifest = (
+        "session_id: target-run\n"
+        "harness_session_id: harness-run\n"
+        "harness: claude\n"
+    )
+    repo = _temp_git_repo(tmp_path, manifest)
+    env = {**os.environ, "FNO": "fno-py", "FNO_HOME": str(tmp_path / "home")}
+    r = subprocess.run(
+        ["bash", str(_SCRIPT), "code-review", "pass"],
+        cwd=repo, env=env, capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    events = [
+        json.loads(line)
+        for line in (repo / ".fno" / "events.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    started = [
+        event for event in events
+        if event["type"] == "review_invocation"
+        and event["data"].get("stage") == "started"
+    ][-1]
+    assert started["data"]["invocation_id"] == "UNJOINED"
+    assert _last_event(repo)["data"]["invocation_id"] == "UNJOINED"
+
+
 def test_attestation_records_the_routed_model(tmp_path: Path) -> None:
     """A routed session -> the attestation names the model that rendered the
     verdict. Routing stamps ANTHROPIC_MODEL for the whole worker process, so a
