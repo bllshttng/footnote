@@ -1,14 +1,14 @@
-//! Native work-claim substrate: a second implementation of the lockfile
-//! protocol owned by `cli/src/fno/claims/` (Python stays the reference
-//! implementation and the only CLI surface).
+//! Native work-claim substrate: Rust owns the lockfile decisions and the
+//! complete liveness fact set; Python remains the CLI surface and calls the
+//! native verdict door for reads.
 //!
-//! Scope is consumer-driven: `acquire` / `release` / `status` plus the
-//! liveness classifier — exactly what the daemon/adopt/drive/stream-worker
-//! call sites need. Everything else (`list`, `refresh`, `force-release`,
-//! lane slots) remains Python-only.
+//! The claim decision is native and batch-shaped: `list`, `sweep`, `status`,
+//! and liveness classification share one fact set so a Python caller does not
+//! shell once per claim. Mutation verbs and lane-specific policy remain on the
+//! Python CLI surface.
 //!
 //! Protocol parity is the contract, not just passing tests. Source of truth:
-//! `cli/src/fno/claims/{types,io,core,staleness}.py` and
+//! `cli/src/fno/claims/{types,io,core,verdict}.py` and
 //! `docs/architecture/coordination.md`. Load-bearing wire details a second
 //! implementation must reproduce exactly:
 //!
