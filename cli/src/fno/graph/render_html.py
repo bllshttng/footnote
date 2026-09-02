@@ -489,7 +489,7 @@ select { background:var(--surface-2); color:var(--ink); border:1px solid var(--l
 .rmain:hover { background:var(--surface-2) }
 body[data-local="true"] .rid { cursor:copy; border-radius:4px }
 body[data-local="true"] .rid:hover { background:var(--accent-soft); color:var(--accent) }
-.rid.ok, .pbtn.ok { background:var(--done-bg); color:var(--done); border-color:var(--done) }
+.rid.ok, .ridtxt.ok, .pbtn.ok { background:var(--done-bg); color:var(--done); border-color:var(--done) }
 /* A public board emits an empty .rid, so the fixed id column would be a
    permanent empty gutter on every row. Remove the TRACK, not just its width:
    a zero-width column still takes the 11px grid gap, leaving a smaller gutter
@@ -533,6 +533,9 @@ body[data-local="false"] .detail { padding-left:15px }
 .votes.z { color:var(--muted) }
 .votes.z:hover { background:var(--line) }
 .votes:hover { background:var(--accent-soft) }
+/* The pill moved into the id gutter under the node id, so it inherits .rid's
+   12.5px; the .dot cluster it left was 11px. */
+.rid .votes { font-size:11px }
 .haspl { color:var(--accent) }
 .haspr { color:var(--done) }
 .kids { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; color:var(--muted);
@@ -604,7 +607,6 @@ _DASHBOARD_JS = """\
   var label = function (s) { return String(s).replace(/_/g, ' ').replace(/\\b\\w/g, function (c) { return c.toUpperCase(); }); };
   var counts = function (nodes) { var result = {}; ORDER.forEach(function (s) { result[s] = 0; });
     nodes.forEach(function (n) { result[n.s] = (result[n.s] || 0) + 1; }); return result; };
-  var ALL = counts(NODES);
   var state = { q:'', status:new Set(), projects:new Set(), projectFilterActive:false, group:'', prio:'', size:'', from:'', ty:'', planOnly:false, prOnly:false, demand:false };
   var PROJECT_KEY = 'fno-kanban-project-state';
   function loadProjects() {
@@ -620,18 +622,26 @@ _DASHBOARD_JS = """\
   }
   function saveProjects() { try { localStorage.setItem(PROJECT_KEY, JSON.stringify({selected:Array.from(state.projects), active:state.projectFilterActive})); } catch (e) {} }
   var statsEl = document.getElementById('stats');
-  var statRows = [['Total', NODES.length, ''], ['In progress', ALL.in_progress || 0, 'is-prog'],
-    ['In review', ALL.in_review || 0, ''], ['Ready', ALL.ready || 0, 'is-ready'], ['Blocked', ALL.blocked || 0, 'is-blocked'],
-    ['Design', ALL.design || 0, ''], ['Idea', ALL.idea || 0, ''], ['Deferred', ALL.deferred || 0, ''],
-    ['Done', ALL.done || 0, 'is-done'], ['Shipped', NODES.length ? Math.round(100 * (ALL.done || 0) / NODES.length) + '%' : '0%', 'is-done']];
+  // Each row carries a QUANTITY KEY, not a number: the values are filled by
+  // refreshCounts() on the first render. Setup wrote these tiles once from
+  // NODES/ALL, so selecting a project moved the rows while every number above
+  // them kept reporting the whole graph.
+  var statRows = [['Total', 'total', ''], ['In progress', 'in_progress', 'is-prog'],
+    ['In review', 'in_review', ''], ['Ready', 'ready', 'is-ready'], ['Blocked', 'blocked', 'is-blocked'],
+    ['Design', 'design', ''], ['Idea', 'idea', ''], ['Deferred', 'deferred', ''],
+    ['Done', 'done', 'is-done'], ['Shipped', 'shipped', 'is-done']];
+  var statNums = [];
   statRows.forEach(function (s) { var d = document.createElement('div'); d.className = 'stat' + (s[2] ? ' ' + s[2] : '');
-    d.innerHTML = '<div class=\"n\">' + s[1] + '</div><div class=\"k\">' + s[0] + '</div>'; statsEl.appendChild(d); });
-  document.getElementById('totalCount').textContent = NODES.length;
-  document.getElementById('planCount').textContent = NODES.filter(function (n) { return n.pl && n.s !== 'done' && n.s !== 'superseded'; }).length;
-  document.getElementById('prCount').textContent = NODES.filter(function (n) { return n.pr; }).length;
+    d.innerHTML = '<div class=\"n\"></div><div class=\"k\">' + s[0] + '</div>'; statsEl.appendChild(d); statNums.push(d.querySelector('.n')); });
+  var totalCount = document.getElementById('totalCount');
+  var planCount = document.getElementById('planCount');
+  var prCount = document.getElementById('prCount');
   var statusChips = document.getElementById('statusChips');
+  // Null-prototype: keyed on GRAPH status values, same reason TYPE_CLASSES is.
+  var statusBadges = Object.create(null);
   ORDER.forEach(function (s) { var b = document.createElement('button'); b.className = 'chip'; b.type = 'button';
-    b.dataset.s = s; b.setAttribute('aria-pressed', 'false'); b.innerHTML = esc(label(s)) + ' <span class=\"c\">' + (ALL[s] || 0) + '</span>';
+    b.dataset.s = s; b.setAttribute('aria-pressed', 'false'); b.innerHTML = esc(label(s)) + ' <span class=\"c\">0</span>';
+    statusBadges[s] = b.querySelector('.c');
     b.addEventListener('click', function () { if (state.status.has(s)) state.status.delete(s); else state.status.add(s);
       b.setAttribute('aria-pressed', state.status.has(s) ? 'true' : 'false'); render(); }); statusChips.appendChild(b); });
   var projectNames = []; NODES.forEach(function (n) { if (projectNames.indexOf(n.project) < 0) projectNames.push(n.project); });
@@ -699,16 +709,51 @@ _DASHBOARD_JS = """\
     if (state.q && (String(n.id || '') + ' ' + n.t + ' ' + String(n.d || '') + ' ' + String(n.pl || '')).toLowerCase().indexOf(state.q) < 0) return false;
     return true;
   }
+  // Every number ABOVE the row list describes the CURRENT board, not the
+  // document: the tiles, totalCount, planCount, prCount and the chip badges.
+  // They were written once at setup, so a project selection moved the rows
+  // while the headline numbers kept reporting the whole graph. Recomputed here
+  // from the SAME predicate the rows obey, so a tile cannot disagree with what
+  // is visible and Total always equals the shown count.
+  function refreshCounts() {
+    var visNodes = [];
+    NODES.forEach(function (n) { if (matches(n) || n.id === revealed) visNodes.push(n); });
+    var c = counts(visNodes);
+    statRows.forEach(function (s, i) {
+      var v;
+      if (s[1] === 'total') v = visNodes.length;
+      else if (s[1] === 'shipped') v = visNodes.length ? Math.round(100 * (c.done || 0) / visNodes.length) + '%' : '0%';
+      else v = c[s[1]] || 0;
+      statNums[i].textContent = v;
+    });
+    totalCount.textContent = visNodes.length;
+    planCount.textContent = visNodes.filter(function (n) { return n.pl && n.s !== 'done' && n.s !== 'superseded'; }).length;
+    prCount.textContent = visNodes.filter(function (n) { return n.pr; }).length;
+    // Faceted: a chip's badge counts against every OTHER active filter but not
+    // its own. Counting a chip against itself drove it to zero the moment it
+    // was deselected, and the reader could never select it back. The swap is
+    // the reuse of matches() itself - a second counting predicate beside it
+    // would drift silently under some filter combinations.
+    var saved = state.status; state.status = new Set();
+    var facet = counts(NODES.filter(function (n) { return matches(n); }));
+    state.status = saved;
+    ORDER.forEach(function (s) { var el = statusBadges[s]; if (el) el.textContent = facet[s] || 0; });
+  }
   // Copy, with the execCommand fallback the canonical template carried. This
   // board is opened from disk as often as over http, and file:// is not a
   // secure context, so navigator.clipboard is frequently absent exactly where
   // the operator uses it most. Dropping the fallback would make the buttons
   // dead on the surface they matter on.
   function flash(btn, msg) {
-    var prev = btn.dataset.label || btn.textContent;
+    // innerHTML, not textContent: the .rid gutter now carries children (the
+    // line break and the vote pill under it), and a text write would destroy
+    // them, so one id-copy click would flatten the pill into plain text.
+    // Both strings are trusted: msg is a constant, prev is the element's own
+    // esc()'d markup.
+    var prev = btn.dataset.label || btn.innerHTML;
     btn.dataset.label = prev;
-    btn.textContent = msg; btn.classList.add('ok');
-    setTimeout(function () { btn.textContent = prev; btn.classList.remove('ok'); }, 1200);
+    btn.innerHTML = msg; btn.classList.add('ok');
+    setTimeout(function () { btn.innerHTML = prev; btn.classList.remove('ok'); }, 1200);
   }
   function legacyCopy(text) {
     try {
@@ -815,7 +860,14 @@ _DASHBOARD_JS = """\
         if (n.ty) row.dataset.type = n.ty;
         var main = document.createElement('button'); main.className = 'rmain'; main.type = 'button';
         var votePill = LOCAL ? '<span class=\"votes' + (n.en ? '' : ' z') + '\" title=\"' + (n.en - n.eo) + ' agent, ' + n.eo + ' operator\">▲ ' + n.en + '</span>' : '';
-        main.innerHTML = (LOCAL ? '<span class=\"rid\">' + esc(n.id) + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\">' + typeBadge(n.ty) + '<span class=\"pill s-' + esc(n.s) + '\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill' + (n.p === 'p0' || n.p === 'p1' ? ' pr-p1' : '') + '\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + '</span><span class=\"dot\">' + kidBar(n) + votePill + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
+        // The pill lives in the id gutter UNDER the id, not in the .dot cluster
+        // on the right. The operator reviewed three placements and picked the
+        // gutter because it already has vertical room (a long id wraps to two
+        // lines there), so a second line never squeezes the title column.
+        // Click order matters: the pill's handler stops propagation, which also
+        // keeps the .rid copy-id handler beneath it from firing, so one click
+        // copies the command and nothing else.
+        main.innerHTML = (LOCAL ? '<span class=\"rid\"><span class=\"ridtxt\">' + esc(n.id) + '</span><br>' + votePill + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\">' + typeBadge(n.ty) + '<span class=\"pill s-' + esc(n.s) + '\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill' + (n.p === 'p0' || n.p === 'p1' ? ' pr-p1' : '') + '\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + '</span><span class=\"dot\">' + kidBar(n) + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
         main.setAttribute('aria-expanded', 'false');
         // The id is the thing most often copied out of this board, so it is
         // one click ON the id rather than a trip through the detail. A span,
@@ -825,7 +877,11 @@ _DASHBOARD_JS = """\
         // Copy button instead; this is the pointer shortcut to it.
         if (LOCAL && n.id) { var rid = main.querySelector('.rid');
           if (rid) { rid.title = 'Copy node id';
-            rid.addEventListener('click', function (ev) { ev.stopPropagation(); copyText(n.id, rid); }); } }
+            // The flash target is the id's own leaf span, never .rid itself:
+            // an innerHTML write on .rid would re-parse the vote pill beneath
+            // the id and the replacement node would carry no click listener,
+            // so one id copy would leave the pill permanently dead.
+            rid.addEventListener('click', function (ev) { ev.stopPropagation(); copyText(n.id, rid.querySelector('.ridtxt') || rid); }); } }
         if (LOCAL) { var votes = main.querySelector('.votes');
           if (votes) votes.addEventListener('click', function (ev) { ev.stopPropagation(); copyText(voteCommand(n), votes); }); }
         main.addEventListener('click', function () { var old = row.querySelector('.detail');
@@ -884,6 +940,7 @@ _DASHBOARD_JS = """\
       sec.el.className = 'group' + (vis.length ? '' : ' is-hidden');
     });
     wasSorted = sorted;
+    refreshCounts();
     document.getElementById('shown').textContent = shown + ' of ' + NODES.length + ' nodes shown';
   }
   // A child link can name a row the active filter hides, and an anchor to a

@@ -1054,3 +1054,92 @@ def test_zero_encounter_row_still_renders_a_clickable_vote_pill(tmp_path: Path):
     demand = re.search(r"if \((state\.demand [^)]*?)\) return false;", local)
     assert demand, "demand predicate not found, so nothing was checked"
     assert demand.group(1) == "state.demand && !n.en"
+
+
+def test_the_vote_pill_sits_in_the_id_gutter_not_the_right_cluster(tmp_path: Path):
+    """The gutter is where the operator put the pill, after reviewing three
+    placements: the id column already has vertical room (a long id wraps there),
+    so a second line never squeezes the title. The pill was built in the .dot
+    span, the far-right cluster that already holds the kid bar, the plan and PR
+    markers and the date, which is why it read as squished.
+
+    The row builder is one concatenated string, so both halves are pinned by
+    equality on their extracted segments rather than by a word search that any
+    respelling would slip past.
+    """
+    entry = _entry("ab-gutter01", project="alpha", title="Gutter placement")
+    render_graph_html([entry], tmp_path / "local.html")
+    local = (tmp_path / "local.html").read_text()
+
+    # The pill hangs INSIDE the rid span, under the id, on its own line. The
+    # id itself sits in a leaf span so the copy flash can be scoped to it.
+    builder = re.search(r"main\.innerHTML = (.*?);$", local, re.MULTILINE)
+    assert builder, "row builder not found, so nothing was checked"
+    assert "esc(n.id) + '</span><br>' + votePill" in builder.group(1), (
+        "the pill is not concatenated under the id inside the rid segment"
+    )
+    # The flash target is the id's leaf span, never .rid: an innerHTML write
+    # on .rid re-parses the pill and the replacement node carries no click
+    # listener, so one id copy would leave the vote pill permanently dead.
+    assert "copyText(n.id, rid.querySelector('.ridtxt') || rid)" in local
+
+    # And the .dot cluster no longer carries it: the segment between the dot
+    # span and its closing quote must not mention votePill at all. The dot
+    # span opens inside a combined literal ('</span><span class="dot">'), so
+    # the anchor is the tag, not a string-leading quote.
+    dot_segment = re.search(
+        r"<span class=\"dot\">' \+ (.*?) \+ '</span>'", builder.group(1)
+    )
+    assert dot_segment, "dot segment not found, so the absence was not checked"
+    assert "votePill" not in dot_segment.group(1)
+    # Positive control on the same segment: the kid bar's neighbor is now the
+    # plan marker, proving the segment was read and not merely failed to match.
+    assert dot_segment.group(1).startswith("kidBar(n) + (n.pl ?")
+
+    # The copy flash must round-trip innerHTML, not text: the rid span now
+    # carries children (the line break and this pill), and a text write would
+    # destroy them, so one id-copy click would flatten the pill into plain
+    # text forever.
+    flash_body = re.search(r"function flash\(btn, msg\) \{(.*?)\n  \}", local, re.DOTALL)
+    assert flash_body, "flash() not found, so nothing was checked"
+    assert "btn.dataset.label || btn.innerHTML" in flash_body.group(1)
+    assert "btn.innerHTML = msg;" in flash_body.group(1)
+    assert "btn.innerHTML = prev;" in flash_body.group(1)
+
+
+def test_the_board_counts_recompute_from_the_filtered_set(tmp_path: Path):
+    """Every number above the filters describes the CURRENT board.
+
+    The tiles, totalCount, planCount, prCount and the chip badges were written
+    once at setup from NODES/ALL, so selecting a project moved the rows while
+    the headline numbers kept reporting the whole graph. render() must drive
+    the recompute, from the same predicate the rows obey.
+    """
+    entry = _entry("ab-counts01", project="alpha", title="Live counts")
+    render_graph_html([entry], tmp_path / "local.html")
+    local = (tmp_path / "local.html").read_text()
+
+    # render() drives it: the tiles move on every filter change, not only on
+    # the first paint.
+    render_body = re.search(r"function render\(keepReveal\) \{(.*?)\n  \}", local, re.DOTALL)
+    assert render_body, "render() not found, so nothing was checked"
+    assert "refreshCounts();" in render_body.group(1)
+
+    # The tiles are written from the filtered set, and Shipped % from the
+    # filtered numerator AND denominator (both were global before).
+    assert "totalCount.textContent = visNodes.length;" in local
+    assert "(c.done || 0) / visNodes.length" in local
+    assert "statNums[i].textContent = v;" in local
+
+    # Chip badges are FACETED: the badge ignores its own status filter, so
+    # deselecting a chip moves its badge to the count selecting it restores.
+    # The facet reuses matches() itself - the swap below IS the reuse; a second
+    # counting predicate beside matches() would drift under some combinations.
+    assert "var saved = state.status; state.status = new Set();" in local
+    assert "state.status = saved;" in local
+    assert "NODES.filter(function (n) { return matches(n); })" in local
+    assert "el.textContent = facet[s] || 0;" in local
+
+    # The frozen shape is gone for positive reasons above; this names it: the
+    # setup-time snapshot of the whole graph no longer exists to go stale.
+    assert "var ALL = counts(NODES);" not in local

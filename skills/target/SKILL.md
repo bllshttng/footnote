@@ -85,6 +85,10 @@ Environment-specific traps that defy reasonable assumptions. Read these before y
 - **The manifest is write-once.** After `fno do target init`, the only legal write is first-filling an empty `plan_path` via `fno do state set`. There are no gate booleans or status fields to set; any other field write exits 5.
 - **A `bg` worker is unsupervised, NOT headless.** `/target bg` dispatches and continues without blocking, but the worker is not invisible: it registers an agent-view row and keeps an attachable pane, so it stays observable and drivable after launch (`fno agents logs <name>`, or attach). "Fire-and-forget" describes only the dispatching session's non-blocking stance, never the worker's nature.
 
+## When another node costs you time
+
+A target run that loses time to a node it does not own is exactly what the demand signal records. `fno backlog encounter <node-id> --evidence "what it cost you"` votes that node up the demand read; evidence is required, and the cap is one vote per node per session (a session may vote on many nodes). Vote when it happens, from the session that paid the cost - a retold vote is someone else's transcript.
+
 ## Optional: external loop wrapper
 
 For walk-away / overnight execution, drive this skill from a terminal via the external loop wrapper:

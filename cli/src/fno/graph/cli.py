@@ -1097,6 +1097,36 @@ def _prompt_difficulty_value(value: str) -> str:
         raise click.UsageError(f"{exc}. {DIFFICULTY_HELP}") from exc
 
 
+def _encounter_provenance(harness: str | None) -> dict[str, str]:
+    """Model/effort provenance for an encounter record, or nothing.
+
+    Read from the harness's own env, and only for the harness that owns those
+    names. The variables survive a fork, so a codex session launched from a
+    claude shell inherits them; writing them onto a codex vote would attribute
+    it to a model that did not cast it, which reads as measured. A harness with
+    nothing to report omits the keys rather than writing a plausible default.
+
+    The two names are not equally first-party. CLAUDE_EFFORT lives in the
+    claude binary's own namespace, so its presence is claude's doing.
+    ANTHROPIC_MODEL is a provider SDK name a shell can export for unrelated
+    tooling, so it counts only when ANTHROPIC_BASE_URL is exported beside it:
+    the launcher that owns the model string owns the endpoint and sets the
+    pair, and a lone model string says nothing about the route this session
+    actually ran on.
+    """
+    provenance: dict[str, str] = {}
+    if harness != "claude":
+        return provenance
+    effort = (os.environ.get("CLAUDE_EFFORT") or "").strip()
+    if effort:
+        provenance["effort"] = effort
+    if (os.environ.get("ANTHROPIC_BASE_URL") or "").strip():
+        model = (os.environ.get("ANTHROPIC_MODEL") or "").strip()
+        if model:
+            provenance["model"] = model
+    return provenance
+
+
 def _append_creation_encounter(path: Path, node_id: str, evidence: str) -> None:
     """Best-effort creator encounter after a node is safely minted."""
     try:
@@ -1143,6 +1173,7 @@ def _append_creation_encounter(path: Path, node_id: str, evidence: str) -> None:
             "fno_id": canonical_handle(session_id),
             "evidence": evidence,
         }
+        record.update(_encounter_provenance(harness))
         appended, error, _reason = append_encounter(path, node_id, record)
         if not appended:
             raise ValueError(error or "append refused")
@@ -3451,6 +3482,7 @@ def cmd_encounter(
             record["fno_id"] = canonical_handle(session_id)
         if harness:
             record["harness"] = harness
+        record.update(_encounter_provenance(harness))
     else:
         assert session_id is not None and harness is not None
         record.update(
@@ -3462,6 +3494,7 @@ def cmd_encounter(
                 "fno_id": canonical_handle(session_id),
             }
         )
+        record.update(_encounter_provenance(harness))
     appended, error, reason = append_encounter(_graph_path(), task_id, record)
     if not appended:
         typer.echo(f"Error: {error}", err=True)

@@ -96,6 +96,11 @@ def probe(tmp_path: Path):
         env["PROBE_SESSION_ID"] = session_id
         env["PROBE_HARNESS"] = harness
         env.pop("FNO_STYLE_ENFORCE", None)
+        # The provenance env is scrubbed so a developer's own session cannot
+        # leak a model onto a test record; tests that want it set it via
+        # extra_env, which runs after these pops.
+        env.pop("ANTHROPIC_MODEL", None)
+        env.pop("CLAUDE_EFFORT", None)
         env.update(extra_env or {})
         return subprocess.run(
             [sys.executable, "-c", _PROBE, *args],
@@ -454,6 +459,129 @@ def test_a_graph_with_no_encounters_serializes_byte_identical(probe):
 
     assert probe("backlog", "note", "zz-0002", "another note.").returncode == 0
     assert b"encounters" not in probe.graph.read_bytes()
+
+
+# --- provenance: model and effort --------------------------------------------
+
+
+def test_a_vote_carries_its_model_and_effort(probe):
+    """An encounter names WHO cast it; model and effort say ON WHAT.
+
+    Read from the harness's own env, so a vote and its provenance cannot
+    disagree about who cast it. The model counts only beside the launcher's
+    base URL, the pair that names the route this session ran on.
+    """
+    _seed(probe, _node())
+    result = probe(
+        "backlog",
+        "encounter",
+        "zz-0001",
+        "--evidence",
+        "cost a CI cycle.",
+        extra_env={
+            "ANTHROPIC_MODEL": "glm-5.3-flash[1m]",
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+            "CLAUDE_EFFORT": "xhigh",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    record = _encounters(probe)[0]
+    assert record["model"] == "glm-5.3-flash[1m]"
+    assert record["effort"] == "xhigh"
+
+
+def test_a_lone_anthropic_model_is_not_provenance(probe):
+    """ANTHROPIC_MODEL is a provider SDK name shells export for other tooling.
+
+    With no ANTHROPIC_BASE_URL beside it, the string names nothing about the
+    route this claude session ran on, so recording it would read as measured.
+    CLAUDE_EFFORT stays: it lives in the claude binary's own namespace.
+    """
+    _seed(probe, _node())
+    result = probe(
+        "backlog",
+        "encounter",
+        "zz-0001",
+        "--evidence",
+        "cost a CI cycle.",
+        extra_env={"ANTHROPIC_MODEL": "glm-5.3-flash[1m]", "CLAUDE_EFFORT": "xhigh"},
+    )
+    assert result.returncode == 0, result.stderr
+    record = _encounters(probe)[0]
+    assert "model" not in record
+    assert record["effort"] == "xhigh"
+
+
+def test_an_unreportable_effort_is_omitted_not_guessed(probe):
+    """A provenance record with a plausible default reads as measured.
+
+    A missing key says the harness could not report it; a filled one claims it
+    did. The vote is still accepted.
+    """
+    _seed(probe, _node())
+    result = probe(
+        "backlog",
+        "encounter",
+        "zz-0001",
+        "--evidence",
+        "cost a CI cycle.",
+        extra_env={
+            "ANTHROPIC_MODEL": "glm-5.3-flash[1m]",
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    record = _encounters(probe)[0]
+    assert record["model"] == "glm-5.3-flash[1m]"
+    assert "effort" not in record
+
+
+def test_a_non_claude_harness_does_not_inherit_the_claude_model_env(probe):
+    """The env survives a fork: a codex session launched from a claude shell
+    carries ANTHROPIC_MODEL, and writing it onto a codex vote would attribute
+    the vote to a model that did not cast it. Omission is the honest answer."""
+
+    _seed(probe, _node())
+    result = probe(
+        "backlog",
+        "encounter",
+        "zz-0001",
+        "--evidence",
+        "cost a rebase.",
+        harness="codex",
+        extra_env={"ANTHROPIC_MODEL": "glm-5.3-flash[1m]", "CLAUDE_EFFORT": "xhigh"},
+    )
+    assert result.returncode == 0, result.stderr
+    record = _encounters(probe)[0]
+    assert record["harness"] == "codex"
+    assert "model" not in record
+    assert "effort" not in record
+
+
+def test_encounters_live_only_on_the_node_in_graph_json(probe):
+    """The single-store rule.
+
+    A sidecar index or a denormalized count cached elsewhere is a second store
+    to keep true, and two stores drift. After a vote, the evidence string may
+    exist in exactly one file in the state dir: the graph itself. This walks
+    every byte the verb's render fanout wrote and fails the moment a parallel
+    vote store appears.
+    """
+    _seed(probe, _node())
+    evidence = "cost one full rebase and a wrong diagnosis."
+    assert probe("backlog", "encounter", "zz-0001", "--evidence", evidence).returncode == 0
+
+    stored = _encounters(probe)
+    assert len(stored) == 1
+    assert stored[0]["evidence"] == evidence
+
+    carriers = [
+        str(path.relative_to(probe.state))
+        for path in probe.state.rglob("*")
+        if path.is_file() and evidence.encode() in path.read_bytes()
+    ]
+    assert carriers == ["graph.json"]
+
 
 
 # --- the note advisory (progress_notes stays uncapped) -----------------------
