@@ -23,6 +23,17 @@ from fno.agents.harness_map import (
 _NO_CFG: dict = {}
 
 
+@pytest.fixture(autouse=True)
+def _installed_loop_extensions(monkeypatch):
+    """These tests exercise resolution and normalization, not the loop gate's
+    install state, which is machine environment: whether fno's installer has
+    placed the extension at the harness's load surface is asserted in
+    tests/agents/test_harness_loop_participation.py."""
+    import fno.agents.harness_map as _harness_map
+
+    monkeypatch.setattr(_harness_map, "_loop_extension_installed", lambda h: True)
+
+
 _REQUIRED_INTERACTIVE_FIELDS = {
     "permission_response", "resume_strategy", "model_switch_strategy", "ready_marker",
     "send_keys_enter_delay_ms", "submit_keys", "stop_strategy", "remove_strategy",
