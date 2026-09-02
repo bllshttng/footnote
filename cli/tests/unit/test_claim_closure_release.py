@@ -8,6 +8,7 @@ closure-release hook (every closure path funnels through it) and the
 settlement reading in the single reap decision, plus the board queue and the
 graph lock mirror that made the leak read as a stall.
 """
+
 from __future__ import annotations
 
 import json
@@ -95,9 +96,7 @@ class TestClosureReleaseHook:
         """A non-configured graph (tests, capture flows) owns no global claim:
         its closure clears only its own mirror."""
         graph, global_root = self._graph_with_claimed_node(tmp_path, monkeypatch)
-        monkeypatch.setattr(
-            "fno.paths.graph_json", lambda: tmp_path / "the-configured-one.json"
-        )
+        monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "the-configured-one.json")
 
         def _close(entries):
             for e in entries:
@@ -216,11 +215,7 @@ def test_release_at_closure_is_a_noop_without_a_claim_file(tmp_path, monkeypatch
 
 
 def _reading(workers_by_node: dict, *, consulted: bool = True) -> RosterReading:
-    rows_by_session = {
-        row["row_id"]: row
-        for rows in workers_by_node.values()
-        for row in rows
-    }
+    rows_by_session = {row["row_id"]: row for rows in workers_by_node.values() for row in rows}
     return RosterReading(
         consulted=consulted,
         rows_scanned=sum(len(v) for v in workers_by_node.values()) or 1,
@@ -245,14 +240,28 @@ def _expired_live_claim(key: str = "node:x-gone") -> Claim:
     )
 
 
+def _native_verdict(claim: Claim) -> dict:
+    expired = claim.expires_at is not None and now_ms() >= claim.expires_at
+    return {
+        "key": claim.key,
+        "expired": expired,
+        "provably_dead": False,
+        "bucket": "suspect" if expired else "live",
+    }
+
+
 class TestNodeSettlement:
     def test_terminal_node_settles_a_live_expired_claim(self, tmp_path, monkeypatch):
         """The healing read: a node the graph closed has no legitimate holder,
         whatever the pid table says."""
-        graph = _make_graph(tmp_path, [{"id": "x-gone", "status": "done", "completed_at": "2026-08-21T03:16:00Z"}])
+        graph = _make_graph(
+            tmp_path, [{"id": "x-gone", "status": "done", "completed_at": "2026-08-21T03:16:00Z"}]
+        )
         monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
         verdict, bucket = sweep_verdict(
-            _expired_live_claim(), node_settlement=_node_settlement(_reading({}))
+            _expired_live_claim(),
+            node_settlement=_node_settlement(_reading({})),
+            native_verdict=_native_verdict(_expired_live_claim()),
         )
         assert verdict is True and bucket == ""
 
@@ -276,20 +285,23 @@ class TestNodeSettlement:
             pid=os.getpid(),
             host=socket.gethostname(),
         )
-        assert settlement(claim, now=now_ms()) is None
+        assert settlement(claim, now=now_ms(), native_verdict=_native_verdict(claim)) is None
 
     def test_holder_on_a_different_node_settles_an_expired_lease(self):
         settlement = _node_settlement(_reading({"x-other": [_row()]}))
-        assert settlement(_expired_live_claim(), now=now_ms()) is True
+        claim = _expired_live_claim()
+        assert settlement(claim, now=now_ms(), native_verdict=_native_verdict(claim)) is True
 
     def test_holder_on_this_node_is_not_settled(self):
         settlement = _node_settlement(_reading({"x-gone": [_row()]}))
-        assert settlement(_expired_live_claim(), now=now_ms()) is None
+        claim = _expired_live_claim()
+        assert settlement(claim, now=now_ms(), native_verdict=_native_verdict(claim)) is None
 
     def test_row_absent_is_not_settled(self):
         """Not-found is not gone (the doctrine the probe lives by)."""
         settlement = _node_settlement(_reading({"x-other": [_row("someone-else")]}))
-        assert settlement(_expired_live_claim(), now=now_ms()) is None
+        claim = _expired_live_claim()
+        assert settlement(claim, now=now_ms(), native_verdict=_native_verdict(claim)) is None
 
     def test_unexpired_lease_is_never_settled(self):
         settlement = _node_settlement(_reading({"x-other": [_row()]}))
@@ -301,24 +313,24 @@ class TestNodeSettlement:
             pid=os.getpid(),
             host=socket.gethostname(),
         )
-        assert settlement(claim, now=now_ms()) is None
+        assert settlement(claim, now=now_ms(), native_verdict=_native_verdict(claim)) is None
 
     def test_roster_not_consulted_is_not_settled(self):
         settlement = _node_settlement(_reading({}, consulted=False))
-        assert settlement(_expired_live_claim(), now=now_ms()) is None
+        claim = _expired_live_claim()
+        assert settlement(claim, now=now_ms(), native_verdict=_native_verdict(claim)) is None
 
     def test_unreadable_graph_is_not_settled(self, tmp_path, monkeypatch):
         monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "nope.json")
         settlement = _node_settlement(_reading({"x-other": [_row()]}))
         # Graph unreadable -> None; the different-node arm still answers.
-        assert settlement(_expired_live_claim(), now=now_ms()) is True
+        claim = _expired_live_claim()
+        assert settlement(claim, now=now_ms(), native_verdict=_native_verdict(claim)) is True
 
     def test_settlement_true_reaps_through_the_sweep(self, tmp_path, monkeypatch):
         """The settlement reaches reap_dead_claims, not just the predicate."""
         # Pin the settlement's graph read away from the operator's real graph.
-        monkeypatch.setattr(
-            "fno.paths.graph_json", lambda: tmp_path / "not-a-graph.json"
-        )
+        monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "not-a-graph.json")
         _write_claim(
             "node:x-gone",
             holder=HOLDER,
@@ -357,6 +369,16 @@ class TestNodeSettlement:
                 host=socket.gethostname(),
             ),
             node_settlement=_boom,
+            native_verdict=_native_verdict(
+                Claim(
+                    key="node:x-gone",
+                    holder=HOLDER,
+                    acquired_at=now_ms(),
+                    expires_at=now_ms() + 3_600_000,
+                    pid=_dead_pid(),
+                    host=socket.gethostname(),
+                )
+            ),
         )
         assert verdict is False
 

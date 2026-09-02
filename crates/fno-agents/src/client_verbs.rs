@@ -5059,10 +5059,11 @@ fn claim_sweep_payload_from_records(
         let (provably_dead, bucket) =
             crate::claims::classify_for_sweep(rec, Some(now), probe, pid_exclusive);
         let expired = rec.expires_at.is_some_and(|expires_at| now >= expires_at);
-        claims.push(serde_json::json!({
+        let mut row = serde_json::json!({
             "key": rec.key,
             "state": state.as_str(),
             "holder": rec.holder,
+            "schema_version": rec.schema_version,
             "host": rec.host,
             "pid": rec.pid,
             "basis": basis,
@@ -5074,7 +5075,19 @@ fn claim_sweep_payload_from_records(
             "pid_provenance": rec.pid_provenance,
             "acquired_at": rec.acquired_at,
             "expires_at": rec.expires_at,
-        }));
+        });
+        if let Value::Object(fields) = &mut row {
+            if let Some(reason) = &rec.reason {
+                fields.insert("reason".into(), Value::String(reason.clone()));
+            }
+            if let Some(harness) = &rec.harness {
+                fields.insert("harness".into(), Value::String(harness.clone()));
+            }
+            if !rec.metadata.is_empty() {
+                fields.insert("metadata".into(), Value::Object(rec.metadata.clone()));
+            }
+        }
+        claims.push(row);
     }
     claims.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     serde_json::json!({ "claims": claims })

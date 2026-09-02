@@ -1347,15 +1347,12 @@ def _node_settlement(reading: Optional[RosterReading] = None):
                 cache["terminal"] = None
         return cache["terminal"]
 
-    def _probe(claim, now=None) -> Optional[bool]:
+    def _probe(claim, now=None, native_verdict=None) -> Optional[bool]:
         node_id = claim.key[len("node:") :]
         terminal = _terminal_ids()
         if terminal is not None and node_id in terminal:
             return True
-        from .verdict import claim_verdicts
-
-        native = claim_verdicts([claim.key]).get(claim.key)
-        if native is None or native.get("expired") is not True:
+        if native_verdict is None or native_verdict.get("expired") is not True:
             return None
         if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
             # A launch window, never a settled abandonment: same reasoning as

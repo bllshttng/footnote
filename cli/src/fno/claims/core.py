@@ -504,7 +504,11 @@ def acquire_claim(
     # mutex, two workers can both observe a stale file, both archive (one
     # actually moves, one no-ops), and both successfully create the new lock
     # in the gap between archive-and-create.
-    if not _existing_is_live(existing, root=root):
+    try:
+        existing_is_live = _existing_is_live(existing, root=root)
+    except ClaimGoneAway:
+        return _retry()
+    if not existing_is_live:
         recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
         acquired_lock = False
         recovery_token = ""
@@ -558,7 +562,11 @@ def acquire_claim(
                 emit_claim_idempotent_reacquired(refreshed, previous=existing)
                 return refreshed
 
-            if _existing_is_live(existing, root=root):
+            try:
+                existing_is_live = _existing_is_live(existing, root=root)
+            except ClaimGoneAway:
+                return _release_and_retry()
+            if existing_is_live:
                 # Raced - now it's live. Fall through to ClaimHeldByOther.
                 raise ClaimHeldByOther(
                     holder=existing.holder,
@@ -1001,6 +1009,9 @@ def _claim_verdict(claim: Claim, *, root: Optional[Path] = None) -> dict[str, An
     """Read one claim verdict from the native batch door."""
     verdict = claim_verdicts([claim.key], root=root).get(claim.key)
     if verdict is None:
+        path = claim_path(claim.key, root=root)
+        if not path.exists():
+            raise ClaimGoneAway(str(path))
         raise ClaimVerdictError(
             f"native claim verdict omitted readable claim {claim.key!r}; refusing to assume free"
         )
@@ -1347,6 +1358,8 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
 
     try:
         return _claim_verdict(claim, root=root)
+    except ClaimGoneAway:
+        return {"key": key, "state": ClaimState.FREE.value}
     except (ClaimVerdictError, ClaimVerdictUnavailable) as exc:
         return {
             "key": key,
@@ -1695,16 +1708,16 @@ def sweep_verdict(
     for every caller without sibling context (the spawn guard's single-key
     recovery).
     """
+    verdict = native_verdict or _claim_verdict(claim)
     if node_settlement is not None and claim.key.startswith("node:"):
         # A settlement instrument that raises answers nothing; a broken probe
         # must never become a verdict. The CLI-built settlement never raises
         # by contract - this is the belt under it.
         try:
-            if node_settlement(claim, now=now) is True:
+            if node_settlement(claim, now=now, native_verdict=verdict) is True:
                 return True, ""
         except Exception:  # noqa: BLE001 - unknown keeps
             pass
-    verdict = native_verdict or _claim_verdict(claim)
     if "provably_dead" not in verdict or "bucket" not in verdict:
         raise RuntimeError("native claim verdict omitted sweep fields")
     provably_dead = bool(verdict["provably_dead"])
