@@ -105,6 +105,58 @@ def resolve_dispatch_harness(
     return "claude", HARNESS_SOURCE_BUILTIN
 
 
+def configured_dispatch_harness(
+    settings: object = None,
+    *,
+    verb: str = "target",
+) -> tuple[Optional[str], Optional[str]]:
+    """The config rung of the autonomous-dispatch harness axis, read once.
+
+    Precedence inside the rung:
+
+      ``agents.profiles.<verb>.provider``  the stage table; the home
+      ``dispatch.harness``                 deprecated one release; fallback rung
+
+    Both dispatch doors read the stage table for this axis: ``resolve_dispatch``
+    (the seam behind dispatch-node.sh and ``fno agents dispatch resolve``) takes
+    the returned value as its config rung, and ``fno agents spawn`` reads the
+    same ``provider`` field through its own profile merge, so a caller cannot
+    get two answers for one node.
+
+    Returns ``(harness, shadowed_note)``. ``harness`` is None when neither key
+    is set (the caller applies its own builtin). ``shadowed_note`` is set only
+    when both keys were set and the stage table won by disagreement; it names
+    the losing spelling for the resolve receipt's decision trail. Read-only and
+    total: a missing block or field reads as unset, never raises.
+    """
+    if settings is None:
+        try:
+            from fno.config import load_settings
+
+            settings = load_settings()
+        except Exception:  # noqa: BLE001 - a bad config must not brick resolution
+            return None, None
+    profile_verb = (verb or "target").strip().lstrip("/")
+    if profile_verb.startswith("fno:"):
+        profile_verb = profile_verb[len("fno:"):] or "target"
+    agents = getattr(settings, "agents", None)
+    profiles = getattr(agents, "profiles", None) or {}
+    profile = profiles.get(profile_verb) if profile_verb else None
+    stage = (getattr(profile, "provider", "") or "").strip()
+    legacy = (getattr(getattr(settings, "dispatch", None), "harness", "") or "").strip()
+    if stage:
+        if legacy and legacy != stage:
+            note = (
+                f"harness=deprecated dispatch.harness={legacy!r} ignored; "
+                f"agents.profiles.{profile_verb}.provider={stage!r} is the home"
+            )
+            return stage, note
+        return stage, None
+    if legacy:
+        return legacy, None
+    return None, None
+
+
 def reject_empty_model(model: Optional[str]) -> Optional[str]:
     """Validate a ``--model`` flag: None passes through; empty/whitespace rejected.
 

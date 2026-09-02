@@ -764,7 +764,11 @@ def resolve_dispatch(
     unsupported autonomous ``pane``, an unknown trigger or substrate, or an
     empty / unsubstituted command. ``dispatch_cfg`` overrides the config read
     (for tests)."""
-    cfg = dict(dispatch_cfg) if dispatch_cfg is not None else _load_dispatch_cfg(settings)
+    cfg = (
+        dict(dispatch_cfg)
+        if dispatch_cfg is not None
+        else _load_dispatch_cfg(settings, verb=verb)
+    )
     decision: list[str] = []
     chosen_trigger = (trigger or "autonomous").strip().lower() or "autonomous"
     if chosen_trigger not in ("autonomous", "attended"):
@@ -785,6 +789,8 @@ def resolve_dispatch(
     elif cfg.get("harness"):
         chosen_harness = str(cfg["harness"]).strip()
         decision.append(f"harness=config({chosen_harness})")
+        if cfg.get("harness_note"):
+            decision.append(str(cfg["harness_note"]))
     else:
         chosen_harness = "claude"
         decision.append("harness=builtin(claude)")
@@ -986,10 +992,12 @@ def resolve_dispatch(
     }
 
 
-def _load_dispatch_cfg(settings: object) -> dict:
-    """Read ``config.dispatch`` (harness/substrate/command) plus the
-    ``config.auto_merge.grant`` actor key as a plain dict. A missing/unreadable
-    config yields ``{}`` so a resolve never bricks on config.
+def _load_dispatch_cfg(settings: object, verb: Optional[str] = None) -> dict:
+    """Read the dispatch config rung as a plain dict: the stage-table harness
+    (with the deprecated ``dispatch.harness`` folded beneath it) plus
+    ``config.dispatch`` substrate/command and the ``config.auto_merge.grant``
+    actor key. A missing/unreadable config yields ``{}`` so a resolve never
+    bricks on config.
 
     Every field is read through ``getattr`` with a default, per field. Attribute
     access on a partial settings object (a caller's stub, an older config model)
@@ -1004,6 +1012,12 @@ def _load_dispatch_cfg(settings: object) -> dict:
             settings = load_settings()
         except Exception:  # noqa: BLE001 - a bad config must not brick resolution
             return {}
+    # One home for the harness axis (the stage table) with the deprecated
+    # dispatch.harness folded beneath it; the note names the losing spelling
+    # when both were set and disagreed.
+    from fno.dispatch_flags import configured_dispatch_harness
+
+    harness_value, harness_note = configured_dispatch_harness(settings, verb=verb or "target")
     d = getattr(settings, "dispatch", None)
     # The grant lives in config.auto_merge, NOT under dispatch (x-4be1), so it
     # is read before the dispatch-block gate: a settings object carrying an
@@ -1012,14 +1026,19 @@ def _load_dispatch_cfg(settings: object) -> dict:
     am_block = getattr(settings, "auto_merge", None)
     grant = getattr(am_block, "grant", None) == "dispatch"
     if d is None:
-        return {"auto_merge": grant}
+        return {
+            "harness": harness_value or "",
+            "harness_note": harness_note or "",
+            "auto_merge": grant,
+        }
 
     def _text(name: str) -> str:
         return (getattr(d, name, None) or "").strip()
 
     try:
         return {
-            "harness": _text("harness"),
+            "harness": harness_value or "",
+            "harness_note": harness_note or "",
             "substrate": _text("substrate"),
             "command": _text("command"),
             "allowed_verbs": list(getattr(d, "allowed_verbs", None) or []),

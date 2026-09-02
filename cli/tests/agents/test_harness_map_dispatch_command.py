@@ -370,13 +370,18 @@ def test_partial_settings_object_does_not_drop_auto_merge():
 
 
 def test_settings_without_dispatch_section_yields_empty_cfg():
-    """x-4be1: no dispatch overlay and no grant -> only the (no-)grant key; the
-    harness/substrate/command keys stay absent so their builtin rungs run."""
+    """x-4be1: no dispatch overlay and no grant -> only the (no-)grant key plus
+    the harness fold, both EMPTY: the harness rung is unset so the builtin
+    claude rung runs, and no shadowing note exists."""
     import types
 
     from fno.agents.harness_map import _load_dispatch_cfg
 
-    assert _load_dispatch_cfg(types.SimpleNamespace()) == {"auto_merge": False}
+    assert _load_dispatch_cfg(types.SimpleNamespace()) == {
+        "auto_merge": False,
+        "harness": "",
+        "harness_note": "",
+    }
 
 
 @pytest.mark.parametrize("allow,expected", [(True, "/target {id}"), (False, "/target --no-merge {id}")])
