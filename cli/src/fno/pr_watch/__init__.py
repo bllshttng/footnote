@@ -26,7 +26,7 @@ from typing import Literal, Optional
 from fno.pr_watch._discover import PrObservation
 
 
-DecisionKind = Literal["merge", "review", "noop", "park"]
+DecisionKind = Literal["merge", "review", "noop", "park", "execute"]
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,9 @@ class Decision:
     - ``"noop"``   -- no action needed; update the watermark timestamp only.
     - ``"park"``   -- the PR is closed or stale; remove it from the polling
                       set (task 1.2 will implement the parking-lot write).
+    - ``"execute"`` -- the PR is OPEN with a durable granted dispatch and a
+                      positively not-live worker: run the canonical merge core
+                      under this watcher's own attribution.
 
     ``pr_number`` identifies which PR the decision is for.
     ``reason`` is a short human-readable string for logging.
@@ -94,6 +97,7 @@ def decide(
     merge_ready: bool,
     now_iso: str,
     max_age_days: int = 14,
+    durable_grant_eligible: bool = False,
 ) -> Decision:
     """Return the watcher's dispatch verdict for one PR observation.
 
@@ -118,6 +122,13 @@ def decide(
         datetime.now() call and tests can pin the clock.
     max_age_days:
         PRs older than this many days are parked (default 14).
+    durable_grant_eligible:
+        Caller-supplied, computed by the typed durable-grant resolver: True
+        when the PR's newest recorded dispatch receipt is a positive grant,
+        the node claim is positively not live, and live config still says
+        enabled=true, grant=dispatch. Only then may an OPEN PR execute. The
+        canonical merge guards still run at execution time - eligibility is
+        the watcher's own arm, never a bypass.
 
     Returns
     -------
@@ -144,6 +155,15 @@ def decide(
         age = _days_between(obs.opened_at, now_iso)
         if age > max_age_days:
             return Decision("park", pr, "max-age")
+
+    # 3.5 OPEN + durable granted dispatch whose worker is positively not
+    # live: execute through the canonical merge core. Sits before the
+    # reviewer-activity step deliberately: an eligible grant is the rarer,
+    # stronger action, and the merge guards inside run_merge (in-flight
+    # review, coverage, posture) are what hold it while work is mid-flight -
+    # duplicating that judgment here would be a second precedence to drift.
+    if obs.state == "OPEN" and durable_grant_eligible:
+        return Decision("execute", pr, "durable-grant")
 
     # 4. New reviewer activity (only when reviewers are configured)
     if reviewers and obs.latest_review_ts is not None:

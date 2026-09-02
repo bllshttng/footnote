@@ -1566,6 +1566,19 @@ def _overlaps(base_paths: List[str], pr_paths: List[str]) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
+def run_merge_for_durable_grant(pr_number: int, cwd: str) -> int:
+    """The watcher's internal durable-grant merge entry (returns run_merge's code).
+
+    Canonical ``run_merge`` with ``authority="durable_grant"``: the parked
+    worker's recorded receipt is the posture, and every other guard - hold,
+    in-flight review, incarnation fence, stub manifest, coverage, posture,
+    CI - runs identically. The exit code is the receipt's outcome: 0 merged,
+    2 held/skipped (retryable, no failure budget consumed), anything else a
+    failed attempt.
+    """
+    return run_merge([str(int(pr_number))], cwd=cwd, authority="durable_grant")
+
+
 def run_merge(
     argv: Sequence[str], cwd: Optional[str] = None, *, authority: str = "manifest"
 ) -> int:

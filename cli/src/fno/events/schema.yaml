@@ -3784,6 +3784,39 @@ event_types:
           type: string
           description: "Bounded diagnostic: the warm miss reason or the ritual receipt tail."
 
+  - name: merge_grant_execution
+    description: "One attributable attempt by the PR watcher to execute a durable dispatch grant on an OPEN PR: reserved under the per-PR lock before the canonical merge core runs, then executed, held, or failed from the core's verdict. Attribution only - the merge core's own receipts carry the reasons."
+    sources: [daemon]
+    data:
+      required: [phase, actor, pr]
+      properties:
+        phase:
+          type: string
+          enum: [reserved, executed, held, failed]
+          description: "'reserved' precedes the merge call; 'executed' = merged (exit 0); 'held' = a canonical guard refused, retryable and consuming no failure budget; 'failed' = the attempt errored."
+        actor:
+          type: string
+          enum: [pr-watch]
+          description: "The only component permitted to execute a durable grant."
+        pr:
+          type: integer
+          description: "GitHub PR number."
+        node_id:
+          type: string
+          description: "Backlog node the PR delivers, when the graph resolved one."
+        source:
+          type: string
+          description: "The winning durable receipt's source (config, no-merge-flag, none)."
+        recorded_by:
+          type: string
+          description: "The session that recorded the winning receipt - the dispatching spawner, i.e. the grant session."
+        recorded_at:
+          type: string
+          description: "When the winning receipt was recorded."
+        exit_code:
+          type: integer
+          description: "The merge core's exit code on a failed attempt."
+
   - name: pr_watch_skipped
     description: "PR-state watcher skipped a candidate PR this tick without firing (no local checkout, or a live node/walker claim owns it)."
     sources: [daemon]

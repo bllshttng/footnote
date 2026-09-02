@@ -2928,3 +2928,189 @@ class TestQuotaPreflight:
         receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
         assert receipt["swept_count"] == 1
         assert receipt["swept"] == {"owner/repo": [7]}
+
+
+# ---------------------------------------------------------------------------
+# Durable-grant execution: the watcher merges an OPEN PR whose worker parked
+# ---------------------------------------------------------------------------
+
+def _seed_tracked_entry(tmp_path: Path) -> Path:
+    from fno.pr_watch._state import WatermarkStore
+
+    store_path = tmp_path / "state.json"
+    WatermarkStore(path=store_path).set("owner/repo#1", {
+        "last_review_ts": None,
+        "last_seen_state": "OPEN",
+        "merge_dispatched": False,
+        "retries": 0,
+        "parked": None,
+    })
+    return store_path
+
+
+def _arm_durable_grant(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    approved: bool = True,
+    claim_state: str = "stale",
+    enabled: bool = True,
+    grant: str = "dispatch",
+) -> None:
+    """Point the resolver's three local reads at tmp facts: a graph whose node
+    carries a positive do-row receipt, an unheld claim, and a dispatching
+    config."""
+    from fno.config import AutoMergeBlock
+    import fno.config as config_mod
+
+    g = tmp_path / "grant-graph.json"
+    receipt = {
+        "approved": approved,
+        "source": "config",
+        "recorded_by": "spawner-session",
+        "recorded_at": "2026-08-24T12:00:00Z",
+    }
+    g.write_text(json.dumps({"entries": [{
+        "id": "x-abc12345", "title": "t", "pr_number": 1,
+        "sessions": [{"phase": "do", "harness": "claude", "session_id": "w1",
+                      "merge_grant": receipt}],
+    }]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    monkeypatch.setattr("fno.pr._coverage_gate._repo_slug", lambda repo: None)
+    monkeypatch.setattr(
+        "fno.claims.core.claim_status",
+        lambda key, **kw: {"key": key, "state": claim_state, "holder": "w1"},
+    )
+    monkeypatch.setattr(
+        "fno.config.load_settings_for_repo",
+        lambda path: config_mod.load_settings().model_copy(
+            update={"auto_merge": AutoMergeBlock(enabled=enabled, grant=grant)}
+        ),
+    )
+
+
+class TestDurableGrantExecution:
+    """The OPEN-granted action: reserved -> canonical merge -> executed/held/failed."""
+
+    def _tick(self, tmp_path, deps, monkeypatch, rc, store_path=None):
+        from fno.pr_watch._dispatch import tick
+
+        monkeypatch.setattr(
+            "fno.pr._merge.run_merge_for_durable_grant",
+            lambda pr, cwd: rc,
+        )
+        return tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path or _seed_tracked_entry(tmp_path),
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({k: "OPEN" for k in keys}, 0),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            max_retries=2,
+            graphql_remaining_fn=lambda: (4800, None),
+        )
+
+    def _grant_events(self, deps, phase):
+        return [
+            e for e in deps["events"]
+            if e["type"] == "merge_grant_execution" and e["data"].get("phase") == phase
+        ]
+
+    def test_executed_merges_and_marks_dispatched(self, tmp_path, monkeypatch):
+        deps = _make_tick_deps(
+            tmp_path, candidates=[_make_candidate(repo_dir=tmp_path)],
+            obs_map={1: _make_obs(pr_number=1, state="OPEN")},
+        )
+        _arm_durable_grant(monkeypatch, tmp_path)
+        result = self._tick(tmp_path, deps, monkeypatch, 0)
+
+        assert result.acted == 1
+        reserved = self._grant_events(deps, "reserved")
+        executed = self._grant_events(deps, "executed")
+        assert len(reserved) == 1 and len(executed) == 1
+        assert reserved[0]["data"]["actor"] == "pr-watch"
+        assert reserved[0]["data"]["pr"] == 1
+        assert reserved[0]["data"]["node_id"] == "x-abc12345"
+        assert reserved[0]["data"]["recorded_by"] == "spawner-session"
+        from fno.pr_watch._state import WatermarkStore
+
+        entry = WatermarkStore(path=tmp_path / "state.json").get("owner/repo#1")
+        assert entry["merge_dispatched"] is True
+        assert entry["retries"] == 0
+
+    def test_held_consumes_no_failure_budget(self, tmp_path, monkeypatch):
+        deps = _make_tick_deps(
+            tmp_path, candidates=[_make_candidate(repo_dir=tmp_path)],
+            obs_map={1: _make_obs(pr_number=1, state="OPEN")},
+        )
+        _arm_durable_grant(monkeypatch, tmp_path)
+        self._tick(tmp_path, deps, monkeypatch, 2)
+
+        assert len(self._grant_events(deps, "held")) == 1
+        assert not self._grant_events(deps, "failed")
+        from fno.pr_watch._state import WatermarkStore
+
+        entry = WatermarkStore(path=tmp_path / "state.json").get("owner/repo#1")
+        assert entry["retries"] == 0
+        assert not entry.get("parked")
+
+    def test_failed_consumes_budget_and_parks_at_max(self, tmp_path, monkeypatch):
+        deps = _make_tick_deps(
+            tmp_path, candidates=[_make_candidate(repo_dir=tmp_path)],
+            obs_map={1: _make_obs(pr_number=1, state="OPEN")},
+        )
+        _arm_durable_grant(monkeypatch, tmp_path)
+        store_path = _seed_tracked_entry(tmp_path)
+        self._tick(tmp_path, deps, monkeypatch, 1, store_path=store_path)
+        self._tick(tmp_path, deps, monkeypatch, 1, store_path=store_path)
+
+        failed = self._grant_events(deps, "failed")
+        assert len(failed) == 2
+        assert failed[0]["data"]["exit_code"] == 1
+        parked = [e for e in deps["events"] if e["type"] == "pr_watch_parked"]
+        assert parked and parked[0]["data"]["reason"] == "retries-exhausted"
+
+    def test_live_claim_never_executes(self, tmp_path, monkeypatch):
+        """AC10-CON at the watcher: a live claim keeps the resolver's verdict
+        HELD, decide() never sees eligible, and no execution event exists."""
+        deps = _make_tick_deps(
+            tmp_path, candidates=[_make_candidate(repo_dir=tmp_path)],
+            obs_map={1: _make_obs(pr_number=1, state="OPEN")},
+        )
+        _arm_durable_grant(monkeypatch, tmp_path, claim_state="live")
+
+        class Boom(Exception):
+            pass
+
+        monkeypatch.setattr(
+            "fno.pr._merge.run_merge_for_durable_grant",
+            lambda pr, cwd: (_ for _ in ()).throw(Boom()),
+        )
+        self._tick(tmp_path, deps, monkeypatch, 0)
+
+        assert deps["events"] == [] or all(
+            e["type"] != "merge_grant_execution" for e in deps["events"]
+        )
+        assert all(
+            e["type"] != "pr_watch_dispatch_failed" for e in deps["events"]
+        )
+
+    def test_refused_receipt_never_executes(self, tmp_path, monkeypatch):
+        """A newest explicit refusal (a --no-merge re-dispatch) holds the
+        watcher off the PR entirely."""
+        deps = _make_tick_deps(
+            tmp_path, candidates=[_make_candidate(repo_dir=tmp_path)],
+            obs_map={1: _make_obs(pr_number=1, state="OPEN")},
+        )
+        _arm_durable_grant(monkeypatch, tmp_path, approved=False)
+        self._tick(tmp_path, deps, monkeypatch, 0)
+
+        assert all(
+            e["type"] != "merge_grant_execution" for e in deps["events"]
+        )
