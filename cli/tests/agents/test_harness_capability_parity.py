@@ -7,6 +7,11 @@ file cannot see a merge the two implement differently, so this guard stages
 one config chain covering every field kind, resolves it through the Python
 reader HERE, and re-resolves it through the Rust reader inside one cargo
 test that fails naming the harness and field.
+
+One asymmetry is deliberate and not staged here: a NEW name with no bundled
+row is the x-296f teach path on the Rust side (the pane lane lands on any
+parsable form block), while the Python dispatch reader stays roster-gated.
+Dispatch needs a measured row; a pane does not.
 """
 
 from __future__ import annotations

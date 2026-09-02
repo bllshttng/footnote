@@ -413,47 +413,82 @@ fn apply_row_overrides(rows: &mut std::collections::BTreeMap<String, toml::Value
             let Some(over) = over.as_table() else {
                 continue;
             };
-            // An override may correct a bundled row or ADD one for a name
-            // the Rust roster already carries; anything else is refused by
-            // name, never advertised.
-            if !rows.contains_key(name)
-                && !fno_agents::provider::KNOWN_PROVIDERS.contains(&name.as_str())
-            {
-                if let Ok(mut w) = warnings_slot().lock() {
-                    w.push(format!(
-                        "{}: harness {name:?} override rejected: absent from KNOWN_PROVIDERS",
-                        path.display()
-                    ));
-                }
-                continue;
-            }
-            let mut candidate = rows
-                .get(name)
-                .cloned()
-                .unwrap_or(toml::Value::Table(Default::default()));
             let normalized = lane_alias_normalized(over);
-            merge_field(&mut candidate, &toml::Value::Table(normalized));
-            // The merged candidate passes the SAME per-row validation the
-            // bundled table ships under, or it does not land: a rejected
-            // override keeps the bundled row and names itself, never
-            // silently drops (AC1-ERR).
-            if let Err(error) =
-                fno_agents::harness_capabilities::HarnessContract::validate_merged_row(
-                    name, &candidate,
-                )
-            {
-                if let Ok(mut w) = warnings_slot().lock() {
-                    w.push(format!(
-                        "{}: harness {name:?} override rejected: {error}",
-                        path.display()
-                    ));
+            if rows.contains_key(name) {
+                // A bundled row corrects per field: the merged candidate
+                // passes the SAME whole-row validation the bundled table
+                // ships under, or it does not land. A rejected override
+                // keeps the bundled row and names itself, never silently
+                // drops (AC1-ERR).
+                let mut candidate = rows.get(name).cloned().unwrap();
+                merge_field(&mut candidate, &toml::Value::Table(normalized));
+                if let Err(error) =
+                    fno_agents::harness_capabilities::HarnessContract::validate_merged_row(
+                        name, &candidate,
+                    )
+                {
+                    if let Ok(mut w) = warnings_slot().lock() {
+                        w.push(format!(
+                            "{}: harness {name:?} override rejected: {error}",
+                            path.display()
+                        ));
+                    }
+                    continue;
                 }
-                continue;
+                rows.insert(name.clone(), candidate);
+            } else {
+                // A name with no bundled row is the x-296f teach path: the
+                // config declares the pane lane and nothing else, so a whole
+                // row would fail validation by construction. The gate is the
+                // shipped lane parse instead - every form block the override
+                // carries must parse (or declare unsupported), and one that
+                // parses is what lands. The Python reader stays roster-gated
+                // for additions: dispatch needs a measured row, the pane lane
+                // does not, and the pane lane is this crate's surface.
+                let Some(candidate) = parse_lane_blocks(&normalized) else {
+                    if let Ok(mut w) = warnings_slot().lock() {
+                        w.push(format!(
+                            "{}: harness {name:?} add rejected: no parsable form block",
+                            path.display()
+                        ));
+                    }
+                    continue;
+                };
+                rows.insert(name.clone(), candidate);
             }
-            rows.insert(name.clone(), candidate);
             overridden.insert(name.clone());
         }
     }
+}
+
+/// The x-6678 shallow lane keys, translated into the nested paths the bundled
+/// row carries them under, so one override shape feeds both readers. Returns
+/// `None` when neither interactive lane block parses (or declares
+/// unsupported) - the teach path lands a row only when it can drive a lane.
+/// Create/headless blocks ride along unparsed: a create form needs no id and
+/// the renderers tolerate a missing or unparseable block by lane.
+fn parse_lane_blocks(normalized: &toml::Table) -> Option<toml::Value> {
+    let forms = normalized
+        .get("resume_strategy")?
+        .get("forms")?
+        .as_table()?;
+    let drivable = [
+        ("interactive_attach", FormLane::Attach),
+        ("interactive_resume", FormLane::Resume),
+    ]
+    .into_iter()
+    .any(|(lane_key, lane)| {
+        forms
+            .get(lane_key)
+            .is_some_and(|block| parse_form(lane, block).is_some())
+            || forms.get(lane_key).is_some_and(|block| {
+                block.get("kind").and_then(|k| k.as_str()) == Some("unsupported")
+            })
+    });
+    if !drivable {
+        return None;
+    }
+    Some(toml::Value::Table(normalized.clone()))
 }
 
 /// The x-6678 shallow lane keys, translated into the nested paths the bundled
