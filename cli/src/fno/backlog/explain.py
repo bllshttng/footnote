@@ -675,6 +675,22 @@ def render_report(report: dict) -> str:
             out.append(f"ASKED  {asked['id']}: eligible, ranked {asked['rank'] + 1}")
 
     out.append("")
+    _render_gates_routing_decision(report, out)
+
+    d = report["decision"]
+    out.append("")
+    out.append("DECISION")
+    out.append(
+        f"  would dispatch: {d['would_dispatch'] or 'nothing (no eligible node)'}"
+    )
+    out.append(f"  armed: {d['armed']} (rank={d['armed_rank']})")
+    if d.get("note"):
+        out.append(f"  {d['note']}")
+    return "\n".join(out)
+
+
+def _render_gates_routing_decision(report: dict, out: list) -> None:
+    """The GATES and ROUTING sections, shared by both cascade renderers."""
     out.append("GATES")
     for g in report["gates"]:
         out.append(
@@ -708,12 +724,216 @@ def render_report(report: dict) -> str:
         else "  -> grid declined; the spawn falls back to caller defaults"
     )
 
+
+# The canonical lane-fill filter names, in report order. The names come from
+# advance.lane_fill_filter_name's mapping over the classifier's tokens; this
+# list only fixes the ORDER the report prints them in, plus the catch-alls.
+_LANE_FILL_FILTER_ORDER = (
+    "live-lane",
+    "live-lane-domain",
+    "in-flight-collision",
+    "unevaluated",
+)
+
+
+def build_lane_fill_report(
+    *,
+    epic: str,
+    project: Optional[str] = None,
+    node_id: Optional[str] = None,
+    top: int = 5,
+) -> dict:
+    """``--explain --epic``: the fill the daemon's cascade would make, as a READ.
+
+    The daemon's only walk is ``active_backlog`` shelling ``advance --epic``,
+    which reaches ``select_lane_fill`` - a SECOND selector beside ``next``, with
+    its own drops. Reporting the ``next`` cascade for an epic question is the
+    second-selector lie this function exists to prevent, so this runs (a
+    preview of) the fill itself and aggregates its drops by name.
+
+    One implementation, not two: every drop is classified by the fill's own
+    ``_classify_lane_candidate`` - the single per-candidate truth the live
+    selector and the shadow report already share - so this report cannot
+    describe a selection the selector would not make. Counts reflect the seed
+    state (live lanes and in-flight work at read time), not the fill's own
+    growing state mid-loop; the fill preview carries the authoritative
+    ``stop`` / ``excluded`` / picks.
+
+    Never dispatches, never claims a slot (``claim=False``), never emits.
+    """
+    from fno.backlog import advance as adv
+    from fno.claims.lanes import active_lane_count
+
+    max_lanes = adv._max_lanes()
+    fill_report: dict = {}
+    selected = adv.select_lane_fill(
+        max_lanes, project, mission=epic, claim=False, report=fill_report
+    )
+    ready = adv._ready_nodes(project, epic)
+
+    # The preview holds no slot, so it can never trip the fill's own cap-full
+    # stop; the cap is read directly instead. Lanes already held by live peers
+    # consume the width, and a pick beyond the remaining headroom is exactly
+    # the drop ``lane-slot`` names in the live path.
+    slot_note: Optional[str] = None
+    try:
+        headroom = max(0, max_lanes - active_lane_count())
+    except Exception as exc:  # noqa: BLE001 - report the unreadable cap, never a fake zero
+        headroom = max_lanes
+        slot_note = f"lane-slot count unreadable: {str(exc)[:120]}"
+    cap_denied = 0
+    if len(selected) > headroom:
+        cap_denied = len(selected) - headroom
+        selected = selected[:headroom]
+        fill_report["stop"] = "cap-full"
+        fill_report["excluded"] = list(fill_report.get("excluded", []))
+
+    # Seed the classifier exactly like the fill does (fail-open to empty), so
+    # the recount sees the same world the fill's first pick saw.
+    try:
+        used_domains = adv._live_lane_domains()
+    except Exception:  # noqa: BLE001 - annotation-only seed; fail open like the fill
+        used_domains = set()
+    try:
+        inflight = adv._live_worked_entries()
+    except Exception:  # noqa: BLE001 - fail open like the fill's collision gate
+        inflight = []
+
+    counts: dict[str, int] = {}
+    reasons_by_id: dict[str, str] = {}
+    for entry in ready:
+        reason = adv._classify_lane_candidate(
+            entry, used_domains=used_domains, inflight=inflight
+        )
+        if reason is not None:
+            reasons_by_id[entry["id"]] = reason
+            name = adv.lane_fill_filter_name(reason)
+            counts[name] = counts.get(name, 0) + 1
+    if cap_denied:
+        counts["lane-slot"] = cap_denied
+
+    ordered_names = list(_LANE_FILL_FILTER_ORDER) + [
+        n for n in counts if n not in _LANE_FILL_FILTER_ORDER
+    ]
+    if slot_note is not None:
+        ordered_names.append("lane-slot-unreadable")
+    drops = [{"filter": n, "dropped": counts.get(n, 0)} for n in ordered_names]
+
+    selected_ids = [e["id"] for e in selected]
+    asked: dict = {}
+    if node_id:
+        excluded_row = next(
+            (r for r in fill_report.get("excluded", []) if r.get("id") == node_id), None
+        )
+        rank = next((i for i, nid in enumerate(selected_ids) if nid == node_id), None)
+        reason = reasons_by_id.get(node_id)
+        if excluded_row is not None or reason is not None:
+            asked = {
+                "id": node_id,
+                "dropped_by": reason or excluded_row.get("reason"),
+                "rank": None,
+            }
+        elif rank is not None:
+            asked = {"id": node_id, "dropped_by": None, "rank": rank}
+        else:
+            asked = {
+                "id": node_id,
+                "dropped_by": None,
+                "rank": None,
+                "never_a_candidate": True,
+            }
+
+    subject = selected[0] if selected else None
+    routing = routing_for(subject)
+    armed, rank_source = adv._auto_continue_resolve()
+
+    return {
+        "mode": "lane-fill",
+        "epic": epic,
+        "selection": {
+            "width": max_lanes,
+            "pool": len(ready),
+            "drops": drops,
+            "would_fill": [
+                {
+                    "id": e.get("id"),
+                    "priority": e.get("priority"),
+                    "difficulty": e.get("difficulty"),
+                    "project": e.get("project"),
+                    "title": e.get("title"),
+                }
+                for e in selected[:top]
+            ],
+            "stop": fill_report.get("stop"),
+            "excluded": fill_report.get("excluded", []),
+            "slot_note": slot_note,
+        },
+        "asked": asked,
+        "gates": [
+            g.as_dict()
+            for g in gates_for(subject, (routing.get("candidate") or {}).get("harness"))
+        ],
+        "routing": routing,
+        "decision": {
+            "would_dispatch": selected_ids,
+            "armed": armed,
+            "armed_rank": rank_source,
+            "note": (
+                "advance is DISARMED, so nothing above would run automatically. "
+                "This report is a dry run of the pipeline, not a record of a "
+                "decision advance made."
+            )
+            if not armed
+            else None,
+        },
+    }
+
+
+def render_lane_fill_report(report: dict) -> str:
+    """The lane-fill cascade as text: the same four sections, the fill's drops."""
+    out: list[str] = []
+    sel = report["selection"]
+    out.append(
+        f"SELECTION  lane fill (epic {report['epic']})  "
+        f"width {sel['width']}  {sel['pool']} ready -> {len(sel['would_fill'])} would fill"
+    )
+    for row in sel["drops"]:
+        out.append(f"  -{row['dropped']:<5} {row['filter']}")
+    if sel.get("slot_note"):
+        out.append(f"  {sel['slot_note']}")
+    out.append(f"  stop: {sel['stop']}")
+    for row in sel["excluded"]:
+        out.append(f"    excluded {row.get('id')}: {row.get('reason')}")
+    if sel["would_fill"]:
+        out.append("  would fill:")
+        for i, e in enumerate(sel["would_fill"]):
+            marker = "->" if i == 0 else "  "
+            out.append(
+                f"   {marker} {i + 1}. {e['id']}  {e['priority'] or '-':<3} "
+                f"{e['difficulty'] or '-':<7} {(e['title'] or '')[:60]}"
+            )
+
+    asked = report.get("asked") or {}
+    if asked:
+        out.append("")
+        if asked.get("never_a_candidate"):
+            out.append(f"ASKED  {asked['id']}: not in this epic's ready list")
+        elif asked.get("dropped_by"):
+            out.append(f"ASKED  {asked['id']}: dropped by {asked['dropped_by']}")
+        else:
+            out.append(f"ASKED  {asked['id']}: selectable, fill rank {asked['rank'] + 1}")
+
+    out.append("")
+    _render_gates_routing_decision(report, out)
+
     d = report["decision"]
     out.append("")
     out.append("DECISION")
-    out.append(
-        f"  would dispatch: {d['would_dispatch'] or 'nothing (no eligible node)'}"
-    )
+    if d["would_dispatch"]:
+        out.append(f"  would dispatch {len(d['would_dispatch'])} lane(s): "
+                   f"{', '.join(d['would_dispatch'])}")
+    else:
+        out.append("  would dispatch: nothing (fill selected no node)")
     out.append(f"  armed: {d['armed']} (rank={d['armed_rank']})")
     if d.get("note"):
         out.append(f"  {d['note']}")

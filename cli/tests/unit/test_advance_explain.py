@@ -170,3 +170,155 @@ def test_every_filter_carries_an_actionable_why():
     assert filters, "the cascade is never empty"
     for f in filters:
         assert f.why.strip(), f"{f.name} has no explanation"
+
+
+# ---------------------------------------------------------------------------
+# --explain --epic: the daemon's lane-fill cascade (task 5.1, LD5)
+#
+# The daemon's only walk is active_backlog shelling `advance --epic`, which
+# reaches select_lane_fill - a second selector beside next. An epic question
+# answered with the next cascade is the second-selector lie, so the epic
+# explain runs the fill itself and names ITS drops.
+# ---------------------------------------------------------------------------
+
+def _lane_fill_world(monkeypatch, ready, *, high_collision_for=None, max_lanes=2,
+                     live_slots=0):
+    """Hermetic seams for build_lane_fill_report; returns the advance module."""
+    from fno.backlog import advance as adv
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(adv, "_max_lanes", lambda: max_lanes)
+    monkeypatch.setattr(adv, "_ready_nodes", lambda project, mission: ready)
+    monkeypatch.setattr(adv, "_live_lane_domains", lambda *a, **k: set())
+    monkeypatch.setattr(adv, "_live_worked_entries", lambda *a, **k: [])
+    monkeypatch.setattr(adv, "_auto_continue_resolve", lambda: (False, "config"))
+    monkeypatch.setattr("fno.claims.lanes.find_lane_slot", lambda nid, root=None: None)
+    monkeypatch.setattr("fno.claims.lanes.active_lane_count", lambda *a, **k: live_slots)
+    # A stated file surface, so the collision gate actually runs for every node.
+    monkeypatch.setattr(
+        "fno.graph.collision.resolve_plan_path", lambda p: p
+    )
+    monkeypatch.setattr("fno.graph.collision.has_file_surface", lambda p: True)
+    hits = high_collision_for or {}
+
+    def _fake_high_collision(node, inflight):
+        target = hits.get(node["id"])
+        return SimpleNamespace(with_node_id=target) if target else None
+
+    monkeypatch.setattr(adv, "_high_collision", _fake_high_collision)
+    return adv
+
+
+def _ready_node(nid, **kw):
+    base = {"id": nid, "title": f"t-{nid}", "priority": "p1", "difficulty": "m",
+            "project": "fno", "domain": "code", "plan_path": "plan.md"}
+    base.update(kw)
+    return base
+
+
+def test_epic_explain_counts_drops_under_the_fill_filter_names(monkeypatch):
+    """AC14: the collision drop is counted under in-flight-collision, by name."""
+    adv = _lane_fill_world(
+        monkeypatch,
+        [_ready_node("x-win"), _ready_node("x-coll")],
+        high_collision_for={"x-coll": "some-plan"},
+    )
+    from fno.backlog.explain import build_lane_fill_report
+
+    report = build_lane_fill_report(epic="x-epic")
+    assert report["mode"] == "lane-fill"
+    drops = {d["filter"]: d["dropped"] for d in report["selection"]["drops"]}
+    assert drops["in-flight-collision"] == 1
+    assert drops["unevaluated"] == 0
+    assert [e["id"] for e in report["selection"]["would_fill"]] == ["x-win"]
+    assert report["selection"]["stop"] in ("no-candidate", "filled")
+
+
+def test_epic_explain_names_the_filter_that_dropped_the_asked_node(monkeypatch):
+    adv = _lane_fill_world(
+        monkeypatch,
+        [_ready_node("x-win"), _ready_node("x-coll")],
+        high_collision_for={"x-coll": "some-plan"},
+    )
+    from fno.backlog.explain import build_lane_fill_report
+
+    asked = build_lane_fill_report(epic="x-epic", node_id="x-coll")["asked"]
+    assert asked["dropped_by"] == "high-collision:some-plan"
+
+    winner = build_lane_fill_report(epic="x-epic", node_id="x-win")["asked"]
+    assert winner["rank"] == 0
+
+    stranger = build_lane_fill_report(epic="x-epic", node_id="x-elsewhere")["asked"]
+    assert stranger["never_a_candidate"] is True
+
+
+def test_epic_explain_renders_no_next_cascade(monkeypatch):
+    """The rendered text carries the fill's drops and none of the next cascade."""
+    adv = _lane_fill_world(
+        monkeypatch,
+        [_ready_node("x-win"), _ready_node("x-coll")],
+        high_collision_for={"x-coll": "some-plan"},
+    )
+    from fno.backlog.explain import build_lane_fill_report, render_lane_fill_report
+
+    text = render_lane_fill_report(build_lane_fill_report(epic="x-epic"))
+    assert "lane fill" in text
+    assert "in-flight-collision" in text
+    assert "unmerged-open-pr" not in text
+    assert "selection-guard" not in text
+
+
+def test_cap_full_counts_the_denied_lanes_under_lane_slot(monkeypatch):
+    """Preview holds no slot, so the cap is measured live: width 1, 1 held slot,
+    three selectable nodes - the two picks beyond headroom are lane-slot drops."""
+    _lane_fill_world(
+        monkeypatch,
+        [_ready_node("x-a"), _ready_node("x-b"), _ready_node("x-c")],
+        max_lanes=1,
+        live_slots=1,
+    )
+    from fno.backlog.explain import build_lane_fill_report
+
+    report = build_lane_fill_report(epic="x-epic")
+    drops = {d["filter"]: d["dropped"] for d in report["selection"]["drops"]}
+    assert report["selection"]["stop"] == "cap-full"
+    assert drops.get("lane-slot") == 1
+    assert report["selection"]["would_fill"] == []
+
+
+def test_advance_explain_epic_routes_to_the_fill_not_the_next_cascade(monkeypatch):
+    """The CLI wiring: --explain --epic never builds the next cascade."""
+    from types import SimpleNamespace
+
+    from fno.backlog import explain
+
+    calls = {"lane_fill": 0, "next": 0}
+
+    def _fake_fill(**kw):
+        calls["lane_fill"] += 1
+        return {"mode": "lane-fill", "epic": kw.get("epic"), "selection": {},
+               "asked": {}, "gates": [], "routing": {}, "decision": {}}
+
+    def _fail_next(**kw):
+        calls["next"] += 1
+        raise AssertionError("next cascade built for an epic question")
+
+    monkeypatch.setattr(explain, "build_lane_fill_report", _fake_fill)
+    monkeypatch.setattr(explain, "render_lane_fill_report", lambda r: "LANE FILL")
+    monkeypatch.setattr(explain, "build_report", _fail_next)
+
+    import fno.graph.cli as gcli
+
+    monkeypatch.setattr(
+        "fno.backlog.explain.build_lane_fill_report", _fake_fill
+    )
+    monkeypatch.setattr(gcli, "_display_entries", lambda *a, **k: [])
+    from fno.cli import app
+    from typer.testing import CliRunner
+
+    result = CliRunner().invoke(
+        app, ["backlog", "advance", "--explain", "--epic", "x-epic"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "LANE FILL" in result.output
+    assert calls["lane_fill"] == 1 and calls["next"] == 0

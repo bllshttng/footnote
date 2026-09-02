@@ -50,7 +50,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, NamedTuple, Optional
+from typing import Any, Literal, NamedTuple, Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
@@ -861,6 +861,30 @@ _SAME_DOMAIN_ANNOTATION = "+same-domain:"
 # Same reasoning for the file-overlap token: the producer builds it and
 # select_lane_fill matches it to decide how loudly to log the skip.
 _HIGH_COLLISION_PREFIX = "high-collision:"
+
+
+def lane_fill_filter_name(reason: Optional[str]) -> str:
+    """Map one classifier reason token to its canonical lane-fill filter name.
+
+    The canonical names the ``--explain --epic`` SELECTION section reports.
+    Living HERE, beside the tokens, keeps the explainer's vocabulary from
+    drifting from the selector's: both derive from the classifier's stable
+    tokens, never from a second hand-written list. An unmapped token maps to
+    itself (its head up to the first colon), so a future token shows up in
+    the report under its own name instead of vanishing into a bucket that
+    no longer matches.
+    """
+    if not reason:
+        return ""
+    if reason == "peer-lane":
+        return "live-lane"
+    if reason.startswith(_HIGH_COLLISION_PREFIX):
+        return "in-flight-collision"
+    if _SAME_DOMAIN_ANNOTATION in reason:
+        return "live-lane-domain"
+    if reason.startswith(_UNEVALUATED_PREFIX):
+        return "unevaluated"
+    return reason.split(":", 1)[0]
 
 
 def _classify_lane_candidate(
