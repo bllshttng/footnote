@@ -32,7 +32,8 @@ from fno.agents.session_truth import STALE_ATTENTION_S
 # `model_substituted` (the emission-time marker naming both values when the
 # request and the observation disagree family-wise). Both always present; null
 # means unknown, never a clean bill.
-JSON_SCHEMA_VERSION = 5
+# v6 adds `node`, the registry's spawn-stamped backlog identity.
+JSON_SCHEMA_VERSION = 6
 
 # Basis values that are falsifiers rather than evidence: a positive
 # measurement that the worker is gone, which no other reading outranks.
@@ -218,6 +219,9 @@ def serialize_entry(
         # the positive assertion instead of passing silently.
         "thread_id": getattr(entry, "fno_id", None),
         "current_session_id": entry.harness_session_id,
+        # The node this row works, already stamped in registry storage from
+        # resolved spawn provenance. Never infer it from the row name.
+        "node": entry.node,
         # Classified lineage: the succession chain A->B->... and the fork
         # edge of a parallel branch. Empty/None for a worker never re-minted
         # and never forked - the dominant case.

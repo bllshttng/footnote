@@ -1992,7 +1992,11 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
         state, state_warning = _row_state(r)
         if state_warning:
             unmapped_states.add(state_warning)
-        node = _node_id_from_worktree(cwd) if _is_linked_worktree(cwd) else None
+        # The registry stamp is the spawn-time identity for this exact row.
+        # Manifest and ledger reads remain fallbacks for legacy/unstamped rows.
+        node = getattr(match, "node", None)
+        if node is None and _is_linked_worktree(cwd):
+            node = _node_id_from_worktree(cwd)
         if node is None:
             if ledger_nodes is None:
                 ledger_nodes = _ledger_nodes()
