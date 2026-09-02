@@ -222,9 +222,13 @@ def test_all_zero_byte_roots_pass(tmp_path: Path) -> None:
 
 def test_breach_teaches_trade_before_raise(tmp_path: Path) -> None:
     """AC6-FR: failure output makes the recurring cost and escape explicit."""
+    # Pinned RELATIVE to the live ceiling, the same way the over/under tests
+    # above read it from the gate: fixed bytes here went stale the moment the
+    # ceiling followed a measurement up, and the breach quietly became a pass.
+    agents_bytes = CEILING_BYTES - 18_900
     _write_fixed_roots(
         tmp_path,
-        agents_bytes=20_000,
+        agents_bytes=agents_bytes,
         claude_bytes=7_000,
         skill_bytes=12_000,
     )
@@ -233,7 +237,7 @@ def test_breach_teaches_trade_before_raise(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "Largest:" in result.stderr
-    assert "AGENTS.md 20000" in result.stderr
+    assert f"AGENTS.md {agents_bytes}" in result.stderr
     assert "skills/using-fno/SKILL.md 12000" in result.stderr
     assert "CLAUDE.md 7000" in result.stderr
     assert "tok/turn" in result.stderr

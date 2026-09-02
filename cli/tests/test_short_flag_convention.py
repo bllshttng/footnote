@@ -128,9 +128,10 @@ TWO_SPELLING_SITES: dict[tuple[str, str], list[tuple[str, str]]] = {
     # ("fno/cli.py", "loop") and ("gates/cli.py", "check") removed:
     # `fno loop` became a flagless supersession stub and the `fno gate`
     # sub-app was deleted by the control-plane collapse wedge (ab-d0337fbc).
-    ("fno/cli.py", "review"): [("--session-id", "--session")],
+    # ("fno/cli.py", "review") and ("worker/cli.py", "review") removed: the
+    # sigma panel's retirement left review a refusal stub plus the
+    # --assess-assurance read, and no caller ever used the legacy spelling.
     ("graph/cli.py", "cmd_cost"): [("--session-id", "--session")],
-    ("worker/cli.py", "review"): [("--session-id", "--session")],
     ("worker/cli.py", "external"): [("--pr-number", "--pr")],
     ("retro/cli.py", "run"): [
         ("--session-id", "--session"),

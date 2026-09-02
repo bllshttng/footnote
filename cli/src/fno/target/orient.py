@@ -495,11 +495,11 @@ def _local_review_gates(review: Any) -> List[str]:
     from fno.review.provider_resolution import DISPATCHABLE_PROVIDERS
 
     known = resolvable_reviewers(review.reviewer_registry)
-    # Built-ins carry their own emit (sigma/declare auto-emit on a clean pass;
-    # code-review bakes the helper into its invocation string). A project-
-    # registered reviewer does not, so its printed producer must append the emit
-    # or a session that follows it verbatim reviews and still leaves the gate
-    # unmet -- the exact failure this line exists to prevent.
+    # Built-ins carry their own emit (the lane's emit step runs on a clean
+    # pass for the built-ins). A project-registered reviewer does not, so its
+    # printed producer must append the emit or a session that follows it
+    # verbatim reviews and still leaves the gate unmet -- the exact failure
+    # this line exists to prevent.
     builtin = resolvable_reviewers()
     gates: List[str] = []
     for name in review.reviewers or []:

@@ -149,6 +149,8 @@ model = "claude-opus-5"
 # output_dir = <unset>   # optional; no default
 
 [review]
+# How much review a code PR must have before it can merge, as one rung of a nine-step ladder (no_review | tests_pass | self_review | independent_review | github_review | peer_review | self_and_github | self_and_peer | self_github_and_peer). Default self_review: one real final-head review, author context allowed. Auto-merge (config grants, env grants, finalize, GitHub-native arming) refuses below self_review and names the remedy. Unset infers one visible posture from the legacy settings and prints the exact `fno config set review.posture <rung>` command that makes it permanent.
+# posture = <unset>   # optional; no default
 # GitHub App bot logins that must have reviewed before the ship gate goes green (the GATE). Legacy alias: required_bots.
 # github_apps = <unset>   # optional; no default
 # Legacy alias for config.review.github_apps (a straight rename); github_apps wins if both are set.
@@ -187,7 +189,7 @@ external_reviewers = []
 agent_harnesses = {}
 # Legacy alias for config.review.agent_harnesses (a straight rename); agent_harnesses wins if both are set.
 agent_providers = {}
-# Opt-in per-agent harness/provider/model routes for named sigma sessions.
+# RETIRED with the sigma panel: the review-posture ladder (config.review.posture) replaced per-agent review routing. An empty value is accepted; any configured route refuses with the replacement named, so remove the key.
 agent_routes = {}
 
 [review.cross_model]
@@ -395,7 +397,7 @@ max_concurrent = 1
 max_lanes = 1
 
 [auto_merge]
-# Auto-merge a PR once external review passes.
+# Auto-merge a PR once CI is green AND the review posture is satisfied. There is no 'external review' step unless the review posture demands one: with review.posture below self_review (the floor) the merge refuses and names the rung to set. Read review.posture for what the rung requires before enabling this.
 enabled = false
 # WHO may merge once enabled passes (actor scope): 'none' = humans only via `fno do pr merge`; 'dispatch' = autonomously dispatched /target workers may merge too. Replaces the deprecated dispatch.auto_merge bool. Any unknown value degrades to 'none'.
 grant = "none"

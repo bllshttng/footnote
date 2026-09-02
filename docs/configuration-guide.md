@@ -57,6 +57,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `post_merge.sync_stale_hours` | int | `24` | advanced | How long the newest merge may sit unsynced before `fno doctor` reports the canonical checkout stale (default 24h). |
 | `post_merge.model` | str | `claude-opus-5` | advanced | Model for post-merge ritual workers (default claude-opus-5). Routing wins when a secondary provider is keyed. |
 | `research.output_dir` | str (optional) | _(none)_ | advanced | Landing dir for the `fno do research` doc deliverable (brief + sources sidecar); vault area, not repo-relative. Unset => ship fails loud (never guesses). |
+| `review.posture` | str (optional) | _(none)_ | always | How much review a code PR must have before it can merge, as one rung of a nine-step ladder (no_review \| tests_pass \| self_review \| independent_review \| github_review \| peer_review \| self_and_github \| self_and_peer \| self_github_and_peer). Default self_review: one real final-head review, author context allowed. Auto-merge (config grants, env grants, finalize, GitHub-native arming) refuses below self_review and names the remedy. Unset infers one visible posture from the legacy settings and prints the exact `fno config set review.posture <rung>` command that makes it permanent. |
 | `review.github_apps` | list[str] (optional) | _(none)_ | advanced | GitHub App bot logins that must have reviewed before the ship gate goes green (the GATE). Legacy alias: required_bots. |
 | `review.required_bots` | list[str] (optional) | _(none)_ | never | Legacy alias for config.review.github_apps (a straight rename); github_apps wins if both are set. |
 | `review.peers` | list[Any] | `[]` | advanced | Harness peers run locally and gate on a head-pinned clean verdict. Scalar or {provider, model} entries need no second GitHub account; adding identity opts into legacy posted-review mode. |
@@ -76,7 +77,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `review.external_reviewers` | list[str] | `[]` | always | Which AI reviewers /pr requests a review from (the INVOCATION list). |
 | `review.agent_harnesses` | dict[str, str] | `{}` | never | Per-agent harness routing (claude/codex/gemini) for the cross-model review panel. Legacy alias: agent_providers. |
 | `review.agent_providers` | dict[str, str] | `{}` | never | Legacy alias for config.review.agent_harnesses (a straight rename); agent_harnesses wins if both are set. |
-| `review.agent_routes` | dict[str, AgentRouteBlock] | `{}` | never | Opt-in per-agent harness/provider/model routes for named sigma sessions. |
+| `review.agent_routes` | dict[str, object] | `{}` | never | RETIRED with the sigma panel: the review-posture ladder (config.review.posture) replaced per-agent review routing. An empty value is accepted; any configured route refuses with the replacement named, so remove the key. |
 | `review.cross_model.enabled` | bool | `false` | advanced | Enable cross-model (codex/gemini) second-opinion review. |
 | `style.word_cap.mail` | int | `80` | advanced | Masked-word cap for style rule 7 on a mail body (default 80). The refusal names the number enforced here, not the built-in. |
 | `style.word_cap.encounter` | int | `80` | advanced | Masked-word cap for the evidence on a `fno backlog encounter` vote (default 80). Over-length evidence is refused, never truncated. |
@@ -155,7 +156,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `active_backlog.max_concurrent` | int | `1` | never | In-flight nodes per project per tick (v1 == 1). |
 | `active_backlog.mission` | str (optional) | _(none)_ | never | Scope the drain daemon to a single mission's nodes. |
 | `parallel.max_lanes` | int | `1` | advanced | Deprecated and ignored: the epic advance's width derives from spawn-gate headroom (agents.max_live, provider lanes). The key stays parseable for one release; delete it from config. |
-| `auto_merge.enabled` | bool | `false` | always | Auto-merge a PR once external review passes. |
+| `auto_merge.enabled` | bool | `false` | always | Auto-merge a PR once CI is green AND the review posture is satisfied. There is no 'external review' step unless the review posture demands one: with review.posture below self_review (the floor) the merge refuses and names the rung to set. Read review.posture for what the rung requires before enabling this. |
 | `auto_merge.grant` | str | `none` | advanced | WHO may merge once enabled passes (actor scope): 'none' = humans only via `fno do pr merge`; 'dispatch' = autonomously dispatched /target workers may merge too. Replaces the deprecated dispatch.auto_merge bool. Any unknown value degrades to 'none'. |
 | `auto_merge.merge_strategy` | str | `merge` | advanced | Merge strategy: merge \| squash \| rebase. |
 | `auto_merge.delete_branch_on_merge` | bool | `true` | advanced | Delete the remote branch after a merge. Executor paths only (`fno do pr merge`, pr verify); GitHub's native auto-merge queue has no branch-delete hook. |

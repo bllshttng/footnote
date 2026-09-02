@@ -577,6 +577,50 @@ def _corroboration_refusal(cov: Optional[dict], cwd: str) -> Optional[str]:
     )
 
 
+def posture_refusal(cov: Optional[dict], *, recomputed: bool = False) -> Optional[str]:
+    """The refusal when the resolved review posture is unsatisfied or unknown.
+
+    The verdict is the Rust producer's (`review_posture` on the coverage row);
+    this gate reads it and never reclassifies (AC7-ERR: an unsatisfied or
+    unknown posture refuses from the Rust verdict before any merge is called).
+    None when the row answers something else (the unknown-coverage and
+    no-lane paths have their own refusals) or the rung is satisfied.
+
+    A covered row that NAMES no posture is a two-case read. The recompute
+    THIS gate read just ran and the row still carries no rung: the producer
+    binary predates the posture field, and the refusal names the upgrade,
+    because guessing a rung is how the dangerous cell (auto-merge beside no
+    review) reopens. A STORED row from before the field with no recompute
+    (head unchanged, nothing overtaken it) passes through as today - the
+    pre-posture corpus merges under its own evidence until a fresh producer
+    rewrites its row.
+    """
+    if not cov or cov.get("coverage") != "covered":
+        return None
+    posture = cov.get("review_posture")
+    if not isinstance(posture, dict):
+        if not recomputed:
+            return None
+        return (
+            "review posture unknown: a fresh coverage recompute resolved no "
+            "review.posture, so the ladder cannot answer what review the rung "
+            "demands. Remedy: refresh the fno-agents binary "
+            "(`fno doctor update`) and re-run the merge"
+        )
+    if posture.get("posture_satisfied") is True:
+        return None
+    gaps = posture.get("posture_gaps")
+    gaps = (
+        "; ".join(str(g) for g in gaps)
+        if isinstance(gaps, list) and gaps
+        else "the rung's evidence is not at this head"
+    )
+    return (
+        f"review posture {posture.get('posture')!r} (rank "
+        f"{posture.get('rank')}) is unsatisfied: {gaps}"
+    )
+
+
 def _ordinary_verdict(
     pr_number: int, cwd: str, *, recompute: bool
 ) -> Tuple[int, str, str, str, Optional[tuple]]:
@@ -653,6 +697,10 @@ def _ordinary_verdict(
 
     covered, failed = covered_conjuncts(cov, head, code_review_required)
     corroboration = _corroboration_refusal(cov, cwd)
+    # `recomputed` is the freshness proof: only a row the producer JUST wrote
+    # can prove the binary resolved no rung. A stored pre-posture row is
+    # legacy evidence, not a stale binary.
+    posture = posture_refusal(cov, recomputed=recompute_note == "recomputed")
 
     # Locked Decision 1: the pass condition is disposition-complete at the
     # head, not clean. The chain read needs the PR's head branch to scope
@@ -739,6 +787,17 @@ def _ordinary_verdict(
 
     if covered and corroboration:
         return REFUSED, corroboration, "", "; ".join(
+            x for x in (recompute_note, unread_note, filed_note) if x
+        ), (head, disposition_hard)
+    # The Rust posture verdict, read beside corroboration: generic coverage
+    # (any counted review) is not the rung the config demands, and a refusal
+    # here names the exact gap per component rather than a bare count
+    # (AC7-ERR). Scope: this tightens SATISFIED coverage only. The spent-
+    # budget discharge below governs the uncovered case and keeps its
+    # operator ruling - a budget ruling waives rounds, a posture names what
+    # satisfied review must already contain; the two do not overlap here.
+    if covered and posture:
+        return REFUSED, posture, "", "; ".join(
             x for x in (recompute_note, unread_note, filed_note) if x
         ), (head, disposition_hard)
     if covered:

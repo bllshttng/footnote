@@ -1444,6 +1444,7 @@ def append_session_record(
     effort: "str | None" = None,
     ended_at: "str | None" = None,
     started_at: "str | None" = None,
+    merge_grant: "dict | None" = None,
 ) -> "tuple[bool, bool]":
     """Append a ``{phase, harness, session_id, effort, ended_at, started_at,
     observed_model}`` lifecycle record to a node's append-only ``sessions``
@@ -1512,6 +1513,31 @@ def append_session_record(
     if started_at is not None:
         started_at = _utc_session_stamp("started_at", started_at)
 
+    # The spawner-resolved merge grant, carried on the do row so it
+    # outlives the worker's transient manifest. The shape is validated HERE:
+    # a caller that cannot name approved/source/recorded_by/recorded_at has
+    # no grant to record, and a malformed one must be refused rather than
+    # stored to be guessed at later. Absence of the key stays the honest
+    # "no grant was resolved at stamp time"; the resolver grants on a
+    # positive receipt only, never on absence or shape-guessing.
+    if merge_grant is not None:
+        if not isinstance(merge_grant, dict):
+            raise ValueError("merge_grant must be a mapping when provided")
+        unknown = set(merge_grant) - {
+            "approved", "source", "recorded_by", "recorded_at",
+        }
+        if unknown:
+            raise ValueError(f"merge_grant carries unknown keys: {sorted(unknown)}")
+        if not isinstance(merge_grant.get("approved"), bool):
+            raise ValueError("merge_grant.approved must be a boolean")
+        for key in ("source", "recorded_by", "recorded_at"):
+            value = merge_grant.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"merge_grant.{key} must be a non-empty string")
+            if key != "recorded_at" and len(value) > _SESSION_STR_MAX:
+                raise ValueError(f"merge_grant.{key} exceeds {_SESSION_STR_MAX} chars")
+        grant_recorded_at = _utc_session_stamp("recorded_at", merge_grant["recorded_at"])
+
     # Read the transcript BEFORE the graph lock: the mutator runs under
     # _acquire_flock and this is not a cheap read - claude resolution globs every
     # dir under the projects root and the model read seeks a 256KB tail, with a
@@ -1548,6 +1574,18 @@ def append_session_record(
                 prior["started_at"] = started_at
             if effort is not None and "effort" not in prior:
                 prior["effort"] = effort
+            if merge_grant is not None and "merge_grant" not in prior:
+                # Fill-if-absent, like the timestamps: the first resolved
+                # posture owns the row, and a re-stamp cannot rewrite a
+                # recorded refusal into a grant in place. A CHANGED posture
+                # belongs to a NEWER dispatch, which is a NEWER row and wins
+                # at resolve time (AC9-EDGE).
+                prior["merge_grant"] = {
+                    "approved": merge_grant["approved"],
+                    "source": merge_grant["source"],
+                    "recorded_by": merge_grant["recorded_by"],
+                    "recorded_at": grant_recorded_at,
+                }
             # observed_model is the one field the LATEST stamp owns rather than
             # the first, so a mid-run failover is not recorded as the lane the
             # phase started on. See _merge_observed_model.
@@ -1565,6 +1603,13 @@ def append_session_record(
             row["started_at"] = started_at
         if effort is not None:
             row["effort"] = effort
+        if merge_grant is not None:
+            row["merge_grant"] = {
+                "approved": merge_grant["approved"],
+                "source": merge_grant["source"],
+                "recorded_by": merge_grant["recorded_by"],
+                "recorded_at": grant_recorded_at,
+            }
         # Written unconditionally, including the unknown kinds: an ABSENT key
         # means this row predates the field or its writer never looked, while
         # {"kind": "no-transcript"} means the writer looked and found nothing.

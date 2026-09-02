@@ -7,11 +7,11 @@
 Run the internal review on your working diff before anything leaves your machine.
 
 ```
-/fno:review            # sigma: the internal six-agent panel (default)
+/fno:review            # the owned lane: one inline reviewer, one head-pinned attestation (default)
 /fno:review peer       # a cross-model second opinion (e.g. Codex reviews Claude's code)
 ```
 
-`sigma` fans out specialized reviewers (silent-failure hunting, test-coverage, type design, UX flows, responsive checks) over the diff and reports only findings worth acting on. `peer` routes the review to a different model than wrote the code, so you catch the things one model is systematically blind to. Fix what it surfaces, then move on.
+The default lane works every finding angle in this session, verifies what it finds, and emits the same attestation a native review produces; it dispatches zero subagents. `peer` routes the review to a different model than wrote the code, so you catch the things one model is systematically blind to. Fix what either surfaces, then move on.
 
 ## 2. Open the PR: `/fno:pr create`
 

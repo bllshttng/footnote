@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any, Collection, Optional, Sequence, TYPE_CHECKING
 
 from fno.pr._proc import ToolMissing
@@ -572,6 +573,22 @@ def _ready_blockers(
                 blockers.append("review_coverage_corroboration")
             elif not ok:
                 blockers.append(f"review_coverage_{failed}")
+            # The Rust posture verdict, read the same way the merge gate reads
+            # it (one producer, never a reclassification): a satisfied-conjunct
+            # row whose rung is explicitly unsatisfied is its own blocker,
+            # because `ready` must not promise a merge the verb refuses. A row
+            # naming NO posture stays a receipt fact (`review_posture: null`)
+            # rather than a blocker here: this surface never recomputes, so a
+            # pre-posture row would read as blocked on a machine the merge
+            # gate would send to upgrade first - the verb, not the read,
+            # owns that refusal.
+            posture = coverage.get("review_posture") if ok else None
+            if (
+                ok
+                and isinstance(posture, dict)
+                and posture.get("posture_satisfied") is not True
+            ):
+                blockers.append("review_posture_unsatisfied")
     return blockers
 
 
@@ -622,6 +639,94 @@ def _review_owner_guidance(coverage: dict, worktree: dict) -> Optional[dict]:
         "manifest_path": worktree.get("manifest_path"),
         "authority_note": authority_note,
     }
+
+
+def _merge_authority(repo: str) -> dict:
+    """The resolved merge-authority axes for this repo.
+
+    Three keys, all fail-open to None on an unreadable settings load: a
+    status receipt that cannot read config says so rather than asserting
+    "disabled" - a guessed NO here is the direction a wedged fleet reads as
+    a disarm, and a guessed YES is the dangerous one. The autonomous shape
+    is `enabled AND grant=dispatch`; every other enabled grant routes the
+    actual merge through a human or the operator.
+    """
+    try:
+        from fno.config import load_settings_for_repo
+
+        am = load_settings_for_repo(Path(repo)).auto_merge
+        enabled = bool(am.enabled)
+        grant = str(am.grant or "none")
+        return {
+            "auto_merge_enabled": enabled,
+            "grant": grant,
+            "mergeable_autonomously": enabled and grant == "dispatch",
+        }
+    except Exception:  # noqa: BLE001 - an unreadable config is not a verdict
+        return {
+            "auto_merge_enabled": None,
+            "grant": None,
+            "mergeable_autonomously": None,
+        }
+
+
+def _observer_health() -> dict:
+    """The watcher's liveness, for an execution receipt that needs an executor.
+
+    A durable grant is only worth anything while something ticks: with no
+    live watcher a granted PR waits forever, and the receipt must say so
+    (`observer_unavailable`) instead of reading as a working merge lane.
+    Reads the same liveness report the doctor and the SessionStart hook use -
+    one probe, never a second verdict implementation.
+    """
+    try:
+        from fno.pr_watch._install import liveness_report_live
+
+        report = liveness_report_live()
+        verdict = str(report.get("verdict") or "unknown")
+        available = verdict in ("healthy", "healthy-pending")
+        return {
+            "state": "observer_available" if available else "observer_unavailable",
+            "detail": str(report.get("detail") or verdict),
+            "repair": "" if available else str(
+                report.get("fix") or "fno config set pr_watch.enabled true; "
+                "then verify with fno do pr watch status"
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001 - liveness never crashes a receipt
+        return {
+            "state": "unknown",
+            "detail": f"liveness probe failed: {type(exc).__name__}: {exc}",
+            "repair": "verify with fno do pr watch status",
+        }
+
+
+def _merge_execution_projection(repo: str, pr: str) -> dict:
+    """The durable-grant execution state, through the ONE resolver.
+
+    Answers "if the worker parked, would the watcher merge this now": the
+    newest recorded receipt, the node claim's liveness, and the standing
+    config, fail-closed in the resolver's every arm. A projection only - it
+    never widens the merge verb's own gates. When a recorded receipt exists
+    the projection also names the observer's health, because a grant without
+    a live watcher is the AC12-ERR shape: loud, with a repair, and merging
+    nothing.
+    """
+    try:
+        from fno.pr._merge_grant import resolve_durable_grant
+
+        verdict = resolve_durable_grant(int(pr), repo)
+        projection = verdict.as_projection()
+    except Exception as exc:  # noqa: BLE001 - a receipt never lies by crashing
+        return {
+            "state": "unknown",
+            "reason": f"durable-grant resolve failed: {type(exc).__name__}: {exc}",
+            "node_id": None,
+            "claim_state": None,
+        }
+    if verdict.state != "absent":
+        projection["observer"] = _observer_health()
+    return projection
 
 
 def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int:
@@ -775,7 +880,11 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         review_lane = code_review_required or _review_lane(pr, cwd)
         try:
             coverage = read_review_coverage(
-                int(pr), cwd, head=pr_json.get("headRefOid"), recompute=review_lane
+                int(pr),
+                cwd,
+                head=pr_json.get("headRefOid"),
+                recompute=review_lane,
+                recompute_postureless=False,
             )
         except Exception:
             # The producer's own sentinel, not a copy of it: a second literal
@@ -942,6 +1051,30 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         "optional_reviews_unresolved": unresolved,
         "optional_reviews_resolved_unchanged": resolved_unchanged,
         "review_coverage": coverage,
+        # The Rust posture verdict verbatim (never reclassified), so the
+        # receipt answers "what review does this repo demand and is it met"
+        # without reading config in the same turn. None when the row resolved
+        # no rung - the same fact the merge gate refuses on.
+        "review_posture": (
+            coverage.get("review_posture")
+            if isinstance(coverage.get("review_posture"), dict)
+            else None
+        ),
+        # The merge-authority axes (AC7-HP): may the fleet merge, and via
+        # which grant. Read from the same settings object the merge verb and
+        # the config validator use, so a king asking "can this merge" gets the
+        # authority from the receipt rather than from memory.
+        "merge_authority": _merge_authority(cwd or os.getcwd()),
+        # The execution axis (AC7-HP): whether a parked granted worker's PR
+        # would be merged by the watcher right now - receipt, claim liveness,
+        # and standing config through the one durable-grant resolver. None on
+        # a terminal PR: nothing would execute, the same exemption the
+        # coverage conjunct takes above.
+        "merge_execution": (
+            None
+            if is_terminal
+            else _merge_execution_projection(cwd or os.getcwd(), pr)
+        ),
         # The round budget, from the same cap helper the blocker read, so a
         # worker sees the budget BEFORE spending the round that trips it.
         # reviews=None buys a zero-gh read, so the count is the events axis

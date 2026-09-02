@@ -40,6 +40,17 @@ def _stub_recompute(
         if coverage in ("covered", "uncovered"):
             data["reviewed_count"] = count
         if coverage == "covered":
+            # The modern producer resolves a rung on every covered row: a row
+            # without the verdict reads as written by a pre-posture binary,
+            # and the merge gate's upgrade refusal would shadow the behavior
+            # these tests pin (the recompute loop, not the posture).
+            data["review_posture"] = {
+                "posture": "self_review",
+                "rank": 3,
+                "source": "legacy",
+                "posture_satisfied": True,
+                "posture_gaps": [],
+            }
             data["verdicts"] = [{
                 "name": "code-review",
                 "producer": "local_attestation",

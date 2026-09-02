@@ -629,6 +629,14 @@ def status(
         typer.echo(
             f"Completed tick: {completed['ts']} swept={completed['swept_count']}"
         )
+    scan = report.get("merge_scan")
+    if isinstance(scan, dict):
+        typer.echo(
+            f"Merge scan:   completed_at={scan.get('completed_at')} "
+            f"eligible={scan.get('eligible')} attempted={scan.get('attempted')}"
+        )
+    else:
+        typer.echo("Merge scan:   (no scan receipt from a merge_scan-capable tick)")
 
     # Fleet watchdog freshness (x-55c3): a watchdog on a dead cadence never
     # fires, and its silence is indistinguishable from a healthy fleet. When
@@ -718,6 +726,21 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
                     chunks_by_receipt.setdefault(data["receipt_id"], []).append(data)
             elif etype == "pr_watch_tick":
                 marks["last_tick"] = ev.get("ts")
+                # The newest tick's grant-scan receipt: the completed-scan
+                # probe reads it from status --json. Absent on ticks from a
+                # pre-merge_scan binary - the key stays absent then, which is
+                # the honest "this tick never scanned" (AC12-HP).
+                tick_data = ev.get("data")
+                if isinstance(tick_data, dict) and isinstance(
+                    tick_data.get("merge_scan"), dict
+                ):
+                    scan = tick_data["merge_scan"]
+                    marks["merge_scan"] = {
+                        "completed": scan.get("completed") is True,
+                        "completed_at": ev.get("ts"),
+                        "eligible": scan.get("eligible"),
+                        "attempted": scan.get("attempted"),
+                    }
                 completed = _valid_completed_tick(
                     ev.get("ts"), ev.get("data"), chunks_by_receipt
                 )
@@ -879,6 +902,7 @@ def liveness_report(
             "fix": fix,
             "loaded": loaded,
             "last_tick": last_tick_ts,
+            "interval_seconds": interval_seconds,
         }
 
     if not enabled:
@@ -935,9 +959,9 @@ def liveness_report_live(
     plist_path = (launch_agents_dir or _LAUNCH_AGENTS_DIR) / _PLIST_FILENAME
     plist_exists = plist_path.exists()
     plist_mtime = plist_path.stat().st_mtime if plist_exists else None
-    last_tick_ts = (
-        marks["last_tick"] if marks is not None else _tick_watermarks(events_path)["last_tick"]
-    )
+    if marks is None:
+        marks = _tick_watermarks(events_path)
+    last_tick_ts = marks["last_tick"]
 
     report = liveness_report(
         enabled=cfg.enabled,
@@ -948,6 +972,11 @@ def liveness_report_live(
         plist_mtime=plist_mtime,
         now=time.time(),
     )
+    # The last completed grant scan rides the same report the liveness verdict
+    # uses: a done-probe can then assert "a healthy watcher completed a scan
+    # within one interval" from ONE read instead of scanning the event log.
+    if isinstance(marks.get("merge_scan"), dict):
+        report["merge_scan"] = marks["merge_scan"]
     # Fleet watchdog freshness rides the SAME report the --json path emits:
     # the SessionStart hook and the doctor read this dict, and a sweep starved
     # while the pr_watch tick stayed healthy must read loud there too, not

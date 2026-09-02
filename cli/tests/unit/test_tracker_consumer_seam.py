@@ -110,16 +110,18 @@ def test_cwd_roots_scan_reads_sidecar(external_store, contradictory_graph, tmp_p
 def test_node_size_is_guarded_metadata(external_store, contradictory_graph, monkeypatch, tmp_path):
     """Reader class: footnote-minted metadata (size pin) reads the default
     store through the guarded reader and never leaks under an external
-    backend - the graph carries GRAPH-SIZE, external must yield None."""
-    import fno.worker.review as review_mod
+    backend - the graph carries GRAPH-SIZE, external must yield None. The
+    panel's size-pin accessor is gone , so the seam reads the same
+    guarded reader directly."""
+    from fno.tracker import metadata
 
-    monkeypatch.setattr(
-        "fno.worker.ship._read_graph_node_id", lambda _sp: "N-1"
-    )
-    assert review_mod._resolve_node_size(tmp_path / "state.md") is None
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "external")
+    with pytest.raises(Exception):
+        metadata.read_entries("worker.review")
     # Graph mode reads the same pin it always did (byte-compat, AC1).
     monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
-    assert review_mod._resolve_node_size(tmp_path / "state.md") == "GRAPH-SIZE"
+    rows = metadata.read_entries("worker.review")
+    assert any(row.get("size") == "GRAPH-SIZE" for row in rows)
 
 
 def test_metadata_class_guards_external(external_store, contradictory_graph):

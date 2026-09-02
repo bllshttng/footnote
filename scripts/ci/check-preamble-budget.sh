@@ -125,7 +125,13 @@ set -euo pipefail
 # 26 worktrees, so the rule must reach every session before it writes a sweep;
 # compressed from a +451 first draft to +224 net, and this residue is the three
 # source-dir paths plus the incident and the marker recipe, zero spare.
-CEILING_BYTES=38911
+# +153 (38911 -> 39064), measured 2026-09-02: the `fno do pr status` row in
+# skills/using-fno/SKILL.md grew by the merge_authority and merge_execution
+# projections that surface now reports (recorded grant, claim liveness, live
+# observer). The status table is the one discovery channel every session
+# reads, the clause is compressed to the two names and their three axes, and
+# the ceiling follows the measurement up, zero spare.
+CEILING_BYTES=39064
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
