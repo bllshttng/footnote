@@ -1,10 +1,10 @@
 # The resource meter and the lane advisor
 
-The operator ask behind this feature: a live monitor that says how the machine is doing and makes a best guess on how many more lanes the fleet can take. Two surfaces answer it. `fno doctor lanes` is the on-demand verb: one number and its reasoning. The status row carries the same reading as a live one-line meter when you switch it on.
+The operator ask behind this feature was a live monitor. It must say how the machine is doing and make a best guess on how many more lanes the fleet can take. Two surfaces answer it. `fno doctor lanes` is the on-demand verb: one number and its reasoning. The status row carries the same reading as a live one-line meter, once you switch the meter on.
 
 ## The feature is conditional
 
-The meter needs `macmon` on PATH. Install it with `brew install macmon`. It is Apple Silicon only, it needs no sudo, and fno core does not depend on it: nothing breaks when it is absent, and `config.resource_meter.enabled` ships false. Turn the meter on either with `fno config set resource_meter.enabled true` or from the settings modal's general tab, where it sits beside the status-row toggle.
+The meter needs `macmon` on PATH. Install it with `brew install macmon`. It is Apple Silicon only and needs no sudo. fno core does not depend on it. If it is absent, nothing breaks, and `config.resource_meter.enabled` ships false. Turn the meter on with `fno config set resource_meter.enabled true`, or in the settings modal's general tab beside the status-row toggle.
 
 ## What you get without macmon
 
@@ -14,9 +14,9 @@ Two arms still work, because they read fno's own numbers. The spawn-load arm com
 
 `fno doctor footprint` measures fno's own descendants, and that is the right answer to its own question. But the browser, Slack and every other app compete for the same box. A lane answer built on fno-only load will keep advising "room for more" while something else eats the machine. The lane advisor reads the whole machine first and the fleet second.
 
-## Which memory signal is authoritative, and when it is dark
+## Which memory signal is authoritative, and which state is dark
 
-Swap is the pressure signal, but only when a swap file exists. On the machine this feature was specified against, `ram_usage` read 81.5 GB of 103 GB while `swap_usage` and `swap_total` were both 0, and `sysctl vm.swapusage` confirmed no swap file exists. A swap-only rule reports infinite headroom there. A free-RAM rule is no better: `memory_pressure` called that same machine 87 percent free while the compressor held 7.3 GB. So the memory arm reads `swap_usage` when `swap_total > 0`, falls back to `memory_pressure` when no swap file exists, and goes dark when neither answers. Neither number alone is the answer.
+Swap is the pressure signal, but only for a machine that has a swap file. On the machine this feature was specified against, `ram_usage` read 81.5 GB of 103 GB. `swap_usage` and `swap_total` were both 0, and `sysctl vm.swapusage` confirmed no swap file exists. A swap-only rule reports infinite headroom there. A free-RAM rule is no better: `memory_pressure` called that same machine 87 percent free while the compressor held 7.3 GB. So the memory arm reads `swap_usage` for a machine with a swap file. On a machine without one it falls back to `memory_pressure`, and it goes dark if neither sensor answers. Neither number alone is the answer.
 
 ## The two verdicts are different alarms
 
