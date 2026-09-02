@@ -574,6 +574,7 @@ def test_ac5_hp_json_reports_fleet_totals_and_cpu_shares(
 ) -> None:
     from fno import doctor_footprint
 
+    _pin_load(monkeypatch, status="within")
     monkeypatch.setattr(
         doctor_footprint.subprocess,
         "run",
