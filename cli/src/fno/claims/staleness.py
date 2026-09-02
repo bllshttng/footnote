@@ -36,46 +36,91 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _process_create_time_ms(pid: int) -> Optional[int]:
-    """Return the holder's process create time in epoch-ms, or None if absent.
+# The liveness cause vocabulary: HOW a holder passed or failed the pid check.
+# A verdict beside its cause is the house shape (classify_for_sweep already
+# returns one); without it, "suspect" is five different situations wearing
+# one word. Mirrored by the Rust leg - the parity harness pins the strings.
+CAUSE_LIVE = "live"
+CAUSE_OFFHOST = "offhost"
+CAUSE_PID_UNAVAILABLE = "pid-unavailable"
+CAUSE_PID_ABSENT = "pid-absent"
+CAUSE_ACCESS_DENIED = "access-denied"
+CAUSE_PID_REUSE = "pid-reuse"
 
-    None means "the OS does not report this PID" - treat as dead.
-    Permission errors are also treated as None: a holder we cannot inspect
-    is one we cannot validate, so we cannot prove it's still ours.
+
+def _probe_create_time(pid: Optional[int]) -> tuple[Optional[int], str]:
+    """Ask the OS for the holder's create time, and name the failure if none.
+
+    Returns ``(create_ms, cause)``; an empty cause means the read succeeded.
+
+    The split is load-bearing. NoSuchProcess means the pid has no holder -
+    provably dead. AccessDenied means the holder EXISTS and this process may
+    not inspect it, because permission cannot be denied on a pid that is
+    gone. Collapsing them into one None made a live-but-unreadable holder
+    read as dead, and its claim stealable.
     """
+    if pid is None:
+        return None, CAUSE_PID_UNAVAILABLE
     try:
         proc = psutil.Process(pid)
-        return int(proc.create_time() * 1000)
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return None
+        return int(proc.create_time() * 1000), ""
+    except psutil.NoSuchProcess:
+        return None, CAUSE_PID_ABSENT
+    except psutil.AccessDenied:
+        return None, CAUSE_ACCESS_DENIED
+
+
+def _process_create_time_ms(pid: Optional[int]) -> Optional[int]:
+    """Readable-create-time-only view of :func:`_probe_create_time`.
+
+    For callers that cannot act on the cause and only need "no usable time"
+    (the pid re-anchor check in core.py). Absent and refused both read None
+    here - that caller gives up either way.
+    """
+    create_ms, cause = _probe_create_time(pid)
+    return None if cause else create_ms
+
+
+def _liveness_reading(claim: Claim) -> tuple[bool, str]:
+    """Return ``(verifiably_live, cause)`` for the claim's holder.
+
+    ``cause`` is one of the CAUSE_* constants: the branch that decided.
+    ``is_live`` is the bool view of this; the classifier carries the cause
+    beside its verdict so callers can tell the ways a holder fails apart.
+    """
+    if claim.pid_unavailable:
+        return False, CAUSE_PID_UNAVAILABLE
+    if not is_same_machine(claim.host, claim.machine_id):
+        return False, CAUSE_OFFHOST
+
+    create_ms, cause = _probe_create_time(claim.pid)
+    if cause:
+        return False, cause
+
+    # PID-reuse: the process currently holding this PID started AFTER the
+    # claim was filed, so it is a different process. The original holder
+    # died and the kernel handed the slot to someone else.
+    if create_ms is not None and create_ms > claim.acquired_at:
+        return False, CAUSE_PID_REUSE
+
+    return True, CAUSE_LIVE
 
 
 def is_live(claim: Claim) -> bool:
     """Return True iff the claim's holder is verifiably running.
 
     Returns False if:
+      - The claim never recorded a pid (pid_unavailable, or pid is None).
       - The claim is on another machine (we cannot remotely verify).
       - The OS does not report claim.pid.
+      - The holder process exists but refuses inspection (AccessDenied).
+        Unreadable is NOT provably dead - see _probe_create_time - and
+        classify reads that cause as SUSPECT so the claim is never stolen
+        on pid evidence.
       - The OS-reported create_time for claim.pid is AFTER claim.acquired_at
         (PID reuse: a new process took over the slot).
-      - We cannot read the process info (AccessDenied counts as dead).
     """
-    if claim.pid_unavailable:
-        return False
-    if not is_same_machine(claim.host, claim.machine_id):
-        return False
-
-    create_ms = _process_create_time_ms(claim.pid) if claim.pid is not None else None
-    if create_ms is None:
-        return False
-
-    # PID-reuse: the process currently holding this PID started AFTER the
-    # claim was filed, so it is a different process. The original holder
-    # died and the kernel handed the slot to someone else.
-    if create_ms > claim.acquired_at:
-        return False
-
-    return True
+    return _liveness_reading(claim)[0]
 
 
 def is_expired(claim: Claim, now: Optional[int] = None) -> bool:
@@ -135,7 +180,13 @@ def classify(
     worker case; the TTL keeps protecting the slot (acquire/dispatch refuse it
     like LIVE), but the distinct state lets init/dispatch branch. Only TTL expiry
     frees the claim (-> STALE). Mirrors ``claims.rs::classify``.
+
+    SUSPECT also covers the unreadable holder on a PID-liveness claim:
+    AccessDenied means the process EXISTS and refuses inspection (permission
+    cannot be denied on a pid that is gone), so it is not a proof of death and
+    must never free the claim on pid evidence.
     """
+    live, cause = _liveness_reading(claim)
     if is_expired(claim, now=now):
         # HYBRID, corroborated: an expired clock does NOT imply a dead session,
         # but a live pid speaks for the holder only when it was prover-proven
@@ -145,16 +196,22 @@ def classify(
         # corroboration. The shared shape reads SUSPECT, not STALE: the pid
         # proves the daemon lives, which is neither holder-live nor holder-dead,
         # so the sweep's secondary instruments settle it.
-        if claim.pid_provenance == "session-prover" and is_live(claim):
+        if claim.pid_provenance == "session-prover" and live:
             if pid_exclusive is False:
                 return ClaimState.SUSPECT
             return ClaimState.LIVE
         return ClaimState.STALE
     if claim.expires_at is None:
-        return ClaimState.LIVE if is_live(claim) else ClaimState.STALE
+        if live:
+            return ClaimState.LIVE
+        # Unreadable is not provably dead: never free a claim on pid evidence
+        # we were refused.
+        if cause == CAUSE_ACCESS_DENIED:
+            return ClaimState.SUSPECT
+        return ClaimState.STALE
     # TTL claim, not yet expired: live pid => LIVE, dead/replaced pid => SUSPECT
     # (TTL-protected, not stealable).
-    return ClaimState.LIVE if is_live(claim) else ClaimState.SUSPECT
+    return ClaimState.LIVE if live else ClaimState.SUSPECT
 
 
 def classify_for_sweep(
