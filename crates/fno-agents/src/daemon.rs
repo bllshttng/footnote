@@ -3838,6 +3838,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         // on error: emit and serve past, like the sweep below.
                         match keeper_registry_sweep(&home_sweep, &emitter_sweep) {
                             Ok(report) => {
+                                // Store-socket hygiene rides the same startup
+                                // pass (x-b21e): dead store sockets unlinked,
+                                // live ones untouched. Non-fatal by posture.
+                                let store_unlinked =
+                                    store_socket_sweep(&home_sweep, &emitter_sweep);
                                 let _ = emitter_sweep.emit(
                                     "keeper_sweep_done",
                                     &json!({
@@ -3846,6 +3851,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                         "dead": report.dead.len(),
                                         "wedged": report.wedged.len(),
                                         "superseded": report.superseded.len(),
+                                        "store_unlinked": store_unlinked,
                                     }),
                                 );
                             }
@@ -9849,6 +9855,87 @@ fn lane_b_keeper_dir(home: &AgentsHome) -> PathBuf {
         .unwrap_or(home.root())
         .join("mux")
         .join("threads")
+}
+
+/// Stale store-socket hygiene (x-b21e): the store keeper unlinks its socket
+/// on every clean exit, so a socket file nobody answers is a kill -9
+/// leftover. The graph client self-heals a dead socket (its
+/// connect-before-bind removes the stale file and rebinds), so this walk is
+/// tidiness plus an honest dead count, never liveness authority: a socket
+/// with a live listener is left exactly as found, and an unreadable one is
+/// left for the process-table reaper (keeper_lane) rather than guessed at.
+/// Walks the two locations the client's `store_socket_for` can place a
+/// socket: state-root siblings (`<graph>.store.sock`) and the hashed temp
+/// root (`fno-store-<uid>/`, whose contents are ours by construction).
+pub fn store_socket_sweep(home: &AgentsHome, emitter: &EventEmitter) -> usize {
+    // SAFETY: getuid reads a per-process kernel value; it cannot fail or race.
+    let uid = unsafe { libc::getuid() };
+    store_socket_sweep_in(
+        home,
+        std::env::temp_dir().join(format!("fno-store-{uid}")),
+        emitter,
+    )
+}
+
+/// The parameterized core, so tests point the hashed root at their own tree
+/// instead of sweeping the machine's real one.
+pub fn store_socket_sweep_in(
+    home: &AgentsHome,
+    temp_root: std::path::PathBuf,
+    emitter: &EventEmitter,
+) -> usize {
+    let state_root = home.root().parent().unwrap_or(home.root()).to_path_buf();
+    let dirs = vec![state_root, temp_root.clone()];
+    let mut unlinked = 0;
+    for dir in dirs {
+        let in_temp_root = dir == temp_root;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let is_store_sock = if in_temp_root {
+                // The hashed root is ours by construction: every .sock in it
+                // is a store socket.
+                name.starts_with(".fno-store-") && name.ends_with(".sock")
+            } else {
+                name.ends_with(".store.sock")
+            };
+            if !is_store_sock {
+                continue;
+            }
+            let path = entry.path();
+            let dead = match std::os::unix::net::UnixStream::connect(&path) {
+                Ok(stream) => {
+                    // A live keeper is behind it: leave the socket alone.
+                    drop(stream);
+                    false
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ConnectionRefused
+                        || e.kind() == std::io::ErrorKind::NotFound
+                        // macOS answers ENOTSOCK when the path is not a
+                        // socket at all (Linux says ECONNREFUSED); either
+                        // way nothing can ever be listening behind it, so
+                        // the litter is safe to unlink.
+                        || e.raw_os_error() == Some(libc::ENOTSOCK) =>
+                {
+                    true
+                }
+                Err(_) => false, // unreadable is not dead; the reaper owns that verdict
+            };
+            if dead && std::fs::remove_file(&path).is_ok() {
+                unlinked += 1;
+                let _ = emitter.emit(
+                    "store_socket_unlinked",
+                    &json!({"path": path.to_string_lossy()}),
+                );
+            }
+        }
+    }
+    unlinked
 }
 
 /// One planned row mutation out of the sweep. `bound_socket`/`bound_session`
@@ -17843,6 +17930,43 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             apply_keeper_sweep_changes(&mut matching, &changes, "2026-09-01T00:00:00Z");
         assert!(superseded.is_empty(), "identity-held change applies");
         assert_eq!(matching.entries[0].status, AgentStatus::Exited);
+    }
+
+    #[test]
+    #[test]
+    fn store_socket_sweep_unlinks_the_dead_and_leaves_the_live() {
+        // Dead sockets (kill -9 leftovers) are unlinked from both walk
+        // locations; a socket with a live listener is left exactly as found.
+        let home = keeper_sweep_home("storesock");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let state_root = home.root().parent().unwrap().to_path_buf();
+        let temp_root = state_root.join("hashed");
+
+        // The true kill -9 leftover: a bound socket whose listener is gone
+        // (ECONNREFUSED), not a plain file.
+        let dead_sibling = state_root.join("graph.json.store.sock");
+        let corpse = std::os::unix::net::UnixListener::bind(&dead_sibling).unwrap();
+        drop(corpse);
+        let dead_hashed = temp_root.join(".fno-store-abcdef1234567890.sock");
+        std::fs::create_dir_all(&temp_root).unwrap();
+        // The hashed root is ours by construction, so its litter can also be
+        // a bare file (ENOTSOCK) - covered on this fixture.
+        std::fs::write(&dead_hashed, b"").unwrap();
+        // A live listener: a bound unix socket in the state root.
+        let live_sock = state_root.join("other.store.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&live_sock).unwrap();
+        // An unrelated file the state-root walk must never touch.
+        let bystander = state_root.join("graph.json");
+        std::fs::write(&bystander, b"{}").unwrap();
+
+        let unlinked = store_socket_sweep_in(&home, temp_root, &emitter);
+        assert_eq!(unlinked, 2, "both dead sockets unlinked");
+        assert!(!dead_sibling.exists());
+        assert!(!dead_hashed.exists());
+        assert!(live_sock.exists(), "a live listener is never unlinked");
+        assert!(bystander.exists(), "non-socket files are untouched");
+        drop(listener);
+        let _ = std::fs::remove_file(&live_sock);
     }
 
     #[test]

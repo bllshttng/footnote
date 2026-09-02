@@ -148,6 +148,25 @@ def test_a_thread_lane_keeper_is_recognized(monkeypatch) -> None:
     assert result.verdicts[4101][0] == kl.REAP
 
 
+def test_a_store_lane_keeper_is_recognized_and_reapable(monkeypatch) -> None:
+    """The store keeper declares `--store-keeper --sock --session` (x-b21e),
+    so the process-table walk finds it and the same three positive arms
+    decide: a dead socket, no claiming row, past grace -> REAP. This is the
+    reapability the 2026-09-01 seven-unreaped-keepers measurement demanded."""
+    monkeypatch.setattr(
+        kl,
+        "iter_processes",
+        lambda *a, **k: iter([_proc_row(4103, "/tmp/g.store.sock", lane_flag="--store-keeper")]),
+    )
+    monkeypatch.setattr(kl, "sock_state_of", lambda sock: kl.NO_LISTENER)
+    monkeypatch.setattr(kl, "REAP_MIN_AGE_S", 0.0)
+    result = kl.discover(now_s=time.time())
+    assert not result.broken
+    assert result.observations[0].lane == "store"
+    assert result.observations[0].session == "fk-9"
+    assert result.verdicts[4103][0] == kl.REAP
+
+
 def test_a_non_keeper_process_is_invisible(monkeypatch) -> None:
     row = _proc_row(4102, "/tmp/z.sock")
     row["cmdline"][0] = "/bin/cat"
