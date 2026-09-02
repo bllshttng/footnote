@@ -951,6 +951,80 @@ def test_append_session_record_accepts_utc_ended_at(tmp_path, monkeypatch, good_
     assert read_graph(g)[0]["sessions"][0]["ended_at"] == stored
 
 
+# -- merge_grant: the spawner's durable merge verdict on the do row --
+
+
+_GRANT = {
+    "approved": True, "source": "config",
+    "recorded_by": "spawner", "recorded_at": "2026-08-24T12:00:00Z",
+}
+
+
+def test_merge_grant_round_trips_on_the_row(tmp_path, monkeypatch):
+    """AC9-HP: a well-formed grant lands on the row verbatim, recorded_at normalized."""
+    g = _make_graph(tmp_path, [{"id": "ab-grant001", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import append_session_record, read_graph
+
+    append_session_record(g, "ab-grant001", phase="do", harness="claude",
+                          session_id="S", started_at="2026-08-24T11:59:00Z",
+                          merge_grant={**_GRANT, "recorded_at": "2026-08-24T12:00:00+00:00"})
+    grant = read_graph(g)[0]["sessions"][0]["merge_grant"]
+    assert grant == {**_GRANT, "recorded_at": "2026-08-24T12:00:00Z"}
+
+
+@pytest.mark.parametrize("bad,frag", [
+    ("not-a-dict", "must be a mapping"),
+    ({"approved": True, "source": "config", "recorded_by": "s",
+      "recorded_at": "2026-08-24T12:00:00Z", "extra": 1}, "unknown keys"),
+    ({**_GRANT, "approved": "yes"}, "approved must be a boolean"),
+    ({**_GRANT, "source": ""}, "source must be a non-empty string"),
+    ({**_GRANT, "recorded_by": None}, "recorded_by must be a non-empty string"),
+    ({**_GRANT, "recorded_at": "yesterday"}, "ISO-8601 timestamp"),
+    ({**_GRANT, "recorded_at": "2026-08-24T12:00:00+02:00"}, "UTC timestamp"),
+])
+def test_merge_grant_malformed_is_refused(tmp_path, monkeypatch, bad, frag):
+    """AC12-ERR: a grant the resolver could not have minted is refused at write
+    time, never stored to be guessed at resolve time."""
+    g = _make_graph(tmp_path, [{"id": "ab-grant002", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import append_session_record, read_graph
+
+    with pytest.raises(ValueError, match=frag):
+        append_session_record(g, "ab-grant002", phase="do", harness="claude",
+                              session_id="S", merge_grant=bad)
+    assert _node_sessions(g, "ab-grant002") == []
+
+
+def test_merge_grant_duplicate_fills_but_never_overwrites(tmp_path, monkeypatch):
+    """AC9-EDGE: a re-stamp cannot rewrite a recorded verdict in place. The
+    first receipt owns the row; a CHANGED posture belongs to a NEWER dispatch,
+    which is a NEWER row and wins at resolve time."""
+    g = _make_graph(tmp_path, [{"id": "ab-grant003", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import append_session_record, read_graph
+
+    refusal = {**_GRANT, "approved": False, "source": "no-merge-flag"}
+    append_session_record(g, "ab-grant003", phase="do", harness="claude",
+                          session_id="S", merge_grant=refusal)
+    append_session_record(g, "ab-grant003", phase="do", harness="claude",
+                          session_id="S", merge_grant=_GRANT)
+    rows = _node_sessions(g, "ab-grant003")
+    assert len(rows) == 1
+    assert rows[0]["merge_grant"] == refusal
+
+
+def test_merge_grant_absent_on_plain_rows(tmp_path, monkeypatch):
+    """Absence of the key stays the honest 'no grant was resolved at stamp time'."""
+    g = _make_graph(tmp_path, [{"id": "ab-grant004", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import append_session_record, read_graph
+
+    append_session_record(g, "ab-grant004", phase="do", harness="claude",
+                          session_id="S", ended_at="2026-08-24T12:00:00Z")
+    assert "merge_grant" not in read_graph(g)[0]["sessions"][0]
+
+
 # -- stamp_session_for_pr: resolve the unique PR-linked node (Locked Decision 9) --
 
 

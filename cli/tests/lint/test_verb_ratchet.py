@@ -47,13 +47,17 @@ def test_python_surface_recurses_to_real_leaves():
 
 
 def test_python_surface_captures_hidden_opts_on_every_leaf_kind():
-    # Plain-function leaves (doctor) and eager commands (review) carry hidden
+    # Plain-function leaves (doctor) and eager commands (agents) carry hidden
     # options a raw-function or bare-name enumeration would silently miss.
     py = vr.enumerate_python_leaves()
     doctor = [leaf for leaf in py if leaf == "doctor" or leaf.startswith("doctor ")]
     assert doctor and any("!--context-audit" in leaf for leaf in doctor)
+    agents = [leaf for leaf in py if leaf.startswith("agents ")]
+    assert agents and any("!--output-format" in leaf for leaf in agents)
+    # The review leaf enumerates bare: the sigma options it once hid are
+    # retired, and the refusal command carries no hidden flags.
     review = [leaf for leaf in py if leaf == "review" or leaf.startswith("review ")]
-    assert review and any("!--sigma-" in leaf for leaf in review)
+    assert review == ["review"]
 
 
 # --------------------------------------------------------------------------- #

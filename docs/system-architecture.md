@@ -42,7 +42,7 @@ footnote is structured as a layered plugin with six architectural layers:
 ```mermaid
 graph TB
     subgraph "Entry Points"
-        CMD["/target, /blueprint, /execute, /execute waves, /fix investigate, /fix, /review sigma, /think, /think what-if"]
+        CMD["/target, /blueprint, /execute, /execute waves, /fix investigate, /fix, /review, /think, /think what-if"]
     end
 
     subgraph "Skills Layer (25 skills)"
@@ -50,7 +50,7 @@ graph TB
         WF["Workflow Skills<br/>target, plan, execute, operator,<br/>megawalk"]
         DS["Design Skills<br/>think, what-if, audit"]
         EX["Execution Skills<br/>tdd, fix, debug, speculate"]
-        RV["Review Skills<br/>sigma-review, create-pr,<br/>check-pr"]
+        RV["Review Skills<br/>review, create-pr,<br/>check-pr"]
         UT["Utility Skills<br/>setup, codemap,<br/>ship-docs,<br/>git-worktrees"]
     end
 
@@ -109,7 +109,7 @@ sequenceDiagram
     participant P as /blueprint
     participant O as /execute waves or /execute
     participant A as Agents (target/archer)
-    participant CR as /review sigma
+    participant CR as /review
     participant GV as goal-verifier
     participant PR as /pr create
     participant SH as Stop Hook
@@ -467,7 +467,7 @@ The `target-adapters.yaml` maps each pipeline phase to provider-specific impleme
 | think | fno:think | (default) | (default) | (default) |
 | plan | fno:blueprint | (default) | (default) | (default) |
 | execute | fno:operator | native_subagents | custom_agents | sequential_fallback |
-| review | fno:sigma-review | code-reviewer | reviewer | in_session |
+| review | fno:review | (inline lane) | reviewer | in_session |
 | verify | goal-verifier | goal-verifier | verifier | in_session |
 | ship | fno:create-pr | (default) | (default) | (default) |
 
@@ -589,7 +589,7 @@ footnote/                               # Flat root (plugin.json at .claude-plug
         plan/SKILL.md                    # Implementation planning
         do/SKILL.md                      # Lightweight executor
         operator/SKILL.md               # Heavy orchestrator
-        sigma-review/SKILL.md            # Multi-agent review
+        review/SKILL.md                  # The owned review lane
         codemap/SKILL.md               # AST structural analysis
         megawalk/SKILL.md            # Multi-session orchestration
         ...

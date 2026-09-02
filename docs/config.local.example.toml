@@ -50,6 +50,8 @@ enabled = true           # already the code default; shown for awareness
 # peers = ["codex", "gemini"]                 # gate on one clean, head-pinned cross-model local verdict
 # peer_identity = "fno-peer-bot"              # optional: opt into legacy posted-review mode
 # peer_token_env = "GH_PEER_TOKEN"            # PAT env var for legacy posted-review mode only
-# reviewers = ["sigma"]                       # or gate on a LOCAL reviewer (sigma | /code-review |
+# reviewers = ["code-review"]                  # or gate on a LOCAL reviewer (code-review | peer |
 #                                             #   declare) via a head-pinned attestation - no App bot,
 #                                             #   no GitHub review object. Fits a solo/claude-only harness.
+# posture = "self_review"                     # the merge floor as one rung of the nine-rung ladder; see
+#                                             #   config.global.example.toml [review] for the vocabulary

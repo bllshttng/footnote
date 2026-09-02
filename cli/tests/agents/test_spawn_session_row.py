@@ -498,3 +498,104 @@ def test_reap_open_do_default_still_removes(graph_cli_home) -> None:
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["row_removed"] is True
     assert _node_rows() == []
+
+
+# ---------------------------------------------------------------------------
+# The spawner records the durable merge grant on the do row
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_do_row_records_refusal_without_config(workdir_claude, resolvable_uuid) -> None:
+    """No standing grant: the row still records an EXPLICIT approved=false, so
+    absence-on-a-row never has to be guessed at resolve time."""
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "bg",
+            "--node", NODE, "/fno:target resume",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    grant = _node_rows()[0]["merge_grant"]
+    assert grant["approved"] is False
+    assert grant["source"] == "none"
+    assert grant["recorded_by"]
+    assert grant["recorded_at"]
+
+
+def test_spawn_do_row_records_config_grant(workdir_claude, resolvable_uuid, monkeypatch) -> None:
+    """enabled=true + grant=dispatch: the row records the positive grant with
+    source naming the config."""
+    from fno.agents.cli import agents_app
+    from fno.config import AutoMergeBlock, load_settings
+
+    real = load_settings
+
+    def granted_settings():
+        return real().model_copy(
+            update={"auto_merge": AutoMergeBlock(enabled=True, grant="dispatch")}
+        )
+
+    monkeypatch.setattr("fno.config.load_settings", granted_settings)
+
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "bg",
+            "--node", NODE, "/fno:target resume",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    grant = _node_rows()[0]["merge_grant"]
+    assert grant["approved"] is True
+    assert grant["source"] == "config"
+
+
+def test_spawn_no_merge_flag_outranks_config_grant(workdir_claude, resolvable_uuid, monkeypatch) -> None:
+    """A /target message carrying --no-merge records approved=false with the
+    flag named as the source, even while the standing config would grant
+    (AC9-EDGE's newer refusal)."""
+    from fno.agents.cli import agents_app
+    from fno.config import AutoMergeBlock, load_settings
+
+    real = load_settings
+
+    def granted_settings():
+        return real().model_copy(
+            update={"auto_merge": AutoMergeBlock(enabled=True, grant="dispatch")}
+        )
+
+    monkeypatch.setattr("fno.config.load_settings", granted_settings)
+
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "do-worker", "-H", "claude", "--substrate", "bg",
+            "--node", NODE, "/fno:target resume --no-merge",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    grant = _node_rows()[0]["merge_grant"]
+    assert grant["approved"] is False
+    assert grant["source"] == "no-merge-flag"
+
+
+def test_spawn_review_row_carries_no_grant(workdir_claude, resolvable_uuid) -> None:
+    """A review-phase worker never merges; its row records no grant at all."""
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "bg",
+            "--node", NODE, "review this diff",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert "merge_grant" not in _node_rows()[0]

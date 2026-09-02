@@ -28,6 +28,8 @@ from typing import Literal, Mapping, Optional
 
 from fno.config import (
     _coerce_affirmative,
+    MIN_AUTOMERGE_RANK,
+    ResolvedReviewPosture,
     resolvable_reviewers,
     ReviewerDescriptor,
 )
@@ -643,6 +645,7 @@ def render_self_review_invocation(
     pr_number: Optional[int] = None,
     head_sha: Optional[str] = None,
     base_branch: Optional[str] = None,
+    raw_transport: bool = False,
 ) -> str:
     """Render the native review request, optionally pinned to one PR head.
 
@@ -658,7 +661,14 @@ def render_self_review_invocation(
     target from the ambient cwd."""
     try:
         h = harness or detect_session().harness
-        rendered = self_review_invocation(h, level=diff_review_level(project_root))
+        level = diff_review_level(project_root)
+        if raw_transport and h == "codex":
+            # Raw Codex review routing reaches the app-server review/start RPC,
+            # whose payload grammar requires the native slash verb. `$fno:review`
+            # is the skill spelling for a model prompt, not a raw RPC payload.
+            rendered = f"/review {level or '<level>'} --comment"
+        else:
+            rendered = self_review_invocation(h, level=level)
         target_fields = (pr_number, head_sha, base_branch)
         if any(value is not None for value in target_fields):
             if not all(value is not None for value in target_fields):
@@ -704,6 +714,26 @@ def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:
         f"run fno do target request-self-review --pr on the final pushed HEAD; "
         f"the fno lane (/fno:review) is the review producer on every harness "
         f"(reviewers resolved: {sorted(names) or ['none']})",
+    )
+
+
+def automerge_floor_refusal(resolved: "ResolvedReviewPosture") -> Optional[str]:
+    """The refusal when a merge grant arms below the posture floor, or None.
+
+    One wording, every merge-grant surface (the merge verb's manifest arm, the
+    durable-grant resolver, and the finalize arming gate): the rung that
+    failed, the rung the floor requires, and the exact remedy. Routing the
+    merge to a human is NOT a remedy - an unconstrained human merge is rung 1,
+    and the floor's whole point is that code always gets some review.
+    """
+    if not resolved.automerge_blocked:
+        return None
+    return (
+        f"auto-merge refused: review.posture is {resolved.value!r} "
+        f"(rank {resolved.rank}), below the merge floor "
+        f"self_review (rank {MIN_AUTOMERGE_RANK}). A merge needs at least one "
+        f"real final-head code review. Remedy: set a real review posture, "
+        f"e.g. `fno config set review.posture self_review --local`."
     )
 
 

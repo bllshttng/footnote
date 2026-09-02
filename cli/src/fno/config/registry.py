@@ -184,6 +184,11 @@ FIELD_META: dict[str, Meta] = {
         "advanced", "Effect class -> principal ids allowed to approve it; the key `*` matches every class. Absent or empty means nobody may approve, so a fresh install can inspect pending approvals but cannot decide one. Financial, signature, employment, and destructive classes stay denied regardless of what is listed here.",
     ),
     # --- config.review.* ---
+    "review.posture": Meta(
+        "always",
+        "How much review a code PR must have before it can merge, as one rung of a nine-step ladder (no_review | tests_pass | self_review | independent_review | github_review | peer_review | self_and_github | self_and_peer | self_github_and_peer). Default self_review: one real final-head review, author context allowed. Auto-merge (config grants, env grants, finalize, GitHub-native arming) refuses below self_review and names the remedy. Unset infers one visible posture from the legacy settings and prints the exact `fno config set review.posture <rung>` command that makes it permanent.",
+        question="How much review must a code PR have before it can merge? (default: self_review)",
+    ),
     "review.github_apps": Meta(
         "advanced", "GitHub App bot logins that must have reviewed before the ship gate goes green (the GATE). Legacy alias: required_bots.",
     ),
@@ -242,7 +247,7 @@ FIELD_META: dict[str, Meta] = {
     "review.agent_providers": Meta(
         "never", "Legacy alias for config.review.agent_harnesses (a straight rename); agent_harnesses wins if both are set.",
     ),
-    "review.agent_routes": Meta("never", "Opt-in per-agent harness/provider/model routes for named sigma sessions."),
+    "review.agent_routes": Meta("never", "RETIRED with the sigma panel: the review-posture ladder (config.review.posture) replaced per-agent review routing. An empty value is accepted; any configured route refuses with the replacement named, so remove the key."),
     "review.cross_model.enabled": Meta("advanced", "Enable cross-model (codex/gemini) second-opinion review."),
     # --- config.style.* ---
     "style.word_cap.mail": Meta(
@@ -426,8 +431,13 @@ FIELD_META: dict[str, Meta] = {
     ),
     # --- config.auto_merge.* ---
     "auto_merge.enabled": Meta(
-        "always", "Auto-merge a PR once external review passes.",
-        question="Auto-merge PRs after external review passes?",
+        "always",
+        "Auto-merge a PR once CI is green AND the review posture is satisfied. "
+        "There is no 'external review' step unless the review posture demands "
+        "one: with review.posture below self_review (the floor) the merge "
+        "refuses and names the rung to set. Read review.posture for what the "
+        "rung requires before enabling this.",
+        question="Auto-merge PRs once checks pass and the review posture is satisfied?",
     ),
     "auto_merge.grant": Meta(
         "advanced",
@@ -534,6 +544,28 @@ FIELD_META: dict[str, Meta] = {
     ),
     "routing.prefer_harness": Meta(
         "advanced", "The harness the prefer-harness objective favors. A tiebreaker WITHIN a band, never a reason to lower one.",
+    ),
+    # --- config.sideline.colors (x-1b35, the mux sideline lane color) ---
+    # Four axis tables, every key naming its axis. A bare key under
+    # [sideline.colors] is REFUSED (extra=forbid): it is ambiguous between
+    # account, route and model. Resolution is one fixed cascade, most
+    # specific first: a matching [[routing.models]] row carrying a `color`
+    # field (or named in sideline.colors.row), then model, then route, then
+    # harness, then the built-in table (route-keyed: zai green, openrouter
+    # magenta, openai blue, anthropic cyan). First declaration wins; no
+    # precedence knob. Values: ANSI-16 names, indexed(<n>), or #rrggbb; an
+    # unknown name falls through to the next cascade level.
+    "sideline.colors.harness": Meta(
+        "advanced", "Lane colors keyed by harness name (e.g. codex = \"cyan\"). The cascade's coarsest config key; see sideline.colors.route.",
+    ),
+    "sideline.colors.route": Meta(
+        "advanced", "Lane colors keyed by the vendor lane the row bills (route, else provider), e.g. openrouter = \"magenta\". The DEFAULT colored axis: it separates bills where harness and model each fail alone.",
+    ),
+    "sideline.colors.model": Meta(
+        "advanced", "Lane colors keyed by the recorded model string, quoted (\"glm-5.3-flash[1m]\" = \"green\"). Rendered verbatim; never imply an alias resolved.",
+    ),
+    "sideline.colors.row": Meta(
+        "advanced", "Lane colors keyed by a [[routing.models]] row NAME (row.zai-glm-flash = \"orange\"). A row's own `color` field outranks this table for the same row.",
     ),
     # --- config.model_routing.* (role-based per-spawn model routing, x-d2fe) ---
     "model_routing.enabled": Meta(

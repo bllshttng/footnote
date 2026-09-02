@@ -124,7 +124,7 @@ research
 restart
 resume
 retro
-review !--session !--sigma-current-head !--sigma-head !--sigma-node !--sigma-pr !--sigma-project !--sigma-reviews-root !--sigma-round !--sigma-scope-base !--sigma-scope-reason
+review
 roles
 route
 scoreboard

@@ -1158,6 +1158,19 @@ def set_cmd(
             _couple_pr_watch(bool(r.value))
             break
 
+    # The durable-grant coupling: a write leaving the standing dispatch grant
+    # armed implies a live watcher, because recorded receipts are only
+    # executable while something ticks. ONE-WAY on purpose: arming the grant
+    # activates the agent, but revoking it never unloads - pr_watch.enabled
+    # owns that switch and the watcher serves review dispatch beyond grants.
+    # Subordinate to autonomy.enabled: the panic switch outranks every
+    # spawner, and an autonomous merger must never be brought to life behind
+    # its back. Failure is loud and never reverts the config (doctor guards).
+    for r in results:
+        if r.key.endswith("auto_merge.enabled") or r.key.endswith("auto_merge.grant"):
+            _couple_grant_observer()
+            break
+
 
 def _check_overridden_writes(results: list) -> None:
     """Warn on stderr when a write succeeded on disk but a higher-precedence
@@ -1258,6 +1271,44 @@ def _couple_pr_watch(enabled: bool) -> None:
             )
         else:
             typer.echo(f"pr-watch: agent {outcome} (disabled).")
+
+
+def _couple_grant_observer() -> None:
+    """Activate the watcher when a config write leaves the dispatch grant armed.
+
+    The activation half of the grant-implies-observer coupling; revocation is
+    deliberately NOT coupled (see the call site). Best-effort and loud: an
+    activation failure never reverts the write, it just says so.
+    """
+    import sys
+
+    try:
+        from fno.config import load_settings
+
+        load_settings.cache_clear()
+        settings = load_settings()
+        am = settings.auto_merge
+        armed = bool(am.enabled) and str(am.grant or "none") == "dispatch"
+        if not armed or not settings.autonomy.enabled:
+            return
+        from fno.pr_watch.cli import ensure_watcher_activated
+
+        outcome = ensure_watcher_activated()
+        if outcome == "activated":
+            typer.echo(
+                "pr-watch: activated to serve the standing dispatch grant."
+            )
+        elif outcome == "already-running":
+            pass
+        else:
+            typer.echo(
+                f"pr-watch: WARNING dispatch grant armed but activation failed "
+                f"({outcome}); config stays. Run `fno do pr watch install` or "
+                "check `fno doctor`.",
+                file=sys.stderr,
+            )
+    except Exception as exc:  # noqa: BLE001 - coupling is best-effort
+        typer.echo(f"pr-watch grant coupling unavailable: {exc}", file=sys.stderr)
 
 
 @app.command("unset")

@@ -38,7 +38,7 @@ quote_valid_at_head() { # <quote> <file>
 }
 
 echo "== reference carries the carry-forward rules"
-for marker in 'carried from round <id>' 'dropped-unverifiable' 'emit no attestation from the incomplete round' 'Never read a failed inspection as an empty prior report'; do
+for marker in 'carried from round <id>' 'dropped-unverifiable' 'emit no attestation from the incomplete round' 'unreadable evidence, not an empty prior report'; do
   if grep -qF -- "$marker" "$LANE"; then pass "reference carries: $marker"; else fail "reference missing: $marker"; fi
 done
 

@@ -139,41 +139,31 @@ def test_review_agent_providers_scalar_fails_safe(
     assert settings.review.agent_providers == {}
 
 
-def test_review_agent_routes_parse_full_tuple(
+def test_review_agent_routes_empty_stays_legal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The key retired with the sigma panel it routed: absent or empty loads
+    clean, so a config that never used it is untouched."""
     settings = _load(
         tmp_path,
         monkeypatch,
-        "schema_version: 1\nconfig:\n  review:\n    agent_routes:\n"
-        "      code_reviewer:\n        harness: claude\n        provider: zai\n"
-        "        model: glm-5.2\n",
+        "schema_version: 1\nconfig:\n  review:\n    agent_routes: {}\n",
     )
-    route = settings.review.agent_routes["code_reviewer"]
-    assert route.harness == "claude"
-    assert route.provider == "zai"
-    assert route.model == "glm-5.2"
+    assert settings.review.agent_routes == {}
 
 
-@pytest.mark.parametrize(
-    "route_yaml",
-    [
-        "harness: codex\n        provider: zai\n        model: glm-5.2",
-        "harness: claude\n        provider: zai",
-        "harness: claude\n        provider: zai\n        model: ''",
-    ],
-)
-def test_review_agent_routes_reject_invalid_tuple_before_spawn(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    route_yaml: str,
+def test_review_agent_routes_configured_refuses_with_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    with pytest.raises(ValueError):
+    """AC8-ERR: a stale sigma routing config fails loud and names the rung
+    vocabulary as the replacement, never silently routing nothing."""
+    with pytest.raises(ValueError, match="review-posture"):
         _load(
             tmp_path,
             monkeypatch,
             "schema_version: 1\nconfig:\n  review:\n    agent_routes:\n"
-            f"      code_reviewer:\n        {route_yaml}\n",
+            "      code_reviewer:\n        harness: claude\n        provider: zai\n"
+            "        model: glm-5.2\n",
         )
 
 
@@ -787,3 +777,153 @@ def test_max_rounds_registry_row_documents_the_key() -> None:
     from fno.config.registry import FIELD_META
 
     assert "review.max_rounds" in FIELD_META
+
+
+# --- review.posture: the nine-rung ladder ---
+
+
+def _review(content: str):
+    """A ReviewBlock parsed from a review-block YAML fragment."""
+    from fno.config import ReviewBlock
+
+    import yaml as _yaml
+
+    return ReviewBlock(**_yaml.safe_load(content))
+
+
+def test_posture_defaults_unset_and_bare_install_is_default_floor() -> None:
+    """No posture leaf anywhere: the shipped default is self_review (rung 3),
+    source=default, and NO migration command (nothing was inferred)."""
+    from fno.config import resolve_review_posture
+
+    block = _review("{}")
+    assert block.posture is None
+    resolved = resolve_review_posture(block)
+    assert resolved.value == "self_review"
+    assert resolved.rank == 3
+    assert resolved.source == "default"
+    assert resolved.migration is None
+    assert not resolved.automerge_blocked
+
+
+def test_posture_explicit_leaf_wins() -> None:
+    from fno.config import resolve_review_posture
+
+    resolved = resolve_review_posture(_review("posture: peer_review\n"))
+    assert resolved.value == "peer_review"
+    assert resolved.rank == 6
+    assert resolved.source == "explicit"
+    assert resolved.migration is None
+
+
+def test_posture_typo_fails_loud() -> None:
+    """A misspelled rung must never read as unset (unset infers and can only
+    land on a real rung; a typo falling through would ship a different rung
+    than the operator wrote)."""
+    import pytest as _pytest
+
+    from fno.config import ReviewBlock
+
+    with _pytest.raises(Exception, match="not one of"):
+        ReviewBlock(posture="self_reviewk")
+
+
+def test_posture_legacy_github_app_infers_self_and_github() -> None:
+    """The shipped self_review_required floor composes with the App gate."""
+    from fno.config import resolve_review_posture
+
+    resolved = resolve_review_posture(
+        _review("github_apps: [chatgpt-codex-connector]\n")
+    )
+    assert resolved.value == "self_and_github"
+    assert resolved.source == "legacy"
+    assert resolved.migration == (
+        "fno config set review.posture self_and_github --local"
+    )
+    assert resolved.signals == ("github_apps", "self_review_required")
+
+
+def test_posture_legacy_declared_none_infers_tests_pass() -> None:
+    """An explicit [] gate is the declared PR+CI-only path: rung 2, not 1."""
+    from fno.config import resolve_review_posture
+
+    resolved = resolve_review_posture(_review("required_bots: []\n"))
+    assert resolved.value == "tests_pass"
+    assert resolved.source == "legacy"
+    assert resolved.automerge_blocked
+
+
+def test_posture_legacy_explicit_floor_optout_infers_no_review() -> None:
+    """An explicit self_review_required=false with no other lane read as
+    no-gate before the ladder existed; the inference preserves the opt-out
+    visibly instead of silently hardening it."""
+    from fno.config import resolve_review_posture
+
+    resolved = resolve_review_posture(_review("self_review_required: false\n"))
+    assert resolved.value == "no_review"
+    assert resolved.automerge_blocked
+    assert resolved.migration == "fno config set review.posture no_review --local"
+
+
+def test_posture_legacy_corroboration_infers_independent() -> None:
+    """Corroboration makes the author's own attestation read uncovered, so the
+    honest legacy reading is the rung demanding non-self evidence."""
+    from fno.config import resolve_review_posture
+
+    resolved = resolve_review_posture(_review("require_corroboration: true\n"))
+    assert resolved.value == "independent_review"
+    assert resolved.signals == ("require_corroboration",)
+
+
+def test_posture_legacy_peers_infers_self_and_peer() -> None:
+    from fno.config import resolve_review_posture
+
+    resolved = resolve_review_posture(_review("peers: [codex]\n"))
+    assert resolved.value == "self_and_peer"
+    assert resolved.migration == "fno config set review.posture self_and_peer --local"
+
+
+def test_posture_legacy_github_plus_peers_infers_top_rung() -> None:
+    from fno.config import resolve_review_posture
+
+    resolved = resolve_review_posture(
+        _review("github_apps: [codex]\npeers: [gemini]\n")
+    )
+    assert resolved.value == "self_github_and_peer"
+    assert resolved.rank == 9
+
+
+def test_posture_legacy_floor_off_downgrades_composition() -> None:
+    """An explicit floor opt-out keeps the inference from claiming a self lane
+    the config explicitly declined."""
+    from fno.config import resolve_review_posture
+
+    resolved = resolve_review_posture(
+        _review("github_apps: [codex]\nself_review_required: false\n")
+    )
+    assert resolved.value == "github_review"
+
+
+def test_posture_sigma_and_declare_never_count_as_a_self_lane() -> None:
+    """sigma is retired (refuses at init) and declare is a self-cert; neither
+    may make a legacy config LOOK reviewed."""
+    from fno.config import resolve_review_posture
+
+    resolved = resolve_review_posture(_review("reviewers: [sigma, declare]\n"))
+    assert resolved.value == "self_review"
+    assert resolved.source == "default"
+    assert "reviewers" not in resolved.signals
+
+
+def test_posture_descriptors_cover_nine_rungs_with_costs() -> None:
+    """The ladder is exactly nine rungs, ranked 1..9, each carrying the cost
+    string a receipt prints."""
+    from fno.config import REVIEW_POSTURES
+
+    assert len(REVIEW_POSTURES) == 9
+    ranks = sorted(d.rank for d in REVIEW_POSTURES.values())
+    assert ranks == list(range(1, 10))
+    for name, d in REVIEW_POSTURES.items():
+        assert d.value == name
+        assert d.cost
+        assert d.summary

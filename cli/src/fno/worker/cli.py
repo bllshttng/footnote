@@ -87,60 +87,19 @@ def ship(
 
 
 @cli.command()
-def review(
-    ctx: typer.Context,
-    session: Optional[str] = typer.Option(None, "--session-id", help="session id (overrides state file)"),
-    session_legacy: Optional[str] = typer.Option(
-        None, "--session", hidden=True, help="[DEPRECATED] alias for --session-id."
-    ),
-    state: Optional[Path] = typer.Option(None, "--state", help="path to target-state.md"),
-    diff: Optional[Path] = typer.Option(None, "--diff", help="path to diff file (default: git diff HEAD~1)"),
-    artifacts_dir: Optional[Path] = typer.Option(None, "--artifacts-dir", help="artifacts directory"),
-    no_cache: bool = typer.Option(False, "--no-cache", help="bypass cache read and write"),
-) -> None:
-    """Run internal sigma-review orchestrator and write quality_check artifact."""
-    import json
-    from fno._flag_aliases import merge_deprecated_alias
-    from fno.worker.review import (
-        ReviewInputError,
-        capture_review_input,
-        review as _review,
+def review() -> None:
+    """Refuse: the sigma panel is removed; the review lane is bare /fno:review.
+
+    No attestation is emitted here - a removed producer must never leave a
+    path that still writes gate evidence (AC8-ERR).
+    """
+    typer.secho(
+        "sigma is removed: the review is bare /fno:review (the fno review "
+        "lane), which runs inline on every harness and emits its own "
+        "attestation.",
+        err=True,
     )
-    from fno.review.locking import ReviewLockBusy
-
-    session = merge_deprecated_alias(
-        session, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
-    )
-
-    state_path = state or Path(".fno/target-state.md")
-
-    try:
-        reviewed_head, diff_context = capture_review_input(diff)
-    except ReviewInputError as exc:
-        typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(code=2)
-
-    try:
-        result = _review(
-            diff_context=diff_context,
-            state_path=state_path,
-            artifacts_dir=artifacts_dir,
-        session_id=session,
-        no_cache=no_cache,
-        git_sha_value=reviewed_head,
-    )
-    except ReviewLockBusy as exc:
-        typer.echo(f"error: review lock busy: {exc}", err=True)
-        raise typer.Exit(code=11)
-
-    if _json_mode(ctx):
-        typer.echo(json.dumps(result))
-    else:
-        typer.echo(f"action: {result['action']}")
-        typer.echo(f"verdict: {result.get('verdict', 'unknown')}")
-        typer.echo(f"findings: {result.get('findings', 0)}")
-        if result.get("cached"):
-            typer.echo("cached: true")
+    raise typer.Exit(code=2)
 
 
 @cli.command()

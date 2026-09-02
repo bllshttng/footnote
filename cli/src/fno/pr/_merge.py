@@ -1566,7 +1566,33 @@ def _overlaps(base_paths: List[str], pr_paths: List[str]) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
+def run_merge_for_durable_grant(pr_number: int, cwd: str) -> int:
+    """The watcher's internal durable-grant merge entry (returns run_merge's code).
+
+    Canonical ``run_merge`` with ``authority="durable_grant"``: the parked
+    worker's recorded receipt is the posture, and every other guard - hold,
+    in-flight review, incarnation fence, stub manifest, coverage, posture,
+    CI - runs identically. The exit code is the receipt's outcome: 0 merged,
+    2 held/skipped (retryable, no failure budget consumed), anything else a
+    failed attempt.
+    """
+    return run_merge([str(int(pr_number))], cwd=cwd, authority="durable_grant")
+
+
+def run_merge(
+    argv: Sequence[str], cwd: Optional[str] = None, *, authority: str = "manifest"
+) -> int:
+    """Merge one PR through the canonical guard chain.
+
+    ``authority`` selects where step (1) reads the merge posture from:
+    ``"manifest"`` (default) reads the calling session's ``target-state.md``
+    exactly as before; ``"durable_grant"`` reads the typed durable-grant
+    resolver (``_merge_grant``) instead - the path the PR watcher drives for a
+    worker that parked. It swaps ONLY the authority arm: the hold, in-flight
+    review, incarnation fence, stub-manifest, coverage, posture, and CI gates
+    below run identically for both callers, so a granted watcher lane can
+    never merge a PR the interactive lane would refuse (AC11-EDGE).
+    """
     repo = cwd or os.getcwd()
     pr_raw = ""
     for arg in argv:
@@ -1716,7 +1742,31 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     auto_merge = _load_auto_merge()
     state_file = os.path.join(_repo_state_dir(repo), "target-state.md")
     approved = _read_state_field(state_file, "auto_merge_approved")
-    if approved and not _approved_true(approved):
+    if authority == "durable_grant":
+        # The watcher's authority arm: the parked worker's
+        # manifest is gone, so posture reads from the durable receipt instead.
+        # The resolver is fail-closed in every arm (absence, malformed,
+        # ambiguity, a live holder, a flipped config switch all refuse), and
+        # it re-checks the standing config itself, so arm B below is a
+        # no-op on this path and is left shared rather than forked.
+        from fno.pr._merge_grant import resolve_durable_grant
+
+        grant_verdict = resolve_durable_grant(pr_number, repo)
+        if not grant_verdict.merge_eligible:
+            word = {
+                "refused": "skipped",
+                "absent": "skipped",
+                "held": "held",
+            }.get(grant_verdict.state, "blocked")
+            _emit(
+                pr_number,
+                word,
+                f"durable-grant merge not executable: {grant_verdict.reason}",
+                "none",
+                err=(word == "blocked"),
+            )
+            return 2
+    elif approved and not _approved_true(approved):
         # Name WHICH input set the posture (x-9d11): the operator's first
         # question on this refusal is "what layer said no". A pre-provenance
         # manifest carries no source; that reads as unknown, never a guess.
@@ -1765,6 +1815,36 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             "none",
             err=False,
         )
+        return 2
+
+    # (1b) The posture floor: every merge GRANT above (standing or per-run)
+    # may arm only at rung 3 or better. The durable arm already holds via the
+    # resolver's own floor check; this step covers the manifest arm, so no
+    # granted path merges a repo whose resolved posture is no_review or
+    # tests_pass. The refusal is the shared floor wording (one wording, every
+    # arming surface) and names the config remedy.
+    from pathlib import Path
+
+    from fno.config import load_settings_for_repo, resolve_review_posture
+    from fno.review_capability import automerge_floor_refusal
+
+    try:
+        floor_refusal = automerge_floor_refusal(
+            resolve_review_posture(load_settings_for_repo(Path(repo)).review)
+        )
+    except Exception as exc:  # noqa: BLE001 - a floor verdict fails closed
+        _emit(
+            pr_number,
+            "blocked",
+            f"merge floor unverifiable ({type(exc).__name__}: {exc}); refusing "
+            "to merge against an unreadable review posture. Remedy: repair the "
+            "config (`fno config doctor`) and re-run",
+            "none",
+            err=True,
+        )
+        return 2
+    if floor_refusal:
+        _emit(pr_number, "skipped", floor_refusal, "none", err=False)
         return 2
 
     # (2) gh must be installed.

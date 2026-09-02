@@ -396,8 +396,9 @@ def _render(board: dict, max_rows: int) -> None:
             typer.echo(f"  {q['name']:<20} UNREADABLE  {q['error']}")
         else:
             mark = "*" if q["actionable"] and q["count"] else " "
+            verb = f"  -> {q['verb']}" if q.get("verb") else ""
             note = f"  ({q['note']})" if q["note"] and q["count"] else ""
-            typer.echo(f" {mark}{q['name']:<20} {q['count']}{note}")
+            typer.echo(f" {mark}{q['name']:<20} {q['count']}{verb}{note}")
             for row in q["rows"][:max_rows]:
                 typer.echo(f"      {row}")
             hidden = max(0, len(q["rows"]) - max_rows)

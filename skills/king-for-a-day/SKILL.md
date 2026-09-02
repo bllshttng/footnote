@@ -282,8 +282,8 @@ fno backlog update <id> --plan-path <doc>
 ```
 
 Status is derived on read, never stored.
-Lifecycle facts win over plan-existence, so `blocked`, `deferred`, and `claimed` all outrank whatever the plan says, and a node with no plan is never autonomously dispatchable.
-The consequence: linking a plan to a node that is otherwise unencumbered is what makes it selectable.
+Lifecycle facts win over plan-existence, so `blocked`, `deferred`, and `claimed` all outrank whatever the plan says. A node with no plan is not target-dispatchable, but an idea node can enter the king board's `unplanned` queue for blueprinting.
+The consequence: linking a plan to a node that is otherwise unencumbered is what makes it selectable for target execution.
 That is the right move for the head of a wave and the wrong move for a design doc you are filing for later.
 Check what a link will actually do before you make it (`fno backlog get <id>` for the current state), and park anything that should not arm yet on `blocked` or `deferred`, or leave it unlinked.
 
@@ -314,7 +314,8 @@ Fifteen one-node spawns re-read the repo fifteen times. Each spawn is a process.
 
 Note what these two verbs do and do not do.
 They change *how* a dispatcher launches a node it has already selected; they do not make it selectable.
-A plan-less node is not selected by any autonomous path, so setting `--dispatch-verb` on one arms nothing by itself.
+The king board's `unplanned` queue selects an otherwise dispatchable plan-less idea for `/fno:blueprint`.
+Setting `--dispatch-verb` still governs how a dispatcher launches a node it has already selected; it does not select the node or replace the board's blueprint verb.
 Autonomous selection is not the only route: naming a node is itself the consent, so a plan-less node gets its think pass from an attended `/think <id>` or an explicit `fno agents spawn --name <n> "/think <id>"`.
 Set the dispatch verb anyway when you file the node, so the routing is already correct on the day it does become selectable.
 

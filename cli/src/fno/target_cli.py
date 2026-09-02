@@ -1136,6 +1136,7 @@ def request_self_review_cmd(
             pr_number=pr_number,
             head_sha=head_sha,
             base_branch=base_branch,
+            raw_transport=True,
         )
         receipt = _send_self_review_payload(
             payload=payload, harness=harness, session_id=session_id

@@ -651,13 +651,12 @@ This is Spec 1 of 4. Specs 2-4 extend the substrate with automation:
 
 - **Reactive failover (Spec 2, planned):** no automatic switching when a provider
   hits a rate limit or returns an error. You must run `fno config accounts use` manually.
-- **Per-agent sigma-review routing (Spec 3):** sigma-review subagents can be
-  routed to a different coding model (`codex` / `gemini`). The shipped path is
-  `config.review.cross_model` / `config.review.agent_harnesses`, resolved by the
-  same `provider_resolution` code both `fno do review` and `/review sigma`
-  (via `fno do review --print-providers`) dispatch through. The Spec-3 design below
-  named a `config.agents.<name>.provider` key that was never wired - use the
-  `config.review.*` keys instead.
+- **Per-agent sigma-review routing (Spec 3, retired):** the sigma panel that
+  Spec 3 routed is gone, and per-agent review routing retired with it. The
+  live cross-model surfaces are `/fno:review peer`, the `config.review.peers`
+  gate, and the review-posture ladder (`config.review.posture`); the panel-era
+  `config.review.*` routing keys no longer drive anything. The Spec-3 design
+  below named a `config.agents.<name>.provider` key that was never wired.
 - **Per-phase pinning + proactive round-robin (Spec 4, planned):** no automatic
   rotation across providers between phases. All phases in a session use the same
   active provider.
@@ -875,12 +874,13 @@ The sidecar feeds:
 
 ## Per-agent routing (Spec 3)
 
-> **Shipped path:** the wired cross-model routing for `/review sigma` and
-> `fno do review` uses `config.review.cross_model` / `config.review.agent_harnesses`
-> (see `skills/review/references/sigma.md` -> "Cross-Model Review Routing"), resolved by
-> `cli/src/fno/review/provider_resolution.py`. The `config.agents.<name>.provider`
-> schema described in the rest of this section is the original Spec-3 design and
-> was never wired; prefer the `config.review.*` keys.
+> **Retired with the panel:** the sigma panel this section routed no longer
+> exists, and the `config.review.*` routing keys below no longer drive
+> anything. The live cross-model surfaces are `/fno:review peer`, the
+> `config.review.peers` gate, and the review-posture ladder. The section is
+> kept as the design record. The `config.agents.<name>.provider` schema
+> described in the rest of this section is the original Spec-3 design and
+> was never wired.
 
 Spec 3 lets each sigma-review subagent run on a
 different provider, so model blind-spots cancel across reviews. The routing config

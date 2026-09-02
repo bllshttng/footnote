@@ -1267,3 +1267,51 @@ def test_liveness_old_tick_and_old_plist_still_dead():
     tick = _install()._parse_ts("2026-06-14T01:00:00Z")
     v = _live(last_tick_ts="2026-06-14T01:00:00Z", plist_mtime=tick, now=tick + 5000)
     assert v["verdict"] == "dead"
+
+
+# ---------------------------------------------------------------------------
+# The completed-merge-scan receipt on the status surface
+# ---------------------------------------------------------------------------
+
+
+def test_liveness_report_carries_interval_and_merge_scan(
+    tmp_path, monkeypatch
+):
+    """status --json answers the done-probe's whole question in one read:
+    interval_seconds for the freshness window, and the last tick's grant-scan
+    receipt with completed/completed_at."""
+    import types
+
+    m = _install()
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: types.SimpleNamespace(
+            pr_watch=types.SimpleNamespace(enabled=True, interval_seconds=600),
+        ),
+    )
+    monkeypatch.setattr(m, "_launchctl_is_loaded", lambda: True)
+    plist = tmp_path / "sh.fno.pr-watcher.plist"
+    plist.write_text("<plist/>", encoding="utf-8")
+    # An OLD plist: a fresh one trips the healthy-pending grace arm and the
+    # verdict this test pins never appears. The tick is 25s old against the
+    # real clock so the freshness arm reads healthy, not dead.
+    import os as _os
+    import time as _time
+    from datetime import datetime as _dt, timezone as _tz
+
+    now = _time.time()
+    _os.utime(plist, (now - 5000, now - 5000))
+    tick_iso = _dt.fromtimestamp(now - 25, _tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    report = m.liveness_report_live(
+        launch_agents_dir=tmp_path,
+        marks={"last_tick": tick_iso, "last_attempt": None,
+               "last_end": None, "completed_tick": None,
+               "merge_scan": {"completed": True, "completed_at": tick_iso,
+                              "eligible": 0, "attempted": 0}},
+    )
+    assert report["verdict"] == "healthy"
+    assert report["interval_seconds"] == 600
+    assert report["merge_scan"]["completed"] is True
+    assert report["merge_scan"]["completed_at"] == tick_iso
+    assert report["merge_scan"]["eligible"] == 0

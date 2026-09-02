@@ -102,3 +102,49 @@ def test_routing_model_block_defaults():
 def test_routing_block_tolerates_extra_keys():
     block = RoutingBlock.model_validate({"objective": "best-available", "future_key": 1})
     assert block.objective == "best-available"
+
+
+# --- config.sideline.colors (x-1b35) ----------------------------------------
+
+
+def test_sideline_colors_axis_tables_parse():
+    from fno.config import SidelineBlock
+
+    s = _settings({
+        "sideline": {"colors": {
+            "harness": {"codex": "cyan"},
+            "route": {"openrouter": "magenta"},
+            "model": {"glm-5.3-flash[1m]": "green"},
+            "row": {"zai-glm-flash": "orange"},
+        }},
+    })
+    c = s.sideline.colors
+    assert c.harness == {"codex": "cyan"}
+    assert c.route == {"openrouter": "magenta"}
+    assert c.model == {"glm-5.3-flash[1m]": "green"}
+    assert c.row == {"zai-glm-flash": "orange"}
+
+
+def test_sideline_colors_bare_key_is_refused():
+    """A bare key is ambiguous between account, route and model - the config
+    layer refuses it by name instead of guessing an axis."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as err:
+        _settings({"sideline": {"colors": {"zai": "green"}}})
+    assert "forbid" in str(err.value).lower() or "extra" in str(err.value).lower()
+
+
+def test_routing_model_row_carries_color():
+    """The routing row's `color` field is the cascade's most specific key."""
+    s = _settings({"routing": {"models": [
+        {"name": "zai-glm-flash", "harness": "claude",
+         "model": "glm-5.3-flash[1m]", "route": "zai", "color": "green"},
+    ]}})
+    assert s.routing.models[0].color == "green"
+
+
+def test_routing_model_row_color_defaults_empty():
+    row = RoutingModelBlock()
+    assert row.color == ""

@@ -618,7 +618,7 @@ SHORTHAND_POINTER = (
 _EAGER_COMMAND_HELP: dict[str, str] = {
     "help": "Show help for the root command or any subcommand.",
     "mux": "Mux pane control and the web console (forwards to the Rust front).",
-    "review": "Run the internal sigma-review panel on the current diff.",
+    "review": "Refuse: sigma is removed; the review lane is bare /fno:review (classify/resolve-level remain).",
     "version": "Show the installed fno version(s) (forwards to the Rust front).",
 }
 
@@ -789,59 +789,13 @@ def help_command(ctx: typer.Context) -> None:
     raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
-@app.command(
-    hidden=True,
-    help=(
-        "Run the internal sigma-review panel on the current diff.\n\n"
-        "Reads the diff from --diff path or `git diff HEAD~1` by default.\n"
-        "Resolves session_id from --session or target-state.md.\n\n"
-        "Exit codes:\n"
-        "  0   Reviewed (or cached hit)\n"
-        " 11   Review lock busy\n"
-        "130   SIGINT (workers reaped)\n"
-    ),
-)
+@app.command(hidden=True)
 def review(
     ctx: typer.Context,
     session: Optional[str] = typer.Option(
         None, "--session-id", help="session id (overrides state file)"
     ),
-    session_legacy: Optional[str] = typer.Option(
-        None, "--session", hidden=True, help="[DEPRECATED] alias for --session-id."
-    ),
     state: Optional[Path] = typer.Option(None, "--state", help="path to target-state.md"),
-    diff: Optional[Path] = typer.Option(
-        None, "--diff", help="path to diff file (default: git diff HEAD~1)"
-    ),
-    artifacts_dir: Optional[Path] = typer.Option(
-        None, "--artifacts-dir", help="artifacts directory"
-    ),
-    no_cache: bool = typer.Option(False, "--no-cache", help="bypass cache"),
-    print_providers: bool = typer.Option(
-        False,
-        "--print-providers",
-        help="Print the per-agent cross-model provider routing as JSON and exit "
-        "(no panel run). The /review sigma skill consumes this so it dispatches "
-        "the same providers as the fno do review panel.",
-    ),
-    publish_sigma: Optional[Path] = typer.Option(
-        None,
-        "--publish-sigma",
-        help="Publish a completed sigma report to the node-bound durable artifact.",
-    ),
-    inspect_sigma: bool = typer.Option(
-        False,
-        "--inspect-sigma",
-        help="Inspect the current node-bound sigma artifact without running a panel.",
-    ),
-    sigma_last_head: bool = typer.Option(
-        False,
-        "--sigma-last-head",
-        help=(
-            "Print the head the node's current sigma artifact was reviewed at "
-            "and exit. Empty stdout plus a non-zero exit means no prior head."
-        ),
-    ),
     assess_assurance: bool = typer.Option(
         False,
         "--assess-assurance",
@@ -857,74 +811,23 @@ def review(
         "--risk-surface",
         help="Named risk surface for --assess-assurance (repeatable).",
     ),
-    sigma_node: Optional[str] = typer.Option(None, "--sigma-node", hidden=True),
-    sigma_pr: Optional[int] = typer.Option(None, "--sigma-pr", hidden=True),
-    sigma_head: Optional[str] = typer.Option(None, "--sigma-head", hidden=True),
-    sigma_current_head: Optional[str] = typer.Option(None, "--sigma-current-head", hidden=True),
-    sigma_round: Optional[str] = typer.Option(None, "--sigma-round", hidden=True),
-    sigma_scope_base: Optional[str] = typer.Option(None, "--sigma-scope-base", hidden=True),
-    sigma_scope_reason: Optional[str] = typer.Option(None, "--sigma-scope-reason", hidden=True),
-    sigma_project: Optional[str] = typer.Option(None, "--sigma-project", hidden=True),
-    sigma_reviews_root: Optional[Path] = typer.Option(None, "--sigma-reviews-root", hidden=True),
-    json_output: bool = typer.Option(
-        False,
-        "--json",
-        "-J",
-        help="Output structured JSON to stdout.",
-    ),
 ) -> None:
-    """Run the internal sigma-review panel and write a quality_check artifact."""
+    """The sigma panel is removed; the review lane is bare /fno:review.
+
+    ``fno do review classify`` / ``resolve-level`` still run as subcommands of
+    this group (the lane's emit step depends on them). Every panel surface
+    refuses here: the replacement is named and NO attestation is emitted -
+    a removed producer must never leave a path that still writes gate
+    evidence (AC8-ERR).
+    """
     # Under ``fno do review`` this body is the GROUP's default callback, so a
     # subcommand invocation (``fno do review classify``) reaches this line
-    # first; step aside and let the subcommand run. The root ``fno review``
-    # command never carries a subcommand, so its behavior is unchanged.
+    # first; step aside and let the subcommand run.
     if getattr(ctx, "invoked_subcommand", None):
-        return
-    from fno._flag_aliases import merge_deprecated_alias
-    from fno.worker.review import (
-        ReviewInputError,
-        capture_review_input,
-        review as _review,
-    )
-    from fno.review.locking import ReviewLockBusy
-
-    session = merge_deprecated_alias(
-        session, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
-    )
-
-    ctx.ensure_object(dict)
-    if json_output:
-        ctx.obj["json"] = True
-
-    # --print-providers: resolve the per-agent routing via the SAME path the
-    # panel uses (worker.review.panel_provider_routing -> resolve_panel_providers)
-    # and exit before any diff/panel work. Empty {} means all-claude (cross-model
-    # OFF). This is the seam that lets /review sigma honor config.review.cross_model
-    # without a parallel resolver (US3, no drift).
-    if print_providers:
-        from fno.worker.review import panel_provider_routing, resolve_session_id
-
-        # Resolve the session the SAME way the panel run does (explicit flag,
-        # else target-state.md) so the implementer-provider read - which
-        # `alternate` routing excludes - matches; otherwise the skill could
-        # resolve a different provider than the panel (drift).
-        sid = resolve_session_id(session, state or Path(".fno/target-state.md"))
-        routing = {
-            agent: {
-                "provider": rp.provider,
-                "harness": rp.route.harness if rp.route else rp.provider,
-                "route_provider": rp.route.provider if rp.route else None,
-                "model": rp.route.model if rp.route else None,
-                "degraded": rp.degraded,
-                "reason": rp.reason,
-            }
-            for agent, rp in panel_provider_routing(sid).items()
-        }
-        typer.echo(json.dumps(routing))
         return
 
     if assess_assurance:
-        from fno.worker.review import resolve_session_id, review_assurance
+        from fno.review.policy import resolve_session_id, review_assurance
 
         sid = resolve_session_id(session, state or Path(".fno/target-state.md"))
         verdict = review_assurance(
@@ -935,155 +838,14 @@ def review(
         # an unsatisfied high-assurance policy must not read as a clean pass.
         raise typer.Exit(0 if verdict["satisfied"] else 3)
 
-    if publish_sigma is not None or inspect_sigma or sigma_last_head:
-        from fno.config import load_settings
-        from fno.paths import vault_root
-        from fno.review.artifact import (
-            inspect_sigma_artifact,
-            publish_sigma_artifact,
-            read_sigma_last_head,
-        )
-
-        project = sigma_project or load_settings().project.id
-        root = sigma_reviews_root
-        if root is None:
-            vault = vault_root()
-            root = vault / "internal" if vault is not None else None
-        missing = [
-            name
-            for name, value in (
-                ("--sigma-node", sigma_node),
-                ("--sigma-pr", sigma_pr),
-                ("config.project.id/--sigma-project", project),
-                ("configured vault/--sigma-reviews-root", root),
-            )
-            if value is None
-        ]
-        if publish_sigma is not None or inspect_sigma:
-            missing.extend(
-                name for name, value in (("--sigma-head", sigma_head),) if value is None
-            )
-        if publish_sigma is not None:
-            missing.extend(
-                name
-                for name, value in (
-                    ("--sigma-current-head", sigma_current_head),
-                    ("--sigma-round", sigma_round),
-                )
-                if value is None
-            )
-            if (sigma_scope_base is None) != (sigma_scope_reason is None):
-                missing.append(
-                    "--sigma-scope-base and --sigma-scope-reason (both or neither)"
-                )
-        if missing:
-            typer.echo(f"error: sigma artifact metadata missing: {', '.join(missing)}", err=True)
-            raise typer.Exit(code=2)
-
-        if sigma_last_head and (publish_sigma is not None or inspect_sigma):
-            typer.echo(
-                "error: --sigma-last-head cannot combine with --publish-sigma/--inspect-sigma",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-
-        if sigma_last_head:
-            assert root is not None and project is not None
-            assert sigma_node is not None and sigma_pr is not None
-            last_head = read_sigma_last_head(
-                reviews_root=root,
-                project=project,
-                node=sigma_node,
-                pr_number=sigma_pr,
-            )
-            if last_head.head_sha is None:
-                typer.echo(
-                    f"error: sigma last head unavailable: {last_head.reason}", err=True
-                )
-                raise typer.Exit(code=1)
-            # Bare SHA only: callers consume it as one token of shell input.
-            typer.echo(last_head.head_sha)
-            return
-
-        assert root is not None and project is not None
-        assert sigma_node is not None and sigma_pr is not None and sigma_head is not None
-        if publish_sigma is not None:
-            assert sigma_current_head is not None and sigma_round is not None
-            publish_result = publish_sigma_artifact(
-                publish_sigma,
-                reviews_root=root,
-                project=project,
-                node=sigma_node,
-                pr_number=sigma_pr,
-                reviewed_head=sigma_head,
-                current_head=sigma_current_head,
-                round_id=sigma_round,
-                scope_base=sigma_scope_base,
-                scope_reason=sigma_scope_reason,
-            )
-            payload = {
-                "published": publish_result.published,
-                "reason": publish_result.reason,
-                "path": str(publish_result.current_path),
-                "round_path": str(publish_result.round_path),
-                "head_sha": sigma_head,
-                "finding_count": publish_result.finding_count,
-            }
-        else:
-            inspected = inspect_sigma_artifact(
-                reviews_root=root,
-                project=project,
-                node=sigma_node,
-                pr_number=sigma_pr,
-                head_sha=sigma_head,
-            )
-            payload = {
-                "status": inspected.status,
-                "reason": inspected.reason,
-                "path": str(inspected.path),
-                "head_sha": sigma_head,
-                "finding_count": inspected.finding_count,
-                "review_round": inspected.round_id,
-                "body": inspected.body,
-            }
-        if json_output:
-            typer.echo(json.dumps(payload))
-        else:
-            for key, value in payload.items():
-                if key != "body":
-                    typer.echo(f"{key}: {value}")
-        return
-
-    state_path = state or Path(".fno/target-state.md")
-
-    try:
-        reviewed_head, diff_context = capture_review_input(diff)
-    except ReviewInputError as exc:
-        typer.echo(f"error: {exc}", err=True)
-        raise typer.Exit(code=2)
-
-    try:
-        review_result = _review(
-            diff_context=diff_context,
-            state_path=state_path,
-            artifacts_dir=artifacts_dir,
-            session_id=session,
-            no_cache=no_cache,
-            git_sha_value=reviewed_head,
-        )
-    except ReviewLockBusy as exc:
-        typer.echo(f"error: review lock busy: {exc}", err=True)
-        raise typer.Exit(code=11)
-
-    use_json = bool(ctx.obj and ctx.obj.get("json", False))
-    if use_json:
-        typer.echo(json.dumps(review_result))
-    else:
-        typer.echo(f"action: {review_result['action']}")
-        typer.echo(f"verdict: {review_result.get('verdict', 'unknown')}")
-        typer.echo(f"findings: {review_result.get('findings', 0)}")
-        if review_result.get("cached"):
-            typer.echo("cached: true")
+    typer.secho(
+        "sigma is removed: the review is bare /fno:review (the fno review lane), "
+        "which runs inline on every harness and emits its own attestation. "
+        "`fno do review classify` and `fno do review resolve-level` remain for "
+        "the lane's emit step.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
 
 
 def _run_rust_front(args: list[str]) -> None:

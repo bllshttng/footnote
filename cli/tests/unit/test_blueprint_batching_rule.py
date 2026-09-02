@@ -3,7 +3,7 @@
 Two checks, because they answer different questions.
 
 Static, blocking: the king skill's dispatch step states the number (a rule
-without a number is advice nobody applies), and the undispatched board queue
+without a number is advice nobody applies), and the unplanned board queue
 carries the batching note at the exact moment a king picks what to dispatch.
 Both assert a positive marker, never an absence.
 
@@ -60,7 +60,24 @@ def _node(node_id, priority="p0", plan_path="/plans/p.md"):
     return {"id": node_id, "priority": priority, "plan_path": plan_path}
 
 
-def test_undispatched_queue_carries_a_nonempty_note():
+def test_unplanned_queue_carries_a_nonempty_note():
+    inputs = BoardInputs(
+        ready=_ok([_node("x-1234", plan_path=None)]),
+        claims=_ok([]),
+        claimed_nodes=_ok([]),
+        holder_activity={},
+        prs=_ok([]),
+        outstanding=_ok({}),
+        needs=_ok([]),
+        lane=_ok([]),
+    )
+    board = build_board(inputs)
+    queue = next(q for q in board["queues"] if q["name"] == "unplanned")
+    assert queue["note"], "unplanned queue has no batching note"
+    assert "3" in queue["note"] or "three" in queue["note"].lower()
+
+
+def test_undispatched_queue_names_the_target_verb_not_blueprint():
     inputs = BoardInputs(
         ready=_ok([_node("x-1234")]),
         claims=_ok([]),
@@ -73,8 +90,8 @@ def test_undispatched_queue_carries_a_nonempty_note():
     )
     board = build_board(inputs)
     queue = next(q for q in board["queues"] if q["name"] == "undispatched")
-    assert queue["note"], "undispatched queue has no batching note"
-    assert "3" in queue["note"] or "three" in queue["note"].lower()
+    assert queue["verb"] == "/fno:target"
+    assert "blueprint" not in queue["note"].lower()
 
 
 @pytest.mark.skipif(not DISPATCH_PLAN.exists(), reason="behavioral artifact not present; run the eval first")

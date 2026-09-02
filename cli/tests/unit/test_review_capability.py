@@ -348,6 +348,21 @@ def test_render_self_review_invocation_names_the_final_pr_head_and_base():
     )
 
 
+def test_raw_codex_self_review_uses_native_slash_verb():
+    import fno.review_capability as rc
+
+    rendered = rc.render_self_review_invocation(
+        "codex",
+        project_root=None,
+        pr_number=123,
+        head_sha="abc1234",
+        base_branch="main",
+        raw_transport=True,
+    )
+
+    assert rendered == "/review <level> --comment 123 HEAD abc1234 against origin/main"
+
+
 def test_level_for_diff_sizes_from_both_dimensions():
     """Either dimension alone pushes the tier up: a tier holds only when both
     the file count and the line count sit inside its caps."""
@@ -454,3 +469,29 @@ def test_review_invocation_verb_prints_the_render(monkeypatch, tmp_path):
     portable = CliRunner().invoke(target_app, ["review-invocation", "--harness", "agy"])
     assert portable.exit_code == 0, portable.output
     assert portable.output.strip() == f"/review {sized} --comment"
+
+
+# --- automerge_floor_refusal: one wording, every arming surface ---
+
+
+def test_automerge_floor_refuses_below_rung_three() -> None:
+    """no_review names the failing rung, the floor, and the exact remedy."""
+    from fno.config import ReviewBlock, resolve_review_posture
+    from fno.review_capability import automerge_floor_refusal
+
+    resolved = resolve_review_posture(ReviewBlock(posture="no_review"))
+    msg = automerge_floor_refusal(resolved)
+    assert msg is not None
+    assert "no_review" in msg
+    assert "self_review" in msg
+    assert "fno config set review.posture self_review --local" in msg
+
+
+def test_automerge_floor_allows_rung_three_and_up() -> None:
+    from fno.config import ReviewBlock, resolve_review_posture
+    from fno.review_capability import automerge_floor_refusal
+
+    for value in ("self_review", "peer_review", "self_github_and_peer"):
+        assert automerge_floor_refusal(
+            resolve_review_posture(ReviewBlock(posture=value))
+        ) is None

@@ -310,7 +310,7 @@ fn default_true() -> bool {
 /// v62 (row detach): `Command::DetachPane { pane }` removes a live
 /// worker pane from the visible tree without changing the frozen client-session
 /// `ClientMsg::Detach` behavior.
-pub const PROTO_VERSION: u32 = 62;
+pub const PROTO_VERSION: u32 = 63;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1103,6 +1103,21 @@ pub enum Reach {
 pub struct AgentRow {
     pub squad: Option<u64>,
     pub name: String,
+    /// (v63, x-1b35) The harness axis, verbatim from the registry row
+    /// (`claude`, `codex`, ...). `None` for a bare pane. The lane-color
+    /// cascade's coarsest key; never the whole lane on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    /// (v63, x-1b35) The spawn-recorded model string, raw. A recorded value
+    /// may name an alias rather than a resolved id, so the client renders it
+    /// (as a deviation token) without implying resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// (v63, x-1b35) The vendor lane the row bills: the registry `route` key,
+    /// else the `provider` key. The bill-separating axis the default lane
+    /// color keys on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
     /// The mux pane hosting this agent in THIS session; `None` = a watch-only
     /// row (bg/headless/daemon-worker agents surfaced from the registry).
     pub pane_id: Option<u64>,
@@ -4089,6 +4104,36 @@ mod tests {
     }
 
     #[test]
+    fn agent_row_lane_axes_are_wire_tolerant_both_ways() {
+        // (x-1b35, v63) The three lane axes ride additive and
+        // skip-when-None. A pre-v63 row (no keys) decodes with all three
+        // None; a None row serializes without the keys; a filled row
+        // roundtrips verbatim.
+        let pre = r#"{"squad":null,"name":"old","pane_id":null,
+                      "badge":null,"reason":null,"exited":false}"#;
+        let row: AgentRow = serde_json::from_str(pre).unwrap();
+        assert_eq!(row.harness, None);
+        assert_eq!(row.model, None);
+        assert_eq!(row.route, None);
+        let encoded = serde_json::to_string(&row).unwrap();
+        assert!(!encoded.contains("harness"), "None axes stay off the wire");
+        assert!(
+            !encoded.contains("\"model\""),
+            "None model stays off the wire"
+        );
+        let filled_json = r#"{"squad":null,"name":"z","pane_id":null,
+                      "badge":null,"reason":null,"exited":false,
+                      "harness":"claude","model":"glm-5.3-flash[1m]","route":"zai"}"#;
+        let filled: AgentRow = serde_json::from_str(filled_json).unwrap();
+        assert_eq!(filled.harness.as_deref(), Some("claude"));
+        assert_eq!(filled.model.as_deref(), Some("glm-5.3-flash[1m]"));
+        assert_eq!(filled.route.as_deref(), Some("zai"));
+        let round: AgentRow =
+            serde_json::from_str(&serde_json::to_string(&filled).unwrap()).unwrap();
+        assert_eq!(round, filled);
+    }
+
+    #[test]
     fn agent_row_crown_fields_are_serde_default_tolerant_and_proto_version_is_pinned() {
         // The mux-crown wire lift bumped PROTO_VERSION 40 -> 41; the templates
         // node (x-c4d4) bumped it 41 -> 42; the US9 drag faces (x-d6a8) bumped it
@@ -4105,7 +4150,8 @@ mod tests {
         // bumps it 56 -> 57; the ThreadPane control verb (x-07c2) bumps it
         // 57 -> 58; the classified-lineage pair bumped it 58 -> 59; the
         // workspace-restore verb (x-7b5e) re-bumped it 59 -> 60 (second to
-        // merge); DND presence (x-7d02) bumps it 60 -> 61.
+        // merge); DND presence (x-7d02) bumps it 60 -> 61; the sideline lane
+        // axes (x-1b35) bump it 62 -> 63.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -4114,7 +4160,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 62);
+        assert_eq!(PROTO_VERSION, 63);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -4407,6 +4453,9 @@ mod tests {
                 area: (24, 80),
                 agents: vec![
                     AgentRow {
+                        harness: None,
+                        model: None,
+                        route: None,
                         reach: Reach::Locate,
                         spawned_by_session: None,
                         harness_session_id: None,
@@ -4455,6 +4504,9 @@ mod tests {
                         pane_activity: None,
                     },
                     AgentRow {
+                        harness: None,
+                        model: None,
+                        route: None,
                         reach: Reach::Locate,
                         spawned_by_session: None,
                         harness_session_id: None,

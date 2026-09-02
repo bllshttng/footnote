@@ -2287,6 +2287,29 @@ def _emit_human(
     elif pw_verdict == "healthy-pending":
         out(f"fno doctor: pr-watch installed, awaiting first tick ({pw.get('detail')}).")
 
+    # The durable-grant observer coupling: a standing dispatch grant
+    # (auto_merge.enabled true, grant=dispatch) implies a live watcher -
+    # recorded receipts are only executable while something ticks, so a
+    # grant whose observer is disabled or dead is not a quiet no-op, it is
+    # an UNREAD grant. Report observer_unavailable with the repair; the
+    # merge side stays silent on its own (nothing executes without the
+    # tick), which is exactly why the doctor must be the one to speak.
+    try:
+        from fno.config import load_settings
+
+        _am = load_settings().auto_merge
+        _standing_grant = bool(_am.enabled) and str(_am.grant or "none") == "dispatch"
+    except Exception:  # noqa: BLE001 - an unreadable config reads no grant
+        _standing_grant = False
+    if _standing_grant and pw_verdict in ("disabled", "dead"):
+        _fix = pw.get("fix") or "fno config set pr_watch.enabled true"
+        out(
+            "fno doctor: observer_unavailable - auto_merge.grant=dispatch is "
+            f"standing, but the PR watcher is {pw_verdict} ({pw.get('detail')}); "
+            f"recorded grants will not execute. Run `{_fix}`, then verify with "
+            "`fno do pr watch status`."
+        )
+
     # Open-file soft limit (advisory): name BOTH numbers and which launch
     # context each belongs to, or the warning repeats the trap it diagnoses.
     fd = result.get("fd_limit") or {}

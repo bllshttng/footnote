@@ -707,6 +707,13 @@ def _run_tick(
 
     acted = 0
     skipped = 0
+    # The merge-scan receipt (the completed tick's positive proof the grant
+    # scan RAN): eligible = OPEN candidates whose durable verdict granted,
+    # attempted = executions actually reserved. Integers, zero fine - a scan
+    # that saw nothing is still a scan that ran, which is the fact AC12-HP
+    # needs and a bare absence cannot prove.
+    merge_scan_eligible = 0
+    merge_scan_attempted = 0
 
     # GraphQL budget preflight. The dispatch pass below spends gh pr view,
     # which bills the shared per-user GraphQL pool by point cost; with the
@@ -854,6 +861,18 @@ def _run_tick(
                 except Exception as exc:
                     log.warning("pr-watch: post_merge_readiness failed for PR #%d: %s", pr, exc)
 
+            # The durable-grant arm (OPEN PRs only): one typed resolve per
+            # candidate per tick - graph, claim liveness, and standing config
+            # are all local reads. The verdict's grant fields ride the
+            # execution events for attribution.
+            grant_verdict = None
+            if obs.state == "OPEN":
+                from fno.pr._merge_grant import resolve_durable_grant
+
+                grant_verdict = resolve_durable_grant(pr, str(cand.repo_dir))
+                if grant_verdict.merge_eligible:
+                    merge_scan_eligible += 1
+
             decision = decide(
                 obs,
                 watermark=entry,
@@ -861,6 +880,9 @@ def _run_tick(
                 merge_ready=merge_ready,
                 now_iso=now_iso,
                 max_age_days=max_age_days,
+                durable_grant_eligible=bool(
+                    grant_verdict is not None and grant_verdict.merge_eligible
+                ),
             )
 
             if decision.kind == "noop":
@@ -979,6 +1001,79 @@ def _run_tick(
                         except Exception as exc:
                             log.warning("pr-watch: notify failed: %s", exc)
 
+            elif decision.kind == "execute":
+                # The parked worker hands execution to the watcher: one
+                # attributable attempt under the per-PR lock held above. The
+                # canonical merge core owns every safety judgment (hold,
+                # in-flight review, coverage, posture, CI); this branch only
+                # attributes the attempt and classifies its verdict.
+                grant_fields: dict[str, Any] = {}
+                if grant_verdict is not None and isinstance(grant_verdict.grant, dict):
+                    grant_fields = {
+                        "source": grant_verdict.grant.get("source"),
+                        "recorded_by": grant_verdict.grant.get("recorded_by"),
+                        "recorded_at": grant_verdict.grant.get("recorded_at"),
+                    }
+                emit(
+                    "merge_grant_execution",
+                    {"phase": "reserved", "actor": "pr-watch", "pr": pr,
+                     "node_id": cand.node_id, **grant_fields},
+                )
+                merge_scan_attempted += 1
+                from fno.pr._merge import run_merge_for_durable_grant
+
+                try:
+                    rc = run_merge_for_durable_grant(pr, str(cand.repo_dir))
+                except Exception as exc:  # noqa: BLE001 - a crash is a failed attempt
+                    log.warning("pr-watch: durable-grant merge for PR #%d crashed: %s", pr, exc)
+                    rc = 1
+                if rc == 0:
+                    acted += 1
+                    entry["merge_dispatched"] = True
+                    entry["retries"] = 0
+                    store.set(key, entry)
+                    emit(
+                        "merge_grant_execution",
+                        {"phase": "executed", "actor": "pr-watch", "pr": pr,
+                         "node_id": cand.node_id, **grant_fields},
+                    )
+                elif rc == 2:
+                    # Held or skipped by a canonical guard: retryable, and it
+                    # consumes no failure budget - the refusing guard is a
+                    # state to wait out (CI, review in flight), not a watcher
+                    # defect. The next tick re-resolves and re-attempts.
+                    store.set(key, entry)
+                    emit(
+                        "merge_grant_execution",
+                        {"phase": "held", "actor": "pr-watch", "pr": pr,
+                         "node_id": cand.node_id, **grant_fields},
+                    )
+                else:
+                    try:
+                        retries = int(entry.get("retries") or 0) + 1
+                    except (TypeError, ValueError):
+                        retries = 1
+                    entry["retries"] = retries
+                    store.set(key, entry)
+                    emit(
+                        "merge_grant_execution",
+                        {"phase": "failed", "actor": "pr-watch", "pr": pr,
+                         "node_id": cand.node_id, "exit_code": rc, **grant_fields},
+                    )
+                    if retries >= max_retries:
+                        entry["parked"] = "retries-exhausted"
+                        store.set(key, entry)
+                        emit("pr_watch_parked", {"pr": pr, "reason": "retries-exhausted"})
+                        try:
+                            notify(
+                                f"PR #{pr} ({slug}) parked after {retries} failed "
+                                "durable-grant merge attempts",
+                                pr=pr,
+                                repo_slug=slug,
+                            )
+                        except Exception as exc:
+                            log.warning("pr-watch: notify failed: %s", exc)
+
             entry["last_seen_state"] = obs.state
             if obs.state in ("MERGED", "CLOSED"):
                 _drop_cached_terminal(state, dropped, key, obs.state)
@@ -1013,6 +1108,16 @@ def _run_tick(
         "failed": sorted(failed),
         "sweep_failures": sweep_failures,
         "listing_api": "rest",
+        # The grant scan's positive receipt: this tick LOOKED, and here is
+        # what it saw. completed=true always - it rides a completed sweep,
+        # and the quota-skip arm above returns before here precisely so a
+        # skipped tick mints no scan receipt (AC12-HP: counts are coherent,
+        # integer, and include zero).
+        "merge_scan": {
+            "completed": True,
+            "eligible": merge_scan_eligible,
+            "attempted": merge_scan_attempted,
+        },
     }
     _emit_tick_receipt(emit, receipt)
     return TickResult(

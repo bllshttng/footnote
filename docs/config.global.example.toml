@@ -41,10 +41,17 @@ optional_apps = ["chatgpt-codex-connector"]
 # Setting peer_identity opts into the legacy posted-review carrier:
 # peer_identity = "fno-peer-bot"
 # peer_token_env = "GH_PEER_TOKEN"
+# posture: how much review a code PR must have before it can merge, one rung
+# of a nine-step ladder (no_review | tests_pass | self_review | independent_review |
+# github_review | peer_review | self_and_github | self_and_peer | self_github_and_peer).
+# Default self_review: one real final-head review, author context allowed. Auto-merge
+# refuses below that floor and names the remedy. Unset infers from the legacy
+# settings above and prints the exact `fno config set review.posture <rung>` command.
+# posture = "self_review"
 # reviewers: local reviewers that produce NO GitHub review - loop-check reads a
 # head-pinned attestation event instead. Lets a solo/claude-only harness (no App
-# bot) express a real gate. One of sigma | /code-review | declare. Uncomment:
-# reviewers = ["sigma"]
+# bot) express a real gate. One of code-review | peer | declare. Uncomment:
+# reviewers = ["code-review"]
 
 # Worktree placement for every repo on this machine: <base>/<repo>/<name>.
 # Leave unset for the harness-native <repo>/.claude/worktrees/<name>.

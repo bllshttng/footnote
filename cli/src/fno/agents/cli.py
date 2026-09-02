@@ -1007,6 +1007,45 @@ def cmd_court(
 _REVIEW_VERB_PREFIXES = ("/code-review", "/review", "/fno:review")
 
 
+def _resolve_spawn_merge_grant(message: str) -> dict:
+    """The spawner's OWN merge-grant verdict for a do-phase worker.
+
+    Explicit refusal first (the message carries --no-merge), then the standing
+    config: auto_merge enabled with grant=dispatch grants, and every other
+    shape records an explicit false anyway. Recording the false - rather than
+    omitting the grant - is what makes AC9-EDGE work (a newer refusal outranks
+    an older grant at resolve time, because the newest RECEIPT wins) and keeps
+    the verdict the spawner's own observation: a worker can never mint or
+    rewrite it, and absence on a row this old predating the field reads as
+    "nobody resolved", never as a grant.
+    """
+    from datetime import datetime, timezone
+
+    from fno.agents.harness_map import message_carries_no_merge
+    from fno.config import load_settings
+
+    recorded_by = (os.environ.get("FNO_AGENT_SELF") or "").strip() or "spawn"
+    recorded_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if message_carries_no_merge(message):
+        return {
+            "approved": False,
+            "source": "no-merge-flag",
+            "recorded_by": recorded_by,
+            "recorded_at": recorded_at,
+        }
+    try:
+        auto_merge = load_settings().auto_merge
+        granted = bool(auto_merge.enabled) and str(auto_merge.grant or "none") == "dispatch"
+    except Exception:  # noqa: BLE001 - an unreadable config never grants
+        granted = False
+    return {
+        "approved": granted,
+        "source": "config" if granted else "none",
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+    }
+
+
 def _stamp_spawned_session_row(
     *,
     node: "str | None",
@@ -1106,11 +1145,15 @@ def _stamp_spawned_session_row(
         return
 
     started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # The durable grant rides only a do-phase row: review/think workers never
+    # merge, and a grant on their rows would be a receipt nobody should read.
+    merge_grant = _resolve_spawn_merge_grant(message) if phase == "do" else None
     try:
         found, _added = append_session_record(
             graph_json(), node_id, phase=phase,
             harness=harness, session_id=session_id, started_at=started,
             effort=worker_effort,
+            merge_grant=merge_grant,
         )
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the spawn
         print(f"spawn: session row open skipped for {node_id}: {exc}", file=sys.stderr)

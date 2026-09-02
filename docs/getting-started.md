@@ -160,7 +160,7 @@ The PR has a lifecycle, and there's a verb for each step. Full walkthrough: [the
 
 | Command | What it's for |
 |---------|---------------|
-| `/fno:review` | Review a diff before you push. Default `sigma` is the internal six-agent panel; `peer` gets a cross-model second opinion (e.g. have Codex review Claude's code). |
+| `/fno:review` | Review a diff before you push. Default is the owned lane: one inline reviewer that emits a head-pinned attestation; `peer` gets a cross-model second opinion (e.g. have Codex review Claude's code). |
 | `/fno:pr create` | Open a PR from your commits (a Haiku worker writes the description). |
 | `/fno:pr check` | Poll for the external review bot, then implement its feedback. |
 | `/fno:pr merged` | The post-merge ritual: reconcile the backlog, run the retro, and file any follow-up work. Run it after a PR merges. |

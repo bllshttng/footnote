@@ -37,6 +37,17 @@ def _seed_row(
     data = {"pr": pr, "coverage": coverage, "head_sha": head}
     if review_state is not None:
         data["review_state"] = review_state
+    if coverage == "covered":
+        # A posture-capable producer resolves a rung on every covered row;
+        # without the key the gate treats the row as pre-posture evidence and
+        # demands a recompute, which is not what these tests are about.
+        data["review_posture"] = {
+            "posture": "self_review",
+            "rank": 3,
+            "source": "legacy",
+            "posture_satisfied": True,
+            "posture_gaps": [],
+        }
     if coverage in ("covered", "uncovered"):
         data["reviewed_count"] = count
     if self_attested is not None:
