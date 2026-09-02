@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from datetime import date as _date
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import Any, Optional, TypedDict
 
 # Slug must be filesystem/URL-safe so `#group-<slug>` is a stable plan fragment.
 GROUP_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
@@ -270,6 +270,140 @@ def extract_why_digest(doc_text: str) -> tuple[str, Optional[str]]:
     )
 
 
+def _yaml_str(value: str) -> str:
+    """A double-quoted YAML scalar, safe for a title carrying a colon or quote."""
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def wave_numbers(spec: str) -> list[int]:
+    """The wave numbers a group's ``waves`` range string names.
+
+    Accepts ``4``, ``1-2``, ``1,3`` and ``1-2,4``, with any spacing. Returns an
+    empty list when the string names nothing parseable, which the caller reads
+    as "no slice" rather than as wave zero.
+    """
+    out: list[int] = []
+    for part in str(spec or "").replace(" ", "").split(","):
+        if not part:
+            continue
+        if "-" in part:
+            lo, _, hi = part.partition("-")
+            if lo.isdigit() and hi.isdigit() and int(lo) <= int(hi):
+                out.extend(range(int(lo), int(hi) + 1))
+            continue
+        if part.isdigit():
+            out.append(int(part))
+    return sorted(set(out))
+
+
+def epic_strategy_from_doc(text: str) -> Optional[dict[str, Any]]:
+    """The epic doc's parsed ``## Execution Strategy``, or None.
+
+    Scoped to the section body, never the whole doc: ``parse_execution_strategy``
+    takes the FIRST fenced YAML block it is given, and an epic carries earlier
+    fences (kill_criteria, examples) that would parse as a strategy with no
+    waves. Returns None on a missing section or malformed YAML, which the
+    scaffold reports by name rather than treating as an empty strategy.
+    """
+    match = re.search(
+        r"^##[ \t]+Execution Strategy[ \t]*$\n(.*?)(?=^##[ \t]|\Z)",
+        text,
+        re.DOTALL | re.MULTILINE,
+    )
+    if not match:
+        return None
+    from fno.plan.brief import BriefParseError, parse_execution_strategy
+
+    try:
+        return parse_execution_strategy(match.group(1))
+    except BriefParseError:
+        return None
+
+
+def epic_wave_slice(
+    epic_strategy: dict[str, Any] | None, waves_spec: str
+) -> tuple[str, Optional[str]]:
+    """The ``## Execution Strategy`` body for one group's slice of the epic.
+
+    Returns ``(block, None)`` when the epic's parsed strategy yields at least
+    one wave in range. Returns ``("", reason)`` otherwise, and the caller emits
+    the reason instead of the section. An empty strategy block measures width 0
+    and reads as a narrow plan rather than a missing one, so the absent case
+    must never emit the heading.
+
+    Wave numbers and task ids keep the epic's numbering, so a child task traces
+    back to the wave it came from. A ``blocked_by`` naming a task outside the
+    slice is dropped: that blocker ships in a sibling child's PR, so within this
+    child the task is unblocked. Keeping the dangling id would make the task
+    graph unsolvable and refuse a width measurement outright.
+    """
+    if not epic_strategy:
+        return "", "the epic doc has no parsable execution strategy section"
+    wanted = wave_numbers(waves_spec)
+    if not wanted:
+        return "", f"the group's wave range {waves_spec or '(unset)'!r} names no wave number"
+
+    waves = [
+        w for w in (epic_strategy.get("waves") or [])
+        if isinstance(w, dict) and _wave_index(w) in wanted
+    ]
+    if not waves:
+        return "", (
+            f"the epic's execution strategy declares no wave in range "
+            f"{waves_spec}"
+        )
+
+    sliced_ids: list[str] = []
+    for w in waves:
+        for tid in w.get("tasks") or []:
+            if str(tid) not in sliced_ids:
+                sliced_ids.append(str(tid))
+    by_id = {str(t.get("id", "")): t for t in (epic_strategy.get("tasks") or [])}
+
+    lines = ["```yaml", f"execution_mode: {epic_strategy.get('execution_mode') or 'sequential'}", "waves:"]
+    for w in waves:
+        lines.append(f"  - wave: {_wave_index(w)}")
+        lines.append(f"    mode: {w.get('mode') or 'sequential'}")
+        if w.get("name"):
+            lines.append(f"    name: {_yaml_str(w['name'])}")
+        if w.get("difficulty"):
+            lines.append(f"    difficulty: {w['difficulty']}")
+        ids = [str(t) for t in (w.get("tasks") or [])]
+        lines.append("    tasks: [" + ", ".join(f"'{i}'" for i in ids) + "]")
+
+    lines.append("tasks:")
+    for tid in sliced_ids:
+        t = by_id.get(tid)
+        if t is None:
+            continue
+        lines.append(f"  - id: '{tid}'")
+        lines.append(f"    title: {_yaml_str(t.get('title') or tid)}")
+        surface = [s for s in (t.get("surface") or []) if str(s).strip()]
+        lines.append("    surface: [" + ", ".join(_yaml_str(s) for s in surface) + "]")
+        if t.get("verify"):
+            lines.append(f"    verify: {_yaml_str(t['verify'])}")
+        acceptance = [a for a in (t.get("acceptance") or []) if str(a).strip()]
+        if acceptance:
+            lines.append("    acceptance:")
+            lines.extend(f"      - {_yaml_str(a)}" for a in acceptance)
+        if t.get("blocked_by_declared"):
+            kept = [b for b in (t.get("blocked_by") or []) if str(b) in sliced_ids]
+            lines.append("    blocked_by: [" + ", ".join(f"'{b}'" for b in kept) + "]")
+    lines.append("```")
+    return "\n".join(lines), None
+
+
+def _wave_index(wave: dict) -> Optional[int]:
+    """A wave entry's number, or None when it carries no integral ``wave:``."""
+    raw = wave.get("wave")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.strip().isdigit():
+        return int(raw.strip())
+    return None
+
 def scaffold_separate_plan(
     group: NormalizedGroup,
     epic_id: str,
@@ -277,6 +411,7 @@ def scaffold_separate_plan(
     why_digest: str = "",
     adopted: list[tuple[str, str]] | None = None,
     created: str | None = None,
+    epic_strategy: dict[str, Any] | None = None,
 ) -> str:
     """A self-contained quick-plan stub for one group child.
 
@@ -293,6 +428,15 @@ def scaffold_separate_plan(
     folded group's plan actually addresses every commitment it absorbed, because
     both nodes close on merge either way - the checklist is the one mitigation.
     Empty/None is byte-identical to the pre-adopt scaffold (AC10).
+
+    ``epic_strategy`` is the epic's parsed ``## Execution Strategy``. When it
+    carries a wave in this group's range, the child is born holding that slice,
+    preserving each task's ``surface`` and each wave's ``difficulty`` band. The
+    epic already computed that partition to build the groups, and minting a
+    child unable to hold it discards the answer. When no slice resolves, the
+    child gets the pre-change section list plus a comment naming why, never an
+    empty strategy block: an empty one measures width 0 and reads as a narrow
+    plan rather than a missing one.
 
     ``idea`` replaced the earlier ``stub`` spelling: ``stub`` was in no status
     vocabulary, so every readiness gate classified a linked scaffold as ``ready``
@@ -322,6 +466,14 @@ def scaffold_separate_plan(
         )
     else:
         coverage_block = ""
+    slice_yaml, slice_why = epic_wave_slice(epic_strategy, group["waves"])
+    if slice_yaml:
+        strategy_block = f"\n## Execution Strategy\n\n{slice_yaml}\n"
+    else:
+        strategy_block = (
+            f"\n<!-- No execution strategy carried from the epic: {slice_why}. "
+            f"Write one here, or this child measures no width and join refuses it. -->\n"
+        )
     return (
         f'---\n'
         f'title: "{yaml_title}"\n'
@@ -353,6 +505,7 @@ def scaffold_separate_plan(
         f'<!-- From the epic\'s File Ownership Map: the files this group owns. -->\n\n'
         f'## Verification\n\n'
         f'<!-- The checks that prove this group\'s slice works. -->\n'
+        f'{strategy_block}'
     )
 
 
