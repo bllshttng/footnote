@@ -27,6 +27,13 @@ def test_superseded_candidate_is_visible_to_the_consolidation_gate() -> None:
     }
 
 
+def test_live_candidate_shape_stays_unchanged() -> None:
+    assert _node_summary({"id": "x-live", "status": "ready"}) == {
+        "id": "x-live",
+        "status": "ready",
+    }
+
+
 def test_every_decisive_field_has_exactly_one_claimed_behavioral_test() -> None:
     try:
         decisive = importlib.import_module("fno.agents.decisive")

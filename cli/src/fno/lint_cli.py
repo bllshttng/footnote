@@ -1496,6 +1496,25 @@ def _field_names(block: Any) -> set[str]:
     }
 
 
+_KNOWN_GAP_OWNER_RE = re.compile(r"\b[a-z][a-z0-9]*-[0-9a-f]+\b")
+
+
+def _valid_known_gaps(block: Any) -> dict[str, str]:
+    if not isinstance(block, dict):
+        return {}
+    valid: dict[str, str] = {}
+    for field, detail in block.items():
+        if not isinstance(field, str) or field.startswith("$") or not isinstance(detail, str):
+            continue
+        owner = _KNOWN_GAP_OWNER_RE.search(detail)
+        if owner is None or "\n" in detail:
+            continue
+        defect = (detail[: owner.start()] + detail[owner.end() :]).strip(" :-")
+        if defect:
+            valid[field] = detail
+    return valid
+
+
 def _source_field_coverage(repo_root: Path) -> dict[str, Any]:
     registry_path = repo_root / "cli" / "src" / "fno" / "agents" / "registry.py"
     schema_path = repo_root / "schemas" / "agents-list-row.json"
@@ -1535,9 +1554,10 @@ def _source_field_coverage(repo_root: Path) -> dict[str, Any]:
         "rust_only",
         "python_only",
         "storage_only",
-        "known_gaps",
     ):
         accounted.update(_field_names(schema.get(key)))
+    known_gaps = _valid_known_gaps(schema.get("known_gaps"))
+    accounted.update(known_gaps)
 
     if len(required) < 40 or len(declared) < 40:
         return {
@@ -1551,18 +1571,13 @@ def _source_field_coverage(repo_root: Path) -> dict[str, Any]:
         }
 
     uncovered = sorted(declared - accounted)
-    known_gaps = schema.get("known_gaps", {})
     return {
         "status": "uncovered" if uncovered else "ok",
         "declared_count": len(declared),
         "required_count": len(required),
         "accounted_count": len(declared & accounted),
         "uncovered_fields": uncovered,
-        "known_gaps": {
-            key: value
-            for key, value in (known_gaps.items() if isinstance(known_gaps, dict) else [])
-            if isinstance(key, str) and not key.startswith("$")
-        },
+        "known_gaps": known_gaps,
     }
 
 
