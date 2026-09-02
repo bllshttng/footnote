@@ -10,7 +10,7 @@ from typing import Any, Sequence
 import psutil
 
 from fno.rust_binary import resolve_binary
-from .io import claim_path
+from .io import claim_path, global_claims_root
 
 
 class ClaimVerdictUnavailable(RuntimeError):
@@ -85,8 +85,9 @@ def claim_verdicts(
     for key in requested:
         if key in verdicts:
             continue
-        path = claim_path(key, root=root)
-        if path.exists():
+        candidate_roots = [global_claims_root()]
+        candidate_roots.append(root if root is not None else Path.cwd())
+        if any(claim_path(key, root=candidate).exists() for candidate in candidate_roots):
             raise ClaimVerdictError(
                 f"native claim sweep omitted existing claim {key!r}; refusing to assume free"
             )
