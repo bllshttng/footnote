@@ -125,6 +125,22 @@ The axis can never be inferred from a value, so no mechanical rename can be trus
 
 When the surrounding type or field name does not reveal the axis, document the ambiguous binding at the site.
 
+## Claim: one word, three senses
+
+`claim` names three unrelated things in this codebase, and the collision once led a worker to believe it held a lock it never took. The three senses:
+
+| Sense | Surface | Means |
+|---|---|---|
+| work lock | `fno agents claim` lockfiles under `.fno/claims/` | the live primitive recording which session holds a node's work right now |
+| graph field | `claimed_at` on a node row | a timestamp the graph carries; clearing it promotes an idea and takes no lock |
+| plan link | the `node:` and `claims:` frontmatter keys, and the `--claims` flag on `fno backlog intake` | which node's delivery unit a plan file is; one plan is one PR is one node |
+
+The frontmatter keys and the flag carry the plan-link sense, never the work lock.
+
+Intake prints `linked plan to <id>`, not `claimed`, and names the verb that takes the lock: `fno do target start <id>`.
+
+A receipt that said a plan was claimed stated a fact about the first sense while writing the second. The word is retired from that line.
+
 ## Recognized and unrecognized harness values
 
 Session-marker detection (`HARNESS_SESSION_MARKERS` in `cli/src/fno/harness_identity.py`) recognizes four harnesses today: `codex`, `claude`, `gemini`, `opencode`.
