@@ -136,17 +136,26 @@ fn write_if_different(path: &Path, bytes: &[u8]) {
     }
 }
 
-/// PRODUCE the Python-side copy of the capability table instead of checking it.
+/// PRODUCE the downstream copies of the capability table instead of checking
+/// them.
 ///
 /// `harness_capabilities.rs` `include_str!`s the canonical TOML, so the Rust
-/// tree owns it; `cli/src/fno/agents/harness_capabilities.toml` is a byte copy
-/// loaded as Python package data. The developer who edits the canonical is the
-/// developer who builds this crate, so the sync happens where the edit happens
-/// and silent drift is impossible. `scripts/ci/check-harness-capabilities-fresh.sh`
-/// stays only as a tripwire for a copy edited by hand.
+/// tree owns it. Two byte copies hang off it, both generated per build:
+/// `cli/src/fno/agents/harness_capabilities.toml` (loaded as Python package
+/// data) and `crates/fno/src/harness_capabilities.toml` (`include_str!`ed by
+/// the mux's registry reader). The fno crate stays copy-fed rather than
+/// dep-fed on purpose: the two crates publish to crates.io independently
+/// (the crates-publish workflow states the order is irrelevant because fno
+/// does not depend on fno-agents as a cargo dep), so a dep would tie fno's
+/// publishability to a registry state that lags this repo. The developer who
+/// edits the canonical is the developer who builds this crate, so the sync
+/// happens where the edit happens and silent drift is impossible.
+/// `scripts/ci/check-harness-capabilities-fresh.sh` stays only as a tripwire
+/// for a copy edited by hand.
 ///
-/// No-op when `cli/` is absent: that is the `cargo package` / crates.io tarball
-/// case, where the crate must still build (`publish = true`).
+/// No-op when `cli/` or the sibling crate is absent: that is the `cargo
+/// package` / crates.io tarball case, where the crate must still build
+/// (`publish = true`).
 fn sync_harness_capabilities() {
     println!("cargo:rerun-if-changed=src/harness_capabilities.toml");
     let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/harness_capabilities.toml");
@@ -154,11 +163,16 @@ fn sync_harness_capabilities() {
         return;
     };
     let Some(root) = repo_root() else { return };
-    let copy = root.join("cli/src/fno/agents/harness_capabilities.toml");
-    if !copy.is_file() {
+    let cli_copy = root.join("cli/src/fno/agents/harness_capabilities.toml");
+    if !cli_copy.is_file() {
         return;
     }
-    write_if_different(&copy, &bytes);
+    write_if_different(&cli_copy, &bytes);
+    let mux_copy = root.join("crates/fno/src/harness_capabilities.toml");
+    if !mux_copy.is_file() {
+        return;
+    }
+    write_if_different(&mux_copy, &bytes);
 }
 
 /// PRODUCE `src/events_limits.toml` from the Python-owned event schema.

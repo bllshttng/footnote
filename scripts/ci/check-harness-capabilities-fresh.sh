@@ -3,24 +3,24 @@
 #
 # Tripwire, not a sync step. ONE canonical table is edited by humans:
 # `crates/fno-agents/src/harness_capabilities.toml`. Every build of
-# `crates/fno-agents` PRODUCES the Python-tree byte copy
-# (`cli/src/fno/agents/harness_capabilities.toml`) from it (`build.rs`), and
-# `crates/fno` reads the table through the fno-agents dep instead of carrying
-# its own copy (x-244c, operator ruling 2026-09-02, which collapsed the old
-# three-copy arrangement). The cli copy stays tracked because the Python
-# package loads it as a package resource.
+# `crates/fno-agents` PRODUCES two downstream byte copies from it (`build.rs`):
+# `cli/src/fno/agents/harness_capabilities.toml` (loaded as Python package
+# data) and `crates/fno/src/harness_capabilities.toml` (`include_str!`ed by
+# the mux's registry reader; the crates publish independently, so it is
+# copy-fed, not dep-fed). Both copies stay tracked because their consumers
+# must compile/load without this repo's workspace.
 #
-# The only way the copy diverges now is a hand edit of the generated file that
-# was committed without a rebuild. This gate catches that.
+# The only way a copy diverges now is a hand edit of a generated file that was
+# committed without a rebuild. This gate catches that.
 #
 # Modes:
-#   (default)    compare the COMMITTED bytes of both files
+#   (default)    compare the COMMITTED bytes of every copy
 #   --worktree   compare the working-tree bytes
-#   --write      copy canonical over the generated copy and exit 0
+#   --write      copy canonical over every copy and exit 0
 #
 # Comparing HEAD by default closes an ordering hazard the producer creates: a
 # CI job that builds Rust before running this gate would resync the WORKTREE
-# copy and launder a hand edit that is still committed. HEAD is
+# copies and launder a hand edit that is still committed. HEAD is
 # order-independent.
 #
 # Exit codes: 0 fresh, 1 diverged, 2 misuse (a file is missing).
@@ -34,6 +34,7 @@ MODE="$GATE_MODE"
 CANONICAL_REL="crates/fno-agents/src/harness_capabilities.toml"
 COPY_RELS=(
   "cli/src/fno/agents/harness_capabilities.toml"
+  "crates/fno/src/harness_capabilities.toml"
 )
 
 CANONICAL="$REPO_ROOT/$CANONICAL_REL"

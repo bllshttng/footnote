@@ -432,7 +432,6 @@ dependencies = [
  "axum",
  "blake3",
  "crossterm",
- "fno-agents",
  "libc",
  "portable-pty",
  "regex",

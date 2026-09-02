@@ -8,10 +8,15 @@ one config chain covering every field kind, resolves it through the Python
 reader HERE, and re-resolves it through the Rust reader inside one cargo
 test that fails naming the harness and field.
 
-One asymmetry is deliberate and not staged here: a NEW name with no bundled
+Two asymmetries are deliberate and not staged here. A NEW name with no bundled
 row is the x-296f teach path on the Rust side (the pane lane lands on any
 parsable form block), while the Python dispatch reader stays roster-gated.
-Dispatch needs a measured row; a pane does not.
+Dispatch needs a measured row; a pane does not. And a nested override whose
+keys are all bundled but whose VALUES fail the contract (an incomplete
+strategy table, say) lands in the Rust reader and is refused by Python: the
+crates publish independently, so the Rust gate is the bundled key vocabulary,
+not the semantic validator. The divergence is inert because the mux reads
+lane forms from these rows; the accepted class is what this test pins.
 """
 
 from __future__ import annotations
