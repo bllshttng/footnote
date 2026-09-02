@@ -682,8 +682,8 @@ def test_intake_with_frontmatter_claim_updates_idea_node(fixture_graph, tmp_path
     target = next(e for e in entries if e["id"] == "ab-1dea1234")
     assert target["plan_path"] == str(plan)
     assert target["title"] == "Backlog intake honors plan claims (final)"
-    # claimed_at is reset to None as part of the idea -> ready promotion.
-    assert target["claimed_at"] is None
+    # locked_at is reset to None as part of the idea -> ready promotion.
+    assert target["locked_at"] is None
 
 
 def test_intake_with_node_only_frontmatter_claims_idea_node(fixture_graph, tmp_path, capsys):
@@ -1779,7 +1779,7 @@ def test_multi_intake_claim_updates_idea_node_in_place(fixture_graph, tmp_path, 
     assert len(entries) == 3
     claimed = next(e for e in entries if e["id"] == "ab-1dea1234")
     assert claimed["plan_path"] == str(plan)
-    assert claimed["claimed_at"] is None
+    assert claimed["locked_at"] is None
     assert "Claimed by multi batch iota" in claimed["title"]
     assert "claim ab-1dea1234" in captured.out
     assert "1 claimed" in captured.out

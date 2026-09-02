@@ -55,7 +55,7 @@ def _claimed_node(node_id: str = "ab-1234abcd") -> dict:
         "project": "p",
         "plan_path": "internal/plan.md",  # so the underlying status is `ready`, not `idea`
         "session_id": "20260101T000000Z-1111-aaaaaa",
-        "claimed_at": "2026-01-01T00:00:00+00:00",
+        "locked_at": "2026-01-01T00:00:00+00:00",
     }
 
 
@@ -68,7 +68,7 @@ def test_unclaim_reverts_claimed_to_ready(tmp_graph, claims_root):
     assert result.exit_code == 0, result.output
     node = _read(tmp_graph)[0]
     assert node["session_id"] is None
-    assert node["claimed_at"] is None
+    assert node["locked_at"] is None
     assert node["status"] == "ready"
 
 
@@ -76,7 +76,7 @@ def test_unclaim_idempotent_on_ready_node(tmp_graph, claims_root):
     _seed(tmp_graph, [
         {"id": "ab-1234abcd", "title": "Ready", "slug": "ready", "domain": "code",
          "project": "p", "plan_path": "internal/plan.md",
-         "session_id": None, "claimed_at": None},
+         "session_id": None, "locked_at": None},
     ])
     result = runner.invoke(app, ["backlog", "unclaim", "ab-1234abcd"])
     assert result.exit_code == 0, result.output

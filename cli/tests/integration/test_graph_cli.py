@@ -1734,7 +1734,7 @@ def test_update_can_replace_and_clear_an_old_in_progress_owner(tmp_graph):
                         "status": "in_progress",
                         "locked_by": "worker-old",
                         "session_id": "worker-old",
-                        "claimed_at": old,
+                        "locked_at": old,
                         "plan_path": "plans/long-running.md",
                         "created_at": old,
                     }
@@ -1751,7 +1751,7 @@ def test_update_can_replace_and_clear_an_old_in_progress_owner(tmp_graph):
     assert row["status"] == "in_progress"
     assert row["locked_by"] == "worker-replacement"
     assert row["session_id"] == "worker-replacement"
-    assert row["claimed_at"] != old
+    assert row["locked_at"] != old
     assert "ownership_defect" not in row
 
     cleared = _invoke("backlog", "update", node_id, "--locked-by", "null")
@@ -1759,7 +1759,7 @@ def test_update_can_replace_and_clear_an_old_in_progress_owner(tmp_graph):
     row = _read_graph(tmp_graph)[0]
     assert row["locked_by"] is None
     assert row["session_id"] is None
-    assert row["claimed_at"] is None
+    assert row["locked_at"] is None
     assert "ownership_defect" not in row
 
 
