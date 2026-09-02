@@ -1,4 +1,8 @@
-"""`fno agents top` (x-c5cc US4): union table, degradation, empty state, JSON parity."""
+"""`fno agents top` (x-c5cc US4): union table, degradation, empty state, JSON parity.
+
+Read-only over the registry, so it emits nothing; the conftest per-module pin
+sets FNO_EVENTS_PATH to a per-test tmp journal regardless.
+"""
 from __future__ import annotations
 
 import json

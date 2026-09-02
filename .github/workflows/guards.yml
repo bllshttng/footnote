@@ -299,6 +299,11 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check-gate-refusals-emit.sh
 
+      - name: dispatch-observability test journals stay hermetic
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-tests-hermetic-events.sh
+
       - name: identity precedence-primitive caller ratchet
         if: ${{ !cancelled() }}
         timeout-minutes: 5

@@ -7,6 +7,10 @@ reconstruct "why did this node not launch" by reading source.
 The load-bearing property under test is not that the explanation is pretty. It
 is that `cmd_next._pick_ready` and `advance --explain` run THE SAME cascade
 object, so an explanation cannot describe a selection that did not happen.
+
+Journal isolation: the dry run writes no event; the conftest per-module pin
+sets FNO_EVENTS_PATH to a per-test tmp journal anyway, so a future emitter
+cannot reach the live file from here.
 """
 from __future__ import annotations
 

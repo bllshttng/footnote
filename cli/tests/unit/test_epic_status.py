@@ -5,6 +5,9 @@ worker (node:<id> claim holder), PR (node stamp). A `ready` child with no live
 worker shows its most recent dispatch/skip/failure receipt inline - never a
 blank cell (the silent failure this verb exists to kill). A `deferred` child
 shows its consecutive-failure breaker streak.
+
+Read-only, so it emits nothing; the conftest per-module pin sets
+FNO_EVENTS_PATH to a per-test tmp journal regardless.
 """
 from __future__ import annotations
 

@@ -24,8 +24,13 @@ from tests.unit.test_backlog_join import BANDED_PLAN, PARALLEL_PLAN, SEQUENTIAL_
 
 @pytest.fixture
 def journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect the agents events journal into the test's own tmp dir."""
+    """Redirect the agents events journal into the test's own tmp dir.
+
+    Belt and braces with the conftest per-module pin: the fixture also sets
+    FNO_EVENTS_PATH so any non-patched emitter in this module lands here too.
+    """
     target = tmp_path / "events.jsonl"
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(target))
     real_emit = agent_events.emit
     monkeypatch.setattr(
         agent_events,
