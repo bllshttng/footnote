@@ -115,7 +115,12 @@ set -euo pipefail
 # correcting "one per session" to "one per node per session" in the AGENTS.md
 # bullet, which had misstated the cap since the signal shipped. Zero spare,
 # still.
-CEILING_BYTES=38811
+# +57 (38811 -> 38868), measured 2026-09-02: one doc link in the Platform &
+# ops index (`docs/architecture/resource-meter.md`), a plan-mandated pointer
+# for the whole-machine lane advisor and status-row meter. The link is index
+# text, not corpus growth, and the floor test above confirms no entry gave it
+# room; the ceiling follows the measurement up, zero spare, per doctrine.
+CEILING_BYTES=38868
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
