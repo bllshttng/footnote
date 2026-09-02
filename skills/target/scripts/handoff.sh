@@ -607,6 +607,11 @@ _PREPARE_RC=0
 # (scripts/lib/fno-python.sh): a PYTHONPATH sourced from an env var that only
 # test harness files set left production running the leg with an empty path.
 _HANDOFF_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$_HANDOFF_REPO_ROOT" ]; then
+  # Non-repo cwd (the handoff smoke sandbox): the script's own location still
+  # names this checkout, so the shared bootstrap stays reachable.
+  _HANDOFF_REPO_ROOT="$(cd "$_SCRIPT_DIR/../../.." 2>/dev/null && pwd || true)"
+fi
 _HANDOFF_PYTHON="python3"
 _HANDOFF_PKG_SRC=""
 if [ -n "$_HANDOFF_REPO_ROOT" ] && [ -f "$_HANDOFF_REPO_ROOT/scripts/lib/fno-python.sh" ]; then
@@ -670,6 +675,13 @@ if [ "$_PREPARE_RC" -ne 0 ]; then
   echo "parked $NODE_ID reason=\"handoff prepare failed (rc=$_PREPARE_RC)\""
   exit "$_EXIT_PARKED"
 fi
+
+# Positive receipt, not an absence: the module returned rc=0, so its JSON
+# said the manifest is archived and the node claim release was positively
+# confirmed. Relaying the line gives every reader (operator tail, journey
+# smoke) one observable marker for the custody handover the stubbed CLI
+# calls around it cannot show.
+echo "prepare: archived manifest and released node:$NODE_ID"
 
 # From this point, the parent's claim is released. Any failure that cannot
 # restore the manifest MUST exit 12.

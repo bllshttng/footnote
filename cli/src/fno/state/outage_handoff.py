@@ -273,7 +273,18 @@ def prepare_manifest_and_release(
     digest = _archive_exact(state_path, archive_path, content)
     try:
         released = release_exact(claim_key, holder)
-        if released is False or released is None:
+        if released is None:
+            # Strict release answers None only when there is NO claim file: a
+            # mismatch raises, contention raises. An absent claim means this
+            # session cannot prove it still owns the node - it may have
+            # expired and been archived, or another worker may already have
+            # taken the node - so handing off would move a node nobody
+            # verifiably holds. Refuse naming that, after restoring.
+            raise RuntimeError(
+                f"source claim {claim_key!r} is absent on disk; the session "
+                "cannot prove it holds the node to hand off"
+            )
+        if released is False:
             raise RuntimeError("exact claim release was not positively confirmed")
     except Exception as exc:
         live_holder = getattr(exc, "actual", None)
