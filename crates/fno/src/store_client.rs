@@ -122,15 +122,14 @@ fn connect(sock: &Path) -> Result<UnixStream, String> {
     }
 }
 
-fn round_trip(
-    stream: &mut UnixStream,
-    method: &str,
-    params: Value,
-) -> Result<Value, String> {
+fn round_trip(stream: &mut UnixStream, method: &str, params: Value) -> Result<Value, String> {
     let payload = serde_json::to_vec(&json!({"id": 1, "method": method, "params": params}))
         .map_err(|e| e.to_string())?;
     if payload.len() > MAX_FRAME_BYTES {
-        return Err(format!("request frame of {} bytes exceeds the cap", payload.len()));
+        return Err(format!(
+            "request frame of {} bytes exceeds the cap",
+            payload.len()
+        ));
     }
     let mut frame = Vec::with_capacity(5 + payload.len());
     frame.push(TAG_REQUEST);
@@ -251,7 +250,9 @@ pub fn rank_top(graph: &Path, node_id: &str) -> Result<String, String> {
                 && e.get("project").and_then(Value::as_str).unwrap_or_default() == project
         })
         .filter_map(ranked_rank)
-        .fold(None, |acc: Option<f64>, v| Some(acc.map_or(v, |a: f64| a.min(v))));
+        .fold(None, |acc: Option<f64>, v| {
+            Some(acc.map_or(v, |a: f64| a.min(v)))
+        });
     let new_rank = head.map_or(0.0, |h| h - 1.0);
     call(
         graph,

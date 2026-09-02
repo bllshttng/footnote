@@ -3558,17 +3558,14 @@ async fn run_backlog_verb(node: &str, verb: crate::proto::BacklogVerb) -> String
     let label = verb.label();
     let graph = backlog_view::graph_path();
     let target = node.to_string();
-    let outcome =
-        tokio::task::spawn_blocking(move || match verb {
-            crate::proto::BacklogVerb::RankTop => crate::store_client::rank_top(&graph, &target),
-            crate::proto::BacklogVerb::Defer => {
-                crate::store_client::defer(&graph, &target, crate::proto::DEFER_REASON)
-            }
-            crate::proto::BacklogVerb::EndMission => {
-                crate::store_client::end_mission(&graph, &target)
-            }
-        })
-        .await;
+    let outcome = tokio::task::spawn_blocking(move || match verb {
+        crate::proto::BacklogVerb::RankTop => crate::store_client::rank_top(&graph, &target),
+        crate::proto::BacklogVerb::Defer => {
+            crate::store_client::defer(&graph, &target, crate::proto::DEFER_REASON)
+        }
+        crate::proto::BacklogVerb::EndMission => crate::store_client::end_mission(&graph, &target),
+    })
+    .await;
     match outcome {
         Ok(Ok(notice)) => notice,
         Ok(Err(e)) => format!("{label} {node}: {e}"),

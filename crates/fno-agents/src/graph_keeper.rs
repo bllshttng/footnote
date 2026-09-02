@@ -122,7 +122,9 @@ fn decode_frame(buf: &[u8]) -> (Option<Incoming>, usize) {
     let len = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
     if len > MAX_FRAME_BYTES {
         return (
-            Some(Incoming::Violation(format!("frame of {len} bytes exceeds the cap"))),
+            Some(Incoming::Violation(format!(
+                "frame of {len} bytes exceeds the cap"
+            ))),
             buf.len(),
         );
     }
@@ -193,8 +195,8 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
-    let listener =
-        UnixListener::bind(&cfg.sock).map_err(|e| format!("cannot bind {}: {e}", cfg.sock.display()))?;
+    let listener = UnixListener::bind(&cfg.sock)
+        .map_err(|e| format!("cannot bind {}: {e}", cfg.sock.display()))?;
 
     let state = Arc::new(StoreState {
         graph: cfg.graph.clone(),
@@ -237,10 +239,22 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn serve_client(state: Arc<StoreState>, mut stream: UnixStream, identify: Vec<u8>, shutdown: Arc<AtomicU64>) {
+fn serve_client(
+    state: Arc<StoreState>,
+    mut stream: UnixStream,
+    identify: Vec<u8>,
+    shutdown: Arc<AtomicU64>,
+) {
     loop {
         match read_one_frame(&mut stream) {
-            Incoming::HungUp | Incoming::Violation(_) => return,
+            Incoming::HungUp => return,
+            Incoming::Violation(msg) => {
+                // The message names the violation for whoever runs the keeper
+                // in the foreground; a detached keeper's stderr is its
+                // spawner's problem, and the client sees a plain hangup.
+                eprintln!("store keeper: protocol violation: {msg}");
+                return;
+            }
             Incoming::Identify => {
                 let _ = stream.write_all(&encode(TAG_IDENTIFY_REPLY, &identify));
                 let _ = stream.flush();
@@ -267,8 +281,8 @@ fn serve_client(state: Arc<StoreState>, mut stream: UnixStream, identify: Vec<u8
                 let body = serde_json::to_vec(&reply).unwrap_or_else(|_| {
                     json!({"id": 0, "ok": false,
                            "error": {"kind": "internal", "message": "reply serialization failed"}})
-                        .to_string()
-                        .into_bytes()
+                    .to_string()
+                    .into_bytes()
                 });
                 if stream.write_all(&encode(TAG_RESPONSE, &body)).is_err()
                     || stream.flush().is_err()
@@ -316,7 +330,9 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "defaults" => handle_pure(&params, |mut entries, p| {
             graph_store::apply_defaults(
                 &mut entries,
-                p.get("keep_malformed").and_then(Value::as_bool).unwrap_or(false),
+                p.get("keep_malformed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             );
             entries
         }),
@@ -339,15 +355,15 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         // The canonical key order, for the ordering tests and any caller
         // that documents the on-disk shape: one source of truth (the
         // ported store's constant), never a re-typed copy.
-        "canonical_field_order" => {
-            Ok(json!({ "fields": graph_store::CANONICAL_FIELD_ORDER }))
-        }
+        "canonical_field_order" => Ok(json!({ "fields": graph_store::CANONICAL_FIELD_ORDER })),
         // One named op applied over client-shipped rows, no file I/O and no
         // publish: `set_related`, `plan_path_owner_conflict`, and friends
         // run INSIDE a client mutator on an in-hand snapshot, where a full
         // locked cycle would be a write the caller never asked for.
         "pure_op" => handle_pure_op(&params),
-        other => Err(StoreError::Invalid(format!("unknown store method {other:?}"))),
+        other => Err(StoreError::Invalid(format!(
+            "unknown store method {other:?}"
+        ))),
     };
     match result {
         Ok(v) => json!({"id": id, "ok": true, "result": v}),
@@ -362,7 +378,10 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
 /// diagnoses without writing.
 fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let _gate = state.write_gate.lock().unwrap_or_else(|e| e.into_inner());
-    let strict = params.get("strict").and_then(Value::as_bool).unwrap_or(false);
+    let strict = params
+        .get("strict")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let keep_malformed = params
         .get("keep_malformed")
         .and_then(Value::as_bool)
@@ -611,7 +630,10 @@ fn apply_op_impl(entries: &mut Vec<Value>, name: &str, p: &Value) -> Result<Valu
                     "error": format!("no node resolves to '{node_id}'")}));
             };
             let obj = entries[idx].as_object_mut().unwrap();
-            let terminal = obj.get("completed_at").map(|v| !v.is_null()).unwrap_or(false)
+            let terminal = obj
+                .get("completed_at")
+                .map(|v| !v.is_null())
+                .unwrap_or(false)
                 || matches!(
                     obj.get("status").and_then(Value::as_str),
                     Some("done") | Some("superseded")
@@ -658,14 +680,8 @@ fn apply_op_impl(entries: &mut Vec<Value>, name: &str, p: &Value) -> Result<Valu
             let harness = param_str(p, "harness")?;
             let session_id = param_str(p, "session_id")?;
             let started_at = param_str(p, "started_at")?;
-            let (found, removed) = session_remove_open(
-                entries,
-                node_id,
-                phase,
-                harness,
-                session_id,
-                started_at,
-            )?;
+            let (found, removed) =
+                session_remove_open(entries, node_id, phase, harness, session_id, started_at)?;
             Ok(json!({"found": found, "removed": removed}))
         }
         "session_reap_open" => {
@@ -692,9 +708,9 @@ fn apply_op_impl(entries: &mut Vec<Value>, name: &str, p: &Value) -> Result<Valu
         "defer" => {
             let node_id = param_str(p, "node_id")?;
             let reason = param_str(p, "reason")?;
-            let kind = opt_str(p, "kind").map(str::to_string).or_else(|| {
-                classify_deferred_reason(reason).map(str::to_string)
-            });
+            let kind = opt_str(p, "kind")
+                .map(str::to_string)
+                .or_else(|| classify_deferred_reason(reason).map(str::to_string));
             let idx = find_exact(entries, node_id)
                 .ok_or_else(|| StoreError::Invalid(format!("no node resolves to '{node_id}'")))?;
             let obj = entries[idx].as_object_mut().unwrap();
@@ -705,7 +721,10 @@ fn apply_op_impl(entries: &mut Vec<Value>, name: &str, p: &Value) -> Result<Valu
                 "deferred_at".to_string(),
                 Value::String(graph_store::now_isoformat()),
             );
-            obj.insert("deferred_reason".to_string(), Value::String(reason.to_string()));
+            obj.insert(
+                "deferred_reason".to_string(),
+                Value::String(reason.to_string()),
+            );
             match kind {
                 Some(k) => {
                     obj.insert("deferred_kind".to_string(), Value::String(k));
@@ -824,16 +843,18 @@ fn node_carries_pr(node: &Value, pr_number: i64, repo: Option<&str>) -> bool {
         return false;
     }
     match repo {
-        None => primary
-            || node
-                .get("additional_prs")
-                .and_then(Value::as_array)
-                .map(|extras| {
-                    extras
-                        .iter()
-                        .any(|e| e.get("number").and_then(Value::as_i64) == Some(pr_number))
-                })
-                .unwrap_or(false),
+        None => {
+            primary
+                || node
+                    .get("additional_prs")
+                    .and_then(Value::as_array)
+                    .map(|extras| {
+                        extras
+                            .iter()
+                            .any(|e| e.get("number").and_then(Value::as_i64) == Some(pr_number))
+                    })
+                    .unwrap_or(false)
+        }
         Some(want) => {
             let want = want.to_lowercase();
             urls.iter().any(|url| {
@@ -874,7 +895,9 @@ fn session_row(
     let session_id = session_id.trim();
     for (label, value) in [("harness", harness), ("session_id", session_id)] {
         if value.is_empty() {
-            return Err(StoreError::Invalid(format!("{label} must be a non-empty string")));
+            return Err(StoreError::Invalid(format!(
+                "{label} must be a non-empty string"
+            )));
         }
         if value.len() > STR_MAX {
             return Err(StoreError::Invalid(format!(
@@ -891,7 +914,9 @@ fn session_row(
                 ));
             }
             if e.len() > STR_MAX {
-                return Err(StoreError::Invalid(format!("effort exceeds {STR_MAX} chars")));
+                return Err(StoreError::Invalid(format!(
+                    "effort exceeds {STR_MAX} chars"
+                )));
             }
             Some(e.to_string())
         }
@@ -900,9 +925,7 @@ fn session_row(
     let stamp = |label: &str, v: &str| -> Result<String, StoreError> {
         let parsed = chrono::DateTime::parse_from_rfc3339(&v.trim().replace('Z', "+00:00"))
             .map_err(|_| {
-                StoreError::Invalid(format!(
-                    "{label} must be an ISO-8601 timestamp, got {v:?}"
-                ))
+                StoreError::Invalid(format!("{label} must be an ISO-8601 timestamp, got {v:?}"))
             })?;
         if parsed.offset().local_minus_utc() != 0 {
             return Err(StoreError::Invalid(format!(
@@ -933,9 +956,12 @@ fn session_row(
                     "merge_grant carries unknown keys: {unknown:?}"
                 )));
             }
-            let approved = obj.get("approved").and_then(Value::as_bool).ok_or_else(
-                || StoreError::Invalid("merge_grant.approved must be a boolean".into()),
-            )?;
+            let approved = obj
+                .get("approved")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| {
+                    StoreError::Invalid("merge_grant.approved must be a boolean".into())
+                })?;
             let text = |key: &str| -> Result<String, StoreError> {
                 let v = obj.get(key).and_then(Value::as_str).unwrap_or("").trim();
                 if v.is_empty() {
@@ -1000,8 +1026,16 @@ fn session_append(
     let Some(idx) = find_exact(entries, node_id) else {
         return Ok((false, false));
     };
-    let phase = row.get("phase").and_then(Value::as_str).unwrap_or("").to_string();
-    let harness = row.get("harness").and_then(Value::as_str).unwrap_or("").to_string();
+    let phase = row
+        .get("phase")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let harness = row
+        .get("harness")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let session_id = row
         .get("session_id")
         .and_then(Value::as_str)
@@ -1123,7 +1157,10 @@ fn session_remove_open(
             !((r.get("phase").and_then(Value::as_str) == Some(phase)
                 && r.get("harness").and_then(Value::as_str) == Some(harness)
                 && r.get("session_id").and_then(Value::as_str) == Some(session_id))
-                && !r.as_object().map(|o| o.contains_key("ended_at")).unwrap_or(false)
+                && !r
+                    .as_object()
+                    .map(|o| o.contains_key("ended_at"))
+                    .unwrap_or(false)
                 && r.get("started_at").and_then(Value::as_str) == Some(started_norm.as_str()))
         })
         .cloned()
@@ -1136,8 +1173,12 @@ fn session_remove_open(
 }
 
 fn stamp_utc(v: &str) -> Result<String, StoreError> {
-    let parsed = chrono::DateTime::parse_from_rfc3339(&v.trim().replace('Z', "+00:00"))
-        .map_err(|_| StoreError::Invalid(format!("started_at must be an ISO-8601 timestamp, got {v:?}")))?;
+    let parsed =
+        chrono::DateTime::parse_from_rfc3339(&v.trim().replace('Z', "+00:00")).map_err(|_| {
+            StoreError::Invalid(format!(
+                "started_at must be an ISO-8601 timestamp, got {v:?}"
+            ))
+        })?;
     if parsed.offset().local_minus_utc() != 0 {
         return Err(StoreError::Invalid(format!(
             "started_at must be a UTC timestamp (offset +00:00 / Z), got {v:?}"
@@ -1176,7 +1217,9 @@ fn session_reap_open(
     };
     let remove_do = phase == "do" || phase == "all";
     if harness.trim().is_empty() || session_id.trim().is_empty() {
-        return Err(StoreError::Invalid("identity must be non-empty strings".into()));
+        return Err(StoreError::Invalid(
+            "identity must be non-empty strings".into(),
+        ));
     }
     let ended = match ended_at {
         Some(v) => stamp_utc(v)?,
@@ -1200,10 +1243,22 @@ fn session_reap_open(
         .unwrap_or_default();
     let is_open = |r: &Value, phase: &str| -> bool {
         r.get("phase").and_then(Value::as_str) == Some(phase)
-            && r.get("harness").and_then(Value::as_str).map(|h| !h.trim().is_empty()).unwrap_or(false)
-            && r.get("session_id").and_then(Value::as_str).map(|s| !s.trim().is_empty()).unwrap_or(false)
-            && r.get("started_at").and_then(Value::as_str).map(|s| !s.trim().is_empty()).unwrap_or(false)
-            && !r.as_object().map(|o| o.contains_key("ended_at")).unwrap_or(false)
+            && r.get("harness")
+                .and_then(Value::as_str)
+                .map(|h| !h.trim().is_empty())
+                .unwrap_or(false)
+            && r.get("session_id")
+                .and_then(Value::as_str)
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+            && r.get("started_at")
+                .and_then(Value::as_str)
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+            && !r
+                .as_object()
+                .map(|o| o.contains_key("ended_at"))
+                .unwrap_or(false)
     };
     let mut row_removed = false;
     let mut kept: Vec<Value> = rows.clone();
@@ -1265,18 +1320,15 @@ fn set_related(entries: &mut [Value], node_id: &str, desired: &[String]) -> Resu
     let after: std::collections::HashSet<String> = desired.iter().cloned().collect();
     let mut sorted: Vec<&String> = after.iter().collect();
     sorted.sort();
-    entries[idx]
-        .as_object_mut()
-        .unwrap()
-        .insert(
-            "related".to_string(),
-            Value::Array(
-                sorted
-                    .into_iter()
-                    .map(|s| Value::String(s.clone()))
-                    .collect(),
-            ),
-        );
+    entries[idx].as_object_mut().unwrap().insert(
+        "related".to_string(),
+        Value::Array(
+            sorted
+                .into_iter()
+                .map(|s| Value::String(s.clone()))
+                .collect(),
+        ),
+    );
     for peer_id in after.difference(&before) {
         let Some(pidx) = find_exact(entries, peer_id) else {
             return Err(StoreError::Invalid(format!(
@@ -1313,8 +1365,10 @@ fn set_related(entries: &mut [Value], node_id: &str, desired: &[String]) -> Resu
                     .collect()
             })
             .unwrap_or_default();
-        let without: std::collections::BTreeSet<String> =
-            rel.difference(&std::iter::once(node_id.to_string()).collect()).cloned().collect();
+        let without: std::collections::BTreeSet<String> = rel
+            .difference(&std::iter::once(node_id.to_string()).collect())
+            .cloned()
+            .collect();
         obj.insert(
             "related".to_string(),
             Value::Array(without.into_iter().map(Value::String).collect()),
@@ -1376,9 +1430,7 @@ pub fn store_socket_for(graph: &std::path::Path) -> PathBuf {
     let absolute = match graph.canonicalize() {
         Ok(p) => p,
         Err(_) if graph.is_absolute() => graph.to_path_buf(),
-        Err(_) => std::env::current_dir()
-            .unwrap_or_default()
-            .join(graph),
+        Err(_) => std::env::current_dir().unwrap_or_default().join(graph),
     };
     let mut h = sha2::Sha256::new();
     h.update(absolute.to_string_lossy().as_bytes());
@@ -1418,7 +1470,10 @@ mod tests {
         assert_eq!(out["added"], json!(true));
         let row = entries[0]["sessions"][0].as_object().unwrap();
         assert_eq!(row["merge_grant"]["approved"], json!(true));
-        assert_eq!(row["merge_grant"]["recorded_at"], json!("2026-09-02T10:00:00Z"));
+        assert_eq!(
+            row["merge_grant"]["recorded_at"],
+            json!("2026-09-02T10:00:00Z")
+        );
 
         // A re-stamp carrying a DIFFERENT posture must not rewrite the
         // recorded one: the first resolved posture owns the row.
@@ -1434,7 +1489,10 @@ mod tests {
         });
         let out = apply_op_for_tests(&mut entries, &req2).unwrap();
         assert_eq!(out["added"], json!(false));
-        assert_eq!(entries[0]["sessions"][0]["merge_grant"]["approved"], json!(true));
+        assert_eq!(
+            entries[0]["sessions"][0]["merge_grant"]["approved"],
+            json!(true)
+        );
 
         // An ABSENT grant on a fresh row writes no key.
         let req3 = json!({

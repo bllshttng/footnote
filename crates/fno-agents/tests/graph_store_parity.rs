@@ -58,7 +58,9 @@ fn normalize_volatile(v: &Value) -> Value {
         // A step value that IS a serialized JSON payload (read_after) is
         // parsed and normalized structurally, so stamps inside it cannot
         // hide and formatting cannot leak into the comparison.
-        Value::String(text) if text.trim_start().starts_with('[') || text.trim_start().starts_with('{') => {
+        Value::String(text)
+            if text.trim_start().starts_with('[') || text.trim_start().starts_with('{') =>
+        {
             match serde_json::from_str::<Value>(text) {
                 Ok(parsed) => normalize_volatile(&parsed),
                 Err(_) => Value::String(text.clone()),
@@ -73,8 +75,7 @@ fn normalize_volatile(v: &Value) -> Value {
 fn normalize_bytes(text: &str) -> String {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        regex::Regex::new(r#"(\\)?"(touched_at|deferred_at)(\\)?"(\\)?: (\\)?"[^"\\\\]*"#)
-            .unwrap()
+        regex::Regex::new(r#"(\\)?"(touched_at|deferred_at)(\\)?"(\\)?: (\\)?"[^"\\\\]*"#).unwrap()
     });
     re.replace_all(text, |caps: &regex::Captures| {
         let esc = caps.get(1).map(|m| m.as_str()).unwrap_or("");
@@ -217,23 +218,27 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
                 let mut request = serde_json::Map::new();
                 request.insert("name".into(), Value::String(other.to_string()));
                 request.insert("params".into(), op.clone());
-                let op_result =
-                    apply_op_for_tests(&mut entries, &Value::Object(request)).unwrap_or_else(
-                        |e| panic!("rust op {other}: {e}"),
-                    );
+                let op_result = apply_op_for_tests(&mut entries, &Value::Object(request))
+                    .unwrap_or_else(|e| panic!("rust op {other}: {e}"));
                 mutate(entries, graph);
                 let shaped = match other {
-                    "append_progress_note" => serde_json::json!([
-                        op_result.get("found"), op_result.get("plan_path")]),
+                    "append_progress_note" => {
+                        serde_json::json!([op_result.get("found"), op_result.get("plan_path")])
+                    }
                     "append_encounter" => serde_json::json!([
-                        op_result.get("appended"), op_result.get("error"),
-                        op_result.get("reason")]),
-                    "append_wave_note" => serde_json::json!([
-                        op_result.get("found"), op_result.get("error")]),
-                    "session_append" => serde_json::json!([
-                        op_result.get("found"), op_result.get("added")]),
-                    "session_remove_open" => serde_json::json!([
-                        op_result.get("found"), op_result.get("removed")]),
+                        op_result.get("appended"),
+                        op_result.get("error"),
+                        op_result.get("reason")
+                    ]),
+                    "append_wave_note" => {
+                        serde_json::json!([op_result.get("found"), op_result.get("error")])
+                    }
+                    "session_append" => {
+                        serde_json::json!([op_result.get("found"), op_result.get("added")])
+                    }
+                    "session_remove_open" => {
+                        serde_json::json!([op_result.get("found"), op_result.get("removed")])
+                    }
                     "session_reap_open" => {
                         let mut r = op_result.clone();
                         let o = r.as_object_mut().unwrap();
@@ -346,8 +351,19 @@ fn run_case(name: &str, fixture: String, ops: serde_json::Value) {
     assert_frozen(
         name,
         "read",
-        &Value::String(rs.get("read").and_then(Value::as_str).unwrap_or("").to_string()),
-        &Value::String(golden.get("read").and_then(Value::as_str).unwrap_or("").to_string()),
+        &Value::String(
+            rs.get("read")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        ),
+        &Value::String(
+            golden
+                .get("read")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        ),
     );
 
     assert_frozen(
@@ -378,7 +394,12 @@ fn run_case(name: &str, fixture: String, ops: serde_json::Value) {
     // Byte identity, checked structurally then textually: the structural
     // compare localizes a divergence; the textual one on normalized bytes
     // catches ordering the structural compare forgives.
-    assert_frozen(name, "file-content", &normalize_volatile(&rs_root), &normalize_volatile(&golden_root));
+    assert_frozen(
+        name,
+        "file-content",
+        &normalize_volatile(&rs_root),
+        &normalize_volatile(&golden_root),
+    );
     assert_eq!(
         normalize_bytes(&rs_file), normalize_bytes(&golden_file),
         "{name}: the published file must be byte-identical to the golden modulo volatile stamps\n--- live ---\n{rs_file}\n--- golden ---\n{golden_file}"
@@ -515,8 +536,16 @@ fn corrupt_and_malformed_roots_keep_the_read_failure_taxonomy() {
     // golden: the contract is the kind, not bytes.
     for (name, body, want_kind) in [
         ("corrupt", "{not json", "GraphUnreadableError"),
-        ("malformed_root", "{\"no_entries\": []}", "GraphMalformedRootError"),
-        ("entries_not_list", "{\"entries\": \"x\"}", "GraphUnreadableError"),
+        (
+            "malformed_root",
+            "{\"no_entries\": []}",
+            "GraphMalformedRootError",
+        ),
+        (
+            "entries_not_list",
+            "{\"entries\": \"x\"}",
+            "GraphUnreadableError",
+        ),
         ("empty_file", "", "GraphUnreadableError"),
     ] {
         let dir = tempfile::tempdir().unwrap();

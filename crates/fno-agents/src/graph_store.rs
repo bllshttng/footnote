@@ -253,7 +253,9 @@ impl FieldUpdate {
     pub fn from_value(field: &str, value: &Value) -> Result<Self, StoreError> {
         match value {
             Value::Null => Ok(FieldUpdate::Keep),
-            Value::Object(o) if o.get("clear") == Some(&Value::Bool(true)) => Ok(FieldUpdate::Clear),
+            Value::Object(o) if o.get("clear") == Some(&Value::Bool(true)) => {
+                Ok(FieldUpdate::Clear)
+            }
             Value::String(s) => Ok(FieldUpdate::Set(TextField::parse(field, s)?)),
             other => {
                 if PRESENCE_TEXT_FIELDS.contains(&field) {
@@ -457,7 +459,13 @@ fn defuse_nonfinite(text: &str) -> String {
             let delimited = next.is_none()
                 || matches!(
                     next,
-                    Some(',') | Some('}') | Some(']') | Some(' ') | Some('\n') | Some('\r') | Some('\t')
+                    Some(',')
+                        | Some('}')
+                        | Some(']')
+                        | Some(' ')
+                        | Some('\n')
+                        | Some('\r')
+                        | Some('\t')
                 );
             if delimited {
                 out.push_str("null");
@@ -478,9 +486,8 @@ pub fn read_raw(path: &Path) -> Result<RawRead, StoreError> {
     if !path.exists() {
         return Ok(RawRead::Empty);
     }
-    let raw = std::fs::read(path).map_err(|e| {
-        StoreError::Unreadable(path.display().to_string(), format!("{e}"))
-    })?;
+    let raw = std::fs::read(path)
+        .map_err(|e| StoreError::Unreadable(path.display().to_string(), format!("{e}")))?;
     let text = String::from_utf8(raw).map_err(|e| {
         StoreError::Unreadable(path.display().to_string(), format!("not UTF-8: {e}"))
     })?;
@@ -500,16 +507,27 @@ pub fn read_raw(path: &Path) -> Result<RawRead, StoreError> {
     // surfacing them; the strict read just diagnoses.
     let data: Value = match serde_json::from_str(&text) {
         Ok(v) => v,
-        Err(_) => return Ok(RawRead::Corrupt(format!("{} is not valid JSON", path.display()))),
+        Err(_) => {
+            return Ok(RawRead::Corrupt(format!(
+                "{} is not valid JSON",
+                path.display()
+            )))
+        }
     };
     let Some(obj) = data.as_object() else {
-        return Ok(RawRead::Corrupt(format!("{} root is not a JSON object", path.display())));
+        return Ok(RawRead::Corrupt(format!(
+            "{} root is not a JSON object",
+            path.display()
+        )));
     };
     let Some(entries) = obj.get("entries") else {
         return Ok(RawRead::MalformedRoot);
     };
     let Some(list) = entries.as_array() else {
-        return Ok(RawRead::Corrupt(format!("{} 'entries' is not a list", path.display())));
+        return Ok(RawRead::Corrupt(format!(
+            "{} 'entries' is not a list",
+            path.display()
+        )));
     };
     Ok(RawRead::Entries(list.clone()))
 }
@@ -532,9 +550,7 @@ pub fn now_isoformat() -> String {
 
 /// Python `strftime("%Y%m%dT%H%M%S%f")` in UTC, the backup filename stamp.
 fn backup_stamp() -> String {
-    chrono::Utc::now()
-        .format("%Y%m%dT%H%M%S%f")
-        .to_string()
+    chrono::Utc::now().format("%Y%m%dT%H%M%S%f").to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -575,7 +591,8 @@ pub fn compute_children(entries: &mut [Value]) {
             // evidence caller needs malformed rows to survive the pass.
             continue;
         }
-        let (Some(cid), Some(parent)) = (entry_id(e).map(str::to_string), s_str(e, "parent")) else {
+        let (Some(cid), Some(parent)) = (entry_id(e).map(str::to_string), s_str(e, "parent"))
+        else {
             continue;
         };
         // A self-parented node must not become its own child: that would
@@ -592,7 +609,9 @@ pub fn compute_children(entries: &mut [Value]) {
             "status".to_string(),
             status.map(Value::String).unwrap_or(Value::Null),
         );
-        kids.entry(parent.to_string()).or_default().push(Value::Object(summary));
+        kids.entry(parent.to_string())
+            .or_default()
+            .push(Value::Object(summary));
     }
     for e in entries.iter_mut() {
         if !is_dict(e) {
@@ -608,9 +627,10 @@ pub fn compute_children(entries: &mut [Value]) {
                         .unwrap_or("")
                         .cmp(b.get("id").and_then(Value::as_str).unwrap_or(""))
                 });
-                e.as_object_mut()
-                    .unwrap()
-                    .insert("children".to_string(), Value::Array(std::mem::take(summaries)));
+                e.as_object_mut().unwrap().insert(
+                    "children".to_string(),
+                    Value::Array(std::mem::take(summaries)),
+                );
             }
             None => {
                 e.as_object_mut()
@@ -632,21 +652,26 @@ pub fn normalize_lock_fields(entries: &mut [Value]) {
         if !obj.contains_key("locked_by") {
             // Legacy row: on a LIVE node session_id IS the lock owner; on a
             // done node it is work/cost provenance, never a lock.
-            let adopted = if obj.get("completed_at").map(|v| !v.is_null()).unwrap_or(false) {
+            let adopted = if obj
+                .get("completed_at")
+                .map(|v| !v.is_null())
+                .unwrap_or(false)
+            {
                 Value::Null
             } else {
                 obj.get("session_id").cloned().unwrap_or(Value::Null)
             };
             obj.insert("locked_by".to_string(), adopted);
         }
-        let resolved = obj
-            .get("locked_by")
-            .map(|v| !v.is_null())
-            .unwrap_or(false);
+        let resolved = obj.get("locked_by").map(|v| !v.is_null()).unwrap_or(false);
         if resolved {
             let owner = obj.get("locked_by").cloned().unwrap_or(Value::Null);
             obj.insert("session_id".to_string(), owner);
-        } else if !obj.get("completed_at").map(|v| !v.is_null()).unwrap_or(false) {
+        } else if !obj
+            .get("completed_at")
+            .map(|v| !v.is_null())
+            .unwrap_or(false)
+        {
             // Released and not done: drop the stale mirror.
             obj.insert("session_id".to_string(), Value::Null);
         }
@@ -660,7 +685,10 @@ pub fn normalize_lock_fields(entries: &mut [Value]) {
 
 /// Read-time dependency readiness for one entry: never a boolean
 /// (statuses.compute_readiness).
-pub fn compute_readiness(entry: &Value, by_id: &std::collections::HashMap<String, Value>) -> (String, Option<String>) {
+pub fn compute_readiness(
+    entry: &Value,
+    by_id: &std::collections::HashMap<String, Value>,
+) -> (String, Option<String>) {
     let Some(blockers) = entry.get("blocked_by").and_then(Value::as_array) else {
         return ("ready".to_string(), None);
     };
@@ -671,7 +699,11 @@ pub fn compute_readiness(entry: &Value, by_id: &std::collections::HashMap<String
         let Some(blocker) = by_id.get(bid) else {
             return ("unknown-dep".to_string(), Some(bid.to_string()));
         };
-        if blocker.get("completed_at").map(|v| v.is_null()).unwrap_or(true) {
+        if blocker
+            .get("completed_at")
+            .map(|v| v.is_null())
+            .unwrap_or(true)
+        {
             return ("blocked-by".to_string(), Some(bid.to_string()));
         }
     }
@@ -700,7 +732,12 @@ pub fn pending_supersession_reason(entry: &Value) -> Option<String> {
         .get("successor")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| entry.get("superseded_by").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| {
+            entry
+                .get("superseded_by")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| "missing successor".to_string());
     let cause = record
         .get("cause")
@@ -891,11 +928,11 @@ pub fn apply_defaults(entries: &mut Vec<Value>, keep_malformed: bool) {
         if !obj.contains_key("locked_at") {
             let legacy = obj.get("claimed_at").and_then(Value::as_str);
             let stamped = match legacy {
-                Some(s) if !s.trim().is_empty() => chrono::DateTime::parse_from_rfc3339(
-                    &s.replace('Z', "+00:00"),
-                )
-                .map(|_| Value::String(s.to_string()))
-                .unwrap_or(Value::Null),
+                Some(s) if !s.trim().is_empty() => {
+                    chrono::DateTime::parse_from_rfc3339(&s.replace('Z', "+00:00"))
+                        .map(|_| Value::String(s.to_string()))
+                        .unwrap_or(Value::Null)
+                }
                 _ => Value::Null,
             };
             obj.insert("locked_at".to_string(), stamped);
@@ -1092,7 +1129,10 @@ pub fn is_terminal_entry(entry: &Value) -> bool {
         .and_then(Value::as_str)
         .map(|s| TERMINAL_RUNGS.contains(&s))
         .unwrap_or(false)
-        || entry.get("superseded_by").map(|v| !v.is_null()).unwrap_or(false)
+        || entry
+            .get("superseded_by")
+            .map(|v| !v.is_null())
+            .unwrap_or(false)
     {
         return true;
     }
@@ -1120,7 +1160,10 @@ fn is_open_phase_row(row: &Value, phase: &str) -> bool {
             .and_then(Value::as_str)
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false)
-        && !row.as_object().map(|o| o.contains_key("ended_at")).unwrap_or(false)
+        && !row
+            .as_object()
+            .map(|o| o.contains_key("ended_at"))
+            .unwrap_or(false)
 }
 
 fn is_open_do_row(row: &Value) -> bool {
@@ -1163,12 +1206,20 @@ pub fn recompute_statuses(entries: &mut [Value]) {
             continue;
         }
         let obj = e.as_object_mut().unwrap();
-        if let Some(old) = obj.get("priority").and_then(Value::as_str).map(str::to_string) {
+        if let Some(old) = obj
+            .get("priority")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
             if let Some((_, to)) = PRIORITY_MIGRATION.iter().find(|(from, _)| from == &old) {
                 obj.insert("priority".to_string(), Value::String(to.to_string()));
             }
         }
-        if let Some(old) = obj.get("status").and_then(Value::as_str).map(str::to_string) {
+        if let Some(old) = obj
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
             if let Some((_, to)) = STATUS_MIGRATION.iter().find(|(from, _)| from == &old) {
                 obj.insert("status".to_string(), Value::String(to.to_string()));
             }
@@ -1207,17 +1258,31 @@ pub fn recompute_statuses(entries: &mut [Value]) {
         // borrow immutably, the writes need the mutable borrow.
         let completed = e.get("completed_at").map(|v| !v.is_null()).unwrap_or(false);
         let pending_reason = pending_supersession_reason(e);
-        let superseded = e.get("superseded_by").map(|v| !v.is_null()).unwrap_or(false);
+        let superseded = e
+            .get("superseded_by")
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
         let deferred = e.get("deferred_at").map(|v| !v.is_null()).unwrap_or(false);
         let locked = e.get("locked_by").map(|v| !v.is_null()).unwrap_or(false);
-        let lock_quality = if locked { Some(lock_timestamp_quality(e)) } else { None };
+        let lock_quality = if locked {
+            Some(lock_timestamp_quality(e))
+        } else {
+            None
+        };
         let has_pr = e.get("pr_number").map(|v| !v.is_null()).unwrap_or(false);
         let open_do = e
             .get("sessions")
             .and_then(Value::as_array)
             .map(|rows| rows.iter().any(is_open_do_row))
             .unwrap_or(false);
-        let rung = if !locked && !open_do && !completed && pending_reason.is_none() && !superseded && !deferred && !has_pr {
+        let rung = if !locked
+            && !open_do
+            && !completed
+            && pending_reason.is_none()
+            && !superseded
+            && !deferred
+            && !has_pr
+        {
             Some(plan_rung(e))
         } else {
             None
@@ -1263,10 +1328,7 @@ pub fn recompute_statuses(entries: &mut [Value]) {
                     "holder".to_string(),
                     obj.get("locked_by").cloned().unwrap_or(Value::Null),
                 );
-                defect.insert(
-                    "liveness".to_string(),
-                    Value::String("unverified".into()),
-                );
+                defect.insert("liveness".to_string(), Value::String("unverified".into()));
                 obj.insert("ownership_defect".to_string(), Value::Object(defect));
             }
         }
@@ -1329,7 +1391,10 @@ pub fn recompute_statuses(entries: &mut [Value]) {
         let Some(&pidx) = id_index.get(&pid) else {
             continue;
         };
-        let parent_status = entries[pidx].get("status").and_then(Value::as_str).map(str::to_string);
+        let parent_status = entries[pidx]
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         if entries[pidx]
             .get("completed_at")
             .map(|v| !v.is_null())
@@ -1342,10 +1407,10 @@ pub fn recompute_statuses(entries: &mut [Value]) {
             continue;
         }
         if let Some(reason) = pending_supersession_reason(&entries[pidx]) {
-            entries[pidx].as_object_mut().unwrap().insert(
-                "status".to_string(),
-                Value::String("blocked".into()),
-            );
+            entries[pidx]
+                .as_object_mut()
+                .unwrap()
+                .insert("status".to_string(), Value::String("blocked".into()));
             entries[pidx]
                 .as_object_mut()
                 .unwrap()
@@ -1381,8 +1446,12 @@ pub fn recompute_statuses(entries: &mut [Value]) {
             .collect();
         // A container carrying live work of its own is NOT done just because
         // its children are.
-        let own_work_live = matches!(parent_status.as_deref(), Some("in_review") | Some("in_progress"));
-        if !child_statuses.is_empty() && child_statuses.iter().all(|s| s.as_deref() == Some("done")) {
+        let own_work_live = matches!(
+            parent_status.as_deref(),
+            Some("in_review") | Some("in_progress")
+        );
+        if !child_statuses.is_empty() && child_statuses.iter().all(|s| s.as_deref() == Some("done"))
+        {
             if !own_work_live {
                 entries[pidx]
                     .as_object_mut()
@@ -1457,7 +1526,11 @@ pub fn derive_base_slug(title: &str) -> String {
         "a", "an", "the", "of", "for", "to", "and", "or", "in", "on", "with",
     ];
     let kept: Vec<&str> = {
-        let filtered: Vec<&str> = words.iter().copied().filter(|w| !STOPWORDS.contains(w)).collect();
+        let filtered: Vec<&str> = words
+            .iter()
+            .copied()
+            .filter(|w| !STOPWORDS.contains(w))
+            .collect();
         if filtered.is_empty() {
             words
         } else {
@@ -1484,7 +1557,10 @@ pub fn derive_base_slug(title: &str) -> String {
 
 fn hex_fallback_slug(node_id: &str) -> String {
     let suffix = node_id.split_once('-').map(|(_, s)| s).unwrap_or(node_id);
-    format!("node-{}", if suffix.is_empty() { "unknown" } else { suffix })
+    format!(
+        "node-{}",
+        if suffix.is_empty() { "unknown" } else { suffix }
+    )
 }
 
 /// Assign a slug to every entry lacking one (slug.ensure_slugs). Idempotent.
@@ -1548,9 +1624,7 @@ fn curation_key(entry: &Value) -> Value {
 /// The sibling lockfile for a graph file (store._graph_lock_path), resolved so
 /// two spellings of the same graph share one inode.
 pub fn graph_lock_path(path: &Path) -> PathBuf {
-    let base = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf());
+    let base = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     PathBuf::from(format!("{}.lock", base.display()))
 }
 
@@ -1665,7 +1739,9 @@ pub fn create_backup(path: &Path) -> Option<PathBuf> {
 pub fn write_atomic(path: &Path, body: &str) -> Result<(), StoreError> {
     let tmp = path.with_file_name(format!(
         "{}.tmp-{}",
-        path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
         std::process::id()
     ));
     {
@@ -1684,7 +1760,9 @@ pub fn write_sha256_sidecar(path: &Path) -> Result<(), StoreError> {
     let sidecar = PathBuf::from(format!("{}.sha256", path.display()));
     let tmp = path.with_file_name(format!(
         "{}.sha256.tmp-{}",
-        path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
         std::process::id()
     ));
     {
@@ -1759,7 +1837,11 @@ pub fn file_content_version(path: &Path) -> String {
 /// atomic publish with backup + sidecar. The MUTATOR is the caller's: it ran
 /// client-side against the begin snapshot, and contention is resolved by the
 /// caller retrying on [`StoreError::LockTimeout`] or a version conflict.
-pub fn locked_mutate(path: &Path, input: MutateInput, timeout: Duration) -> Result<MutateOutcome, StoreError> {
+pub fn locked_mutate(
+    path: &Path,
+    input: MutateInput,
+    timeout: Duration,
+) -> Result<MutateOutcome, StoreError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1773,7 +1855,9 @@ pub fn locked_mutate(path: &Path, input: MutateInput, timeout: Duration) -> Resu
     let raw = match read_raw(path)? {
         RawRead::Entries(v) => v,
         RawRead::Empty => vec![],
-        RawRead::MalformedRoot => return Err(StoreError::MalformedRoot(path.display().to_string())),
+        RawRead::MalformedRoot => {
+            return Err(StoreError::MalformedRoot(path.display().to_string()))
+        }
         RawRead::Corrupt(reason) => return Err(StoreError::Corrupt(reason)),
     };
 
@@ -1816,9 +1900,9 @@ pub fn locked_mutate(path: &Path, input: MutateInput, timeout: Duration) -> Resu
         pre_curation.insert(id, curation_key(&snapshot));
     }
 
-    let dropped = raw.len().saturating_sub(
-        raw.iter().filter(|e| is_dict(e)).count(),
-    );
+    let dropped = raw
+        .len()
+        .saturating_sub(raw.iter().filter(|e| is_dict(e)).count());
     let mut entries = input.entries;
 
     // The presence invariant holds at the STORE boundary, not only at the
@@ -1886,7 +1970,9 @@ pub fn locked_mutate(path: &Path, input: MutateInput, timeout: Duration) -> Resu
             .unwrap_or_default();
         let pre_rung = status_normalized.get(&id).map(String::as_str);
         if !TERMINAL_RUNGS.contains(&rung.as_str())
-            || pre_rung.map(|r| TERMINAL_RUNGS.contains(&r)).unwrap_or(false)
+            || pre_rung
+                .map(|r| TERMINAL_RUNGS.contains(&r))
+                .unwrap_or(false)
         {
             continue;
         }
@@ -1960,7 +2046,9 @@ pub fn read_defaulted_opts(
             if backup_on_corrupt {
                 let backup = path.with_file_name(format!(
                     "{}.bak",
-                    path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default()
                 ));
                 // path.with_suffix(".json.bak") in Python; the file-name form
                 // keeps "graph.json" -> "graph.json.bak" for the same effect.
@@ -2033,7 +2121,11 @@ pub fn normalize_plan_path(path: Option<&str>) -> Option<String> {
         }
     }
     let joined = stack.join("/");
-    let mut s = if absolute { format!("/{joined}") } else { joined };
+    let mut s = if absolute {
+        format!("/{joined}")
+    } else {
+        joined
+    };
     if s.is_empty() {
         s = ".".to_string();
     }
@@ -2100,7 +2192,10 @@ mod tests {
             FieldUpdate::from_cli("details", Some("real content")),
             Ok(FieldUpdate::Set(_))
         ));
-        assert!(matches!(FieldUpdate::from_cli("details", None), Ok(FieldUpdate::Keep)));
+        assert!(matches!(
+            FieldUpdate::from_cli("details", None),
+            Ok(FieldUpdate::Keep)
+        ));
     }
 
     #[test]
@@ -2203,7 +2298,10 @@ mod tests {
         let keys: Vec<&String> = obj.keys().collect();
         assert_eq!(keys[0], "id");
         assert!(keys.contains(&&"zebra".to_string()), "unknown keys kept");
-        assert!(keys.iter().position(|k| **k == *"zebra").unwrap() > keys.iter().position(|k| **k == *"title").unwrap());
+        assert!(
+            keys.iter().position(|k| **k == *"zebra").unwrap()
+                > keys.iter().position(|k| **k == *"title").unwrap()
+        );
     }
 
     #[test]
@@ -2241,7 +2339,10 @@ mod tests {
         let body = std::fs::read_to_string(&graph).unwrap();
         assert!(body.starts_with("{\n  \"entries\": [\n    {"));
         assert!(body.ends_with("\n"));
-        assert!(graph.with_extension("json.sha256").exists() || PathBuf::from(format!("{}.sha256", graph.display())).exists());
+        assert!(
+            graph.with_extension("json.sha256").exists()
+                || PathBuf::from(format!("{}.sha256", graph.display())).exists()
+        );
         assert!(out.dropped == 0);
     }
 

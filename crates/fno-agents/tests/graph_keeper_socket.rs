@@ -33,12 +33,7 @@ impl Drop for Keeper {
 fn short_home(tag: &str) -> PathBuf {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "fno-gsk{}_{}_{}",
-        std::process::id(),
-        tag,
-        n
-    ));
+    let dir = std::env::temp_dir().join(format!("fno-gsk{}_{}_{}", std::process::id(), tag, n));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -173,10 +168,7 @@ fn keeper_serves_reads_ops_and_shutdown_over_its_socket() {
             }
         }
     }
-    assert!(
-        !sock.exists(),
-        "an explicit shutdown unlinks its socket"
-    );
+    assert!(!sock.exists(), "an explicit shutdown unlinks its socket");
 }
 
 #[test]
@@ -195,11 +187,19 @@ fn keeper_keeps_serving_after_its_client_hangs_up() {
     }
     // The keeper keeps: the next connection is served.
     let mut stream = UnixStream::connect(&sock).unwrap();
-    let result = ok_result(rpc(&mut stream, 2, "op", json!({
-        "name": "append_progress_note",
-        "params": {"node_id": "ab-missing", "note": {"ts": "t", "text": "x"}}
-    })));
-    assert_eq!(result["op"]["found"], false, "absent node answers found=false");
+    let result = ok_result(rpc(
+        &mut stream,
+        2,
+        "op",
+        json!({
+            "name": "append_progress_note",
+            "params": {"node_id": "ab-missing", "note": {"ts": "t", "text": "x"}}
+        }),
+    ));
+    assert_eq!(
+        result["op"]["found"], false,
+        "absent node answers found=false"
+    );
     // And the answer names the node, never an empty graph substitute.
     drop(stream);
 
