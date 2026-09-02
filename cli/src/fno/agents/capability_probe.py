@@ -243,8 +243,8 @@ def _write_stanza(harness: str, disagreements: list[FieldReport]) -> Optional[st
                 # binary does not. Suggesting one here would prescribe what
                 # the measurement just contradicted.
                 lines.append(
-                    "# the row overstates the CLI; correct it by hand - the",
-                    "# authority above declares no reasoning-effort surface",
+                    "# the row overstates the CLI; correct it by hand - the"
+                    " authority above declares no reasoning-effort surface"
                 )
                 continue
             lines.extend(

@@ -231,3 +231,17 @@ def test_write_without_disagreements_writes_nothing(bundled_state, fake_authorit
     report = _report(write=True)
 
     assert report["stanza"] is None
+
+
+def test_write_overstate_direction_suggests_no_strategy(bundled_state, fake_authority) -> None:
+    """The reverse disagreement: the row DECLARES a strategy the binary does
+    not. The stanza must not suggest one - that would prescribe exactly what
+    the measurement just contradicted."""
+    fake_authority(NO_EFFORT_HELP)
+
+    report = _report(harness="claude", write=True)
+
+    stanza = report["stanza"]
+    assert stanza is not None
+    assert "[harness.claude.model_switch_strategy]" not in stanza
+    assert "correct it by hand" in stanza
