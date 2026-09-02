@@ -191,3 +191,25 @@ def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
         drained += 1
     receipt["migrated"] = drained
     return receipt
+
+
+def migrate_updated_at(entries: list[dict], *, apply: bool = False) -> dict:
+    """Remove the proven-unread ``__updated_at`` residue, once and audibly."""
+    pending = [
+        row
+        for row in entries
+        if isinstance(row, dict) and "__updated_at" in row
+    ]
+    receipt: dict = {
+        "candidates": [row.get("id") for row in pending],
+        "candidate_count": len(pending),
+        "apply": apply,
+        "removed": 0,
+    }
+    if not apply:
+        return receipt
+
+    for row in pending:
+        row.pop("__updated_at", None)
+    receipt["removed"] = len(pending)
+    return receipt
