@@ -5960,6 +5960,11 @@ def cmd_get(
         help="Node ab-id, slug, or bare 8-hex (e.g. ab-ff6f96e0 | dashless-spawn | ff6f96e0)",
     ),
     field: Optional[str] = typer.Option(None, help="Print only this field"),
+    grouped: bool = typer.Option(
+        False,
+        "--grouped",
+        help="Render populated fields in human-readable concept groups.",
+    ),
     strict: bool = typer.Option(
         False,
         "--strict",
@@ -6007,6 +6012,10 @@ def cmd_get(
                 typer.echo(json.dumps(value))
             else:
                 typer.echo(value)
+        elif grouped:
+            from fno.graph.grouped import render_grouped
+
+            typer.echo(render_grouped(e))
         else:
             typer.echo(json.dumps(e, indent=2))
         return
@@ -6043,6 +6052,10 @@ def cmd_get(
                     typer.echo(json.dumps(value))
                 else:
                     typer.echo(value)
+            elif grouped:
+                from fno.graph.grouped import render_grouped
+
+                typer.echo(render_grouped(e))
             else:
                 typer.echo(json.dumps(e, indent=2))
             return
@@ -13531,6 +13544,32 @@ def cmd_migrate_difficulty(
     typer.echo(json.dumps(receipt, sort_keys=True))
 
 
+@cli.command("migrate-updated-at", hidden=True)
+def cmd_migrate_updated_at(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Remove the proven-unread __updated_at field from candidate rows.",
+    ),
+) -> None:
+    """Dry-run or apply the one-shot __updated_at residue migration."""
+    from fno.graph.migrations import migrate_updated_at
+    from fno.graph.store import locked_mutate_graph, read_graph
+
+    if apply:
+        holder: list[dict] = []
+
+        def mutator(entries: list[dict]) -> list[dict]:
+            holder.append(migrate_updated_at(entries, apply=True))
+            return entries
+
+        locked_mutate_graph(_graph_path(), mutator)
+        receipt = holder[0]
+    else:
+        receipt = migrate_updated_at(read_graph(_graph_path()), apply=False)
+    typer.echo(json.dumps(receipt, sort_keys=True))
+
+
 # -- rank --
 
 
@@ -15561,6 +15600,7 @@ _TRACKER_OWNED_VERBS = frozenset(
         "remove",
         "migrate-priorities",
         "migrate-difficulty",
+        "migrate-updated-at",
         "reopen",
         "supersede",
         "unsupersede",
