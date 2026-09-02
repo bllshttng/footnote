@@ -4824,44 +4824,10 @@ pub fn run_claim(args: &[String]) -> i32 {
             let (state, rec) = crate::claims::status(&key, opts.root.as_deref());
             // Mirror the `fno agents claim status -J` dict shape so the compat
             // matrix can diff the two implementations field-by-field.
-            let mut out = serde_json::Map::new();
-            out.insert("key".into(), Value::String(key));
-            out.insert("state".into(), Value::String(state.as_str().into()));
-            if let Some(rec) = rec {
-                out.insert("holder".into(), Value::String(rec.holder));
-                out.insert(
-                    "schema_version".into(),
-                    Value::Number(rec.schema_version.into()),
-                );
-                out.insert(
-                    "pid".into(),
-                    rec.pid.map(Value::from).unwrap_or(Value::Null),
-                );
-                out.insert("pid_unavailable".into(), Value::Bool(rec.pid_unavailable));
-                out.insert("host".into(), Value::String(rec.host));
-                // Liveness compares this, not host. Omitting it here would leave a
-                // caller that classifies ownership from status JSON on the mutable
-                // hostname, so the fix would not reach that path at all.
-                out.insert(
-                    "machine_id".into(),
-                    rec.machine_id.map(Value::from).unwrap_or(Value::Null),
-                );
-                out.insert("acquired_at".into(), Value::Number(rec.acquired_at.into()));
-                out.insert(
-                    "expires_at".into(),
-                    rec.expires_at.map(Value::from).unwrap_or(Value::Null),
-                );
-                if let Some(r) = rec.reason {
-                    out.insert("reason".into(), Value::String(r));
-                }
-                if let Some(h) = rec.harness {
-                    out.insert("harness".into(), Value::String(h));
-                }
-                if !rec.metadata.is_empty() {
-                    out.insert("metadata".into(), Value::Object(rec.metadata));
-                }
-            }
-            println!("{}", Value::Object(out));
+            let output = rec.map(|record| claim_status_value(&record)).unwrap_or_else(|| {
+                serde_json::json!({"key": key, "state": state.as_str()})
+            });
+            println!("{output}");
             0
         }
         other => {
