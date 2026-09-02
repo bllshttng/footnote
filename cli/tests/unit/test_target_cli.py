@@ -1592,6 +1592,94 @@ def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(
     assert fields["COLLISION_ID"] == foreign
 
 
+def test_resolve_owned_identity_self_row_is_not_contention(tmp_path, monkeypatch) -> None:
+    """AC2-HP: a spawned worker whose own registry row holds its stamped id
+    resolves that identity with no proof available. The prover is silent (a
+    codex thread worker has no harness ancestor to walk); the complete
+    canonical stamp and the worker's own row agree on (harness, id) because
+    spawn minted both in one act, so the row reads as self, not as a
+    competing holder."""
+    from fno.agents.registry import register_existing_session
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    mine = "019fc88e-aaaa-7c90-926a-6bdd7ebb186c"
+    register_existing_session(harness="codex", session_id=mine, cwd="/x")
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: None,
+    )
+    monkeypatch.setenv("FNO_HARNESS_NAME", "codex")
+    monkeypatch.setenv("FNO_HARNESS_SESSION_ID", mine)
+    monkeypatch.setenv("CODEX_THREAD_ID", mine)
+
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in result.stdout.splitlines()
+        if "=" in line
+    }
+    assert fields["HARNESS"] == "codex"
+    assert fields["SESSION_ID"] == mine
+    assert fields["DISPOSITION"] == "canonical"
+    assert fields["COLLISION"] == ""
+
+
+def test_resolve_owned_identity_foreign_row_still_refused(tmp_path, monkeypatch) -> None:
+    """AC3-ERR: a stamped id whose live registry row carries a DIFFERENT
+    harness is another session's row, not self, and the refusal names it."""
+    from fno.agents.registry import register_existing_session
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    theirs = "019fc88e-bbbb-7c90-926a-6bdd7ebb186c"
+    owner = register_existing_session(harness="claude", session_id=theirs, cwd="/x").name
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: None,
+    )
+    monkeypatch.setenv("FNO_HARNESS_NAME", "codex")
+    monkeypatch.setenv("FNO_HARNESS_SESSION_ID", theirs)
+    monkeypatch.setenv("CODEX_THREAD_ID", theirs)
+
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in result.stdout.splitlines()
+        if "=" in line
+    }
+    assert fields["HARNESS"] == ""
+    assert fields["SESSION_ID"] == ""
+    assert fields["COLLISION"] == owner
+    assert fields["COLLISION_ID"] == theirs
+
+
+def test_resolve_owned_identity_absent_registry_degrades(tmp_path, monkeypatch) -> None:
+    """AC8-EDGE: no registry at all means no collision evidence; the verb
+    answers exactly as before (ambiguous, nothing named) and never blocks."""
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: None,
+    )
+    monkeypatch.setenv("FNO_HARNESS_NAME", "codex")
+    monkeypatch.setenv("FNO_HARNESS_SESSION_ID", "019fc88e-cccc-7c90-926a-6bdd7ebb186c")
+
+    result = runner.invoke(app, ["do", "target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in result.stdout.splitlines()
+        if "=" in line
+    }
+    assert fields["DISPOSITION"] == "ambiguous"
+    assert fields["COLLISION"] == ""
+
+
 def test_holder_is_ours_recognizes_own_pid_unavailable_claim(monkeypatch):
     """The transcript-identity arm: init minted ``target-session:<sid>`` from the
     proven harness session when no env id existed, and the pid walk failed, so

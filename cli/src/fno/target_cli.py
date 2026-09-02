@@ -1182,9 +1182,17 @@ def resolve_owned_identity_cmd() -> None:
 
     Read-only; writes no state. Always exits 0 - it is a resolver, not a gate.
     """
-    from fno.agents.registry import row_owning_session_id
+    from fno.agents.registry import (
+        _OWNERSHIP_LIVE_STATUSES,
+        load_registry,
+        row_owning_session_id,
+    )
     from fno.claims.session_pid import resolve_session_harness
-    from fno.harness_identity import resolve_owned_identity
+    from fno.harness_identity import (
+        parse_canonical_identity,
+        resolve_owned_identity,
+        session_identity_key,
+    )
 
     true_harness = resolve_session_harness()
 
@@ -1198,6 +1206,40 @@ def resolve_owned_identity_cmd() -> None:
     ).strip():
         env["CLAUDE_CODE_SESSION_ID"] = env["TARGET_TRANSCRIPT_ID"]
 
+    canonical = parse_canonical_identity(env)
+
+    def _owning_row_harness(sid: str) -> Optional[str]:
+        """Harness of the live registry row holding ``sid``, if any."""
+        try:
+            entries = load_registry()
+        except Exception:
+            return None
+        needle = session_identity_key(sid)
+        for entry in entries:
+            if entry.status not in _OWNERSHIP_LIVE_STATUSES:
+                continue
+            held = getattr(entry, "harness_session_id", None)
+            if held and session_identity_key(held) == needle:
+                return (getattr(entry, "harness", "") or "").strip().lower()
+        return None
+
+    def _self_row_backs(harness: str, sid: str) -> bool:
+        """The spawn-minted binding: spawn writes the canonical stamp and the
+        registry row in one act, so a live row agreeing with a COMPLETE stamp
+        on (harness, id) is this worker's own row. Read from the registry,
+        never FNO_AGENT_SELF: that env write cannot reach a daemon-forked
+        worker while the row survives the fork. Scoped to the stamp so a
+        vendor marker (provenance unverified) never self-checks, which keeps
+        the ambient-leak detector intact."""
+        if canonical.disposition != "complete":
+            return False
+        if (canonical.harness or "").strip().lower() != (harness or "").strip().lower():
+            return False
+        if session_identity_key(canonical.session_id or "") != session_identity_key(sid):
+            return False
+        row_harness = _owning_row_harness(sid)
+        return row_harness is not None and row_harness == (harness or "").strip().lower()
+
     def _prove(harness: str, _sid: str) -> Optional[bool]:
         # Three states: True (this process mints this harness), False (the
         # process tree resolves to a DIFFERENT harness, so this marker is
@@ -1205,16 +1247,21 @@ def resolve_owned_identity_cmd() -> None:
         # tell). Only True skips the collision check; None falls through to
         # collision-elimination so the verb still resolves in a headless runner.
         if true_harness is None:
-            return None
+            # No ancestor to walk: the spawn-minted registry binding is the
+            # remaining proof. Without it (no stamp, or no backing row) the
+            # answer stays None so collision-elimination decides.
+            return True if _self_row_backs(harness, _sid) else None
         return harness == true_harness
 
     # The COLLIDER stays wired HERE and is deliberately not hoisted into the
     # shared resolver every stamp site uses. A live registry row holding an id
-    # proves the id is not ours only while the prover is silent about it - and a
-    # session whose OWN row holds its id, in an environment where the process
-    # tree cannot be walked, is then refused its own identity. Survivable at
-    # this init-time verb, which reports the collision to a human reading the
-    # output. On the per-call stamp path it would silently unstamp a fleet.
+    # is contention only when the prover cannot claim it: the prover above now
+    # reads the spawn-minted binding when the process tree is silent, so a
+    # worker whose OWN row holds its stamped id resolves instead of being
+    # refused by its own row (that refusal cost three runs on one node in one
+    # evening). A vendor marker without a complete stamp never self-proves, so
+    # the collider remains the cause-agnostic ambient-leak backstop. On the
+    # per-call stamp path a wrong refusal would silently unstamp a fleet.
     owned = resolve_owned_identity(
         env,
         prove=_prove,
