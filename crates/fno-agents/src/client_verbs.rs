@@ -1786,15 +1786,16 @@ fn adopt_from_manifest(session_id: &str, home: &AgentsHome) -> Result<Option<Val
 /// "resume contract is invalid" message is a contract that LOADS and declares
 /// the form, then fails to render it: a malformed token template.
 fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Option<Vec<String>> {
+    // The declared form is the whole identity: cursor-agent's interactive_resume
+    // tokens already end in --trust, and a second one is a duplicated flag,
+    // never a stronger one. Python's builder renders the same form with no
+    // cursor arm, so runtimes stay byte-identical by rendering and nothing else.
     let mut argv = crate::harness_capabilities::render_session_argv(
         provider,
         "interactive_resume",
         Some(session_id),
     )
     .ok()?;
-    if provider == "cursor-agent" {
-        argv.push("--trust".to_string());
-    }
     // codex's bounded sandbox re-resolves from config on `resume`, so the git +
     // plan grants ride as `-c` tokens spliced right after the `codex` binary
     // token. (`codex resume` does accept --add-dir; `codex exec resume` is the
