@@ -77,7 +77,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `review.external_reviewers` | list[str] | `[]` | always | Which AI reviewers /pr requests a review from (the INVOCATION list). |
 | `review.agent_harnesses` | dict[str, str] | `{}` | never | Per-agent harness routing (claude/codex/gemini) for the cross-model review panel. Legacy alias: agent_providers. |
 | `review.agent_providers` | dict[str, str] | `{}` | never | Legacy alias for config.review.agent_harnesses (a straight rename); agent_harnesses wins if both are set. |
-| `review.agent_routes` | dict | `{}` | never | RETIRED with the sigma panel: the review-posture ladder (config.review.posture) replaced per-agent review routing. An empty value is accepted; any configured route refuses with the replacement named, so remove the key. |
+| `review.agent_routes` | dict[str, object] | `{}` | never | RETIRED with the sigma panel: the review-posture ladder (config.review.posture) replaced per-agent review routing. An empty value is accepted; any configured route refuses with the replacement named, so remove the key. |
 | `review.cross_model.enabled` | bool | `false` | advanced | Enable cross-model (codex/gemini) second-opinion review. |
 | `style.word_cap.mail` | int | `80` | advanced | Masked-word cap for style rule 7 on a mail body (default 80). The refusal names the number enforced here, not the built-in. |
 | `style.word_cap.encounter` | int | `80` | advanced | Masked-word cap for the evidence on a `fno backlog encounter` vote (default 80). Over-length evidence is refused, never truncated. |
