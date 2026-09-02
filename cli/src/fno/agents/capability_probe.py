@@ -44,7 +44,9 @@ _AUTHORITY_TIMEOUT_S = 15
 #: named here must not contradict it. The live specimen is agy: its ``--help``
 #: declares ``--effort (low|medium|high)`` while the bundled row says
 #: ``kind = "unsupported"``.
-_DECLARED_CHECKS: dict[str, Callable[[dict, "re.Match[str]"], tuple[bool, str]]] = {}
+_DECLARED_CHECKS: dict[
+    str, Callable[[dict, Optional["re.Match[str]"]], tuple[bool, str]]
+] = {}
 
 
 @dataclass(frozen=True)
