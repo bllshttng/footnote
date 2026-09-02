@@ -1559,6 +1559,234 @@ fn worktree_clean_probe(cwd: &str) -> Option<bool> {
     None
 }
 
+/// (x-d545) The reapable gate's answer for a removed row's worktree: the
+/// verdict, plus the reason a kept tree names in its receipt.
+enum WorktreeGate {
+    Reapable,
+    Blocked(String),
+    Unanswerable(String),
+}
+
+/// Per-subprocess budget for the rm worktree path, matching the Python
+/// runtime's remove bound (`subprocess.run(..., timeout=60.0)`).
+const RM_SUBPROCESS_TIMEOUT_SECS: u64 = 60;
+
+/// One subprocess read under a wall-clock budget: `std` has no
+/// `Command::output` timeout, and a git stalled on a wedged filesystem must
+/// not park the daemon's rm handler forever. Past the deadline the child is
+/// killed and the killed status returned, so a "kept" receipt can never be
+/// contradicted by a removal finishing in the background.
+fn output_with_timeout(mut cmd: std::process::Command, secs: u64) -> Option<std::process::Output> {
+    use std::io::Read;
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        if let Some(mut s) = stdout {
+            let _ = s.read_to_end(&mut out);
+        }
+        if let Some(mut s) = stderr {
+            let _ = s.read_to_end(&mut err);
+        }
+        (out, err)
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                break child.wait().ok()?;
+            }
+            Err(_) => return None,
+        }
+    };
+    let (stdout, stderr) = reader.join().ok()?;
+    Some(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Is the worktree's branch merged into the repo's main line? The rm door's
+/// half of the third bucket: the `--merged` sweep merge-filters BEFORE its
+/// gate, and this caller has no such pre-filter, so it asks here. `None`:
+/// nothing names the work or the main line (detached HEAD, no main ref, git
+/// error) - the caller keeps the tree. Mirrors
+/// `fno.worktree_reapable.branch_merged`, the Python door's same question.
+fn branch_merged(cwd: &str) -> Option<bool> {
+    let mut bases = vec!["origin/main".to_string(), "main".to_string()];
+    if let Some(out) = output_with_timeout(
+        {
+            let mut cmd = std::process::Command::new("git");
+            cmd.current_dir(cwd)
+                .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+            cmd
+        },
+        RM_SUBPROCESS_TIMEOUT_SECS,
+    ) {
+        let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if out.status.success() && !head.is_empty() {
+            bases.insert(0, head);
+        }
+    }
+    let mut base: Option<String> = None;
+    for candidate in &bases {
+        let known = output_with_timeout(
+            {
+                let mut cmd = std::process::Command::new("git");
+                cmd.current_dir(cwd)
+                    .args(["rev-parse", "--verify", "--quiet", candidate]);
+                cmd
+            },
+            RM_SUBPROCESS_TIMEOUT_SECS,
+        );
+        if known.is_some_and(|out| out.status.success()) {
+            base = Some(candidate.clone());
+            break;
+        }
+    }
+    let base = base?;
+    let branch = output_with_timeout(
+        {
+            let mut cmd = std::process::Command::new("git");
+            cmd.current_dir(cwd).args(["branch", "--show-current"]);
+            cmd
+        },
+        RM_SUBPROCESS_TIMEOUT_SECS,
+    )?;
+    if !branch.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
+    if branch.is_empty() {
+        return None;
+    }
+    let merged = output_with_timeout(
+        {
+            let mut cmd = std::process::Command::new("git");
+            cmd.current_dir(cwd)
+                .args(["merge-base", "--is-ancestor", &branch, &base]);
+            cmd
+        },
+        RM_SUBPROCESS_TIMEOUT_SECS,
+    )?;
+    match merged.status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
+/// Ask `fno agents workspace worktree reapable` - the same verb the `--merged`
+/// sweep, `archive-worktree.sh` and the GC probe ask - and read BOTH the
+/// literal marker and the reason, so a kept tree's receipt can name why. A
+/// `yes` then meets the merge check, because this door has no sweep-style
+/// pre-filter: a clean-but-unmerged branch is exactly where abandoned-but-real
+/// work lives, and the contract keeps it for a human.
+fn worktree_gate(cwd: &str) -> WorktreeGate {
+    let out = match output_with_timeout(
+        {
+            let mut cmd = std::process::Command::new("fno");
+            cmd.args(["agents", "workspace", "worktree", "reapable", cwd]);
+            cmd
+        },
+        RM_SUBPROCESS_TIMEOUT_SECS,
+    ) {
+        Some(out) => out,
+        None => {
+            return WorktreeGate::Unanswerable("the reapable probe could not run".into());
+        }
+    };
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let reason = |fallback: &str| -> String {
+        text.split("reason=")
+            .nth(1)
+            .and_then(|r| r.split_whitespace().next())
+            .unwrap_or(fallback)
+            .to_string()
+    };
+    // The literal marker, never a bare exit code a shim could swallow - the
+    // same double permission `worktree_clean_probe` needs.
+    if out.status.success() && text.contains("reapable=yes") {
+        return match branch_merged(cwd) {
+            Some(true) => WorktreeGate::Reapable,
+            Some(false) => WorktreeGate::Blocked("clean but the branch is not merged".into()),
+            None => WorktreeGate::Unanswerable("the merged-branch probe could not answer".into()),
+        };
+    }
+    if text.contains("reapable=no") {
+        return WorktreeGate::Blocked(reason("blocked"));
+    }
+    WorktreeGate::Unanswerable("the reapable probe could not answer".into())
+}
+
+/// (x-d545) A human removed ONE named row: its worktree goes with it, but
+/// only through the reapable gate plus the merge check - the same three
+/// buckets the `--merged` sweep and the watchdog honor (DIRTY untouched,
+/// clean-and-unmerged never auto-pruned, clean-and-MERGED loses the TREE and
+/// keeps the BRANCH: `git worktree remove` never deletes branches). A gate
+/// that cannot answer keeps the tree - removal never guesses. The row is
+/// removed either way; a protected worktree must not wedge the row on the
+/// sideline. `None`: the row owned no linked worktree, a clean no-op.
+fn rm_take_worktree_with(
+    entry: &state::RegistryEntry,
+    gate: &dyn Fn(&str) -> WorktreeGate,
+    remove: &dyn Fn(&str) -> Result<(), String>,
+) -> Option<String> {
+    let cwd = entry.cwd.as_str();
+    if !is_linked_worktree(cwd) {
+        return None;
+    }
+    match gate(cwd) {
+        WorktreeGate::Reapable => match remove(cwd) {
+            Ok(()) => Some(format!("worktree removed: {cwd}")),
+            Err(e) => Some(format!(
+                "worktree kept: {cwd} (git worktree remove failed: {e})"
+            )),
+        },
+        WorktreeGate::Blocked(reason) => {
+            Some(format!("worktree kept: {cwd} (the gate said no: {reason})"))
+        }
+        WorktreeGate::Unanswerable(why) => Some(format!("worktree kept: {cwd} ({why})")),
+    }
+}
+
+fn rm_take_worktree(entry: &state::RegistryEntry) -> Option<String> {
+    rm_take_worktree_with(entry, &worktree_gate, &|cwd| {
+        // Run git FROM the worktree: the daemon's own cwd is usually not a
+        // repository, and `git worktree remove` needs one to resolve against.
+        // A forced self-removal from inside the leaf is allowed by git.
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(cwd)
+            .args(["worktree", "remove", "--force", cwd]);
+        output_with_timeout(cmd, RM_SUBPROCESS_TIMEOUT_SECS)
+            .ok_or_else(|| "the removal timed out".to_string())
+            .and_then(|out| {
+                if out.status.success() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "exited {}: {}",
+                        out.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ))
+                }
+            })
+    })
+}
+
 /// Wall-clock epoch seconds, for GC grace math. Degrades to 0 (a pre-1970 clock
 /// makes every stamped row look in-grace -> nothing reaped, the safe direction).
 fn now_epoch_secs() -> i64 {
@@ -8429,6 +8657,13 @@ async fn handle_rm_with(
         );
     }
     cleanup_king_manifest(&entry);
+    // (x-d545) The row is gone from the registry: take its worktree, but only
+    // as far as the reapable gate allows. The receipt rides the RESULT (the
+    // operator's notice), deliberately NOT the event: agent_removed sits
+    // near the 500-byte event cap already, so the receipt would push every
+    // rm event over it and the writer would replace the whole record. The
+    // auditable event field is x-90ee's to land with a shape that fits.
+    let worktree_receipt = rm_take_worktree(&entry);
     let pane_session = entry.mux.as_ref().map(|mux| mux.session.clone());
     let pane_id = entry.mux.as_ref().map(|mux| mux.pane_id);
     let event = json!({
@@ -8472,6 +8707,7 @@ async fn handle_rm_with(
         "pane_id": pane_id,
         "pane_removed": pane_outcome.removed_json(),
         "pane_reason": pane_outcome.reason(),
+        "worktree_receipt": worktree_receipt,
         "event_written": event_error.is_none(),
         "event_reason": event_error,
         "was_orphaned": was_orphaned,
@@ -11076,6 +11312,180 @@ mod tests {
             .entries
             .is_empty());
         std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// A temp dir whose `.git` is a FILE: linked-worktree shape, no real repo
+    /// behind it (the gate and the removal are injected, so none is needed).
+    fn fake_worktree(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fno-rm-wt-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".git"), "gitdir: /elsewhere/worktrees/x.git\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn output_with_timeout_bounds_a_stalled_subprocess() {
+        // The rm path's budget: a fast child answers, a stalled one is
+        // bounded instead of parking the daemon's rm handler.
+        let fast = output_with_timeout(
+            {
+                let mut c = std::process::Command::new("echo");
+                c.arg("ok");
+                c
+            },
+            10,
+        );
+        assert!(fast.is_some(), "a fast child answers");
+        let stalled = output_with_timeout(
+            {
+                let mut c = std::process::Command::new("sleep");
+                c.arg("30");
+                c
+            },
+            1,
+        );
+        let stalled = stalled.expect("a stalled child is killed, not left running");
+        assert!(
+            !stalled.status.success(),
+            "the killed child reads as a failed call"
+        );
+    }
+
+    #[test]
+    fn branch_merged_answers_real_repos() {
+        // The rm door's half of the third bucket: a fresh branch is
+        // unmerged; a fast-forward into the main line flips it.
+        let root = std::env::temp_dir().join(format!("fno-rm-mg-{}", std::process::id()));
+        let repo = root.join("repo");
+        let wt = root.join("leaf");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str], cwd: &std::path::Path| {
+            std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let commit_args = [
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "seed",
+        ];
+        assert!(git(&["init", "-q", "-b", "main"], &repo).status.success());
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        assert!(git(&["add", "-A"], &repo).status.success());
+        assert!(git(&commit_args, &repo).status.success());
+        let worktree_add = [
+            "worktree",
+            "add",
+            "-q",
+            wt.to_str().unwrap(),
+            "-b",
+            "feature",
+        ];
+        assert!(git(&worktree_add, &repo).status.success());
+        std::fs::write(wt.join("b.txt"), "b\n").unwrap();
+        assert!(git(&["add", "-A"], &wt).status.success());
+        assert!(git(&commit_args, &wt).status.success());
+
+        assert_eq!(
+            branch_merged(wt.to_str().unwrap()),
+            Some(false),
+            "an unmerged branch blocks the rm door"
+        );
+
+        assert!(git(&["merge", "-q", "feature"], &repo).status.success());
+        assert_eq!(
+            branch_merged(wt.to_str().unwrap()),
+            Some(true),
+            "a merged branch passes"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn rm_take_worktree_removes_when_the_gate_answers_yes() {
+        // AC5-HP: a clean tree goes. The branch survives by git's own
+        // contract (`worktree remove` never deletes branches) - the command
+        // choice is the sweep's, not a second policy.
+        let wt = fake_worktree("clean");
+        let mut row = ask_row("wt1", Some("2020-01-01T00:00:00Z"));
+        row.cwd = wt.to_string_lossy().into_owned();
+        let receipt = rm_take_worktree_with(&row, &|_| WorktreeGate::Reapable, &|_| Ok(()));
+        assert_eq!(
+            receipt.as_deref().map(|s| s.to_string()),
+            Some(format!("worktree removed: {}", wt.to_string_lossy()))
+        );
+        std::fs::remove_dir_all(&wt).ok();
+    }
+
+    #[test]
+    fn rm_take_worktree_keeps_a_blocked_tree_and_names_the_reason() {
+        // AC6-EDGE: DIRTY or clean-and-unmerged keeps the tree; the receipt
+        // names the path and the gate's reason. The ROW was already removed
+        // by the caller - the receipt never blocks that.
+        let wt = fake_worktree("dirty");
+        let mut row = ask_row("wt2", Some("2020-01-01T00:00:00Z"));
+        row.cwd = wt.to_string_lossy().into_owned();
+        let receipt = rm_take_worktree_with(
+            &row,
+            &|_| WorktreeGate::Blocked("modified-tracked".into()),
+            &|_| Ok(()),
+        );
+        assert_eq!(
+            receipt.as_deref().map(|s| s.to_string()),
+            Some(format!(
+                "worktree kept: {} (the gate said no: modified-tracked)",
+                wt.to_string_lossy()
+            ))
+        );
+        std::fs::remove_dir_all(&wt).ok();
+    }
+
+    #[test]
+    fn rm_take_worktree_keeps_the_tree_when_the_probe_cannot_answer() {
+        // AC7-ERR: an unanswerable probe keeps the tree. Removal never guesses.
+        let wt = fake_worktree("mute");
+        let mut row = ask_row("wt3", Some("2020-01-01T00:00:00Z"));
+        row.cwd = wt.to_string_lossy().into_owned();
+        let receipt = rm_take_worktree_with(
+            &row,
+            &|_| WorktreeGate::Unanswerable("the reapable probe could not answer".into()),
+            &|_| Ok(()),
+        );
+        assert_eq!(
+            receipt.as_deref().map(|s| s.to_string()),
+            Some(format!(
+                "worktree kept: {} (the reapable probe could not answer)",
+                wt.to_string_lossy()
+            ))
+        );
+        std::fs::remove_dir_all(&wt).ok();
+    }
+
+    #[test]
+    fn rm_take_worktree_is_a_noop_for_a_row_without_a_linked_worktree() {
+        // A row that ran in a plain directory owns nothing removable: the
+        // gate is never consulted, the receipt is None, nothing fails.
+        let mut row = ask_row("wt4", Some("2020-01-01T00:00:00Z"));
+        row.cwd = "/tmp/plain-cwd".into();
+        let asked = std::cell::Cell::new(0);
+        let receipt = rm_take_worktree_with(
+            &row,
+            &|_| {
+                asked.set(asked.get() + 1);
+                WorktreeGate::Reapable
+            },
+            &|_| Ok(()),
+        );
+        assert_eq!(receipt, None);
+        assert_eq!(asked.get(), 0, "the gate was never consulted");
     }
 
     #[tokio::test]

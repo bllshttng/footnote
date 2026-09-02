@@ -4193,6 +4193,73 @@ class RmResult:
     claude_exit: Optional[int] = None
     force: bool = False
     registry_changed: bool = False
+    worktree_receipt: Optional[str] = None
+
+
+def _prune_row_worktree(entry: Any) -> Optional[str]:
+    """Take a removed row's worktree with it, through the reapable gate only.
+
+    A human removed ONE named row, so its worktree may go with it - but a
+    row removal must never become a fourth door around the three buckets in
+    ``.claude/rules/worktrees.md``. Every decision routes through
+    :func:`fno.worktree_reapable.reapable` (the classifier behind
+    ``fno agents workspace worktree reapable``) PLUS the merge check the
+    ``--merged`` sweep applies as its own pre-filter: DIRTY is never
+    touched, clean-and-unmerged is never auto-pruned (the branch is where
+    its work lives; a human judges), and clean-and-MERGED loses the TREE
+    while the branch stays (``git worktree remove`` never deletes
+    branches).
+
+    A gate that cannot answer keeps the tree - removal never guesses. A
+    refusal prints a receipt naming the path and the gate's reason, and the
+    ROW is removed either way: a protected worktree must not wedge the row
+    on the sideline. ``None``: the row owned no linked worktree, a clean
+    no-op.
+    """
+    cwd = entry.cwd or ""
+    if not cwd:
+        return None
+
+    from fno.worktree_reapable import (
+        branch_merged,
+        is_linked_worktree,
+        reapable as classify_reapable,
+    )
+
+    if not is_linked_worktree(cwd):
+        return None
+
+    verdict = classify_reapable(cwd)
+    if not verdict.reapable:
+        if verdict.reason == "probe-failed":
+            return (
+                f"worktree kept: {cwd} "
+                f"(the reapable probe could not answer: {verdict.detail or verdict.reason})"
+            )
+        return f"worktree kept: {cwd} (the gate said no: {verdict.reason})"
+    if branch_merged(cwd) is not True:
+        return (
+            f"worktree kept: {cwd} "
+            "(clean but the branch is not merged; the contract keeps it for a human)"
+        )
+    try:
+        removed = subprocess.run(
+            ["git", "worktree", "remove", "--force", cwd],
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+            # Run git FROM the worktree: git discovers the repository from
+            # the process cwd, and the caller's cwd is often not the row's
+            # repo. A forced self-removal from inside the leaf is allowed.
+            cwd=cwd,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"worktree kept: {cwd} (git worktree remove failed: {exc})"
+    if removed.returncode != 0:
+        detail = (removed.stderr or "").strip().splitlines()
+        why = detail[0] if detail else f"exited {removed.returncode}"
+        return f"worktree kept: {cwd} (git worktree remove failed: {why})"
+    return f"worktree removed: {cwd}"
 
 
 @dataclass(frozen=True)
@@ -5409,6 +5476,14 @@ def rm_agent(
                     ),
                 )
 
+            # (x-d545) The row is gone from the registry: now take its
+            # worktree, but only as far as the reapable gate allows. The
+            # receipt rides stdout, the event, and RmResult; a refusal never
+            # blocks the removal that already happened.
+            worktree_receipt = _prune_row_worktree(existing)
+            if worktree_receipt:
+                print(worktree_receipt, flush=True)
+
             # Stdout "removed:" prints come AFTER update_registry succeeds so
             # a write failure cannot leave the operator with a misleading
             # confirmation. (Sigma-review C3 finding.)
@@ -5428,6 +5503,7 @@ def rm_agent(
                 force=force,
                 registry_changed=True,
                 teardown_error=teardown_error,
+                worktree_receipt=worktree_receipt,
             )
             return RmResult(
                 name=name,
@@ -5435,6 +5511,7 @@ def rm_agent(
                 claude_exit=claude_exit,
                 force=force,
                 registry_changed=True,
+                worktree_receipt=worktree_receipt,
             )
     except AgentLockTimeout as exc:
         # Symmetric with stop_agent's lock-timeout emit so forensics can
