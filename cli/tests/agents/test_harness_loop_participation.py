@@ -132,12 +132,25 @@ def test_a_harness_with_no_loop_boundary_is_refused(command):
     assert "never stop" in message
 
 
-def test_an_extension_harness_without_a_shipped_artifact_is_refused():
+def test_an_extension_harness_without_a_shipped_artifact_is_refused(monkeypatch):
     """pi's command_surface is ``slash``, so a /target resolves fine there.
 
     Without this refusal the dispatch succeeds and the worker runs with nothing
-    to stop it, which is a hang no instrument reports.
+    to stop it, which is a hang no instrument reports. pi's artifact shipped
+    (x-43bd), so the empty-artifact shape is asserted by blanking the row's
+    path - the refusal must come from the CONTRACT, not from one harness's
+    accident of shipping.
     """
+    import fno.agents.harness_map as harness_map
+
+    real_caps = harness_map.capabilities
+
+    def caps_without_artifact(harness):
+        caps = dict(real_caps(harness))
+        caps["loop_extension"] = ""
+        return caps
+
+    monkeypatch.setattr(harness_map, "capabilities", caps_without_artifact)
     with pytest.raises(DispatchResolveError) as exc:
         check_loop_participation("pi", "/target x-1")
     assert "pi" in str(exc.value)
@@ -146,6 +159,8 @@ def test_an_extension_harness_without_a_shipped_artifact_is_refused():
 
 def test_an_extension_harness_with_a_shipped_artifact_is_dispatched():
     check_loop_participation("opencode", "/fno:target x-1")
+    # pi joined in x-43bd: the shipped footnote.ts extension satisfies the gate.
+    check_loop_participation("pi", "/target x-1")
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "agy"])
@@ -169,12 +184,14 @@ def test_a_non_looping_dispatch_is_never_refused(harness):
     check_loop_participation(harness, "\t\n")
 
 
-def test_resolve_dispatch_refuses_a_looping_target_at_pi():
-    with pytest.raises(DispatchResolveError) as exc:
-        resolve_dispatch(
-            harness="pi", substrate="pane", trigger="attended", node_id="x-1"
-        )
-    assert "loop_participation" in str(exc.value)
+def test_resolve_dispatch_resolves_a_looping_target_at_pi():
+    """pi's loop extension shipped (x-43bd), so the resolver that used to
+    refuse a looping /target here now resolves it: the worker has something
+    to stop it."""
+    resolved = resolve_dispatch(
+        harness="pi", substrate="pane", trigger="attended", node_id="x-1"
+    )
+    assert resolved["loop_participation"] == "extension"
 
 
 def test_resolve_dispatch_still_resolves_a_looping_target_at_claude():
