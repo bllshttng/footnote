@@ -277,6 +277,8 @@ max_fleet_cpu_share = 0.5
 hard_max_load_per_cpu = 40.0
 # Worker CPU/IO priority: utility (background QoS, default) or off.
 worker_qos = "utility"
+# Absolute override for the doctor footprint sustained-CPU threshold, in cores. Unset, the threshold derives from measured CPU capacity (a fraction per core) instead of an absolute constant that asked a 12-core machine's fleet to idle at 8%.
+# footprint_sustained_cpu_cores = <unset>   # optional; no default
 # Default --permission-mode for autonomous dispatchers only (dispatch-node.sh / backlog advance / think dispatch); defaults to bypassPermissions so fire-and-forget workers skip the worktree-entry prompt. An explicit flag wins; opt out with an explicit "" (forward nothing) or "default" (prompt positively). Claude-native, fail-closed at the spawn seam.
 spawn_permission_mode = "bypassPermissions"
 
@@ -486,6 +488,36 @@ enabled = true
 # Override health-history path.
 # path = <unset>   # optional; no default
 # Health-history retention (days).
+retain_days = 90
+
+[resource_meter]
+# Whole-machine resource meter (needs macmon on PATH, Apple Silicon only; brew install macmon). Off by default because fno core does not depend on the binary.
+enabled = false
+# How often the status-row meter re-samples the machine (seconds).
+refresh_seconds = 5
+
+[resource_meter.thresholds]
+# Whole-machine CPU busy fraction the meter flags as hot.
+cpu_busy_fraction = 0.9
+# Swap in use (GB) above which the meter flags memory pressure.
+swap_used_gb = 1.0
+
+[resource_meter.notifications]
+# Meter notification surfaces (terminal/discord/webhook/log_only).
+surfaces = ["terminal"]
+# Discord channel for meter notifications.
+# discord_channel = <unset>   # optional; no default
+# Webhook URL for meter notifications.
+# webhook_url = <unset>   # optional; no default
+# Meter notification throttle (minutes).
+throttle_minutes = 60
+
+[resource_meter.history]
+# Append meter readings to history.
+enabled = true
+# Override meter-history path.
+# path = <unset>   # optional; no default
+# Meter-history retention (days).
 retain_days = 90
 
 [collision.severity_thresholds]

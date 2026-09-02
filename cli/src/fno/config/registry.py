@@ -488,8 +488,11 @@ FIELD_META: dict[str, Meta] = {
     "resource_meter.thresholds.swap_used_gb": Meta("never", "Swap in use (GB) above which the meter flags memory pressure."),
     "resource_meter.notifications.surfaces": Meta("never", "Meter notification surfaces (terminal/discord/webhook/log_only)."),
     "resource_meter.notifications.throttle_minutes": Meta("never", "Meter notification throttle (minutes)."),
+    "resource_meter.notifications.discord_channel": Meta("never", "Discord channel for meter notifications."),
+    "resource_meter.notifications.webhook_url": Meta("never", "Webhook URL for meter notifications."),
     "resource_meter.history.enabled": Meta("never", "Append meter readings to history."),
     "resource_meter.history.retain_days": Meta("never", "Meter-history retention (days)."),
+    "resource_meter.history.path": Meta("never", "Override meter-history path."),
     # --- config.collision.* ---
     "collision.severity_thresholds.high_count": Meta("never", "Collision scoring: high-severity shared-file count."),
     "collision.severity_thresholds.high_ratio": Meta("never", "Collision scoring: high-severity shared-file ratio."),

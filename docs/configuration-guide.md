@@ -112,6 +112,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `agents.auto_register_sessions` | bool | `false` | advanced | Auto-join every hand-started session to the roster at SessionStart (default false = opt-in via /fno-me). Spawned workers register regardless. |
 | `agents.happy_routed_panes` | bool | `false` | advanced | Launch routed claude panes through happy for remote monitoring; default false and pane-only. |
 | `agents.dead_row_grace` | int \| dict[str, int] | `3600` | advanced | Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600). |
+| `agents.reap_receipts.retain_days` | int | `7` | advanced | Days a reap receipt (the resume handle for a reaped row) stays before the GC sweep expires it (default 7). A receipt whose reaped_at cannot be read is kept and named, never deleted on a failed read. |
 | `agents.codex.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless codex workers. |
 | `agents.gemini.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless gemini workers. |
 | `agents.max_live` | int | `3` | advanced | Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3). |
@@ -122,6 +123,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `agents.max_fleet_cpu_share` | float | `0.5` | advanced | Share of CPU capacity the fleet may hold before spawn preflight refuses, checked only above agents.max_load_per_cpu (default 0.5). This is the figure the refusal already printed and never decided on. Unreadable attribution refuses, because an unknown share is not evidence of headroom. |
 | `agents.hard_max_load_per_cpu` | float | `40.0` | advanced | Absolute machine backstop for spawn preflight: refuse above this factor times the CPU count regardless of whose load it is (<= 0 disables; default 40). Pure fleet-share admits spawns onto a box already thrashing from foreign work. Keep it well above agents.max_load_per_cpu. |
 | `agents.worker_qos` | str | `utility` | advanced | Worker CPU/IO priority: utility (background QoS, default) or off. |
+| `agents.footprint_sustained_cpu_cores` | float (optional) | _(none)_ | advanced | Absolute override for the doctor footprint sustained-CPU threshold, in cores. Unset, the threshold derives from measured CPU capacity (a fraction per core) instead of an absolute constant that asked a 12-core machine's fleet to idle at 8%. |
 | `agents.spawn_permission_mode` | str | `bypassPermissions` | advanced | Default --permission-mode for autonomous dispatchers only (dispatch-node.sh / backlog advance / think dispatch); defaults to bypassPermissions so fire-and-forget workers skip the worktree-entry prompt. An explicit flag wins; opt out with an explicit "" (forward nothing) or "default" (prompt positively). Claude-native, fail-closed at the spawn seam. |
 | `process_admission.max_processes` | int | `400` | advanced | Maximum fno-attributed OS processes admitted by the native pre-spawn gate; counts processes, not agents or panes (default 400). |
 | `dispatch.harness` | str | `` | advanced | Default dispatch harness (claude\|codex\|gemini\|agy\|opencode); empty = claude. Overlays the harness-capability map. |
@@ -191,6 +193,17 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `health_monitor.history.enabled` | bool | `true` | never | Append health-history entries. |
 | `health_monitor.history.path` | str (optional) | _(none)_ | never | Override health-history path. |
 | `health_monitor.history.retain_days` | int | `90` | never | Health-history retention (days). |
+| `resource_meter.enabled` | bool | `false` | advanced | Whole-machine resource meter (needs macmon on PATH, Apple Silicon only; brew install macmon). Off by default because fno core does not depend on the binary. |
+| `resource_meter.refresh_seconds` | int | `5` | advanced | How often the status-row meter re-samples the machine (seconds). |
+| `resource_meter.thresholds.cpu_busy_fraction` | float | `0.9` | never | Whole-machine CPU busy fraction the meter flags as hot. |
+| `resource_meter.thresholds.swap_used_gb` | float | `1.0` | never | Swap in use (GB) above which the meter flags memory pressure. |
+| `resource_meter.notifications.surfaces` | list[str] | `["terminal"]` | never | Meter notification surfaces (terminal/discord/webhook/log_only). |
+| `resource_meter.notifications.discord_channel` | str (optional) | _(none)_ | never | Discord channel for meter notifications. |
+| `resource_meter.notifications.webhook_url` | str (optional) | _(none)_ | never | Webhook URL for meter notifications. |
+| `resource_meter.notifications.throttle_minutes` | int | `60` | never | Meter notification throttle (minutes). |
+| `resource_meter.history.enabled` | bool | `true` | never | Append meter readings to history. |
+| `resource_meter.history.path` | str (optional) | _(none)_ | never | Override meter-history path. |
+| `resource_meter.history.retain_days` | int | `90` | never | Meter-history retention (days). |
 | `collision.severity_thresholds.high_count` | float | `3` | never | Collision scoring: high-severity shared-file count. |
 | `collision.severity_thresholds.high_ratio` | float | `0.5` | never | Collision scoring: high-severity shared-file ratio. |
 | `collision.severity_thresholds.medium_count` | float | `2` | never | Collision scoring: medium-severity shared-file count. |
