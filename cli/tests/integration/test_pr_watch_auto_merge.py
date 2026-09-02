@@ -47,7 +47,7 @@ def _receipt(approved: bool, at: str) -> dict:
     }
 
 
-def _write_graph(tmp_path: Path, receipts: list[dict]) -> None:
+def _write_graph(monkeypatch, tmp_path: Path, receipts: list[dict]) -> None:
     sessions = [
         {"phase": "do", "harness": "claude", "session_id": f"w{i}",
          "merge_grant": receipt}
@@ -57,12 +57,15 @@ def _write_graph(tmp_path: Path, receipts: list[dict]) -> None:
     g.write_text(json.dumps({"entries": [{
         "id": NODE, "title": "t", "pr_number": PR, "sessions": sessions,
     }]}), encoding="utf-8")
+    # THROUGH monkeypatch, never a bare module-attribute write: a bare write
+    # survives the test and poisons whatever runs next on the same xdist
+    # worker (a later doctor test then reads this tmp's graph archive).
     import fno.paths as paths_mod
 
-    paths_mod.graph_json = lambda: g  # the resolver's own read
+    monkeypatch.setattr(paths_mod, "graph_json", lambda: g)  # the resolver's own read
     import fno.pr._coverage_gate as cg
 
-    cg._repo_slug = lambda repo: None  # bare-number node matching
+    monkeypatch.setattr(cg, "_repo_slug", lambda repo: None)  # bare-number node matching
 
 
 def _arm_world(
@@ -200,7 +203,7 @@ def _grant_events(events: list[dict], phase: str) -> list[dict]:
 class TestParkedWorkerJourney:
     def test_live_hold_green_merge_refusal_outranks(self, tmp_path, monkeypatch):
         # The grant is on the node from a dispatch whose receipt is newest.
-        _write_graph(tmp_path, [_receipt(True, "2026-08-24T10:00:00Z")])
+        _write_graph(monkeypatch, tmp_path, [_receipt(True, "2026-08-24T10:00:00Z")])
 
         # (1) Worker LIVE: the tick must not even reserve an attempt.
         _arm_world(monkeypatch, tmp_path, claim_state="live", checks_pending=True)
@@ -234,7 +237,7 @@ class TestParkedWorkerJourney:
     def test_newer_no_merge_refusal_outranks_older_grant(self, tmp_path, monkeypatch):
         """AC9-EDGE in the journey: a newer `--no-merge` re-dispatch records
         approved=false, and the watcher never merges despite the older grant."""
-        _write_graph(tmp_path, [
+        _write_graph(monkeypatch, tmp_path, [
             _receipt(True, "2026-08-24T10:00:00Z"),
             _receipt(False, "2026-08-24T11:00:00Z"),
         ])
@@ -253,7 +256,7 @@ class TestParkedWorkerJourney:
         repair, from the same receipt a human reads."""
         from fno.pr import _status
 
-        _write_graph(tmp_path, [_receipt(True, "2026-08-24T10:00:00Z")])
+        _write_graph(monkeypatch, tmp_path, [_receipt(True, "2026-08-24T10:00:00Z")])
         _arm_world(monkeypatch, tmp_path, claim_state="stale", checks_pending=False)
         monkeypatch.setattr(
             "fno.pr_watch._install.liveness_report_live",
