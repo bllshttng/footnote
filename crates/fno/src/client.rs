@@ -1890,6 +1890,15 @@ impl MenuAction {
                 "move-tab-right"
             }),
             MenuAction::Remove => Some("remove-row"),
+            // (x-d545) The row-menu verbs join the keyboard: every entry that
+            // can carry a key now shows one, and the drawn glyph and the
+            // dispatched byte both resolve through the same menu-scope id.
+            MenuAction::Stop => Some("stop-row"),
+            MenuAction::Peek => Some("peek-row"),
+            MenuAction::Mail => Some("mail-row"),
+            MenuAction::Diff => Some("diff-row"),
+            MenuAction::OpenHere => Some("open-here"),
+            MenuAction::Resume => Some("resume-row"),
             _ => None,
         }
     }
@@ -1947,11 +1956,18 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     // says the row CAN be removed and names the precondition, where leaving it
     // out of the live menus entirely said the action does not exist. Disabled
     // contributes zero targets (`PopupRow::cells`), so it carries no action and
-    // the actions vector stays aligned with the selectable rows.
-    let inert = |glyph: &str, label: &str, hint: &str| PopupRow::Entry {
+    // the actions vector stays aligned with the selectable rows. (x-d545) The
+    // hint carries the key too: the one moment the menu could teach the byte
+    // that WILL remove the row one keypress later is this one, so the glyph
+    // (resolved through the menu scope, never a literal) rides beside the
+    // precondition.
+    let inert = |glyph: &str, label: &str| PopupRow::Entry {
         glyph: glyph.into(),
         label: label.into(),
-        hint: hint.into(),
+        hint: format!(
+            "{} stop first",
+            crate::keys::menu_key_for("remove-row").unwrap_or_default()
+        ),
         enabled: false,
     };
     add(PopupRow::Header(agent.name.clone()), &[]);
@@ -1961,18 +1977,21 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
             entry_acc("✕", "Remove", "remove-row"),
             &[MenuAction::Remove],
         );
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
+        add(entry_acc("◉", "Peek", "peek-row"), &[MenuAction::Peek]);
         // Resume above the rule (AC7): the menu twin of peek `r`, on the row
         // state `r` accepts - an exited row.
-        add(entry("↻", "Resume"), &[MenuAction::Resume]);
+        add(
+            entry_acc("↻", "Resume", "resume-row"),
+            &[MenuAction::Resume],
+        );
     } else if agent.pane_id.is_some() {
         // Live pane row: already placed, so re-placement is a MOVE of the live
         // pane, never an attach. Same 2x2 grid geometry the paneless branch uses
         // below, so the two menus read as one system; the verbs differ because
         // the operations do (move a running pane vs. place a new one).
         add(entry("→", "Focus"), &[MenuAction::Focus]);
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
-        add(entry("✉", "Mail"), &[MenuAction::Mail]);
+        add(entry_acc("◉", "Peek", "peek-row"), &[MenuAction::Peek]);
+        add(entry_acc("✉", "Mail", "mail-row"), &[MenuAction::Mail]);
         add(PopupRow::Rule, &[]);
         add(
             PopupRow::FullWidth("▭ New Tab".into()),
@@ -1996,14 +2015,14 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
             &[MenuAction::MoveDir(Dir::Up), MenuAction::MoveDir(Dir::Down)],
         );
         add(PopupRow::Rule, &[]);
-        add(entry("■", "Stop"), &[MenuAction::Stop]);
-        add(inert("✕", "Remove", "stop first"), &[]);
+        add(entry_acc("■", "Stop", "stop-row"), &[MenuAction::Stop]);
+        add(inert("✕", "Remove"), &[]);
     } else if agent.attach_id.is_some() {
         // Paneless bg row: the motivating case - open as a tab or a split pane.
         // Open-here leads (repoint the focused viewer). The client can't know viewer-ness, so the
         // server's fail-closed notice is the feedback path when the focus isn't a detachable viewer.
         add(
-            PopupRow::FullWidth("⊙ Open Here".into()),
+            entry_acc("⊙", "Open Here", "open-here"),
             &[MenuAction::OpenHere],
         );
         add(
@@ -2023,27 +2042,26 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
             &[MenuAction::Split(Dir::Up), MenuAction::Split(Dir::Down)],
         );
         add(PopupRow::Rule, &[]);
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
-        add(entry("✉", "Mail"), &[MenuAction::Mail]);
-        add(entry("■", "Stop"), &[MenuAction::Stop]);
-        add(inert("✕", "Remove", "stop first"), &[]);
+        add(entry_acc("◉", "Peek", "peek-row"), &[MenuAction::Peek]);
+        add(entry_acc("✉", "Mail", "mail-row"), &[MenuAction::Mail]);
+        add(entry_acc("■", "Stop", "stop-row"), &[MenuAction::Stop]);
+        add(inert("✕", "Remove"), &[]);
     } else {
         // A live row that is neither pane-hosted nor attachable here.
-        add(entry("◉", "Peek"), &[MenuAction::Peek]);
-        add(entry("✉", "Mail"), &[MenuAction::Mail]);
+        add(entry_acc("◉", "Peek", "peek-row"), &[MenuAction::Peek]);
+        add(entry_acc("✉", "Mail", "mail-row"), &[MenuAction::Mail]);
         if agent.no_pane_reason == Some(AgentNoPaneReason::LivePaneless) {
             add(entry("↩", "Reattach"), &[MenuAction::Reattach]);
         }
-        add(entry("■", "Stop"), &[MenuAction::Stop]);
-        add(inert("✕", "Remove", "stop first"), &[]);
+        add(entry_acc("■", "Stop", "stop-row"), &[MenuAction::Stop]);
+        add(inert("✕", "Remove"), &[]);
     }
     // Diff is common to every row state: it reads the row's worktree,
     // which an exited or paneless row has just as much as a live pane-hosted
     // one - and a finished worker's diff is the one you most want to read.
-    // No hint: its prefix chord is not a menu key, and the menu scope leaves
-    // it unbound (x-91a1).
+    // (x-d545) Bound in menu scope now, so its hint is the live key.
     add(PopupRow::Rule, &[]);
-    add(entry("±", "Diff"), &[MenuAction::Diff]);
+    add(entry_acc("±", "Diff", "diff-row"), &[MenuAction::Diff]);
     RowMenu {
         popup: Popup::new(rows, anchor),
         target: MenuTarget::Agent(AgentIdent::of(agent)),
@@ -23521,6 +23539,202 @@ mod tests {
         );
     }
 
+    // ---- (x-d545) the row menu teaches its own keyboard ----------------------
+
+    /// A live paneless bg row: the menu shape the operator's complaint runs
+    /// through (Open Here / New Tab / splits / Peek / Mail / Stop / inert
+    /// Remove / Diff).
+    fn paneless_bg_row(name: &str) -> AgentRow {
+        let mut r = agent_row(name, 10, None, false);
+        r.pane_id = None;
+        r.attach_id = Some("job1".into());
+        r
+    }
+
+    fn entry_hint(v: &View, label: &str) -> Option<String> {
+        let m = v.row_menu.as_ref()?;
+        m.popup.rows.iter().find_map(|row| match row {
+            PopupRow::Entry { label: l, hint, .. } if l == label => Some(hint.clone()),
+            _ => None,
+        })
+    }
+
+    #[tokio::test]
+    async fn row_menu_verbs_show_their_menu_keys() {
+        // AC9-HP: Stop, Peek, Mail, Open Here and Diff each show the
+        // menu-scope key that runs them - the glyph read live from
+        // keys::menu_key_for, never a literal.
+        let mut v = view_with_agents(vec![paneless_bg_row("w1")]);
+        assert!(v.open_row_menu(1, Anchor::Center));
+        for (label, id) in [
+            ("Open Here", "open-here"),
+            ("Peek", "peek-row"),
+            ("Mail", "mail-row"),
+            ("Stop", "stop-row"),
+            ("Diff", "diff-row"),
+        ] {
+            let want = crate::keys::menu_key_for(id).expect("the verb is bound in menu scope");
+            assert_eq!(
+                entry_hint(&v, label),
+                Some(want),
+                "{label} shows its menu-scope key"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn row_menu_keys_run_the_same_execute_path_as_enter() {
+        // AC9-HP: typing the drawn byte runs the entry through the SAME
+        // execute path a click and Enter use - positive markers on the
+        // command sent, the confirm armed, or the composer opened.
+        let mut v = view_with_agents(vec![paneless_bg_row("w1")]);
+        assert!(v.open_row_menu(1, Anchor::Center));
+
+        // o runs Open Here: the attach-here command.
+        let o = crate::keys::menu_byte_for("open-here").unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_keys(&mut v, &[o], &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::attach_agent_here("job1".to_string())],
+            "the open-here key attached here"
+        );
+
+        // s arms the SAME stop confirm the click arms.
+        assert!(v.open_row_menu(1, Anchor::Center));
+        let s = crate::keys::menu_byte_for("stop-row").unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_keys(&mut v, &[s], &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "arming sends nothing");
+        assert!(
+            matches!(
+                v.confirm.as_ref().map(|c| &c.action),
+                Some(super::ConfirmKind::StopAgent { name }) if name == "w1"
+            ),
+            "the stop key armed the stop confirm"
+        );
+
+        // d sends the diff toggle for this row.
+        assert!(v.open_row_menu(1, Anchor::Center));
+        let d = crate::keys::menu_byte_for("diff-row").unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_keys(&mut v, &[d], &mut buf).await.unwrap();
+        assert!(
+            decode_cmds(buf)
+                .iter()
+                .any(|c| matches!(c, Command::ToggleDiffPane { .. })),
+            "the diff key toggled the diff pane"
+        );
+
+        // p opens the peek (the fetch rides the wire).
+        assert!(v.open_row_menu(1, Anchor::Center));
+        let p = crate::keys::menu_byte_for("peek-row").unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_keys(&mut v, &[p], &mut buf).await.unwrap();
+        assert!(
+            decode_cmds(buf)
+                .iter()
+                .any(|c| matches!(c, Command::PeekAgent { .. })),
+            "the peek key opened the peek"
+        );
+
+        // m opens the SAME composer peek `m` opens.
+        assert!(v.open_row_menu(1, Anchor::Center));
+        let m = crate::keys::menu_byte_for("mail-row").unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_keys(&mut v, &[m], &mut buf).await.unwrap();
+        assert!(
+            v.peek_input.as_ref().is_some_and(|(name, _)| name == "w1"),
+            "the mail key armed the peek composer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bound_byte_no_entry_offers_dismisses_without_action() {
+        // AC10-HP: the resume byte (`r`, bound for exited-row menus) is NOT
+        // offered by a live row's menu, so typing it dismisses exactly as any
+        // unbound byte does and sends nothing - and the inert Remove entry
+        // contributes no action slot for `x` to hit either.
+        let mut v = view_with_agents(vec![paneless_bg_row("w1")]);
+        assert!(v.open_row_menu(1, Anchor::Center));
+        let r = crate::keys::menu_byte_for("resume-row").unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_keys(&mut v, &[r], &mut buf).await.unwrap();
+        assert!(v.row_menu.is_none(), "the menu dismissed");
+        assert!(buf.is_empty(), "no action fired");
+
+        // The remove byte on a LIVE row's menu: remove-row is bound, the row
+        // offers no Remove action (the entry is inert), so it dismisses too.
+        assert!(v.open_row_menu(1, Anchor::Center));
+        let x = crate::keys::menu_byte_for("remove-row").unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_keys(&mut v, &[x], &mut buf).await.unwrap();
+        assert!(v.row_menu.is_none(), "the menu dismissed");
+        assert!(buf.is_empty(), "no remove fired from a live row's menu");
+    }
+
+    #[test]
+    fn the_inert_remove_entry_shows_the_key_and_the_precondition() {
+        // AC11-EDGE: the disabled Remove entry carries the byte that WILL
+        // remove the row once the precondition clears, beside the
+        // precondition - and it stays unselectable, contributing no action
+        // slot, so the actions vector stays index-aligned with the rows.
+        let mut v = view_with_agents(vec![paneless_bg_row("w1")]);
+        assert!(v.open_row_menu(1, Anchor::Center));
+        let m = v.row_menu.as_ref().unwrap();
+        let remove_key = crate::keys::menu_key_for("remove-row").unwrap();
+        let inert_row = m.popup.rows.iter().find_map(|row| match row {
+            PopupRow::Entry {
+                glyph,
+                label,
+                hint,
+                enabled,
+            } if label == "Remove" && !*enabled => Some((glyph.clone(), hint.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            inert_row,
+            Some(("✕".into(), format!("{remove_key} stop first"))),
+            "the hint carries the key and the precondition"
+        );
+        assert!(
+            !m.actions
+                .iter()
+                .any(|a| matches!(a, super::MenuAction::Remove)),
+            "an inert entry contributes no action slot"
+        );
+    }
+
+    #[test]
+    fn new_menu_bindings_share_no_byte_within_one_offered_set() {
+        // The one-safety property every new binding relies on: within any ONE
+        // menu, no two offered actions resolve to the same byte, so the
+        // offer-scoped dispatch can never be ambiguous. The exited-row menu
+        // (Remove/Peek/Resume/Diff) and the live paneless menu are the two
+        // shapes that carry the new verbs.
+        let exited = build_row_menu(
+            &{
+                let mut r = paneless_bg_row("w1");
+                r.exited = true;
+                r
+            },
+            Anchor::Center,
+        );
+        let live = build_row_menu(&paneless_bg_row("w1"), Anchor::Center);
+        for (menu, shape) in [(&exited, "exited"), (&live, "live")] {
+            let mut seen: Vec<(u8, &str)> = Vec::new();
+            for a in &menu.actions {
+                if let Some(b) = a.accelerator_id().and_then(crate::keys::menu_byte_for) {
+                    assert!(
+                        seen.iter().all(|(sb, _)| *sb != b),
+                        "{shape} menu: byte {b} answers two actions ({seen:?} + {a:?})"
+                    );
+                    seen.push((b, "taken"));
+                }
+            }
+        }
+    }
+
     /// Point the open row menu's selection at `action` (executes nothing).
     async fn menu_select(v: &mut View, action: super::MenuAction) {
         let m = v.row_menu.as_mut().unwrap();
@@ -24242,9 +24456,14 @@ mod tests {
         assert!(
             matches!(
                 inert.as_slice(),
-                [PopupRow::Entry { label, hint, .. }] if label == "Remove" && hint == "stop first"
+                [PopupRow::Entry { label, hint, .. }]
+                    if label == "Remove"
+                        && hint == &format!(
+                            "{} stop first",
+                            crate::keys::menu_key_for("remove-row").unwrap_or_default()
+                        )
             ),
-            "exactly one greyed Remove naming its precondition: {inert:?}"
+            "exactly one greyed Remove naming its key and precondition: {inert:?}"
         );
         assert!(
             !menu.actions.contains(&super::MenuAction::Remove),
@@ -24801,8 +25020,9 @@ mod tests {
         // AC8-EDGE, x-91a1: hints resolve from the LIVE menu-scope registry
         // (`menu_key_for`), never a literal and never a prefix-only chord - the
         // open menu does not run prefix chords, so advertising one is the LD9
-        // lie. Prefix-only actions (Diff) and scope-less actions (peek,
-        // resume) render NO key.
+        // lie. (x-d545) Diff, Peek and Resume are bound in menu scope now, so
+        // they mirror their live glyphs; the invariant that survives is that
+        // every hint IS the menu-scope answer, never a hardcoded chord.
         let exited = {
             let mut r = pane_hosted_row("dead", 0);
             r.pane_id = None;
@@ -24825,8 +25045,16 @@ mod tests {
             crate::keys::menu_key_for("remove-row").unwrap_or_default(),
             "Remove mirrors the menu-scope glyph for remove-row"
         );
-        for label in ["Diff", "Peek", "Resume"] {
-            assert_eq!(hint_of(&row, label), "", "{label} has no menu key");
+        for (label, id) in [
+            ("Diff", "diff-row"),
+            ("Peek", "peek-row"),
+            ("Resume", "resume-row"),
+        ] {
+            assert_eq!(
+                hint_of(&row, label),
+                crate::keys::menu_key_for(id).unwrap_or_default(),
+                "{label} mirrors its menu-scope glyph"
+            );
         }
         // Tab menu: every tab verb mirrors its scoped glyph; the join grid
         // carries no hint slot at all, so nothing can hardcode a chord there
