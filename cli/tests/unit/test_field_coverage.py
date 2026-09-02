@@ -77,6 +77,10 @@ def test_source_coverage_rediscovers_node_projection_omission_and_choices(
 ) -> None:
     required = [f"field_{index}" for index in range(40)]
     _write_source_fixture(tmp_path, required=required, extra=["node"])
+    schema_path = tmp_path / "schemas" / "agents-list-row.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema["stored"] = {"node": "Descriptive metadata is not a disposition."}
+    schema_path.write_text(json.dumps(schema), encoding="utf-8")
 
     result = _invoke(monkeypatch, tmp_path)
 

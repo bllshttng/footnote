@@ -1549,8 +1549,6 @@ def _source_field_coverage(repo_root: Path) -> dict[str, Any]:
         "required",
         "projection_omissions",
         "removed",
-        "stored",
-        "derived",
         "rust_only",
         "python_only",
         "storage_only",
