@@ -319,7 +319,7 @@ headless_yolo = false
 max_processes = 400
 
 [dispatch]
-# Default dispatch harness (claude|codex|gemini|agy|opencode); empty = claude. Overlays the harness-capability map.
+# DEPRECATED: the stage table (config.agents.profiles.<verb>.provider) is the home for the harness axis; this key reads as the fallback rung beneath it for one release. Migrate with `fno config set agents.profiles.target.provider <harness>`. Formerly the configured harness for autonomous dispatch.
 harness = ""
 # Default dispatch substrate (thread|headless|pane); bg is a deprecated alias for thread for one release. Empty = per-harness default (claude=thread, else headless; a harness's thread bit must be journey-proven).
 substrate = ""
