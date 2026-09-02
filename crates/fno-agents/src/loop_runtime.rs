@@ -195,6 +195,78 @@ pub struct Unit {
     pub plan_path: Option<String>,
 }
 
+/// Why a walk stopped and what the operator can do about a sentinel.
+#[derive(Debug, Clone)]
+pub struct Cancelled {
+    pub cause: &'static str,
+    pub path: Option<PathBuf>,
+    pub age_secs: Option<u64>,
+    pub clear_hint: String,
+}
+
+impl Cancelled {
+    fn event_data(&self, iterations_used: u64, units_closed: usize) -> Value {
+        let mut data = json!({
+            "reason": "Interrupted",
+            "iterations_used": iterations_used,
+            "units_closed": units_closed,
+            "cancel_cause": self.cause,
+        });
+        if let Some(path) = &self.path {
+            data["cancel_path"] = json!(path.to_string_lossy());
+        }
+        if let Some(age_secs) = self.age_secs {
+            data["cancel_age_seconds"] = json!(age_secs);
+        }
+        data
+    }
+
+    fn refusal_message(&self) -> String {
+        match (&self.path, self.age_secs) {
+            (Some(path), Some(age_secs)) => {
+                let mut message = format!(
+                    "fno-agents loop run: refusing to walk - a cancel signal is set.\n  file:  {}\n  age:   {}\n  clear: {}",
+                    path.display(),
+                    format_cancel_age(age_secs),
+                    self.clear_hint
+                );
+                if age_secs >= STALE_CANCEL_SECS {
+                    message.push_str(
+                        "\n  stale: this cancel signal is older than 24h; it may be debris rather than fresh intent.",
+                    );
+                }
+                message
+            }
+            (Some(path), None) => format!(
+                "fno-agents loop run: refusing to walk - a cancel signal is set.\n  file:  {}\n  age:   unavailable\n  clear: {}",
+                path.display(),
+                self.clear_hint
+            ),
+            _ => format!(
+                "fno-agents loop run: refusing to walk - interrupted by {}.",
+                self.cause
+            ),
+        }
+    }
+}
+
+const STALE_CANCEL_SECS: u64 = 24 * 60 * 60;
+
+fn format_cancel_age(age_secs: u64) -> String {
+    let days = age_secs / 86_400;
+    let hours = (age_secs % 86_400) / 3_600;
+    let minutes = (age_secs % 3_600) / 60;
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {}s", age_secs % 60)
+    } else {
+        format!("{age_secs}s")
+    }
+}
+
 /// Evidence of termination extracted from the project journal.
 pub struct Evidence {
     /// The parsed TerminationReason.
@@ -718,7 +790,7 @@ pub fn run_loop(
     dispatcher: &dyn Dispatcher,
     budget: &LoopBudget,
     journal: &Journal,
-    cancel: &dyn Fn() -> bool,
+    cancel: &dyn Fn() -> Option<Cancelled>,
     per_unit_max_dispatches: Option<u64>,
 ) -> Result<LoopOutcome, LoopError> {
     let mut iterations_used: u64 = 0;
@@ -726,15 +798,12 @@ pub fn run_loop(
 
     loop {
         // ── cancel check (outer loop top) ─────────────────────────────────
-        if cancel() {
+        if let Some(cancelled) = cancel() {
             journal.append(
                 "loop_terminated",
-                json!({
-                    "reason": "Interrupted",
-                    "iterations_used": iterations_used,
-                    "units_closed": units.len(),
-                }),
+                cancelled.event_data(iterations_used, units.len()),
             )?;
+            eprintln!("{}", cancelled.refusal_message());
             return Ok(LoopOutcome {
                 reason: TerminationReason::Interrupted,
                 iterations_used,
@@ -853,15 +922,12 @@ pub fn run_loop(
             }
 
             // Cancel check (inner loop, before dispatch).
-            if cancel() {
+            if let Some(cancelled) = cancel() {
                 journal.append(
                     "loop_terminated",
-                    json!({
-                        "reason": "Interrupted",
-                        "iterations_used": iterations_used,
-                        "units_closed": units.len(),
-                    }),
+                    cancelled.event_data(iterations_used, units.len()),
                 )?;
+                eprintln!("{}", cancelled.refusal_message());
                 return Ok(LoopOutcome {
                     reason: TerminationReason::Interrupted,
                     iterations_used,

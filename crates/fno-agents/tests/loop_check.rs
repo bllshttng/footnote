@@ -8959,7 +8959,7 @@ fn king_arm_honors_the_cancel_sentinel() {
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
     let state = king_manifest(cwd, "k-cancel");
-    fs::write(cwd.join(".fno/.target-cancelled"), "").unwrap();
+    fs::write(state.with_extension("cancelled"), "").unwrap();
     let events = cwd.join("events.jsonl");
     let bin_dir = TempDir::new().unwrap();
     let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);

@@ -17,8 +17,8 @@
 ///   8. journal_write_failure_is_fatal
 ///   9. envelope_shape
 use fno_agents::loop_runtime::{
-    run_loop, CloseOutcome, DispatchCtx, Dispatcher, Evidence, Journal, LoopBudget, LoopError,
-    Queue, Session, Unit,
+    run_loop, Cancelled, CloseOutcome, DispatchCtx, Dispatcher, Evidence, Journal, LoopBudget,
+    LoopError, Queue, Session, Unit,
 };
 // Note: tests use Journal::new_raw (cfg(test) convenience constructor) to avoid
 // importing the newtype wrappers in every test.
@@ -373,7 +373,7 @@ fn empty_queue_terminates_nowork_without_dispatch() {
     let budget = LoopBudget::new(10).unwrap();
     let journal = Journal::new_raw(project_events.clone(), global_events);
 
-    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
+    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| None, None).unwrap();
 
     assert_eq!(outcome.reason, TerminationReason::NoWork);
     assert_eq!(outcome.iterations_used, 0);
@@ -415,7 +415,7 @@ fn unit_closes_on_termination_event() {
     let budget = LoopBudget::new(10).unwrap();
     let journal = Journal::new_raw(project_events.clone(), global_events);
 
-    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
+    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| None, None).unwrap();
 
     // Walk reason: queue empty after ab-001 -> NoWork (walk level).
     assert_eq!(outcome.reason, TerminationReason::NoWork);
@@ -463,7 +463,7 @@ fn no_event_exit_emits_node_failed_then_redispatches() {
     let budget = LoopBudget::new(10).unwrap();
     let journal = Journal::new_raw(project_events.clone(), global_events);
 
-    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
+    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| None, None).unwrap();
 
     assert_eq!(outcome.reason, TerminationReason::NoWork);
     assert_eq!(outcome.iterations_used, 2);
@@ -518,7 +518,7 @@ fn kill_mid_tool_call_prepends_unknown_outcome_and_journals_event() {
     let budget = LoopBudget::new(3).unwrap();
     let journal = Journal::new_raw(project_events.clone(), global_events);
 
-    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
+    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| None, None).unwrap();
 
     match previous_projects {
         Some(value) => std::env::set_var("FNO_CLAUDE_PROJECTS_DIR", value),
@@ -586,7 +586,7 @@ fn iteration_ceiling_terminates_budget() {
     let budget = LoopBudget::new(3).unwrap();
     let journal = Journal::new_raw(project_events.clone(), global_events);
 
-    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
+    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| None, None).unwrap();
 
     assert_eq!(outcome.reason, TerminationReason::Budget);
     assert_eq!(
@@ -635,7 +635,7 @@ fn preexisting_termination_skips_dispatch() {
     let budget = LoopBudget::new(5).unwrap();
     let journal = Journal::new_raw(project_events.clone(), global_events);
 
-    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
+    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| None, None).unwrap();
 
     // Walk closes ab-004 without dispatching; the close pass still spends
     // one iteration (a budget counts passes, not dispatches).
@@ -684,7 +684,18 @@ fn repeating_queue_under_resume_guard_terminates_on_budget() {
     // assertion below instead of wedging CI in the hot loop.
     let cancel_calls = Arc::new(AtomicU64::new(0));
     let calls = cancel_calls.clone();
-    let cancel = move || calls.fetch_add(1, Ordering::SeqCst) >= 50;
+    let cancel = move || {
+        if calls.fetch_add(1, Ordering::SeqCst) >= 50 {
+            Some(Cancelled {
+                cause: "sigint",
+                path: None,
+                age_secs: None,
+                clear_hint: String::new(),
+            })
+        } else {
+            None
+        }
+    };
 
     let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &cancel, None).unwrap();
 
@@ -728,7 +739,7 @@ fn exhausted_budget_then_empty_queue_reports_nowork() {
     let budget = LoopBudget::new(1).unwrap();
     let journal = Journal::new_raw(project_events.clone(), global_events);
 
-    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
+    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| None, None).unwrap();
 
     assert_eq!(outcome.reason, TerminationReason::NoWork);
     assert_eq!(outcome.iterations_used, 1);
@@ -756,7 +767,7 @@ fn unaffordable_unit_is_not_dequeued_no_claim_stranded() {
     let budget = LoopBudget::new(1).unwrap();
     let journal = Journal::new_raw(project_events.clone(), global_events);
 
-    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
+    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| None, None).unwrap();
 
     assert_eq!(outcome.reason, TerminationReason::Budget);
     assert_eq!(outcome.iterations_used, 1);
@@ -793,7 +804,14 @@ fn cancel_returns_interrupted() {
         &dispatcher,
         &budget,
         &journal,
-        &move || flag.load(Ordering::SeqCst),
+        &move || {
+            flag.load(Ordering::SeqCst).then_some(Cancelled {
+                cause: "sigint",
+                path: None,
+                age_secs: None,
+                clear_hint: String::new(),
+            })
+        },
         None,
     )
     .unwrap();
@@ -840,7 +858,7 @@ fn journal_write_failure_is_fatal() {
     let budget = LoopBudget::new(5).unwrap();
     let journal = Journal::new_raw(project_events, global_events);
 
-    let result = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None);
+    let result = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| None, None);
     assert!(
         result.is_err(),
         "journal write failure to project path must be fatal (Err)"
@@ -1028,7 +1046,7 @@ fn envelope_shape() {
     let budget = LoopBudget::new(5).unwrap();
     let journal = Journal::new_raw(project_events.clone(), global_events.clone());
 
-    run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
+    run_loop(&mut queue, &dispatcher, &budget, &journal, &|| None, None).unwrap();
 
     // Read all lines from project events (skip the pre-seeded garbage).
     let content = fs::read_to_string(&project_events).unwrap();
@@ -1117,7 +1135,7 @@ fn termination_event_missing_reason_skips_no_panic() {
     let journal = Journal::new_raw(project_events.clone(), global_events);
 
     // Must not panic; budget terminates the walk.
-    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
+    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| None, None).unwrap();
     assert_eq!(
         outcome.reason,
         fno_agents::loopcheck::TerminationReason::Budget,
@@ -1268,7 +1286,7 @@ fn bg_guard_refusal_parks_without_redispatch() {
     let budget = LoopBudget::new(100).unwrap();
     let journal = Journal::new_raw(project_events.clone(), global_events);
 
-    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
+    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| None, None).unwrap();
 
     // The unit is parked (NoProgress) after exactly one dispatch; the walk then
     // drains the queue and finishes NoWork.
@@ -1332,7 +1350,7 @@ fn bare_crash_exit_still_redispatches() {
         &dispatcher,
         &budget,
         &journal,
-        &|| false,
+        &|| None,
         Some(2),
     )
     .unwrap();

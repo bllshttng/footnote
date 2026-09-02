@@ -8261,11 +8261,22 @@ pub(crate) fn is_full_run_id(value: &str) -> bool {
 
 // ── cancel sentinel ───────────────────────────────────────────────────────────
 
-fn check_cancel_sentinel(cwd: &Path, created_at: &Option<String>) -> bool {
-    let sentinel = cwd.join(".fno/.target-cancelled");
-    let tombstone = cwd.join(".fno/.target-cancelled-final");
+fn check_cancel_sentinel(
+    cwd: &Path,
+    state_path: &Path,
+    created_at: &Option<String>,
+    driver: &str,
+) -> bool {
+    let target_sentinel = cwd.join(".fno/.target-cancelled");
+    let target_tombstone = cwd.join(".fno/.target-cancelled-final");
+    let king_sentinel = state_path.with_extension("cancelled");
+    let paths: Vec<&Path> = if driver == "king" {
+        vec![king_sentinel.as_path()]
+    } else {
+        vec![target_tombstone.as_path(), target_sentinel.as_path()]
+    };
 
-    for path in &[&tombstone, &sentinel] {
+    for path in paths {
         if !path.exists() {
             continue;
         }
@@ -8986,7 +8997,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     }
 
     // ── Step 1: cancel sentinel ───────────────────────────────────────────────
-    if check_cancel_sentinel(&cwd, &manifest.created_at) {
+    if check_cancel_sentinel(&cwd, &state_path, &manifest.created_at, "target") {
         emit(
             "termination",
             serde_json::json!({
@@ -13205,7 +13216,12 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         )
     };
 
-    if check_cancel_sentinel(&parsed.cwd, &manifest.created_at) {
+    if check_cancel_sentinel(
+        &parsed.cwd,
+        &parsed.state_path,
+        &manifest.created_at,
+        "king",
+    ) {
         return terminate(
             TerminationReason::Interrupted,
             "cancel sentinel present; exiting",

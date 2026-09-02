@@ -32,7 +32,7 @@ use crate::loop_dispatch::{
     driver_default_max, preflight, resolve_driver_binary, ShelloutDispatcher,
 };
 use crate::loop_runtime::{
-    run_loop, CloseOutcome, Evidence, GlobalJournalPath, Journal, LoopBudget, LoopError,
+    run_loop, Cancelled, CloseOutcome, Evidence, GlobalJournalPath, Journal, LoopBudget, LoopError,
     ProjectJournalPath, Queue, Unit,
 };
 use crate::loopcheck::TerminationReason;
@@ -40,6 +40,7 @@ use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::SystemTime;
 
 // ── SIGINT handler ────────────────────────────────────────────────────────────
 
@@ -60,6 +61,43 @@ pub(crate) fn install_sigint_handler() {
             libc::SIGINT,
             handle_sigint as *const () as libc::sighandler_t,
         );
+    }
+}
+
+fn cancel_path_for_driver(cwd: &Path, king_manifest: Option<&Path>) -> PathBuf {
+    king_manifest
+        .map(|path| absolute_path(&path.with_extension("cancelled")))
+        .unwrap_or_else(|| absolute_path(&cwd.join(".fno").join(".target-cancelled")))
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    if let Ok(resolved) = fs::canonicalize(path) {
+        return resolved;
+    }
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+fn sentinel_cancelled(path: &Path, clear_hint: String) -> Cancelled {
+    let age_secs = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .map(|modified| {
+            SystemTime::now()
+                .duration_since(modified)
+                .unwrap_or_default()
+                .as_secs()
+        });
+    Cancelled {
+        cause: "sentinel",
+        path: Some(path.to_path_buf()),
+        age_secs,
+        clear_hint,
     }
 }
 
@@ -760,8 +798,28 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     };
 
     // ── cancel closure ────────────────────────────────────────────────────────
-    let cancel_file = cwd.join(".fno").join(".target-cancelled");
-    let cancel = move || SIGINT_RECEIVED.load(Ordering::SeqCst) || cancel_file.exists();
+    // The target sentinel is scoped to target walks. A king has no target
+    // manifest, so its sidecar lives beside its own canonical crown manifest.
+    let sentinel = cancel_path_for_driver(&cwd, king_queue.as_ref().map(|q| q.manifest_path()));
+    let clear_hint = if let Some(kq) = king_queue.as_ref() {
+        format!("fno agents king cancel --scope {} --clear", kq.scope())
+    } else {
+        format!("rm {}", sentinel.display())
+    };
+    let cancel = move || {
+        if SIGINT_RECEIVED.load(Ordering::SeqCst) {
+            return Some(Cancelled {
+                cause: "sigint",
+                path: None,
+                age_secs: None,
+                clear_hint: String::new(),
+            });
+        }
+        if sentinel.is_file() {
+            return Some(sentinel_cancelled(&sentinel, clear_hint.clone()));
+        }
+        None
+    };
 
     // ── run the loop ──────────────────────────────────────────────────────────
     // Per-unit cap: None for a target (one deliverable re-dispatching until it
@@ -819,7 +877,8 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
 
 #[cfg(test)]
 mod tests {
-    use super::king_wake_clause;
+    use super::{cancel_path_for_driver, king_wake_clause};
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn a_mail_wake_names_the_matched_inbox_and_its_ack() {
@@ -848,5 +907,19 @@ mod tests {
             assert!(!clause.contains("mail unread"), "{reason}: {clause}");
         }
         assert!(king_wake_clause(None, None).is_empty());
+    }
+
+    #[test]
+    fn cancel_path_is_scoped_to_the_selected_driver() {
+        let cwd = Path::new("/repo/worktree");
+        let king_manifest = Path::new("/repo/.fno/kings/k.md");
+        assert_eq!(
+            cancel_path_for_driver(cwd, Some(king_manifest)),
+            PathBuf::from("/repo/.fno/kings/k.cancelled")
+        );
+        assert_eq!(
+            cancel_path_for_driver(cwd, None),
+            PathBuf::from("/repo/worktree/.fno/.target-cancelled")
+        );
     }
 }

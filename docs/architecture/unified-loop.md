@@ -22,7 +22,7 @@ pub fn run_loop(
     dispatcher: &dyn Dispatcher,
     budget:     &LoopBudget,
     journal:    &Journal,
-    cancel:     &dyn Fn() -> bool,
+    cancel:     &dyn Fn() -> Option<Cancelled>,
 ) -> Result<LoopOutcome, LoopError>
 ```
 
@@ -192,7 +192,7 @@ After `next()` returns the unit and `close()` is called, subsequent `next()` cal
 
 **Resume guard (AC1-FR):** a pre-existing `termination` event for the manifest's `session_key` on the first `next()` call closes the unit without dispatch. This handles the case where the loop process was killed after the session completed but before the walk recorded the close. The close pass consumes one iteration. A budget counts work, not dispatches. A queue that re-derives the same unit must not spin for free. No duplicate dispatch occurs.
 
-**Cancel:** the cancel closure checks `SIGINT_RECEIVED` (atomic bool set by a signal handler) OR the existence of `.fno/.target-cancelled`. Either trips `Interrupted`.
+**Cancel:** the target cancel closure checks `SIGINT_RECEIVED` (atomic bool set by a signal handler) or `.fno/.target-cancelled`; a king closure checks its canonical `.fno/kings/<scope>.cancelled` sidecar. Either trips `Interrupted`, and a sentinel refusal records its cause, absolute path, age, and clear command.
 
 ## The board-empty walk (king driver)
 
@@ -448,7 +448,7 @@ The legacy `scripts/run-target-loop.sh` was 466 lines. The code it contained is 
 |---|---|
 | `<promise>` grep in session output | typed `termination` event from `loop-check` verb; loop never reads stdout |
 | Model-fallback chain (`sed`/`grep` state machine over model names) | intentionally NOT ported; loop-check budget/backstop + driver-level retries cover the failure modes; strangler flag parity only. The rate-limit/model-fallback class is deliberately not ported as an output-grep detector (locked decision: retry and backoff policies belong over typed events, not detectors); retry/backoff policy is the per-unit dispatch cap and consecutive-failure pause in the megawalk walk policy (group 2). |
-| Restart-signal file polling | cancel closure checks `SIGINT_RECEIVED` + `.target-cancelled` sentinel |
+| Restart-signal file polling | target closure checks `SIGINT_RECEIVED` + `.target-cancelled`; king closure checks its scoped `.cancelled` sidecar |
 | Multi-plan grep over session output | plan identity in manifest (`plan_path`), not parsed from stdout |
 | Phase re-read / phase tracking | deleted by step-1 wedge; no phase state remains |
 | Fingerprint / consecutive-fire counting | inside `fno-agents loop-check` (already Rust since the wedge) |

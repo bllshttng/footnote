@@ -1619,6 +1619,13 @@ PYEOF
             fi
           else
             touch "$STATE_DIR/.target-cancelled"
+            _EVENT_DATA="$(python3 -c 'import json,sys; print(json.dumps({"lane":"target","path":sys.argv[1],"reason":"claim_held_by_other"}))' "$STATE_DIR/.target-cancelled" 2>/dev/null || true)"
+            if [[ -n "$_EVENT_DATA" ]]; then
+              fno doctor event emit -t cancel_signal_set -s hook -d "$_EVENT_DATA" >/dev/null 2>&1 || \
+                echo "target: WARNING: cancel signal set but its event was not emitted ($STATE_DIR/.target-cancelled)" >&2
+            else
+              echo "target: WARNING: cancel signal set but its event payload could not be built ($STATE_DIR/.target-cancelled)" >&2
+            fi
             echo "target_claim_blocked_reason: claim_held_by_other" >> "$STATE_FILE"
           fi
         else

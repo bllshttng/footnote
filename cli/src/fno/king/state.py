@@ -23,7 +23,6 @@ import json
 import os
 import re
 import secrets
-import subprocess
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -72,7 +71,21 @@ class KingManifestExists(RuntimeError):
     """Raised when init would overwrite a manifest that is already there."""
 
 
-def king_manifest_path(scope: str, *, state_root: Path = Path(".fno")) -> Path:
+def king_state_root(cwd: Path | None = None) -> Path:
+    """Return the canonical checkout's ``.fno`` coordination root.
+
+    King manifests survive worktree changes and are shared coordination state,
+    so ambient cwd must not move a crown into a disposable linked worktree.
+    """
+    from fno.paths import resolve_canonical_repo_root, resolve_canonical_worktree
+
+    if cwd is None:
+        return resolve_canonical_repo_root() / ".fno"
+    canonical = resolve_canonical_worktree(Path(cwd))
+    return (canonical if canonical is not None else Path(cwd).resolve()) / ".fno"
+
+
+def king_manifest_path(scope: str, *, state_root: Optional[Path] = None) -> Path:
     """Return the manifest path for one canonical crown scope.
 
     Scope is registry data, but it becomes a filename here. Refuse path syntax
@@ -82,14 +95,15 @@ def king_manifest_path(scope: str, *, state_root: Path = Path(".fno")) -> Path:
     scope = scope.strip()
     if not scope or ".." in scope or "/" in scope or "\\" in scope or "\0" in scope:
         raise ValueError(f"unsafe king scope for manifest path: {scope!r}")
-    return Path(state_root) / "kings" / f"{scope}.md"
+    root = state_root if state_root is not None else king_state_root()
+    return Path(root) / "kings" / f"{scope}.md"
 
 
 def resolve_king_manifest_path(
     harness_session_id: str,
     harness: Optional[str],
     *,
-    state_root: Path = Path(".fno"),
+    state_root: Optional[Path] = None,
     registry=None,
 ) -> Optional[Path]:
     """Resolve this live session's crowned scope to its existing manifest.
@@ -172,22 +186,12 @@ def arm_king_manifest(
             owner_pid=owner_pid,
             owner_cwd=owner_cwd,
         )
+        path.with_suffix(".cancelled").unlink(missing_ok=True)
     return path
 
 
 def _owner_state_root(owner_cwd: Optional[str]) -> Path:
-    cwd = Path(owner_cwd).resolve() if owner_cwd else Path.cwd().resolve()
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        root = Path(proc.stdout.strip()).resolve() if proc.returncode == 0 else cwd
-    except OSError:
-        root = cwd
-    return root / ".fno"
+    return king_state_root(Path(owner_cwd) if owner_cwd else None)
 
 
 @contextmanager

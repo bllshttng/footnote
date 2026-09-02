@@ -127,7 +127,7 @@ The matching writer lives in `/pr check`: it replies in-thread (`in_reply_to`) p
 | `NoWork` | No state file or no recognizable work in progress |
 | `Budget` | Budget cap reached (see Budget Resolution below) |
 | `NoProgress` | Backstop: fingerprint unchanged across N independent observations |
-| `Interrupted` | Cancel sentinel `.fno/.target-cancelled` detected |
+| `Interrupted` | Target `.fno/.target-cancelled` or king `.fno/kings/<scope>.cancelled` detected |
 | `Aborted` | `<aborted reason="...">` tag seen in transcript |
 
 ### Backstop fingerprint
