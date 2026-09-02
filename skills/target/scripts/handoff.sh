@@ -792,10 +792,14 @@ done
 
 if [ "$_CHILD_TARGET_READY" -eq 0 ]; then
   fno agents stop "$CHILD_NAME" >/dev/null 2>&1 || true
-  FNO_CLAIMS_ROOT="$HOME" fno agents claim release "node:$NODE_ID" \
-    --holder "$_CHILD_EXPECTED_HOLDER" >/dev/null 2>&1 || true
   fno agents rm "$CHILD_NAME" >/dev/null 2>&1 || true
 
+  # No shell-side node release here, and not as a formality: the child never
+  # proved custody, so a release naming the child's holder is a guess about
+  # who holds the key - against a still-free claim it is a HolderMismatch the
+  # non-strict CLI reports as success, the exact silent-custody defect the
+  # prepare owner exists to retire. The REACQUIRE below is the receipt: it
+  # takes over a stale/dead claim or fails loud naming the live holder.
   _REACQ_RC=0
   FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "node:$NODE_ID" \
     --holder "$CLAIM_HOLDER" --ttl "$CLAIM_TTL" >/dev/null 2>&1 || _REACQ_RC=$?

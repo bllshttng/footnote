@@ -3431,13 +3431,17 @@ def dispatch_spawn_bounded_pane(
     from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim, release_claim
     from fno.claims.io import global_claims_root
 
-    provider = spawn_kwargs.get("provider")
-    if provider not in PANE_HOSTABLE_PROVIDERS:
-        raise DispatchAskError(
-            f"unknown provider {provider!r}; pane-hostable providers: "
-            f"{', '.join(PANE_HOSTABLE_PROVIDERS)}",
-            exit_code=2,
-        )
+    # No provider allowlist here on purpose: x-f579 gives an undeclared
+    # harness a pane lane. But the shared named refusals run BEFORE the claim
+    # and any mux subprocess - a refusal that costs a placement lease first is
+    # a refusal that contends the lease it must not take.
+    validate_pane_provider(
+        str(spawn_kwargs.get("provider") or ""),
+        model=spawn_kwargs.get("model"),
+        effort=spawn_kwargs.get("effort"),
+        permission_mode=spawn_kwargs.get("permission_mode"),
+        yolo=spawn_kwargs.get("yolo"),
+    )
     # The wrapper's own control flag, never a pane-spawn argument: the CLI
     # passes it on every pane lane, and forwarding it would TypeError the
     # half below.
@@ -3490,6 +3494,51 @@ def dispatch_spawn_bounded_pane(
             logging.getLogger(__name__).warning(
                 "mux placement lease %s release failed after spawn: %s: %s",
                 key, type(exc).__name__, exc,
+            )
+
+
+def validate_pane_provider(
+    provider: str, *, model=None, effort=None, permission_mode=None, yolo=None
+) -> None:
+    """The x-f579 named refusals for an UNDECLARED harness, shared by every
+    pane lane. Three fail-closed refusals replace the old membership raise,
+    each before any pane exists; a declared harness skips all three. The
+    declared/undeclared fact is read from the TABLE (is_declared), the same
+    predicate build_pane_argv's generic arm and the UNDECLARED receipt below
+    read, so they can never disagree about a harness. PANE_HOSTABLE_PROVIDERS
+    stays the declared pane ROSTER (spawn defaults, probes); the roster gains
+    no member here."""
+    from fno.agents.harness_map import is_declared
+
+    if is_declared(provider):
+        return
+    if _UNDECLARED_HARNESS_TOKEN.fullmatch(provider) is None:
+        raise DispatchAskError(
+            f"harness {provider!r} is not a spawnable CLI binary name: it "
+            "must match ^[a-z][a-z0-9._-]{0,31}$ (a lowercase letter, then "
+            "lowercase letters, digits, dots, underscores or hyphens). "
+            "Refused before any PATH lookup or argv is composed.",
+            exit_code=2,
+        )
+    if shutil.which(provider) is None:
+        raise DispatchAskError(
+            f"harness {provider!r} resolved to no binary on PATH; a pane "
+            "spawn execs the CLI binary itself, so there is nothing to host",
+            exit_code=2,
+        )
+    for flag, value in (
+        ("--model", model),
+        ("--effort", effort),
+        ("--permission-mode", permission_mode),
+        ("--yolo", yolo),
+    ):
+        if value:
+            raise DispatchAskError(
+                f"{flag} is not available for harness {provider!r}: fno has "
+                "no capability row for it, so there is no measured mapping "
+                "to the vendor's own flag spelling. Pass the vendor's own "
+                "flag after '--' instead.",
+                exit_code=2,
             )
 
 
@@ -3677,45 +3726,18 @@ def dispatch_spawn_pane(
     # approvals, so warn on every reachable path, not just the CLI seam.
     emit_env_scrub_warning(provider, permission_pinned=bool(permission_mode or yolo))
     validate_spawn_name(name)
-    from fno.agents.harness_map import is_declared
     # x-f579: undeclared has a lane - fno hosts the binary as a pane and is the
     # viewport (x-8f7f's agy observation, a pane host needs only an interactive
-    # argv, taken to its conclusion). The declared/undeclared fact is read from
-    # the TABLE (is_declared), the same predicate build_pane_argv's generic arm
-    # and the UNDECLARED receipt below read, so the three can never disagree
-    # about a harness. Three named refusals replace the old membership raise,
-    # each fail-closed before any pane exists; a declared harness skips all
-    # three and keeps today's path. PANE_HOSTABLE_PROVIDERS stays the declared
-    # pane ROSTER (spawn defaults, probes); the roster gains no member here.
-    if not is_declared(provider):
-        if _UNDECLARED_HARNESS_TOKEN.fullmatch(provider) is None:
-            raise DispatchAskError(
-                f"harness {provider!r} is not a spawnable CLI binary name: it "
-                "must match ^[a-z][a-z0-9._-]{0,31}$ (a lowercase letter, then "
-                "lowercase letters, digits, dots, underscores or hyphens). "
-                "Refused before any PATH lookup or argv is composed.",
-                exit_code=2,
-            )
-        if shutil.which(provider) is None:
-            raise DispatchAskError(
-                f"harness {provider!r} resolved to no binary on PATH; a pane "
-                "spawn execs the CLI binary itself, so there is nothing to host",
-                exit_code=2,
-            )
-        for flag, value in (
-            ("--model", model),
-            ("--effort", effort),
-            ("--permission-mode", permission_mode),
-            ("--yolo", yolo),
-        ):
-            if value:
-                raise DispatchAskError(
-                    f"{flag} is not available for harness {provider!r}: fno has "
-                    "no capability row for it, so there is no measured mapping "
-                    "to the vendor's own flag spelling. Pass the vendor's own "
-                    "flag after '--' instead.",
-                    exit_code=2,
-                )
+    # argv, taken to its conclusion). The named refusals live in
+    # validate_pane_provider, shared with the bounded wrapper so no lane can
+    # refuse them differently.
+    validate_pane_provider(
+        provider,
+        model=model,
+        effort=effort,
+        permission_mode=permission_mode,
+        yolo=yolo,
+    )
     if tab_id is not None:
         # The internal bounded-placement lane must hand the transport a stable
         # id, never an ordinal: an ordinal resolves against live tab order and
@@ -5047,6 +5069,8 @@ def dispatch_spawn_pane(
     # the two agree, and a test pins that. gemini and agy bind no session at all
     # and resolve to None rather than to either lie.
     bound_val = _resolve_bound(session_uuid, provider)
+    from fno.agents.harness_map import is_declared
+
     if not is_declared(provider):
         # x-f579 AC9: the receipt STATES the lane, so a caller reading only it
         # cannot infer a thread lane, steering, or `ask` that are not there, and
