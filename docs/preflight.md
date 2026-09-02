@@ -25,9 +25,9 @@ Modes:
 | `fno doctor test smoke --list [--verbose]` | Print the registry (names; with `--verbose`, working dir + command) and exit. |
 | `fno doctor test smoke --changed [--base REV --head REV]` | Run only the work the changed paths map to. Explicitly partial: see below. |
 
-`--only` and `--skip` remain mutually exclusive. `--changed` and `--retry-failed` cannot combine with `--shard`; `--shard` is intentionally compatible with the full-gate `--only` and `--skip` selections. A malformed shard, a shard with no selected steps, or a conflicting partial mode fails non-zero instead of silently mislabeling evidence.
+`--only` and `--skip` remain mutually exclusive. `--changed` and `--retry-failed` cannot combine with `--shard`. The shard flag is compatible with full-gate `--only` and `--skip` selections. A malformed shard, a shard with no selected steps, or a conflicting partial mode fails non-zero instead of silently mislabeling evidence.
 
-Prerequisites are asserted up front and named on failure with exit 2. They include `uv`, `python3` with `yaml`, and `cargo` for selected steps. The runner never installs system packages. Install PyYAML once by hand for local runs. A subset or sharded run labels itself in both the header and the summary, so a partial green cannot look full. `--shard 1/1` preserves the unsharded selection and `FULL` header; `N > 1` uses `SHARD SUBSET` and includes `shard=I/N`. Preflight records `mode=FULL verdict=green` only after a full, all-green run. A subset pass cannot mint or satisfy that attestation. A zero-step run exits non-zero instead of reading as green.
+Prerequisites are asserted up front and named on failure with exit 2. They include `uv`, `python3` with `yaml`, and `cargo` for selected steps. The runner never installs system packages. Install PyYAML once by hand for local runs. A subset or sharded run labels itself in both the header and the summary, so a partial green cannot look full. `--shard 1/1` preserves the unsharded selection and `FULL` header. `N > 1` uses `SHARD SUBSET` and includes `shard=I/N`. Preflight records `mode=FULL verdict=green` only after a full, all-green run. A subset pass cannot mint or satisfy that attestation. A zero-step run exits non-zero instead of reading as green.
 
 ### `--changed` - the changed-surface packet
 
@@ -69,11 +69,11 @@ Every executing run (not `--list`, which is a dry run) writes `.fno/changed-last
 
 ### Full-gate sharding and the changed-smoke boundary
 
-The full gate uses four legs per lane. `smoke-pytest` selects `Sync + build` and the pytest registry step in every leg, and exports `FNO_PYTEST_SHARD=I/4` only while that pytest step runs. `smoke-rest` selects the complementary non-pytest registry and partitions it by registry index. The runner repeats `Sync + build` in every leg and adds `Build fno-agents debug binary (for journey tests)` to any leg that contains a later Rust step, preserving the binary-absent ordering before that build.
+The full gate uses four legs per lane. `smoke-pytest` selects `Sync + build` and the pytest registry step in every leg, and exports `FNO_PYTEST_SHARD=I/4` only while that pytest step runs. `smoke-rest` selects the complementary non-pytest registry and partitions it by registry index. The runner repeats `Sync + build` in every leg. It adds `Build fno-agents debug binary (for journey tests)` to legs with later Rust steps, preserving binary-absent ordering before that build.
 
-The `smoke` aggregator is the required check. It positively asserts that every matrix lane result is `success`; a single failed, cancelled, or missing leg therefore keeps the required check non-green. `cli/tests/unit/test_smoke_shards.py` reads the selectors, shard denominator, matrix indices, and registry from the checked-in workflow and fails on a missing leg or uncovered step.
+The `smoke` aggregator is the required check. It positively asserts that every matrix lane result is `success`. A single failed, cancelled, or missing leg therefore keeps the required check non-green. `cli/tests/unit/test_smoke_shards.py` reads the selectors, shard denominator, matrix indices, and registry from the checked-in workflow and fails on a missing leg or uncovered step.
 
-`changed-smoke` remains early, partial feedback for pull requests only. It is skipped on main. No test reached only through its `--changed` selector is counted as main coverage; widening that selector would widen the existing out-of-tree coverage hole. Main coverage comes from all `smoke-pytest` and `smoke-rest` matrix legs through the `smoke` aggregator.
+`changed-smoke` remains early, partial feedback for pull requests only. It is skipped on main. No test reached only through its `--changed` selector is counted as main coverage. Widening that selector can widen the existing out-of-tree coverage hole. Main coverage comes from all `smoke-pytest` and `smoke-rest` matrix legs through the `smoke` aggregator.
 
 ### `scripts/ci/preflight.sh` - the hermetic runner
 
