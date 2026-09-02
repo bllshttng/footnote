@@ -415,25 +415,43 @@ fn is_same_machine(host: &str, machine: Option<&str>) -> bool {
     host == hostname()
 }
 
-/// Process create time in EPOCH MILLISECONDS, or `None` if the pid is gone or
-/// uninspectable (permission denied counts as dead: a holder we cannot
-/// inspect is one we cannot validate — fail toward recoverable, matching
-/// psutil's NoSuchProcess/AccessDenied handling).
-///
-/// This is a SIBLING of `daemon::process_start_time`, not a reuse: that
-/// helper returns platform-native units (Linux ticks / macOS µs) compared
-/// only for equality against itself; the claims protocol needs an absolute
-/// epoch-ms value comparable against `acquired_at`.
+/// What the OS said when asked for a pid's create time. Refused is its own
+/// arm because the holder EXISTS when inspection is denied - permission
+/// cannot be denied on a pid that is gone - so a refusal must never read as
+/// death. Mirrors the (create_ms, cause) split in `staleness._probe_create_time`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PidProbe {
+    Created(i64),
+    Absent,
+    Refused,
+}
+
+/// The liveness cause vocabulary (mirrors the CAUSE_* constants in
+/// `fno.claims.staleness`; the parity harness pins the strings). `pid-shared`
+/// is absent here: it is the basis of a demotion only the Python signature
+/// can request (`pid_exclusive`), so the Rust leg can never produce it.
+pub mod basis {
+    pub const LIVE: &str = "live";
+    pub const OFFHOST: &str = "offhost";
+    pub const PID_UNAVAILABLE: &str = "pid-unavailable";
+    pub const PID_ABSENT: &str = "pid-absent";
+    pub const ACCESS_DENIED: &str = "access-denied";
+    pub const PID_REUSE: &str = "pid-reuse";
+    pub const TTL_EXPIRED: &str = "ttl-expired";
+}
+
+/// Ask the OS what the pid's holder create time is, and name the failure.
 #[cfg(target_os = "macos")]
-pub fn process_create_time_ms(pid: i32) -> Option<i64> {
+pub fn probe_pid(pid: i32) -> PidProbe {
     use std::mem;
     if pid <= 0 {
-        return None;
+        return PidProbe::Absent;
     }
     let mut info: libc::proc_bsdinfo = unsafe { mem::zeroed() };
     let size = mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
     // SAFETY: buffer is a zeroed proc_bsdinfo of exactly `size` bytes; a
-    // partial fill means gone / not introspectable -> None.
+    // partial fill means gone / not introspectable -> Absent unless the OS
+    // named a permission failure, which is a live holder refusing inspection.
     let written = unsafe {
         libc::proc_pidinfo(
             pid as libc::c_int,
@@ -443,10 +461,18 @@ pub fn process_create_time_ms(pid: i32) -> Option<i64> {
             size,
         )
     };
-    if written != size {
-        return None;
+    if written == size {
+        return PidProbe::Created(
+            (info.pbi_start_tvsec as i64) * 1000 + (info.pbi_start_tvusec as i64) / 1000,
+        );
     }
-    Some((info.pbi_start_tvsec as i64) * 1000 + (info.pbi_start_tvusec as i64) / 1000)
+    if written == -1 {
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EPERM) | Some(libc::EACCES) => return PidProbe::Refused,
+            _ => {}
+        }
+    }
+    PidProbe::Absent
 }
 
 /// Linux: epoch create time = `btime` (epoch seconds, from `/proc/stat`) plus
@@ -455,27 +481,37 @@ pub fn process_create_time_ms(pid: i32) -> Option<i64> {
 /// skew vs psutil's float math is tolerable: the comparison is directional
 /// and real holders start well before they claim.
 #[cfg(target_os = "linux")]
-pub fn process_create_time_ms(pid: i32) -> Option<i64> {
+pub fn probe_pid(pid: i32) -> PidProbe {
     if pid <= 0 {
-        return None;
+        return PidProbe::Absent;
     }
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return PidProbe::Refused,
+        Err(_) => return PidProbe::Absent,
+    };
     // comm (field 2) can contain spaces/parens; split on the LAST ')'.
-    let after = stat.rsplit_once(')')?.1;
-    let starttime: i64 = after.split_whitespace().nth(19)?.parse().ok()?;
-    let btime = linux_boot_time_s()?;
+    let Some(after) = stat.rsplit_once(')').map(|(_, tail)| tail) else {
+        return PidProbe::Absent;
+    };
+    let Some(Ok(starttime)) = after.split_whitespace().nth(19).map(|v| v.parse::<i64>()) else {
+        return PidProbe::Absent;
+    };
+    let Some(btime) = linux_boot_time_s() else {
+        return PidProbe::Absent;
+    };
     let tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     if tck <= 0 {
-        return None;
+        return PidProbe::Absent;
     }
-    Some(btime * 1000 + starttime * 1000 / tck as i64)
+    PidProbe::Created(btime * 1000 + starttime * 1000 / tck as i64)
 }
 
 #[cfg(target_os = "linux")]
 fn linux_boot_time_s() -> Option<i64> {
     // btime (boot epoch seconds) is constant for the life of the host, so cache
-    // it: process_create_time_ms is on the claim status/acquire hot path and
-    // re-reading /proc/stat every call is wasted I/O.
+    // it: probe_pid is on the claim status/acquire hot path and re-reading
+    // /proc/stat every call is wasted I/O.
     static BTIME: std::sync::OnceLock<Option<i64>> = std::sync::OnceLock::new();
     *BTIME.get_or_init(|| {
         let stat = std::fs::read_to_string("/proc/stat").ok()?;
@@ -489,24 +525,60 @@ fn linux_boot_time_s() -> Option<i64> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn process_create_time_ms(_pid: i32) -> Option<i64> {
-    None
+pub fn probe_pid(_pid: i32) -> PidProbe {
+    PidProbe::Absent
+}
+
+/// Process create time in EPOCH MILLISECONDS, or `None` if the pid is gone or
+/// uninspectable - the give-up view of [`probe_pid`] for callers that cannot
+/// act on the cause.
+///
+/// This is a SIBLING of `daemon::process_start_time`, not a reuse: that
+/// helper returns platform-native units (Linux ticks / macOS µs) compared
+/// only for equality against itself; the claims protocol needs an absolute
+/// epoch-ms value comparable against `acquired_at`.
+pub fn process_create_time_ms(pid: i32) -> Option<i64> {
+    match probe_pid(pid) {
+        PidProbe::Created(ms) => Some(ms),
+        PidProbe::Absent | PidProbe::Refused => None,
+    }
+}
+
+/// The liveness reading beside its cause (mirrors
+/// `staleness._liveness_reading`). `probe` is injectable so tests and the
+/// parity harness can drive the Refused arm deterministically; the Python
+/// leg's equivalent seam is monkeypatching `_probe_create_time`.
+fn liveness_reading(rec: &ClaimRecord, probe: &dyn Fn(i32) -> PidProbe) -> (bool, &'static str) {
+    if rec.pid_unavailable {
+        return (false, basis::PID_UNAVAILABLE);
+    }
+    if !is_same_machine(&rec.host, rec.machine_id.as_deref()) {
+        return (false, basis::OFFHOST);
+    }
+    let Some(pid) = rec.pid else {
+        return (false, basis::PID_UNAVAILABLE);
+    };
+    match probe(pid) {
+        PidProbe::Created(create_ms) => {
+            // PID reuse: the current occupant of the pid slot started AFTER
+            // the claim was filed, so it is a different process.
+            if create_ms > rec.acquired_at {
+                (false, basis::PID_REUSE)
+            } else {
+                (true, basis::LIVE)
+            }
+        }
+        PidProbe::Absent => (false, basis::PID_ABSENT),
+        PidProbe::Refused => (false, basis::ACCESS_DENIED),
+    }
 }
 
 /// Is the claim's holder verifiably running? (mirrors `staleness.is_live`)
-/// False when: cross-machine, pid gone/uninspectable, or the current occupant
-/// of the pid slot started AFTER the claim was filed (PID reuse).
+/// False when: no pid was recorded, cross-machine, the pid is gone, the
+/// holder refuses inspection, or the current occupant of the pid slot
+/// started AFTER the claim was filed (PID reuse).
 fn is_live(rec: &ClaimRecord) -> bool {
-    if rec.pid_unavailable {
-        return false;
-    }
-    if !is_same_machine(&rec.host, rec.machine_id.as_deref()) {
-        return false;
-    }
-    match rec.pid.and_then(process_create_time_ms) {
-        Some(create_ms) => create_ms <= rec.acquired_at,
-        None => false,
-    }
+    liveness_reading(rec, &|pid| probe_pid(pid)).0
 }
 
 fn is_expired(rec: &ClaimRecord, now: i64) -> bool {
@@ -523,39 +595,61 @@ fn is_expired(rec: &ClaimRecord, now: i64) -> bool {
 /// its claim reclaimed by a peer, while a live FOREIGN pid (a chat app's
 /// app-server answering for the holder) must not make the lease permanent).
 ///
-/// SUSPECT arm (x-ba4b): a TTL claim still inside its window whose recorded pid
+/// SUSPECT arm: a TTL claim still inside its window whose recorded pid
 /// is NOT a live process reads `Suspect`, not `Live`. Dead-pid-but-unexpired is
 /// the respawned-worker case (supervisor pid died, session lives on): the TTL
 /// keeps protecting the slot, so acquire/dispatch treat it like `Live` (never
 /// steal), but the distinct state lets init/dispatch branch on it. Only TTL
 /// expiry frees the claim (-> `Stale`); pid death alone never does.
+///
+/// SUSPECT also covers the unreadable holder on a pid-liveness claim:
+/// a probe refusal means the process EXISTS and refuses inspection, so it is
+/// not a proof of death and must never free the claim on pid evidence.
 pub fn classify(rec: &ClaimRecord, now: Option<i64>) -> ClaimState {
+    classify_with_basis(rec, now, &|pid| probe_pid(pid)).0
+}
+
+/// `classify` beside its basis, with the pid probe injectable (mirrors
+/// `staleness.classify_with_basis`; the parity harness pins the vocabulary).
+/// The basis names WHY, one cause per way a verdict can arise: `live`,
+/// `ttl-expired`, or the liveness cause that failed (`offhost`,
+/// `pid-unavailable`, `pid-absent`, `access-denied`, `pid-reuse`).
+pub fn classify_with_basis(
+    rec: &ClaimRecord,
+    now: Option<i64>,
+    probe: &dyn Fn(i32) -> PidProbe,
+) -> (ClaimState, &'static str) {
     let now = now.unwrap_or_else(now_ms);
+    let (live, cause) = liveness_reading(rec, probe);
     if is_expired(rec, now) {
         // Corroborated hybrid: the pid keeps the claim Live only when it was
         // proven to be the holder session's own process. Any other provenance
         // (or a legacy record with no field) is Stale, as a pre-hybrid claim
         // was: the TTL is a lease.
-        let corroborated = rec.pid_provenance.as_deref() == Some("session-prover") && is_live(rec);
+        let corroborated = rec.pid_provenance.as_deref() == Some("session-prover") && live;
         return if corroborated {
-            ClaimState::Live
+            (ClaimState::Live, cause)
         } else {
-            ClaimState::Stale
+            (ClaimState::Stale, basis::TTL_EXPIRED)
         };
     }
     if rec.expires_at.is_none() {
-        return if is_live(rec) {
-            ClaimState::Live
-        } else {
-            ClaimState::Stale
-        };
+        if live {
+            return (ClaimState::Live, cause);
+        }
+        // Unreadable is not provably dead: never free a claim on pid evidence
+        // we were refused.
+        if cause == basis::ACCESS_DENIED {
+            return (ClaimState::Suspect, cause);
+        }
+        return (ClaimState::Stale, cause);
     }
     // TTL claim, still inside its window: live pid => Live, dead/replaced pid
     // => Suspect (TTL-protected, not stealable).
-    if is_live(rec) {
-        ClaimState::Live
+    if live {
+        (ClaimState::Live, cause)
     } else {
-        ClaimState::Suspect
+        (ClaimState::Suspect, cause)
     }
 }
 
@@ -3167,6 +3261,104 @@ mod tests {
             classify(&record(-1, now, Some(now - 1), &host), Some(now)),
             ClaimState::Stale
         );
+    }
+
+    // ---- the verdict carries its basis ------------------------------------
+
+    /// Classify with a probe that refuses inspection of `refused_pid`.
+    fn refused_probe(refused_pid: i32) -> impl Fn(i32) -> PidProbe {
+        move |pid| {
+            if pid == refused_pid {
+                PidProbe::Refused
+            } else {
+                probe_pid(pid)
+            }
+        }
+    }
+
+    #[test]
+    fn classify_basis_names_each_cause() {
+        let me = std::process::id() as i32;
+        let host = hostname();
+        let now = now_ms();
+        let basis_of = |rec: &ClaimRecord, probe: &dyn Fn(i32) -> PidProbe| {
+            classify_with_basis(rec, Some(now), probe).1
+        };
+        // Live holder, pid liveness and TTL alike.
+        assert_eq!(
+            basis_of(&record(me, now, None, &host), &probe_pid),
+            basis::LIVE
+        );
+        assert_eq!(
+            basis_of(&record(me, now, Some(now + 60_000), &host), &probe_pid),
+            basis::LIVE
+        );
+        // Gone pid on a pid-liveness claim: provably dead.
+        assert_eq!(
+            basis_of(&record(-1, now, None, &host), &probe_pid),
+            basis::PID_ABSENT
+        );
+        // Reuse: acquired before this process started.
+        assert_eq!(
+            basis_of(&record(me, 1, None, &host), &probe_pid),
+            basis::PID_REUSE
+        );
+        // Off-machine.
+        assert_eq!(
+            basis_of(&record(me, now, None, "elsewhere.example"), &probe_pid),
+            basis::OFFHOST
+        );
+        // Expired TTL without corroboration.
+        assert_eq!(
+            basis_of(&record(me, now, Some(now - 1), &host), &probe_pid),
+            basis::TTL_EXPIRED
+        );
+        // The positive marker that separates the deaths: a REFUSED holder is
+        // SUSPECT/access-denied, a GONE holder is STALE/pid-absent.
+        let (state, cause) =
+            classify_with_basis(&record(me, now, None, &host), Some(now), &refused_probe(me));
+        assert_eq!((state, cause), (ClaimState::Suspect, basis::ACCESS_DENIED));
+        // The same refusal inside a TTL window stays SUSPECT; past the window
+        // the TTL decides (STALE/ttl-expired).
+        let (state, cause) = classify_with_basis(
+            &record(me, now, Some(now + 60_000), &host),
+            Some(now),
+            &refused_probe(me),
+        );
+        assert_eq!((state, cause), (ClaimState::Suspect, basis::ACCESS_DENIED));
+        let (state, cause) = classify_with_basis(
+            &record(me, now, Some(now - 1), &host),
+            Some(now),
+            &refused_probe(me),
+        );
+        assert_eq!((state, cause), (ClaimState::Stale, basis::TTL_EXPIRED));
+        // pid_unavailable names itself.
+        let mut unp = record(-1, now, Some(now + 60_000), &host);
+        unp.pid = None;
+        unp.pid_unavailable = true;
+        unp.schema_version = 2;
+        assert_eq!(basis_of(&unp, &probe_pid), basis::PID_UNAVAILABLE);
+    }
+
+    #[test]
+    fn classify_is_the_state_view_of_classify_with_basis() {
+        let me = std::process::id() as i32;
+        let host = hostname();
+        let now = now_ms();
+        let cases = [
+            record(me, now, None, &host),
+            record(-1, now, None, &host),
+            record(me, 1, None, &host),
+            record(me, now, Some(now - 1), &host),
+            record(-1, now, Some(now + 60_000), &host),
+            record(me, now, Some(now + 60_000), "elsewhere.example"),
+        ];
+        for rec in &cases {
+            assert_eq!(
+                classify(rec, Some(now)),
+                classify_with_basis(rec, Some(now), &|pid| probe_pid(pid)).0
+            );
+        }
     }
 
     #[test]
