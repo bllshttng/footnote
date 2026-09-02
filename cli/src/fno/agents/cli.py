@@ -1,8 +1,9 @@
 """`fno agents` Typer subapp.
 
-US1 wires ``ask`` to ``dispatch_ask``. US3 (this revision) replaces the
-``list`` stub with a real implementation and adds the new ``logs``
-verb. ``ping`` remains a Phase 1 stub until its own user story lands.
+``ask`` resolves its recipient and execs the Rust client binary; the Python
+ask adapters it once dispatched are gone (ported, parity frozen). ``list``
+and ``logs`` are live; ``ping`` remains a Phase 1 stub until its own user
+story lands.
 """
 
 from __future__ import annotations

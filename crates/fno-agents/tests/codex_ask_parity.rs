@@ -10,7 +10,7 @@
 //! freezes the golden under `tests/golden/codex_ask/`; normally it asserts
 //! the Rust outcome against that frozen golden and Python never runs.
 //!
-//! Three cases stay LIVE differential on purpose, because their Python
+//! Four cases stay LIVE differential on purpose, because their Python
 //! counterparts SURVIVE the port as the codex one-shot spawn substrate:
 //! `create`, the no-JSONL exit-11 path, soft-error promotion, and
 //! `inject_from_name`. Those keep the skip-when-Python-unavailable policy.

@@ -54,9 +54,9 @@ All four are finished ports. Their oracle legs are gone. Each converted case now
 
 ## The real dual set
 
-There were four, in retirement order. Three are retired.
+There are four, in retirement order. The ask adapters are retired (2026-09-02). The claim classifier and the native graph reader are still live duals.
 
-**The claim classifier.** Dual and UNGUARDED. It went first for that reason. Nothing pinned it. It drifted or died only by luck.
+**The claim classifier.** Dual. It goes first. When it was sequenced, no parity guard pinned it, so it could drift silently, and that is why it leads. `claim_classifier_parity.rs` pins it now while its port runs.
 
 **The ask adapters.** `fno.agents.harnesses.claude` and `fno.agents.harnesses.codex`, pinned by the two differential harnesses until their port completed (2026-09-02). The Rust runtime already owned production `ask` end to end. The port deleted the Python ask functions and moved the last Python-only caller duty, `--to-project` anycast resolution, into `cmd_ask` ahead of the binary exec. The surviving Python surface is spawn substrate, not ask: `parse_short_id` for bg receipts, the registry reply readers, and `codex.create` for one-shot spawns.
 
@@ -126,11 +126,11 @@ The header carries no node id and no PR number. `scripts/ci/check-no-internal-re
 
 ## Sequence
 
-The claim classifier went first. It was the only dual implementation with no parity guard pinning it. A guarded leg cannot drift silently. An unguarded one can.
+The claim classifier goes first. When it was sequenced it was the only dual implementation with no parity guard pinning it. `claim_classifier_parity.rs` pins it now. A guarded leg cannot drift silently. An unguarded one can.
 
 Retirement order is subordinate to the crossing dependency order in [the seam doc](rust-python-seam.md). A leg with no guard still waits for the legs it feeds. Risk argues for a port. Dependency decides the safe order.
 
-The ask adapters went second, and the sequence is complete. They sat at step 1. The work was steps 2 through 4, plus moving one caller and fixing the guard the first symbol-oracle port exposed.
+The ask adapters went second, and their retirement is complete. They sat at step 1. The work was steps 2 through 4, plus moving one caller and fixing the guard the first symbol-oracle port exposed.
 
 There is no third. Do not open a `kill_criteria` port under this sequence. The table above removed it from the dual set. Filing one re-imports the error this page corrects.
 
