@@ -1429,11 +1429,15 @@ def row_owning_session_id(
     """Name of an active registry row whose ``harness_session_id`` is
     ``session_id``, or None.
 
-    Two live sessions cannot share a harness session id, so a hit proves a
-    candidate id is NOT this session's - the cause-agnostic detector that would
-    have caught the ambient-leak incident regardless of how the marker entered
-    the environment. Only rows in an ownership-live status count; an exited
-    row's id is free.
+    Two live sessions cannot share a harness session id, but that premise
+    alone decides nothing. Provenance decides a hit: self when the id under test is this session's own, foreign otherwise.
+    This lookup is provenance-blind on purpose - it answers whether a live
+    row holds the id and leaves the reading to the caller, which owns the
+    provenance. A candidate id suspected of leaking in from the environment
+    turns a hit into the cause-agnostic ambient-leak detector; an id the
+    caller proved (process tree) or carries on its spawn stamp turns the
+    same hit into the caller's own row. Only rows in an ownership-live
+    status count; an exited row's id is free.
 
     Degrade-safe by contract (AC4-ERR): an absent, unreadable, or alien-shape
     registry returns None (cannot prove a collision) rather than raising, so an

@@ -752,10 +752,11 @@ def resolve_owned_identity(
     default ``None`` skips the check. Both default off so this module stays
     dependency-free; the consuming verb injects the real prover and collider.
 
-    Resolution order: a uniquely proven family wins; collision rejects ids a
-    live row owns (recorded regardless of proof, so the owner is named); a
-    marker the prover actively contradicts is excluded; among the rest, the sole
-    surviving family wins or the result degrades to ``None``.
+    Resolution order: proof beats collision - a proven marker wins without
+    consulting the collider, in both branches; collision then rejects ids a
+    live row owns when proof is absent or negative (the owner is named); a
+    marker the prover actively contradicts is excluded; among the rest, the
+    sole surviving family wins or the result degrades to ``None``.
     """
     environ = os.environ if env is None else env
     markers = present_harness_markers(environ)

@@ -183,9 +183,11 @@ def _roster_name_for_session(session_id: str) -> str:
     """The roster name bound to this harness session id, or ``""``.
 
     ``fno agents spawn`` writes the name->harness_session_id binding into the
-    registry at spawn time, so a row naming this exact session id proves the
-    name is this worker's own - the same guarantee the ``FNO_WORKER_NAME``
-    export was meant to give. The env write cannot reach a daemon-forked
+    registry at spawn time - the same guarantee the ``FNO_WORKER_NAME``
+    export was meant to give, available only because the id under test here
+    comes from the self-resolution above, never from a raw ambient scan.
+    Provenance decides a hit: self when the id under test is this session's own, foreign otherwise.
+    The env write cannot reach a daemon-forked
     worker: the serving session inherits the claude daemon's env, never the
     spawning process's (x-6de8), so a spawned worker's holder degraded to a
     raw session id (live join proof, 2026-08-27). The registry row survives
