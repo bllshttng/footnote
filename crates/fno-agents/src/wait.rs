@@ -137,7 +137,10 @@ fn find_effective_entry(
 
 /// `fno-agents wait --agent <name> --state idle|blocked|done [--timeout-ms N] [--json]`
 pub async fn run_wait(rest: &[String], home: &AgentsHome) -> i32 {
-    run_wait_with_probe(rest, home, crate::claude_ask::family1_truth_probe).await
+    run_wait_with_timed_probe(rest, home, |handle, timeout| {
+        crate::claude_ask::family1_truth_probe_with_timeout(handle, timeout)
+    })
+    .await
 }
 
 /// Testable implementation of [`run_wait`], with the family-1 truth reader
@@ -147,6 +150,14 @@ pub async fn run_wait_with_probe(
     rest: &[String],
     home: &AgentsHome,
     truth_probe: impl Fn(&str) -> Option<crate::claude_ask::TruthProbe>,
+) -> i32 {
+    run_wait_with_timed_probe(rest, home, |handle, _timeout| truth_probe(handle)).await
+}
+
+async fn run_wait_with_timed_probe(
+    rest: &[String],
+    home: &AgentsHome,
+    truth_probe: impl Fn(&str, Duration) -> Option<crate::claude_ask::TruthProbe>,
 ) -> i32 {
     let mut name: Option<String> = None;
     let mut target: Option<String> = None;
@@ -220,13 +231,19 @@ pub async fn run_wait_with_probe(
                 last_observation =
                     Some(format!("{} (candidate_authority={authority})", st.label()));
                 if st == target_state {
-                    if authority == "hook" && entry.harness_name() == "claude" {
+                    if target_state == EffState::Done
+                        && authority == "hook"
+                        && entry.harness_name() == "claude"
+                    {
                         if let Some(handle) = entry
                             .harness_session_id
                             .as_deref()
                             .filter(|handle| !handle.is_empty())
                         {
-                            match truth_probe(handle) {
+                            let probe_timeout = deadline
+                                .map(|d| d.saturating_duration_since(Instant::now()))
+                                .unwrap_or(Duration::from_secs(5));
+                            match truth_probe(handle, probe_timeout) {
                                 Some(probe) if probe.state == "done" => {
                                     if json_out {
                                         println!(
@@ -507,6 +524,71 @@ mod tests {
         })
         .await;
         assert_eq!(result, 0);
+    }
+
+    #[tokio::test]
+    async fn live_claude_blocked_target_keeps_exact_state_semantics() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let home = AgentsHome::at(dir.path());
+        state::update_registry(&home.registry_json(), |registry| {
+            registry.entries.push(entry(json!({
+                "harness": "claude",
+                "harness_session_id": "claude-session",
+                "inside_leg": live_leg("blocked"),
+            })));
+        })
+        .expect("registry fixture writes");
+
+        let args = vec![
+            "--agent".to_string(),
+            "a".to_string(),
+            "--state".to_string(),
+            "blocked".to_string(),
+            "--timeout-ms".to_string(),
+            "50".to_string(),
+        ];
+        let result = run_wait_with_probe(&args, &home, |_handle| {
+            panic!("Claude truth probe invoked for a non-done wait target")
+        })
+        .await;
+        assert_eq!(result, 0);
+    }
+
+    #[tokio::test]
+    async fn timed_truth_probe_receives_only_remaining_wait_budget() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let home = AgentsHome::at(dir.path());
+        state::update_registry(&home.registry_json(), |registry| {
+            registry.entries.push(entry(json!({
+                "harness": "claude",
+                "harness_session_id": "claude-session",
+                "inside_leg": live_leg("done"),
+            })));
+        })
+        .expect("registry fixture writes");
+
+        let args = vec![
+            "--agent".to_string(),
+            "a".to_string(),
+            "--state".to_string(),
+            "done".to_string(),
+            "--timeout-ms".to_string(),
+            "50".to_string(),
+        ];
+        let observed_budget = std::sync::Mutex::new(None);
+        let result = run_wait_with_timed_probe(&args, &home, |_handle, timeout| {
+            *observed_budget.lock().expect("budget lock") = Some(timeout);
+            None
+        })
+        .await;
+        assert_eq!(result, WAIT_TIMEOUT_EXIT);
+        assert!(
+            observed_budget
+                .lock()
+                .expect("budget lock")
+                .expect("probe was called")
+                <= Duration::from_millis(50)
+        );
     }
 
     #[tokio::test]
