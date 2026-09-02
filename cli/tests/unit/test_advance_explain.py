@@ -184,8 +184,9 @@ def test_every_filter_carries_an_actionable_why():
 def _lane_fill_world(monkeypatch, ready, *, high_collision_for=None, max_lanes=2,
                      live_slots=0):
     """Hermetic seams for build_lane_fill_report; returns the advance module."""
-    from fno.backlog import advance as adv
     from types import SimpleNamespace
+
+    from fno.backlog import advance as adv
 
     monkeypatch.setattr(adv, "_spawn_headroom", lambda *a, **k: max_lanes)
     monkeypatch.setattr(adv, "_ready_nodes", lambda project, mission: ready)
@@ -218,7 +219,7 @@ def _ready_node(nid, **kw):
 
 def test_epic_explain_counts_drops_under_the_fill_filter_names(monkeypatch):
     """AC14: the collision drop is counted under in-flight-collision, by name."""
-    adv = _lane_fill_world(
+    _lane_fill_world(
         monkeypatch,
         [_ready_node("x-win"), _ready_node("x-coll")],
         high_collision_for={"x-coll": "some-plan"},
@@ -235,7 +236,7 @@ def test_epic_explain_counts_drops_under_the_fill_filter_names(monkeypatch):
 
 
 def test_epic_explain_names_the_filter_that_dropped_the_asked_node(monkeypatch):
-    adv = _lane_fill_world(
+    _lane_fill_world(
         monkeypatch,
         [_ready_node("x-win"), _ready_node("x-coll")],
         high_collision_for={"x-coll": "some-plan"},
@@ -254,7 +255,7 @@ def test_epic_explain_names_the_filter_that_dropped_the_asked_node(monkeypatch):
 
 def test_epic_explain_renders_no_next_cascade(monkeypatch):
     """The rendered text carries the fill's drops and none of the next cascade."""
-    adv = _lane_fill_world(
+    _lane_fill_world(
         monkeypatch,
         [_ready_node("x-win"), _ready_node("x-coll")],
         high_collision_for={"x-coll": "some-plan"},
@@ -288,8 +289,6 @@ def test_cap_full_counts_the_denied_lanes_under_lane_slot(monkeypatch):
 
 def test_advance_explain_epic_routes_to_the_fill_not_the_next_cascade(monkeypatch):
     """The CLI wiring: --explain --epic never builds the next cascade."""
-    from types import SimpleNamespace
-
     from fno.backlog import explain
 
     calls = {"lane_fill": 0, "next": 0}
