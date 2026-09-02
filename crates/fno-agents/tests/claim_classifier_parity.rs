@@ -464,8 +464,7 @@ fn rust_classify_all(cases: &[Case], now: i64) -> Value {
             ProbeSpec::Absent => &|_| fno_agents::claims::PidProbe::Absent,
             ProbeSpec::Refused => &|_| fno_agents::claims::PidProbe::Refused,
         };
-        let (state, basis) =
-            fno_agents::claims::classify_with_basis(&record(c), Some(now), probe);
+        let (state, basis) = fno_agents::claims::classify_with_basis(&record(c), Some(now), probe);
         rows.insert(
             c.label.to_string(),
             json!({"state": state.as_str(), "basis": basis}),
@@ -502,6 +501,13 @@ fn classify_state_and_basis_parity_with_real_python() {
     assert_golden_common("claim_classifier", "corpus", &rust_golden, oracle);
     // A zero-case pass is an absence, not a verdict: the corpus must actually
     // carry every state and basis into the frozen contract.
-    assert!(cases.len() >= 10, "corpus contains only {} cases", cases.len());
-    eprintln!("claim classifier corpus: {} cases frozen or verified", cases.len());
+    assert!(
+        cases.len() >= 10,
+        "corpus contains only {} cases",
+        cases.len()
+    );
+    eprintln!(
+        "claim classifier corpus: {} cases frozen or verified",
+        cases.len()
+    );
 }
