@@ -891,6 +891,24 @@ pub struct WorktreeSweepReport {
     pub dirty: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeSweepOutput {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[cfg(test)]
+impl WorktreeSweepOutput {
+    fn success(stdout: impl Into<String>) -> Self {
+        Self {
+            exit_code: Some(0),
+            stdout: stdout.into(),
+            stderr: String::new(),
+        }
+    }
+}
+
 /// Parse `fno agents workspace worktree cleanup --merged`'s summary line.
 ///
 /// Returns `None` rather than a zeroed report when the line is absent. A sweep
@@ -916,7 +934,7 @@ pub fn parse_worktree_sweep(stdout: &str) -> Option<WorktreeSweepReport> {
     })
 }
 
-/// Worktree sweep, one line per repo, on a 24h floor: report-only until a
+/// Worktree sweep, one line per repo, on a 6h floor: report-only until a
 /// merge-minted reap order stands, then applying.
 ///
 /// A timer tick proves nothing on its own, so an unearned tick still only
@@ -937,7 +955,7 @@ pub fn worktree_sweep(
     now: i64,
     roots: &[String],
     orders: &dyn Fn() -> bool,
-    run: &dyn Fn(&str, bool) -> Option<String>,
+    run: &dyn Fn(&str, bool) -> WorktreeSweepOutput,
 ) -> usize {
     let stamp = home.root().join("worktree-sweep.stamp");
     let last = std::fs::read_to_string(&stamp)
@@ -955,7 +973,11 @@ pub fn worktree_sweep(
         // stays silent when it finds nothing cannot be told from a tick that
         // never ran, and this sweep exists precisely to surface what the
         // ritual missed.
-        match run(root, apply).as_deref().and_then(parse_worktree_sweep) {
+        let output = run(root, apply);
+        let report = (output.exit_code == Some(0))
+            .then(|| parse_worktree_sweep(&output.stdout))
+            .flatten();
+        match report {
             Some(r) => {
                 let _ = emitter.emit(
                     "worktree_sweep",
@@ -970,9 +992,16 @@ pub fn worktree_sweep(
                 swept += 1;
             }
             None => {
+                let stderr = output.stderr.lines().next().unwrap_or("");
                 let _ = emitter.emit(
                     "worktree_sweep",
-                    &json!({"repo": root, "mode": mode, "error": "unreadable-summary"}),
+                    &json!({
+                        "repo": root,
+                        "mode": mode,
+                        "error": "unreadable-summary",
+                        "exit_code": output.exit_code,
+                        "stderr": stderr,
+                    }),
                 );
             }
         }
@@ -3490,10 +3519,18 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                             if apply {
                                 cmd.arg("--apply");
                             }
-                            cmd.output()
-                                .ok()
-                                .filter(|o| o.status.success())
-                                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                            match cmd.output() {
+                                Ok(output) => WorktreeSweepOutput {
+                                    exit_code: output.status.code(),
+                                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                                },
+                                Err(error) => WorktreeSweepOutput {
+                                    exit_code: None,
+                                    stdout: String::new(),
+                                    stderr: error.to_string(),
+                                },
+                            }
                         });
                     });
                 }
@@ -8125,7 +8162,7 @@ async fn handle_rm_with(
         .is_some_and(|state| matches!(state, "done" | "stopped" | "failed"));
     let provably_gone = row_state_terminal
         || claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref())
-            || pane_provably_absent(entry.mux.as_ref(), mux_pane_probe);
+        || pane_provably_absent(entry.mux.as_ref(), mux_pane_probe);
     if entry.status == AgentStatus::Live && !force && !provably_gone {
         let row = harness_row_id
             .clone()
@@ -11862,7 +11899,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             1_000_000,
             &["/repo/a".into(), "/repo/b".into()],
             &|| false,
-            &|_, _| Some(quiet.to_string()),
+            &|_, _| WorktreeSweepOutput::success(quiet),
         );
 
         assert_eq!(swept, 2, "a tick that finds nothing must still report");
@@ -11889,7 +11926,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &|| true,
             &|_, apply| {
                 assert!(apply, "a standing order must reach the verb as --apply");
-                Some(quiet.to_string())
+                WorktreeSweepOutput::success(quiet)
             },
         );
 
@@ -11903,7 +11940,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     fn sweep_honours_its_own_6h_floor() {
         let home = tmp_home("wt-sweep-floor");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let out = |_: &str, _: bool| Some(REAL_SUMMARY.to_string());
+        let out = |_: &str, _: bool| WorktreeSweepOutput::success(REAL_SUMMARY);
         let now = 1_000_000;
 
         assert_eq!(
@@ -11960,13 +11997,67 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             1_000_000,
             &["/repo/a".into()],
             &|| false,
-            &|_, _| None,
+            &|_, _| WorktreeSweepOutput {
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
         );
 
         assert_eq!(swept, 0);
         let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
         assert!(log.contains("unreadable-summary"));
         assert!(!log.contains("\"eligible\""));
+    }
+
+    #[test]
+    fn sweep_records_a_nonzero_exit_and_first_stderr_line() {
+        let home = tmp_home("wt-sweep-nonzero");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let output = WorktreeSweepOutput {
+            exit_code: Some(7),
+            stdout: String::new(),
+            stderr: "permission denied\nextra detail\n".into(),
+        };
+
+        let swept = worktree_sweep(
+            &home,
+            &emitter,
+            1_000_000,
+            &["/repo/a".into()],
+            &|| false,
+            &|_, _| output.clone(),
+        );
+
+        assert_eq!(swept, 0);
+        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(log.contains("\"exit_code\":7"));
+        assert!(log.contains("\"stderr\":\"permission denied\""));
+        assert!(!log.contains("extra detail"));
+    }
+
+    #[test]
+    fn sweep_distinguishes_a_zero_exit_with_no_summary() {
+        let home = tmp_home("wt-sweep-zero-no-summary");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+
+        let swept = worktree_sweep(
+            &home,
+            &emitter,
+            1_000_000,
+            &["/repo/a".into()],
+            &|| false,
+            &|_, _| WorktreeSweepOutput {
+                exit_code: Some(0),
+                stdout: "no summary here\n".into(),
+                stderr: String::new(),
+            },
+        );
+
+        assert_eq!(swept, 0);
+        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(log.contains("\"exit_code\":0"));
+        assert!(log.contains("\"stderr\":\"\""));
     }
 
     #[test]
