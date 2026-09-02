@@ -11,7 +11,7 @@ Read [worktree-mechanics](../../docs/architecture/worktree-mechanics.md) for hoo
 - **Unset (OSS-neutral default):** harness-native `<repo>/.claude/worktrees/<name>` (gitignored, search-clean). No config needed.
 - **`config.paths.worktrees_base: <dir>`:** worktrees land at `<dir>/<repo>/<name>` (`<repo>` = `basename $(git rev-parse --show-toplevel)`).
 - **`worktree.use_conductor_canonical: true` is DEPRECATED:** acts as `worktrees_base = ~/conductor/workspaces`. Prefer `worktrees_base`.
-- Cargo targets stay worktree-local (sibling builds never share the artifact lock). Details in [worktree-mechanics](../../docs/architecture/worktree-mechanics.md).
+- Cargo targets stay worktree-local (sibling builds never share the artifact lock). Details in [worktree-mechanics](../../docs/architecture/worktree-mechanics.md). Never match target dirs by NAME: `cli/src/fno/target`, `skills/target`, and `tests/target` are source dirs. A 2026-09-02 name-based sweep deleted 66 of them across 26 worktrees. Select cargo dirs by a positive marker or by path shape. `CACHEDIR.TAG` marks every dir cargo owns. The glob `crates/*/target` works too. A name is not proof. The name match also poisons measurement: that sweep's `du` counted 84 dirs where 18 were cargo, a 4.7x inflation.
 
 ## Creating and entering one
 
