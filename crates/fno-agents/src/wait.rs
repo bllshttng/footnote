@@ -118,16 +118,36 @@ fn find_effective(
     name: &str,
     now: u64,
 ) -> Result<Option<(EffState, &'static str)>, String> {
+    Ok(find_effective_entry(home, name, now)?.map(|(_, state, authority)| (state, authority)))
+}
+
+/// Read the named registry row, fold its candidate state, and retain the row
+/// for any authority that must reconcile the candidate with a second source.
+fn find_effective_entry(
+    home: &AgentsHome,
+    name: &str,
+    now: u64,
+) -> Result<Option<(RegistryEntry, EffState, &'static str)>, String> {
     let reg = state::load_registry(&home.registry_json()).map_err(|e| e.to_string())?;
-    Ok(reg
-        .entries
-        .iter()
-        .find(|e| e.name == name)
-        .map(|e| effective_state(e, now)))
+    Ok(reg.entries.iter().find(|e| e.name == name).map(|e| {
+        let (state, authority) = effective_state(e, now);
+        (e.clone(), state, authority)
+    }))
 }
 
 /// `fno-agents wait --agent <name> --state idle|blocked|done [--timeout-ms N] [--json]`
 pub async fn run_wait(rest: &[String], home: &AgentsHome) -> i32 {
+    run_wait_with_probe(rest, home, crate::claude_ask::family1_truth_probe).await
+}
+
+/// Testable implementation of [`run_wait`], with the family-1 truth reader
+/// injected so wait's authority arbitration can be tested without spawning a
+/// second CLI process.
+pub async fn run_wait_with_probe(
+    rest: &[String],
+    home: &AgentsHome,
+    truth_probe: impl Fn(&str) -> Option<crate::claude_ask::TruthProbe>,
+) -> i32 {
     let mut name: Option<String> = None;
     let mut target: Option<String> = None;
     let mut timeout_ms = DEFAULT_TIMEOUT_MS;
@@ -193,16 +213,65 @@ pub async fn run_wait(rest: &[String], home: &AgentsHome) -> i32 {
     // checked_add so an astronomically large --timeout-ms (which would overflow
     // the Instant) is treated as "wait indefinitely" rather than panicking.
     let deadline = Instant::now().checked_add(Duration::from_millis(timeout_ms));
+    let mut last_observation: Option<String>;
     loop {
-        match find_effective(home, &name, now_secs()) {
-            Ok(Some((st, authority))) => {
+        match find_effective_entry(home, &name, now_secs()) {
+            Ok(Some((entry, st, authority))) => {
+                last_observation =
+                    Some(format!("{} (candidate_authority={authority})", st.label()));
                 if st == target_state {
-                    if json_out {
-                        println!("{}", json!({"state": st.label(), "authority": authority}));
+                    if authority == "hook" && entry.harness_name() == "claude" {
+                        if let Some(handle) = entry
+                            .harness_session_id
+                            .as_deref()
+                            .filter(|handle| !handle.is_empty())
+                        {
+                            match truth_probe(handle) {
+                                Some(probe) if probe.state == "done" => {
+                                    if json_out {
+                                        println!(
+                                            "{}",
+                                            json!({
+                                                "state": st.label(),
+                                                "authority": "transcript",
+                                                "candidate_authority": authority,
+                                            })
+                                        );
+                                    } else {
+                                        println!(
+                                            "{name} is {} (authority=transcript; candidate_authority={authority})",
+                                            st.label(),
+                                        );
+                                    }
+                                    return 0;
+                                }
+                                Some(probe) => {
+                                    last_observation = Some(format!(
+                                        "done (candidate_authority={authority}, transcript={})",
+                                        probe.state
+                                    ));
+                                }
+                                None => {
+                                    last_observation = Some(
+                                        "done (candidate_authority=hook, transcript=unknown/probe-failed)"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        } else {
+                            last_observation = Some(
+                                "done (candidate_authority=hook, transcript=unknown; no handle)"
+                                    .to_string(),
+                            );
+                        }
                     } else {
-                        println!("{name} is {} (via {authority})", st.label());
+                        if json_out {
+                            println!("{}", json!({"state": st.label(), "authority": authority}));
+                        } else {
+                            println!("{name} is {} (via {authority})", st.label());
+                        }
+                        return 0;
                     }
-                    return 0;
                 }
             }
             // Unknown agent: an immediate, non-retryable miss (AC edge).
@@ -218,11 +287,14 @@ pub async fn run_wait(rest: &[String], home: &AgentsHome) -> i32 {
         // A `None` deadline (overflow above) never fires -> effectively infinite.
         if deadline.is_some_and(|d| Instant::now() >= d) {
             // Report the last-observed state (one read; the timeout path is rare).
-            let last = find_effective(home, &name, now_secs())
-                .ok()
-                .flatten()
-                .map(|(s, _)| s.label())
-                .unwrap_or("unknown");
+            let last = last_observation
+                .or_else(|| {
+                    find_effective(home, &name, now_secs())
+                        .ok()
+                        .flatten()
+                        .map(|(s, _)| s.label().to_string())
+                })
+                .unwrap_or_else(|| "unknown".to_string());
             eprintln!(
                 "fno-agents: wait timed out after {timeout_ms}ms \
                  (agent {name} last observed: {last}, wanted: {})",
@@ -256,9 +328,27 @@ mod tests {
         serde_json::from_value(base).expect("fixture deserializes")
     }
 
-    // A report with no ttl_ms never ages out -> always live at any `now`.
+    // Keep the measured row inside its TTL while remaining independent of the
+    // wall clock used by this test.
     fn live_leg(state: &str) -> Value {
-        json!({"state": state, "seq": 1, "received_at": "2026-01-01T00:00:00Z"})
+        json!({
+            "state": state,
+            "seq": 1,
+            "received_at": "2026-01-01T00:00:00Z",
+            "ttl_ms": 4_000_000_000_000u64
+        })
+    }
+
+    fn truth_probe(state: &str) -> crate::claude_ask::TruthProbe {
+        crate::claude_ask::TruthProbe {
+            state: state.into(),
+            reachability: Some("reachable".into()),
+            basis: Some("transcript".into()),
+            last_activity_age_s: Some(1.0),
+            last_event_at: None,
+            last_message: None,
+            observed_model: Value::Null,
+        }
     }
 
     const NOW: u64 = 1_800_000_000; // well past any fixture stamp
@@ -330,5 +420,121 @@ mod tests {
         assert_eq!(parse_target("done"), Some(EffState::Done));
         assert_eq!(parse_target("working"), None); // transient, not a goal
         assert_eq!(parse_target("bogus"), None);
+    }
+
+    #[tokio::test]
+    async fn live_claude_hook_done_with_working_truth_stays_pending() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let home = AgentsHome::at(dir.path());
+        state::update_registry(&home.registry_json(), |registry| {
+            registry.entries.push(entry(json!({
+                "harness": "claude",
+                "harness_session_id": "claude-session",
+                "inside_leg": live_leg("done"),
+            })));
+        })
+        .expect("registry fixture writes");
+
+        let args = vec![
+            "--agent".to_string(),
+            "a".to_string(),
+            "--state".to_string(),
+            "done".to_string(),
+            "--timeout-ms".to_string(),
+            "50".to_string(),
+        ];
+        let result =
+            run_wait_with_probe(&args, &home, |_handle| Some(truth_probe("working"))).await;
+        assert_eq!(result, WAIT_TIMEOUT_EXIT);
+    }
+
+    #[tokio::test]
+    async fn live_claude_hook_done_with_done_truth_succeeds() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let home = AgentsHome::at(dir.path());
+        state::update_registry(&home.registry_json(), |registry| {
+            registry.entries.push(entry(json!({
+                "harness": "claude",
+                "harness_session_id": "claude-session",
+                "inside_leg": live_leg("done"),
+            })));
+        })
+        .expect("registry fixture writes");
+
+        let args = vec![
+            "--agent".to_string(),
+            "a".to_string(),
+            "--state".to_string(),
+            "done".to_string(),
+            "--timeout-ms".to_string(),
+            "50".to_string(),
+            "--json".to_string(),
+        ];
+        let probes = std::sync::atomic::AtomicUsize::new(0);
+        let result = run_wait_with_probe(&args, &home, |handle| {
+            assert_eq!(handle, "claude-session");
+            probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(truth_probe("done"))
+        })
+        .await;
+        assert_eq!(result, 0);
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn live_codex_hook_done_skips_claude_truth_probe() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let home = AgentsHome::at(dir.path());
+        state::update_registry(&home.registry_json(), |registry| {
+            registry.entries.push(entry(json!({
+                "harness": "codex",
+                "harness_session_id": "codex-session",
+                "inside_leg": live_leg("done"),
+            })));
+        })
+        .expect("registry fixture writes");
+
+        let args = vec![
+            "--agent".to_string(),
+            "a".to_string(),
+            "--state".to_string(),
+            "done".to_string(),
+            "--timeout-ms".to_string(),
+            "50".to_string(),
+        ];
+        let result = run_wait_with_probe(&args, &home, |_handle| {
+            panic!("Claude truth probe invoked for a Codex row")
+        })
+        .await;
+        assert_eq!(result, 0);
+    }
+
+    #[tokio::test]
+    async fn exited_claude_row_is_done_without_truth_probe() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let home = AgentsHome::at(dir.path());
+        state::update_registry(&home.registry_json(), |registry| {
+            registry.entries.push(entry(json!({
+                "status": "exited",
+                "harness": "claude",
+                "harness_session_id": "claude-session",
+                "inside_leg": live_leg("done"),
+            })));
+        })
+        .expect("registry fixture writes");
+
+        let args = vec![
+            "--agent".to_string(),
+            "a".to_string(),
+            "--state".to_string(),
+            "done".to_string(),
+            "--timeout-ms".to_string(),
+            "50".to_string(),
+        ];
+        let result = run_wait_with_probe(&args, &home, |_handle| {
+            panic!("Claude truth probe invoked for an exited row")
+        })
+        .await;
+        assert_eq!(result, 0);
     }
 }
