@@ -150,6 +150,12 @@ When a profile has `lanes`, the live-worker count chooses the round-robin start.
 
 The two layers compose by design. The stage table picks the coordinate per verb; `--role`, attached by the dispatch lane, owns the model when it resolves. A field the dispatch pinned explicitly (harness, substrate) is not displaced, which is why a stage table entry can set the model or route without rerouting the fleet's binary.
 
+## What a plan carries, and what it never carries
+
+A plan names one routing axis in its frontmatter: the `difficulty` band. The band is the only axis a plan carries. Waves stamp it, the dispatch grid consumes it, and the band-to-harness/model resolution lives entirely in config (the declared inventory, the stage table, the role lanes). A plan that names no model is not a gap. Models were kept out of plans on purpose, so re-routing the fleet stays a config edit and never a plan rewrite.
+
+The second easy misread is a wave's `mode`. `mode: sequential | parallel` describes fan-out between the tasks inside that one wave. `parallel` says those tasks can run as concurrent subagents. `sequential` says one after another. It is not a cross-wave marker, and it is not a width claim. The join width function gives an undeclared task the previous wave's whole task list as blockers. It then adds derived partition edges only for waves whose mode is `parallel`. Flipping a wave to parallel can only narrow a plan's measured width, never widen it. Reading `mode: sequential` as "this plan is narrow" gets it backwards. Several single-task sequential waves measure wider than one big parallel wave, because the single wave is where all the tasks sit unblocked. `fno backlog join` sizes its worker pool from the measured width, the node priority and the highest wave band, never from a wave's mode.
+
 ## The declared inventory and the dispatch grid
 
 `config.routing` declares the model inventory. One `[[routing.models]]` row per model carries `name`, `harness`, `model`, and optional `band`, `effort`, `cost_per_mtok_in`, `context`, `route`, `account`.
