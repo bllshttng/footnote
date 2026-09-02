@@ -2779,6 +2779,23 @@ def _join_node(
                 lane_h, lane_m = grid_h, grid_m
         cmd = [
             *_subprocess_util.fno_py_cmd(),
+            # `thread`, deliberately, overriding spawn's own `pane` default.
+            # A thread hosts no pane, so the team runs invisibly and the mail
+            # hub has no watchable surface - a real cost, and flipping this one
+            # word plus the shipped `--split`/`--tab` flags would buy a visible
+            # squad. It stays a thread because the flip REVERSES the 2026-08-24
+            # operator ruling that sent spawns to threads after a closable pane
+            # was ended mid-flight, and that reversal is gated on pane-keeper
+            # durability being confirmed end to end: a keeper must survive
+            # `fno mux kill-server` and re-adopt the SAME pid.
+            #
+            # Not confirmed as of 2026-09-02. `fno mux pane keeper list` shows
+            # only the operator's own main pane, no joiner survivor to read
+            # durability off, and the one machine that could run the kill-server
+            # test was hosting live joiners at the time. Untested, not false.
+            # Do not flip this word on the strength of pane-keeper EXISTING;
+            # run the restart test first. An invisible team that survives beats
+            # a visible one that dies.
             "agents", "spawn", "--substrate", "thread",
             # Explicit harness, like _spawn_worker's `prov` default: an
             # untagged spawn leaves the lane unresolved, and this machine's
