@@ -130,7 +130,7 @@ def candidates(
         incoming,
         pool,
         k=None,
-        floor=0.0,
+        floor=relatedness._MIN_SCORE,
     )
     related_by_id = {
         node_id: (score, reason)

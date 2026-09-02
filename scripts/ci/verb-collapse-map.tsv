@@ -160,6 +160,7 @@ backlog decompose	T1	backlog decompose	8
 backlog defer	T1	backlog defer	14
 backlog demand	T1	backlog demand	0
 backlog dispatch-lanes	T1	backlog dispatch-lanes	1
+backlog discover	T1	backlog discover	0
 backlog done	KEEP	backlog done	42	deliberate readability slack for a high-traffic distinct operation
 backlog encounter	T1	backlog encounter	0
 backlog epic status	T1	backlog epic status	7
