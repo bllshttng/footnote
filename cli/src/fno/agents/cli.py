@@ -3954,8 +3954,16 @@ def cmd_orphans(
 
 @agents_app.command("pane-identity", hidden=True)
 def cmd_pane_identity(
-    session: Optional[str] = typer.Option(
-        None, "--session", help="Mux session to check. Default: the resolved session."
+    session_id: Optional[str] = typer.Option(
+        None,
+        "--session-id",
+        help="Mux session to check. Default: the resolved session.",
+    ),
+    session_legacy: Optional[str] = typer.Option(
+        None,
+        "--session",
+        hidden=True,
+        help="Deprecated alias for --session-id.",
     ),
     as_json: bool = typer.Option(
         False, "--json", "-J", help="Emit the same content as JSON."
@@ -3977,6 +3985,7 @@ def cmd_pane_identity(
     import json as _json
     import subprocess as _subprocess
 
+    from fno._flag_aliases import merge_deprecated_alias
     from fno.agents.mux_spawn import _run_mux, resolve_mux_session
     from fno.agents.reachability import (
         pane_identity_crosscheck,
@@ -3984,7 +3993,14 @@ def cmd_pane_identity(
     )
     from fno.agents.registry import load_registry
 
-    session_name = resolve_mux_session(session)
+    session_name = resolve_mux_session(
+        merge_deprecated_alias(
+            session_id,
+            session_legacy,
+            canonical_flag="--session-id",
+            legacy_flag="--session",
+        )
+    )
     listing = _run_mux(
         ["mux", "pane", "ls", "--session", session_name, "--json"], _subprocess.run
     )
