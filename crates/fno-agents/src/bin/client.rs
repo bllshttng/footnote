@@ -1189,9 +1189,14 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // can't be honored without a silent downgrade - reject it, pointing at the
     // pane substrate (which DOES map every provider's vocabulary).
     if permission_mode.is_some() && provider != "claude" {
+        let remedy = if provider == "codex" {
+            "drop --permission-mode and pass -Y/--yolo"
+        } else {
+            "use --substrate pane"
+        };
         eprintln!(
-            "--permission-mode is not supported for harness {} on --substrate bg/headless (its one-shot lane hardcodes its own bypass form); use --substrate pane",
-            py_repr(provider)
+            "--permission-mode is not supported for harness {} on --substrate bg/headless (its one-shot lane hardcodes its own bypass form); {remedy}",
+            py_repr(provider),
         );
         return Some(2);
     }

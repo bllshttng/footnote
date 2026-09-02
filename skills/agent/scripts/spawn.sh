@@ -151,6 +151,28 @@ fi
 
 sanitize() { printf '%s' "$1" | tr '\n\r' '  ' | sed 's/"/'"'"'/g' | cut -c1-300; }
 
+# A payload writes code when it is a node-id build dispatch or an explicit
+# /target|/execute|/fix passthrough. Keep this predicate ahead of every probe:
+# the Codex posture gate below must refuse before any registry-minting path.
+is_code_payload() {
+  case "$PAYLOAD_MODE" in
+    build) return 0 ;;
+    passthrough)
+      case "$MESSAGE" in
+        /target|/target\ *|/execute|/execute\ *|/do|/do\ *|/fix|/fix\ *) return 0 ;;
+        /fno:target|/fno:target\ *|/fno:execute|/fno:execute\ *|/fno:do|/fno:do\ *|/fno:fix|/fno:fix\ *) return 0 ;;
+        '$fno:target'|'$fno:target '*|'$fno:execute'|'$fno:execute '*|'$fno:do'|'$fno:do '*|'$fno:fix'|'$fno:fix '*) return 0 ;;
+        *) return 1 ;;
+      esac ;;
+    *) return 1 ;;
+  esac
+}
+
+if [[ "$PROVIDER" == "codex" && "$YOLO" -eq 0 && "$PERMISSION_MODE" != "yolo" ]] \
+  && is_code_payload; then
+  fail "Codex code payloads require an unsandboxed launch so target init can write shared .git metadata. Pass -Y/--yolo; no worker launched"
+fi
+
 # ---- Read-only early receipt; cmd_spawn owns the real guard (x-5c08) ------
 # Preserve /agent's self-handoff and contested-worker receipts without taking a
 # reservation here. The actual `fno agents spawn --node` below reruns the same
@@ -296,19 +318,6 @@ AUTO_WT=""
 # isolate. seed (verbatim conversational pane) and handoff (a doc continuation)
 # and a non-code claude slash command (/think writes a design doc) are NOT code
 # payloads.
-is_code_payload() {
-  case "$PAYLOAD_MODE" in
-    build) return 0 ;;  # node-id dispatch: /target|/fno:target|$fno:target <id>
-    passthrough)        # explicit slash command; isolate only code verbs
-      case "$MESSAGE" in
-        /target|/target\ *|/execute|/execute\ *|/do|/do\ *|/fix|/fix\ *) return 0 ;;
-        /fno:target|/fno:target\ *|/fno:execute|/fno:execute\ *|/fno:do|/fno:do\ *|/fno:fix|/fno:fix\ *) return 0 ;;
-        '$fno:target'|'$fno:target '*|'$fno:execute'|'$fno:execute '*|'$fno:do'|'$fno:do '*|'$fno:fix'|'$fno:fix '*) return 0 ;;
-        *) return 1 ;;
-      esac ;;
-    *) return 1 ;;      # seed | handoff
-  esac
-}
 # A claude `/target <node>` worker isolates ITSELF at cold-start (`fno do target
 # start` -> `fno agents workspace worktree ensure` -> the harness `EnterWorktree` tool), which
 # moves the session's cwd while leaving its PROJECT at the launch dir. Pre-
