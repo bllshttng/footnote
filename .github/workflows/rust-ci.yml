@@ -108,6 +108,15 @@ jobs:
     # across two jobs, or find the serialization they actually need.
     timeout-minutes: 40
 
+    # The claim classifier parity harness needs the FULL oracle package
+    # (pydantic included: fno.claims.staleness imports claims/types.py), not a
+    # hand-picked subset a bare interpreter could carry. Point it at the
+    # uv-synced venv so the guard runs on the interpreter CI already keeps
+    # complete; otherwise the import fails and the harness rots into a
+    # silent skip.
+    env:
+      FNO_CLAIMS_PARITY_PYTHON: ${{ github.workspace }}/cli/.venv/bin/python
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5

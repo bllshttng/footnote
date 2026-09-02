@@ -428,6 +428,8 @@ fn classify_state_and_basis_parity_with_real_python() {
         compared += 1;
     }
     // A zero-case pass is an absence, not a verdict: the corpus must actually
-    // have driven both legs, state AND basis.
+    // have driven both legs, state AND basis. The compared count is the run's
+    // positive marker - a silent skip above prints SKIP and returns early.
     assert!(compared >= 10, "corpus compared only {compared} cases");
+    eprintln!("claim classifier parity: {compared} corpus cases compared across both legs");
 }

@@ -452,6 +452,14 @@ pub fn probe_pid(pid: i32) -> PidProbe {
     // SAFETY: buffer is a zeroed proc_bsdinfo of exactly `size` bytes; a
     // partial fill means gone / not introspectable -> Absent unless the OS
     // named a permission failure, which is a live holder refusing inspection.
+    //
+    // proc_pidinfo's failure return is not uniformly -1 (it can return 0 or a
+    // short fill), and errno is only meaningful when the call failed, so
+    // clear errno first and consult it on ANY failed fill. Reading errno
+    // without the clear could honor a stale EPERM from an unrelated earlier
+    // call; skipping the read entirely would make a denied inspection read
+    // as death, which is the misclassification this probe exists to prevent.
+    unsafe { *libc::__error() = 0 };
     let written = unsafe {
         libc::proc_pidinfo(
             pid as libc::c_int,
@@ -466,13 +474,10 @@ pub fn probe_pid(pid: i32) -> PidProbe {
             (info.pbi_start_tvsec as i64) * 1000 + (info.pbi_start_tvusec as i64) / 1000,
         );
     }
-    if written == -1 {
-        match std::io::Error::last_os_error().raw_os_error() {
-            Some(libc::EPERM) | Some(libc::EACCES) => return PidProbe::Refused,
-            _ => {}
-        }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::EPERM) | Some(libc::EACCES) => PidProbe::Refused,
+        _ => PidProbe::Absent,
     }
-    PidProbe::Absent
 }
 
 /// Linux: epoch create time = `btime` (epoch seconds, from `/proc/stat`) plus
@@ -3343,6 +3348,15 @@ mod tests {
         unp.pid_unavailable = true;
         unp.schema_version = 2;
         assert_eq!(basis_of(&unp, &probe_pid), basis::PID_UNAVAILABLE);
+    }
+
+    #[test]
+    fn probe_pid_reads_absent_for_an_impossible_pid() {
+        // The errno consult must not honor a stale EPERM from an unrelated
+        // earlier call: a pid no OS can have assigned is ABSENT (provably
+        // dead), never Refused (which would read SUSPECT and wedge a slot).
+        assert_eq!(probe_pid(2_000_000_000), PidProbe::Absent);
+        assert_eq!(probe_pid(-1), PidProbe::Absent);
     }
 
     #[test]
