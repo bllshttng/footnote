@@ -3597,6 +3597,7 @@ fn create(
     // CLIENT process, which inherited the spawning session's env, so the
     // markers read here name this row's true parent.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
+    let launch_account = crate::state::launch_account_from_env();
     let new_entry = RegistryEntry {
         // x-98ab: client-side mint - this process inherited the spawning
         // session's env, so the exported FNO_NODE names the node THIS spawn
@@ -3638,8 +3639,15 @@ fn create(
         forked_from_session_id: None,
         // x-d285: this client inherited the spawn seam's env verbatim, so the
         // three-valued env read is the honest account fact for the row.
-        launch_account: crate::state::launch_account_from_env(),
+        launch_account: launch_account.clone(),
         related_session_id: None,
+        // v25: the route axes this lane actually used, stamped so the
+        // provider-outage collector can join outage evidence to this row.
+        // The vendor mirrors `provider` above; the account mirrors the
+        // launch read (unknown stays unknown, never a guess).
+        route_provider_id: Some("anthropic".to_string()),
+        model_name: model.filter(|m| !m.is_empty()).map(str::to_string),
+        account_record_id: launch_account.clone(),
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,

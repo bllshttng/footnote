@@ -157,7 +157,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // 2026-09-01: a writer without the fields erased the stamps at an EQUAL
 // version number, so this takes the next free number instead of reusing 23.
 // Accepted set widens to 1..=24.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 24;
+//
+// v25 adds the explicit model-route identity - `route_provider_id` /
+// `model_name` / `account_record_id`, captured at spawn, identifiers only.
+// The provider-outage supervisor joins outage evidence on these; a row
+// without them is a blind spot for that collector, never a default. Mirrors
+// Python's AgentEntry; same additive-optional writer-protection rationale as
+// v22-v24: a pre-v25 writer accepts the unknown keys and erases them on its
+// next read-modify-write. Accepted set widens to 1..=25.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 25;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -585,6 +593,17 @@ pub struct RegistryEntry {
     pub requested_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_effort: Option<String>,
+    /// Explicit model-route identity captured by the spawn path (v25),
+    /// mirroring Python's `AgentEntry.route_provider_id`/`model_name`/
+    /// `account_record_id`. These fields contain stable identifiers only;
+    /// credentials and route settings remain in their protected stores. Same
+    /// X3 passthrough duty as every Python-stamped field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_record_id: Option<String>,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` (ab-b946b59c):
     /// skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2082,6 +2101,9 @@ mod tests {
             harness_session_id: None,
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
+            route_provider_id: None,
+            model_name: None,
+            account_record_id: None,
             cwd: "/tmp/x".into(),
             project_root: "/tmp/x".into(),
             session_id: Some("uuid-1".into()),
@@ -3555,7 +3577,12 @@ mod tests {
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":15,"agents":[]}"#).unwrap();
+        let future = REGISTRY_SCHEMA_VERSION + 1;
+        std::fs::write(
+            &path,
+            format!(r#"{{"schema_version":{future},"agents":[]}}"#),
+        )
+        .unwrap();
         assert!(
             load_registry(&path).is_ok(),
             "a newer writer must not brick this reader"
@@ -3638,10 +3665,13 @@ mod tests {
         let path = dir.join("registry.json");
         std::fs::write(
             &path,
-            r#"{"schema_version":14,"agents":[
-                {"name":"bad","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"}
-            ]}"#,
+            &format!(
+                r#"{{"schema_version":{},"agents":[
+                {{"name":"bad","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"}}
+            ]}}"#,
+                REGISTRY_SCHEMA_VERSION
+            ),
         )
         .unwrap();
 

@@ -68,6 +68,20 @@ target_claim_holder: "target-session:${SID}"
 target_claim_ttl: "2h"
 MAN
 
+# Production truth: the manifest exists because target init holds the node
+# claim. The prepare leg releases that claim in-process (strict) and refuses
+# when it cannot prove custody, so seed the real claim in the claims root the
+# prepare leg reads (HOME); the stubbed `fno claim release` exit-0 line this
+# sandbox used to rely on released nothing.
+SEED_PY="${REPO_ROOT}/cli/.venv/bin/python"
+[[ -x "$SEED_PY" ]] || SEED_PY="$(command -v python3)"
+FNO_CLAIMS_ROOT="$HOME_DIR" PYTHONPATH="${REPO_ROOT}/cli/src" "$SEED_PY" -c "
+from fno.claims.core import acquire_claim
+from pathlib import Path
+acquire_claim('node:${NODE_ID}', holder='target-session:${SID}',
+              pid_unavailable=True, ttl_ms=3_600_000, root=Path('${HOME_DIR}'))
+" >/dev/null 2>&1 || fail "claim seeding failed; the prepare leg will refuse custody"
+
 # Stub `fno`: the capability probe returns an exact nonce response. Raw target
 # delivery installs the child claim and manifest, the commit proof handoff.sh
 # requires before it emits delegated.

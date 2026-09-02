@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import subprocess
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 import typer
@@ -98,14 +99,14 @@ def test_healthy_injectable_row_is_leave():
     assert "does not owe a move" in v.basis
 
 
-def test_sgt_stamp_is_reroute_at_1840_and_wake_at_1850():
+def test_single_sgt_429_is_report_only_until_provider_quorum():
     row = Row("cccc3333-0000", "r1", "blocked", None, "/tmp/r1")
     # 125m silent: past classify_tail's 2h window, so the tail POSITIVELY
     # asserts the session owes its next move (stalled) - the wake gate's
     # resumability marker, not a missing-429 absence.
     [before] = _run([row], {"cccc3333-0000": _facts(RATE_LIMIT_TAIL, age_min=125)})
-    assert before.verdict == REROUTE
-    assert "18:48:21Z" in before.basis and "8m out" in before.basis
+    assert before.verdict == LEAVE
+    assert "provider quorum" in before.basis
     [after] = _run(
         [row], {"cccc3333-0000": _facts(RATE_LIMIT_TAIL, age_min=125)}, now_s=NOW_1850
     )
@@ -198,7 +199,7 @@ def test_chatty_attach_cannot_push_a_live_window_out_of_scope():
     assert epoch == datetime(2026, 8, 16, 18, 48, 21, tzinfo=timezone.utc).timestamp()
 
 
-def test_old_passed_plus_new_live_429_is_reroute_not_wake():
+def test_old_passed_plus_new_live_429_waits_for_provider_quorum():
     row = Row("eeee5555-0000", "r2", "blocked", None, "/tmp/r2")
     old = "API Error: 429 rate limit, window resets at 02:10:00 SGT"
     facts = TailFacts(
@@ -210,8 +211,8 @@ def test_old_passed_plus_new_live_429_is_reroute_not_wake():
         "text",
     )
     [v] = _run([row], {"eeee5555-0000": facts})
-    assert v.verdict == REROUTE
-    assert "18:48:21Z" in v.basis
+    assert v.verdict == LEAVE
+    assert "provider quorum" in v.basis
 
 
 def test_identity_joins_on_claim_holder_not_name():
@@ -1306,12 +1307,31 @@ def test_an_open_429_window_never_retires():
     """A session waiting out a rate limit is silent and is NOT finished. Retire
     sits above the reroute lane, so without this it stops exactly the rows
     reroute exists to move onto a fresh account, and stops them without
-    rotating anything. `reap_decision` refuses on the same reading."""
+    rotating anything. `reap_decision` refuses on the same reading. Reroute
+    itself needs a quorum-confirmed breaker: a lone 429 is terminal for the
+    session but is not provider-wide authority, so without one the row reads
+    LEAVE, named as waiting for positive quorum."""
     row = Row("dddd4444-0000", "bp-worker", "blocked", None, "/tmp/bp", "spawn")
     tail = f"{FINISHED_TAIL}\n{RATE_LIMIT_TAIL}"
-    [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=20)})
+    facts = {row.row_id: _facts(tail, age_min=20)}
+    [v] = _retire_run([row], facts)
     assert v.verdict != watchdog.RETIRE
-    assert v.verdict == REROUTE, "the row belongs to reroute, not retire"
+    assert v.verdict == LEAVE, "a lone 429 has no provider-wide authority"
+    assert "quorum" in v.basis
+    breaker_outages = {"breakers": [{
+        "provider": "zai", "account": "acct-a", "outage_epoch": "1",
+        "row_ids": [row.row_id],
+    }]}
+    [v] = verdicts(
+        [row],
+        transcript_for=lambda sid: facts.get(sid),
+        claim_for=lambda node: {},
+        node_state_for=lambda node: None,
+        now_s=NOW_1840,
+        retire_grace_s_value=RETIRE_GRACE,
+        provider_outages=breaker_outages,
+    )
+    assert v.verdict == REROUTE, "a quorum-confirmed breaker moves the row"
 
 
 def test_the_predicate_is_the_only_route_to_a_retire_verdict():
@@ -1698,6 +1718,34 @@ def test_sweep_file_stamps_recoverable_count_and_preserves_it_on_manual_sweep(
     assert second["last_tick_epoch"] == first["last_tick_epoch"]
 
 
+def test_ac12_obs_sweep_payload_and_receipt_include_measured_provider_outages(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "watchdog-sweep.json"
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: path)
+    measured = {
+        "instrument": "measured",
+        "breakers": [{"provider": "zai", "account": "acct-a"}],
+        "counts": {"open": 1},
+        "refusals": [],
+    }
+    rows = [Row("aaaa1111-0000", "w1", "working", None, "/tmp")]
+    payload, _ = watchdog.run_sweep(
+        now_s=NOW_1840,
+        rows_provider=lambda: (rows, []),
+        transcript_fn=lambda sid: _facts("ok"),
+        claim_fn=lambda node: {},
+        graph_fn=lambda: {},
+        provider_outage_fn=lambda: measured,
+    )
+    assert payload["provider_outages"] == measured
+    watchdog.write_sweep_file(
+        "tick", payload["counts"], NOW_1840,
+        provider_outages=payload["provider_outages"],
+    )
+    assert json.loads(path.read_text())["provider_outages"] == measured
+
+
 def test_stopped_row_survives_claude_agents_json(monkeypatch):
     from fno.agents.harnesses import claude as claude_mod
 
@@ -1745,6 +1793,12 @@ def test_sweep_payload_shape():
     assert payload["generated_at"] == "2026-08-16T18:40:00Z"
     assert payload["verdicts"][0]["verdict"] == LEAVE
     assert payload["terminal_harness_rows"] == 3
+    assert payload["provider_outages"] == {
+        "instrument": "unknown",
+        "breakers": [],
+        "counts": {"provider_outage_collector_missing": 1},
+        "refusals": [{"reason": "provider_outage_collector_missing", "count": 1}],
+    }
     # Rows ride along index-aligned so apply lanes can reach each cwd.
     assert out_rows == rows
 
@@ -2178,6 +2232,705 @@ def test_recoverable_apply_defers_remaining_candidates_when_budget_is_spent(tmp_
 
     assert [result["outcome"] for result in results] == ["deferred", "deferred"]
     assert all("next tick" in result["detail"] for result in results)
+
+def test_ac12_obs_sweep_file_never_invents_measured_provider_evidence(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "watchdog-sweep.json"
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: path)
+
+    watchdog.write_sweep_file("tick", {LEAVE: 1}, NOW_1840)
+
+    stored = json.loads(path.read_text())
+    assert stored["provider_outages"] == {
+        "instrument": "unknown",
+        "breakers": [],
+        "counts": {"provider_outage_report_missing": 1},
+        "refusals": [{"reason": "provider_outage_report_missing", "count": 1}],
+    }
+
+
+@pytest.mark.parametrize("mode", ["off", "report", "wake"])
+def test_ac12_obs_only_handoff_mode_arms_provider_migration(mode):
+    settings = SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=SimpleNamespace(enabled=True, watchdog=mode),
+    )
+    assert watchdog.handoff_armed(settings) is False
+
+
+def test_ac12_obs_handoff_mode_obeys_master_vetoes():
+    armed = SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=SimpleNamespace(enabled=True, watchdog="handoff"),
+    )
+    assert watchdog.lane_armed(armed) is True
+    assert watchdog.handoff_armed(armed) is True
+    assert watchdog.handoff_armed(SimpleNamespace()) is False
+    assert watchdog.handoff_armed(SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=False),
+        recovery=SimpleNamespace(enabled=True, watchdog="handoff"),
+    )) is False
+
+
+def test_ac1_det_production_collector_joins_explicit_registry_route_identity(
+    monkeypatch, tmp_path
+):
+    fup = (
+        "API Error: Request rejected (429): Fair Usage Policy; "
+        "submit a request to restore access"
+    )
+    paths = {}
+    entries = []
+    rows = []
+    for index in (1, 2):
+        sid = f"session-{index}"
+        path = tmp_path / f"{sid}.jsonl"
+        path.write_text(json.dumps({
+            "type": "assistant",
+            "timestamp": "2026-08-16T18:39:30Z",
+            "isApiErrorMessage": True,
+            "apiErrorStatus": 429,
+            "message": {"role": "assistant", "content": fup},
+        }) + "\n", encoding="utf-8")
+        paths[sid] = path
+        entries.append(SimpleNamespace(
+            harness_session_id=sid,
+            harness="claude",
+            route_provider_id="anthropic",
+            account_record_id="acct-a",
+            cwd=str(tmp_path),
+        ))
+        rows.append(Row(sid, f"worker-{index}", "working", "x-abcd", str(tmp_path)))
+
+    report = watchdog.measure_provider_outages(
+        rows,
+        now_s=NOW_1840,
+        entries_provider=lambda: entries,
+        transcript_path_for=lambda identity: paths[identity.session_id],
+        journal=tmp_path / "provider-outages.json",
+    )
+
+    assert report["instrument"] == "measured"
+    assert report["breakers"][0]["provider"] == "anthropic"
+    assert report["breakers"][0]["account"] == "acct-a"
+
+
+def test_ac4_err_production_collector_missing_axes_is_count_bearing_unknown(tmp_path):
+    rows = [Row("session-1", "worker", "working", "x-abcd", str(tmp_path))]
+    report = watchdog.measure_provider_outages(
+        rows,
+        now_s=NOW_1840,
+        entries_provider=lambda: [SimpleNamespace(
+            harness_session_id="session-1", harness="claude", cwd=str(tmp_path),
+        )],
+        journal=tmp_path / "provider-outages.json",
+    )
+    assert report["instrument"] == "unknown"
+    assert report["breakers"] == []
+    assert report["counts"] == {"unknown_route_identity": 1}
+
+
+def test_ac1_det_production_collector_persists_exact_pane_fallback_before_vote(
+    tmp_path,
+):
+    fup = (
+        "API Error: Request rejected (429): Fair Usage Policy; "
+        "submit a request to restore access"
+    )
+    rows = []
+    entries = []
+    reads = []
+    for index in (1, 2):
+        sid = f"agy-session-{index}"
+        rows.append(Row(sid, f"agy-{index}", "working", "x-abcd", str(tmp_path)))
+        entries.append(SimpleNamespace(
+            harness_session_id=sid,
+            harness="agy",
+            route_provider_id="zai",
+            account_record_id="acct-a",
+            cwd=str(tmp_path),
+            mux={"session": "stable-session", "pane_id": 40 + index},
+        ))
+
+    def pane_read(session, pane_id):
+        reads.append((session, pane_id))
+        return fup
+
+    journal = tmp_path / "provider-outages.json"
+    snapshots = tmp_path / "pane-snapshots"
+    report = watchdog.measure_provider_outages(
+        rows,
+        now_s=NOW_1840,
+        entries_provider=lambda: entries,
+        transcript_path_for=lambda _identity: None,
+        pane_read_fn=pane_read,
+        pane_snapshot_dir=snapshots,
+        journal=journal,
+    )
+
+    assert report["instrument"] == "measured"
+    assert report["breakers"][0]["row_ids"] == ["agy-session-1", "agy-session-2"]
+    assert reads == [("stable-session", 41), ("stable-session", 42)]
+    stored = [json.loads(path.read_text()) for path in snapshots.glob("*.json")]
+    assert len(stored) == 2
+    assert all(item["observed_at"] == NOW_1840 for item in stored)
+    assert {(item["mux_session"], item["pane_id"]) for item in stored} == {
+        ("stable-session", "41"), ("stable-session", "42"),
+    }
+    assert all(item["provider"] == "zai" and item["account"] == "acct-a" for item in stored)
+
+
+def test_ac1_det_readable_transcript_is_not_duplicated_as_a_pane_vote(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "assistant",
+        "timestamp": "2026-08-16T18:39:30Z",
+        "isApiErrorMessage": True,
+        "apiErrorStatus": 429,
+        "message": {"role": "assistant", "content": "API Error 429: Fair Usage Policy"},
+    }) + "\n", encoding="utf-8")
+    entry = SimpleNamespace(
+        harness_session_id="session-1", harness="claude",
+        route_provider_id="zai", account_record_id="acct-a", cwd=str(tmp_path),
+        mux={"session": "stable-session", "pane_id": 9},
+    )
+    reads = []
+
+    report = watchdog.measure_provider_outages(
+        [Row("session-1", "claude", "working", "x-abcd", str(tmp_path))],
+        now_s=NOW_1840,
+        entries_provider=lambda: [entry],
+        transcript_path_for=lambda _identity: transcript,
+        pane_read_fn=lambda *args: reads.append(args) or "API Error 429: Fair Usage Policy",
+        pane_snapshot_dir=tmp_path / "snapshots",
+        journal=tmp_path / "provider-outages.json",
+    )
+
+    assert report["counts"]["accepted"] == 1
+    assert reads == []
+
+
+def test_ac1_det_shape_unsupported_row_votes_once_through_the_pane(tmp_path):
+    """A row whose transcript shape has no parser refuses the transcript lane
+    BY NAME and votes once through its pane - the pane is the only instrument
+    that can see a 429 on that row. Without the fallback, every non-claude
+    pane row reads as a named refusal and the quorum never hears it."""
+    entry = SimpleNamespace(
+        harness_session_id="session-1", harness="agy",
+        route_provider_id="zai", account_record_id="acct-a", cwd=str(tmp_path),
+        mux={"session": "stable-session", "pane_id": 9},
+    )
+    reads = []
+
+    report = watchdog.measure_provider_outages(
+        [Row("session-1", "agy", "working", "x-abcd", str(tmp_path))],
+        now_s=NOW_1840,
+        entries_provider=lambda: [entry],
+        transcript_path_for=lambda _identity: tmp_path / "absent.jsonl",
+        pane_read_fn=lambda *args: reads.append(args) or "API Error 429: Fair Usage Policy",
+        pane_snapshot_dir=tmp_path / "snapshots",
+        journal=tmp_path / "provider-outages.json",
+    )
+
+    assert report["instrument"] == "measured"
+    assert report["counts"]["accepted"] == 1
+    assert len(reads) == 1  # one pane read, never a duplicated vote
+
+
+def test_production_measure_applies_validated_outage_policy_settings(tmp_path):
+    from fno.config import RecoveryBlock
+
+    fup = "API Error: Request rejected (429): Fair Usage Policy"
+    entries = []
+    rows = []
+    paths = {}
+    for index in (1, 2):
+        sid = f"session-{index}"
+        transcript = tmp_path / f"{sid}.jsonl"
+        transcript.write_text(json.dumps({
+            "type": "assistant", "timestamp": "2026-08-16T18:39:30Z",
+            "isApiErrorMessage": True, "apiErrorStatus": 429,
+            "message": {"role": "assistant", "content": fup},
+        }) + "\n")
+        paths[sid] = transcript
+        entries.append(SimpleNamespace(
+            harness_session_id=sid, harness="claude", route_provider_id="zai",
+            account_record_id="acct-a", cwd=str(tmp_path), mux=None,
+        ))
+        rows.append(Row(sid, sid, "working", "x-abcd", str(tmp_path)))
+
+    report = watchdog.measure_provider_outages(
+        rows,
+        now_s=NOW_1840,
+        settings=SimpleNamespace(recovery=RecoveryBlock(provider_outage_quorum=3)),
+        entries_provider=lambda: entries,
+        transcript_path_for=lambda identity: paths[identity.session_id],
+        journal=tmp_path / "provider-outages.json",
+    )
+    assert report["breakers"] == []
+
+
+def test_ac5_hlth_production_candidate_uses_policy_order_and_observed_health(tmp_path):
+    from fno.agents.provider_outage import CanaryProof
+
+    entries = [
+        SimpleNamespace(
+            account_record_id="full", harness="codex", route_provider_id="openai",
+            model_name="gpt-full", route_settings_path=None,
+        ),
+        SimpleNamespace(
+            account_record_id="good", harness="agy", route_provider_id="google",
+            model_name="gemini-good", route_settings_path=None,
+        ),
+    ]
+    canaries = []
+
+    def canary(candidate, _row, now_s):
+        canaries.append(candidate.record_id)
+        return CanaryProof(
+            source="pane", content="FNO_PROVIDER_HEALTH_OK", observed_at=now_s,
+            persisted=True, assistant_role=False, pane_id="88", stopped=True,
+        )
+
+    selected = watchdog.production_handoff_candidate(
+        {"provider": "zai", "account": "broken"},
+        Row("source", "worker", "working", "x-abcd", str(tmp_path)),
+        NOW_1840,
+        entries_provider=lambda: entries,
+        route_policy_provider=lambda _row: (["full", "good"], {}),
+        account_env_for=lambda account, _root: {"ACCOUNT": account},
+        route_env_for=lambda _entry: {},
+        runtime_exhausted_fn=lambda account, _root: account == "full",
+        harness_installed_fn=lambda harness: harness in {"codex", "agy"},
+        pane_occupancy_fn=lambda _harness: 3,
+        canary_fn=canary,
+        open_breakers_provider=lambda: [],
+    )
+
+    assert selected is not None
+    assert (selected.record_id, selected.harness, selected.provider, selected.model) == (
+        "good", "agy", "google", "gemini-good",
+    )
+    assert selected.pane_count == 3
+    assert selected.runtime_exhausted is False
+    assert canaries == ["good"]
+
+
+def test_production_pane_occupancy_counts_per_harness(tmp_path, monkeypatch):
+    """x-581b AC6-HP: occupancy is a per-harness number, not session-wide.
+
+    The old read measured the whole mux session (min tab occupancy) and
+    dropped its harness argument, so claude's full tab told a codex candidate
+    the session was at capacity. Two harnesses in ONE session must report
+    DIFFERENT numbers; a one-harness test would pass against the broken
+    implementation. The join key is the ``harness_session_id`` the pane
+    listing already carries - never a cwd or title guess.
+    """
+    from fno.agents import registry as registry_mod
+    from fno.agents import mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "resolve_mux_session", lambda _arg: "stable-session")
+
+    pane_listing = json.dumps([
+        {"pane_id": 1, "harness_session_id": "claude-one"},
+        {"pane_id": 2, "harness_session_id": "claude-two"},
+        {"pane_id": 3, "harness_session_id": "codex-one"},
+        {"pane_id": 4, "harness_session_id": None},
+    ])
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=pane_listing, stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        registry_mod,
+        "load_registry",
+        lambda: [
+            SimpleNamespace(harness="claude", harness_session_id="claude-one"),
+            SimpleNamespace(harness="claude", harness_session_id="claude-two"),
+            SimpleNamespace(harness="codex", harness_session_id="codex-one"),
+        ],
+    )
+
+    assert watchdog._production_pane_occupancy("claude") == 2
+    assert watchdog._production_pane_occupancy("codex") == 1
+    assert watchdog._production_pane_occupancy("claude") != (
+        watchdog._production_pane_occupancy("codex")
+    )
+    # A pane with no harness session (a plain shell) counts toward nothing,
+    # and an unknown harness reads zero rather than inheriting the session.
+    assert watchdog._production_pane_occupancy("agy") == 0
+
+
+def test_production_pane_occupancy_answers_at_capacity_when_unreadable(tmp_path, monkeypatch):
+    """An unreadable listing answers 4, not 0: the route gate must skip a
+    candidate whose occupancy it could not measure."""
+    from fno.agents import mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "resolve_mux_session", lambda _arg: "stable-session")
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=7, stdout="", stderr="boom"),
+    )
+
+    assert watchdog._production_pane_occupancy("claude") == 4
+
+
+def test_ac6_edge_one_transcript_read_per_tick(monkeypatch, tmp_path):
+    """x-581b AC6-EDGE: one tick reads and parses each transcript at most once.
+
+    The default sweep path shares one parsed tail between the outage
+    evidence collector and the tail classifier; before the sharing, both
+    legs opened and parsed the same file. The counting fake sits at the read
+    seam (tail_entries), not a timing measurement, and both consumers must
+    have run: the provider report is measured from that parse and the
+    verdicts are classified from it.
+    """
+    from fno.agents import provider_outage as po
+    from fno.agents import registry as registry_mod
+
+    rows = [
+        Row("aaaa1111-0000", "w1", "working", None, str(tmp_path)),
+        Row("bbbb2222-0000", "w2", "working", None, str(tmp_path)),
+    ]
+    monkeypatch.setattr(watchdog, "fleet_rows", lambda timeout=None: (rows, []))
+
+    def record(text, *, is_error=False, status=None):
+        return {
+            "type": "assistant",
+            "timestamp": "2026-08-16T18:39:00Z",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+            "isApiErrorMessage": is_error,
+            "apiErrorStatus": status,
+        }
+
+    entries_by_sid = {
+        "aaaa1111-0000": [
+            record("429 quota", is_error=True, status=429),
+            record("continuing"),
+        ],
+        "bbbb2222-0000": [record("healthy")],
+    }
+    reads: list[str] = []
+
+    def counting_tail_entries(sid, cwd, *, agent="claude"):
+        reads.append(sid)
+        return entries_by_sid.get(sid)
+
+    monkeypatch.setattr(watchdog, "tail_entries", counting_tail_entries)
+    monkeypatch.setattr(
+        registry_mod,
+        "load_registry",
+        lambda: [
+            SimpleNamespace(
+                harness="claude", harness_session_id="aaaa1111-0000",
+                route_provider_id="zai", account_record_id="acct-a",
+                cwd=str(tmp_path), mux=None,
+            ),
+            SimpleNamespace(
+                harness="claude", harness_session_id="bbbb2222-0000",
+                route_provider_id="zai", account_record_id="acct-a",
+                cwd=str(tmp_path), mux=None,
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        po, "journal_path", lambda: tmp_path / "provider-outages.json"
+    )
+
+    payload, _out_rows = watchdog.run_sweep(
+        now_s=NOW_1840,
+        claim_fn=lambda key: {},
+        graph_fn=lambda: {},
+    )
+
+    # The AC itself: each transcript read exactly once, not once per consumer.
+    assert reads == ["aaaa1111-0000", "bbbb2222-0000"]
+    # The outage leg actually consumed the shared parse: the 429 record and
+    # both healthy records were accepted as evidence from it.
+    assert payload["provider_outages"]["instrument"] == "measured"
+    assert payload["provider_outages"]["counts"]["accepted"] == 3
+    # The classifier leg ran off the same entries, not a second read.
+    assert len(payload["verdicts"]) == 2
+
+
+def test_ac5_hlth_production_candidate_canaries_configured_route_without_registry_row(
+    tmp_path, monkeypatch,
+):
+    from fno import paths
+    from fno.agents import provider_outage
+
+    config = tmp_path / ".fno" / "config.toml"
+    config.parent.mkdir()
+    config.write_text("""
+[accounts]
+active_combo = "outage"
+
+[[accounts.records]]
+id = "broken"
+name = "Broken"
+harness = "claude"
+auth = "api_key"
+route_provider_id = "zai"
+model_name = "glm-5.3"
+env = { ANTHROPIC_API_KEY = "test" }
+
+[[accounts.records]]
+id = "codex-backup"
+name = "Codex backup"
+harness = "codex"
+auth = "api_key"
+route_provider_id = "openai"
+model_name = "gpt-5.6-sol"
+env = { OPENAI_API_KEY = "test" }
+
+[accounts.combos.outage]
+providers = ["broken", "codex-backup"]
+strategy = "fallback"
+""", encoding="utf-8")
+    canaries = []
+    state = tmp_path / "state"
+    monkeypatch.setattr(paths, "state_dir", lambda: state)
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="FNO_PROVIDER_HEALTH_OK\n", stderr=""
+        ),
+    )
+
+    def run_canary(candidate, **kwargs):
+        canaries.append(candidate)
+        return kwargs["collect_proof"](SimpleNamespace(
+            session="stable-session", pane_id=88, name="health-canary",
+        ))
+
+    monkeypatch.setattr(provider_outage, "run_health_canary", run_canary)
+
+    selected = watchdog.production_handoff_candidate(
+        {"provider": "zai", "account": "broken"},
+        Row("source", "worker", "working", "x-missing", str(tmp_path)),
+        NOW_1840,
+        entries_provider=lambda: [],
+        runtime_exhausted_fn=lambda _account, _root: False,
+        harness_installed_fn=lambda harness: harness == "codex",
+        pane_occupancy_fn=lambda _harness: 0,
+        open_breakers_provider=lambda: [],
+    )
+
+    assert selected is not None
+    assert (
+        selected.record_id,
+        selected.harness,
+        selected.provider,
+        selected.model,
+    ) == ("codex-backup", "codex", "openai", "gpt-5.6-sol")
+    assert selected.account_env == {"OPENAI_API_KEY": "test"}
+    assert [candidate.record_id for candidate in canaries] == ["codex-backup"]
+    [proof] = list((state / "recovery" / "provider-canaries").glob("*.json"))
+    persisted = json.loads(proof.read_text())
+    assert persisted["provider"] == "openai"
+    assert persisted["account"] == "codex-backup"
+
+
+def test_ac5_hlth_node_pin_to_broken_route_refuses_automatic_movement(tmp_path):
+    canaries = []
+    selected = watchdog.production_handoff_candidate(
+        {"provider": "zai", "account": "broken"},
+        Row("source", "worker", "working", "x-abcd", str(tmp_path)),
+        NOW_1840,
+        entries_provider=lambda: [],
+        route_policy_provider=lambda _row: (["other"], {"provider": "zai"}),
+        canary_fn=lambda *_args: canaries.append(True),
+    )
+    assert selected is None
+    assert canaries == []
+
+
+@pytest.mark.parametrize("mode", ["report", "wake"])
+def test_ac12_obs_report_and_wake_never_call_provider_handoff(mode, tmp_path):
+    settings = SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=SimpleNamespace(enabled=True, watchdog=mode),
+    )
+    called = []
+    results = watchdog.supervise_provider_handoffs(
+        {"instrument": "measured", "breakers": [{
+            "provider": "zai", "account": "acct-a", "outage_epoch": 1,
+            "row_ids": ["source"], "fingerprints": ["f1", "f2"],
+        }]},
+        [Row("source", "worker", "working", "x-abcd", str(tmp_path))],
+        settings=settings,
+        now_s=NOW_1840,
+        candidate_for=lambda *_args: called.append("candidate"),
+        handoff_fn=lambda *_args, **_kwargs: called.append("handoff"),
+    )
+    assert results == []
+    assert called == []
+
+
+def test_ac12_obs_handoff_mode_requires_fresh_canary_then_runs_one_transaction(
+    tmp_path
+):
+    from fno.agents.outage_handoff import HandoffResult
+    from fno.agents.provider_outage import CanaryProof, RouteCandidate
+
+    settings = SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=SimpleNamespace(enabled=True, watchdog="handoff"),
+    )
+    candidate = RouteCandidate(
+        record_id="codex-work", harness="codex", provider="openai",
+        account="acct-b", account_env={}, model="gpt-5.6-sol", route_env={},
+        canary=CanaryProof(
+            source="pane", content="FNO_PROVIDER_HEALTH_OK",
+            observed_at=NOW_1840 - 1, persisted=True, assistant_role=False,
+            pane_id="pane-7", stopped=True,
+        ),
+    )
+    calls = []
+    decisions = []
+
+    def handoff(request, **_kwargs):
+        calls.append(request)
+        return HandoffResult(
+            node=request.node, outage_epoch=request.outage_epoch,
+            attempt="attempt-1", phase="committed", replayed=False,
+        )
+
+    results = watchdog.supervise_provider_handoffs(
+        {"instrument": "measured", "breakers": [{
+            "provider": "zai", "account": "acct-a", "outage_epoch": 1,
+            "row_ids": ["source"], "fingerprints": ["f1", "f2"],
+        }]},
+        [Row("source", "worker", "working", "x-abcd", str(tmp_path))],
+        settings=settings,
+        now_s=NOW_1840,
+        candidate_for=lambda *_args: candidate,
+        handoff_fn=handoff,
+        deps_factory=lambda: object(),
+        decision_fn=lambda **kwargs: decisions.append(kwargs),
+        journal_root=tmp_path / "transactions",
+    )
+
+    assert results[0]["phase"] == "committed"
+    assert len(calls) == 1
+    assert calls[0].destination_provider == "openai"
+    assert calls[0].destination_model == "gpt-5.6-sol"
+    assert calls[0].source_provider == "zai"
+    assert calls[0].source_account == "acct-a"
+    assert calls[0].evidence_fingerprints == ("f1", "f2")
+    assert decisions[0]["authority_source"] == "daemon-automation"
+    assert decisions[0]["source"] == "daemon"
+
+
+def test_production_supervisor_applies_configured_canary_ttl(tmp_path):
+    from fno.agents.outage_handoff import HandoffResult
+    from fno.agents.provider_outage import CanaryProof, RouteCandidate
+    from fno.config import RecoveryBlock
+
+    settings = SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=RecoveryBlock(
+            enabled=True, watchdog="handoff", provider_health_marker_ttl_seconds=121,
+        ),
+    )
+    candidate = RouteCandidate(
+        record_id="codex-work", harness="codex", provider="openai",
+        account="acct-b", account_env={}, model="gpt-5.6-sol", route_env={},
+        canary=CanaryProof(
+            source="pane", content="FNO_PROVIDER_HEALTH_OK",
+            observed_at=NOW_1840 - 121, persisted=True, assistant_role=False,
+            pane_id="pane-7", stopped=True,
+        ),
+    )
+    calls = []
+    results = watchdog.supervise_provider_handoffs(
+        {"instrument": "measured", "breakers": [{
+            "provider": "zai", "account": "acct-a", "outage_epoch": 1,
+            "row_ids": ["source"], "fingerprints": ["f1", "f2"],
+        }]},
+        [Row("source", "worker", "working", "x-abcd", str(tmp_path))],
+        settings=settings,
+        now_s=NOW_1840,
+        candidate_for=lambda *_args: candidate,
+        handoff_fn=lambda request, **_kwargs: calls.append(request) or HandoffResult(
+            node=request.node, outage_epoch=request.outage_epoch,
+            attempt="attempt-1", phase="committed", replayed=False,
+        ),
+        deps_factory=lambda: object(),
+        decision_fn=lambda **_kwargs: None,
+        journal_root=tmp_path / "transactions",
+    )
+    assert results[0]["phase"] == "committed"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("phase,replayed,expected", [
+    ("committed", True, 0),
+    ("parked", False, 1),
+    ("refused", False, 0),
+])
+def test_ac12_obs_terminal_decision_is_once_only(phase, replayed, expected, tmp_path):
+    from fno.agents.outage_handoff import HandoffResult
+    from fno.agents.provider_outage import CanaryProof, RouteCandidate
+
+    settings = SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=SimpleNamespace(enabled=True, watchdog="handoff"),
+    )
+    candidate = RouteCandidate(
+        record_id="codex-work", harness="codex", provider="openai",
+        account="acct-b", account_env={}, model="gpt-5.6-sol", route_env={},
+        canary=CanaryProof(
+            source="pane", content="FNO_PROVIDER_HEALTH_OK",
+            observed_at=NOW_1840 - 1, persisted=True, assistant_role=False,
+            pane_id="pane-7", stopped=True,
+        ),
+    )
+    decisions = []
+    watchdog.supervise_provider_handoffs(
+        {"instrument": "measured", "breakers": [{
+            "provider": "zai", "account": "acct-a", "outage_epoch": 1,
+            "row_ids": ["source"], "fingerprints": ["f1", "f2"],
+        }]},
+        [Row("source", "worker", "working", "x-abcd", str(tmp_path))],
+        settings=settings, now_s=NOW_1840,
+        candidate_for=lambda *_args: candidate,
+        handoff_fn=lambda request, **_kwargs: HandoffResult(
+            node=request.node, outage_epoch=request.outage_epoch,
+            attempt="attempt-1", phase=phase, replayed=replayed,
+        ),
+        deps_factory=lambda: object(),
+        decision_fn=lambda **kwargs: decisions.append(kwargs),
+        journal_root=tmp_path / "transactions",
+    )
+    assert len(decisions) == expected
+
+
+def test_ac12_obs_enriched_handoff_transition_passes_event_schema():
+    from fno.events import _build, validate
+
+    event = _build("provider_handoff_transition", "daemon", {
+        "node": "x-abcd",
+        "outage_epoch": "1",
+        "provider": "openai",
+        "account": "codex-work",
+        "source_provider": "zai",
+        "source_account": "acct-a",
+        "phase": "committed",
+        "count": 8,
+        "attempt": "attempt-1",
+    })
+    assert validate(event) is None
+    assert watchdog.handoff_armed(SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=SimpleNamespace(enabled=False, watchdog="handoff"),
+    )) is False
 
 
 def test_cli_prints_the_terminal_harness_row_count(monkeypatch, capsys):
@@ -3047,18 +3800,18 @@ def test_a_bounded_caller_spends_its_own_budget_not_the_lanes(monkeypatch):
     assert spent["timeout"] == 1.0
 
 
-def test_the_second_spelling_of_blocked_reaches_every_lane():
+def test_the_second_spelling_of_blocked_reaches_the_quorum_hold():
     """claude spells one state two ways and the lane knew only one.
 
     `busy` was folded onto working by hand; its sibling `needs input` was
-    missed, so a row wearing it could never ghost, reroute or wake - it fell
-    to leave while looking healthy. The fold now comes from the harness map,
-    so this pins the behaviour rather than the table.
+    missed, so a row wearing it could bypass the explicit provider-quorum
+    hold. The fold now comes from the harness map, so this pins the behaviour
+    rather than the table.
     """
     from fno.agents.harnesses.claude import _LIVE_STATUS_INPUT
 
     # Every input spelling claude maps onto "Needs input" must reach the
-    # reroute lane. Enumerating the map is the point: a new spelling added
+    # quorum hold. Enumerating the map is the point: a new spelling added
     # there fails this test instead of silently falling to leave.
     blocked_spellings = [
         raw for raw, out in _LIVE_STATUS_INPUT.items() if out == "Needs input"
@@ -3069,7 +3822,8 @@ def test_the_second_spelling_of_blocked_reaches_every_lane():
         assert (state, warning) == ("blocked", ""), raw
         row = Row("cccc3333-0000", "r1", state, None, "/tmp/r1")
         [v] = _run(row and [row], {"cccc3333-0000": _facts(RATE_LIMIT_TAIL)})
-        assert v.verdict == REROUTE, f"{raw} never reached reroute"
+        assert v.verdict == LEAVE, f"{raw} never reached the quorum hold"
+        assert "provider quorum" in v.basis
 
 
 def test_reap_never_fires_on_an_unreadable_transcript():

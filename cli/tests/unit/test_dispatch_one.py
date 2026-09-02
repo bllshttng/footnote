@@ -4,7 +4,7 @@ The shared guard's claims are held for real against an isolated
 `FNO_CLAIMS_ROOT`, so the reservation and the release-on-failure path are
 genuinely exercised. Selection (`_next_node`), the family-2 guard
 (`_spawn_guard_decision`), the spawn gate (`run_gate`), the worktree resolver
-and the pane spawn (`dispatch_spawn_pane`) are monkeypatched - no real
+and the pane spawn (`dispatch_spawn_bounded_pane`) are monkeypatched - no real
 `fno backlog next` subprocess, no real gate, no real pane.
 """
 
@@ -81,7 +81,7 @@ def _wire(monkeypatch, tmp_path, *, next_node=None, spawn=None):
             return spawn()
         return _FakeSpawnOK()
 
-    monkeypatch.setattr(dispatch, "dispatch_spawn_pane", fake_spawn)
+    monkeypatch.setattr(dispatch, "dispatch_spawn_bounded_pane", fake_spawn)
     return calls, gate
 
 
@@ -127,6 +127,28 @@ def test_parented_child_uses_parent_as_pane_group(monkeypatch, tmp_path, slug):
     assert verdict["node"] == f"x-{slug}"
     assert calls[0]["tab"] == "x-feature"
     assert calls[0]["name"] == f"target-x-{slug}"
+
+
+def test_node_dispatch_spawns_through_the_bounded_wrapper(monkeypatch, tmp_path):
+    """One placement policy: the ordinary node-dispatch pane spawn rides the
+    bounded wrapper (placement lease + tab-capacity cap), never the raw pane
+    spawn the outage successor spawn stopped using."""
+    calls, _gate = _wire(
+        monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "feat", "cwd": str(tmp_path)}
+    )
+    raw_calls: list = []
+    # raising=False: the module no longer even imports the raw spawn - the
+    # attribute would only exist if a caller reintroduced the bypass.
+    monkeypatch.setattr(
+        dispatch, "dispatch_spawn_pane", lambda **kwargs: raw_calls.append(kwargs),
+        raising=False,
+    )
+
+    verdict = dispatch._dispatch_one(session="work", node=None, project=None)
+
+    assert verdict["outcome"] == "launched"
+    assert len(calls) == 1
+    assert raw_calls == []
 
 
 def _real_result(**fields):

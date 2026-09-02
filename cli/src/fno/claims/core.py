@@ -998,6 +998,10 @@ def release_claim(
         (then raise HolderMismatch). Releases are idempotent in the common
         case; strict mode is for explicit "this MUST be ours" callers.
       - File present but corrupted: silent success (treat as released).
+      - The recovery-dir mutex cannot be acquired within the wait window:
+        ``None`` in non-strict mode (indistinguishable from the three cases
+        above - nothing was released, but WHY is not answerable from the
+        return value alone), ``ClaimContended`` in strict mode.
 
     ``sync_graph_mirror`` defaults to true for confirmed ``node:`` releases.
     It runs the shared post-release mirror cleanup after the claim is gone;
@@ -1009,44 +1013,56 @@ def release_claim(
 
     Returns the released ``Claim`` (carrying ``acquired_at``) on a real
     release, or ``None`` when nothing was released (already gone, holder
-    mismatch, corrupted) - so a caller can stamp a window bounded by the
-    claim's own acquire time without re-reading the file.
+    mismatch, corrupted, mutex lost) - so a caller can stamp a window bounded
+    by the claim's own acquire time without re-reading the file. A caller
+    that must TELL those cases apart needs strict mode, not this return
+    value.
     """
     if not key or not holder:
         raise ClaimValidationError("key and holder must be non-empty")
 
     path = claim_path(key, root=root)
-    if not path.exists():
-        return None
-
-    try:
-        existing = read_claim_file(path)
-    except ClaimGoneAway:
-        return None
-    except ClaimCorrupted:
-        # Corrupted file: we cannot verify ownership. Conservative default
-        # is to leave it for force_release. strict mode surfaces the issue.
+    recovery_lock = path.with_name(path.name + ".recovery.d")
+    token = acquire_dir_mutex(
+        recovery_lock,
+        _RECOVERY_LOCK_MAX_WAIT_S,
+        poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S,
+    )
+    if token is None:
         if strict:
-            raise
+            raise ClaimContended(f"release_claim could not lock {key!r}")
         return None
-
-    if existing.holder != holder:
-        if strict:
-            raise HolderMismatch(expected=holder, actual=existing.holder, key=key)
-        return None
-
-    duration_ms = max(0, now_ms() - existing.acquired_at)
     try:
-        path.unlink()
-    except FileNotFoundError:
-        return None
-    emit_claim_released(existing, duration_ms=duration_ms)
-    if sync_graph_mirror and key.startswith("node:"):
-        _clear_lock_mirror_for_reaped(
-            [key[len("node:") :]],
-            claim_roots=[root] if root is not None else None,
-        )
-    return existing
+        if not path.exists():
+            return None
+        try:
+            existing = read_claim_file(path)
+        except ClaimGoneAway:
+            return None
+        except ClaimCorrupted:
+            if strict:
+                raise
+            return None
+
+        if existing.holder != holder:
+            if strict:
+                raise HolderMismatch(expected=holder, actual=existing.holder, key=key)
+            return None
+
+        duration_ms = max(0, now_ms() - existing.acquired_at)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return None
+        emit_claim_released(existing, duration_ms=duration_ms)
+        if sync_graph_mirror and key.startswith("node:"):
+            _clear_lock_mirror_for_reaped(
+                [key[len("node:") :]],
+                claim_roots=[root] if root is not None else None,
+            )
+        return existing
+    finally:
+        release_dir_mutex(recovery_lock, token)
 
 
 def _reanchor_pid_for(existing: Claim) -> Optional[int]:

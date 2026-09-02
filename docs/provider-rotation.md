@@ -63,6 +63,8 @@ priority = 100
 account_id = "account-secondary"
 tags = ["secondary", "max"]
 description = "Personal secondary subscription"
+route_provider_id = "anthropic"
+model_name = "claude-opus-4-1"
 ```
 
 ### Field reference
@@ -79,6 +81,8 @@ description = "Personal secondary subscription"
 | `account_id` | string | no | `id` | Account label written to ledger entries for cost attribution. |
 | `tags` | list[string] | no | `[]` | Arbitrary tags (reserved for future routing). |
 | `description` | string | no | - | Free-text note. |
+| `route_provider_id` | string | no | - | Explicit model-vendor route used by unattended provider-outage canaries. Never inferred from the account id, harness, or model name. |
+| `model_name` | string | no | - | Explicit model for unattended provider-outage canaries. A route is eligible only when both model fields are set. |
 
 ### Agent-to-agent switchboard (`config.agents.a2a`)
 

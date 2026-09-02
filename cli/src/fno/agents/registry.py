@@ -255,7 +255,15 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # the unknown keys and erase them on its next read-modify-write. Measured live
 # 2026-09-01: a writer without the fields erased the stamps at an EQUAL version
 # number, which is why this takes the next free number instead of reusing 23.
-SCHEMA_VERSION = 24
+# v25: additive `route_provider_id`/`model_name`/`account_record_id` - the
+# explicit model-route identity captured at spawn, distinct from the observed
+# `provider` axis and from `launch_account`. Identifiers only: no endpoint,
+# token, environment overlay, or settings contents. The provider-outage
+# supervisor joins outage evidence on these; a row without them is a blind
+# spot for that collector, never a default. Same additive-optional shape and
+# forward-compat rationale as v11-v24.
+SCHEMA_VERSION = 25
+
 
 
 class RegistryVersionError(RuntimeError):
@@ -367,6 +375,11 @@ class AgentEntry:
     # without changing the stable fno_id thread key.
     predecessor_session_ids: list[str] = field(default_factory=list)
     forked_from_session_id: Optional[str] = None
+    # Explicit route axes captured at spawn. These are identifiers only: no
+    # endpoint, token, environment overlay, or settings contents belong here.
+    route_provider_id: Optional[str] = None
+    model_name: Optional[str] = None
+    account_record_id: Optional[str] = None
     # Spawn-time parent edge (Task 2.2, x-30f6). Ambient-captured from the
     # SPAWNING session's environment; never required of a caller. All three
     # default to None so pre-existing rows and callers that pass none of them

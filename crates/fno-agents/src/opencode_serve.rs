@@ -791,6 +791,11 @@ fn dispatch_opencode_serve_inner(
         // x-98ab: client-side mint - this process inherited the spawning
         // session's env, so the exported FNO_NODE names the node THIS spawn
         // is for.
+        // v25: the route axes this lane actually used - opencode is both
+        // harness and provider axis here, its auth is ambient, so "default".
+        route_provider_id: Some("opencode".to_string()),
+        model_name: model.filter(|m| !m.is_empty()).map(str::to_string),
+        account_record_id: Some("default".to_string()),
         node: std::env::var("FNO_NODE").ok().filter(|v| !v.is_empty()),
         // The serve-hosted worker lane (a detached run --attach writer behind
         // a shared serve): the public "thread" name for the local bg

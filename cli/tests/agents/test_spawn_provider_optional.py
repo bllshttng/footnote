@@ -66,7 +66,9 @@ def _stub_pane_path(monkeypatch) -> dict:
 
     monkeypatch.setattr(spawn_gate, "run_gate", fake_run_gate)
     monkeypatch.setattr(mux_spawn, "resolve_provenance", fake_resolve_provenance)
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch_spawn_pane)
+    monkeypatch.setattr(
+        mux_spawn, "dispatch_spawn_bounded_pane", fake_dispatch_spawn_pane
+    )
     monkeypatch.setattr(agents_cli, "_spawn_guard_decision", fake_spawn_guard)
     return received
 
@@ -102,7 +104,7 @@ def test_unverified_seed_prints_receipt_then_exits_nonzero(monkeypatch, runner):
 
     monkeypatch.setattr(
         mux_spawn,
-        "dispatch_spawn_pane",
+        "dispatch_spawn_bounded_pane",
         lambda **kwargs: mux_spawn.MuxSpawnResult(
             name=kwargs["name"],
             provider=kwargs["provider"],
@@ -130,9 +132,12 @@ def test_unverified_seed_prints_receipt_then_exits_nonzero(monkeypatch, runner):
 def _pane_receipt(monkeypatch, **fields):
     from fno.agents import mux_spawn
 
+    # Stub at the wrapper seam: cmd_spawn's pane lane rides
+    # dispatch_spawn_bounded_pane, and stubbing the inner pane spawn would let
+    # the real wrapper reach for a live mux tab listing first.
     monkeypatch.setattr(
         mux_spawn,
-        "dispatch_spawn_pane",
+        "dispatch_spawn_bounded_pane",
         lambda **kwargs: mux_spawn.MuxSpawnResult(
             name=kwargs["name"],
             provider=kwargs["provider"],

@@ -44,7 +44,7 @@ def _stub_pane_path(monkeypatch) -> dict:
             pane_id=1, child_pid=None, session_uuid=None,
         )
 
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_pane)
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", fake_pane)
     return received
 
 
@@ -109,6 +109,81 @@ def test_dispatch_account_threads_to_pane_and_receipt(monkeypatch, runner):
         next(ln for ln in result.output.splitlines() if ln.startswith("{"))
     )
     assert receipt["dispatch_account"] == "makers"
+    assert receipt["credential_source"] == "record-derived"
+
+
+def test_proven_credential_carrier_overrides_record_derivation(monkeypatch, runner):
+    """AC4-HP: the outage handoff's canary proved a SPECIFIC env for this
+    account and shipped it through FNO_DISPATCH_ACCOUNT_ENV; the spawn stages
+    that env VERBATIM instead of re-deriving from the record, and the receipt
+    names the provenance and the staged keys (never their values)."""
+    received = _stub_pane_path(monkeypatch)
+    from fno.adapters.providers import dispatch, loader
+
+    monkeypatch.setattr(
+        loader,
+        "load_providers",
+        lambda **_kwargs: SimpleNamespace(
+            by_id={"makers": SimpleNamespace(harness="claude")}
+        ),
+    )
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("a proven carrier must not re-derive from the record")
+
+    monkeypatch.setattr(dispatch, "dispatch_env", boom)
+    monkeypatch.setenv(
+        "FNO_DISPATCH_ACCOUNT_ENV",
+        json.dumps({"CLAUDE_CONFIG_DIR": "/proved/account", "AUTH_PROVEN": "1"}),
+    )
+
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        [
+            "spawn", "--name", "w1", "hi", "--harness", "claude",
+            "--dispatch-account", "makers", "--here",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert received["account_env"] == {
+        "CLAUDE_CONFIG_DIR": "/proved/account", "AUTH_PROVEN": "1",
+    }
+    receipt = json.loads(
+        next(ln for ln in result.output.splitlines() if ln.startswith("{"))
+    )
+    assert receipt["credential_source"] == "canary-proven carrier"
+    assert receipt["credential_env_keys"] == ["AUTH_PROVEN", "CLAUDE_CONFIG_DIR"]
+
+
+def test_proven_credential_carrier_refuses_when_unreadable(monkeypatch, runner):
+    """A corrupt carrier is fail-closed: exit 2, no spawn - the alternative is
+    silently falling back to a re-derivation nothing proved."""
+    received = _stub_pane_path(monkeypatch)
+    from fno.adapters.providers import loader
+
+    monkeypatch.setattr(
+        loader,
+        "load_providers",
+        lambda **_kwargs: SimpleNamespace(
+            by_id={"makers": SimpleNamespace(harness="claude")}
+        ),
+    )
+    monkeypatch.setenv("FNO_DISPATCH_ACCOUNT_ENV", "{not json")
+
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        [
+            "spawn", "--name", "w1", "hi", "--harness", "claude",
+            "--dispatch-account", "makers", "--here",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "unreadable" in result.output
+    assert received == {}
 
 
 def test_account_refusal_fails_closed(monkeypatch, runner):
@@ -314,7 +389,7 @@ def test_composed_receipt_names_live_credential_and_payer(monkeypatch, runner):
 def test_account_only_receipt_has_no_credential_fields(monkeypatch, runner):
     """AC3-EDGE (x-8552): an --account spawn with no route emits no auth/bills -
     its receipt stays byte-identical to the pre-x-8552 shape."""
-    received = _stub_pane_path(monkeypatch)
+    _stub_pane_path(monkeypatch)
     import fno.agents.account_env as ae
     from fno.agents.account_env import AccountOverlay
 

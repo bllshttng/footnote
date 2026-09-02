@@ -13,7 +13,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 
@@ -1215,6 +1215,15 @@ def cmd_spawn(
             "the CLI binary -- that is --harness/-H. Capital -P: -p is headless."
         ),
     ),
+    recorded_provider: str | None = typer.Option(
+        None,
+        "--recorded-provider",
+        hidden=True,
+        help=(
+            "Machine-recorded model-vendor identity for a recovery spawn. "
+            "Unlike --provider, this does not configure a Claude route."
+        ),
+    ),
     once: bool = typer.Option(
         False,
         "--once",
@@ -1496,6 +1505,16 @@ def cmd_spawn(
             "with room, or create the next. --substrate pane only."
         ),
     ),
+    bounded_placement: bool = typer.Option(
+        False,
+        "--bounded-placement",
+        hidden=True,
+        help=(
+            "Spawn-side lane for automated placement (the outage handoff's "
+            "successor spawn): serialize placement under the mux lease, select "
+            "a stable tab with room, and enforce at most four panes per tab."
+        ),
+    ),
     crown: list[str] = typer.Option(
         [],
         "--crown",
@@ -1664,6 +1683,20 @@ def cmd_spawn(
     except DispatchFlagError as exc:
         print(str(exc), file=sys.stderr)
         raise typer.Exit(code=2) from exc
+    if recorded_provider is not None:
+        recorded_provider = recorded_provider.strip()
+        if not recorded_provider or model is None:
+            print(
+                "--recorded-provider requires a non-empty --model",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if vendor is not None and recorded_provider != vendor:
+            print(
+                "--recorded-provider must match --provider when both are supplied",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
     # Provenance rides the pane receipt's harness_source field below (the
     # default substrate) - it is the HARNESS axis's provenance, so it is not
     # named provider_*, which now holds the vendor. The bg/once stdout
@@ -1817,7 +1850,11 @@ def cmd_spawn(
     # pane substrate has. bg/headless have no pane tree, so the controls are
     # refused fail-closed before any spawn (mirrors the tier-3 guard shape above).
     placement_requested = (
-        squad is not None or split is not None or at is not None or tab is not None
+        bounded_placement
+        or squad is not None
+        or split is not None
+        or at is not None
+        or tab is not None
     )
     if squad is not None and not squad.strip():
         print("--workspace/-s needs a nonblank workspace name", file=sys.stderr)
@@ -1837,6 +1874,13 @@ def cmd_spawn(
         raise typer.Exit(code=2)
     if tab is not None and not tab.strip():
         print("--tab needs a nonblank selector or pane-group name", file=sys.stderr)
+        raise typer.Exit(code=2)
+    if bounded_placement and any(value is not None for value in (split, at, tab)):
+        print(
+            "--bounded-placement selects its own stable tab and cannot be combined "
+            "with --split, --at, or --tab",
+            file=sys.stderr,
+        )
         raise typer.Exit(code=2)
     if at is not None:
         # `--at current` is the exact-anchor spelling: the mux CLI resolves the
@@ -2026,12 +2070,54 @@ def cmd_spawn(
         overlay = resolve_account_overlay_or_exit(account)
         account_env = overlay.env if overlay else None
 
+    # The proven-credential carrier (outage handoff) is claimed unconditionally:
+    # it carries real credential values, so a spawn that somehow sets it without
+    # --dispatch-account must refuse here rather than let the child inherit the
+    # carrier verbatim (a leak outside the one staged overlay that was proved).
+    proven_env_raw = os.environ.pop("FNO_DISPATCH_ACCOUNT_ENV", None)
+    if proven_env_raw is not None and dispatch_account is None:
+        print(
+            "refusing: the proven-credential carrier is set but no "
+            "--dispatch-account was given; no worker launched",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
     # The autonomous-cutover carrier. Same fail-closed posture as --account, and
     # deliberately a separate flag: --account's claude-only refusal is an operator
     # contract, while a cutover's whole point is landing on another harness.
     if dispatch_account is not None:
         from fno.adapters.providers.dispatch import dispatch_env
         from fno.adapters.providers.loader import load_providers
+
+        # The proven-credential carrier (outage handoff): the supervisor's
+        # health canary proved a SPECIFIC env for this account and passed it
+        # through the FNO_DISPATCH_ACCOUNT_ENV environment carrier (never
+        # argv). When present, it IS the dispatch overlay - re-deriving from
+        # the record here could stage different credentials than the ones
+        # proved, which is the exact disconnect that made the canary's proof
+        # decorative. The record still must exist and match the harness: the
+        # env proves the values, this check proves the target.
+        proven_env: dict[str, str] | None = None
+        if proven_env_raw:
+            try:
+                parsed = json.loads(proven_env_raw)
+                if not isinstance(parsed, dict) or not all(
+                    isinstance(k, str) and isinstance(v, str)
+                    for k, v in parsed.items()
+                ):
+                    raise ValueError("carrier payload must be a flat string map")
+                if not parsed:
+                    raise ValueError("carrier payload is empty")
+                proven_env = parsed
+            except (TypeError, ValueError) as exc:
+                print(
+                    f"refusing --dispatch-account {dispatch_account!r}: the "
+                    f"proven-credential carrier is unreadable ({exc}); "
+                    "no worker launched",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=2) from exc
 
         try:
             # Resolve against the WORKER's root, not the dispatcher's cwd: the
@@ -2056,10 +2142,20 @@ def cmd_spawn(
                     f"record is a {rec_harness or '<no harness>'} account but "
                     f"the spawn resolves {harness}"
                 )
+            dispatch_overlay = (
+                proven_env if proven_env is not None
+                else dispatch_env(dispatch_account, repo_root=workdir)
+            )
             account_env = {
                 **(account_env or {}),
-                **dispatch_env(dispatch_account, repo_root=workdir),
+                **dispatch_overlay,
             }
+            if proven_env is not None:
+                credential_source = "canary-proven carrier"
+                credential_env_keys = sorted(proven_env)
+            else:
+                credential_source = "record-derived"
+                credential_env_keys = sorted(dispatch_overlay)
         except Exception as exc:  # noqa: BLE001 - never spawn onto an unresolved record
             print(
                 f"refusing --dispatch-account {dispatch_account!r}: {exc}; "
@@ -2399,10 +2495,11 @@ def cmd_spawn(
     spawn_succeeded = False
     try:
         if substrate == "pane" and not once:
-            from fno.agents.mux_spawn import dispatch_spawn_pane
+            from fno.agents.mux_spawn import dispatch_spawn_bounded_pane
 
             try:
-                pane_result = dispatch_spawn_pane(
+                pane_dispatch = dispatch_spawn_bounded_pane
+                pane_kwargs: dict[str, Any] = dict(
                     name=name,
                     message=message,
                     provider=harness,
@@ -2416,10 +2513,10 @@ def cmd_spawn(
                     agent=agent,
                     tools=tools,
                     deny_tools=deny_tools,
-                    squad=squad,
                     split=split,
                     at=at,
                     tab=tab,
+                    bounded_placement=bounded_placement,
                     crown_level=crown_level,
                     crown_scope=crown_scope,
                     succession=succeed,
@@ -2429,10 +2526,15 @@ def cmd_spawn(
                     monitor=monitor,
                     route_provider=route_provider,
                     provider_gate=gate,
+                    route_provider_id=route_provider or recorded_provider,
+                    model_name=model or route_model,
+                    account_record_id=dispatch_account or account,
                     passthrough=passthrough,
                     launch_account=account or dispatch_account,
                     route_model=route_model,
                 )
+                pane_kwargs["workspace"] = squad
+                pane_result = pane_dispatch(**pane_kwargs)
             except DispatchAskError as exc:
                 print(str(exc), file=sys.stderr)
                 raise typer.Exit(code=exc.exit_code) from exc
@@ -2503,8 +2605,8 @@ def cmd_spawn(
             # Reporting only route_model here would re-introduce the
             # receipt-can-lie defect: a `--route zai,glm-5.3 --model opus` spawn
             # would name glm-5.3 in the receipt while the worker runs opus.
-            if route_provider is not None:
-                receipt_obj["provider"] = route_provider
+            if route_provider is not None or recorded_provider is not None:
+                receipt_obj["provider"] = route_provider or recorded_provider
             receipt_model = model or route_model
             if receipt_model is not None:
                 # v23 (x-2019): the label is the point. At receipt time this
@@ -2547,6 +2649,13 @@ def cmd_spawn(
                 receipt_obj["account"] = account
             if dispatch_account is not None:
                 receipt_obj["dispatch_account"] = dispatch_account
+                # Name the credential provenance and the env keys actually
+                # staged (never their values): a reader can tell a
+                # canary-proven overlay from a record re-derivation, which is
+                # the difference the outage handoff's proof rests on.
+                if account_env is not None:
+                    receipt_obj["credential_source"] = credential_source
+                    receipt_obj["credential_env_keys"] = credential_env_keys
             # x-8552: for the composed spawn, which credential fno made live and
             # who is billed - derived from the composed env, never the flags.
             if credential is not None:
@@ -2656,6 +2765,9 @@ def cmd_spawn(
                 resume_session_id=resume,
                 account_env=account_env,
                 launch_account=account or dispatch_account,
+                route_provider_id=route_provider or recorded_provider,
+                model_name=model or route_model,
+                account_record_id=dispatch_account or account,
                 crown_level=crown_level,
                 crown_scope=crown_scope,
                 succession=succeed,
@@ -2764,8 +2876,9 @@ def cmd_spawn(
         # `model` is the EFFECTIVE model: an explicit --model reaches claude as
         # its own `--model` flag and beats the route's ANTHROPIC_MODEL, so it
         # wins the receipt too (see the pane branch above).
+        receipt_provider = route_provider or recorded_provider
         provider_field = (
-            f", \"provider\": {json.dumps(route_provider)}" if route_provider else ""
+            f", \"provider\": {json.dumps(receipt_provider)}" if receipt_provider else ""
         )
         receipt_model = model or route_model
         # v23 (x-2019): a receipt that prints `model` labels it - the request
@@ -4745,6 +4858,9 @@ def cmd_watchdog(
         "manual", payload["counts"], now, signature,
         events_signature=signature_to_stamp,
         terminal_harness_rows=payload.get("terminal_harness_rows", 0),
+        provider_outages=payload.get("provider_outages") or wd._unknown_provider_report(
+            "provider_outage_payload_missing"
+        ),
     )
 
     # Classification events ride every mode: a verdict emitted only under a
@@ -4782,6 +4898,22 @@ def cmd_watchdog(
         typer.echo(
             f"terminal harness rows: {payload.get('terminal_harness_rows', 0)}"
         )
+        outage_counts = (payload.get("provider_outages") or {}).get("counts") or {}
+        blind_spots = {
+            reason: outage_counts[reason]
+            for reason in ("unknown_route_identity", "transcript_shape_unsupported")
+            if outage_counts.get(reason)
+        }
+        if blind_spots:
+            # Loud, not silent: these rows are outside what the provider-outage
+            # instrument can measure at all, not rows it measured and cleared.
+            named = " ".join(f"{k}={v}" for k, v in sorted(blind_spots.items()))
+            typer.echo(
+                f"provider-outage coverage gap ({named}): route identity "
+                f"missing on daemon-managed rows, or a transcript shape this "
+                f"instrument does not parse - filed as follow-up work, not "
+                f"measured this sweep"
+            )
         return
 
     lanes = "all" if apply_all else "wake"

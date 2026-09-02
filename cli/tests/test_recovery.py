@@ -443,6 +443,42 @@ class TestRunRecoverySweep:
         assert "capped:gone9999" not in saved
         assert saved["aaaa1111"] == 1
 
+    @pytest.mark.parametrize("mode", ["report", "wake", "handoff"])
+    def test_ac12_obs_provider_supervision_disables_legacy_failover_only(
+        self, mode, tmp_path, monkeypatch
+    ):
+        h = _Harness()
+        entries = [_Entry("claude", "aaaa1111", cwd=_node_bound_cwd(tmp_path))]
+        live = {"aaaa1111": _Locator("aaaa1111", "/tmp/a.sock", tmp_path)}
+        failovers = []
+        monkeypatch.setattr(
+            recovery, "_default_failover",
+            lambda *_args: failovers.append((mode, "default")) or "swapped",
+        )
+        monkeypatch.setattr(
+            recovery, "_redispatch",
+            lambda *_args, **_kwargs: failovers.append((mode, "redispatch")) or True,
+        )
+
+        recovery.run_recovery_sweep(
+            _Cfg(),
+            emit=h.emit,
+            now=_now(),
+            registry_load=lambda: entries,
+            locate_fn=lambda sid: live.get(sid),
+            read_state_fn=h.read_state,
+            truth_fn=lambda _candidate: {
+                **h.truth(_candidate),
+                "last_message": "API Error: rate limit exceeded, retry later",
+            },
+            liveness_fn=h.liveness,
+            load_counts_fn=lambda: {},
+            save_counts_fn=lambda _counts: None,
+            provider_failover=False,
+        )
+
+        assert failovers == []
+
 
 # ---------------------------------------------------------------------------
 # out-of-usage provider failover (x-7abe) — wire attempt_swap into the watchdog
@@ -2245,3 +2281,80 @@ class TestRedispatchAxisBundle:
         assert "-H" in spawn_cmd and "codex" in spawn_cmd
         assert spawn_cmd[spawn_cmd.index("--substrate") + 1] == "pane"
         assert "--harness" not in spawn_cmd
+
+
+class TestOutageQuorumFloor:
+    """AC5-HP: the handoff quorum is the CONFIGURED OutagePolicy.quorum.
+
+    The literal 2 once kept a configured quorum of 1 from ever applying to
+    the one action that moves provider ownership, and kept a lone worker
+    from reaching a live redispatch. Both directions are pinned."""
+
+    @staticmethod
+    def _request(count):
+        from fno.agents.outage_handoff import HandoffRequest
+
+        return HandoffRequest(
+            node="x-abcd",
+            outage_epoch="epoch-1",
+            source_row_id="source-row",
+            destination_harness="codex",
+            destination_provider="openai",
+            destination_model="gpt-5.6-sol",
+            destination_account="work",
+            quorum_evidence_count=count,
+        )
+
+    @staticmethod
+    def _settings(quorum):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(recovery=SimpleNamespace(provider_outage_quorum=quorum))
+
+    def test_default_refuses_a_lone_row(self):
+        from types import SimpleNamespace
+
+        with pytest.raises(ValueError, match="quorum"):
+            recovery.recover_provider_outage(
+                self._request(1),
+                deps=None,
+                journal_root=None,
+                settings=SimpleNamespace(
+                    recovery=SimpleNamespace()  # no quorum key: schema default
+                ),
+            )
+
+    def test_configured_quorum_one_lets_a_lone_row_through(self, monkeypatch, tmp_path):
+        calls = []
+
+        def fake_run(request, *, deps, journal_root):
+            calls.append(request)
+            return "transaction"
+
+        monkeypatch.setattr(
+            "fno.agents.outage_handoff.run_outage_handoff", fake_run, raising=True
+        )
+        result = recovery.recover_provider_outage(
+            self._request(1),
+            deps={"fake": True},
+            journal_root=tmp_path,
+            settings=self._settings(1),
+        )
+        assert result == "transaction"
+        assert len(calls) == 1
+
+    def test_configured_quorum_three_refuses_two(self):
+        with pytest.raises(ValueError, match="2 of 3"):
+            recovery.recover_provider_outage(
+                self._request(2),
+                deps=None,
+                journal_root=None,
+                settings=self._settings(3),
+            )
+
+    def test_policy_floor_is_one_not_two(self):
+        from fno.agents.provider_outage import OutagePolicy
+
+        assert OutagePolicy(quorum=1).quorum == 1
+        with pytest.raises(ValueError):
+            OutagePolicy(quorum=0)

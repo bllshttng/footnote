@@ -597,49 +597,91 @@ fi
 # From this point, unwind must release the dispatch reservation on failure.
 
 # ---------------------------------------------------------------------------
-# Step 4: Archive target-state.md to {plan_path}.artifacts/
+# Steps 4-5: Python-owned manifest archive + exact-holder claim release
 # ---------------------------------------------------------------------------
 PLAN_ARTIFACTS_DIR="${PLAN_PATH}.artifacts"
-mkdir -p "$PLAN_ARTIFACTS_DIR"
 ARCHIVED_STATE="$PLAN_ARTIFACTS_DIR/target-state-${SESSION_ID}.md"
 
-_ARCHIVE_RC=0
-mv "$STATE_FILE" "$ARCHIVED_STATE" 2>/dev/null || _ARCHIVE_RC=$?
-
-if [ "$_ARCHIVE_RC" -ne 0 ]; then
-  # Unwind: release dispatch reservation
-  FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$DISPATCH_KEY" \
-    --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
-  echo "parked $NODE_ID reason=\"failed to archive manifest (rc=$_ARCHIVE_RC)\""
-  exit "$_EXIT_PARKED"
+_PREPARE_RC=0
+# Bootstrap the interpreter the way every other Python-delegating script does
+# (scripts/lib/fno-python.sh): a PYTHONPATH sourced from an env var that only
+# test harness files set left production running the leg with an empty path.
+_HANDOFF_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$_HANDOFF_REPO_ROOT" ]; then
+  # Non-repo cwd (the handoff smoke sandbox): the script's own location still
+  # names this checkout, so the shared bootstrap stays reachable.
+  _HANDOFF_REPO_ROOT="$(cd "$_SCRIPT_DIR/../../.." 2>/dev/null && pwd || true)"
 fi
+_HANDOFF_PYTHON="python3"
+_HANDOFF_PKG_SRC=""
+if [ -n "$_HANDOFF_REPO_ROOT" ] && [ -f "$_HANDOFF_REPO_ROOT/scripts/lib/fno-python.sh" ]; then
+  # shellcheck source=scripts/lib/fno-python.sh
+  . "$_HANDOFF_REPO_ROOT/scripts/lib/fno-python.sh"
+  fno_python_init "$_HANDOFF_REPO_ROOT"
+  _HANDOFF_PYTHON="${FNO_PYTHON:-python3}"
+  _HANDOFF_PKG_SRC="${_HANDOFF_REPO_ROOT}/cli/src"
+fi
+_HANDOFF_PREPARE_LOG="$(mktemp "${TMPDIR:-/tmp}/fno-handoff-prepare.XXXXXX")"
+FNO_CLAIMS_ROOT="$HOME" PYTHONPATH="${_HANDOFF_PKG_SRC}${PYTHONPATH:+:${PYTHONPATH}}" \
+  "$_HANDOFF_PYTHON" -m fno.state.outage_handoff prepare \
+  --state "$STATE_FILE" \
+  --archive "$ARCHIVED_STATE" \
+  --claim-key "node:$NODE_ID" \
+  --holder "$CLAIM_HOLDER" >"$_HANDOFF_PREPARE_LOG" 2>&1 || _PREPARE_RC=$?
+# A nonzero code the module did NOT emit (10/12 are its own outcomes) means
+# the module never ran to its own error handling: the interpreter or the
+# import failed. The two classes get different reasons and details, so an
+# operator reading the event can tell a broken bootstrap from a real
+# handoff refusal.
+_HANDOFF_PREPARE_STDOUT="$(cat "$_HANDOFF_PREPARE_LOG" 2>/dev/null)"
+rm -f "$_HANDOFF_PREPARE_LOG"
 
-# ---------------------------------------------------------------------------
-# Step 5: Release node claim
-# ---------------------------------------------------------------------------
-_RELEASE_RC=0
-FNO_CLAIMS_ROOT="$HOME" fno agents claim release "node:$NODE_ID" \
-  --holder "$CLAIM_HOLDER" >/dev/null 2>&1 || _RELEASE_RC=$?
-
-if [ "$_RELEASE_RC" -ne 0 ]; then
-  # Unwind: restore manifest, release dispatch reservation
-  _RESTORE_RC=0
-  mv "$ARCHIVED_STATE" "$STATE_FILE" 2>/dev/null || _RESTORE_RC=$?
+if [ "$_PREPARE_RC" -ne 0 ]; then
   FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$DISPATCH_KEY" \
     --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
 
-  _emit_event "handoff_failed" \
-    "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"release_failed\",\"detail\":\"claim release exited $_RELEASE_RC\"}"
+  case "$_PREPARE_RC" in
+    10|12)
+      # The module's own failure receipt (a JSON object on stdout) is the
+      # truth about what it refused; pass its fields through rather than
+      # paraphrasing them into a flat string.
+      _PREPARE_EVENT="$(printf '%s' "$_HANDOFF_PREPARE_STDOUT" \
+        | jq -c --arg node "$NODE_ID" --arg session "$SESSION_ID" \
+          '{node_id:$node, session_id:$session, reason:"prepare_failed",
+            detail:(.reason // "prepare failed"),
+            restored:(.restored // null), live_holder:(.live_holder // null)}' 2>/dev/null)"
+      if [ -z "$_PREPARE_EVENT" ]; then
+        _PREPARE_EVENT="$(jq -cn --arg node "$NODE_ID" --arg session "$SESSION_ID" \
+          --arg detail "$(printf '%s' "$_HANDOFF_PREPARE_STDOUT" | head -c 400)" \
+          '{node_id:$node, session_id:$session, reason:"prepare_failed", detail:$detail}')"
+      fi
+      ;;
+    *)
+      # Any other code means the module never reached its own error
+      # handling: the interpreter or the import failed.
+      _PREPARE_EVENT="$(jq -cn --arg node "$NODE_ID" --arg session "$SESSION_ID" \
+        --arg detail "interpreter or import failed (rc=$_PREPARE_RC): $(printf '%s' "$_HANDOFF_PREPARE_STDOUT" | head -3 | tr '\n' ' ' | head -c 300)" \
+        '{node_id:$node, session_id:$session, reason:"prepare_bootstrap_failed", detail:$detail}')"
+      ;;
+  esac
 
-  if [ "$_RESTORE_RC" -ne 0 ]; then
-    # Archive is gone AND restore failed: unrecoverable
-    echo "handoff-restore-failed $NODE_ID reason=\"release_failed + restore_failed\""
+  _emit_event "handoff_failed" "$_PREPARE_EVENT"
+
+  if [ "$_PREPARE_RC" -eq 12 ]; then
+    echo "handoff-restore-failed $NODE_ID reason=\"prepare failed + restore failed\""
     exit "$_EXIT_RESTORE_FAILED"
   fi
 
-  echo "parked $NODE_ID reason=\"claim release failed (rc=$_RELEASE_RC)\""
+  echo "parked $NODE_ID reason=\"handoff prepare failed (rc=$_PREPARE_RC)\""
   exit "$_EXIT_PARKED"
 fi
+
+# Positive receipt, not an absence: the module returned rc=0, so its JSON
+# said the manifest is archived and the node claim release was positively
+# confirmed. Relaying the line gives every reader (operator tail, journey
+# smoke) one observable marker for the custody handover the stubbed CLI
+# calls around it cannot show.
+echo "prepare: archived manifest and released node:$NODE_ID"
 
 # From this point, the parent's claim is released. Any failure that cannot
 # restore the manifest MUST exit 12.
@@ -762,10 +804,14 @@ done
 
 if [ "$_CHILD_TARGET_READY" -eq 0 ]; then
   fno agents stop "$CHILD_NAME" >/dev/null 2>&1 || true
-  FNO_CLAIMS_ROOT="$HOME" fno agents claim release "node:$NODE_ID" \
-    --holder "$_CHILD_EXPECTED_HOLDER" >/dev/null 2>&1 || true
   fno agents rm "$CHILD_NAME" >/dev/null 2>&1 || true
 
+  # No shell-side node release here, and not as a formality: the child never
+  # proved custody, so a release naming the child's holder is a guess about
+  # who holds the key - against a still-free claim it is a HolderMismatch the
+  # non-strict CLI reports as success, the exact silent-custody defect the
+  # prepare owner exists to retire. The REACQUIRE below is the receipt: it
+  # takes over a stale/dead claim or fails loud naming the live holder.
   _REACQ_RC=0
   FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "node:$NODE_ID" \
     --holder "$CLAIM_HOLDER" --ttl "$CLAIM_TTL" >/dev/null 2>&1 || _REACQ_RC=$?

@@ -34,8 +34,10 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import hashlib
 import logging
 import re
+import shutil
 import subprocess
 import time
 from collections import Counter, namedtuple
@@ -611,7 +613,6 @@ REAP_QUIET_AFTER_S = 900
 # classifies leave, never wake.
 _RESET_STAMP_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})\s*(?:SGT|UTC\+8)")
 _SGT_OFFSET_S = 8 * 3600
-_TAIL_BYTES = 64 * 1024
 #: 60, not 15: a chatty attach (restore markers, compaction lines) must not
 #: push a still-live 429 out of the window the wake gate reads - the burned
 #: turn inside a closed window is the module's measured failure, and a
@@ -711,6 +712,7 @@ def verdicts(
     node_state_for: Callable[[str], Optional[dict]],
     now_s: float,
     quiet_after_s: float = REAP_QUIET_AFTER_S,
+    provider_outages: Optional[dict[str, Any]] = None,
     retire_grace_s_value: Optional[float] = None,
 ) -> list[Verdict]:
     """One verdict per row, in table precedence (ghost > reap > retire >
@@ -766,6 +768,15 @@ def verdicts(
     # rows in one report must be judged against the same grace.
     grace = retire_grace_s() if retire_grace_s_value is None else retire_grace_s_value
 
+    # A row only earns REROUTE by appearing in an already-quorum-confirmed
+    # breaker (_breakers() in provider_outage.py refuses to emit one below
+    # policy.quorum distinct rows) - never from this row's own 429 alone.
+    quorum_row_ids = frozenset(
+        row_id
+        for breaker in (provider_outages or {}).get("breakers") or []
+        for row_id in breaker.get("row_ids") or []
+    )
+
     out: list[Verdict] = []
     for row in rows:
         verdict = _verdict_one(
@@ -777,6 +788,7 @@ def verdicts(
             quiet_after_s=quiet_after_s,
             cotenants=_cotenants(row),
             retire_grace_s_value=grace,
+            in_quorum_breaker=row.row_id in quorum_row_ids,
         )
         # The unclaimed advisory upgrades a LEAVE, and it is applied HERE
         # rather than at a leave return because there are four of them. Putting
@@ -1100,12 +1112,33 @@ def lane_armed(settings: Any) -> bool:
     """
     try:
         return bool(
-            getattr(settings.recovery, "watchdog", "off") in ("report", "wake")
+            getattr(settings.recovery, "watchdog", "off") in ("report", "wake", "handoff")
             and settings.recovery.enabled
             and settings.autonomy.enabled
         )
     except Exception:  # noqa: BLE001 - a partial settings stub is not armed
         return False
+
+
+def handoff_armed(settings: Any) -> bool:
+    """Return true only for the explicit cross-provider action level."""
+    try:
+        return bool(
+            getattr(settings.recovery, "watchdog", "off") == "handoff"
+            and settings.recovery.enabled
+            and settings.autonomy.enabled
+        )
+    except Exception:  # noqa: BLE001 - a partial settings stub is not armed
+        return False
+
+
+def _unknown_provider_report(reason: str) -> dict[str, Any]:
+    return {
+        "instrument": "unknown",
+        "breakers": [],
+        "counts": {reason: 1},
+        "refusals": [{"reason": reason, "count": 1}],
+    }
 
 
 def finished_with_the_tree(
@@ -1538,6 +1571,7 @@ def _verdict_one(
     # that skipped `verdicts()`. A switch documented as off-capable must not
     # have an on-by-default back door.
     retire_grace_s_value: float,
+    in_quorum_breaker: bool = False,
 ) -> Verdict:
 
     # ghost: the row claims working/blocked but its recorded id resolves to no
@@ -1628,9 +1662,11 @@ def _verdict_one(
         return Verdict(row.row_id, row.name, row.state, LEAVE,
                        retire_basis, "none")
 
-    # reroute: blocked on a 429 whose window has NOT opened. Waking bounces
-    # (proved twice by hand); the session must be stopped before the window
-    # opens or it wakes into a duplicate.
+    # reroute: blocked on a 429 whose window has NOT opened. A single 429 is
+    # terminal for this session but is not provider-wide authority: the durable
+    # provider-outage fold requires quorum rows before any migration lane may
+    # act. Waking bounces (proved twice by hand); the session must be stopped
+    # before the window opens or it wakes into a duplicate.
     if (
         row.state == "blocked"
         and window == "live"
@@ -1642,12 +1678,17 @@ def _verdict_one(
         and facts is not None
         and facts.last_event_epoch is not None
     ):
-        reset_utc = datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
+        if in_quorum_breaker:
+            return Verdict(
+                row.row_id, row.name, row.state, REROUTE,
+                "429 terminal for this session; provider quorum already "
+                "confirmed by a separate breaker row",
+                "redispatch",
+            )
         return Verdict(
-            row.row_id, row.name, row.state, REROUTE,
-            f"429 resets {reset_utc.strftime('%H:%M:%SZ')}, "
-            f"{_mins(reset_epoch, now_s)}m out",
-            "redispatch",
+            row.row_id, row.name, row.state, LEAVE,
+            "429 terminal for this session; waiting for positive provider quorum",
+            "none",
         )
 
     # wake: blocked or stopped, a transcript exists, and no live 429 window.
@@ -1768,20 +1809,33 @@ def _holder_session(holder: Optional[str]) -> Optional[str]:
 # Real I/O seams (every one injectable; the classifier above stays pure)
 # ---------------------------------------------------------------------------
 
-def tail_facts(
+#: The per-tick transcript tail read. One size serves both consumers of a
+#: tick's single read+parse: the outage evidence collector's freshness window
+#: (it read 256KB before the sharing) and the tail classifier's record window
+#: (which read 64KB - now derived from the same parse, so a chatty transcript
+#: can no longer truncate the classifier's 60-record window below what the
+#: file actually holds).
+_TICK_TAIL_BYTES = 256 * 1024
+
+
+def tail_entries(
     session_id: str,
     cwd: str,
     *,
     agent: str = "claude",
-    max_records: int = _TAIL_RECORDS,
-) -> Optional[TailFacts]:
-    """Resolve a session's transcript and tail-read it. Never raises.
+) -> Optional[list[dict]]:
+    """Resolve a session's transcript and return its parsed tail records.
 
-    Reuses the provenance resolver (content-aware across every project dir -
-    the dir name is the LAUNCH cwd, never derivable from a repo or worktree
-    name). A missing transcript is None, which the classifier renders as a
-    fact (ghost / unknown-age), never as fresh. A 64KB tail read costs ~0.9ms
-    per row measured over 130 rows, so sweeping the fleet is cheap.
+    THE one transcript read per tick: the tail classifier and the
+    provider-outage evidence collector both derive their views from this
+    single parse instead of each opening and parsing the same file (measured
+    defect: every transcript was read and parsed twice per tick). Callers
+    keep their own windows; this function only reads and parses.
+
+    None means the transcript could not be resolved, read, or decoded - the
+    caller renders that downstream (the classifier as ghost facts, the
+    outage lane as a named ``transcript_unreadable`` refusal feeding the
+    pane fallback). A torn or foreign JSONL line is skipped, not fatal.
     """
     from fno.provenance.observed import resolve_transcript_path
 
@@ -1794,38 +1848,52 @@ def tail_facts(
     try:
         size = path.stat().st_size
         with path.open("rb") as fh:
-            fh.seek(max(0, size - _TAIL_BYTES))
+            fh.seek(max(0, size - _TICK_TAIL_BYTES))
             chunk = fh.read()
-    except OSError:
+        lines = chunk.decode("utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
         return None
-    lines = chunk.decode("utf-8", "replace").splitlines()
-    if size > _TAIL_BYTES and lines:
+    if size > _TICK_TAIL_BYTES and lines:
         lines = lines[1:]  # a mid-file seek lands inside a line; drop it
-    entries: list[tuple[Optional[float], str, Optional[str], Optional[str]]] = []
+    parsed: list[dict] = []
     for line in lines:
         try:
-            e = json.loads(line)
+            record = json.loads(line)
         except Exception:  # noqa: BLE001 - a torn/foreign line is not data
             continue
-        epoch: Optional[float] = None
-        ts = e.get("timestamp")
-        if ts:
-            try:
-                epoch = datetime.fromisoformat(
-                    str(ts).replace("Z", "+00:00")
-                ).timestamp()
-            except ValueError:
-                epoch = None
-        text = _record_text(e)
-        msg = e.get("message")
+        if isinstance(record, dict):
+            parsed.append(record)
+    return parsed
+
+
+def _record_epoch(record: dict) -> Optional[float]:
+    ts = record.get("timestamp")
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _facts_from_entries(
+    entries: Optional[list[dict]], max_records: int
+) -> Optional[TailFacts]:
+    """Pure derivation of :class:`TailFacts` from a parsed transcript tail."""
+    if entries is None:
+        return None
+    windowed: list[tuple[Optional[float], str, Optional[str], Optional[str]]] = []
+    for record in entries:
+        text = _record_text(record)
+        msg = record.get("message")
         role = msg.get("role") if isinstance(msg, dict) else None
-        kind = ("tool" if _has_tool_use(e) else "text") if role else None
-        entries.append((epoch, text, str(role) if role else None, kind))
+        kind = ("tool" if _has_tool_use(record) else "text") if role else None
+        windowed.append((_record_epoch(record), text, str(role) if role else None, kind))
     # The window bounds EVERYTHING downstream, the (role, text, kind) triple
     # included: a triple read from a record older than max_records would pair
     # a stale text with the fresh age and window inputs it is classified
     # against.
-    window = entries[-max_records:]
+    window = windowed[-max_records:]
     records = [(epoch, text) for epoch, text, _role, _kind in window]
     last_epoch = next((t for t, _ in reversed(records) if t is not None), None)
     last_role: Optional[str] = None
@@ -1842,6 +1910,27 @@ def tail_facts(
         records, last_epoch, " ".join(t for _, t in records),
         last_role, last_text, last_kind,
     )
+
+
+def tail_facts(
+    session_id: str,
+    cwd: str,
+    *,
+    agent: str = "claude",
+    max_records: int = _TAIL_RECORDS,
+) -> Optional[TailFacts]:
+    """Resolve a session's transcript and tail-read it. Never raises.
+
+    Reuses the provenance resolver (content-aware across every project dir -
+    the dir name is the LAUNCH cwd, never derivable from a repo or worktree
+    name). A missing transcript is None, which the classifier renders as a
+    fact (ghost / unknown-age), never as fresh. The read goes through
+    :func:`tail_entries`, so a caller holding its entries already (the sweep
+    tick shares one read between the classifier and the outage collector)
+    should derive facts with :func:`_facts_from_entries` instead of reading
+    again.
+    """
+    return _facts_from_entries(tail_entries(session_id, cwd, agent=agent), max_records)
 
 
 def _has_tool_use(e: dict) -> bool:
@@ -2189,6 +2278,601 @@ ROSTER_REFUSAL = (
 )
 
 
+def measure_provider_outages(
+    rows: list[Row], *, now_s: float,
+    settings: Any = None,
+    entries_provider: Optional[Callable[[], list[Any]]] = None,
+    transcript_path_for: Optional[Callable[[Any], Path | None]] = None,
+    pane_read_fn: Optional[Callable[[str, Any], str]] = None,
+    pane_snapshot_dir: Optional[Path] = None,
+    journal: Optional[Path] = None,
+    entries_for: Optional[Callable[[str], Optional[list[dict]]]] = None,
+) -> dict[str, Any]:
+    """Collect durable transcript records, then persist exact pane fallbacks.
+
+    ``entries_for(row_id)`` supplies the tick's shared transcript parse (see
+    :func:`tail_entries`); with it, no transcript file is opened here."""
+    from fno.agents.provider_outage import (
+        EvidenceIdentity,
+        OutagePolicy,
+        collect_pane_evidence,
+        collect_transcript_evidence,
+        journal_path as provider_journal_path,
+        measure_and_persist,
+        pane_read_via_mux,
+    )
+
+    if entries_provider is None:
+        from fno.agents.registry import load_registry
+
+        entries_provider = load_registry
+    try:
+        entries = entries_provider()
+    except Exception as exc:  # noqa: BLE001 - an unreadable join refuses action
+        report = _unknown_provider_report("provider_identity_registry_unreadable")
+        report["refusals"][0]["detail"] = repr(exc)
+        return report
+    by_session = {
+        str(getattr(entry, "harness_session_id", "") or ""): entry
+        for entry in entries
+        if getattr(entry, "harness_session_id", None)
+    }
+    identities = []
+    mux_by_row: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        entry = by_session.get(row.row_id)
+        identities.append(EvidenceIdentity(
+            row_id=row.row_id,
+            harness=str(getattr(entry, "harness", "") or ""),
+            provider=getattr(entry, "route_provider_id", None),
+            account=getattr(entry, "account_record_id", None),
+            session_id=str(getattr(entry, "harness_session_id", "") or row.row_id),
+            cwd=str(getattr(entry, "cwd", "") or row.cwd),
+        ))
+        mux = getattr(entry, "mux", None)
+        if isinstance(mux, dict):
+            mux_by_row[row.row_id] = mux
+    try:
+        if settings is None:
+            from fno.config import load_settings
+
+            settings = load_settings()
+        policy = OutagePolicy.from_settings(settings)
+    except Exception:  # noqa: BLE001 - use the schema floor on a config miss
+        policy = OutagePolicy()
+    records, refusals = collect_transcript_evidence(
+        identities,
+        now_s=now_s,
+        transcript_path_for=transcript_path_for,
+        evidence_freshness_s=policy.evidence_freshness_s,
+        entries_for=entries_for,
+    )
+    # Rows whose transcript cannot be read fall back to the pane buffer: both
+    # a MISSING transcript and an UNSUPPORTED transcript SHAPE leave the pane
+    # as the only instrument that can see a 429/529. Without the second
+    # reason in this set, every codex or opencode pane row reads as a named
+    # refusal and the quorum never hears it - the exact shape that made the
+    # non-Claude fleet invisible.
+    unreadable_rows = {
+        str(item.get("row_id"))
+        for item in refusals
+        if item.get("reason") in ("transcript_unreadable", "transcript_shape_unsupported")
+    }
+    if unreadable_rows:
+        if pane_read_fn is None:
+            pane_read_fn = pane_read_via_mux
+
+        target = journal or provider_journal_path()
+        snapshot_root = pane_snapshot_dir or target.parent / "provider-pane-snapshots"
+        fallback_identities = [
+            identity for identity in identities if identity.row_id in unreadable_rows
+        ]
+        pane_records, pane_refusals = collect_pane_evidence(
+            fallback_identities,
+            mux_by_row=mux_by_row,
+            now_s=now_s,
+            snapshot_dir=Path(snapshot_root),
+            pane_read_fn=pane_read_fn,
+        )
+        successful_rows = {record.row_id for record in pane_records}
+        refusals = [
+            item for item in refusals
+            if not (
+                item.get("reason") in ("transcript_unreadable", "transcript_shape_unsupported")
+                and str(item.get("row_id")) in successful_rows
+            )
+        ]
+        records.extend(pane_records)
+        refusals.extend(pane_refusals)
+    if not records and refusals:
+        counts = Counter(str(item["reason"]) for item in refusals)
+        return {
+            "instrument": "unknown",
+            "breakers": [],
+            "counts": dict(counts),
+            "refusals": refusals,
+        }
+    report = measure_and_persist(
+        records, now_s=now_s, path=journal, policy=policy
+    )
+    if refusals:
+        report["refusals"] = [*report.get("refusals", []), *refusals]
+        counts = Counter(str(item["reason"]) for item in refusals)
+        for reason, count in counts.items():
+            report.setdefault("counts", {})[reason] = count
+    return report
+
+
+def supervise_provider_handoffs(
+    provider_outages: dict[str, Any], rows: list[Row], *, settings: Any,
+    now_s: float,
+    candidate_for: Optional[Callable[[dict[str, Any], Row, float], Any]] = None,
+    handoff_fn: Optional[Callable[..., Any]] = None,
+    deps_factory: Optional[Callable[[], Any]] = None,
+    decision_fn: Optional[Callable[..., Any]] = None,
+    journal_root: Optional[Path] = None,
+) -> list[dict[str, Any]]:
+    """Run at most one proved cross-provider transaction per source row."""
+    if not handoff_armed(settings):
+        return []
+    instrument = provider_outages.get("instrument")
+    if instrument != "measured":
+        # Armed but blind: a config that wants handoff got no evidence to act
+        # on this tick, for reasons that can be transient (a lock timeout, a
+        # torn journal write) as easily as durable. Returning [] here reads
+        # identically to "measured, nothing broken" - one named outcome tells
+        # the difference apart instead of both going quiet the same way.
+        return [{
+            "phase": "refused",
+            "reason": "provider_outage_instrument_unmeasured",
+            "detail": f"instrument={instrument!r}; no handoff evidence this tick",
+            "count": 1,
+        }]
+    from fno.agents.outage_handoff import (
+        HandoffRequest,
+        production_handoff_dependencies,
+    )
+    from fno.agents.provider_outage import OutagePolicy, select_healthy_destination
+    from fno.recovery import recover_provider_outage
+
+    if candidate_for is None:
+        candidate_for = production_handoff_candidate
+    handoff_fn = handoff_fn or (
+        lambda request, deps, journal_root: recover_provider_outage(
+            request, deps=deps, journal_root=journal_root, settings=settings
+        )
+    )
+    deps_factory = deps_factory or production_handoff_dependencies
+    if decision_fn is None:
+        from fno.decide import record_decision
+
+        decision_fn = record_decision
+    root = journal_root or (sweep_path().parent / "recovery" / "transactions")
+    policy = OutagePolicy.from_settings(settings)
+    by_id = {row.row_id: row for row in rows}
+    outcomes: list[dict[str, Any]] = []
+    for breaker in provider_outages.get("breakers") or []:
+        if not isinstance(breaker, dict):
+            continue
+        broken_provider = str(breaker.get("provider") or "")
+        for row_id in breaker.get("row_ids") or []:
+            row = by_id.get(str(row_id))
+            if row is None or not row.node:
+                outcomes.append({
+                    "phase": "refused", "reason": "unknown_source_node",
+                    "source_row_id": str(row_id), "count": 1,
+                    "outage_epoch": str(breaker.get("outage_epoch") or ""),
+                    "provider": broken_provider,
+                    "account": str(breaker.get("account") or ""),
+                })
+                continue
+            try:
+                candidate = (
+                    production_handoff_candidate(
+                        breaker, row, now_s, settings=settings
+                    )
+                    if candidate_for is production_handoff_candidate
+                    else candidate_for(breaker, row, now_s)
+                )
+                selected = select_healthy_destination(
+                    [candidate] if candidate is not None else [],
+                    broken_provider=broken_provider,
+                    now_s=now_s,
+                    policy=policy,
+                )
+                if selected is None or not selected.model:
+                    outcomes.append({
+                        "phase": "refused", "reason": "no_fresh_destination_canary",
+                        "source_row_id": row.row_id, "node": row.node, "count": 1,
+                        "outage_epoch": str(breaker.get("outage_epoch") or ""),
+                        "provider": broken_provider,
+                        "account": str(breaker.get("account") or ""),
+                    })
+                    continue
+                request = HandoffRequest(
+                    node=row.node,
+                    outage_epoch=str(breaker.get("outage_epoch") or ""),
+                    source_row_id=row.row_id,
+                    destination_harness=str(selected.harness),
+                    destination_provider=str(selected.provider),
+                    destination_model=selected.model,
+                    destination_account=str(selected.record_id),
+                    source_provider=broken_provider,
+                    source_account=str(breaker.get("account") or ""),
+                    evidence_fingerprints=tuple(
+                        str(item) for item in (breaker.get("fingerprints") or [])
+                    ),
+                    destination_account_env=selected.account_env or {},
+                    quorum_evidence_count=len(breaker.get("fingerprints") or []),
+                )
+                result = handoff_fn(
+                    request, deps=deps_factory(), journal_root=Path(root)
+                )
+                outcome = result.to_dict()
+                outcome.update({
+                    "provider": selected.provider,
+                    "account": selected.record_id,
+                    "source_provider": broken_provider,
+                    "source_account": str(breaker.get("account") or ""),
+                    "count": max(1, sum(result.counts.values())),
+                })
+                outcomes.append(outcome)
+                contended = (
+                    result.failed_phase == "observed"
+                    and result.counts.get("lease_contention", 0) > 0
+                )
+                if (
+                    result.phase in {"committed", "parked"}
+                    and not result.replayed
+                    and not contended
+                ):
+                    decision_fn(
+                        subject=row.node,
+                        decision=(
+                            f"provider outage handoff {result.phase} for "
+                            f"{broken_provider} to {selected.provider}"
+                        ),
+                        decided_by="provider-outage-supervisor",
+                        authority_source="daemon-automation",
+                        rationale=result.reason or "terminal provider-outage transaction",
+                        source="daemon",
+                    )
+            except Exception as exc:  # noqa: BLE001 - one row's crash must not stall its siblings
+                outcomes.append({
+                    "phase": "refused", "reason": "handoff_supervision_crashed",
+                    "source_row_id": row.row_id, "node": row.node, "count": 1,
+                    "outage_epoch": str(breaker.get("outage_epoch") or ""),
+                    "provider": broken_provider,
+                    "account": str(breaker.get("account") or ""),
+                    "detail": f"{type(exc).__name__}: {exc}",
+                })
+    return outcomes
+
+
+def production_handoff_candidate(
+    breaker: dict[str, Any], row: Row, now_s: float, *,
+    settings: Any = None,
+    entries_provider: Optional[Callable[[], list[Any]]] = None,
+    route_policy_provider: Optional[Callable[[Row], tuple[list[str], dict[str, str]]]] = None,
+    account_env_for: Optional[Callable[[str, Path], dict[str, str]]] = None,
+    route_env_for: Optional[Callable[[Any], dict[str, str]]] = None,
+    runtime_exhausted_fn: Optional[Callable[[str, Path], bool]] = None,
+    harness_installed_fn: Optional[Callable[[str], bool]] = None,
+    pane_occupancy_fn: Optional[Callable[[str], int]] = None,
+    canary_fn: Optional[Callable[[Any, Row, float], Any]] = None,
+    open_breakers_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
+    configured_routes_provider: Optional[Callable[[str, list[str]], list[Any]]] = None,
+):
+    """Walk configured route policy and return the first proved destination."""
+    from fno.agents.provider_outage import (
+        CanaryProof,
+        HEALTH_MARKER,
+        OutagePolicy,
+        RouteCandidate,
+        run_health_canary,
+    )
+    policy = OutagePolicy.from_settings(settings) if settings is not None else OutagePolicy()
+
+    # Candidate route discovery is intentionally conservative: only a route
+    # already stamped on a registry row is eligible. Missing explicit model,
+    # provider, or account identity refuses instead of deriving one axis from
+    # the harness or model label.
+    try:
+        from fno.adapters.providers.dispatch import dispatch_env
+        from fno.agents.model_routing import read_route_settings
+        from fno.agents.registry import load_registry
+
+        entries_provider = entries_provider or load_registry
+        route_policy_provider = route_policy_provider or _production_route_policy
+        account_env_for = account_env_for or (
+            lambda account, root: dispatch_env(account, repo_root=root)
+        )
+        route_env_for = route_env_for or (
+            lambda entry: read_route_settings(entry.route_settings_path)
+            if getattr(entry, "route_settings_path", None) else {}
+        )
+        runtime_exhausted_fn = runtime_exhausted_fn or _runtime_exhausted
+        harness_installed_fn = harness_installed_fn or (
+            lambda harness: shutil.which(harness) is not None
+        )
+        pane_occupancy_fn = pane_occupancy_fn or _production_pane_occupancy
+        open_breakers_provider = open_breakers_provider or _persisted_open_breakers
+        ordered_accounts, pins = route_policy_provider(row)
+        broken_provider = str(breaker.get("provider") or "")
+        broken_account = str(breaker.get("account") or "")
+        if any(str(value) in {broken_provider, broken_account} for value in pins.values()):
+            return None
+        if configured_routes_provider is None:
+            from fno.agents.autonomous_route import configured_outage_routes
+
+            def configured_routes_provider(cwd: str, ordered: list[str]) -> list[Any]:
+                return configured_outage_routes(cwd, ordered_record_ids=ordered)
+        configured_by_account = {
+            route.record_id: route
+            for route in configured_routes_provider(row.cwd, ordered_accounts)
+        }
+        entries_by_account: dict[str, list[Any]] = {}
+        for registered in entries_provider():
+            account = str(getattr(registered, "account_record_id", "") or "")
+            if account:
+                entries_by_account.setdefault(account, []).append(registered)
+        open_routes = {
+            (str(item.get("provider") or ""), str(item.get("account") or ""))
+            for item in open_breakers_provider()
+            if isinstance(item, dict)
+        }
+
+        for account in ordered_accounts:
+            configured = configured_by_account.get(account)
+            if configured is not None:
+                harness = str(configured.harness)
+                provider = str(configured.provider)
+                model = str(configured.model)
+                account_env = dict(configured.account_env)
+                route_env = dict(configured.route_env)
+            else:
+                # A live row may supplement a legacy configured record that
+                # predates explicit model axes, but it is never the candidate
+                # denominator: only ids from ordered_accounts reach this loop.
+                observations = entries_by_account.get(account, [])
+                identities = {
+                    (
+                        str(getattr(item, "harness", "") or ""),
+                        str(getattr(item, "route_provider_id", "") or ""),
+                        str(getattr(item, "model_name", "") or ""),
+                    )
+                    for item in observations
+                }
+                if len(identities) != 1:
+                    continue
+                harness, provider, model = next(iter(identities))
+                if not all((harness, provider, model)):
+                    continue
+                entry = observations[0]
+                root = Path(row.cwd)
+                account_env = account_env_for(account, root)
+                route_env = route_env_for(entry)
+            pin_provider = str(pins.get("provider") or "")
+            if pin_provider and pin_provider not in {account, harness, provider}:
+                continue
+            if pins.get("harness") and str(pins["harness"]) != harness:
+                continue
+            if pins.get("model") and str(pins["model"]) != model:
+                continue
+            root = Path(row.cwd)
+            candidate = RouteCandidate(
+                record_id=account,
+                harness=harness,
+                provider=provider,
+                model=model,
+                account=account,
+                account_env=account_env,
+                route_env=route_env,
+                canary=None,
+                breaker_open=(provider, account) in open_routes,
+                runtime_exhausted=runtime_exhausted_fn(account, root),
+                harness_installed=harness_installed_fn(harness),
+                pane_supported=harness in {"codex", "opencode", "agy"},
+                pane_count=pane_occupancy_fn(harness),
+            )
+            if (
+                provider == broken_provider
+                or candidate.breaker_open
+                or candidate.runtime_exhausted
+                or not candidate.harness_installed
+                or not candidate.pane_supported
+                or candidate.pane_count >= 4
+            ):
+                continue
+
+            if canary_fn is not None:
+                proof = canary_fn(candidate, row, now_s)
+                if proof is not None:
+                    return RouteCandidate(**{**candidate.__dict__, "canary": proof})
+                continue
+
+            from fno import _subprocess_util, paths
+            from fno.agents.mux_spawn import _mux_pane_alive
+
+            canary_cwd = paths.state_dir() / "recovery" / "canary-work"
+            canary_cwd.mkdir(parents=True, exist_ok=True)
+
+            def collect(spawned: Any) -> CanaryProof | None:
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    proc = subprocess.run(
+                        [*_subprocess_util.fno_py_cmd(), "mux", "pane", "read",
+                         "--session", spawned.session, str(spawned.pane_id),
+                         "--lines", "20"],
+                        capture_output=True, text=True, timeout=5, check=False,
+                    )
+                    lines = [line.strip() for line in proc.stdout.splitlines()]
+                    if HEALTH_MARKER in lines:
+                        observed = time.time()
+                        proof_path = paths.state_dir() / "recovery" / "provider-canaries"
+                        proof_path.mkdir(parents=True, exist_ok=True)
+                        digest = hashlib.sha256(
+                            f"{candidate.record_id}\0{spawned.pane_id}".encode()
+                        ).hexdigest()[:20]
+                        from fno.state.io import atomic_write
+
+                        atomic_write(proof_path / f"{digest}.json", json.dumps({
+                            "provider": candidate.provider,
+                            "account": candidate.record_id,
+                            "pane_id": str(spawned.pane_id),
+                            "observed_at": observed,
+                            "content": HEALTH_MARKER,
+                        }, sort_keys=True))
+                        return CanaryProof(
+                            source="pane", content=HEALTH_MARKER,
+                            observed_at=observed, persisted=True,
+                            assistant_role=False, pane_id=str(spawned.pane_id),
+                        )
+                    time.sleep(0.25)
+                return None
+
+            def stop(spawned: Any) -> bool:
+                subprocess.run(
+                    [*_subprocess_util.fno_py_cmd(), "mux", "pane", "kill",
+                     "--session", spawned.session, str(spawned.pane_id)],
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+                stopped = _mux_pane_alive({
+                    "session": spawned.session, "pane_id": spawned.pane_id,
+                }) is False
+                if stopped:
+                    from fno.agents.registry import update_registry
+
+                    update_registry(lambda entries: [
+                        item for item in entries
+                        if not (
+                            item.name == spawned.name
+                            and item.mux == {
+                                "session": spawned.session,
+                                "pane_id": spawned.pane_id,
+                            }
+                        )
+                    ])
+                return stopped
+
+            proof = run_health_canary(
+                candidate,
+                canary_cwd=canary_cwd,
+                node_cwd=Path(row.cwd),
+                now_s=now_s,
+                collect_proof=collect,
+                stop=stop,
+                policy=policy,
+            )
+            if proof is not None:
+                return RouteCandidate(**{**candidate.__dict__, "canary": proof})
+    except Exception as exc:  # noqa: BLE001 - a crash here must not masquerade as "no candidate"
+        logging.getLogger(__name__).warning(
+            "watchdog: candidate discovery crashed for %s: %s", row.row_id, exc
+        )
+        return None
+    return None
+
+
+def _production_route_policy(row: Row) -> tuple[list[str], dict[str, str]]:
+    from fno.adapters.providers.loader import load_combos, load_providers
+    from fno.agents.dispatch_target import resolve_dispatch_target
+
+    root = Path(row.cwd)
+    node = _graph_index().get(str(row.node), {}) if row.node else {}
+    pins = {
+        key: str(node.get(key) or "")
+        for key in ("provider", "harness", "model")
+        if str(node.get(key) or "").strip()
+    }
+    target = resolve_dispatch_target(
+        "provider-outage-handoff", repo_root=root, env={}
+    )
+    if target.provider_id:
+        return [target.provider_id], pins
+    if target.combo_name:
+        combo = load_combos(repo_root=root).get(target.combo_name)
+        return (list(combo.providers) if combo is not None else []), pins
+    config = load_providers(repo_root=root)
+    return ([config.active] if config.active else []), pins
+
+
+def _runtime_exhausted(account: str, root: Path) -> bool:
+    from fno.adapters.providers.loader import load_quota_config
+    from fno.adapters.providers.runtime_state import HeadroomState, headroom
+
+    quota = load_quota_config(repo_root=root)
+    return headroom(
+        account,
+        ttl_seconds=quota.probe_ttl_seconds,
+        threshold_pct=quota.defer_threshold_pct,
+        repo_root=root,
+    ).state is HeadroomState.EXHAUSTED
+
+
+def _persisted_open_breakers() -> list[dict[str, Any]]:
+    from fno.agents.provider_outage import journal_path
+
+    try:
+        value = json.loads(journal_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return []
+    breakers = value.get("breakers") if isinstance(value, dict) else None
+    return [item for item in (breakers or []) if isinstance(item, dict)]
+
+
+def _production_pane_occupancy(harness: str) -> int:
+    """Live pane count for ONE harness in the resolved mux session.
+
+    The pane listing already carries each pane's ``harness_session_id`` (the
+    server joins it off the registry row by mux ref), so the harness axis is
+    one dict join away - never derived from a cwd or title guess. Panes with
+    no harness session (plain shells, foreign panes) count toward nothing.
+
+    An unreadable listing answers 4, the at-capacity value: the route gate
+    skips a candidate whose occupancy it could not measure, which is the
+    fail-closed direction - refusing a healthy route costs a missed handoff,
+    while counting an unreadable mux as empty overfills the session with
+    recovery spawns.
+    """
+    from fno import _subprocess_util
+    from fno.agents.mux_spawn import resolve_mux_session
+
+    session = resolve_mux_session(None)
+    proc = subprocess.run(
+        [*_subprocess_util.fno_py_cmd(), "mux", "pane", "ls",
+         "--session", session, "--json"],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    if proc.returncode != 0:
+        return 4
+    try:
+        panes = json.loads(proc.stdout or "")
+    except (TypeError, ValueError):
+        return 4
+    if not isinstance(panes, list):
+        return 4
+    session_ids = [
+        sid
+        for sid in (
+            str(item.get("harness_session_id") or "")
+            for item in panes
+            if isinstance(item, dict)
+        )
+        if sid
+    ]
+    if not session_ids:
+        return 0
+    from fno.agents.registry import load_registry
+
+    harness_by_sid: dict[str, str] = {}
+    for entry in load_registry():
+        sid = str(getattr(entry, "harness_session_id", "") or "")
+        if sid:
+            harness_by_sid[sid] = str(getattr(entry, "harness", "") or "")
+    return sum(1 for sid in session_ids if harness_by_sid.get(sid) == harness)
+
+
 def run_sweep(
     *,
     now_s: Optional[float] = None,
@@ -2196,6 +2880,7 @@ def run_sweep(
     transcript_fn: Optional[Callable[[str], Optional[TailFacts]]] = None,
     claim_fn: Optional[Callable[[str], dict]] = None,
     graph_fn: Optional[Callable[[], dict[str, dict]]] = None,
+    provider_outage_fn: Optional[Callable[[], dict[str, Any]]] = None,
     roster_timeout: Optional[float] = None,
 ) -> tuple[dict, list[Row]]:
     """Build the real seams and classify the whole fleet once. Returns
@@ -2213,6 +2898,33 @@ def run_sweep(
         rows_provider() if rows_provider is not None
         else fleet_rows(timeout=roster_timeout)
     )
+    # ONE transcript read per row per tick: the shared parse below feeds both
+    # the outage evidence collector and the tail classifier. The defect this
+    # replaces read and parsed every transcript twice per tick - once per
+    # consumer - which was pure cost on the hottest path in the sweep.
+    entries_by_row: dict[str, Optional[list[dict]]] = {}
+    if provider_outage_fn is None and rows_provider is None:
+        for row in rows:
+            try:
+                entries_by_row[row.row_id] = tail_entries(row.row_id, row.cwd)
+            except Exception:  # noqa: BLE001 - a failed read is never a verdict
+                entries_by_row[row.row_id] = None
+        provider_outages = measure_provider_outages(
+            rows, now_s=now_s,
+            entries_for=lambda row_id: entries_by_row.get(row_id),
+        )
+    elif provider_outage_fn is None:
+        provider_outages = _unknown_provider_report("provider_outage_collector_missing")
+    else:
+        try:
+            provider_outages = provider_outage_fn()
+        except Exception as exc:  # noqa: BLE001 - unreadable evidence refuses action
+            provider_outages = {
+                "instrument": "unknown",
+                "breakers": [],
+                "counts": {"provider_outage_read_failed": 1},
+                "refusals": [{"reason": "provider_outage_read_failed", "detail": repr(exc)}],
+            }
     if not rows:
         return {
             "generated_at": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime(
@@ -2222,10 +2934,13 @@ def run_sweep(
             "counts": {},
             "warnings": [*warnings, ROSTER_REFUSAL],
             "refused": ROSTER_REFUSAL,
+            "provider_outages": provider_outages,
         }, rows
     cwd_by_sid = {r.row_id: r.cwd for r in rows}
     if transcript_fn is None:
         def transcript_fn(sid: str) -> Optional[TailFacts]:
+            if sid in entries_by_row:
+                return _facts_from_entries(entries_by_row[sid], _TAIL_RECORDS)
             return tail_facts(sid, cwd_by_sid.get(sid, ""))
     claim_fn = claim_fn or _claim_view
     if graph_fn is None:
@@ -2246,6 +2961,7 @@ def run_sweep(
         node_state_for=lambda node: graph_fn().get(node),
         now_s=now_s,
         quiet_after_s=quiet_after_s,
+        provider_outages=provider_outages,
     )
     counts: dict[str, int] = {}
     for v in vs:
@@ -2258,6 +2974,7 @@ def run_sweep(
         "counts": counts,
         "terminal_harness_rows": sum(r.state in _TERMINAL_STATES for r in rows),
         "warnings": warnings,
+        "provider_outages": provider_outages,
     }
     return payload, rows
 
@@ -2308,6 +3025,7 @@ def write_sweep_file(
     recoverable_count: Optional[int] = None,
     unfinished: Optional[dict] = None,
     recovery_events_signature: Optional[str] = None,
+    provider_outages: Optional[dict[str, Any]] = None,
 ) -> None:
     """Freshness evidence for the done probe: one small state file per sweep,
     best-effort (an unwritable state root must never break a tick). The
@@ -2347,6 +3065,14 @@ def write_sweep_file(
             events_signature = str(previous.get("events_signature") or "")
         if terminal_harness_rows is None:
             terminal_harness_rows = int(previous.get("terminal_harness_rows") or 0)
+        if provider_outages is None:
+            # Same carry rule as counts and signature: a write from another
+            # lane (the unfinished-work report, a recovery stamp) must not
+            # speak for the provider fold. A MISSING measurement from this
+            # lane's own run stamps the named-unknown report instead.
+            provider_outages = previous.get("provider_outages") or _unknown_provider_report(
+                "provider_outage_report_missing"
+            )
         payload: dict[str, Any] = {
             "source": source,
             "at": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime(
@@ -2356,6 +3082,7 @@ def write_sweep_file(
             "terminal_harness_rows": int(terminal_harness_rows),
             "signature": signature,
             "events_signature": events_signature,
+            "provider_outages": provider_outages,
         }
         if recoverable_count is not None:
             payload["recoverable_count"] = int(recoverable_count)
@@ -2536,6 +3263,12 @@ def verdict_signature(payload: dict) -> str:
     terminal_rows = int(payload.get("terminal_harness_rows") or 0)
     if terminal_rows:
         parts.append(f"terminal-harness-rows:{terminal_rows}")
+    for breaker in payload.get("provider_outages", {}).get("breakers", []):
+        parts.append(
+            "provider-breaker:"
+            f"{breaker.get('provider')}:{breaker.get('account')}:"
+            f"{breaker.get('outage_epoch')}"
+        )
     return ";".join(parts)
 
 

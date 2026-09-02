@@ -89,6 +89,7 @@
   "storage_only": {
     "$comment": "AgentEntry fields intentionally omitted from the list-row projection. The field's registry.py docstring owns the reason; do not duplicate those rationales here.",
     "keys": [
+      "account_record_id",
       "aliases",
       "cc_session_id",
       "exited_at",
@@ -99,10 +100,12 @@
       "launch_account",
       "mcp_channel_id",
       "messaging_socket_path",
+      "model_name",
       "pid_start_time",
       "related_session_id",
       "requested_effort",
       "requested_provider",
+      "route_provider_id",
       "route_settings_path",
       "sandbox_posture",
       "screen_state",

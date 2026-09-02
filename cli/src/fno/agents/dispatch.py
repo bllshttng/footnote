@@ -1688,6 +1688,9 @@ def _claude_create_path(
     deny_tools: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
     launch_account: Optional[str] = None,
+    route_provider_id: Optional[str] = None,
+    model_name: Optional[str] = None,
+    account_record_id: Optional[str] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     succession: bool = False,
@@ -2058,6 +2061,9 @@ def _claude_create_path(
         # provenance pass - never this process's ambient value, which names
         # the SPAWNING session's node.
         node=node,
+        route_provider_id=route_provider_id,
+        model_name=model_name,
+        account_record_id=account_record_id,
         crown_level=crown_level,
         crown_scope=crown_scope,
         crown_grantor=crown_grantor_val,
@@ -2659,6 +2665,9 @@ def dispatch_spawn(
     resume_session_id: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
     launch_account: Optional[str] = None,
+    route_provider_id: Optional[str] = None,
+    model_name: Optional[str] = None,
+    account_record_id: Optional[str] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     succession: bool = False,
@@ -2706,10 +2715,10 @@ def dispatch_spawn(
     # overlay the worker will actually launch with.
     #
     # This is ONE of the two Python spawn seams: `cmd_spawn` routes the default
-    # `pane` substrate to `dispatch_spawn_pane` and never reaches here, so the
-    # pane path calls the same helper itself. Two seams, one implementation -
-    # putting it in cli.py instead would miss every in-process caller that
-    # bypasses argument parsing.
+    # `pane` substrate to `dispatch_spawn_bounded_pane` and never reaches here,
+    # so the pane path calls the same helper itself. Two seams, one
+    # implementation - putting it in cli.py instead would miss every in-process
+    # caller that bypasses argument parsing.
     # A --resume spawn is never picked for, the same seam rule `_pick_account_at_seam`
     # applies to the CLI argv: the transcript being resumed lives under the config
     # dir it was created in, so a picked CLAUDE_CONFIG_DIR points at a directory
@@ -3451,6 +3460,9 @@ def dispatch_spawn(
                         account_env=account_env,
                         launch_account=row_launch_account,
                         sandbox_settings=sandbox_settings,
+                        route_provider_id=route_provider_id,
+                        model_name=model_name,
+                        account_record_id=account_record_id,
                         crown_level=crown_level,
                         crown_scope=crown_scope,
                         succession=succession,

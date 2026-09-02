@@ -25,6 +25,7 @@ from __future__ import annotations
 import fcntl
 import functools
 import json
+import logging
 import os
 import re
 import shutil
@@ -3462,6 +3463,181 @@ def _submit_spawn_seed(
     return "submitted", "", trust_source or _send_source(payload), observation
 
 
+def _strict_json_list(
+    args: list[str],
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+    *,
+    noun: str,
+) -> list[dict]:
+    proc = _run_mux(args, runner)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise DispatchAskError(f"{noun} failed: {detail or 'no output'}", exit_code=1)
+    try:
+        value = json.loads(proc.stdout or "")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise DispatchAskError(f"{noun} was unreadable", exit_code=1) from exc
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise DispatchAskError(f"{noun} was unreadable", exit_code=1)
+    return value
+
+
+def _select_or_create_bounded_tab(
+    session: str,
+    workspace: str | None,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> int:
+    args = ["mux", "tab", "ls", "--session", session, "--json"]
+    if workspace:
+        args += ["--workspace", workspace]
+    tabs = _strict_json_list(args, runner, noun="tab listing")
+    for tab in tabs:
+        tab_id = tab.get("tab_id")
+        pane_ids = tab.get("pane_ids")
+        if isinstance(tab_id, int) and isinstance(pane_ids, list) and len(pane_ids) < 4:
+            return tab_id
+    create_args = ["mux", "tab", "create", "--session", session, "--json"]
+    if workspace:
+        create_args += ["--workspace", workspace]
+    proc = _run_mux(create_args, runner)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise DispatchAskError(
+            f"tab creation failed: {detail or 'no output'}", exit_code=1
+        )
+    try:
+        created = json.loads(proc.stdout or "")
+        tab_id = created["tab_id"]
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise DispatchAskError("tab creation receipt was unreadable", exit_code=1) from exc
+    if not isinstance(tab_id, int):
+        raise DispatchAskError("tab creation receipt had no stable tab id", exit_code=1)
+    return tab_id
+
+
+def dispatch_spawn_bounded_pane(
+    *,
+    workspace: str | None = None,
+    placement_holder: str | None = None,
+    claims_root: Path | None = None,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
+    **spawn_kwargs,
+) -> MuxSpawnResult:
+    """Place one canonical pane spawn while holding the mux placement lease."""
+    from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim, release_claim
+    from fno.claims.io import global_claims_root
+
+    # No provider allowlist here on purpose: x-f579 gives an undeclared
+    # harness a pane lane. But the shared named refusals run BEFORE the claim
+    # and any mux subprocess - a refusal that costs a placement lease first is
+    # a refusal that contends the lease it must not take.
+    validate_pane_provider(
+        str(spawn_kwargs.get("provider") or ""),
+        model=spawn_kwargs.get("model"),
+        effort=spawn_kwargs.get("effort"),
+        permission_mode=spawn_kwargs.get("permission_mode"),
+        yolo=spawn_kwargs.get("yolo"),
+    )
+    # The wrapper's own control flag, never a pane-spawn argument: the CLI
+    # passes it on every pane lane, and forwarding it would TypeError the
+    # half below.
+    spawn_kwargs.pop("bounded_placement", None)
+    session = resolve_mux_session(spawn_kwargs.pop("session", None))
+    holder = placement_holder or f"mux-placement:{os.getpid()}:{_uuid.uuid4()}"
+    key = f"placement:{session}:global"
+    root = claims_root or global_claims_root()
+    try:
+        acquire_claim(
+            key, holder, ttl_ms=60_000, root=root,
+            reason="bounded mux pane placement",
+        )
+    except CLAIM_UNAVAILABLE as exc:
+        live_holder = getattr(exc, "holder", "unknown")
+        raise DispatchAskError(
+            f"placement lease held by {live_holder}; no pane spawned", exit_code=2
+        ) from exc
+    try:
+        explicit_geometry = any(
+            spawn_kwargs.get(key) is not None
+            for key in ("split", "at", "tab_id", "tab")
+        )
+        if explicit_geometry:
+            return dispatch_spawn_pane(
+                session=session,
+                squad=workspace,
+                runner=runner,
+                enforce_tab_capacity=True,
+                **spawn_kwargs,
+            )
+        for geometry_key in ("split", "at", "tab_id"):
+            spawn_kwargs.pop(geometry_key, None)
+        tab_id = _select_or_create_bounded_tab(session, workspace, runner)
+        return dispatch_spawn_pane(
+            session=session,
+            squad=workspace,
+            tab_id=f"id:{tab_id}",
+            runner=runner,
+            **spawn_kwargs,
+        )
+    finally:
+        try:
+            release_claim(key, holder, strict=True, root=root)
+        except Exception as exc:  # noqa: BLE001 - a stale lease release must not mask the spawn result
+            # The swallow stays (the spawn already succeeded; aborting it over
+            # a lease release would be a worse failure), but it is LOUD: a
+            # lease held past its TTL with no diagnostic trail is a silent
+            # custody loss on the placement path.
+            logging.getLogger(__name__).warning(
+                "mux placement lease %s release failed after spawn: %s: %s",
+                key, type(exc).__name__, exc,
+            )
+
+
+def validate_pane_provider(
+    provider: str, *, model=None, effort=None, permission_mode=None, yolo=None
+) -> None:
+    """The x-f579 named refusals for an UNDECLARED harness, shared by every
+    pane lane. Three fail-closed refusals replace the old membership raise,
+    each before any pane exists; a declared harness skips all three. The
+    declared/undeclared fact is read from the TABLE (is_declared), the same
+    predicate build_pane_argv's generic arm and the UNDECLARED receipt below
+    read, so they can never disagree about a harness. PANE_HOSTABLE_PROVIDERS
+    stays the declared pane ROSTER (spawn defaults, probes); the roster gains
+    no member here."""
+    from fno.agents.harness_map import is_declared
+
+    if is_declared(provider):
+        return
+    if _UNDECLARED_HARNESS_TOKEN.fullmatch(provider) is None:
+        raise DispatchAskError(
+            f"harness {provider!r} is not a spawnable CLI binary name: it "
+            "must match ^[a-z][a-z0-9._-]{0,31}$ (a lowercase letter, then "
+            "lowercase letters, digits, dots, underscores or hyphens). "
+            "Refused before any PATH lookup or argv is composed.",
+            exit_code=2,
+        )
+    if shutil.which(provider) is None:
+        raise DispatchAskError(
+            f"harness {provider!r} resolved to no binary on PATH; a pane "
+            "spawn execs the CLI binary itself, so there is nothing to host",
+            exit_code=2,
+        )
+    for flag, value in (
+        ("--model", model),
+        ("--effort", effort),
+        ("--permission-mode", permission_mode),
+        ("--yolo", yolo),
+    ):
+        if value:
+            raise DispatchAskError(
+                f"{flag} is not available for harness {provider!r}: fno has "
+                "no capability row for it, so there is no measured mapping "
+                "to the vendor's own flag spelling. Pass the vendor's own "
+                "flag after '--' instead.",
+                exit_code=2,
+            )
+
+
 def dispatch_spawn_pane(
     name: str,
     message: str,
@@ -3482,6 +3658,10 @@ def dispatch_spawn_pane(
     split: Optional[str] = None,
     at: Optional[str] = None,
     tab: Optional[str] = None,
+    # Internal stable-id lane: bounded placement passes id:<n> after it has
+    # selected the tab itself. Not a user flag - the user surface is --tab.
+    tab_id: Optional[str] = None,
+    enforce_tab_capacity: bool = False,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     succession: bool = False,
@@ -3491,6 +3671,9 @@ def dispatch_spawn_pane(
     monitor: Optional[str] = None,
     route_provider: Optional[str] = None,
     provider_gate: object | None = None,
+    route_provider_id: Optional[str] = None,
+    model_name: Optional[str] = None,
+    account_record_id: Optional[str] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
     codex_sessions_dir: Optional[Path] = None,
     passthrough: Optional[Sequence[str]] = None,
@@ -3639,45 +3822,28 @@ def dispatch_spawn_pane(
     # approvals, so warn on every reachable path, not just the CLI seam.
     emit_env_scrub_warning(provider, permission_pinned=bool(permission_mode or yolo))
     validate_spawn_name(name)
-    from fno.agents.harness_map import is_declared
     # x-f579: undeclared has a lane - fno hosts the binary as a pane and is the
     # viewport (x-8f7f's agy observation, a pane host needs only an interactive
-    # argv, taken to its conclusion). The declared/undeclared fact is read from
-    # the TABLE (is_declared), the same predicate build_pane_argv's generic arm
-    # and the UNDECLARED receipt below read, so the three can never disagree
-    # about a harness. Three named refusals replace the old membership raise,
-    # each fail-closed before any pane exists; a declared harness skips all
-    # three and keeps today's path. PANE_HOSTABLE_PROVIDERS stays the declared
-    # pane ROSTER (spawn defaults, probes); the roster gains no member here.
-    if not is_declared(provider):
-        if _UNDECLARED_HARNESS_TOKEN.fullmatch(provider) is None:
+    # argv, taken to its conclusion). The named refusals live in
+    # validate_pane_provider, shared with the bounded wrapper so no lane can
+    # refuse them differently.
+    validate_pane_provider(
+        provider,
+        model=model,
+        effort=effort,
+        permission_mode=permission_mode,
+        yolo=yolo,
+    )
+    if tab_id is not None:
+        # The internal bounded-placement lane must hand the transport a stable
+        # id, never an ordinal: an ordinal resolves against live tab order and
+        # two concurrent placements can resolve the same ordinal differently.
+        stable_tab = tab_id.strip()
+        if not stable_tab.startswith("id:") or not stable_tab[3:].isdigit():
             raise DispatchAskError(
-                f"harness {provider!r} is not a spawnable CLI binary name: it "
-                "must match ^[a-z][a-z0-9._-]{0,31}$ (a lowercase letter, then "
-                "lowercase letters, digits, dots, underscores or hyphens). "
-                "Refused before any PATH lookup or argv is composed.",
+                "tab_id requires id:<stable-id>, not an ordinal or tab name",
                 exit_code=2,
             )
-        if shutil.which(provider) is None:
-            raise DispatchAskError(
-                f"harness {provider!r} resolved to no binary on PATH; a pane "
-                "spawn execs the CLI binary itself, so there is nothing to host",
-                exit_code=2,
-            )
-        for flag, value in (
-            ("--model", model),
-            ("--effort", effort),
-            ("--permission-mode", permission_mode),
-            ("--yolo", yolo),
-        ):
-            if value:
-                raise DispatchAskError(
-                    f"{flag} is not available for harness {provider!r}: fno has "
-                    "no capability row for it, so there is no measured mapping "
-                    "to the vendor's own flag spelling. Pass the vendor's own "
-                    "flag after '--' instead.",
-                    exit_code=2,
-                )
 
     codex_route = None
     if provider == "codex" and role is not None:
@@ -3887,6 +4053,10 @@ def dispatch_spawn_pane(
             # parser owns env identity for every reachable caller (no Python
             # env drift, AC1-ERR).
             placement_args += ["at", at]
+        if tab_id:
+            # The bounded-placement lane's stable id rides the same transport
+            # flag as a caller tab; the id: shape is enforced at the gate.
+            placement_args += ["--tab", tab_id.strip()]
         # Same reasoning as the spawn-clock stamp below, snapshotted first: a
         # sibling pane starting during the lock-wait or argv-build above would
         # otherwise widen the daemon oracle's candidate set. Gated to codex
@@ -3924,8 +4094,8 @@ def dispatch_spawn_pane(
         # Exact placement answers --json so the server authors the receipt
         # (anchor/direction/fallback); Python never synthesizes those from the
         # requested flags (AC1-UI). Legacy spawns keep the plain pane-id stdout.
-        exact = bool(at)
-        if exact:
+        json_receipt = bool(at or tab_id)
+        if json_receipt:
             run_args.append("--json")
         run_args += ["--", *wrapped]
         # x-42c5: pop FNO_SPAWN_TRIGGER BEFORE this env snapshot, mirroring the
@@ -4036,7 +4206,7 @@ def dispatch_spawn_pane(
                 "there is no daemon-PTY fallback)",
                 exit_code=1,
             )
-        elif exact:
+        elif json_receipt:
             try:
                 payload = json.loads((proc.stdout or "").strip().splitlines()[-1])
                 pane_id = int(payload["pane_id"])
@@ -4085,6 +4255,43 @@ def dispatch_spawn_pane(
                 )
 
         child_pid = _lookup_child_pid(session, pane_id, runner)
+        if tab_id or enforce_tab_capacity:
+            expected_tab_id = int(tab_id[3:]) if tab_id else None
+            try:
+                listed = _strict_json_list(
+                    ["mux", "pane", "ls", "--session", session, "--json"],
+                    runner,
+                    noun="pane listing",
+                )
+                if expected_tab_id is None:
+                    spawned_row = next(
+                        (item for item in listed if item.get("pane_id") == pane_id), None
+                    )
+                    expected_tab_id = (
+                        spawned_row.get("tab_id") if isinstance(spawned_row, dict) else None
+                    )
+                in_tab = [
+                    item for item in listed
+                    if isinstance(item, dict) and item.get("tab_id") == expected_tab_id
+                ]
+                placed = expected_tab_id is not None and any(
+                    item.get("pane_id") == pane_id for item in in_tab
+                )
+                if not placed or len(in_tab) > 4:
+                    reason = "wrong tab" if not placed else "fifth pane"
+                    raise DispatchAskError(
+                        f"bounded placement verification failed: {reason}", exit_code=1
+                    )
+            except DispatchAskError as exc:
+                reaped, detail = _reap_spawned_pane(session, pane_id, runner)
+                if reaped:
+                    raise DispatchAskError(
+                        f"{exc}; pane {pane_id} reaped, no registry row written",
+                        exit_code=1,
+                    ) from exc
+                raise DispatchAskError(
+                    f"{exc}; exact cleanup failed: {detail}", exit_code=1
+                ) from exc
         from fno.agents.spawn_gate import _process_start_time
 
         pid_start_time = _process_start_time(child_pid) if child_pid is not None else None
@@ -4682,6 +4889,9 @@ def dispatch_spawn_pane(
                     # session's ambient value.
                     node=(provenance or {}).get("FNO_NODE") or None,
                     fno_id=stored_session_uuid or name,
+                    route_provider_id=route_provider_id,
+                    model_name=model_name,
+                    account_record_id=account_record_id,
                 )
             if entry.crown_level is not None and entry.crown_scope:
                 from fno.king.state import arm_king_manifest
@@ -4987,6 +5197,8 @@ def dispatch_spawn_pane(
     # the two agree, and a test pins that. gemini and agy bind no session at all
     # and resolve to None rather than to either lie.
     bound_val = _resolve_bound(session_uuid, provider)
+    from fno.agents.harness_map import is_declared
+
     if not is_declared(provider):
         # x-f579 AC9: the receipt STATES the lane, so a caller reading only it
         # cannot infer a thread lane, steering, or `ask` that are not there, and
