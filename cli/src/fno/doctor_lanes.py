@@ -174,9 +174,8 @@ def read_memory_pressure(
         raw = exc.stdout or b""
     except (OSError, subprocess.SubprocessError) as exc:
         return None, f"memory_pressure failed: {exc}"
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", errors="replace")
-    match = _FREE_PCT_RE.search(raw)
+    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+    match = _FREE_PCT_RE.search(text)
     if match is None:
         return None, "memory_pressure produced no free-percentage line"
     return int(match.group(1)) / 100.0, None
@@ -224,7 +223,17 @@ def _memory_arm(sample: Optional[dict], macmon_reason: Optional[str]) -> ArmRead
     usage = mem.get("ram_usage")
     swap_total = mem.get("swap_total")
     swap_usage = mem.get("swap_usage")
-    if all(isinstance(v, (int, float)) for v in (total, usage, swap_total, swap_usage)):
+    numeric = all(
+        isinstance(v, (int, float))
+        for v in (total, usage, swap_total, swap_usage)
+    )
+    if (
+        numeric
+        and isinstance(total, (int, float))
+        and isinstance(usage, (int, float))
+        and isinstance(swap_total, (int, float))
+        and isinstance(swap_usage, (int, float))
+    ):
         if swap_total > 0:
             available = (total - usage) + (swap_total - swap_usage)
             return ArmReading(
@@ -316,13 +325,12 @@ def read_lanes(
     macmon_fn = macmon_fn or read_macmon
     sample, macmon_reason = macmon_fn()
     reading = LaneReading()
-    reading.arms.append(_spawn_load_arm())
-    reading.arms.append(_machine_cpu_arm(sample, macmon_reason))
-    reading.arms.append(_memory_arm(sample, macmon_reason))
-    reading.arms.append(_power_arm(sample, macmon_reason))
+    load_arm = _spawn_load_arm()
+    cpu_arm = _machine_cpu_arm(sample, macmon_reason)
+    mem_arm = _memory_arm(sample, macmon_reason)
+    power_arm = _power_arm(sample, macmon_reason)
+    reading.arms.extend([load_arm, cpu_arm, mem_arm, power_arm])
 
-    cpu_arm = reading.arm("whole-machine cpu")
-    mem_arm = reading.arm("memory")
     dark = [a for a in reading.arms if a.state == DARK]
     if cpu_arm.state == DARK or mem_arm.state == DARK:
         working = [a.name for a in reading.arms if a.state == MEASURED]
@@ -333,6 +341,7 @@ def read_lanes(
         )
         return reading
 
+    assert cpu_arm.value is not None and mem_arm.value is not None  # measured arms
     per_cpu, per_gb, rows, cost_source = _fleet_cost()
     busy = cpu_arm.value["busy_fraction"]
     capacity = cpu_arm.value["capacity_cores"]
@@ -350,7 +359,6 @@ def read_lanes(
     mem_fits = available_gb / per_gb
     answer = int(max(0.0, min(cpu_fits, mem_fits, float(LANE_ANSWER_CAP))))
 
-    load_arm = reading.arm("spawn load")
     if (
         isinstance(load_arm.value, dict)
         and load_arm.value.get("status") == "exceeded"
