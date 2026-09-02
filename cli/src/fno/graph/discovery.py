@@ -90,6 +90,7 @@ def candidates(
     entries: list[dict[str, Any]] | None = None,
     graph_path: Path | None = None,
     exclude_id: str | None = None,
+    token_cache: dict[str, frozenset[str]] | None = None,
 ) -> CandidateResults:
     """Union FTS5 and relatedness recall, ranked by relatedness score.
 
@@ -126,12 +127,10 @@ def candidates(
         degraded = True
         warning = str(exc)
 
-    related_rows = relatedness.similar_nodes(
-        incoming,
-        pool,
-        k=None,
-        floor=relatedness._MIN_SCORE,
-    )
+    related_kwargs: dict[str, Any] = {"k": None}
+    if token_cache is not None:
+        related_kwargs["token_cache"] = token_cache
+    related_rows = relatedness.similar_nodes(incoming, pool, **related_kwargs)
     related_by_id = {
         node_id: (score, reason)
         for node_id, score, reason in related_rows

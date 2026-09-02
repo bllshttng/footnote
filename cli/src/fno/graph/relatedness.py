@@ -337,7 +337,12 @@ def epic_candidates(
 
 
 def similar_nodes(
-    entry: Entry, entries: list[Entry], k: int = 3, *, floor: float | None = None
+    entry: Entry,
+    entries: list[Entry],
+    k: int = 3,
+    *,
+    floor: float | None = None,
+    token_cache: dict[str, frozenset[str]] | None = None,
 ) -> list[tuple[str, float, str]]:
     """Score ``entry`` against every live node for filing-time dedup, top-K.
 
@@ -360,7 +365,9 @@ def similar_nodes(
     implementation.
     """
     threshold = _DEDUP_MIN_SCORE if floor is None else floor
-    ta = _tokens(entry)
+    entry_id = entry.get("id")
+    cached_entry_tokens = token_cache.get(entry_id) if token_cache and isinstance(entry_id, str) else None
+    ta = cached_entry_tokens if cached_entry_tokens is not None else _tokens(entry)
     nid = entry.get("id")
     by_id = {
         e.get("id"): e
@@ -385,7 +392,14 @@ def similar_nodes(
             continue
         if e.get("status") == "superseded":
             continue
-        score, reason = _score(entry, e, ta, _tokens(e), include_epic=False)
+        candidate_id = e.get("id")
+        cached_candidate_tokens = (
+            token_cache.get(candidate_id)
+            if token_cache and isinstance(candidate_id, str)
+            else None
+        )
+        tb = cached_candidate_tokens if cached_candidate_tokens is not None else _tokens(e)
+        score, reason = _score(entry, e, ta, tb, include_epic=False)
         if score >= threshold:
             scored.append((eid, score, reason))
     scored.sort(key=lambda r: (-r[1], r[0]))

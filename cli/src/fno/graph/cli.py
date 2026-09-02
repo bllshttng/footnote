@@ -14837,7 +14837,7 @@ def cmd_discover(
     """
     from collections import Counter
 
-    from fno.graph import discovery
+    from fno.graph import discovery, relatedness
     from fno.graph.store import read_graph
 
     graph_path = _graph_path()
@@ -14853,6 +14853,11 @@ def cmd_discover(
         for entry in entries
         if entry.get("status") == "deferred" and entry.get("deferred_kind") != "expired"
     )
+    token_cache = {
+        entry["id"]: relatedness._tokens(entry)
+        for entry in entries
+        if isinstance(entry.get("id"), str)
+    }
 
     worklist: list[dict[str, Any]] = []
     degraded_warnings: list[str] = []
@@ -14864,6 +14869,7 @@ def cmd_discover(
             graph_path=graph_path,
             exclude_id=entry.get("id") if isinstance(entry.get("id"), str) else None,
             limit=limit,
+            token_cache=token_cache,
         )
         if result.degraded and result.warning and result.warning not in degraded_warnings:
             degraded_warnings.append(result.warning)
