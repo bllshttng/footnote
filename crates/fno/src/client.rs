@@ -39,6 +39,7 @@ use crate::proto::{
     PlacementFallback, ProtoError, ServerMsg, SquadMeta, TabMeta, BUILD_VERSION, MAX_MAIL_TEXT,
     MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
 };
+use crate::sideline_color;
 use crate::theme::Theme;
 use crate::tree::{Axis, Dir, Rect, TabId};
 use crate::view_store::{
@@ -8226,7 +8227,20 @@ impl View {
                     if a.external && st != LatticeState::Blocked {
                         flags |= cell_flags::DIM;
                     }
-                    (table_row_text(a, layout, depth, now), flags, style.fg)
+                    // (x-1b35) Same lane-color cascade as the compact arm; the
+                    // Blocked accent wins there and here.
+                    let lane_fg = if st == LatticeState::Blocked {
+                        style.fg
+                    } else {
+                        sideline_color::resolve_lane_color(
+                            a.harness.as_deref(),
+                            a.model.as_deref(),
+                            a.route.as_deref(),
+                            a.account.as_deref(),
+                        )
+                        .unwrap_or(style.fg)
+                    };
+                    (table_row_text(a, layout, depth, now), flags, lane_fg)
                 }
                 DisplayRow::Agent(a) => {
                     // The unified icon lattice (x-df4c): exit beats badge beats
@@ -8248,15 +8262,23 @@ impl View {
                     } else {
                         ' '
                     };
-                    // (x-c914) The account glyph leads the truncatable text (right
-                    // after the fixed mark+glyph prefix) so a long agent name or a
-                    // narrow sideline never truncates the billing badge away (codex
-                    // P2). Absent for the default account.
+                    // (x-1b35) The `@<account>` text prefix is retired from the
+                    // row: the account is an incidental stand-in for the LANE,
+                    // and the lane now renders as zero-width color (x-c914's
+                    // account glyph logic lives in the peek header, which keeps
+                    // its own account surfacing).
                     let dnd = if a.dnd { " [DND]" } else { "" };
-                    let mut text = match a.account.as_deref() {
-                        Some(acct) => format!(" {mark}{glyph}{dnd} @{acct} {}", a.name),
-                        None => format!(" {mark}{glyph}{dnd} {}", a.name),
-                    };
+                    let mut text = format!(" {mark}{glyph}{dnd} {}", a.name);
+                    // (x-1b35) The model-deviation token: a dim short prefix on
+                    // rows OFF their harness's default lane (claude on glm
+                    // renders ` glm`; claude on opus renders nothing). The
+                    // textual channel for the lane color - accessibility and
+                    // grep-ability in one.
+                    if let Some(tok) =
+                        sideline_color::deviation_token(a.harness.as_deref(), a.model.as_deref())
+                    {
+                        text.push_str(&format!(" {tok}"));
+                    }
                     // (x-132c) Indent the row under its lineage parent: one
                     // step per depth, read from the compose-pass depth vec.
                     // Zero steps -> no prefix -> a section with no parent
@@ -8317,7 +8339,22 @@ impl View {
                     if a.external && st != LatticeState::Blocked {
                         flags |= cell_flags::DIM;
                     }
-                    (text, flags, style.fg)
+                    // (x-1b35) The lane color: zero width, keyed on the ROUTE
+                    // through the fixed cascade (routing row > model > route >
+                    // harness > built-in). A Blocked row keeps the lattice
+                    // accent - attention is never re-colored.
+                    let lane_fg = if st == LatticeState::Blocked {
+                        style.fg
+                    } else {
+                        sideline_color::resolve_lane_color(
+                            a.harness.as_deref(),
+                            a.model.as_deref(),
+                            a.route.as_deref(),
+                            a.account.as_deref(),
+                        )
+                        .unwrap_or(style.fg)
+                    };
+                    (text, flags, lane_fg)
                 }
                 DisplayRow::Card(c) => {
                     // The same icon lattice as the agent rows (x-df4c US3): a
@@ -10585,10 +10622,15 @@ fn humanize_age(secs: Option<u64>) -> String {
 /// remain empty because no honest value exists for those cells.
 fn table_row_text(a: &AgentRow, layout: TableLayout, depth: usize, now_secs: u64) -> String {
     let glyph = lattice_glyph(agent_lattice_state(a)).0;
+    // (x-1b35) The deviation token rides the agent cell (pad absorbs the few
+    // chars), matching the compact arm's vocabulary.
+    let token = sideline_color::deviation_token(a.harness.as_deref(), a.model.as_deref())
+        .map(|t| format!(" {t}"))
+        .unwrap_or_default();
     let name = if depth == 0 {
-        a.name.clone()
+        format!("{}{token}", a.name)
     } else {
-        format!("{}{name}", "  ".repeat(depth), name = a.name)
+        format!("{}{name}{token}", "  ".repeat(depth), name = a.name)
     };
     let mut out = pad_cols(&format!("{glyph} "), layout.status.width as usize);
     out.push_str(&pad_cols(&name, layout.agent.width as usize));
@@ -18162,6 +18204,53 @@ mod tests {
             no_pane_reason: None,
             pane_activity: None,
         }
+    }
+
+    #[test]
+    fn sideline_lane_color_and_deviation_token_render_on_the_row() {
+        // x-1b35 AC3: the lane renders as zero-width color on the agent row
+        // (here through the built-in codex table entry), the model-deviation
+        // token appends ` glm` on a claude row OFF its default lane, and the
+        // retired `@<account>` text prefix is gone from the composition.
+        let mut view = two_pane_view();
+        let mut codex_row = focus_agent(21);
+        codex_row.harness = Some("codex".into());
+        let mut glm_row = focus_agent(22);
+        glm_row.harness = Some("claude".into());
+        glm_row.model = Some("glm-5.3-flash[1m]".into());
+        glm_row.account = Some("makers".into());
+        view.layout.agents.push(codex_row);
+        view.layout.agents.push(glm_row);
+        let frame = view.compose();
+        let cols = frame.cols as usize;
+        let panel_w = view.panel_w() as usize;
+        let line = |row: usize| -> (String, Color) {
+            let start = row * cols;
+            let end = start + panel_w.min(cols);
+            let text: String = frame.cells[start..end].iter().map(|c| c.c).collect();
+            // A name cell, not the row lead: the focused row's band and the
+            // selector own the first columns.
+            let fg = frame.cells[start + 3].fg;
+            (text, fg)
+        };
+        // Row 1: the codex row - lane color from the built-in table (blue),
+        // no account prefix.
+        let (text, fg) = line(1);
+        assert_eq!(fg, Color::Indexed(4), "builtin codex lane color");
+        assert!(
+            !text.contains('@'),
+            "the @account prefix is retired: `{text}`"
+        );
+        // Row 2: the claude/glm row - the deviation token is the textual
+        // channel; claude itself carries no builtin color, so fg stays
+        // default and the token does the naming.
+        let (text, fg) = line(2);
+        assert!(
+            text.contains(" glm"),
+            "the deviation token renders: `{text}`"
+        );
+        assert!(!text.contains("@makers"), "no @account prefix: `{text}`");
+        assert_eq!(fg, Color::Default, "claude carries no builtin lane color");
     }
 
     #[test]
