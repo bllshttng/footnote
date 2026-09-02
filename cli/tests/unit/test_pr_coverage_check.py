@@ -2741,6 +2741,84 @@ def test_recorded_scoped_waiver_covers_only_its_head(
     assert "HEAD is eeeeeeee" in refusal
 
 
+def _seed_waiver_law_row(
+    subject, decision_id, *, decision, authority_source, ts="2026-08-29T00:00:00Z"
+):
+    """One live law-lane row at an exact subject, in the sandboxed index."""
+    from fno import paths
+
+    paths.decisions_jsonl().parent.mkdir(parents=True, exist_ok=True)
+    paths.decisions_jsonl().open("a", encoding="utf-8").write(
+        json.dumps(
+            {
+                "type": "operator_decision",
+                "ts": ts,
+                "data": {
+                    "decision_id": decision_id,
+                    "decision": decision,
+                    "subject": subject,
+                    "authority_source": authority_source,
+                },
+            }
+        )
+        + "\n"
+    )
+
+
+def test_a_chat_attested_waiver_row_is_not_authority(monkeypatch, tmp_path):
+    """The law door is open to any harness-descended process, so a
+    chat_attested row cannot carry the person-at-a-terminal fact a waiver
+    asserts - even when its decision text matches WAIVER_DECISION exactly.
+    The gate reads a clean no and the merge verdict stays REFUSED."""
+    subject = _coverage_gate.scoped_waiver_subject("acme/widgets", 42, WAIVE_HEAD)
+    _seed_waiver_law_row(
+        subject,
+        "d-agent001",
+        decision=_coverage_gate.WAIVER_DECISION,
+        authority_source="chat_attested",
+    )
+    assert _coverage_gate.law_authority(subject) == ("none", "")
+
+    # End to end: the forged-looking row opens nothing.
+    _specimen_gates(monkeypatch)
+    _seed_row(tmp_path, coverage="uncovered", count=0, head=WAIVE_HEAD)
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: WAIVE_HEAD)
+    monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+
+
+def test_an_agent_row_cannot_muddy_an_operator_waiver(monkeypatch, tmp_path):
+    """The filter runs BEFORE the conflict count: an operator's real waiver
+    beside an agent's chat_attested noise still reads single, so an agent
+    cannot muddle a reachable operator exit into unknown authority."""
+    subject = _coverage_gate.scoped_waiver_subject("acme/widgets", 42, WAIVE_HEAD)
+    _seed_waiver_law_row(
+        subject,
+        "d-opera001",
+        decision=_coverage_gate.WAIVER_DECISION,
+        authority_source="operator",
+    )
+    _seed_waiver_law_row(
+        subject,
+        "d-agent002",
+        decision=_coverage_gate.WAIVER_DECISION,
+        authority_source="chat_attested",
+    )
+    assert _coverage_gate.law_authority(subject) == ("single", "")
+
+
+def test_waiver_subjects_are_one_spelling_across_decide_and_the_gate():
+    """The write guard keys on fno.decide's prefix; the gate keys on its own
+    standing subject. Two spellings of one family is two drift traps unless a
+    test holds them equal."""
+    from fno.decide import WAIVER_SUBJECT_PREFIX
+
+    assert WAIVER_SUBJECT_PREFIX == _coverage_gate.STANDING_WAIVER_SUBJECT
+
+
 def test_standing_law_waives_an_uncovered_head_on_the_real_merge(
     enabled, live_head, monkeypatch, capsys, tmp_path  # noqa: F811
 ):
