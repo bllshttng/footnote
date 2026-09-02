@@ -250,6 +250,7 @@ def _score(
     tb: frozenset[str],
     *,
     include_epic: bool = True,
+    minimum: float = _MIN_SCORE,
 ) -> tuple[float, str]:
     """Combined relatedness score for a pair + a one-line reason. 0 => drop.
 
@@ -279,9 +280,28 @@ def _score(
             combined += _EPIC_BONUS
             reasons.append(f"same epic ({ea})")
 
-    if combined < _MIN_SCORE:
+    if combined < minimum:
         return 0.0, ""
     return round(combined, 4), "; ".join(reasons)
+
+
+def score_pair(
+    a: Entry, b: Entry, *, include_epic: bool = False
+) -> tuple[float, str]:
+    """Return the raw relatedness score without applying a caller's floor.
+
+    Filing keeps ``_DEDUP_MIN_SCORE``.  Discovery needs the measured score for
+    an FTS-only hit even when that score falls below the filing floor, so this
+    public seam shares the same token and bonus logic without retuning it.
+    """
+    return _score(
+        a,
+        b,
+        _tokens(a),
+        _tokens(b),
+        include_epic=include_epic,
+        minimum=0.0,
+    )
 
 
 # An epic in one of these states is no longer a rollup target.
