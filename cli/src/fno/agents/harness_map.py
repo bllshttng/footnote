@@ -455,7 +455,58 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
         )
     for harness, caps in harnesses.items():
         _validate_row(harness, caps)
+    _validate_probe_decls(root.get("probe"))
     return version, harnesses
+
+
+#: The three ways a probe declaration says a field can be settled, kept
+#: identical to the Rust validator's PROBE_KINDS.
+_PROBE_KINDS = {"declared", "behavioral", "unprobeable"}
+
+
+def _validate_probe_decls(probe: object) -> None:
+    """Validate the ``[probe.*]`` instrument declarations (x-244c): a kind
+    may carry only the fields its instrument needs, and a declared pattern
+    must compile. A declaration IS an instrument spec; a spec that cannot
+    run is a guess with extra steps."""
+    if probe is None:
+        return
+    if not isinstance(probe, dict):
+        raise DispatchResolveError("harness capability contract probe table is not a table")
+    for field, decl in probe.items():
+        if not isinstance(decl, dict) or decl.get("kind") not in _PROBE_KINDS:
+            raise _contract_error(field, "probe.kind", "unknown kind")
+        kind = decl["kind"]
+        need = {
+            "declared": ("authority", "pattern"),
+            "behavioral": ("marker",),
+            "unprobeable": ("reason",),
+        }[kind]
+        forbid = {
+            "declared": ("marker", "reason"),
+            "behavioral": ("authority", "pattern", "reason"),
+            "unprobeable": ("authority", "pattern", "marker"),
+        }[kind]
+        for key in need:
+            if not str(decl.get(key) or "").strip():
+                raise _contract_error(field, f"probe.{key}", f"kind {kind!r} needs {key}")
+        for key in forbid:
+            if str(decl.get(key) or "").strip():
+                raise _contract_error(
+                    field, f"probe.{key}", f"kind {kind!r} must not carry {key}"
+                )
+        if kind == "declared":
+            try:
+                re.compile(decl["pattern"])
+            except re.error as exc:
+                raise _contract_error(field, "probe.pattern", f"invalid pattern: {exc}") from exc
+
+
+def probe_declarations() -> dict[str, dict]:
+    """The ``[probe.*]`` instrument table: how each named field can be
+    settled. A field absent from it is UNDECLARED, and the probe reports it
+    as such instead of guessing an instrument."""
+    return deepcopy(_PROBE_DECLS)
 
 
 def normalize_command(command: str, harness: str) -> str:
@@ -591,9 +642,11 @@ class DispatchResolveError(ValueError):
     so the failure is loud and actionable (AC1-ERR)."""
 
 
-MAP_VERSION, _BUNDLED_CAPS = parse_capability_contract(
+_PACKAGED_CONTRACT_TEXT = (
     files("fno.agents").joinpath("harness_capabilities.toml").read_text(encoding="utf-8")
 )
+MAP_VERSION, _BUNDLED_CAPS = parse_capability_contract(_PACKAGED_CONTRACT_TEXT)
+_PROBE_DECLS: dict[str, dict] = tomllib.loads(_PACKAGED_CONTRACT_TEXT).get("probe") or {}
 # Non-empty subset of the complete roster, mirroring parse_capability_contract:
 # the roster (KNOWN_HARNESSES) is wider than the capability table on purpose.
 assert _BUNDLED_CAPS and set(_BUNDLED_CAPS) <= set(KNOWN_HARNESSES)

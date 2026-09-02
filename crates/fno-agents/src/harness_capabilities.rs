@@ -36,6 +36,12 @@ const STOP_STRATEGIES: [&str; 2] = ["claude-short-id", "registry-noop"];
 /// cannot disagree about which contracts are legal.
 const LOOP_PARTICIPATION: [&str; 3] = ["native", "extension", "none"];
 const REMOVE_STRATEGIES: [&str; 3] = ["claude-short-id", "codex-session-index", "registry-only"];
+/// How a probe declaration says a field can be settled. `declared`: the
+/// vendor states it about its own interface (help/version), and reading that
+/// is not inference. `behavioral`: only a scratch-PTY run checking a
+/// vendor-produced state marker settles it. `unprobeable`: no authority and
+/// no marker, and the declaration must say why.
+const PROBE_KINDS: [&str; 3] = ["declared", "behavioral", "unprobeable"];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("harness capability contract: {0}")]
@@ -46,6 +52,30 @@ pub struct ContractError(String);
 pub struct HarnessContract {
     pub map_version: u32,
     pub harness: BTreeMap<String, HarnessCapabilities>,
+    /// HOW each named field can be settled (x-244c), keyed by field path.
+    /// `declared` carries an authority command (`{bin}` = the harness's own
+    /// binary) plus the pattern that settles it in the authority's output;
+    /// `behavioral` carries the vendor-produced marker a scratch-PTY run
+    /// must read; `unprobeable` carries the reason no one-shot probe exists.
+    /// A field ABSENT from this table is UNDECLARED, and the probe reports
+    /// it as such instead of guessing an instrument.
+    #[serde(default)]
+    pub probe: BTreeMap<String, ProbeDecl>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProbeDecl {
+    /// One of [`PROBE_KINDS`].
+    pub kind: String,
+    #[serde(default)]
+    pub authority: String,
+    #[serde(default)]
+    pub pattern: String,
+    #[serde(default)]
+    pub marker: String,
+    #[serde(default)]
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -206,6 +236,9 @@ impl HarnessContract {
         }
         for (harness, caps) in &self.harness {
             validate_row(harness, caps)?;
+        }
+        for (field, decl) in &self.probe {
+            validate_probe_decl(field, decl)?;
         }
         Ok(())
     }
@@ -506,6 +539,49 @@ fn validate_model_switch_strategy(
 /// The per-harness half of [`HarnessContract::validate`], extracted so an
 /// override reader can gate ONE merged candidate row through the same
 /// contract the bundled table ships under (x-244c).
+/// A probe declaration may carry only the instrument its kind names, and a
+/// declared pattern must compile: the declaration IS an instrument spec, and
+/// a spec that cannot run is a guess with extra steps.
+fn validate_probe_decl(field: &str, decl: &ProbeDecl) -> Result<(), ContractError> {
+    if !PROBE_KINDS.contains(&decl.kind.as_str()) {
+        return Err(ContractError(format!(
+            "probe {field:?}: unknown kind {:?}",
+            decl.kind
+        )));
+    }
+    let (need, forbid): (&[&str], &[&str]) = match decl.kind.as_str() {
+        "declared" => (&["authority", "pattern"], &["marker", "reason"]),
+        "behavioral" => (&["marker"], &["authority", "pattern", "reason"]),
+        _ => (&["reason"], &["authority", "pattern", "marker"]),
+    };
+    let get = |name: &str| match name {
+        "authority" => decl.authority.as_str(),
+        "pattern" => decl.pattern.as_str(),
+        "marker" => decl.marker.as_str(),
+        _ => decl.reason.as_str(),
+    };
+    if let Some(missing) = need.iter().find(|name| get(name).is_empty()) {
+        return Err(ContractError(format!(
+            "probe {field:?}: kind {:?} needs {missing}",
+            decl.kind
+        )));
+    }
+    if let Some(extra) = forbid.iter().find(|name| !get(name).is_empty()) {
+        return Err(ContractError(format!(
+            "probe {field:?}: kind {:?} must not carry {extra}",
+            decl.kind
+        )));
+    }
+    if decl.kind == "declared" {
+        if let Err(error) = Regex::new(&decl.pattern) {
+            return Err(ContractError(format!(
+                "probe {field:?}: invalid pattern: {error}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), ContractError> {
     let allowed_keys: BTreeSet<&str> = [
         "1", "2", "3", "4", "5", "6", "7", "8", "9", "enter", "left", "right", "up", "down",
