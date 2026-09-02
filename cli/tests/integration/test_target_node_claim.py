@@ -42,6 +42,15 @@ fi
 if [[ "$1" == "backlog" && "$2" == "get" ]]; then
   exec python3 "$MOCK_ABI_SHIM" "${@:2}"
 fi
+# The owned-identity verb: a test that pins the refusal wording controls the
+# KEY=value answer here (empty by default, which reads as the stale-fno
+# fail-open path).
+if [[ "$1" == "do" && "$2" == "target" && "$3" == "resolve-owned-identity" ]]; then
+  if [[ -n "${MOCK_ABI_OWNED_OUT:-}" ]]; then
+    printf '%s\n' "$MOCK_ABI_OWNED_OUT"
+  fi
+  exit 0
+fi
 # The graph lock stamp is the one call whose EFFECT a test asserts, so swallowing
 # it as a bare success would hollow out the identity assertion. Delegate to the
 # real writer under the pinned python3; the shim exposes graph.cli directly, so
@@ -155,6 +164,47 @@ def test_node_without_proven_harness_identity_does_not_claim(tmp_path):
     assert "target_claim_blocked_reason: holder_unattributable" in state
     assert "claim acquire" not in log.read_text()
     assert 'target_claim_key: "node:' not in state
+
+
+def test_held_session_id_refusal_names_the_holding_row(tmp_path):
+    """A live row holding the candidate id is contention WITH a name, so the
+    blocked reason must say held, not unattributable - the two demand
+    opposite remedies (wait for the row vs prove an identity)."""
+    repo, home, log, env = _sandbox(tmp_path)
+    env["MOCK_ABI_ACQUIRE_RC"] = "0"
+    env["MOCK_ABI_OWNED_OUT"] = (
+        "HARNESS=\nSESSION_ID=\nDISPOSITION=ambiguous\nCOLLISION=row-theirs"
+    )
+    env.pop("TARGET_SESSION_ID", None)
+    env.pop("CODEX_THREAD_ID", None)
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
+    result = _run_init(repo, env)
+    state = _state(repo)
+    assert result.returncode == 0, result.stderr
+    assert "target_claim_blocked_reason: session_id_held_by_live_row" in state, state
+    assert "target_claim_blocked_reason: holder_unattributable" not in state, state
+    assert "row-theirs" in result.stderr
+    assert "claim acquire" not in log.read_text()
+
+
+def test_self_blind_refusal_says_the_session_cannot_see_itself(tmp_path):
+    """No live row holds the id and nothing was proven: the refusal is about
+    this session's own blindness, and the trace line must say so instead of
+    implying someone else holds the node."""
+    repo, home, log, env = _sandbox(tmp_path)
+    env["MOCK_ABI_ACQUIRE_RC"] = "0"
+    env["MOCK_ABI_OWNED_OUT"] = (
+        "HARNESS=\nSESSION_ID=\nDISPOSITION=ambiguous\nCOLLISION="
+    )
+    env.pop("TARGET_SESSION_ID", None)
+    env.pop("CODEX_THREAD_ID", None)
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
+    result = _run_init(repo, env)
+    state = _state(repo)
+    assert result.returncode == 0, result.stderr
+    assert "target_claim_blocked_reason: holder_unattributable" in state, state
+    assert "cannot see itself" in result.stderr
+    assert "claim acquire" not in log.read_text()
 
 
 def test_codex_thread_identity_aligns_manifest_graph_and_claim(tmp_path):

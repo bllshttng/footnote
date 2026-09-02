@@ -1057,6 +1057,8 @@ EOF
   # (that id is absent from _HARNESS_SESSION); this line is the durable trace.
   if [[ -n "$_OWNED_COLLISION" ]]; then
     echo "[init-target-state] refused harness_session_id owned by live row '$_OWNED_COLLISION'; resolved harness='${PROVIDER}' disposition='${_OWNED_DISP:-legacy}'" >&2
+  elif [[ "${_OWNED_DISP:-}" == "ambiguous" ]]; then
+    echo "[init-target-state] no live row holds the candidate id and no harness session was proven (disposition='ambiguous'): this session cannot see itself, so no identity was attributed" >&2
   fi
 
   # ── Mission context ───────────────────────────────────────────────
@@ -1400,8 +1402,16 @@ PYEOF
     # Not the user-cancel sentinel: an identity refusal is not a user cancel,
     # and under worktree.policy=never the shared .fno would cancel a
     # concurrently live in-place session for another node.
-    echo "target_claim_blocked_reason: holder_unattributable" >> "$STATE_FILE"
-    echo "target: REFUSED: node $_NODE_ID has no proven harness session; final worker claim was not written" >&2
+    # Two states, two words: a named live row is contention with a remedy
+    # (wait for the row), an unnamed one is this session's own blindness
+    # (prove an identity). One word reading as both is how the defect read.
+    if [[ -n "$_OWNED_COLLISION" ]]; then
+      echo "target_claim_blocked_reason: session_id_held_by_live_row" >> "$STATE_FILE"
+      echo "target: REFUSED: harness session id held by live row '$_OWNED_COLLISION'; final worker claim was not written" >&2
+    else
+      echo "target_claim_blocked_reason: holder_unattributable" >> "$STATE_FILE"
+      echo "target: REFUSED: node $_NODE_ID has no proven harness session; final worker claim was not written" >&2
+    fi
   fi
 
   if [[ -n "$_NODE_ID" && -n "$claim_owner_id" ]]; then
