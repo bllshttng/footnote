@@ -339,6 +339,8 @@ doctor evals report	T1	doctor evals report	1
 doctor evals run	T1	doctor evals run	3
 doctor event audit	T1	doctor event audit	5
 doctor event emit	T1	doctor event emit	37
+doctor event find	T1	doctor event find	0
+event find	T1	event find	0
 doctor event fanout tick	T1	doctor event fanout tick	0
 doctor event gate-escape	T1	doctor event gate-escape	2
 doctor event gc	T1	doctor event gc	4

@@ -1984,8 +1984,14 @@ fn member_evidence() -> crate::squad_store::MemberEvidence {
             }
         }
     }
-    if let Ok(raw) = std::fs::read_to_string(registry_path.with_file_name("events.jsonl")) {
-        for line in raw.lines() {
+    // (x-6b0b) The same segmented journal read the server sweep uses: a
+    // death marker rotated out of the live file is still a marker. This
+    // evidence gates the sweep modal and the CLI apply, so it must agree
+    // with the server sweep's view of the same durable rows.
+    let (journal_raw, _) =
+        crate::server::read_journal_text_at(&registry_path.with_file_name("events.jsonl"));
+    {
+        for line in journal_raw.lines() {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
                 continue;
             };
@@ -2017,6 +2023,12 @@ fn member_evidence() -> crate::squad_store::MemberEvidence {
             ) {
                 evidence.add_dead_pair(harness, value);
             }
+        }
+        // The never-bound name set rides the same walk: a member with no
+        // harness and no session id has no pair to match, and its removal
+        // marker is the one identity it will ever have.
+        for name in crate::server::parse_never_bound_removals(&journal_raw).into_keys() {
+            evidence.add_dead_name(name);
         }
     }
     if complete_empty {

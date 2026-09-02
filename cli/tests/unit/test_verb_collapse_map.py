@@ -77,11 +77,11 @@ def test_map_covers_current_surface_once():
     # session-history reader: 549 lines minus the header = 548 + 1 = 549.
     # The resource-meter branch adds `doctor lanes`, the whole-machine lane
     # advisor (hidden, per the new-verb convention): 549 -> 550.
-    # Counted from the merged file at this branch's second main fold-in:
-    # main's sigma-row removal landed on the capability-probe tree, so the
-    # merged TSV holds 552 data rows (553 before the removal, 552 after).
+    # Counted from the merged file at this branch's third main fold-in:
+    # main's event-query allocation (+2) landed on the sigma-trimmed tree,
+    # so the merged TSV holds 554 data rows (552 before, 554 after).
     # The pin is the counted number, never either side's stale one.
-    assert len(mapped) == 552, (
+    assert len(mapped) == 554, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

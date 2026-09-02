@@ -536,6 +536,37 @@ def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
     return substrate == "pane"
 
 
+def _is_keeper_thread_spawn(verb: str, args: Sequence[str]) -> bool:
+    """True for a ``spawn`` on the ``thread`` substrate naming a keeper-lane
+    harness (x-fd31 review round 1).
+
+    The Rust client's thread match handles claude/codex/opencode and refuses
+    every other name, while the keeper arms (``_lane_b_thread_spawn``: pi,
+    cursor-agent, grok) live only in the Python dispatch. Without this
+    carve-out an installed binary answers a working lane with "fno has not
+    built this harness's keeper lane spawn arm yet". The substrate scan
+    mirrors :func:`_is_pane_substrate_spawn` (absent = pane; the headless
+    spellings opt out; the scans stop at ``--argv`` and a bare ``--``), and
+    a headless spawn of these harnesses is NOT carved out: its honest
+    refusal is the stance check the Python seam runs.
+    """
+    if verb != "spawn":
+        return False
+    harness = (_spawn_flag_value(args, "--harness", "-H") or "").strip().lower()
+    if harness not in _KEEPER_THREAD_HARNESSES:
+        return False
+    it = iter(_args_before_argv(args))
+    substrate = "pane"
+    for a in it:
+        if a in ("--once", "-o", "--headless", "-p"):
+            return False
+        if a == "--substrate":
+            substrate = next(it, "")
+        elif a.startswith("--substrate="):
+            substrate = a.split("=", 1)[1]
+    return substrate == "thread"
+
+
 def _args_before_argv(args: Sequence[str]) -> Sequence[str]:
     """The fno-arg head, stopping at the ``--argv`` provider-payload boundary
     and at a bare ``--`` seed fence.
@@ -585,6 +616,16 @@ def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     if verb != "spawn":
         return False
     return _has_flag(args, longs=("--role",))
+
+
+#: The keeper-lane harnesses whose thread spawn arm lives in the Python
+#: dispatch (``_lane_b_thread_spawn``) and nowhere in the Rust client: the
+#: client's thread match handles claude/codex/opencode and refuses every
+#: other name, so a keeper thread spawn that auto-routed would exit 2 with
+#: "fno has not built this harness's keeper lane spawn arm yet" - a false
+#: statement the moment the Python arm ships. Kept in sync with the rows by
+#: a parity test, like the client.rs verb list.
+_KEEPER_THREAD_HARNESSES = ("pi", "cursor-agent", "grok")
 
 
 def _has_flag(
@@ -724,17 +765,16 @@ _ROUTE_NAMING_FLAGS = ("--route", "--provider", "-P", "--account")
 
 
 def _spawn_flag_value(args: Sequence[str], *names: str) -> Optional[str]:
-    """The value of the first of ``names`` present in ``args`` (``--f v`` or
-    ``--f=v``), or None. Scans only the fno-arg head, like every other flag scan
-    here, so a payload token can never masquerade as our flag."""
-    head = list(_args_before_argv(args))
-    for i, a in enumerate(head):
-        if a in names:
-            return head[i + 1] if i + 1 < len(head) else ""
-        for n in names:
-            if a.startswith(f"{n}="):
-                return a.split("=", 1)[1]
-    return None
+    """The value of the first of ``names`` present in ``args`` (``--f v``,
+    ``--f=v``, or the glued short ``-Hv``), or None. Scans only the fno-arg
+    head, like every other flag scan here, so a payload token can never
+    masquerade as our flag. Delegates to the ONE value-flag scanner
+    (:func:`fno.agents.spawn_defaults._flag_value`): a local copy here missed
+    the glued short form, so ``-Hgrok`` routed to the Rust client, whose own
+    parser matches ``-H`` as an exact token only."""
+    from fno.agents.spawn_defaults import _flag_value
+
+    return _flag_value(args, *names)
 
 
 def inherited_tier_remap(
@@ -1326,6 +1366,7 @@ def make_agents_group_cls() -> type:
                     or _is_monitor_bearing_spawn(verb, args)
                     or _is_route_bearing_spawn(verb, args)
                     or _is_pane_substrate_spawn(verb, args)
+                    or _is_keeper_thread_spawn(verb, args)
                     or _is_provenance_bearing_spawn(verb, args)
                     or _is_resume_bearing_spawn(verb, args)
                     or _is_output_format_bearing_spawn(verb, args)

@@ -5526,7 +5526,7 @@ def test_reap_receipt_is_built_from_the_row_with_the_capability_table_resume(
 
 
 def test_reap_receipt_names_the_harness_with_no_capability_row(monkeypatch, tmp_path):
-    """grok ships a readiness manifest, not a capability row: no declared
+    """hermes ships a readiness manifest, not a capability row: no declared
     resume form, so the receipt cannot be built and the row never reaps."""
     import fno.agents.registry as registry_mod
     import fno.paths as paths_mod
@@ -5534,7 +5534,7 @@ def test_reap_receipt_names_the_harness_with_no_capability_row(monkeypatch, tmp_
     monkeypatch.setattr(
         registry_mod,
         "load_registry",
-        lambda path=None: [_receipt_row(harness="grok")],
+        lambda path=None: [_receipt_row(harness="hermes")],
     )
     monkeypatch.setattr(paths_mod, "agents_registry_path", lambda: tmp_path / "reg.json")
     monkeypatch.setattr(paths_mod, "agents_home_dir", lambda: tmp_path)
@@ -5543,7 +5543,7 @@ def test_reap_receipt_names_the_harness_with_no_capability_row(monkeypatch, tmp_
     ok, detail = watchdog._persist_reap_receipt("king-mux")
 
     assert not ok
-    assert "grok" in detail
+    assert "hermes" in detail
 
 
 def test_apply_reap_refuses_when_the_receipt_cannot_be_staged(monkeypatch):

@@ -224,7 +224,8 @@ def test_bg_permission_mode_non_claude_fails_closed(runner, monkeypatch):
          "--permission-mode", "acceptEdits"],
     )
     assert result.exit_code == 2
-    assert "not supported" in result.output and "pane" in result.output
+    assert "not supported" in result.output and "-Y" in result.output
+    assert "use --substrate pane" not in result.output
 
 
 def test_bg_permission_mode_claude_honored_via_python(runner, monkeypatch):

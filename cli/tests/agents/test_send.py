@@ -1961,6 +1961,7 @@ def test_dispatch_send_events_carry_context_envelope(tmp_path: Path, monkeypatch
         assert payload.get("from_name") == "tester", (
             f"agent_send_{label} from_name mismatch: {payload.get('from_name')!r}"
         )
+        assert payload.get("to_session_id") == "abcd1234-1111-7222-8333-444455556666"
 
     # started and done must share the same request_id
     import re

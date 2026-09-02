@@ -1806,10 +1806,15 @@ def cmd_spawn(
     # hardcode their own bypass and can't express a mapped mode. The pane
     # substrate maps every provider, so it's exempt here. (x-dfa4)
     if permission_mode is not None and harness != "claude" and (substrate != "pane" or once):
+        remedy = (
+            "drop --permission-mode and pass -Y/--yolo"
+            if harness == "codex"
+            else "use --substrate pane"
+        )
         print(
             f"--permission-mode is not supported for harness {harness!r} on "
             "--substrate bg/headless (its one-shot lane hardcodes its own bypass "
-            "form); use --substrate pane",
+            f"form); {remedy}",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)

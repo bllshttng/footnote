@@ -1394,9 +1394,9 @@ def history(
     """Read config-write receipts from the global and project journals."""
     import json
 
-    from fno.paths import global_events_json, project_events_json
+    from fno.paths import event_journals
 
-    journal_paths = [global_events_json(), project_events_json()]
+    journal_paths = event_journals()
     rows: list[dict[str, Any]] = []
     for journal_path in journal_paths:
         # Bounded per file: the newest `limit` matching rows of one journal

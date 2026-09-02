@@ -184,7 +184,7 @@ has  "subdir worktree'd" "$err6" "auto-worktree: $TMP/conductor/workspaces/myrep
 #    /target prefix (the Codex P1 fix). A non-slash message still isolates, and
 #    these workers have no location gate to fail safe on.
 out7="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-codex-build" \
-  --provider codex --payload-mode build --node "x-cdx" \
+  --provider codex --yolo --payload-mode build --node "x-cdx" \
   --message "Implement backlog node x-cdx following AGENTS.md. Commit and open a pull request for review; do not merge it." \
   --cwd "$REPO" 2>"$TMP/err7")"
 err7="$(cat "$TMP/err7")"
@@ -253,7 +253,7 @@ err12="$(cat "$TMP/err12")"
 has  "opencode /fno:target passthrough worktree'd" "$err12" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-oc-pass"
 [[ -d "$TMP/conductor/workspaces/myrepo/spawn-oc-pass" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: opencode /fno:target passthrough not worktree'd"; }
 out13="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-cdx-pass" \
-  --provider codex --payload-mode passthrough \
+  --provider codex --yolo --payload-mode passthrough \
   --message '$fno:target ship the thing' --cwd "$REPO" 2>"$TMP/err13")"
 err13="$(cat "$TMP/err13")"
 has  "codex \$fno:target passthrough worktree'd" "$err13" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-cdx-pass"
@@ -277,7 +277,7 @@ out23="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-legacy-fn
   --cwd "$REPO" 2>"$TMP/err23")"
 has "legacy /fno:do worktree'd" "$(cat "$TMP/err23")" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-legacy-fno-do"
 out24="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-legacy-codex-do" \
-  --provider codex --payload-mode passthrough --message '$fno:do task 1.1' \
+  --provider codex --yolo --payload-mode passthrough --message '$fno:do task 1.1' \
   --cwd "$REPO" 2>"$TMP/err24")"
 has "legacy \$fno:do worktree'd" "$(cat "$TMP/err24")" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-legacy-codex-do"
 

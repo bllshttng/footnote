@@ -896,6 +896,7 @@ mod tests {
                 "codex",
                 "cursor-agent",
                 "gemini",
+                "grok",
                 "opencode",
                 "pi"
             ]

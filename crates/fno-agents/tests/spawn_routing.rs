@@ -1126,8 +1126,8 @@ fn client_spawn_substrate_bg_codex_uses_thread_lane() {
 }
 
 /// x-dfa4: --permission-mode on a NON-claude bg/headless lane is fail-closed
-/// (exit 2, pointing at --substrate pane); the one-shot lanes hardcode their own
-/// bypass form and can't honor a mapped mode without a silent downgrade.
+/// (exit 2, pointing at -Y); the one-shot lane cannot honor a mapped mode
+/// without a silent downgrade.
 #[test]
 fn client_spawn_permission_mode_codex_headless_fails_closed() {
     let home_dir = tmpdir("cli-spawn-perm-codex-home");
@@ -1158,8 +1158,10 @@ fn client_spawn_permission_mode_codex_headless_fails_closed() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "must exit 2; stderr: {stderr}");
     assert!(
-        stderr.contains("permission-mode") && stderr.contains("pane"),
-        "error must name --permission-mode and point at pane: {stderr}"
+        stderr.contains("permission-mode")
+            && stderr.contains("-Y")
+            && !stderr.contains("use --substrate pane"),
+        "error must name --permission-mode and point at -Y: {stderr}"
     );
 }
 

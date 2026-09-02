@@ -330,7 +330,7 @@ spawn_json() { printf '{\n  "short_id": "%s",\n  "harness": "%s",\n  "status": "
 # ---- AC1-HP: codex exec spawn launches; ask NEVER called -------------------
 reset_log
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json a1b2c3d4 codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-x --provider codex --message "Implement ab-deadbeef" --node ab-deadbeef --mode exec)"
+       run_spawn --name tgt-x --provider codex --message "Implement ab-deadbeef" --node ab-deadbeef --mode exec --yolo)"
 if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=a1b2c3d4"* ]] \
    && [[ "$OUT" == *"mode=exec"* ]] && [[ "$OUT" == *"fno agents logs tgt-x"* ]] \
    && [[ -s "$SPAWN_LOG" ]] && grep -q "spawn" "$SPAWN_LOG" && [[ ! -s "$ASK_LOG" ]]; then
@@ -342,7 +342,7 @@ fi
 # ---- AC1-ERR: codex binary missing (spawn rc!=0) -> failed + stderr --------
 reset_log
 OUT="$(MOCK_SPAWN_ERR="error: codex: command not found" MOCK_SPAWN_RC=1 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-x --provider codex --message "Implement ab-deadbeef" --node ab-deadbeef --mode exec)"
+       run_spawn --name tgt-x --provider codex --message "Implement ab-deadbeef" --node ab-deadbeef --mode exec --yolo)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" == *"codex: command not found"* ]] \
    && [[ "$OUT" != *"short_id="* ]] && [[ "$OUT" != *"result=launched"* ]]; then
   pass "AC1-ERR codex binary missing -> failed + real stderr, no short_id"
@@ -360,7 +360,7 @@ if printf '%s' "$PRETTY" | grep -qxE '[0-9a-f]{8}'; then
   fail "AC1-UI test premise broken: bare-line grep matched pretty JSON"
 else
   OUT="$(MOCK_SPAWN_OUT="$PRETTY" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-         run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode exec)"
+         run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode exec --yolo)"
   [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=c0ffee12"* ]] \
     && pass "AC1-UI multi-line JSON -> jq parse launches (bare grep alone would fail)" \
     || fail "AC1-UI jq parse: $OUT"
@@ -369,7 +369,7 @@ fi
 # ---- AC1-FR: spawn exits 0 but short_id empty -> failed, never fabricated ---
 reset_log
 OUT="$(MOCK_SPAWN_OUT='{"short_id": "", "harness": "codex", "status": "live"}' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode exec)"
+       run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode exec --yolo)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" == *"no valid short-id"* ]] \
    && [[ "$OUT" != *"short_id="* ]] && [[ "$OUT" != *"result=launched"* ]]; then
   pass "AC1-FR empty short_id (exit 0) -> failed, no fabricated handle"
@@ -383,7 +383,7 @@ fi
 # must accept it (it previously reported a false `failed` for a live worker).
 reset_log
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json spawngoa codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode exec)"
+       run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode exec --yolo)"
 if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=spawngoa"* ]]; then
   pass "AC1-FR pane name-slug short_id -> launched"
 else
@@ -406,7 +406,7 @@ fi
 # line-anchored `grep -qx`; the whole-string `[[ =~ ^...$ ]]` guard rejects it.
 reset_log
 OUT="$(MOCK_SPAWN_OUT='{"short_id": "junk\ndeadbeef", "harness": "codex", "status": "live"}' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode exec)"
+       run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode exec --yolo)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" != *"result=launched"* ]] \
    && [[ "$OUT" != *"short_id=deadbeef"* ]]; then
   pass "AC1-FR multi-line .short_id (embedded newline) -> failed, no leaked hex line"
@@ -506,7 +506,7 @@ fi
 # ---- AC2-HP: `-i` (mode=interactive) routes codex -> host ------------------
 reset_log
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json a1b2c3d4 codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode interactive)"
+       run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode interactive --yolo)"
 if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=a1b2c3d4"* ]] \
    && [[ "$OUT" == *"mode=interactive"* ]] && [[ "$OUT" == *"fno agents grid tgt-x"* ]] \
    && grep -q "host --harness codex" "$SPAWN_LOG" && [[ ! -s "$ASK_LOG" ]]; then
@@ -518,7 +518,7 @@ fi
 # ---- AC2-UI: staged, not running yet --------------------------------------
 reset_log
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json feedface codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode interactive)"
+       run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode interactive --yolo)"
 if [[ "$OUT" == *"staged="* ]] && [[ "$OUT" == *"not running"* ]]; then
   pass "AC2-UI interactive launch reports staged / not running yet"
 else
@@ -528,7 +528,7 @@ fi
 # ---- AC2-ERR: host spawn-failed in the readiness window -> failed + bytes --
 reset_log
 OUT="$(MOCK_SPAWN_ERR="error: auth failed during host settle" MOCK_SPAWN_RC=1 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode interactive)"
+       run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode interactive --yolo)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" == *"auth failed during host settle"* ]] \
    && [[ "$OUT" != *"short_id="* ]] && [[ "$OUT" != *"result=launched"* ]]; then
   pass "AC2-ERR host spawn-failed -> failed + captured bytes, no short_id"
@@ -539,7 +539,7 @@ fi
 # ---- AC2-EDGE: bare interactive session (no task) is valid -----------------
 reset_log
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json ba5eba11 codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-bare --provider codex --mode interactive)"
+       run_spawn --name tgt-bare --provider codex --payload-mode seed --mode interactive)"
 if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=ba5eba11"* ]] \
    && grep -q "host --harness codex" "$SPAWN_LOG"; then
   pass "AC2-EDGE bare interactive host (empty message) -> launched, not a validation error"
@@ -550,7 +550,7 @@ fi
 # ---- AC2-FR: interactive receipt parsed from JSON; empty short_id never faked
 reset_log
 OUT="$(MOCK_SPAWN_OUT='{"short_id": "", "harness": "codex", "status": "live"}' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode interactive)"
+       run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode interactive --yolo)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" == *"no valid short-id"* ]] \
    && [[ "$OUT" != *"short_id="* ]] && [[ "$OUT" != *"result=launched"* ]]; then
   pass "AC2-FR host empty short_id (exit 0) -> failed, no fabricated handle (parity with AC1-FR)"
@@ -561,14 +561,15 @@ fi
 # ===========================================================================
 # US3 - --yolo opt-in: appended to the spawn/host argv only when explicit
 # ===========================================================================
-# ---- AC3-HP: no --yolo -> no --yolo in the spawn argv (sandboxed default) --
+# ---- AC3-ERR: code payload without --yolo refuses before spawn --------------
 reset_log
 OUT="$(MOCK_SPAWN_OUT="$(spawn_json a1b2c3d4 codex)" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode exec)"
-if [[ "$OUT" == *"result=launched"* ]] && ! grep -q -- "--yolo" "$SPAWN_LOG"; then
-  pass "AC3-HP no --yolo -> sandboxed (no --yolo in spawn argv)"
+if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" == *"Pass -Y/--yolo"* ]] \
+   && [[ ! -s "$SPAWN_LOG" ]]; then
+  pass "AC3-ERR no --yolo -> refused before spawn"
 else
-  fail "AC3-HP sandboxed default: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
+  fail "AC3-ERR sandboxed code refusal: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
 fi
 
 # ---- AC3-UI/HP: --yolo passed -> appended to the spawn argv ----------------
@@ -603,7 +604,7 @@ fi
 # ---- AC4-HP: codex headless -> reply receipt (the reply is the deliverable) -
 reset_log
 OUT="$(MOCK_SPAWN_OUT=$'Bubble sort is O(n^2) worst/average case,\nO(n) best case on a pre-sorted input.\n' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-q --provider codex --substrate headless --message "what is bubble sort" --mode exec)"
+       run_spawn --name tgt-q --provider codex --payload-mode seed --substrate headless --message "what is bubble sort" --mode exec)"
 if [[ "$OUT" == *"result=replied"* ]] && [[ "$OUT" == *"Bubble sort is O(n^2)"* ]] \
    && [[ "$OUT" != *"short_id="* ]] && grep -q -- "spawn --harness codex" "$SPAWN_LOG" \
    && grep -q -- "--substrate headless" "$SPAWN_LOG" && [[ ! -s "$ASK_LOG" ]]; then
@@ -626,7 +627,7 @@ fi
 # ---- AC4-FR: codex headless exits 0 with an empty reply -> failed, never faked
 reset_log
 OUT="$(MOCK_SPAWN_OUT="" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-q --provider codex --substrate headless --message "what is bubble sort" --mode exec)"
+       run_spawn --name tgt-q --provider codex --payload-mode seed --substrate headless --message "what is bubble sort" --mode exec)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" == *"empty reply"* ]] \
    && [[ "$OUT" != *"result=replied"* ]] && [[ "$OUT" != *"result=launched"* ]]; then
   pass "AC4-FR codex headless empty reply (exit 0) -> failed, no fabricated answer"
@@ -637,7 +638,7 @@ fi
 # ---- codex headless whitespace-only reply -> failed (not a real answer) -----
 reset_log
 OUT="$(MOCK_SPAWN_OUT=$'   \n  \t\n' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-q --provider codex --substrate headless --message "q" --mode exec)"
+       run_spawn --name tgt-q --provider codex --payload-mode seed --substrate headless --message "q" --mode exec)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" == *"empty reply"* ]] && [[ "$OUT" != *"result=replied"* ]]; then
   pass "codex headless whitespace-only reply -> failed"
 else
@@ -647,7 +648,7 @@ fi
 # ---- codex headless nonzero exit -> failed + stderr (binary missing) --------
 reset_log
 OUT="$(MOCK_SPAWN_ERR="codex: command not found" MOCK_SPAWN_RC=1 MOCK_CLAIM_STATE=free \
-       run_spawn --name tgt-q --provider codex --substrate headless --message "q" --mode exec)"
+       run_spawn --name tgt-q --provider codex --payload-mode seed --substrate headless --message "q" --mode exec)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" == *"command not found"* ]] && [[ "$OUT" != *"result=replied"* ]]; then
   pass "codex headless nonzero exit -> failed + stderr"
 else

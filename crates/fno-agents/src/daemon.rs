@@ -13187,10 +13187,12 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         state::update_registry(&home.registry_json(), |r| {
             let mut e = ask_row("no-cap-row", Some(exited_at.as_str()));
             e.short_id = "nocap".into();
-            // A harness whose capability row does not exist yet (grok ships a
-            // readiness manifest, not a row) carries a session identity but
-            // no declared resume form: the Unknown case, by name.
-            e.harness = Some("grok".into());
+            // A harness with no capability row at all (hermes hosts real
+            // sessions per docs/SETUP-*.md and ships no row) carries a
+            // session identity but no declared resume form: the Unknown
+            // case, by name. grok carried this fixture until x-fd31 landed
+            // its row; hermes has no row to land.
+            e.harness = Some("hermes".into());
             e.pid = Some(999_999_999); // confirmed dead: nothing else holds it
             r.entries.push(e);
         })
@@ -13212,7 +13214,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert_eq!(summary.kept_no_receipt.len(), 1);
         let (id, reason) = &summary.kept_no_receipt[0];
         assert_eq!(id, "nocap");
-        assert!(reason.contains("grok"), "{reason}");
+        assert!(reason.contains("hermes"), "{reason}");
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert!(reg.entries.iter().any(|e| e.name == "no-cap-row"));
         assert!(!home.root().join("reap-receipts").exists());
@@ -13341,13 +13343,15 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             let receipt = build_reap_receipt(&e, None).unwrap();
             assert_eq!(receipt.resume, tokens.join(" "), "{harness}");
         }
-        // A harness with no capability row (grok ships a readiness manifest,
-        // not a row) cannot produce a resume command: Unknown, by name.
-        let mut e = ask_row("grok-row", None);
-        e.harness = Some("grok".into());
-        e.harness_session_id = Some("g-1".into());
+        // A harness with no capability row (hermes hosts real sessions per
+        // docs/SETUP-*.md and ships no row) cannot produce a resume command:
+        // Unknown, by name. grok carried this fixture until x-fd31 landed
+        // its row and the positive arm above covers the declared case.
+        let mut e = ask_row("hermes-row", None);
+        e.harness = Some("hermes".into());
+        e.harness_session_id = Some("h-1".into());
         let err = build_reap_receipt(&e, None).unwrap_err();
-        assert!(err.contains("grok"), "{err}");
+        assert!(err.contains("hermes"), "{err}");
     }
 
     /// The ledger entry wins the enrichment (change 5): when the session

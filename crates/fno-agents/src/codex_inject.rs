@@ -614,6 +614,7 @@ fn review_start_audit_fields(
     )
 }
 
+#[cfg(test)]
 fn review_start_audit_fields_with_origin(
     thread_id: &str,
     target_raw: &str,
@@ -623,6 +624,30 @@ fn review_start_audit_fields_with_origin(
     audit_target_cwd: Option<&str>,
     failure_reason: Option<&str>,
     audit_origin: Option<&str>,
+) -> serde_json::Map<String, serde_json::Value> {
+    review_start_audit_fields_with_origin_and_self(
+        thread_id,
+        target_raw,
+        delivery,
+        audit_payload,
+        audit_sender,
+        audit_target_cwd,
+        failure_reason,
+        audit_origin,
+        false,
+    )
+}
+
+fn review_start_audit_fields_with_origin_and_self(
+    thread_id: &str,
+    target_raw: &str,
+    delivery: ReviewDelivery,
+    audit_payload: Option<&str>,
+    audit_sender: Option<&str>,
+    audit_target_cwd: Option<&str>,
+    failure_reason: Option<&str>,
+    audit_origin: Option<&str>,
+    self_send: bool,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut fields = serde_json::Map::new();
     fields.insert("target_session".into(), thread_id.into());
@@ -642,6 +667,15 @@ fn review_start_audit_fields_with_origin(
     fields.insert("harness".into(), "codex".into());
     fields.insert("lane".into(), "codex-review-start".into());
     fields.insert("confirmed".into(), failure_reason.is_none().into());
+    let payload = fields
+        .get("payload")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let verb = payload
+        .strip_prefix('/')
+        .and_then(|_| payload.split_whitespace().next());
+    fields.insert("verb".into(), verb.map(str::to_string).into());
+    fields.insert("self_send".into(), self_send.into());
     if let Some(sender) = audit_sender {
         fields.insert("sender".into(), sender.into());
     }
@@ -940,6 +974,7 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
     let mut audit_sender: Option<String> = None;
     let mut audit_target_cwd: Option<String> = None;
     let mut audit_origin: Option<String> = None;
+    let mut audit_self_send = false;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -977,6 +1012,7 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
             "--audit-origin" => {
                 audit_origin = it.next().cloned();
             }
+            "--audit-self-send" => audit_self_send = true,
             other => {
                 eprintln!("review-start: unknown flag: {other}");
                 return 2;
@@ -1038,7 +1074,7 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
     // marker in the recipient thread, so it needs the same ledger record the
     // mail-inject lane writes -- a guard on one of two reachable paths is
     // decorative. Best-effort; a write failure never changes the exit code.
-    let fields = review_start_audit_fields_with_origin(
+    let fields = review_start_audit_fields_with_origin_and_self(
         &thread_id,
         &target_raw,
         delivery,
@@ -1047,6 +1083,7 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
         audit_target_cwd.as_deref(),
         failure_reason.as_deref(),
         audit_origin.as_deref(),
+        audit_self_send,
     );
     let _ = crate::events::EventEmitter::new(
         crate::paths::AgentsHome::from_env().events_jsonl(),
@@ -1494,7 +1531,23 @@ mod tests {
         assert_eq!(fields["harness"], "codex");
         assert_eq!(fields["lane"], "codex-review-start");
         assert_eq!(fields["confirmed"], true);
+        assert_eq!(fields["verb"], "/review");
+        assert_eq!(fields["self_send"], false);
         assert!(!fields.contains_key("reason"));
+
+        let self_fields = review_start_audit_fields_with_origin_and_self(
+            "thread-1",
+            "uncommittedChanges",
+            ReviewDelivery::Inline,
+            Some("/compact"),
+            Some("thread-1"),
+            Some("/repo"),
+            None,
+            None,
+            true,
+        );
+        assert_eq!(self_fields["verb"], "/compact");
+        assert_eq!(self_fields["self_send"], true);
     }
 
     #[test]

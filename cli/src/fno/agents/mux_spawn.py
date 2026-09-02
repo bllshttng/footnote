@@ -464,6 +464,7 @@ PANE_HOSTABLE_PROVIDERS: tuple[str, ...] = (
     "opencode",
     "pi",
     "cursor-agent",
+    "grok",
 )
 
 #: x-f579: the token shape an UNDECLARED harness name must match before the
@@ -535,6 +536,13 @@ def permission_pane_tokens(provider: str, mode: str) -> list[str]:
             "'force' maps to --force; --auto-review and --sandbox are separate settings",
             exit_code=2,
         )
+    if provider == "grok":
+        # grok's `--permission-mode <MODE>` carries the same vocabulary claude
+        # does (default, acceptEdits, auto, dontAsk, bypassPermissions, plan
+        # per `grok --help` on 1.0.13), so this is exact passthrough and
+        # grok's own CLI validates it. `--always-approve` is the bypass AXIS
+        # and stays the yolo spelling, not a permission-mode value.
+        return ["--permission-mode", mode]
     raise DispatchAskError(f"provider {provider!r} has no permission-mode mapping", exit_code=2)
 
 
@@ -627,6 +635,10 @@ def effort_tokens(harness: str, value: str) -> list[str]:
         # xhigh, max. Exact passthrough, like claude's - pi validates the
         # vocabulary itself, and fno does not keep a second copy of it.
         return ["--thinking", value]
+    if harness == "grok":
+        # grok's first-class effort flag, exact passthrough (launched with
+        # `--reasoning-effort high` against 1.0.13 in the x-fd31 measurement).
+        return ["--reasoning-effort", value]
     if harness == "cursor-agent":
         raise DispatchAskError(
             "harness 'cursor-agent' has no --effort flag; effort is encoded in "
@@ -1564,6 +1576,25 @@ def build_pane_argv(
             argv += effort_tokens("cursor-agent", effort)
         argv += tier3
         refuse_cursor_native_worktree_tokens(passthrough)
+        argv += pane_passthrough_tokens(passthrough, argv)
+        return argv
+    if provider == "grok":
+        # grok's pane hosts the plain TUI; the declared interactive_create
+        # form carries the caller-assigned `--session-id` and nothing else.
+        # The bypass (--always-approve), the one model axis and the effort
+        # axis are appended here, so pane and keeper compose the same argv.
+        # grok maps no --add-dir, and its permission vocabulary is claude's,
+        # so permission_pane_tokens passes it through exactly.
+        argv = identity
+        if permission_mode:
+            argv += permission_pane_tokens("grok", permission_mode)
+        elif yolo:
+            argv += ["--always-approve"]
+        if model:
+            argv += ["--model", model]
+        if effort:
+            argv += effort_tokens("grok", effort)
+        argv += tier3
         argv += pane_passthrough_tokens(passthrough, argv)
         return argv
     if not is_declared(provider):
@@ -2686,7 +2717,7 @@ _RECLAIMABLE_STATUSES = frozenset({"exited", "failed", "permanent_dead"})
 #: it mint its own would hand the fleet a UUIDv7 whose head-8 is the same clock
 #: bucket that collides two codex short ids.
 _SESSION_BINDING_HARNESSES: tuple[str, ...] = (
-    "claude", "codex", "opencode", "pi", "cursor-agent"
+    "claude", "codex", "opencode", "pi", "cursor-agent", "grok"
 )
 
 

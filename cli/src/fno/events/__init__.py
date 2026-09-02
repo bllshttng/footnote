@@ -1174,6 +1174,8 @@ def agent_raw_inject(
     target_head: str | None = None,
     confirmed: bool | None = None,
     origin: str | None = None,
+    verb: str | None = None,
+    self_send: bool = False,
     source: str = "daemon",
 ) -> dict[str, Any]:
     """Build an ``agent_raw_inject`` provenance event.
@@ -1189,11 +1191,17 @@ def agent_raw_inject(
     after the send, and its ``False`` covers both a clean refusal and a landed
     payload the confirm budget missed.
     """
+    if verb is None and payload.startswith("/"):
+        verb = payload.split(maxsplit=1)[0]
+    if not isinstance(self_send, bool):
+        raise ValidationError("agent_raw_inject self_send must be a boolean")
     data: dict[str, Any] = {
         "target_session": target_session,
         "payload": payload,
         "harness": harness,
         "lane": lane,
+        "verb": verb,
+        "self_send": self_send,
     }
     if sender is not None:
         data["sender"] = sender
@@ -1556,6 +1564,71 @@ def config_write(
     return _build("config_write", "config", data)
 
 
+def plan_stamped(
+    *,
+    plan_path: str,
+    session_id: str,
+    outcome: str,
+    node_id: str | None = None,
+    status_from: str | None = None,
+    status_to: str | None = None,
+    urls: list[str] | None = None,
+    expected_url_count: int | None = None,
+    reason: str | None = None,
+    source: str = "target",
+) -> dict[str, Any]:
+    """Build the receipt emitted after a plan stamp is applied."""
+    if outcome not in {"stamped", "idempotent_noop"}:
+        raise ValidationError(f"unknown plan_stamped outcome: {outcome!r}")
+    data: dict[str, Any] = {
+        "plan_path": plan_path,
+        "session_id": session_id,
+        "outcome": outcome,
+    }
+    for key, value in (
+        ("node_id", node_id),
+        ("status_from", status_from),
+        ("status_to", status_to),
+        ("urls", urls),
+        ("expected_url_count", expected_url_count),
+        ("reason", reason),
+    ):
+        if value is not None:
+            data[key] = value
+    return _build("plan_stamped", source, data)
+
+
+def plan_graduated(
+    *,
+    plan_path: str,
+    outcome: str,
+    session_id: str | None = None,
+    node_id: str | None = None,
+    status_from: str | None = None,
+    status_to: str | None = None,
+    urls: list[str] | None = None,
+    expected_url_count: int | None = None,
+    reason: str | None = None,
+    source: str = "target",
+) -> dict[str, Any]:
+    """Build the receipt emitted after a plan graduate decision."""
+    if outcome not in {"graduated", "idempotent_noop", "not_met"}:
+        raise ValidationError(f"unknown plan_graduated outcome: {outcome!r}")
+    data: dict[str, Any] = {"plan_path": plan_path, "outcome": outcome}
+    for key, value in (
+        ("session_id", session_id),
+        ("node_id", node_id),
+        ("status_from", status_from),
+        ("status_to", status_to),
+        ("urls", urls),
+        ("expected_url_count", expected_url_count),
+        ("reason", reason),
+    ):
+        if value is not None:
+            data[key] = value
+    return _build("plan_graduated", source, data)
+
+
 class HermeticEscapeError(RuntimeError):
     """A test process tried to append to a journal outside its sandbox."""
 
@@ -1742,4 +1815,7 @@ __all__ = [
     "wave_advanced",
     "worktree_overlap_observed",
     "config_write",
+    "plan_stamped",
+    "plan_graduated",
+    "agent_raw_inject",
 ]

@@ -1235,6 +1235,7 @@ def _lane_b_thread_spawn(
     permission_mode: Optional[str] = None,
     add_dir: Optional[str] = None,
     resume_session_id: Optional[str] = None,
+    effort: Optional[str] = None,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
 ) -> dict:
     """Host a lane-B harness thread on a pane-less keeper (x-889a).
@@ -1351,6 +1352,22 @@ def _lane_b_thread_spawn(
             from fno.agents.harnesses.pi import pi_model, pi_provider
 
             argv = [*argv, "--provider", pi_provider(), "--model", pi_model()]
+        elif harness == "grok":
+            # The axes the row's arms append on the pane lane: the bypass,
+            # the one model axis and the effort axis. The declared form
+            # carries only `--session-id`; the keeper hosts the same TUI the
+            # pane does, so the completion must match build_pane_argv's grok
+            # arm or the two lanes disagree about how the worker launches.
+            from fno.agents.mux_spawn import permission_pane_tokens
+
+            if permission_mode:
+                argv = [*argv, *permission_pane_tokens("grok", permission_mode)]
+            elif yolo:
+                argv = [*argv, "--always-approve"]
+            if model:
+                argv = [*argv, "--model", model]
+            if effort:
+                argv = [*argv, "--reasoning-effort", effort]
 
         sock = _lane_b_keeper_socket(name)
         log_path = paths.state_dir() / "agents" / name / "keeper.log"
@@ -3081,6 +3098,89 @@ def dispatch_spawn(
             effective_message=effective_message,
         )
 
+    # 3b-4. grok thread spawns ride the same keeper lane (x-fd31). The
+    # measurement behind the row: `--session-id` adopts the caller-assigned
+    # uuid, `--resume` on a fresh process recalls a prior turn across a
+    # SIGKILL. Model, effort and the permission axis are carried; everything
+    # else the lane has no measured spelling for is refused by name, the
+    # pi branch's posture.
+    if harness == "grok" and not headless:
+        unsupported = next(
+            (
+                flag
+                for flag, value in (
+                    ("--role", launch_role),
+                    ("--agent", agent),
+                    ("--tools", tools),
+                    ("--deny-tools", deny_tools),
+                    ("--add-dir", add_dir),
+                )
+                if value
+            ),
+            None,
+        )
+        if unsupported is not None:
+            raise DispatchAskError(
+                f"{unsupported} is not supported on the grok thread lane; "
+                "drop it or use --substrate pane",
+                exit_code=2,
+            )
+        if once:
+            raise DispatchAskError(
+                "--once is not supported on the grok thread lane (it is "
+                "persistent); grok has no one-shot lane - its headless "
+                "stance is unmeasured",
+                exit_code=2,
+            )
+        if resume_session_id:
+            # `--session-id` on an id that already exists is a grok REFUSAL
+            # ("must not already exist"), never a resume; rendering the
+            # create form with a used id would fail the spawn with grok's
+            # flag error instead of fno's posture. Same stance as pi.
+            raise DispatchAskError(
+                f"--resume {resume_session_id} is not supported on the grok "
+                "thread lane yet; the keeper row resumes by name (fno agents "
+                "ask/resume <name>). Refusing rather than spawning a fresh "
+                "session.",
+                exit_code=2,
+            )
+        receipt = _lane_b_thread_spawn(
+            name=name,
+            harness="grok",
+            cwd=cwd,
+            model=model,
+            yolo=yolo,
+            permission_mode=permission_mode,
+            effort=effort,
+            lock_timeout=lock_timeout,
+        )
+        session_id = receipt["session_id"]
+        if message.strip():
+            # The seed rides the keeper paste; the status bar's mode hint is
+            # the composer-ready marker (the row's idle marker, measured
+            # 2026-09-02).
+            _keeper_seed_submit(
+                name=name,
+                session_id=session_id,
+                sock=Path(receipt["keeper_socket"]),
+                message=message,
+                ready_marker=b"Shift+Tab:mode",
+            )
+        _emit_ev(
+            "agent_ask_done",
+            stage="dispatch",
+            name=name,
+            provider="grok",
+            substrate="thread",
+        )
+        return SpawnResult(
+            kind="created",
+            name=name,
+            provider="grok",
+            short_id=session_id,
+            effective_message=effective_message,
+        )
+
     registry_path = paths.agents_registry_path()
 
     def _on_wait() -> None:
@@ -3269,6 +3369,7 @@ def dispatch_spawn(
             ctx_for_dispatch = build_context(
                 to_name=name,
                 to_provider=harness,
+                to_session_id=None,
                 transport="direct-cli",
                 from_name_override=from_name,
             )
@@ -6932,6 +7033,7 @@ def _mux_pane_send(
     review: bool = False,
     review_invocation_id: Optional[str] = None,
     origin: Optional[str] = None,
+    self_send: bool = False,
 ) -> bool | str:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
@@ -7143,6 +7245,7 @@ def _mux_pane_send(
                     target_cwd=getattr(entry, "cwd", None),
                     sender=sender,
                     origin=origin,
+                    self_send=self_send,
                     confirmed=confirmed,
                     source="daemon",
                 ),
@@ -7763,6 +7866,7 @@ def _mail_inject_claude(
     liveness_scaled: bool = False,
     harness: Optional[str] = None,
     origin: Optional[str] = None,
+    self_send: bool = False,
 ) -> bool:
     """Inject ``text`` into a live claude session over the daemon ``control.sock``
     via the ``fno-agents mail-inject`` verb (G1 substrate, node x-1f23).
@@ -7852,6 +7956,8 @@ def _mail_inject_claude(
         argv += ["--sender", sender]
     if origin:
         argv += ["--origin", origin]
+    if self_send:
+        argv.append("--self-send")
     timeout = _MAIL_INJECT_TIMEOUT_S
     if liveness_scaled:
         argv += ["--attempts", str(_MAIL_INJECT_LIVENESS_SCALED_ATTEMPTS)]
@@ -8353,6 +8459,7 @@ def _review_start_codex(
     audit_sender: str | None = None,
     audit_target_cwd: str | None = None,
     origin: str | None = None,
+    self_send: bool = False,
 ) -> dict[str, object]:
     """Start an inline Codex review and preserve its structured outcome receipt."""
     import json
@@ -8381,6 +8488,8 @@ def _review_start_codex(
         ):
             if value is not None:
                 argv.extend((flag, value))
+        if self_send:
+            argv.append("--audit-self-send")
         proc = subprocess.run(
             argv,
             capture_output=True,
@@ -9309,6 +9418,7 @@ def dispatch_send(
             ctx_for_dispatch = build_context(
                 to_name=name,
                 to_provider=existing.harness,
+                to_session_id=getattr(existing, "harness_session_id", None),
                 transport="direct-cli",
                 from_name_override=from_name,
             )
@@ -9536,6 +9646,7 @@ def dispatch_send(
                 ctx_for_timeout = build_context(
                     to_name=name,
                     to_provider=timeout_entry.harness,
+                    to_session_id=getattr(timeout_entry, "harness_session_id", None),
                     transport="direct-cli",
                     from_name_override=from_name,
                 )
