@@ -45,3 +45,21 @@ def test_many_keys_use_one_native_batch_subprocess(tmp_path, monkeypatch):
         "node:a": {"key": "node:a", "state": "live"},
         "node:b": {"key": "node:b", "state": "suspect"},
     }
+
+
+def test_claim_status_returns_the_native_verdict_row(tmp_path, monkeypatch):
+    import fno.claims.core as core
+
+    claim = core.acquire_claim("node:native", "holder", root=tmp_path)
+    native = {
+        claim.key: {
+            "key": claim.key,
+            "state": "live",
+            "basis": "live",
+            "holder": claim.holder,
+            "pid": claim.pid,
+        }
+    }
+    monkeypatch.setattr(core, "claim_verdicts", lambda keys, root=None: native)
+
+    assert core.claim_status(claim.key, root=tmp_path) == native[claim.key]

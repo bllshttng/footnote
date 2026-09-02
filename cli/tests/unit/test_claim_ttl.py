@@ -11,8 +11,7 @@ import psutil
 
 from fno.claims.core import acquire_claim, claim_status, refresh_claim
 from fno.claims.io import claim_path, serialize_claim
-from fno.claims.staleness import classify
-from fno.claims.types import Claim, ClaimState, now_ms
+from fno.claims.types import Claim, now_ms
 
 
 def _acquire_ttl(root, key="node:N", holder="target-session:me", ttl_ms=60_000):
@@ -27,7 +26,7 @@ def test_refresh_extends_ttl_window(tmp_path):
     assert refreshed is not None
     assert refreshed.expires_at > now_ms()
     # Still classified live (holder pid is this process).
-    assert classify(refreshed) in (ClaimState.LIVE, ClaimState.SUSPECT)
+    assert claim_status("node:N", root=tmp_path)["state"] in ("live", "suspect")
 
 
 def test_refresh_idempotent_under_repeated_ticks(tmp_path):
@@ -231,7 +230,10 @@ class TestRefreshReanchorsADeadPid:
             key="node:x-foreign", holder="target-session:s", ttl_ms=3_600_000,
             pid=_dead_pid(), root=tmp_path,
         )
-        monkeypatch.setattr("fno.claims.core.is_same_machine", lambda *_a: False)
+        monkeypatch.setattr(
+            "fno.claims.core._claim_verdict",
+            lambda *_a, **_kw: {"state": "suspect", "bucket": "offhost", "expired": False},
+        )
         _anchor(monkeypatch, os.getpid())
         refreshed = refresh_claim(
             key="node:x-foreign", holder="target-session:s", ttl_ms=3_600_000,

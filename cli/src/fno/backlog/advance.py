@@ -1936,6 +1936,12 @@ def dispatch_lanes(
             report["skipped"] = 0
         return []
 
+    from fno.claims.verdict import claim_verdicts
+
+    native_verdicts = claim_verdicts(
+        [key for node in selected for key in (f"node:{node['id']}", f"dispatch:{node['id']}")]
+    )
+
     canonical = _canonical_root()
     ev_path = events_path or _events_path(project_root or canonical)
 
@@ -1964,7 +1970,9 @@ def dispatch_lanes(
             # The lane slot (parallel-lane:<id>) is invisible to the sequential
             # advance()/dispatch-node.sh path, which dedups on node:<id> +
             # dispatch:<id>. Guard with the same dispatch:<id> reservation.
-            block_reason = _node_dispatch_block_reason(node_id, str(root))
+            block_reason = _node_dispatch_block_reason(
+                node_id, str(root), native_verdicts=native_verdicts
+            )
             dispatch_key = f"dispatch:{node_id}"
             dispatch_holder = f"advance:{os.getpid()}"
             dispatch_root = _claims_root_for(dispatch_key)
@@ -2994,12 +3002,27 @@ def _observe_node_claim(
     *,
     enforce_failure_limit: bool = True,
     emit: bool = True,
+    native_info: Optional[dict] = None,
 ) -> DispatchClaimObservation:
     """Family-2 pre-dispatch verdict shared by Python and shell routes."""
     try:
-        from fno.target_cli import _classify_node_claim
+        if native_info is None:
+            from fno.target_cli import _classify_node_claim
 
-        verdict, info = _classify_node_claim(node_id)
+            verdict, info = _classify_node_claim(node_id)
+        else:
+            from fno.target_cli import _holder_is_ours
+
+            info = native_info
+            state = info.get("state")
+            if not state or state == "free":
+                verdict = "free"
+            elif _holder_is_ours(info.get("holder"), info):
+                verdict = "ours"
+            elif state in ("live", "suspect"):
+                verdict = "foreign_live"
+            else:
+                verdict = "dead_predecessor"
     except Exception:  # noqa: BLE001 - an unreadable claim must not crash advance
         verdict, info = "free", None
     info = info or {}
@@ -3057,27 +3080,47 @@ def _observe_node_claim(
     )
 
 
-def _node_dispatch_block_reason(node_id: str, node_cwd: Optional[str] = None) -> Optional[str]:
+def _node_dispatch_block_reason(
+    node_id: str,
+    node_cwd: Optional[str] = None,
+    *,
+    native_verdicts: Optional[dict[str, dict]] = None,
+) -> Optional[str]:
     """One pre-birth decision for node ownership plus boot reservation."""
-    observation = _observe_node_claim(node_id, node_cwd)
+    native_info = (
+        (native_verdicts.get(f"node:{node_id}", {"state": "free"}))
+        if native_verdicts is not None
+        else None
+    )
+    observation = _observe_node_claim(node_id, node_cwd, native_info=native_info)
     if observation.blocks_dispatch:
         return observation.refusal_reason
-    if _claim_is_live(f"dispatch:{node_id}"):
+    if _claim_is_live(f"dispatch:{node_id}", verdicts=native_verdicts):
         return "already-claimed"
     return None
 
 
-def _claim_is_live(key: str, node_cwd: Optional[str] = None) -> bool:
+def _claim_is_live(
+    key: str,
+    node_cwd: Optional[str] = None,
+    *,
+    verdicts: Optional[dict[str, dict]] = None,
+) -> bool:
     # "occupied" for dispatch: a live OR a suspect claim (x-ba4b) blocks
     # selection. suspect = TTL-unexpired, dead pid (respawned worker); the TTL
     # still protects the slot, so selection must skip it, never steal.
     if key.startswith("node:"):
-        return _observe_node_claim(key.removeprefix("node:"), node_cwd).blocks_dispatch
+        return _observe_node_claim(
+            key.removeprefix("node:"),
+            node_cwd,
+            native_info=(verdicts.get(key, {"state": "free"}) if verdicts is not None else None),
+        ).blocks_dispatch
 
-    from fno.claims.core import claim_status
+    from fno.claims.verdict import claim_verdicts
 
     try:
-        return claim_status(key, root=_claims_root_for(key)).get("state") in (
+        rows = verdicts or claim_verdicts([key], root=_claims_root_for(key))
+        return rows.get(key, {}).get("state") in (
             "live",
             "suspect",
         )
@@ -3546,14 +3589,16 @@ def _walker_live_at(project_root: str) -> bool:
     claims root from this process's, so check it there explicitly. A live walker
     there will pick the node up itself; spawning would double-launch into that
     repo (codex P2). Best-effort: a probe error never blocks dispatch."""
-    from fno.claims.core import claim_status
+    from fno.claims.verdict import claim_verdicts
 
     try:
         # live OR suspect (x-ba4b): a suspect walker claim is still an occupied
         # lane; treat it as live so we never double-launch into that repo.
-        return claim_status(
-            f"walker:{project_root}", root=Path(project_root)
-        ).get("state") in ("live", "suspect")
+        key = f"walker:{project_root}"
+        return claim_verdicts([key], root=Path(project_root)).get(key, {}).get("state") in (
+            "live",
+            "suspect",
+        )
     except Exception:  # noqa: BLE001 - a probe error must not block dispatch
         return False
 

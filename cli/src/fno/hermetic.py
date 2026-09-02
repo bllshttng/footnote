@@ -190,6 +190,10 @@ _ENVIRONMENT: tuple[str, ...] = (
 # ``FNO_CLAIMS_COMPAT_REQUIRED=1 uv run pytest ...``, are set inside the child
 # and never travel this path.)
 _RUNNER_PASSTHROUGH = (
+    # Native claim-door tests pin the freshly built checkout binary; without
+    # this explicit runner channel, hermetic test children resolve an older
+    # PATH binary and silently exercise the pre-port flag surface.
+    "FNO_AGENTS_BIN",
     "FNO_REAL_CODEX_PLUGIN_TEST",  # .github/workflows/cli-ci.yml
     "FNO_RUST_FRONT",  # .github/workflows/cli-ci.yml, via $GITHUB_ENV
     # The smoke workflow sets this on the pytest step so each matrix leg keeps

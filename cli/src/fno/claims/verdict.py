@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
-import subprocess
+from subprocess import run as run_subprocess
 from pathlib import Path
 from typing import Any, Sequence
+
+import psutil
 
 from fno.rust_binary import resolve_binary
 
@@ -16,6 +18,16 @@ class ClaimVerdictUnavailable(RuntimeError):
 
 class ClaimVerdictError(RuntimeError):
     """The native claim decision returned an invalid or failed response."""
+
+
+def process_create_time_ms(pid: int | None) -> int | None:
+    """Read a process create time for the re-anchor fact check."""
+    if pid is None:
+        return None
+    try:
+        return int(psutil.Process(pid).create_time() * 1000)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return None
 
 
 def claim_verdicts(
@@ -45,7 +57,7 @@ def claim_verdicts(
         command.extend(("--root", str(root)))
 
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        result = run_subprocess(command, capture_output=True, text=True, check=False)
     except OSError as exc:
         raise ClaimVerdictUnavailable(
             "fno-agents claim verdict unavailable: could not run the native binary; "

@@ -1338,9 +1338,10 @@ def _node_settlement(reading: Optional[RosterReading] = None):
         terminal = _terminal_ids()
         if terminal is not None and node_id in terminal:
             return True
-        from .staleness import is_expired
+        from .verdict import claim_verdicts
 
-        if not is_expired(claim, now=now):
+        native = claim_verdicts([claim.key]).get(claim.key)
+        if native is None or native.get("expired") is not True:
             return None
         if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
             # A launch window, never a settled abandonment: same reasoning as
@@ -1641,7 +1642,9 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
         return cache["reading"]
 
     def _probe(claim) -> Optional[bool]:
-        from .staleness import is_live
+        from .verdict import claim_verdicts
+
+        native = claim_verdicts([claim.key]).get(claim.key)
 
         if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
             # The launch window, not an abandoned session - but the window is
@@ -1652,7 +1655,7 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
             # check is local and cheap, so it runs before the pane subprocess;
             # the pane answer is cached per worker for the sweep's lifetime,
             # like the shared roster reading.
-            if is_live(claim):
+            if native is not None and native.get("state") == ClaimState.LIVE.value:
                 return None
             if _handover_pane_probe_blocked(claim):
                 return None
@@ -1678,7 +1681,7 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
             # a cwd to find the tree, and the claim carries one when its
             # writer stamped it. A finished tree is abandonment proven by
             # FINDING the end, never by failing to find the worker.
-            if is_live(claim):
+            if native is not None and native.get("state") == ClaimState.LIVE.value:
                 return None
             cwd = _claim_worktree_cwd(claim)
             if not cwd:

@@ -126,7 +126,7 @@ def _reclaim_if_provably_dead(
         sweep_verdict,
     )
     from fno.claims.io import claim_path, claims_root_for, read_claim_file
-    from fno.claims.staleness import is_live
+    from fno.claims.verdict import claim_verdicts
     from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
     path = claim_path(key, root=claims_root_for(key))
@@ -146,12 +146,15 @@ def _reclaim_if_provably_dead(
             claim = read_claim_file(path)
         except Exception:  # noqa: BLE001 - unreadable is unproven
             return None, "unreadable"
+        native = claim_verdicts([key], root=claims_root_for(key)).get(key)
+        if native is None:
+            return None, "unreadable"
         if key.startswith("dispatch:"):
             # The reservation's own predicate, deliberately NOT in the shared
             # sweep classifier. `spawn-cli:<pid>` launches a worker and exits, so
             # a dead pid means no launch is in flight from that process. A
             # background sweep must not act on that (the TTL is the boot window,
-            # see staleness.classify_for_sweep), but THIS caller is the next
+            # see the native classify_for_sweep decision), but THIS caller is the next
             # dispatcher, standing at the moment of launch, and it takes the node
             # claim itself, which covers the window the reservation protected.
             #
@@ -161,15 +164,15 @@ def _reclaim_if_provably_dead(
             # barrier its booting worker has. Its pid is dead by design too, so
             # a predicate reading dead-pid-and-same-host alone cleared it and
             # launched a second worker onto the node advance had just staffed.
-            from fno.claims.hostid import is_same_machine
-
             # LIVENESS FIRST. A live holder is benign dedup whoever wrote it,
             # and answering `foreign-reservation` there would lose the one
             # discriminator callers use to tell dedup from a wedge - they would
             # print force-release advice against a reservation somebody is
             # actively launching under.
-            if not is_same_machine(claim.host, claim.machine_id) or is_live(claim):
-                return None, _HOLDER_ALIVE if is_live(claim) else "offhost"
+            if native.get("state") == "live":
+                return None, _HOLDER_ALIVE
+            if native.get("bucket") == "offhost":
+                return None, "offhost"
             if not claim.holder.startswith(_SPAWN_CLI_HOLDER_PREFIX):
                 return None, "foreign-reservation"
             provably_dead, bucket = True, ""
@@ -179,6 +182,7 @@ def _reclaim_if_provably_dead(
                     claim,
                     abandonment_probe=probe,
                     node_settlement=settlement,
+                    native_verdict=native,
                 )
             except Exception:  # noqa: BLE001 - a probe blowing up clears nothing
                 return None, "unprobed"

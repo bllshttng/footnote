@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 
 from fno.claims.core import acquire_claim
+from fno.claims.io import claim_path, read_claim_file, serialize_claim
+from fno.claims.types import now_ms
 from fno.pr import _review_hold
 from fno.pr._proc import Result, ToolMissing
 
@@ -42,6 +44,12 @@ def _worktree_list(entries):
         block += "detached\n" if branch is None else f"branch refs/heads/{branch}\n"
         blocks.append(block)
     return Result(returncode=0, stdout="\n".join(blocks) + "\n", stderr="")
+
+
+def _expire_claim(root: Path, key: str) -> None:
+    path = claim_path(key, root=root)
+    claim = read_claim_file(path)
+    path.write_text(serialize_claim(claim.model_copy(update={"expires_at": now_ms() - 1})))
 
 
 NO_WORKTREE = _fake_git({"worktree": _worktree_list([])})
@@ -132,9 +140,7 @@ def test_expired_hold_clears_but_never_silently(tmp_path: Path, monkeypatch, cap
         pid=DEAD_PID,
         root=tmp_path,
     )
-    from fno.claims import staleness
-
-    monkeypatch.setattr(staleness, "now_ms", lambda: 99_999_999_999_999)
+    _expire_claim(tmp_path, _review_hold.review_hold_key("feature/x"))
     emitted: list[dict] = []
     monkeypatch.setattr(_review_hold, "_emit_expired", lambda **kw: emitted.append(kw))
 
@@ -455,7 +461,7 @@ def test_release_clears_a_corrupted_lockfile(tmp_path: Path):
 
 
 def test_an_expired_hold_is_deleted_in_the_same_breath_as_its_receipt(
-    tmp_path: Path, monkeypatch, capsys
+    tmp_path: Path, capsys
 ):
     """The lapsed lockfile stops blocking HERE but still blocks the stdlib hook,
     which cannot judge expiry and denies on the file's mere presence. One
@@ -466,9 +472,7 @@ def test_an_expired_hold_is_deleted_in_the_same_breath_as_its_receipt(
 
     key = _review_hold.review_hold_key("feature/x")
     acquire_claim(key, "reviewer:sess-1", ttl_ms=60_000, pid=DEAD_PID, root=tmp_path)
-    from fno.claims import staleness
-
-    monkeypatch.setattr(staleness, "now_ms", lambda: 99_999_999_999_999)
+    _expire_claim(tmp_path, key)
 
     activity = _review_hold.review_activity(
         "feature/x", pr_head="abc123", repo=str(tmp_path), root=tmp_path, runner=NO_WORKTREE
