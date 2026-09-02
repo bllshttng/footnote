@@ -4137,13 +4137,16 @@ fn scoped_waiver_subject(repo_slug: &str, pr_number: i64, head: &str) -> String 
 
 /// Three-state current-law verdict for one subject, read through the one
 /// canonical CLI query (`fno backlog decisions <subject> --lane law --state
-/// live --json`). `current_law.status` decides the shape, and a `single`
-/// verdict counts ONLY when the one row's decision equals `WAIVER_DECISION`
+/// live --json`). The verdict is derived from the row list, never trusted
+/// from `current_law.status`: the rows are filtered to `operator` authority
+/// BEFORE the count, because a waiver asserts a person at a terminal read
+/// the diff and `chat_attested` rows cannot carry that fact. A single
+/// filtered row counts ONLY when its decision equals `WAIVER_DECISION`
 /// (row existence carries no polarity); everything else is `NoLaw` or
 /// `Unknown`: a nonzero exit (the reader refuses a damaged index), a dead
-/// probe, a conflict, or malformed output all answer UNKNOWN authority,
-/// which no consumer may read as either permission or absence. Mirrors
-/// `law_authority` on the Python side, seam for seam.
+/// probe, a conflict among operator rows, or malformed output all answer
+/// UNKNOWN authority, which no consumer may read as either permission or
+/// absence. Mirrors `law_authority` on the Python side, seam for seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LawStatus {
     Single,
@@ -4169,45 +4172,37 @@ fn current_law_status(fno_bin: &str, cwd: &Path, subject: &str) -> LawStatus {
     ) {
         BoundedRun::Completed(out) if out.status.success() => {
             let parsed = serde_json::from_slice::<Value>(&out.stdout).ok();
-            let status = parsed.as_ref().and_then(|v| {
-                v.pointer("/current_law/status")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string())
-            });
-            match status.as_deref() {
-                Some("single") => {
-                    // A readable decision that is a different string is a
-                    // definitive no; a missing or non-string decision on the
-                    // one row is malformed authority, which is Unknown and
-                    // never a clean no (mirrors `law_authority`).
-                    match parsed
-                        .as_ref()
-                        .and_then(|v| v.pointer("/decisions/0/decision"))
-                        .and_then(|s| s.as_str())
-                    {
-                        Some(d) if d == WAIVER_DECISION => {
-                            // A waiver asserts a person at a terminal read the
-                            // diff, and only `operator` authority carries that
-                            // fact: any harness-identified session records
-                            // `chat_attested` through the law door. Mirrors
-                            // `law_authority`'s operator-row filter; a row
-                            // without the field reads as no, the way the
-                            // Python filter drops it (malformed rows die
-                            // upstream at the damaged-index check).
-                            match parsed
-                                .as_ref()
-                                .and_then(|v| v.pointer("/decisions/0/authority_source"))
-                                .and_then(|s| s.as_str())
-                            {
-                                Some("operator") => LawStatus::Single,
-                                _ => LawStatus::NoLaw,
-                            }
-                        }
-                        Some(_) => LawStatus::NoLaw,
-                        None => LawStatus::Unknown,
-                    }
-                }
-                Some("none") => LawStatus::NoLaw,
+            // Mirror `law_authority` exactly: filter the rows to operator
+            // authority BEFORE the count, because a waiver asserts a person
+            // at a terminal read the diff and only `operator` carries that
+            // fact (any harness-identified session records `chat_attested`
+            // through the law door). Deriving from the rows rather than
+            // trusting current_law.status is the point: the CLI's verdict
+            // counts chat_attested rows too, so a forged row beside a real
+            // operator waiver would read conflict here and wedge the loop on
+            // a waiver the merge gate honors. An affirmative row with no
+            // readable decision stays malformed authority, Unknown, never a
+            // clean no.
+            let Some(rows) = parsed
+                .as_ref()
+                .and_then(|v| v.get("decisions"))
+                .and_then(|d| d.as_array())
+            else {
+                // A payload without the decisions array is not a shape the
+                // CLI emits: a failed instrument, never a clean no.
+                return LawStatus::Unknown;
+            };
+            let operator_rows: Vec<&Value> = rows
+                .iter()
+                .filter(|r| r.get("authority_source").and_then(|a| a.as_str()) == Some("operator"))
+                .collect();
+            match operator_rows.as_slice() {
+                [] => LawStatus::NoLaw,
+                [row] => match row.get("decision").and_then(|s| s.as_str()) {
+                    Some(d) if d == WAIVER_DECISION => LawStatus::Single,
+                    Some(_) => LawStatus::NoLaw,
+                    None => LawStatus::Unknown,
+                },
                 _ => LawStatus::Unknown,
             }
         }
