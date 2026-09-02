@@ -17085,6 +17085,8 @@ mod tests {
 
     fn agent_in(sess: &str, pane: u64, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
         RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
@@ -17314,6 +17316,8 @@ mod tests {
             // A pane hosted by ANOTHER session -> that session's server renders
             // it; correctly skipped here.
             RegistryAgent {
+            model: None,
+            route: None,
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
@@ -17340,6 +17344,8 @@ mod tests {
             // A bg worker: paneless, no squad match -> watch-only orphan, and
             // it carries a claude jobId so the sideline can attach it.
             RegistryAgent {
+            model: None,
+            route: None,
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
@@ -17366,6 +17372,8 @@ mod tests {
             // A live codex worker with a session identity but no pane or attach
             // target must project the typed branch-four recovery reason.
             RegistryAgent {
+            model: None,
+            route: None,
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: Some("codex-live-id".into()),
@@ -17503,6 +17511,8 @@ mod tests {
             // but its registry cwd "/w" matches no origin - membership must win.
             agent_in("main", 42, None, false),
             RegistryAgent {
+            model: None,
+            route: None,
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
@@ -17583,6 +17593,8 @@ mod tests {
         // consult at all, so `unmeasured` passes the registry's own
         // corroboration read straight through.
         let paneless = |name: &str, liveness: agents_view::Liveness| RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
@@ -17635,6 +17647,8 @@ mod tests {
         let mut core = empty_core();
         core.agents = vec![
             RegistryAgent {
+            model: None,
+            route: None,
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
@@ -17660,6 +17674,8 @@ mod tests {
             },
             // An exited external row (dead pane beat the upgrade): not attachable.
             RegistryAgent {
+            model: None,
+            route: None,
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
@@ -17719,6 +17735,8 @@ mod tests {
         // merge_rows would have set exited=false + external=true on this row,
         // but its mux pane (77) is absent from core.panes -> pane_dead.
         core.agents = vec![RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             predecessor_session_ids: Vec::new(),
@@ -20435,6 +20453,8 @@ mod tests {
     /// optional recorded claude session uuid.
     fn exited_claude_row(name: &str, uuid: Option<&str>) -> RegistryAgent {
         RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
@@ -21342,6 +21362,8 @@ mod tests {
             },
         );
         core.agents = vec![RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             predecessor_session_ids: Vec::new(),
@@ -21423,6 +21445,8 @@ mod tests {
             },
         );
         core.agents = vec![RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             predecessor_session_ids: Vec::new(),
@@ -21508,6 +21532,8 @@ mod tests {
             },
         );
         let live_row = RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             predecessor_session_ids: Vec::new(),
@@ -21633,6 +21659,8 @@ mod tests {
         // and the branch-four reason. A LIVE claude bg row with a jobId still
         // uses attach, but its disposition remains live-paneless.
         let base = || RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             harness_session_id: Some("01a027ad".into()),
@@ -21767,6 +21795,8 @@ mod tests {
         // same sideline told the operator its backend was not live. The
         // narrowed BackendNotLive fires only on the falsified case (Dead).
         let base = || RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             harness_session_id: Some("01a027ad".into()),
@@ -21923,6 +21953,8 @@ mod tests {
         );
         core.panes.get_mut(&pid).unwrap().resume_target = Some("01a03a4e-b862".into());
         let mut row = RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             harness_session_id: Some("01a03a4e-b862".into()),
@@ -24438,6 +24470,8 @@ mod tests {
     /// are the join surfaces; everything else is the quiet default.
     fn bg_row(name: &str, cwd: &str, attach: Option<&str>) -> RegistryAgent {
         RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
@@ -25635,6 +25669,8 @@ mod tests {
             },
         );
         core.agents = vec![RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             predecessor_session_ids: Vec::new(),
@@ -25747,6 +25783,8 @@ mod tests {
             },
         );
         core.agents = vec![RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             predecessor_session_ids: Vec::new(),
@@ -25820,6 +25858,8 @@ mod tests {
             },
         );
         core.agents = vec![RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             predecessor_session_ids: Vec::new(),

@@ -7027,6 +7027,8 @@ mod tests {
         harness: Option<&str>,
     ) -> crate::agents_view::RegistryAgent {
         crate::agents_view::RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
@@ -7433,6 +7435,8 @@ mod tests {
 
     fn reg_row(name: &str, session_id: Option<&str>) -> crate::agents_view::RegistryAgent {
         crate::agents_view::RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             name: name.to_string(),
             cwd: "/x".into(),
