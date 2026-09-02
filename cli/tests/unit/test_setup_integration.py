@@ -10,6 +10,7 @@ fallback when `claude plugin install` is unavailable/errors).
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 
 from fno.setup import integration as I
@@ -339,6 +340,41 @@ def test_opencode_is_installed_false_when_stale(tmp_path, monkeypatch):
 def test_opencode_adapter_registered():
     clis = {a.cli for a in I.build_adapters()}
     assert "opencode" in clis
+
+
+# --- pi (local-file extension install, x-43bd) ------------------------------
+
+def test_pi_install_copies_extension_and_is_installed(tmp_path, monkeypatch):
+    # Redirect HOME so the extension lands under a temp ~/.pi/agent/extensions/.
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert I._pi_is_installed() is False
+
+    res = I._pi_install()
+    assert res.ok and res.cli == "pi"
+
+    dest = I._pi_extension_dest()
+    assert dest.exists()
+    assert dest.read_text(encoding="utf-8") == I._pi_extension_src().read_text(
+        encoding="utf-8"
+    )
+    assert I._pi_is_installed() is True
+
+
+def test_pi_is_installed_false_when_stale(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    dest = I._pi_extension_dest()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text("// stale older footnote extension\n", encoding="utf-8")
+    assert I._pi_is_installed() is False
+
+
+def test_pi_adapter_registered_and_gated_on_path():
+    adapter = next(a for a in I.build_adapters() if a.cli == "pi")
+    # Availability rides shutil.which("pi"), which is machine-dependent; the
+    # contract asserted here is the gate's SHAPE, not this machine's answer.
+    assert adapter.is_available() == (shutil.which("pi") is not None)
+    assert I._pi_extension_src().is_file(), "the shipped artifact must exist"
 
 
 # --- agy (native Stop-hook registration, x-bcfb) ----------------------------

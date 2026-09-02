@@ -888,14 +888,15 @@ mod tests {
             distinct.len() > 1,
             "one value across every row is an inherited declaration, not a measurement"
         );
-        // Only the shipped extension names an artifact; pi's is empty because
-        // fno has not written it, which is what refuses a looping dispatch there.
+        // Both shipped extensions name an artifact; a native harness names
+        // none, which is what keeps the extension lanes honest about what
+        // actually closes a loop there.
         assert!(!contract
             .capabilities("opencode")
             .unwrap()
             .loop_extension
             .is_empty());
-        assert!(contract
+        assert!(!contract
             .capabilities("pi")
             .unwrap()
             .loop_extension
