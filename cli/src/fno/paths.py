@@ -18,6 +18,7 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -734,6 +735,7 @@ def event_journals() -> list[Path]:
         parent = resolved_live.parent
         prefix = resolved_live.name + "."
         rotated: list[tuple[int, Path]] = []
+        entries: Iterable[Path]
         try:
             entries = parent.iterdir()
         except OSError:
