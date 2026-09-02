@@ -1751,17 +1751,17 @@ def run_merge(
         # no-op on this path and is left shared rather than forked.
         from fno.pr._merge_grant import resolve_durable_grant
 
-        verdict = resolve_durable_grant(pr_number, repo)
-        if not verdict.merge_eligible:
+        grant_verdict = resolve_durable_grant(pr_number, repo)
+        if not grant_verdict.merge_eligible:
             word = {
                 "refused": "skipped",
                 "absent": "skipped",
                 "held": "held",
-            }.get(verdict.state, "blocked")
+            }.get(grant_verdict.state, "blocked")
             _emit(
                 pr_number,
                 word,
-                f"durable-grant merge not executable: {verdict.reason}",
+                f"durable-grant merge not executable: {grant_verdict.reason}",
                 "none",
                 err=(word == "blocked"),
             )

@@ -1085,7 +1085,7 @@ def resolve_review_posture(review: "ReviewBlock") -> ResolvedReviewPosture:
     # github_apps itself is unset, so the resolved field is the whole signal.
     declared_none = review.github_apps == []
     peers = bool(review.peers)
-    explicit_sets = getattr(review, "model_fields_set", frozenset())
+    explicit_sets: frozenset[str] = getattr(review, "model_fields_set", frozenset())
     floor_off = (
         not review.self_review_required
         and "self_review_required" in explicit_sets
@@ -1438,7 +1438,7 @@ class ReviewBlock(BaseModel):
     agent_providers: dict[str, str] = Field(default_factory=dict)
     # Full route tuple. Unlike agent_harnesses, each configured entry spends a
     # separate named SessionStart and therefore remains explicit and opt-in.
-    agent_routes: dict = Field(default_factory=dict)
+    agent_routes: dict[str, object] = Field(default_factory=dict)
     cross_model: CrossModelBlock = Field(default_factory=CrossModelBlock)
 
     @field_validator("posture", mode="before")
