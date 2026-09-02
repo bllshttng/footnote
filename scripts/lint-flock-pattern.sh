@@ -19,10 +19,10 @@
 # Allowed call sites for `hold_agent_lock`:
 #   - `with_agent_lock_and_entry` (the helper itself).
 #
-# Ask paths (dispatch_ask / _codex_create_path / _codex_followup_path)
+# Create paths (_codex_create_path; the old ask paths were ported to Rust)
 # intentionally do NOT use the new helper — they take the registry
 # optimistic-read pattern that runs OUTSIDE the per-agent flock. The
-# lint script allows ask paths because they do not call
+# lint script allows them because they do not call
 # `_resolve_registry_entry` directly either.
 #
 # Exit code: 0 on clean dispatch.py, 1 on any violation.

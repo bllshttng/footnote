@@ -9,14 +9,12 @@ Phase 1 surface:
   that catches the "wrong provider on follow-up" mistake before any
   subprocess fires.
 
-US1 surface (this module):
+The ask follow-up orchestration that used to live here
+(``dispatch_ask``) was ported to the Rust runtime and deleted; its
+parity harnesses frozen against goldens are the surviving contract
+(``crates/fno-agents/tests/{claude_ask,codex_ask}_parity.rs``).
 
-- ``dispatch_ask(name, message, harness, cwd, timeout, lock_timeout)`` —
-  orchestrates is_provider_available + per-agent flock + select_provider
-  (INSIDE the flock per architecture step 3) + provider.bg_create +
-  update_registry + events. Returns the parsed short-id on success.
-
-The actual subprocess invocation per provider lives in
+The spawn subprocess invocation per provider lives in
 ``fno.agents.harnesses.{claude,codex}``. Gemini is a legacy readable identity,
 not a maintained Python dispatch provider.
 """
@@ -205,14 +203,14 @@ def _update_registry_if_recipient_unchanged(
 # Dispatch-scoped context propagation (Task 2.1)
 # ---------------------------------------------------------------------------
 #
-# ``dispatch_ask`` builds an ``EventContext`` once it knows the recipient
-# provider (after ``select_provider``) and stashes it on this ContextVar
-# so the helpers it calls can emit context-enriched events without
+# The dispatch paths build an ``EventContext`` once they know the recipient
+# provider (after ``select_provider``) and stash it on this ContextVar
+# so the helpers they call can emit context-enriched events without
 # threading ``ctx`` through every keyword-arg list. ContextVar is the
 # right substrate because:
 #
 # - It is automatically isolated per-task / per-thread (no module-global
-#   races between concurrent dispatch_ask calls in different threads).
+#   races between concurrent dispatch calls in different threads).
 # - The ``set(...)`` + ``reset(token)`` cycle ensures no leakage across
 #   dispatches even when an exception unwinds the stack.
 # - Test code can read it cheaply for assertion (or ignore it; helpers
@@ -226,7 +224,7 @@ def _emit_ev(kind: str, **data: Any) -> None:
     """Emit an event with the active dispatch ``EventContext`` if set.
 
     Falls back to legacy ``events.emit`` when ``_DISPATCH_CTX`` is unset
-    so callers outside the dispatch_ask scope (or pre-migration code
+    so callers outside a dispatch scope (or pre-migration code
     paths) still produce valid records.
     """
     ctx = _DISPATCH_CTX.get()
@@ -238,17 +236,16 @@ def _emit_ev(kind: str, **data: Any) -> None:
 
 @dataclass(frozen=True)
 class DispatchAskResult:
-    """Return shape for :func:`dispatch_ask`.
+    """Return shape for the create/followup dispatch helpers.
 
-    ``kind`` discriminates the two paths the auto-router takes:
+    ``kind`` discriminates the two stdout contracts:
 
     - ``"create"`` — agent name was new; ``short_id`` is the provider's
       newly-minted supervisor id (e.g. claude 8-hex). ``reply`` is None.
       The CLI prints ``<short_id>\\n`` per US1's contract.
-    - ``"followup"`` — agent name existed; ``short_id`` is the existing
-      registry entry's id, and ``reply`` carries the recipient's reply
-      text. The CLI prints ``reply`` verbatim (no trailing newline
-      added) per US2 AC2-HP.
+    - ``"followup"`` — reply-verbatim stdout (no trailing newline
+      added) per US2 AC2-HP; used where the provider returns the reply
+      on its own stdout.
     """
 
     kind: DispatchKind
@@ -334,7 +331,7 @@ def select_provider(name: str, requested_provider: Optional[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# dispatch_ask — US1 orchestrator
+# Shared dispatch surface (validation, locking, events)
 # ---------------------------------------------------------------------------
 
 
@@ -427,51 +424,10 @@ _MUX_THREAD_UNANSWERED = 20
 _PROVABLY_LIVE_WINDOW_SEC = 3600.0
 
 
-def _inside_leg_is_recent(
-    inside_leg: Optional[dict],
-    now_epoch: float,
-    window_sec: float = _PROVABLY_LIVE_WINDOW_SEC,
-) -> bool:
-    """True when the row's ``inside_leg`` report is within ``window_sec`` of now.
-
-    A live bg worker whose registry identity merely wasn't routable (the
-    null-uuid gap, x-c393) still emits ``inside_leg`` reports, so a routing miss
-    on such a row is a gap, not a death. An absent report or unparseable stamp
-    is NOT recent (fail closed), so a genuinely dead / corrupt row still orphans.
-    """
-    if not isinstance(inside_leg, dict):
-        return False
-    stamp = inside_leg.get("received_at")
-    if not isinstance(stamp, str) or not stamp:
-        return False
-    try:
-        recv = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
-    except (ValueError, TypeError):
-        return False
-    # A future stamp (recv > now) is corrupt / clock-skewed, not recent: require
-    # recv <= now so it cannot suppress orphaning (fail closed).
-    return recv <= now_epoch and (now_epoch - recv) <= window_sec
-
-
-def _current_inside_leg(name: str) -> Optional[dict]:
-    """Read the row's CURRENT ``inside_leg``, not the pre-ask snapshot.
-
-    The ask can run for up to the follow-up timeout; deciding orphan-vs-live off
-    the row as it was BEFORE the send would miss a report that landed during it
-    (codex P2). A fresh read right before the guard closes that window. Read
-    failure -> ``None`` (fail closed: no liveness signal -> orphan as today).
-    """
-    try:
-        for entry in load_registry():
-            if entry.name == name:
-                return entry.inside_leg
-    except (OSError, RegistryVersionError):
-        return None
-    return None
 
 
 class DispatchAskError(RuntimeError):
-    """Raised by :func:`dispatch_ask` for any callable failure.
+    """Raised by the dispatch helpers for any callable failure.
 
     Carries the exit code the CLI layer should propagate to the shell.
     """
@@ -620,367 +576,6 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _followup_path(
-    *,
-    name: str,
-    message: str,
-    cwd: Path,
-    from_name: str,
-    existing: AgentEntry,
-    timeout_sec: float,
-    lock_handle,  # type: ignore[no-untyped-def]
-) -> DispatchAskResult:
-    """Execute the US2 follow-up against an already-registered agent.
-
-    Runs INSIDE the per-agent flock acquired by :func:`dispatch_ask`.
-
-    Side effects:
-      - Emits ``agent_followup_started`` then exactly one of
-        ``agent_followup_done`` or ``agent_followup_failed``.
-      - Updates the registry entry: bumps ``last_message_at`` to now and
-        sets ``status="live"`` on success; sets ``status="orphaned"`` on
-        orphan failures (preserves the field for observability).
-      - On post-send registry-write OSError: detaches the flock so the
-        next caller sees the manual-cleanup signal (mirrors US1 AC1-FR
-        registry-write semantics).
-
-    Raises:
-        DispatchAskError: with the documented exit code per AC2 failure
-            mode (1, 11, 12, 13, 15 mapped from provider errors).
-    """
-    short_id = existing.short_id
-    if not short_id:
-        raise DispatchAskError(
-            f"registry entry {name!r} has no short id on file; cannot follow up. "
-            f"Recover the short id from the harness if it can still name the "
-            f"session; 'fno agents rm {name}' drops the row and its route "
-            f"bindings, so run it to recreate, not to clear this refusal.",
-            exit_code=12,
-        )
-
-    from fno.agents.harnesses import claude as claude_mod
-    from fno.agents.harnesses.base import ReachabilityProbeError
-
-    _emit_ev(
-        "agent_followup_started",
-        name=name,
-        provider=existing.harness,
-        short_id=short_id,
-    )
-
-    # --- Phase 5 (US6) MCP route selection ---------------------------
-    # If this is a claude agent that was created with --channels
-    # fno (mcp_channel_id is non-null), probe the MCP sidecar
-    # and prefer that backend. Three failure modes demote silently to
-    # the US2 socket path: probe returns False, probe raises (sidecar
-    # unreachable), or send raises MCPChannelSendError after a True
-    # probe. Each demotion emits mcp_channel_demoted_to_socket with a
-    # machine-stable reason discriminator (per spec AC1-ERR / AC3-HP).
-    reply: Optional[str] = None
-    backend = "socket"
-    demote_reason: Optional[str] = None
-    demote_event_kind: Optional[str] = None
-    # x-e21e: the MCP sidecar lane drives a recipient turn without routing
-    # through any shared injector, so a bus-only row must not take it. Demote
-    # to the socket path, whose injector gate refuses loud by policy.
-    if _delivery_policy_refusal(existing) == BUS_ONLY_POLICY:
-        mcp_alive = False
-        demote_reason = BUS_ONLY_POLICY
-    elif existing.harness == "claude" and existing.mcp_channel_id:
-        try:
-            mcp_alive = claude_mod.mcp_channel_reachable(existing.mcp_channel_id, timeout=0.25)
-        except ReachabilityProbeError as probe_exc:
-            mcp_alive = False
-            demote_reason = probe_exc.reason  # "mcp_channel_disconnected"
-            # Probe-raise path (spec routing decision tree §4d) -> the
-            # mcp_channel_unreachable event kind, distinct from §4c
-            # (probe returned False, the demoted-to-socket path).
-            demote_event_kind = events.KIND_MCP_CHANNEL_UNREACHABLE
-        if mcp_alive:
-            # Outer try/except is exclusively for MCPChannelSendError →
-            # demote-to-socket. ProviderOrphanError and ProviderTimeoutError
-            # raised by the MCP path use the SAME exception classes the
-            # socket-path handler block below already maps to exit codes
-            # 13 and 15 (spec AC1-ERR codex P1, PR #323). We catch them
-            # here ONLY to set backend="mcp" on the event payload so the
-            # forensic trail records which transport failed; then we
-            # re-raise so the standard handler block runs.
-            try:
-                reply = claude_mod.ask_followup_via_mcp(
-                    claude_short_id=short_id,
-                    message=message,
-                    cwd=cwd,
-                    from_name=from_name,
-                    timeout=timeout_sec,
-                    mcp_channel_id=existing.mcp_channel_id,
-                )
-                backend = "mcp"
-            except claude_mod.MCPChannelSendError as send_exc:
-                # Probe-True but send failed (spec AC1-ERR).
-                demote_reason = f"send_failed_post_probe:{send_exc.reason}"
-                demote_event_kind = events.KIND_MCP_CHANNEL_DEMOTED_TO_SOCKET
-            except claude_mod.ProviderOrphanError as orphan_exc:
-                # x-c393: same provably-live guard as the socket path below --
-                # a recent inside_leg report means a routing gap, not a death,
-                # so skip the orphan stamp and report it as a routing gap.
-                truth_routing_gap = orphan_exc.reason == "truth-live-inject-failed"
-                if truth_routing_gap or _inside_leg_is_recent(
-                    _current_inside_leg(name), time.time()
-                ):
-                    events.emit(
-                        "agent_followup_failed",
-                        stage="routing-gap",
-                        name=name,
-                        short_id=short_id,
-                        backend="mcp",
-                        reason=orphan_exc.reason,
-                    )
-                    raise DispatchAskError(
-                        f"agent {name!r} is live but not currently routable "
-                        f"(reason: {orphan_exc.reason}); message not delivered. "
-                        f"Try 'claude attach {short_id}'",
-                        exit_code=13,
-                    ) from orphan_exc
-                # Same exit code (13) + status="orphaned" stamp as the
-                # socket-path orphan handler below. We do NOT fall back
-                # to socket here — orphan means the session itself is
-                # gone, not just the MCP channel. The socket path would
-                # fail the same way.
-                try:
-                    update_registry(
-                        _stamp_status(name, status="orphaned", last_message_at_preserve=True)
-                    )
-                except (OSError, RegistryVersionError) as stamp_exc:
-                    print(
-                        f"fno agents: warning: failed to mark {name!r} as orphaned: {stamp_exc}",
-                        file=sys.stderr,
-                    )
-                events.emit(
-                    "agent_followup_failed",
-                    stage="orphan",
-                    name=name,
-                    short_id=short_id,
-                    backend="mcp",
-                    reason=orphan_exc.reason,
-                )
-                raise DispatchAskError(
-                    f"agent {name!r} is not running via MCP (reason: {orphan_exc.reason})",
-                    exit_code=13,
-                ) from orphan_exc
-            except claude_mod.ProviderTimeoutError as timeout_exc:
-                # Same exit code (15) as the socket-path timeout handler.
-                # Timeout means the send went out (over MCP) but the
-                # reply never arrived in state.json — socket fallback
-                # wouldn't help because reply-polling uses the same
-                # state.json regardless of send transport.
-                events.emit(
-                    "agent_followup_failed",
-                    stage="poll-timeout",
-                    name=name,
-                    short_id=short_id,
-                    backend="mcp",
-                    elapsed_sec=timeout_exc.elapsed_sec,
-                )
-                raise DispatchAskError(
-                    f"message sent via MCP but no reply within "
-                    f"{int(timeout_exc.elapsed_sec)}s. Try "
-                    f"'fno agents logs {name}' to read the transcript.",
-                    exit_code=15,
-                ) from timeout_exc
-        elif demote_reason is None:
-            # Sidecar alive but reports no such channel id -> session is
-            # definitively orphaned at the MCP layer. Socket fallback
-            # may still work (the bg socket survives MCP teardown).
-            # This is the §4c branch (probe False).
-            demote_reason = "channel_not_registered"
-            demote_event_kind = events.KIND_MCP_CHANNEL_DEMOTED_TO_SOCKET
-        if demote_reason is not None:
-            events.emit(
-                demote_event_kind or events.KIND_MCP_CHANNEL_DEMOTED_TO_SOCKET,
-                name=name,
-                short_id=short_id,
-                mcp_channel_id=existing.mcp_channel_id,
-                reason=demote_reason,
-            )
-            print(
-                f"fno agents: warning: MCP channel unavailable for {name!r} "
-                f"({demote_reason}); falling back to socket",
-                file=sys.stderr,
-            )
-
-    if reply is None:
-        try:
-            reply = claude_mod.ask_followup(
-                claude_short_id=short_id,
-                message=message,
-                cwd=cwd,
-                from_name=from_name,
-                timeout=timeout_sec,
-            )
-            backend = "socket_after_mcp_demote" if demote_reason else "socket"
-        except claude_mod.ProviderOrphanError as exc:
-            # x-c393: a live worker whose row merely wasn't routable (a recent
-            # inside_leg report) is a routing gap, not a death -- do NOT stamp
-            # it orphaned (that misleads `fno agents list`). reconcile's
-            # `claude logs` probe stays the authority that orphans a dead one.
-            #
-            # x-2681: "roster-live-inject-failed" means the control.sock fallback
-            # delivery failed on a session that IS live in the daemon roster --
-            # also a routing gap, never a death, so it takes the same no-stamp
-            # branch (AC6-FR: a roster-live session is never stamped orphaned).
-            truth_routing_gap = exc.reason in {
-                "roster-live-inject-failed",
-                "truth-live-inject-failed",
-            }
-            if truth_routing_gap or _inside_leg_is_recent(_current_inside_leg(name), time.time()):
-                events.emit(
-                    "agent_followup_failed",
-                    stage="routing-gap",
-                    name=name,
-                    short_id=short_id,
-                    reason=exc.reason,
-                )
-                raise DispatchAskError(
-                    f"agent {name!r} is live but not currently routable "
-                    f"(reason: {exc.reason}); message not delivered. "
-                    f"Try 'claude attach {short_id}'",
-                    exit_code=13,
-                ) from exc
-            # Stamp status=orphaned on the registry entry so US3 list shows
-            # the dead session. Errors during this best-effort update should
-            # NOT mask the original orphan: the user's primary signal is the
-            # orphan, not a downstream write blip. But losing visibility into
-            # the secondary failure breaks debuggability (status="live" /
-            # status="orphaned" drift between `list` and `ask`), so the swallow
-            # is observable via the events log + a stderr warning.
-            try:
-                update_registry(
-                    _stamp_status(name, status="orphaned", last_message_at_preserve=True)
-                )
-            except (OSError, RegistryVersionError) as stamp_exc:
-                print(
-                    f"fno agents: warning: failed to mark {name!r} as orphaned: {stamp_exc}",
-                    file=sys.stderr,
-                )
-                events.emit(
-                    "agent_status_stamp_failed",
-                    name=name,
-                    short_id=short_id,
-                    target_status="orphaned",
-                    error=str(stamp_exc),
-                    error_type=type(stamp_exc).__name__,
-                )
-            events.emit(
-                "agent_followup_failed",
-                stage="orphan",
-                name=name,
-                short_id=short_id,
-                reason=exc.reason,
-            )
-            if exc.reason == "socket-null":
-                hint = (
-                    f". Run 'claude attach {short_id}' to wake the session, "
-                    f"or 'fno agents rm {name}' to remove"
-                )
-            elif exc.reason == "not-found":
-                hint = f". Run 'fno agents rm {name}' to clear the stale entry"
-            elif exc.reason == "liveness-failed":
-                hint = (
-                    f". Socket exists but is unresponsive; try "
-                    f"'claude attach {short_id}' or 'fno agents rm {name}'"
-                )
-            else:
-                # Defensive: a future OrphanReason variant should surface
-                # explicitly here, not fall back to no-hint generic text.
-                hint = (
-                    f". Inspect with 'fno agents logs {name}' or remove via 'fno agents rm {name}'"
-                )
-            raise DispatchAskError(
-                f"agent {name!r} is not running (reason: {exc.reason}{'; session is suspended' if exc.reason == 'socket-null' else ''})"
-                + hint,
-                exit_code=13,
-            ) from exc
-        except claude_mod.ProviderSocketError as exc:
-            events.emit(
-                "agent_followup_failed",
-                stage="send",
-                name=name,
-                short_id=short_id,
-                reason="socket-error",
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
-            raise DispatchAskError(str(exc), exit_code=1) from exc
-        except claude_mod.ProviderTimeoutError as exc:
-            events.emit(
-                "agent_followup_failed",
-                stage="poll-timeout",
-                name=name,
-                short_id=short_id,
-                elapsed_sec=exc.elapsed_sec,
-            )
-            raise DispatchAskError(
-                f"message sent but no reply within {int(exc.elapsed_sec)}s. "
-                f"Try 'fno agents logs {name}' to read the transcript.",
-                exit_code=15,
-            ) from exc
-
-    # Reply extracted successfully — bump registry. On OSError, the
-    # message has already been delivered; AC2-FR demands the lock stay
-    # held and stdout NOT show the reply.
-    #
-    # ``last_message_at=_utc_now_iso`` (callable, no parens) defers the
-    # timestamp into the registry-wide flock so concurrent followups
-    # stay strictly monotonic.
-    try:
-        update_registry(
-            _stamp_status(name, status="live", last_message_at=_utc_now_iso),
-        )
-    except (OSError, RegistryVersionError) as exc:
-        events.emit(
-            "agent_followup_failed",
-            stage="registry-write",
-            name=name,
-            short_id=short_id,
-            error=str(exc),
-            error_type=type(exc).__name__,
-        )
-        lock_handle.detach()
-        raise DispatchAskError(
-            f"registry write failed: {exc}. NOTE: message was already delivered; do not retry.",
-            exit_code=12,
-        ) from exc
-
-    # Contract guard FIRST: ``reply`` is the value stdout emits on
-    # success. The provider adapter must return "" (not None) when the
-    # recipient produced no text; a None here is a contract breach in
-    # ``ask_followup`` that would otherwise crash the event emit below
-    # with TypeError(len(NoneType)) before the guard fired (Gemini
-    # review on PR #295).
-    if reply is None:
-        events.emit(
-            "agent_followup_failed",
-            stage="provider-contract",
-            name=name,
-            short_id=short_id,
-        )
-        raise DispatchAskError(
-            f"internal error: provider returned None reply for {name!r}; "
-            "expected string (possibly empty). This is a bug in the "
-            "fno provider adapter.",
-            exit_code=12,
-        )
-    _emit_ev(
-        "agent_followup_done",
-        stage="followup",
-        name=name,
-        provider=existing.harness,
-        short_id=short_id,
-        reply_chars=len(reply),
-        backend=backend,
-    )
-    return DispatchAskResult(kind="followup", short_id=short_id, reply=reply)
-
 
 def _stamp_status(
     name: str,
@@ -994,7 +589,7 @@ def _stamp_status(
     ``last_message_at`` may be a literal ``str``/``None`` (resolved at
     construction time) OR a ``Callable[[], str]`` invoked INSIDE the
     updater closure — i.e. while the registry-wide flock is held. The
-    callable form is how dispatch_ask paths defer the timestamp into
+    callable form is how dispatch paths defer the timestamp into
     the lock so concurrent followups stay strictly monotonic per atomic
     write. The pre-lock pattern (``last_message_at=_utc_now_iso()``)
     was a latent race: lock-loser could carry an earlier timestamp than
@@ -1248,145 +843,6 @@ def _codex_create_path(
         duration_ms=result.duration_ms,
     )
 
-
-def _codex_followup_path(
-    *,
-    name: str,
-    message: str,
-    from_name: str,
-    existing: AgentEntry,
-    yolo: bool,
-    timeout_sec: float,
-    lock_handle,
-) -> DispatchAskResult:
-    """Resume an existing codex session via `codex exec resume <id>`.
-
-    Invariants:
-      - cwd is taken from the registry's recorded ``existing.cwd`` (parent
-        design domain pitfall: codex sessions are cwd-pinned). The
-        call-time cwd is ignored.
-      - codex_session_id is preserved (never re-minted, never overwritten).
-      - last_message_at is bumped only on success.
-    """
-    from fno.agents.harnesses import codex as codex_mod
-
-    session_id = existing.harness_session_id
-    if not session_id:
-        raise DispatchAskError(
-            f"registry entry {name!r} has no harness_session_id; cannot follow up. "
-            f"Recover the id from the harness if it can still name the "
-            f"session; 'fno agents rm {name}' drops the row and its route "
-            f"bindings, so run it to recreate, not to clear this refusal.",
-            exit_code=11,
-        )
-
-    _emit_ev(
-        "agent_followup_started",
-        name=name,
-        provider="codex",
-        codex_session_id=session_id,
-        yolo=yolo,
-    )
-
-    # AgentEntry.log_path and .cwd are non-Optional strings; falsy values
-    # are a registry-corruption signal, not a recoverable case. Raise
-    # rather than substitute a default path that would silently land
-    # codex's tee in /tmp (or the conventional path for a DIFFERENT
-    # agent name) and confuse downstream `fno agents logs <name>`.
-    if not existing.log_path:
-        raise DispatchAskError(
-            f"registry entry {name!r} has empty log_path; run 'fno agents rm {name}' and recreate.",
-            exit_code=11,
-        )
-    if not existing.cwd:
-        raise DispatchAskError(
-            f"registry entry {name!r} has empty cwd; "
-            f"codex sessions are cwd-pinned and resume cannot proceed. "
-            f"Run 'fno agents rm {name}' and recreate.",
-            exit_code=11,
-        )
-    output_path = Path(existing.log_path)
-    registered_cwd = Path(existing.cwd)
-
-    try:
-        result = codex_mod.resume(
-            session_id=session_id,
-            cwd=registered_cwd,
-            prompt=message,
-            from_name=from_name,
-            yolo=yolo,
-            output_path=output_path,
-            timeout=timeout_sec,
-            reasoning_effort=existing.effort,
-            agent_self=name,
-        )
-    except codex_mod.CodexTimeoutError as exc:
-        events.emit(
-            "agent_followup_failed",
-            stage="codex-timeout",
-            name=name,
-            codex_session_id=session_id,
-            timeout_sec=exc.timeout_sec,
-        )
-        raise DispatchAskError(
-            f"codex follow-up timed out after {exc.timeout_sec}s",
-            exit_code=15,
-        ) from exc
-    except codex_mod.CodexInvocationError as exc:
-        events.emit(
-            "agent_followup_failed",
-            stage="codex-subprocess",
-            name=name,
-            codex_session_id=session_id,
-            returncode=exc.exit_code,
-        )
-        # Propagate codex's exit code (or structured provider code like
-        # 12 for tee-open EACCES) instead of collapsing to 1. Gemini
-        # PR #305 round 3 flagged the prior collapse as losing context.
-        raise DispatchAskError(
-            f"codex resume exited {exc.exit_code} (see {output_path} for details). "
-            f"If the session was lost, run 'fno agents rm {name}' then re-ask.",
-            exit_code=exc.exit_code if exc.exit_code != 0 else 1,
-        ) from exc
-
-    # AC2-HP: bump last_message_at only on success.
-    # Pass ``_utc_now_iso`` (callable, no parens) so the timestamp is
-    # generated under the registry-wide flock — monotonic per atomic
-    # write under concurrent followup.
-    try:
-        update_registry(
-            _stamp_status(name, status="live", last_message_at=_utc_now_iso),
-        )
-    except (OSError, RegistryVersionError) as exc:
-        events.emit(
-            "agent_followup_failed",
-            stage="registry-write",
-            name=name,
-            codex_session_id=session_id,
-            error=str(exc),
-            error_type=type(exc).__name__,
-        )
-        lock_handle.detach()
-        raise DispatchAskError(
-            f"registry write failed: {exc}. NOTE: message was already delivered; do not retry.",
-            exit_code=12,
-        ) from exc
-
-    _emit_ev(
-        "agent_followup_done",
-        stage="followup",
-        name=name,
-        provider="codex",
-        codex_session_id=session_id,
-        reply_chars=len(result.last_msg or ""),
-        yolo=yolo,
-    )
-    return DispatchAskResult(
-        kind="followup",
-        short_id=session_id,
-        reply=result.last_msg or "",
-        duration_ms=result.duration_ms,
-    )
 
 
 def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]:
@@ -2229,9 +1685,9 @@ def _claude_create_path(
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
 
-    Extracted from the inline create block in :func:`dispatch_ask` so
-    Task 1.2 (the new ``spawn`` verb) can call the same machinery without
-    going through ``dispatch_ask``.  Runs INSIDE the per-agent flock.
+    Extracted from the old ask dispatcher's inline create block so
+    Task 1.2 (the new ``spawn`` verb) could call the same machinery
+    directly. Runs INSIDE the per-agent flock.
 
     The CALLER emits ``agent_ask_started`` (dispatch_spawn does, under its
     dispatch context); this helper emits exactly one of ``agent_ask_done`` or
@@ -2813,241 +2269,6 @@ def _claude_create_path(
         model_substituted=substitution,
     )
 
-
-def dispatch_ask(
-    name: str,
-    message: str,
-    harness: Optional[str],
-    cwd: Path,
-    timeout: Optional[int] = None,
-    lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
-    from_name: str = _FROM_NAME_DEFAULT,
-    yolo: bool = False,
-) -> DispatchAskResult:
-    """Dispatch an ``ask`` to an already-registered agent (follow-up only).
-
-    ``ask`` never creates agents. Unknown names raise
-    :data:`UNKNOWN_AGENT_EXIT_CODE` (16) pointing the caller at
-    ``fno agents spawn``. Use ``spawn`` / ``host`` for initial creation.
-
-    Orchestration:
-
-    1. Validate name / message / from_name.
-    2. Acquire per-agent flock (``hold_agent_lock``) with timeout.
-    3. INSIDE the flock: load the registry; reject unknown names with
-       exit 16 BEFORE calling ``select_provider`` (so unknown+no-provider
-       gets exit 16, not exit 2). For existing names run ``select_provider``
-       to catch provider-mismatch (still exit 2).
-    4. Route existing names to the follow-up path: emit
-       ``agent_followup_started``, invoke ``ask_followup``, bump
-       ``last_message_at`` + ``status="live"`` via ``update_registry``,
-       emit ``agent_followup_done``, return result with reply text.
-
-    Returns:
-        :class:`DispatchAskResult` with ``kind == "followup"`` only.
-        (``kind == "create"`` is returned by ``_claude_create_path`` /
-        ``_codex_create_path`` when called
-        from the ``spawn`` verb; ``dispatch_ask`` itself never returns
-        ``kind == "create"``.)
-
-    Raises:
-        DispatchAskError: every documented failure mode, with the exit
-            code the caller should propagate.
-    """
-    # 1. Input validation.
-    _validate_inputs(name=name, message=message, from_name=from_name)
-
-    registry_path = paths.agents_registry_path()
-    requested_name = name
-    lock_name = requested_name
-    try:
-        preliminary = resolve_registered_agent_across_sources(
-            load_registry(), requested_name
-        )
-        lock_name = preliminary.entry.name
-    except (OSError, ValueError, AgentResolutionError, RegistryVersionError):
-        pass
-
-    def _on_wait() -> None:
-        print(
-            f"Waiting for agent {name!r} lock...",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    # 2. Per-agent flock + 3-onward inside the lock.
-    try:
-        with hold_agent_lock(
-            lock_name,
-            registry_path,
-            timeout=lock_timeout,
-            on_wait=_on_wait,
-        ) as lock_handle:
-            # 3a. Read the registry under the lock so existing-name
-            # detection and provider-selection see a consistent snapshot.
-            # RegistryVersionError is a RuntimeError (not ValueError), so
-            # it MUST be enumerated explicitly here - the schema-version
-            # guard's whole point is to fail loud rather than silently
-            # misread an alien shape.
-            try:
-                entries = load_registry()
-            except (OSError, ValueError, RegistryVersionError) as exc:
-                events.emit(
-                    "agent_ask_failed",
-                    stage="registry-read",
-                    name=name,
-                )
-                raise DispatchAskError(
-                    f"registry read failed: {exc}",
-                    exit_code=12,
-                ) from exc
-
-            try:
-                existing = resolve_registered_agent_across_sources(
-                    entries, requested_name
-                ).entry
-            except AgentResolutionError as exc:
-                if exc.ambiguous or exc.unavailable:
-                    raise DispatchAskError(str(exc), exit_code=exc.exit_code) from exc
-                existing = None
-
-            # 3b. Unknown-agent guard: ask never creates; spawn/host first.
-            # This check precedes select_provider so that an unknown name
-            # with no --provider gets exit 16 (unknown-agent), NOT exit 2
-            # (provider-required). The spec mandates this ordering.
-            if existing is None:
-                events.emit(
-                    "agent_ask_failed",
-                    stage="unknown-name",
-                    name=requested_name,
-                )
-                raise DispatchAskError(
-                    f"unknown agent {requested_name!r}; spawn it first: "
-                    f"fno agents spawn {requested_name} --harness <harness>",
-                    exit_code=UNKNOWN_AGENT_EXIT_CODE,
-                )
-
-            name = existing.name
-
-            # 3c. Provider mismatch check for EXISTING agents. select_provider
-            # raises ProviderMismatchError when a follow-up specifies the wrong
-            # provider. It also validates the requested provider is in
-            # KNOWN_PROVIDERS (ValueError on unknown provider name).
-            # select_provider also calls load_registry internally; guard the
-            # same OSError / RegistryVersionError class.
-            try:
-                chosen = select_provider(name=name, requested_provider=harness)
-            except ProviderMismatchError as exc:
-                raise DispatchAskError(str(exc), exit_code=2) from exc
-            except ValueError as exc:
-                raise DispatchAskError(str(exc), exit_code=2) from exc
-            except (OSError, RegistryVersionError) as exc:
-                events.emit(
-                    "agent_ask_failed",
-                    stage="registry-read",
-                    name=name,
-                )
-                raise DispatchAskError(
-                    f"registry read failed: {exc}",
-                    exit_code=12,
-                ) from exc
-
-            # 3d. Build the dispatch context (EventContext) now that we
-            # know the chosen provider, so the followup branch has one
-            # request_id + caller_kind + from_name across started/done
-            # event pairs (AC4-HP).
-            #
-            # Stashed on the module ContextVar so the followup helpers'
-            # emits pick it up via _emit_ev without threading a new kwarg
-            # through their long signatures. The try/finally resets the
-            # token even when DispatchAskError unwinds the stack so ctx
-            # cannot leak to a sibling dispatch on the same thread.
-            ctx_for_dispatch = build_context(
-                to_name=name,
-                to_provider=chosen,
-                transport="direct-cli",
-                from_name_override=from_name,
-            )
-            ctx_token = _DISPATCH_CTX.set(ctx_for_dispatch)
-
-            try:
-                # 3e. Follow-up path — existing is always not-None here
-                # (unknown-agent guard above exits early). Route to follow-up
-                # under the same flock so two parallel asks for the same name
-                # serialize end to end (AC2-EDGE concurrent ask same-name).
-                if existing is not None:
-                    # Mux-hosted agents (any provider) ride PaneSend, not the
-                    # provider socket/MCP/worker follow-up lanes below (which
-                    # key on a provider short_id a mux row lacks). Mirror
-                    # _deliver_live's mux short-circuit before provider routing.
-                    if existing.mux:
-                        return _mux_followup_path(
-                            name=name,
-                            message=message,
-                            from_name=from_name,
-                            existing=existing,
-                            lock_handle=lock_handle,
-                        )
-                    if yolo and existing.harness == "claude":
-                        # AC3-ERR: --yolo is a no-op for the claude path
-                        # (claude's --bg has no equivalent flag). Emit a
-                        # single-line stderr note and continue normally.
-                        print(
-                            "--yolo has no effect for harness 'claude'",
-                            file=sys.stderr,
-                        )
-                    if existing.harness == "claude":
-                        return _followup_path(
-                            name=name,
-                            message=message,
-                            cwd=cwd,
-                            from_name=from_name,
-                            existing=existing,
-                            timeout_sec=(
-                                float(timeout)
-                                if timeout is not None
-                                else _DEFAULT_FOLLOWUP_TIMEOUT_SEC
-                            ),
-                            lock_handle=lock_handle,
-                        )
-                    if existing.harness == "codex":
-                        return _codex_followup_path(
-                            name=name,
-                            message=message,
-                            from_name=from_name,
-                            existing=existing,
-                            yolo=yolo,
-                            timeout_sec=(
-                                float(timeout)
-                                if timeout is not None
-                                else _DEFAULT_FOLLOWUP_TIMEOUT_SEC
-                            ),
-                            lock_handle=lock_handle,
-                        )
-                    if existing.harness == "gemini":
-                        raise DispatchAskError(
-                            "harness 'gemini' is retired; route this work to agy "
-                            "or a maintained claude/codex harness",
-                            exit_code=2,
-                        )
-                    raise DispatchAskError(
-                        f"follow-up for harness {existing.harness!r} is not implemented",
-                        exit_code=2,
-                    )
-            finally:
-                _DISPATCH_CTX.reset(ctx_token)
-
-    except AgentLockTimeout as exc:
-        events.emit(
-            "agent_ask_failed",
-            stage="lock-timeout",
-            name=name,
-        )
-        raise DispatchAskError(
-            f"lock timeout for agent {name!r} after {exc.timeout}s"
-            f"{exc.holder_note()}",
-            exit_code=11,
-        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -7670,66 +6891,6 @@ _CODEX_ACTIVE_REVIEW_MARKERS = (
 )
 
 
-def _mux_recipient_transcript(entry: "AgentEntry") -> Optional[Path]:
-    """Locate the mux recipient's OWN claude transcript by session uuid, the
-    confirm target for :func:`_mux_pane_send`'s ``confirm`` mode (node x-1904).
-
-    Reuses the resolver `fno.doctor._find_transcript_for` already used for the
-    self-diagnostic surface rather than writing a second transcript-by-uuid
-    walk (the Rust control.sock lane's own mirror is `find_transcript` in
-    `crates/fno-agents/src/claude_drive.rs`). None when the entry carries no
-    resolvable full session uuid, or no matching transcript file exists --
-    both fail the confirm closed, never open.
-    """
-    from fno.doctor import _find_transcript_for
-
-    session_id = entry.harness_session_id or entry.session_id
-    if not session_id:
-        return None
-    return _find_transcript_for(session_id)
-
-
-def _mux_content_confirm(
-    transcript: Path,
-    marker: str,
-    since_byte: int,
-    *,
-    attempts: int = _MUX_CONFIRM_ATTEMPTS,
-    interval_s: float = _MUX_CONFIRM_INTERVAL_S,
-) -> bool:
-    """Poll ``transcript`` for ``marker`` in lines appended after ``since_byte``
-    (node x-1904, change 3): content, not growth, mirroring the claude
-    control.sock lane's ``confirm_content_after``/``escaped_marker`` pair
-    (``crates/fno-agents/src/mail_inject.rs``) so both keystroke lanes confirm
-    delivery the same way. ``marker`` is escaped the same way ``json.dumps``
-    would embed it in a JSON string field, since a claude transcript line
-    stores the turn's text JSON-encoded -- matching Rust's
-    ``serde_json::to_string`` + quote-strip. An empty escaped marker (an empty
-    ``text``) never confirms; a submitted turn is recorded verbatim, an unsent
-    paste records nothing, so a busy recipient's unrelated transcript growth
-    never carries our marker by accident.
-    """
-    import json
-
-    # ensure_ascii=False to match Rust's `serde_json::to_string`, which leaves
-    # non-ASCII literal. With the default the marker's accented or emoji
-    # characters become \uXXXX escapes that a claude transcript never carries,
-    # and the confirm could never match.
-    escaped = json.dumps(marker, ensure_ascii=False)[1:-1]
-    if not escaped:
-        return False
-    needle = escaped.encode("utf-8")
-    for _ in range(max(attempts, 1)):
-        try:
-            with transcript.open("rb") as fh:
-                fh.seek(since_byte)
-                for raw_line in fh:
-                    if needle in raw_line:
-                        return True
-        except OSError:
-            pass
-        time.sleep(interval_s)
-    return False
 
 
 def _pane_recipient_handle(entry: "AgentEntry") -> Optional[str]:
@@ -8338,100 +7499,6 @@ def _mux_pane_send(
             _run(["release", pane])
 
 
-def _mux_followup_path(
-    *,
-    name: str,
-    message: str,
-    from_name: str,
-    existing: "AgentEntry",
-    lock_handle,  # type: ignore[no-untyped-def]
-) -> DispatchAskResult:
-    """Follow-up delivery to a mux-hosted agent (any provider).
-
-    A mux row's PTY is a mux pane, not a provider socket / MCP / worker lane,
-    so the legacy provider follow-up paths (which key on short_id /
-    codex_session_id / gemini_session_id) cannot reach it and raise exit 12.
-    Deliver over PaneSend instead -- the same claim->text->CR->release burst
-    _deliver_live uses for live mail. PaneSend is fire-and-forget: there is no
-    captured reply, so the result carries an empty reply and a stderr note.
-
-    The body rides the SAME cross-session-message container the socket (claude)
-    and PTY (codex/gemini) follow-up paths use, so a peer / nested-agent message
-    lands as an attributed peer turn rather than bare operator input (the PTY
-    delivery contract in docs/architecture/fno-agents-deliver-gate.md).
-    """
-    from fno.agents.harnesses.claude import build_cross_session_container
-    from fno.mail.envelope import ForgedEnvelopeError
-
-    mux = existing.mux or {}
-    ref = f"{mux.get('session')}:{mux.get('pane_id')}"
-    _emit_ev(
-        "agent_followup_started",
-        name=name,
-        provider=existing.harness,
-        short_id=ref,
-    )
-    try:
-        wrapped = build_cross_session_container(message, from_name)
-    except ForgedEnvelopeError as exc:
-        raise DispatchAskError(str(exc), exit_code=1) from exc
-    # Peer follow-up is the writer-claim holder's own raw channel: it has no
-    # durable floor to demote to, so it keeps the unguarded send (the turn-taken
-    # interlock is the mail-delivery lane's guarantee, not this one -- US4 scope).
-    if not _mux_pane_send(existing, wrapped, guarded=False):
-        events.emit(
-            "agent_followup_failed",
-            stage="mux-send",
-            name=name,
-            short_id=ref,
-            reason="pane-send-failed",
-        )
-        raise DispatchAskError(
-            f"mux pane send to {name!r} did not deliver. The reason is on "
-            f"stderr above and it is not always a dead pane: the read-back "
-            f"gate refuses a pane showing a prompt, and refuses again when the "
-            f"prompt detector cannot run at all. This lane is fire-and-forget "
-            f"with no durable floor, so a refusal here is the whole outcome. "
-            f"Check 'fno mux pane read --session <s> <pane>' first, then "
-            f"'fno mux ls' or 'fno agents logs {name}'.",
-            exit_code=1,
-        )
-    # Message delivered. Bump registry under the held flock; on OSError the
-    # send already landed, so keep the lock and do not retry (AC2-FR parity
-    # with the claude follow-up path).
-    try:
-        update_registry(
-            _stamp_status(name, status="live", last_message_at=_utc_now_iso),
-        )
-    except (OSError, RegistryVersionError) as exc:
-        events.emit(
-            "agent_followup_failed",
-            stage="registry-write",
-            name=name,
-            short_id=ref,
-            error=str(exc),
-            error_type=type(exc).__name__,
-        )
-        lock_handle.detach()
-        raise DispatchAskError(
-            f"registry write failed: {exc}. NOTE: message was already delivered; do not retry.",
-            exit_code=12,
-        ) from exc
-    _emit_ev(
-        "agent_followup_done",
-        stage="followup",
-        name=name,
-        provider=existing.harness,
-        short_id=ref,
-        reply_chars=0,
-        backend="mux",
-    )
-    print(
-        f"delivered to mux pane {ref} (fire-and-forget; no reply captured)",
-        file=sys.stderr,
-    )
-    return DispatchAskResult(kind="followup", short_id=ref, reply="")
-
 
 def mail_inject_probe(recipient: str) -> tuple[bool, str]:
     """Ask the ``fno-agents mail-inject --probe`` verb whether an injection path to
@@ -8475,6 +7542,69 @@ def mail_inject_probe(recipient: str) -> tuple[bool, str]:
 #: (compared everywhere) because the registry field is an open
 #: ``Optional[str]``; a second value would graduate to an enum then.
 BUS_ONLY_POLICY = "bus-only"
+
+
+
+def _mux_recipient_transcript(entry: "AgentEntry") -> Optional[Path]:
+    """Locate the mux recipient's OWN claude transcript by session uuid, the
+    confirm target for :func:`_mux_pane_send`'s ``confirm`` mode (node x-1904).
+
+    Reuses the resolver `fno.doctor._find_transcript_for` already used for the
+    self-diagnostic surface rather than writing a second transcript-by-uuid
+    walk (the Rust control.sock lane's own mirror is `find_transcript` in
+    `crates/fno-agents/src/claude_drive.rs`). None when the entry carries no
+    resolvable full session uuid, or no matching transcript file exists --
+    both fail the confirm closed, never open.
+    """
+    from fno.doctor import _find_transcript_for
+
+    session_id = entry.harness_session_id or entry.session_id
+    if not session_id:
+        return None
+    return _find_transcript_for(session_id)
+
+
+def _mux_content_confirm(
+    transcript: Path,
+    marker: str,
+    since_byte: int,
+    *,
+    attempts: int = _MUX_CONFIRM_ATTEMPTS,
+    interval_s: float = _MUX_CONFIRM_INTERVAL_S,
+) -> bool:
+    """Poll ``transcript`` for ``marker`` in lines appended after ``since_byte``
+    (node x-1904, change 3): content, not growth, mirroring the claude
+    control.sock lane's ``confirm_content_after``/``escaped_marker`` pair
+    (``crates/fno-agents/src/mail_inject.rs``) so both keystroke lanes confirm
+    delivery the same way. ``marker`` is escaped the same way ``json.dumps``
+    would embed it in a JSON string field, since a claude transcript line
+    stores the turn's text JSON-encoded -- matching Rust's
+    ``serde_json::to_string`` + quote-strip. An empty escaped marker (an empty
+    ``text``) never confirms; a submitted turn is recorded verbatim, an unsent
+    paste records nothing, so a busy recipient's unrelated transcript growth
+    never carries our marker by accident.
+    """
+    import json
+
+    # ensure_ascii=False to match Rust's `serde_json::to_string`, which leaves
+    # non-ASCII literal. With the default the marker's accented or emoji
+    # characters become \uXXXX escapes that a claude transcript never carries,
+    # and the confirm could never match.
+    escaped = json.dumps(marker, ensure_ascii=False)[1:-1]
+    if not escaped:
+        return False
+    needle = escaped.encode("utf-8")
+    for _ in range(max(attempts, 1)):
+        try:
+            with transcript.open("rb") as fh:
+                fh.seek(since_byte)
+                for raw_line in fh:
+                    if needle in raw_line:
+                        return True
+        except OSError:
+            pass
+        time.sleep(interval_s)
+    return False
 
 
 def _hold_lapsed_for(entry) -> bool:
@@ -9870,7 +9000,7 @@ def dispatch_send(
 
     Orchestration:
 
-    1. Validate name / message / from_name (same rules as dispatch_ask).
+    1. Validate name / message / from_name (the shared _validate_inputs rules).
     2. Reject bodies over 1 MiB (exit 2) BEFORE any store write.
     3. Resolve the address to its registry primary key, then acquire that
        per-agent flock (hold_agent_lock) with timeout. A timeout retries the
@@ -10057,7 +9187,7 @@ def dispatch_send(
             # session's canonical handle so later name reuse cannot inherit it.
             name = canonical_name
 
-            # 4b. Provider mismatch check (mirrors dispatch_ask).
+            # 4b. Provider mismatch check (shared select_provider gate).
             try:
                 select_provider(name=name, requested_provider=provider)
             except ProviderMismatchError as exc:

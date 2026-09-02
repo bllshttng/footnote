@@ -581,9 +581,6 @@ def test_deliver_live_claude_switchboard_delivered_skips_socket(
 
     from fno.agents.harnesses import claude as claude_mod
 
-    send_calls: list = []
-    monkeypatch.setattr(claude_mod, "send_to_session", lambda *a, **kw: send_calls.append(1))
-
     rpc_calls: list = []
     from fno.agents import dispatch as dispatch_mod
 
@@ -623,7 +620,9 @@ def test_deliver_live_claude_switchboard_delivered_skips_socket(
         == "11111111-2222-3333-4444-555555555555"
     )
     assert rpc_calls[0]["params"]["from_identity"]["short_id"] == "fno12345"
-    assert len(send_calls) == 0, "a delivered switchboard turn must skip the socket path"
+    # The old socket-path canary (send_to_session must never fire) is gone
+    # with the ported ask adapters: there is no Python socket send left to
+    # skip, so the switchboard contract above is the whole assertion.
 
 
 # ---------------------------------------------------------------------------

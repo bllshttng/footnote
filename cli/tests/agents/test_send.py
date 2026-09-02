@@ -3,9 +3,11 @@
 Covers US3 AC3-HP / AC3-ERR / AC3-UI / AC3-EDGE / AC3-FR from the design doc.
 
 Mocking strategy: all tests use use_tmpdir + write_registry to set up a
-known-good registry state. Provider calls (send_to_session, mcp_channel_reachable)
+known-good registry state. Provider calls (mcp_channel_reachable)
 are monkeypatched directly on the provider module to avoid real subprocess
-overhead, following the pattern in test_dispatch_ask.py.
+overhead. The old send_to_session socket seam is gone entirely: live
+claude delivery rides the control.sock inject, so the former socket-fail
+fixtures now exercise the real durable-fallback decision.
 """
 from __future__ import annotations
 
@@ -952,15 +954,13 @@ def test_cmd_send_lock_timeout_surfaces_on_stderr(
 # ---------------------------------------------------------------------------
 
 def test_dispatch_send_durable_queued_output(tmp_path: Path, monkeypatch) -> None:
-    """AC3-UI: when peer is live but socket send fails, output says 'queued (durable)'."""
+    """AC3-UI: when the live inject misses, output says 'queued (durable)'."""
     use_tmpdir(monkeypatch, tmp_path)
     _register_claude_peer()
 
     from fno.agents.harnesses import claude as claude_mod
-    from fno.agents.harnesses.claude import ProviderSocketError
     from fno.agents.harnesses._claude_session_registry import SessionLocator
 
-    # locate_session succeeds but send_to_session fails
     monkeypatch.setattr(
         claude_mod, "locate_session",
         lambda short_id, home=None: SessionLocator(
@@ -970,11 +970,6 @@ def test_dispatch_send_durable_queued_output(tmp_path: Path, monkeypatch) -> Non
         ),
     )
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
-
-    def _failing_send(sock_path: str, content: str, from_name: str) -> None:
-        raise ProviderSocketError("connection refused")
-
-    monkeypatch.setattr(claude_mod, "send_to_session", _failing_send)
 
     from fno.agents.dispatch import dispatch_send
 
@@ -1150,7 +1145,6 @@ def test_dispatch_send_200kb_body_round_trip(tmp_path: Path, monkeypatch) -> Non
         ),
     )
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
-    monkeypatch.setattr(claude_mod, "send_to_session", lambda *a, **kw: None)
 
     body = "x" * (200 * 1024)  # 200KB
 
@@ -1362,7 +1356,6 @@ def test_dispatch_send_emits_send_events(tmp_path: Path, monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
-    monkeypatch.setattr(claude_mod, "send_to_session", lambda *a, **kw: None)
 
     from fno import paths
     from fno.agents.dispatch import dispatch_send
@@ -1677,7 +1670,6 @@ def test_dispatch_send_envelope_write_oserror_exit12(tmp_path: Path, monkeypatch
         ),
     )
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
-    monkeypatch.setattr(claude_mod, "send_to_session", lambda *a, **kw: None)
 
     from fno.inbox import store as store_mod
     monkeypatch.setattr(store_mod, "write_new_thread", lambda **kw: (_ for _ in ()).throw(OSError("disk full")))
@@ -1899,7 +1891,6 @@ def test_dispatch_send_envelope_write_valueerror_exit12(tmp_path: Path, monkeypa
         ),
     )
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
-    monkeypatch.setattr(claude_mod, "send_to_session", lambda *a, **kw: None)
 
     from fno.inbox import store as store_mod
     monkeypatch.setattr(store_mod, "write_new_thread", lambda **kw: (_ for _ in ()).throw(ValueError("suffix exhausted")))
@@ -1943,7 +1934,6 @@ def test_dispatch_send_events_carry_context_envelope(tmp_path: Path, monkeypatch
         ),
     )
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
-    monkeypatch.setattr(claude_mod, "send_to_session", lambda *a, **kw: None)
 
     captured: list = []
     from fno.agents import events as events_mod
@@ -2263,7 +2253,6 @@ def test_dispatch_send_durable_stamps_live_drain_owner(tmp_path: Path, monkeypat
     _register_claude_peer()
 
     from fno.agents.harnesses import claude as claude_mod
-    from fno.agents.harnesses.claude import ProviderSocketError
     from fno.agents.harnesses._claude_session_registry import SessionLocator
 
     monkeypatch.setattr(
@@ -2275,11 +2264,6 @@ def test_dispatch_send_durable_stamps_live_drain_owner(tmp_path: Path, monkeypat
         ),
     )
     monkeypatch.setattr(claude_mod, "mcp_channel_reachable", lambda *a, **kw: False)
-
-    def _failing_send(sock_path: str, content: str, from_name: str) -> None:
-        raise ProviderSocketError("connection refused")
-
-    monkeypatch.setattr(claude_mod, "send_to_session", _failing_send)
 
     from fno.agents.dispatch import dispatch_send
     from fno.bus.log import iter_messages
@@ -2761,20 +2745,26 @@ def _reclaim_under_lock_then_release(
         _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
         _P(ready_path).write_text("held")
         time.sleep(hold_seconds)
+        # The override lives ONLY for this write: the thread mutates the real
+        # process env, so a leak here would redirect every later test in the
+        # worker to a tmp registry that no longer exists.
         _os.environ["FNO_AGENTS_REGISTRY"] = registry_path
-        from fno.agents.registry import AgentEntry, write_registry
+        try:
+            from fno.agents.registry import AgentEntry, write_registry
 
-        write_registry([
-            AgentEntry(
-                name="red",
-                harness="claude",
-                harness_session_id="99999999-1111-7222-8333-444455556666",
-                cwd="/tmp",
-                log_path="/tmp/red.log",
-                short_id="99999999",
-                status="live",
-            )
-        ])
+            write_registry([
+                AgentEntry(
+                    name="red",
+                    harness="claude",
+                    harness_session_id="99999999-1111-7222-8333-444455556666",
+                    cwd="/tmp",
+                    log_path="/tmp/red.log",
+                    short_id="99999999",
+                    status="live",
+                )
+            ])
+        finally:
+            _os.environ.pop("FNO_AGENTS_REGISTRY", None)
         _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
 
 

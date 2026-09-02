@@ -554,6 +554,21 @@ def _args_before_argv(args: Sequence[str]) -> Sequence[str]:
     return out
 
 
+def _is_anycast_ask(verb: str, args: Sequence[str]) -> bool:
+    """True for an ``ask`` carrying ``--to-project``.
+
+    The Rust client has no ``--to-project`` flag, so a verbatim route exits
+    ``unknown flag``. Anycast resolves to one live peer in Python (a
+    registry read, ``resolve_to_project``) and then execs the binary with a
+    resolved name; detecting the flag here is what sends that invocation to
+    ``cmd_ask`` first. ``--any`` rides along: it only means something
+    together with ``--to-project``.
+    """
+    if verb != "ask":
+        return False
+    return _has_flag(args, longs=("--to-project", "--any"))
+
+
 def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--role`` (x-d2fe).
 
@@ -1315,6 +1330,10 @@ def make_agents_group_cls() -> type:
                     or _is_resume_bearing_spawn(verb, args)
                     or _is_output_format_bearing_spawn(verb, args)
                     or _is_dispatch_account_bearing_spawn(verb, args)
+                    # An anycast ask resolves its recipient in Python before
+                    # the binary runs (see _is_anycast_ask); the ported ask
+                    # legs did not remove that one pre-exec step.
+                    or _is_anycast_ask(verb, args)
                 )
                 if mode == "rust" and not py_spawn:
                     _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs

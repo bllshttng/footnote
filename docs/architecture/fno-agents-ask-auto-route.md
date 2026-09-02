@@ -93,11 +93,11 @@ Reasons covered: `paths import failed`, `agents_registry_path() raised`, `regist
 | Surface | What it pins |
 |---|---|
 | `cli/tests/agents/test_rust_runtime.py` (contract + parametric) | `_resolve_ask_provider` correctness, routing-decision branches, `RUST_CLIENT_ASK_PROVIDERS` set, value-carrying flag handling, `FNO_AGENTS_DEBUG_ROUTING` observability |
-| `cli/tests/agents/test_ask_e2e_dispatch.py` | CLI-level dispatch differential: Python `dispatch_ask` vs Rust binary subprocess against one shared fake codex; happy path + non-zero exit propagation |
+| `cli/tests/agents/test_ask_e2e_dispatch.py` | CLI-level ask contract: unknown-agent exit propagation and the registry-seeded follow-up path (the Python `dispatch_ask` differential it once ran was retired with that leg) |
 | `crates/fno-agents/tests/codex_ask_unit.rs` (B1) | Pure-function core: argv build, JSONL parse, error enum, exit-code map |
 | `crates/fno-agents/tests/codex_ask_dispatch.rs` (B2) | Subprocess driver + dispatch orchestrator against the fake codex |
-| `crates/fno-agents/tests/codex_ask_parity.rs` (B3) | Cross-language byte parity: Python `harnesses/codex.py` vs Rust `codex_ask` against the SAME fake codex |
-| `crates/fno-agents/tests/claude_ask_parity.rs` (parent) | Cross-language byte parity for claude |
+| `crates/fno-agents/tests/codex_ask_parity.rs` (B3) | Characterization for the retired Python `resume` leg: the frozen golden stands in for `harnesses/codex.py`; the surviving `create`/spawn cases stay live differential |
+| `crates/fno-agents/tests/claude_ask_parity.rs` (parent) | Characterization for the retired Python envelope leg, goldens under `tests/golden/claude_ask/` |
 
 ## Scope boundary
 
