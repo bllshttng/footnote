@@ -1,8 +1,13 @@
 # Dual-implementation inventory and the port protocol
 
-The operator ruling. When something touches Python and can also be written in Rust only, make it Rust only. Something implemented twice is a port candidate.
+The operator ruling. When either trigger fires, port a Python behavior to Rust.
 
-This page answers three questions. Which cross-tree guards mark a real second implementation. What the procedure is for retiring one. Why most of these guards are not port candidates at all.
+1. DUPLICATION. One behavior is hand-written twice, in two languages. This is the original rule, and the dual-logic kind below.
+2. PREVENTION. The port removes a class of defect that a type system makes unrepresentable rather than merely detectable. The qualifying classes are in the second-trigger section below.
+
+Neither trigger reaches a shared-vocabulary or a generated-artifact guard. Those stay excluded regardless of benefit, because porting them retires nothing and a generated-artifact tripwire is correct as built.
+
+This page answers four questions. Which cross-tree guards mark a real second implementation. What the procedure is for retiring one. Why most of these guards are not port candidates at all. When a port is justified without duplication.
 
 ## The discriminator
 
@@ -17,6 +22,20 @@ There are three kinds. Only the first is a port candidate.
 **generated-artifact.** One owner, a generated copy, and a freshness tripwire. This is correct and must not be "fixed". The exemplar is `harness_capabilities.toml`. The Rust tree owns the canonical file. `build.rs` generates the Python copy on every build. `scripts/ci/check-harness-capabilities-fresh.sh` catches a stale copy. One owner, one generated artifact, one guard. A generated data file is not a second implementation.
 
 This page exists to prevent one failure: reading a filename as evidence. A file called `*_parity.rs` looks like a live second implementation. Often it is not. The inventory below was filed wrong twice for that reason. The guard in the last section makes the distinction machine-readable.
+
+## The second trigger: prevention
+
+Duplication is not the only reason a port pays. The second trigger is prevention: the port removes a class of defect that a type system makes unrepresentable rather than merely detectable. Detection-only fixes leave the wrong answer still writable. A type that cannot express the wrong answer ends the class. Every case below is one measured incident of the same failure class: an instrument returning a value indistinguishable from a real answer.
+
+The provenance case. Two docstrings stated opposite meanings for one registry lookup: one said a hit proves the id is NOT ours, the other that it IS ours. Both were confident and both were load-bearing. They reconciled only on the provenance of the input, which nothing encoded. Three workers were refused their own node before anyone read both docstrings.
+
+The exhaustiveness case. A capability table recorded agy and opencode as unsupported with no justification, while pi's row carried a measured reason. One word was doing two jobs, measured-absent and never-checked, and no reader can tell them apart.
+
+The rename-safety case. The substrate vocabulary moved from `bg` to `thread`, and a literal comparison against `bg` survived the rename. Every autonomous dispatch then reported it went headless while it spawned a thread, and emitted a false fallback event with it.
+
+Each case earns the port through the type system. Provenance moves into a type instead of a docstring. A closed vocabulary forces every entry to carry its reason. An enum turns a rename into a compile error at every surviving site instead of a false comparison at one.
+
+The scope guard. Prevention is a second trigger for porting, never a third kind of guard. The discriminator above still decides what a dual implementation is, and its exclusions survive this trigger unchanged. A prevention port follows the same four-step protocol as a duplication port. The sequence section orders duplication ports only. A prevention port is scheduled on its own measured case, never by that sequence.
 
 ## The parity tests
 
