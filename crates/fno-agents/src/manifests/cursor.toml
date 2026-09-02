@@ -1,0 +1,69 @@
+# cursor readiness manifest (x-83e7) - full-roster parity port from
+# the reference manifest for cursor per ADAPTING.md.
+#
+# UNVALIDATED + INERT: cursor has no fno provider host (no build_pane_argv arm /
+# provider impl), so scrape_targets never selects it and this manifest is
+# bundled-but-dormant (like opencode). Markers are reference-derived, NOT pinned
+# against a live cursor TUI. Our engine is case-sensitive and the reference engine is not, so
+# these lowercase needles under-fire until smoke-pinned - the conservative
+# never-false-ready direction (readiness OQ#9). State vocab + arbitration: see
+# codex.toml.
+#
+# Priority (highest wins): 320 write_file_approval (blocked) > 300 approval_prompt
+# (blocked) > 100 stop_hint > 95 background_task > 90 spinner (all working).
+
+min_engine_version = 1
+
+[[rule]]
+id = "write_file_approval"
+state = "blocked"
+priority = 320
+region = "bottom_non_empty_lines(8)"
+gate = { all = [
+  { contains = "write to this file?" },
+  { contains = "proceed (y)" },
+  { any = [
+    { contains = "reject & propose changes" },
+    { contains = "esc or n or p" },
+    { contains = "add write(" },
+  ] },
+] }
+
+[[rule]]
+id = "approval_prompt"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+gate = { any = [
+  { all = [
+    { contains = "waiting for approval" },
+    { contains = "run this command?" },
+    { any = [ { contains = "run (once) (y)" }, { contains = "skip (esc or n)" } ] },
+  ] },
+  { contains = "(y) (enter)" },
+  { line_regex = '(?i)^\s*allow .*\(y\)' },
+  { contains = "keep (n)" },
+  { contains = "skip (esc or n)" },
+  { line_regex = '(?i)^\s*(run |.*\(y\).*(allow|run \(once\)|→ run))' },
+] }
+
+[[rule]]
+id = "stop_hint_working"
+state = "working"
+priority = 100
+region = "bottom_non_empty_lines(6)"
+gate = { contains = "ctrl+c to stop" }
+
+[[rule]]
+id = "background_task_status_working"
+state = "working"
+priority = 95
+region = "bottom_non_empty_lines(5)"
+gate = { line_regex = '\b[1-9][0-9]*\s+background\s+tasks?\b' }
+
+[[rule]]
+id = "spinner_working"
+state = "working"
+priority = 90
+region = "bottom_non_empty_lines(8)"
+gate = { line_regex = '^\s*(⬡|⬢|[\x{2800}-\x{28FF}]+)\s+\p{Alphabetic}+\w*ing\b' }

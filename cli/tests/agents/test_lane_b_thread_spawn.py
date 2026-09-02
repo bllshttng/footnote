@@ -620,6 +620,82 @@ def test_stop_agent_stops_a_keeper_that_dies_between_probe_and_kill(lane_b_home)
         shutil.rmtree(short_state, ignore_errors=True)
 
 
+def test_stop_agent_routes_a_cursor_thread_through_the_keeper_kill(
+    lane_b_home, monkeypatch
+) -> None:
+    """A keeper-hosted cursor-agent thread row must take the Kill-frame arm.
+
+    The pane arm finds no mux pane on a thread row: it would mark the row
+    orphaned while the keeper and the hosted TUI still run. Routing through
+    _stop_keeper_thread is the only stop that reaches the child, with the
+    worker-server census reaped after the teardown."""
+    from fno.agents.harnesses import cursor_agent as cursor_agent_mod
+    from fno.agents.registry import AgentEntry, load_registry, update_registry
+
+    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-cursor-"))
+    sock = short_state / "mux" / "threads" / "wk-cursor-stop.sock"
+    sock.parent.mkdir(parents=True, exist_ok=True)
+    seen: dict[str, object] = {}
+
+    # The vanishing keeper, the same SIGKILLed-mid-stop shape the pi test
+    # pins: one accepted probe connection, then gone without unlinking.
+    def _serve() -> None:
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(sock))
+        server.listen(8)
+        server.settimeout(5)
+        seen["ready"] = True
+        try:
+            conn, _ = server.accept()
+            conn.close()
+        except OSError:
+            pass
+        finally:
+            server.close()
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while "ready" not in seen and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    entry = AgentEntry(
+        name="wk-cursor-stop",
+        cwd=str(lane_b_home),
+        log_path=str(lane_b_home / "keeper.log"),
+        harness="cursor-agent",
+        host_mode="interactive",
+        harness_session_id="fadad56b-8008-45f5-b809-f9fab7074534",
+        pid=4242,
+        keeper_child_pid=555,
+        messaging_socket_path=str(sock),
+        origin="spawn",
+    )
+    update_registry(lambda entries: entries + [entry])
+
+    reap_sizes: list[int] = []
+
+    def _fake_reap(handles):
+        reap_sizes.append(len(list(handles)))
+        return 1
+
+    monkeypatch.setattr(
+        cursor_agent_mod, "capture_detached_worker_servers", lambda owner_pid, owner_pid_start_time: ()
+    )
+    monkeypatch.setattr(cursor_agent_mod, "reap_detached_worker_servers", _fake_reap)
+
+    try:
+        result = dispatch_mod.stop_agent("wk-cursor-stop")
+        assert result.name == "wk-cursor-stop"
+        row = next(e for e in load_registry() if e.name == "wk-cursor-stop")
+        assert row.status == "exited", "the Kill arm went terminal, not the pane arm's orphaned"
+        assert reap_sizes == [0], "the census runs against the live keeper, then reaps after"
+        assert not sock.exists(), "the stale socket file is reaped on the clean stop"
+    finally:
+        thread.join(timeout=5)
+        shutil.rmtree(short_state, ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------
 # cursor-agent: the callee-minted keeper harness
 # ---------------------------------------------------------------------------

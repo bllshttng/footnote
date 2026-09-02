@@ -75,8 +75,11 @@ pub fn chat_id_error(value: &str) -> Option<String> {
 
 pub fn is_cursor_worker_server_command(command: &str) -> bool {
     let command = command.to_ascii_lowercase();
+    // Mirrors the Python twin in cli/src/fno/agents/harnesses/cursor_agent.py:
+    // a worker-server can ride Cursor's extension root (/.cursor/) without
+    // the CLI's name in its cmdline, and both runtimes must reap the same set.
     command.contains("worker-server")
-        && (command.contains("/cursor-agent/") || command.contains("cursor-agent"))
+        && (command.contains("cursor-agent") || command.contains("/.cursor/"))
 }
 
 pub fn select_owned_worker_server_pids(

@@ -789,7 +789,15 @@ mod tests {
         let contract = HarnessContract::packaged().unwrap();
         assert_eq!(
             contract.harness.keys().cloned().collect::<Vec<_>>(),
-            ["agy", "claude", "codex", "gemini", "opencode", "pi"]
+            [
+                "agy",
+                "claude",
+                "codex",
+                "cursor-agent",
+                "gemini",
+                "opencode",
+                "pi"
+            ]
         );
         for (name, caps) in &contract.harness {
             assert_eq!(caps.permission_response.len(), 3, "{name}");

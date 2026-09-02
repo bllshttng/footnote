@@ -2075,7 +2075,10 @@ def _keeper_seed_submit(
 
         # A composer-wide prefix: the TUI wraps long lines, and a newline
         # mid-marker would break a full-line match even after the strip.
-        marker = message.splitlines()[0].encode("utf-8")[:48]
+        # Chars, not bytes - the Rust matcher takes 48 chars, and a byte cut
+        # can split a multi-byte character into a partial codepoint that
+        # never appears in the complete-UTF-8 pty stream.
+        marker = message.splitlines()[0][:48].encode("utf-8")
         base = len(text)
         deadline = _time.monotonic() + 120.0
         while _time.monotonic() < deadline:
@@ -4701,6 +4704,40 @@ def _stop_cursor_agent(name: str, existing: AgentEntry) -> StopResult:
     return StopResult(name=name, provider="cursor-agent", claude_exit=None)
 
 
+def _stop_cursor_agent_thread(
+    name: str, existing: AgentEntry, keeper_sock: str
+) -> StopResult:
+    """Stop a keeper-hosted cursor thread over its socket, then reap servers.
+
+    The keeper's Kill frame tears down the hosted TUI; Cursor's detached
+    worker-server is the TUI's child, so it is captured while the keeper pid
+    still proves ownership and reaped after the teardown. A census failure
+    degrades to an empty capture - the kill does not depend on it - while a
+    reap failure raises, because surviving servers are exactly what the
+    reaper exists to prevent.
+    """
+    from fno.agents.harnesses.cursor_agent import (
+        capture_detached_worker_servers,
+        reap_detached_worker_servers,
+    )
+
+    worker_servers: tuple = ()
+    try:
+        worker_servers = capture_detached_worker_servers(
+            existing.pid, existing.pid_start_time
+        )
+    except RuntimeError:
+        worker_servers = ()
+    result = _stop_keeper_thread(name, existing, keeper_sock)
+    try:
+        reaped = reap_detached_worker_servers(worker_servers)
+    except RuntimeError as exc:
+        raise DispatchAskError(str(exc), exit_code=1) from exc
+    if reaped:
+        print(f"cursor-agent worker-server processes reaped: {reaped}", flush=True)
+    return result
+
+
 def stop_agent(
     name: str,
     *,
@@ -4752,6 +4789,14 @@ def stop_agent(
             existing,
         ):
             if existing.harness == "cursor-agent":
+                keeper_sock = getattr(existing, "messaging_socket_path", None)
+                if keeper_sock and "mux/threads/" in keeper_sock:
+                    # A keeper-hosted thread row has no pane to tear down; the
+                    # Kill frame on its own socket is the only transport that
+                    # reaches the hosted TUI. The pane arm below would skip
+                    # straight to the reaper and mark the row orphaned while
+                    # keeper and child still run.
+                    return _stop_cursor_agent_thread(name, existing, keeper_sock)
                 return _stop_cursor_agent(name, existing)
 
             if existing.harness in ("codex", "gemini"):

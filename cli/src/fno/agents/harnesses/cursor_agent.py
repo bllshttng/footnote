@@ -110,14 +110,22 @@ def create_chat(cwd: Path | str) -> str:
         while time.monotonic() < deadline and b"\n" not in output:
             remaining = max(0.0, deadline - time.monotonic())
             ready, _, _ = select.select(streams, [], [], min(0.2, remaining))
+            # EOF: select reports a closed pipe ready immediately, so once the
+            # helper has exited (the fast-fail auth shape) a plain continue
+            # would spin hot until the deadline. Drain this round, then stop.
+            drained_and_exited = False
             for stream in ready:
                 chunk = os.read(stream.fileno(), 4096)
                 if not chunk:
+                    if process.poll() is not None:
+                        drained_and_exited = True
                     continue
                 if stream is stdout:
                     output.extend(chunk)
                 else:
                     stderr_output.extend(chunk)
+            if drained_and_exited:
+                break
     except (OSError, ValueError) as exc:
         raise CursorAgentSessionError(
             f"cursor-agent create-chat output could not be read: {exc}"
