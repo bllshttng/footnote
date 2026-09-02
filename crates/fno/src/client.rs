@@ -14600,7 +14600,14 @@ async fn execute_aux_action(
             view.aux = None;
             view.open_keys_modal();
         }
-        AuxAction::OpenSettings => view.aux = Some(view.build_settings_modal()),
+        // A FRESH settings open resets the colors drill, so a stale lane
+        // text-entry (left armed by a mouse dismiss mid-typing) can never
+        // capture the keys of a reopened modal. `reopen_settings_keeping_sel`
+        // deliberately keeps it: it rebuilds the SAME view after an action.
+        AuxAction::OpenSettings => {
+            view.lane.reset();
+            view.aux = Some(view.build_settings_modal());
+        }
         AuxAction::OpenUpdate => {
             view.aux = Some(build_update_modal(view.update_outcome.as_ref()));
         }
@@ -14962,10 +14969,16 @@ async fn lane_entry_keys(
                     }
                 }
                 0x20..=0x7e => {
+                    // Same bound as the create overlay: a key name or color
+                    // string never needs to grow without limit.
                     if let Some((_, buf)) = view.lane.key_entry.as_mut() {
-                        buf.push(b as char);
+                        if buf.len() < MAX_SEARCH_QUERY {
+                            buf.push(b as char);
+                        }
                     } else if let Some(buf) = view.lane.custom_entry.as_mut() {
-                        buf.push(b as char);
+                        if buf.len() < MAX_SEARCH_QUERY {
+                            buf.push(b as char);
+                        }
                     }
                 }
                 _ => {}
