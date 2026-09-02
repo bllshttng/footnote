@@ -1178,6 +1178,9 @@ class ReviewBlock(BaseModel):
     # into the claim TTL bounds at use (`_review_hold.resolve_ttl_ms`), never at
     # parse: a misconfigured TTL must not make the merge guard unreadable.
     hold_ttl_minutes: int = 90
+    # How long a merge-gating opt-out claim remains valid. The claim layer caps
+    # the same value at 24 hours, so a writer cannot create an unbounded lease.
+    optout_ttl_minutes: int = Field(default=60, ge=1, le=24 * 60)
     # The INVOCATION list (Locked Decision 2): which AI reviewers /pr requests a
     # review from (gemini | codex | coderabbit | claude | none). Distinct from
     # required_bots (the GATE: which GitHub bot logins must have reviewed before
@@ -5234,6 +5237,25 @@ def _aliased_layers(
     return tuple(layers)
 
 
+def _revoke_unbacked_optouts(raw: dict[str, object]) -> dict[str, object]:
+    """Apply the merge-gating opt-out revocation guard to raw config layers.
+
+    The guard lives in ``fno.claims.optout_lease``: a config value whose
+    validity depends on a claim is a core-layer policy, and this package may
+    not import the claims layer. It is loaded via importlib, never a static
+    import, for two recorded reasons: the runtime cycle (paths imports this
+    package, and the claims layer imports paths), and the mypy SCC that a
+    static edge would form, where the lazy ``__getattr__`` re-exports in
+    ``graph._constants`` degrade to ``Optional[Path]`` and fail unrelated
+    modules. The edge must stay invisible to the import graph, not to runtime.
+    """
+    import importlib
+
+    module = importlib.import_module("fno.claims.optout_lease")
+    result = module.revoke_unbacked_optouts(raw)
+    return result if isinstance(result, dict) else raw
+
+
 @lru_cache(maxsize=1)
 def load_settings() -> SettingsModel:
     """Load, deep-merge, and cache the settings for the lifetime of this process.
@@ -5297,6 +5319,7 @@ def load_settings() -> SettingsModel:
     # there is no need for an additional explicit nested call (which caused duplicate emission).
     _warn_unknown_keys(raw, SettingsModel)
 
+    raw = _revoke_unbacked_optouts(raw)
     return SettingsModel.model_validate(raw)
 
 
@@ -5324,6 +5347,8 @@ def settings_from_files(paths: list[Path]) -> SettingsModel:
     # Alias per-layer (see load_settings) so precedence holds across legacy/canonical.
     for parsed in reversed(layers):
         raw = _deep_merge(raw, _alias_legacy_keys(parsed))
+    raw = _unwrap_config_dict(raw)
+    raw = _revoke_unbacked_optouts(raw)
     return SettingsModel.model_validate(raw)
 
 
@@ -5345,6 +5370,8 @@ def load_settings_for_repo(repo_root: Path) -> SettingsModel:
         raw = _deep_merge(raw, parsed)
     if candidates:
         raw = _layer_worktree_local_override(raw, candidates[0].parent)
+    raw = _unwrap_config_dict(raw)
+    raw = _revoke_unbacked_optouts(raw)
     return SettingsModel.model_validate(raw)
 
 

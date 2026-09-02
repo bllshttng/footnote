@@ -1588,6 +1588,48 @@ def _auto_merge_review_gap(
     }
 
 
+def _merge_gating_optout_report() -> dict[str, Any]:
+    """Report opt-out values left in files without a live claim."""
+    try:
+        from fno.config import (
+            _load_raw,
+            _settings_yaml_locations,
+            _unwrap_config_dict,
+            config_read_candidates,
+        )
+        from fno.claims.optout_lease import _claim_state
+        from fno.config.optouts import MERGE_GATING_OPTOUTS, _raw_leaf, optout_release_command
+
+        residue: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for path in config_read_candidates(_settings_yaml_locations()):
+            if not path.is_file():
+                continue
+            parsed, ok = _load_raw(path)
+            if not ok:
+                continue
+            raw = _unwrap_config_dict(parsed)
+            for key, optout in MERGE_GATING_OPTOUTS.items():
+                present, value = _raw_leaf(raw, key)
+                if not present or value != optout:
+                    continue
+                state = _claim_state(key)
+                marker = (str(path), key)
+                if state != "live" and marker not in seen:
+                    seen.add(marker)
+                    residue.append(
+                        {
+                            "key": key,
+                            "path": str(path),
+                            "claim_state": state,
+                            "command": optout_release_command(key),
+                        }
+                    )
+        return {"residue": residue}
+    except Exception as exc:  # noqa: BLE001 - doctor remains advisory
+        return {"residue": [], "error": str(exc)}
+
+
 def _bounded_command(argv: list[str]) -> Optional[tuple[int, str, str]]:
     try:
         proc = subprocess.Popen(
@@ -2356,6 +2398,15 @@ def _emit_human(
             f"merge gate requires no review for a code payload "
             f"({'; '.join(gap.get('keys') or [])}; {label}). "
             f"Remedy: {gap.get('remedy')}"
+        )
+
+    # A lapsed opt-out is inert at read time, but the file can still mislead a
+    # human until the reaper restores it. Keep that residue visible.
+    for finding in (result.get("merge_gating_optouts") or {}).get("residue") or []:
+        out(
+            f"fno doctor: {finding['key']} remains set to its opt-out value in "
+            f"{finding['path']} without a live claim ({finding['claim_state']}); "
+            f"run `{finding['command']}` or let the reaper restore it."
         )
 
     # Deployed claude plugin cache (x-4be1): the hooks actually executed by
@@ -3876,6 +3927,7 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     result["auto_merge_review_gap"] = _auto_merge_review_gap(
         armed_manifests=armed_manifests
     )
+    result["merge_gating_optouts"] = _merge_gating_optout_report()
 
     # Advisory deployed-plugin-cache freshness (x-4be1): the hooks Claude
     # sessions actually run. Never changes status/exit.

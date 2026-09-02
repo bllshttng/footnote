@@ -39,6 +39,7 @@ from fno.config import (
     _migrate_yaml_to_toml,
     _strip_none,
 )
+from fno.config.optouts import MERGE_GATING_OPTOUTS
 from fno.time_budget import validate_timeout_budget
 
 
@@ -56,6 +57,7 @@ class SetResult:
     value: Any
     path: Path
     scope: str  # "global" | "project"
+    lease: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -66,6 +68,19 @@ class UnsetResult:
     default: Any  # the model default the key reverts to once removed
     path: Path
     scope: str  # "global" | "project"
+
+
+def _stored_leaf(data: dict[str, Any], parts: list[str]) -> tuple[bool, Any]:
+    node: Any = data
+    for part in parts:
+        if not isinstance(node, dict) or part not in node:
+            return False, None
+        node = node[part]
+    return True, node
+
+
+def _is_optout_value(key: str, present: bool, value: Any) -> bool:
+    return present and value == MERGE_GATING_OPTOUTS[key]
 
 
 def _unwrap_optional(ann: Any) -> Any:
@@ -548,6 +563,7 @@ def set_config_values(
     scope: str = "global",
     repo_root: Optional[Path] = None,
     lock_timeout: Optional[float] = None,
+    lease_ops: Any = None,
 ) -> list[SetResult]:
     """Set one or more dotted keys in one atomic, lock-serialized pass (US2).
 
@@ -559,6 +575,11 @@ def set_config_values(
     The single-key ``set_config_value`` delegates here, so both share one
     read-modify-write path. Returns one ``SetResult`` per distinct key, in
     first-seen order.
+
+    ``lease_ops`` carries the claims-backed merge-gating lease operations
+    (implemented by ``fno.claims.optout_lease``); it is injected rather than
+    imported because this module may not import the claims layer. Without it,
+    a batch touching a merge-gating opt-out key is refused, fail-closed.
     """
     if not items:
         raise ConfigSetError("no key=value pairs given", 2)
@@ -571,6 +592,14 @@ def set_config_values(
             order.append(key)
         deduped[key] = value
 
+    touched_optouts = [key for key in order if key in MERGE_GATING_OPTOUTS]
+    if touched_optouts and lease_ops is None:
+        raise ConfigSetError(
+            "merge-gating opt-out keys require the claims lane; route through"
+            " fno.claims.optout_lease",
+            1,
+        )
+
     # Resolve every key up front (unknown -> exit 1) before taking the lock.
     parts_by_key: dict[str, list[str]] = {}
     for key in order:
@@ -581,6 +610,9 @@ def set_config_values(
 
     target = _target_path(scope, repo_root)
     final_values: dict[str, Any] = {}
+    leases: dict[str, dict[str, Any]] = {}
+    newly_acquired: list[tuple[str, str]] = []
+    releases: list[tuple[str, str]] = []
 
     def _validate_and_merge(existing: dict[str, Any]) -> dict[str, Any]:
         # Phase 1: coerce/parse + apply every key, collecting the distinct
@@ -599,6 +631,20 @@ def set_config_values(
                 blocks[block[0]] = block[1]
         for block_parts, parent_cls in blocks.items():
             _validate_block(data, block_parts, parent_cls)
+
+        if touched_optouts:
+            outcome = lease_ops.prepare_set_leases(
+                order=order,
+                parts_by_key=parts_by_key,
+                existing=existing,
+                data=data,
+                target=target,
+                scope=scope,
+            )
+            data = outcome["data"]
+            leases.update(outcome["leases"])
+            newly_acquired.extend(outcome["newly_acquired"])
+            releases.extend(outcome["releases"])
         return data
 
     try:
@@ -611,11 +657,26 @@ def set_config_values(
     except OSError as exc:
         # AC2-FR: the temp+rename already left the original intact; surface a
         # clean non-zero exit.
+        if touched_optouts:
+            lease_ops.rollback_set_leases(newly_acquired)
         raise ConfigSetError(
             f"failed to write {target}: {exc} (settings left unchanged)", 1
         ) from exc
+    except Exception:
+        if touched_optouts:
+            lease_ops.rollback_set_leases(newly_acquired)
+        raise
+
+    if releases:
+        lease_ops.finalize_set_leases(releases)
     return [
-        SetResult(key=key, value=final_values[key], path=written, scope=scope)
+        SetResult(
+            key=key,
+            value=final_values[key],
+            path=written,
+            scope=scope,
+            lease=leases.get(key),
+        )
         for key in order
     ]
 
@@ -703,6 +764,7 @@ def unset_config_value(
     *,
     scope: str = "global",
     repo_root: Optional[Path] = None,
+    lease_ops: Any = None,
 ) -> UnsetResult:
     """Remove a dotted config key, reverting it to the model default.
 
@@ -710,6 +772,10 @@ def unset_config_value(
     confirmation. An unknown key exits 1 (same as ``set``); an absent key is a
     clean no-op (``present=False``, nothing written). Atomic + lock-serialized
     via the shared ``_locked_update``; a write failure leaves the file intact.
+
+    ``lease_ops`` is the claims-backed merge-gating lease lane (see
+    ``set_config_values``); unsetting a merge-gating opt-out key without it is
+    refused, fail-closed.
     """
     parts = key.split(".")
     if _resolve_parent_block(parts) is None:
@@ -728,8 +794,20 @@ def unset_config_value(
     target = _target_path(scope, repo_root)
     real_target = Path(os.path.realpath(target)) if target.is_symlink() else target
 
+    release_holder: Optional[str] = None
+    if key in MERGE_GATING_OPTOUTS:
+        if lease_ops is None:
+            raise ConfigSetError(
+                "merge-gating opt-out keys require the claims lane; route through"
+                " fno.claims.optout_lease",
+                1,
+            )
+        release_holder = lease_ops.plan_unset_release(key)
+
     # No file -> nothing to remove; do not create an empty settings file.
     if not real_target.exists():
+        if release_holder:
+            lease_ops.release_optout(key, release_holder)
         return UnsetResult(
             key=key, was=None, present=False, default=default,
             path=real_target, scope=scope,
@@ -754,6 +832,9 @@ def unset_config_value(
         raise ConfigSetError(
             f"failed to write {target}: {exc} (settings left unchanged)", 1
         ) from exc
+
+    if release_holder:
+        lease_ops.release_optout(key, release_holder)
 
     return UnsetResult(
         key=key,

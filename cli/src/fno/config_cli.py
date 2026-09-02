@@ -1074,7 +1074,8 @@ def set_cmd(
     """
     import sys
 
-    from fno.config.writer import ConfigSetError, set_config_values
+    from fno.claims.optout_lease import ConfigSetError, set_config_values
+    from fno.config.optouts import optout_release_command
 
     scope = "project" if local else "global"
 
@@ -1138,6 +1139,15 @@ def set_cmd(
             typer.echo(f"set {r.key} = {r.value}")
         # Scope + path printed once (AC2-UI).
         typer.echo(f"({results[0].scope}: {results[0].path})")
+
+    for r in results:
+        if r.lease:
+            scope_flag = " --local" if r.scope == "project" else ""
+            release = optout_release_command(r.key, scope_flag)
+            typer.echo(
+                f"lease: {r.key} held by {r.lease['holder']}, expires at "
+                f"{r.lease['expires_at']}; release: {release}"
+            )
 
     _check_overridden_writes(results)
 
@@ -1273,7 +1283,7 @@ def unset_cmd(
     """
     import sys
 
-    from fno.config.writer import ConfigSetError, unset_config_value
+    from fno.claims.optout_lease import ConfigSetError, unset_config_value
 
     scope = "project" if local else "global"
     try:

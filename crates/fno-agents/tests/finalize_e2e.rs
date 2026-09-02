@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
+use fno_agents::claims::{encode_key, ClaimRecord};
+
 const BIN: &str = env!("CARGO_BIN_EXE_fno-agents");
 
 struct Env {
@@ -1246,6 +1248,7 @@ fn run_finalize_shimmed(env: &Env, reason: &str, gh_body: &str) -> std::process:
         .arg(&env.postmortems)
         .env("PYTHONPATH", &env.pypath)
         .env("PATH", path)
+        .env("FNO_CLAIMS_ROOT", env._tmp.path().join("claims-root"))
         // Pin the config chain to this temp project. `$FNO_CONFIG` is
         // the SOLE source when set, so without this a developer who exports it
         // gets a run that never reads the project config.toml a test just wrote,
@@ -1418,6 +1421,37 @@ fn write_auto_merge_config(env: &Env, body: &str) {
     fs::write(env.cwd.join(".fno/config.toml"), body).unwrap();
 }
 
+fn write_live_optout_claim(env: &Env, key: &str) {
+    let root = env._tmp.path().join("claims-root");
+    let claims = root.join(".fno/claims");
+    fs::create_dir_all(&claims).unwrap();
+    let hostname = String::from_utf8(Command::new("hostname").output().expect("hostname").stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let now = 1_900_000_000_000_i64;
+    let claim = ClaimRecord {
+        schema_version: 1,
+        key: format!("config-optout:{key}"),
+        holder: "session-a".into(),
+        acquired_at: now,
+        pid: Some(std::process::id() as i32),
+        host: hostname,
+        pid_unavailable: false,
+        expires_at: Some(now + 300_000),
+        reason: Some("merge-gating opt-out".into()),
+        harness: None,
+        pid_provenance: None,
+        machine_id: None,
+        metadata: serde_json::Map::new(),
+    };
+    fs::write(
+        claims.join(format!("{}.lock", encode_key(&claim.key))),
+        serde_yaml_ng::to_string(&claim).unwrap(),
+    )
+    .unwrap();
+}
+
 fn configure_optional_codex(env: &Env) {
     write_auto_merge_config(
         env,
@@ -1573,6 +1607,30 @@ fn finalize_live_auto_merge_switch_vetoes_an_approved_run() {
     assert!(blocked.contains("auto_merge.enabled=false"));
     assert!(blocked.contains("sanctioned override"));
     assert!(blocked.contains("TARGET_AUTO_MERGE=1"));
+}
+
+#[test]
+fn finalize_withholds_native_arm_for_a_live_merge_optout_claim() {
+    let env = setup("S-live-optout", false);
+    set_posture(&env, "S-live-optout", true);
+    write_auto_merge_config(&env, "[auto_merge]\nenabled = true\n");
+    write_live_optout_claim(&env, "review.self_review_required");
+
+    let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
+
+    assert!(out.status.success());
+    assert!(!calls(&env).contains("gh pr merge"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("config-optout:review.self_review_required"),
+        "stderr must name the live opt-out claim: {stderr}"
+    );
+    let event = finalized_event(&env, "S-live-optout");
+    assert_eq!(event.pointer("/data/auto_merge_armed"), Some(&false.into()));
+    assert!(event
+        .pointer("/data/auto_merge_blocked_reason")
+        .and_then(|v| v.as_str())
+        .is_some_and(|reason| reason.contains("config-optout:review.self_review_required")));
 }
 
 /// x-01b9's positive marker: an explicit spawn-time grant

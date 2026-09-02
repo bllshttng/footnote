@@ -230,7 +230,16 @@ pub fn encode_key(key: &str) -> String {
 /// Claim prefixes whose identifier is globally unique (mirrors
 /// `io._GLOBAL_ID_PREFIXES`): these coordinate across worktrees/repos via the
 /// global root, never a cwd-local dir.
-const GLOBAL_ID_PREFIXES: &[&str] = &["node", "dispatch", "reconcile", "session"];
+const GLOBAL_ID_PREFIXES: &[&str] = &["node", "dispatch", "reconcile", "session", "config-optout"];
+
+/// Dotted configuration keys whose opt-out values are backed by global claims.
+/// Python owns the value membership and tests the source-level parity; Rust
+/// owns the claim routing and the readers that need the live verdict.
+pub const MERGE_GATING_OPTOUT_KEYS: &[&str] = &[
+    "review.self_review_required",
+    "review.optional_apps",
+    "auto_merge.require_checks_pass",
+];
 
 /// The global claims ROOT: `$FNO_CLAIMS_ROOT`, else `$HOME`. A set-but-EMPTY
 /// env value is UNSET (falls to `$HOME`) — Python's `os.environ.get` returns
@@ -2746,6 +2755,24 @@ mod tests {
         // Explicit root always wins.
         let dir = claims_dir("walker:/repo/root", Some(Path::new("/tmp/x"))).unwrap();
         assert_eq!(dir, PathBuf::from("/tmp/x/.fno/claims"));
+    }
+
+    #[test]
+    fn config_optout_claims_route_to_the_global_root() {
+        let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("FNO_CLAIMS_ROOT");
+        let root = std::env::temp_dir().join(format!("fno-optout-root-{}", std::process::id()));
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+
+        assert_eq!(
+            claims_root_for("config-optout:review.self_review_required"),
+            Some(root.clone())
+        );
+
+        match prior {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
     }
 
     // ---- validation bounds (contract item 10) ----------------------------
