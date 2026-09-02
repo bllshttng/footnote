@@ -99,6 +99,17 @@ jobs:
         working-directory: cli
         run: uv run fno-py doctor lint state-roots
 
+      # The Rust/Python seam ratchet, positive-controlled by
+      # tests/ci/test_seam_crossings.sh: the selftest must fail on injected
+      # drift before the check is trusted on the real tree.
+      - name: Seam-crossings ratchet (selftest, then check)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          bash tests/ci/test_seam_crossings.sh
+          (cd cli && uv run fno-py doctor lint seam-crossings)
+
   # PR-only: every member here originally triggered on `pull_request` alone
   # (no `push`), several because they read PR-only context (PR_BODY,
   # BASE_REF, PR_TITLE, PR_BASE_SHA/PR_HEAD_SHA) that does not exist on a push
