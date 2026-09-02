@@ -645,6 +645,7 @@ def render_self_review_invocation(
     pr_number: Optional[int] = None,
     head_sha: Optional[str] = None,
     base_branch: Optional[str] = None,
+    raw_transport: bool = False,
 ) -> str:
     """Render the native review request, optionally pinned to one PR head.
 
@@ -660,7 +661,14 @@ def render_self_review_invocation(
     target from the ambient cwd."""
     try:
         h = harness or detect_session().harness
-        rendered = self_review_invocation(h, level=diff_review_level(project_root))
+        level = diff_review_level(project_root)
+        if raw_transport and h == "codex":
+            # Raw Codex review routing reaches the app-server review/start RPC,
+            # whose payload grammar requires the native slash verb. `$fno:review`
+            # is the skill spelling for a model prompt, not a raw RPC payload.
+            rendered = f"/review {level or '<level>'} --comment"
+        else:
+            rendered = self_review_invocation(h, level=level)
         target_fields = (pr_number, head_sha, base_branch)
         if any(value is not None for value in target_fields):
             if not all(value is not None for value in target_fields):

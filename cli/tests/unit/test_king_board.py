@@ -70,7 +70,13 @@ def _queue(board, name):
 
 def test_scope_ids_filter_every_node_bearing_queue_and_report_rejections():
     inputs = _empty_inputs(
-        ready=_ok([_node("in-ready"), _node("out-ready")]),
+        ready=_ok(
+            [
+                _node("in-ready"),
+                _node("out-ready"),
+                _node("out-unplanned", plan_path=None),
+            ]
+        ),
         claims=_ok(
             [
                 _claim("in-held", holder="target-session:in"),
@@ -95,6 +101,7 @@ def test_scope_ids_filter_every_node_bearing_queue_and_report_rejections():
     )
 
     assert [r["id"] for r in _queue(board, "undispatched")["rows"]] == ["in-ready"]
+    assert _queue(board, "unplanned")["rows"] == []
     assert [r["id"] for r in _queue(board, "stalled_holder")["rows"]] == ["in-held"]
     assert [r["key"] for r in _queue(board, "stale_claim")["rows"]] == [
         "node:in-stale"
@@ -106,6 +113,7 @@ def test_scope_ids_filter_every_node_bearing_queue_and_report_rejections():
     assert outside["actionable"] is False
     assert {r["id"] for r in outside["rows"]} == {
         "out-ready",
+        "out-unplanned",
         "out-held",
         "out-stale",
     }
@@ -188,7 +196,7 @@ def test_undispatched_row_names_the_node_and_carries_a_rerunnable_source():
 
 def test_every_queue_carries_a_source_command():
     board = build_board(_empty_inputs())
-    assert len(board["queues"]) == 9
+    assert len(board["queues"]) == 10
     for q in board["queues"]:
         assert q["source"], f"{q['name']} has no source command"
 
@@ -203,9 +211,113 @@ def test_p2_node_is_not_undispatched_work():
 
 def test_node_without_a_plan_is_not_undispatched_work():
     board = build_board(
-        _empty_inputs(undispatched=_ok([_node("x-1234", plan_path=None)]))
+        _empty_inputs(
+            ready=_ok([_node("x-1234", plan_path=None)]),
+            undispatched=_ok([]),
+        )
     )
     assert _queue(board, "undispatched")["count"] == 0
+    assert [r["id"] for r in _queue(board, "unplanned")["rows"]] == ["x-1234"]
+
+
+def test_a_planless_node_is_unplanned_work_and_names_the_blueprint_verb():
+    board = build_board(
+        _empty_inputs(
+            ready=_ok([_node("x-df08", priority="p1", plan_path=None)]),
+            undispatched=_ok([]),
+        )
+    )
+
+    q = _queue(board, "unplanned")
+    assert [r["id"] for r in q["rows"]] == ["x-df08"]
+    assert q["verb"] == "/fno:blueprint"
+    assert q["actionable"] is True
+    assert board["actionable"] >= 1
+
+
+def test_a_planless_node_makes_the_board_actionable_so_the_king_loop_does_not_exit_nowork():
+    board = build_board(
+        _empty_inputs(
+            ready=_ok([_node("x-df08", priority="p1", plan_path=None)]),
+            undispatched=_ok([]),
+        )
+    )
+
+    assert board["actionable"] == 1
+
+
+def test_a_planned_node_routes_to_target_and_never_to_blueprint():
+    planned = _node("x-planned", priority="p0")
+    board = build_board(
+        _empty_inputs(ready=_ok([planned]), undispatched=_ok([planned]))
+    )
+
+    assert [r["id"] for r in _queue(board, "undispatched")["rows"]] == ["x-planned"]
+    assert _queue(board, "undispatched")["verb"] == "/fno:target"
+    assert _queue(board, "unplanned")["rows"] == []
+
+
+def test_a_p2_planless_node_is_not_the_kings_work():
+    board = build_board(
+        _empty_inputs(
+            ready=_ok([_node("x-p2", priority="p2", plan_path=None)]),
+            undispatched=_ok([]),
+        )
+    )
+
+    assert _queue(board, "unplanned")["count"] == 0
+    assert board["actionable"] == 0
+
+
+@pytest.mark.parametrize("state", sorted({"stale", "corrupted"}))
+def test_a_stale_claim_takes_a_planless_node_out_of_unplanned(state):
+    inputs = _empty_inputs(
+        ready=_ok([_node("x-stale", plan_path=None)]),
+        undispatched=_ok([]),
+        claims=_ok([_claim("x-stale", state=state)]),
+    )
+    board = build_board(inputs)
+
+    assert _queue(board, "unplanned")["count"] == 0
+    assert _queue(board, "stale_claim")["count"] == 1
+
+
+def test_a_live_claimed_planless_node_is_already_out_of_ready():
+    """The upstream ready reader removes live claims before the board sees them."""
+    inputs = _empty_inputs(
+        ready=_ok([]),
+        undispatched=_ok([]),
+        claims=_ok([_claim("x-live")]),
+        claimed_nodes=_ok([_node("x-live", plan_path=None)]),
+    )
+    board = build_board(inputs)
+
+    assert _queue(board, "unplanned")["count"] == 0
+
+
+def test_an_unreadable_ready_read_makes_unplanned_unreadable_never_empty():
+    board = build_board(
+        _empty_inputs(
+            ready=SourceRead(error="exit 1: boom"),
+            undispatched=_ok([]),
+        )
+    )
+
+    q = _queue(board, "unplanned")
+    assert q["status"] == "unreadable"
+    assert q["count"] is None
+    assert board["unreadable"] >= 1
+    assert board["exit_code"] == 1
+    assert q["verb"] == "/fno:blueprint"
+
+
+@pytest.mark.parametrize("status", ["deferred", "blocked", "in_progress", "done"])
+def test_only_an_idea_status_admits_a_planless_node(status):
+    """The king's unplanned queue relies on ready's cold-dispatch gate."""
+    from fno.graph.ladder import is_cold_dispatchable
+
+    assert not is_cold_dispatchable({"id": "x-1", "status": status})
+    assert is_cold_dispatchable({"id": "x-1", "status": "idea"})
 
 
 def test_a_claim_of_any_state_takes_a_node_out_of_undispatched():
