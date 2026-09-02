@@ -1158,16 +1158,32 @@ def test_claude_resume_skips_waking_an_already_working_row() -> None:
     assert res.output == "alpha (deadbeef): Working -> Working\n"
 
 
-def test_claude_resume_skips_waking_an_already_idle_row() -> None:
-    """An Idle row is live and reachable, not blocked: injecting keystrokes
-    risks destroying unsubmitted composer text for no benefit, and must not
-    be scored a failure just because Idle isn't the Working wake target."""
+def test_claude_resume_wakes_an_idle_row_confirmed_by_transcript(monkeypatch) -> None:
+    """An Idle row is between turns: the one state the wake lane exists to
+    move. A short turn starts and finishes inside one ~19s wake attempt, so
+    the post-attempt status reads Idle again; the landing is confirmed by
+    transcript CONTENT, never by the status word."""
+    import fno.agents.watchdog as watchdog_mod
+
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
         name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+        harness_session_id="sess-uuid-1",
     )
     wake_calls: list[int] = []
+
+    class _Facts:
+        last_event_epoch = 100.0
+
+    seen: dict = {}
+
+    def _confirm(row_id, cwd, message, before_epoch, **kw):
+        seen["confirm"] = (row_id, cwd, message, before_epoch)
+        return True
+
+    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: _Facts())
+    monkeypatch.setattr(watchdog_mod, "confirm_wake_landed", _confirm)
 
     res = resume_logic(
         name="alpha",
@@ -1181,7 +1197,12 @@ def test_claude_resume_skips_waking_an_already_idle_row() -> None:
         agents_state_fn=lambda: {"deadbeef": {"live_status": "Idle"}},
     )
     assert res.exit_code == 0
-    assert wake_calls == []
+    assert wake_calls == [1]
+    # The wake lane's session id IS the claude transport short id
+    # (HARNESS_SESSION_ID_FIELDS); the transcript resolver takes an 8-hex
+    # prefix, so content confirmation runs on the same key the wake did.
+    assert seen["confirm"][0] == "deadbeef"
+    assert seen["confirm"][3] == 100.0
     assert res.output == "alpha (deadbeef): Idle -> Idle\n"
 
 
@@ -1386,10 +1407,80 @@ def test_claude_resume_does_not_retry_after_teardown_unconfirmed() -> None:
     assert "teardown unconfirmed" in res.stderr
 
 
+def test_claude_resume_exit_16_when_nothing_answered_the_wake(monkeypatch) -> None:
+    """Content-not-status cuts both ways: when no record equal to the wake
+    message appears in the transcript after the pre-wake marker and the
+    state never reached Working, the wake is a failure (exit 16) even
+    though every status word along the way read plausible."""
+    import fno.agents.watchdog as watchdog_mod
+
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+        harness_session_id="sess-uuid-1",
+    )
+
+    class _Facts:
+        last_event_epoch = 100.0
+
+    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: _Facts())
+    monkeypatch.setattr(watchdog_mod, "confirm_wake_landed", lambda *a, **kw: False)
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=lambda *a, **kw: None,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Idle"}},
+    )
+    assert res.exit_code == 16
+    assert "did not reach" in res.stderr
+    assert "No process answered" not in res.stderr
+
+
+def test_claude_resume_relaunch_hint_when_no_row_answers(monkeypatch) -> None:
+    """An adopted row with no answering supervisor reads `before='unknown'`;
+    after a wake that confirmed nothing, resume still exits 16 and still
+    prints the spawn --resume relaunch hint that path exists to teach."""
+    import fno.agents.watchdog as watchdog_mod
+
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+        harness_session_id="sess-uuid-1",
+    )
+
+    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: None)
+    monkeypatch.setattr(watchdog_mod, "confirm_wake_landed", lambda *a, **kw: False)
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=lambda *a, **kw: None,
+        agents_state_fn=lambda: {},
+    )
+    assert res.exit_code == 16
+    assert "No process answered for deadbeef" in res.stderr
+    # The hint names the row's own session id, which on a claude row IS the
+    # transport short id (HARNESS_SESSION_ID_FIELDS).
+    assert "fno agents spawn --name alpha --resume deadbeef" in res.stderr
+
+
 def test_claude_resume_skips_waking_an_already_done_row() -> None:
     """code-review finding: "Done" is a terminal status (KNOWN_LIVE_STATUSES
     in harnesses/claude.py), newly visible via `--all` -- it must be
-    skip-eligible like Working/Idle rather than burning two ~60s wake
+    skip-eligible like Working rather than burning two ~60s wake
     attempts trying to nudge a session that was never going to move."""
     from fno.agents.resume_cli import resume_logic
 
@@ -1414,17 +1505,23 @@ def test_claude_resume_skips_waking_an_already_done_row() -> None:
     assert res.output == "alpha (deadbeef): Done -> Done\n"
 
 
-def test_claude_resume_skip_check_is_case_insensitive() -> None:
+def test_claude_resume_skip_check_is_case_insensitive(monkeypatch) -> None:
     """code-review finding: read.py's own diff fixed a lowercase-status miss
     with .lower() in this same PR; the wake's skip/target comparisons must
-    apply the same normalization or an un-normalized "idle" gets keystrokes
-    injected into a live session."""
+    apply the same normalization. Lowercase "idle" is still an Idle row, so
+    it is WOKEN now -- the normalization must not read it as skip-eligible."""
+    import fno.agents.watchdog as watchdog_mod
+
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
         name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+        harness_session_id="sess-uuid-1",
     )
     wake_calls: list[int] = []
+
+    monkeypatch.setattr(watchdog_mod, "tail_facts", lambda *a, **kw: None)
+    monkeypatch.setattr(watchdog_mod, "confirm_wake_landed", lambda *a, **kw: True)
 
     res = resume_logic(
         name="alpha",
@@ -1438,7 +1535,7 @@ def test_claude_resume_skip_check_is_case_insensitive() -> None:
         agents_state_fn=lambda: {"deadbeef": {"live_status": "idle"}},
     )
     assert res.exit_code == 0
-    assert wake_calls == []
+    assert wake_calls == [1]
 
 
 def test_script_wrapped_attach_uses_bsd_form_on_darwin(monkeypatch) -> None:

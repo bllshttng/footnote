@@ -2950,10 +2950,19 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // shape below keeps the refusal.
     let mut reentry_plan = None;
     if harness == "claude" {
+        // The transition follows the arm `claude_resume_argv` already chose:
+        // `claim_uuid` is Some only on the dead-relaunch arm, so a live row
+        // asks for Attach (its true route) instead of hardcoding Resume -
+        // which printed a `claude --resume` plan under an `is live` line.
+        let transition = if claim_uuid.is_some() {
+            crate::reentry::ReentryTransition::Resume
+        } else {
+            crate::reentry::ReentryTransition::Attach
+        };
         match crate::reentry::resolve_reentry(
             &home.registry_json(),
             &row_name,
-            crate::reentry::ReentryTransition::Resume,
+            transition,
             None,
             cwd_override.as_deref(),
         ) {
@@ -3182,6 +3191,22 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         }
     }
 
+    // Dead-arm respawn: the plan's mechanism says `claude respawn`, which
+    // exits as soon as the job relaunches. Run and confirm; exec would drop
+    // the operator into a shell that looks like a no-op.
+    if reentry_plan
+        .as_ref()
+        .is_some_and(|p| p.mechanism == "respawn")
+    {
+        return run_and_confirm_respawn(
+            reentry_plan.as_ref().unwrap(),
+            &name,
+            "resume",
+            "agent_resumed",
+            home,
+        );
+    }
+
     // chdir BEFORE the emit so a stale cwd surfaces as exit 13 rather than a
     // misleading "agent_resumed" event followed by a failed exec.
     if let Err(exc) = std::env::set_current_dir(cwd) {
@@ -3226,6 +3251,90 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // exec only returns on failure.
     eprintln!("fno agents resume: failed to exec {}: {err}", argv[0]);
     1
+}
+
+/// Run a respawn plan as a child and confirm it actually revived the row.
+///
+/// `claude respawn` exits as soon as the job is relaunched, so this verb must
+/// NOT exec it (the exec convention the other arms use): the operator's shell
+/// would come back with nothing to show. And exit 0 is not proof - the
+/// receipt-can-lie shape `fno agents rm` already shipped once. The
+/// confirmation is the positive marker: `jobs/<short>/state.json` re-read
+/// after the respawn with an `updated_at` newer than the pre-respawn read.
+/// The state WORD is not evidence - the wake lane's confirm primitive exists
+/// because `working -> working` read the same for a landed and an unlanded
+/// message.
+fn run_and_confirm_respawn(
+    plan: &crate::reentry::ReentryPlan,
+    name: &str,
+    verb: &str,
+    event_kind: &str,
+    home: &AgentsHome,
+) -> i32 {
+    use crate::claude_ask::{read_state_json, ClaudeHome};
+
+    let claude_home = ClaudeHome::from_env();
+    let jobs_dir = claude_home.jobs_dir_for(&plan.short_id);
+    let before_updated_at = read_state_json(&jobs_dir).ok().and_then(|s| s.updated_at);
+
+    let mut command = std::process::Command::new(&plan.argv[0]);
+    command.args(&plan.argv[1..]).current_dir(&plan.cwd);
+    for (key, value) in &plan.env {
+        command.env(key, value);
+    }
+    let status = match command.status() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("fno agents {verb}: failed to run {}: {e}", plan.argv[0]);
+            return 1;
+        }
+    };
+    if !status.success() {
+        eprintln!(
+            "fno agents {verb}: {} for {name} exited {}",
+            plan.argv.join(" "),
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".to_string())
+        );
+        return 1;
+    }
+
+    let confirmed = match (before_updated_at, read_state_json(&jobs_dir)) {
+        (Some(before), Ok(s)) => s.updated_at.as_deref().is_some_and(|a| a > before.as_str()),
+        // No readable BEFORE stamp (the file the resolver just proved exists
+        // did not parse): an AFTER read carrying any stamp is the evidence
+        // left, and it is still content, never an exit code.
+        (None, Ok(s)) => s.updated_at.is_some(),
+        (_, Err(_)) => false,
+    };
+    if !confirmed {
+        eprintln!(
+            "fno agents {verb}: respawn for {name} reported success but {} did not \
+             advance; the row is NOT confirmed back in agent view. Check \
+             `claude agents` before retrying.",
+            jobs_dir.join("state.json").display()
+        );
+        return 16;
+    }
+
+    append_agents_event(
+        &trace_events_path(home),
+        event_kind,
+        &[
+            ("name", Value::String(name.to_string())),
+            ("provider", Value::String("claude".to_string())),
+            ("session_id", Value::String(plan.session_id.clone())),
+            ("cwd", Value::String(plan.cwd.clone())),
+        ],
+    );
+    eprintln!(
+        "{name} is live again under {} (same session id).",
+        plan.session_id
+    );
+    eprintln!("`fno agents attach {name}` to drop in.");
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -3386,6 +3495,13 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
                 return 1;
             }
         }
+    }
+
+    // Respawn mechanism: run and confirm (see run_and_confirm_respawn). A
+    // `claude respawn` exits at once, so the exec below would replace this
+    // process with a launcher that immediately returns.
+    if plan.mechanism == "respawn" {
+        return run_and_confirm_respawn(&plan, &name, "recover", "agent_recovered", home);
     }
 
     if let Err(exc) = std::env::set_current_dir(&plan.cwd) {
@@ -5859,7 +5975,27 @@ mod tests {
     #[test]
     fn recover_verb_print_command_selects_and_prints_paths_and_ids_only() {
         // --print-command is the no-side-effect inspection form: the selected
-        // fork id rides the argv and nothing launches.
+        // fork id rides the argv and nothing launches. The dead arm probes
+        // jobs/<short>/state.json under $HOME, so pin HOME to a throwaway dir
+        // with that state staged. The state is staged under the REAL $HOME
+        // (jobs/11111111, removed after) rather than by repinning the HOME
+        // env: set_var is process-global and races every concurrent test's
+        // env reads and spawns (a flaked `git` NotFound on CI), and the lock
+        // only serializes the tests that already take it.
+        let home_dir = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let jobs = home_dir.join(".claude").join("jobs").join("11111111");
+        let staged_here = !jobs.join("state.json").exists();
+        if staged_here {
+            std::fs::create_dir_all(&jobs).unwrap();
+            std::fs::write(
+                jobs.join("state.json"),
+                serde_json::json!({"state": "idle"}).to_string(),
+            )
+            .unwrap();
+        }
+
         let dir = cv_tmpdir();
         let home = AgentsHome::at(dir.path());
         let entry = forked_row();
@@ -5877,6 +6013,9 @@ mod tests {
             ],
             &home,
         );
+        if staged_here {
+            std::fs::remove_dir_all(&jobs).unwrap();
+        }
         assert_eq!(code, 0);
     }
 

@@ -55,6 +55,20 @@ Actions delegate. The watchdog owns the decision, never the mechanism.
 | `retire` | `fno agents stop <id>` and nothing else. No worktree refusal, no linked-worktree check, no config freeze, because none of those guard a stop |
 | `ghost` | report only |
 
+## Reap or resume: what re-entry can actually restore
+
+A claude background session's job short id IS `sessionId[:8]`. The promote path writes state at `jobs/<first-8-of-uuid>/` with `sessionId` set to the full uuid. The shipped binary and every local job dir confirm it. Identity is the address. Any path that mints a new session id drops the agent-view row, the fno registry binding, and every handle aimed at the old one.
+
+Three routes exist, in order of preference:
+
+1. **Job row present, process reaped:** `claude respawn <short>` resumes the job in place under its own id. `fno agents resume <name>` resolves to the same thing. It refuses with "Can't respawn - that job's saved state is missing" once `jobs/<short>/state.json` is gone.
+2. **Job state gone, transcript alive:** open `claude agents` BARE in the session's directory. Type `/resume` at the dispatch input, pick the session, press Enter. This rejoins under the SAME id. It needs claude 2.1.212+, it is interactive only, and there is no CLI equivalent. The picker takes constraints. Bare `/resume` only: `--cwd`, `--safe-mode`, `--permission-mode` or `--settings` on `claude agents` replace it with an attach hint. It lists only sessions of the directory the agent view was opened from. It refuses a session live in another terminal. When a job row already carries that `sessionId` or `resumeSessionId`, the picker refuses too.
+3. **`claude --bg --resume <id>`:** never a restoration. The shell dispatcher calls the job builder with no session id. Claude mints a fresh uuid, the comparison against the resume target fails, and `--fork-session` is appended. It ALWAYS forks: new id, new row, new binding. `fno agents spawn --resume` rides this same shape and prints a fork receipt naming both ids.
+
+So the `stale` verdict's remedy splits on one fact. When the job row survives, the remedy is a respawn, and `fno agents resume <name>` is the verb for it. When the job state is gone, the remedy is the hand-run picker in route 2. `fno agents resume <name>` refuses with that route spelled out instead of launching something that loses the id.
+
+One more trap deserves its name: `sessionIdTaken`. A worker launches `--resume` against an id a live conversation already holds. The latch fires. The worker dies with "session ID already belongs to another conversation" and the next respawn starts under a fresh id, silently breaking the binding. Record the fork on the row (the related id) before retrying anything.
+
 ## Retire: the slot a finished worker never gives back
 
 A worker that finishes its deliverable and never exits holds a live slot against `config.agents.max_live` forever. Measured 2026-08-19: four blueprint workers had each mailed a finished plan and each still held a slot at 30 of 30. A build spawn queued 91 seconds waiting for one of them.

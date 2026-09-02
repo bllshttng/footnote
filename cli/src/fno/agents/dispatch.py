@@ -2145,9 +2145,10 @@ def _claude_create_path(
     # stream-json `--resume` target alongside the 8-hex short-id so the worker
     # is adoptable by the live stream-json switchboard lane. Runs after the receipt is
     # captured; a miss leaves the field None and never gates the launch.
-    # x-9844 Fix 3: a revival preserves the resumed uuid (the identity being
-    # continued) rather than re-resolving from the fresh short_id, so the
-    # invariant "same conversation, new short_id" holds even if resolution slips.
+    # On a revival this records the SOURCE conversation's id, not the live
+    # session's: `claude --bg --resume` always forks, claude mints a fresh
+    # uuid, and no shell flag can learn it. The row keeps the lineage id for
+    # provenance; the fork is announced loudly below.
     session_uuid = (
         resume_session_id if revive else claude_mod.resolve_session_uuid_at_spawn(short_id)
     )
@@ -2190,17 +2191,15 @@ def _claude_create_path(
             # requested_* stamps above keep the verbatim request.
             verified_model = observed_token
 
-    # A revival continues one conversation under a NEW handle, which is the
-    # invariant directly above -- but it was never printed, so an operator
-    # watching the old handle heard nothing while the new one did the work.
-    # The sibling mail-revive fork already prints its lineage under "a fork is
-    # never silent"; this is the same event on a different door. Same rule as
-    # the rest of this node: never hand back a value without naming what it
-    # continues.
+    # A revival continues one conversation under a NEW session id -- the fork
+    # is never silent, same rule as the mail-revive rung that taught it. The
+    # source id and the new row's handle are named together so an operator
+    # watching the old handle hears that identity moved.
     if revive and resume_session_id:
         print(
-            f"fno agents spawn: resumed {canonical_handle(resume_session_id)} as "
-            f"{short_id} (same conversation, new handle).\n"
+            f"fno agents spawn: forked {canonical_handle(resume_session_id)} into a "
+            f"new session (new id, new row, new fno binding): {short_id} continues "
+            f"the transcript; the source id is not preserved.\n"
             f"Watch the new one: fno agents peek {short_id}",
             file=sys.stderr,
         )

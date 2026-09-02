@@ -78,6 +78,10 @@ impl ReentryTransition {
 pub struct ReentryPlan {
     pub resolved: bool,
     pub transition: String,
+    /// "attach" | "respawn". The transition is the caller's INTENT; this is
+    /// what the plan actually does, and a consumer decides how to run it
+    /// from here.
+    pub mechanism: String,
     pub name: String,
     pub fno_id: Option<String>,
     /// The selected harness session id (primary, or the related id when the
@@ -189,6 +193,43 @@ fn substrate_of(entry: &RegistryEntry) -> &'static str {
     }
 }
 
+/// The dead-arm refusal for a row no CLI can restore under its own id.
+/// Self-teaching runtime text: it names the picker route precisely enough to
+/// follow with no doc open, because after `jobs/<short>/state.json` is gone
+/// this message IS the remedy.
+fn refusal_naming_the_picker(
+    name: &str,
+    session_id: &str,
+    cwd: &str,
+    short_id: &str,
+    claude_home: &crate::claude_ask::ClaudeHome,
+) -> String {
+    let state_note = if short_id.is_empty() {
+        format!(
+            "row {name:?} derives no claude jobId from session {session_id}, \
+             so `claude respawn` has no target"
+        )
+    } else {
+        let state = claude_home.jobs_dir_for(short_id).join("state.json");
+        format!(
+            "row {name:?} has no job state at {}, so no CLI can put session \
+             {session_id} back in agent view under its own id: `claude --bg \
+             --resume` always forks a new one",
+            state.display()
+        )
+    };
+    format!(
+        "{state_note}. Two routes remain, both by hand. Rejoin under the SAME id: \
+         run `claude agents` BARE in {cwd} (no --cwd, --safe-mode, --permission-mode \
+         or --settings, or the picker is replaced by an attach hint), type /resume \
+         at the dispatch input, pick the session, press Enter. Needs claude 2.1.212+, \
+         lists only sessions of that directory, and refuses a session live in another \
+         terminal. Or take the conversation back in THIS terminal under a NEW id, \
+         losing the agent-view row and the registry binding: \
+         `claude --resume {session_id}`."
+    )
+}
+
 /// Resolve one row's re-entry plan, or refuse naming the missing evidence.
 ///
 /// Read-only: no registry write, no launch. `select_session` is the explicit
@@ -199,6 +240,7 @@ pub fn resolve_reentry_with(
     transition: ReentryTransition,
     select_session: Option<&str>,
     account_binding: &AccountBinding,
+    claude_home: &crate::claude_ask::ClaudeHome,
     cwd_override: Option<&str>,
 ) -> Result<ReentryPlan, String> {
     if name.trim().is_empty() {
@@ -271,7 +313,14 @@ pub fn resolve_reentry_with(
             "row {name:?} records no harness session id; nothing to re-enter"
         ));
     }
-    let short_id = if !entry.short_id.is_empty() {
+    // The claude jobId IS sessionId[:8] by construction, so a SELECTED id
+    // derives its own short id: on a two-id row, `recover --session <related>`
+    // must resolve the RELATED transport key, not the primary's cached one.
+    // `entry.short_id` is only a cache of the primary's derivation.
+    let short_id = if select_session.is_some_and(|s| Some(s) != entry.harness_session_id.as_deref())
+    {
+        derived_short_id(&session_id)
+    } else if !entry.short_id.is_empty() {
         entry.short_id.clone()
     } else {
         derived_short_id(&session_id)
@@ -349,30 +398,59 @@ pub fn resolve_reentry_with(
     if let Some(dir) = claude_config_dir.as_deref() {
         env.insert("CLAUDE_CONFIG_DIR".to_string(), dir.to_string());
     }
+    let mechanism: String;
     match transition {
         ReentryTransition::Attach => {
+            mechanism = "attach".to_string();
             argv.push("claude".into());
             argv.push("attach".into());
             argv.push(short_id.clone());
         }
         ReentryTransition::Resume | ReentryTransition::Recover => {
+            // jobs/<short>/state.json is what `claude respawn` reads. Present
+            // means the row can come back under its own id; gone means no CLI
+            // can, and the plan refuses naming the picker instead of handing
+            // back a `claude --resume` that forks a new session id.
+            mechanism = "respawn".to_string();
+            if short_id.is_empty()
+                || !claude_home
+                    .jobs_dir_for(&short_id)
+                    .join("state.json")
+                    .is_file()
+            {
+                return Err(refusal_naming_the_picker(
+                    name,
+                    &session_id,
+                    cwd,
+                    &short_id,
+                    claude_home,
+                ));
+            }
             argv.push("claude".into());
-            argv.push("--resume".into());
-            argv.push(session_id.clone());
+            argv.push("respawn".into());
+            argv.push(short_id.clone());
         }
     }
-    if let Some(path) = entry
-        .route_settings_path
-        .as_deref()
-        .filter(|p| !p.is_empty())
-    {
-        argv.push("--settings".into());
-        argv.push(path.to_string());
+    // The route rides `--settings` only on the ATTACH arm. `claude respawn`
+    // restarts the job from its own saved launch, ignores extra arguments with
+    // a warning (measured: "extra arguments ignored: --settings ..."), and the
+    // job's saved launch already carries the route the original spawn applied
+    // - appending the flag here would teach a route story the binary drops.
+    if mechanism == "attach" {
+        if let Some(path) = entry
+            .route_settings_path
+            .as_deref()
+            .filter(|p| !p.is_empty())
+        {
+            argv.push("--settings".into());
+            argv.push(path.to_string());
+        }
     }
 
     Ok(ReentryPlan {
         resolved: true,
         transition: transition.as_str().to_string(),
+        mechanism,
         name: entry.name.clone(),
         fno_id: entry.fno_id.clone(),
         session_id,
@@ -406,6 +484,7 @@ pub fn resolve_reentry(
         transition,
         select_session,
         &shell_account_binding,
+        &crate::claude_ask::ClaudeHome::from_env(),
         cwd_override,
     )
 }
@@ -477,9 +556,29 @@ pub fn run_reentry_plan(args: &[String], home: &crate::paths::AgentsHome) -> i32
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude_ask::ClaudeHome;
     use crate::state::Registry;
 
     const SECRET: &str = "zai-secret-token";
+
+    /// A ClaudeHome over a throwaway home dir with `jobs/<short>/state.json`
+    /// staged: the one fact the respawn arm probes. Tests that expect a
+    /// respawn plan stage the id they resume; an empty home is the
+    /// job-state-gone case.
+    fn staged_home(shorts: &[&str]) -> (tempfile::TempDir, ClaudeHome) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = ClaudeHome::at(dir.path());
+        for short in shorts {
+            let jobs = home.jobs_dir_for(short);
+            std::fs::create_dir_all(&jobs).unwrap();
+            std::fs::write(
+                jobs.join("state.json"),
+                serde_json::json!({"state": "idle", "sessionId": "x"}).to_string(),
+            )
+            .unwrap();
+        }
+        (dir, home)
+    }
 
     fn row(name: &str) -> RegistryEntry {
         RegistryEntry {
@@ -581,35 +680,74 @@ mod tests {
         e.route_settings_path = Some(dir.to_string_lossy().to_string());
         e.cwd = std::env::temp_dir().to_string_lossy().to_string();
 
+        let (_tmp, home) = staged_home(&["aaaaaaaa"]);
         let plan = resolve_reentry_with(
             &reg(vec![e]),
             "glm",
             ReentryTransition::Resume,
             None,
             &binding_ok,
+            &home,
             None,
         )
         .unwrap();
         assert!(plan.resolved);
+        assert_eq!(plan.mechanism, "respawn");
         assert_eq!(plan.claude_config_dir.as_deref(), Some("/acct/makers/cfg"));
         let want_path = dir.to_string_lossy().to_string();
         assert_eq!(
             plan.route_settings_path.as_deref(),
             Some(want_path.as_str())
         );
+        // Respawn argv stays bare: `claude respawn` restarts the job from its
+        // own saved launch and IGNORES extra arguments (measured warning), so
+        // the recorded route rides the job state, not this argv. The route
+        // file is still recorded on the plan for consumers that need it.
         assert_eq!(
             plan.argv,
             vec![
                 "claude".to_string(),
-                "--resume".to_string(),
-                "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
-                "--settings".to_string(),
-                dir.to_string_lossy().to_string(),
+                "respawn".to_string(),
+                "aaaaaaaa".to_string()
             ]
+        );
+        assert_eq!(
+            plan.route_settings_path.as_deref(),
+            Some(dir.to_string_lossy().to_string()).as_deref()
         );
         assert_eq!(
             plan.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
             Some("/acct/makers/cfg")
+        );
+
+        // The ATTACH arm is a fresh interactive launch: there the recorded
+        // route DOES ride the argv as --settings.
+        let mut e2 = row("glm");
+        e2.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e2.short_id = "aaaaaaaa".into();
+        e2.provider = Some("zai".into());
+        e2.launch_account = Some("makers".into());
+        e2.route_settings_path = Some(dir.to_string_lossy().to_string());
+        e2.cwd = std::env::temp_dir().to_string_lossy().to_string();
+        let attach = resolve_reentry_with(
+            &reg(vec![e2]),
+            "glm",
+            ReentryTransition::Attach,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            attach.argv,
+            vec![
+                "claude".to_string(),
+                "attach".to_string(),
+                "aaaaaaaa".to_string(),
+                "--settings".to_string(),
+                dir.to_string_lossy().to_string(),
+            ]
         );
         // Secrets never cross the boundary: the token lives in the 0600 file
         // the plan only NAMES.
@@ -619,6 +757,7 @@ mod tests {
 
     #[test]
     fn reentry_plan_refuses_an_unknown_account_on_a_routed_row() {
+        let (_tmp, home) = staged_home(&[]);
         let dir = std::env::temp_dir().join("reentry-test-route-b.json");
         write_route(&dir, false);
         let mut e = row("glm");
@@ -632,6 +771,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            &home,
             None,
         )
         .unwrap_err();
@@ -640,6 +780,7 @@ mod tests {
 
     #[test]
     fn reentry_plan_refuses_a_missing_route_file() {
+        let (_tmp, home) = staged_home(&[]);
         let mut e = row("glm");
         e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
         e.short_id = "aaaaaaaa".into();
@@ -653,6 +794,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            &home,
             None,
         )
         .unwrap_err();
@@ -661,6 +803,7 @@ mod tests {
 
     #[test]
     fn reentry_plan_refuses_a_floor_only_route_file() {
+        let (_tmp, home) = staged_home(&[]);
         let dir = std::env::temp_dir().join("reentry-test-floor.json");
         write_route(&dir, true);
         let mut e = row("glm");
@@ -675,6 +818,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            &home,
             None,
         )
         .unwrap_err();
@@ -683,6 +827,7 @@ mod tests {
 
     #[test]
     fn reentry_plan_refuses_an_unreachable_cwd() {
+        let (_tmp, home) = staged_home(&[]);
         let mut e = row("dead");
         e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
         e.short_id = "aaaaaaaa".into();
@@ -694,6 +839,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            &home,
             None,
         )
         .unwrap_err();
@@ -702,6 +848,7 @@ mod tests {
 
     #[test]
     fn reentry_plan_refuses_a_row_with_no_session_identity() {
+        let (_tmp, home) = staged_home(&[]);
         let mut e = row("blank");
         e.launch_account = Some("default".into());
         let err = resolve_reentry_with(
@@ -710,6 +857,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            &home,
             None,
         )
         .unwrap_err();
@@ -718,6 +866,7 @@ mod tests {
 
     #[test]
     fn reentry_plan_keeps_a_proven_default_row_bare() {
+        let (_tmp, home) = staged_home(&[]);
         let mut e = row("plain");
         e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
         e.short_id = "aaaaaaaa".into();
@@ -728,16 +877,19 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            &home,
             None,
         )
         .unwrap();
         assert_eq!(plan.argv, vec!["claude", "attach", "aaaaaaaa"]);
+        assert_eq!(plan.mechanism, "attach");
         assert!(plan.env.is_empty());
         assert_eq!(plan.launch_account, "default");
     }
 
     #[test]
     fn reentry_plan_keeps_a_legacy_default_row_on_its_historical_behavior() {
+        let (_tmp, home) = staged_home(&[]);
         let mut e = row("legacy");
         e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
         e.short_id = "aaaaaaaa".into();
@@ -749,15 +901,18 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            &home,
             None,
         )
         .unwrap();
         assert_eq!(plan.argv, vec!["claude", "attach", "aaaaaaaa"]);
+        assert_eq!(plan.mechanism, "attach");
         assert!(plan.env.is_empty());
     }
 
     #[test]
     fn reentry_plan_names_both_ids_and_requires_selection_to_launch() {
+        let (_tmp, home) = staged_home(&["aaaaaaaa", "11111111"]);
         let mut e = row("forked");
         e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
         e.related_session_id = Some("11111111-2222-3333-4444-555555555555".into());
@@ -771,6 +926,7 @@ mod tests {
             ReentryTransition::Recover,
             None,
             &binding_ok,
+            &home,
             None,
         )
         .unwrap_err();
@@ -783,6 +939,7 @@ mod tests {
             ReentryTransition::Recover,
             Some("99999999-9999-9999-9999-999999999999"),
             &binding_ok,
+            &home,
             None,
         )
         .unwrap_err();
@@ -800,6 +957,7 @@ mod tests {
                 ReentryTransition::Recover,
                 Some(id),
                 &binding_ok,
+                &home,
                 None,
             )
             .unwrap();
@@ -813,6 +971,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            &home,
             None,
         )
         .unwrap();
@@ -826,6 +985,7 @@ mod tests {
             ReentryTransition::Resume,
             None,
             &binding_ok,
+            &home,
             None,
         )
         .unwrap();
@@ -834,6 +994,7 @@ mod tests {
 
     #[test]
     fn reentry_plan_refuses_a_dead_account() {
+        let (_tmp, home) = staged_home(&[]);
         let mut e = row("orphan");
         e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
         e.short_id = "aaaaaaaa".into();
@@ -844,6 +1005,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            &home,
             None,
         )
         .unwrap_err();
@@ -855,6 +1017,7 @@ mod tests {
 
     #[test]
     fn reentry_plan_refuses_an_api_key_lane_account_it_cannot_restore() {
+        let (_tmp, home) = staged_home(&[]);
         // The binding resolves the id but carries no config dir: an api-key
         // lane whose credential the secret-free plan never carries. Launching
         // bare would silently drop the account's key - refuse instead.
@@ -875,6 +1038,7 @@ mod tests {
             ReentryTransition::Resume,
             None,
             &api_key_lane,
+            &home,
             None,
         )
         .unwrap_err();
@@ -886,6 +1050,7 @@ mod tests {
 
     #[test]
     fn reentry_plan_honors_a_replacement_cwd_over_an_unreachable_recorded_one() {
+        let (_tmp, home) = staged_home(&["aaaaaaaa"]);
         // --cwd re-homes a row whose recorded worktree is gone: the operator's
         // live replacement outranks the recorded dir for the check and the plan.
         let mut e = row("moved");
@@ -900,6 +1065,7 @@ mod tests {
             ReentryTransition::Resume,
             None,
             &binding_ok,
+            &home,
             Some(&live),
         )
         .unwrap();
@@ -908,6 +1074,7 @@ mod tests {
 
     #[test]
     fn reentry_plan_refuses_an_ambiguous_or_missing_row() {
+        let (_tmp, home) = staged_home(&[]);
         let e1 = row("dup");
         let e2 = row("dup");
         let err = resolve_reentry_with(
@@ -916,6 +1083,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            &home,
             None,
         )
         .unwrap_err();
@@ -927,6 +1095,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            &home,
             None,
         )
         .unwrap_err();
@@ -935,6 +1104,7 @@ mod tests {
 
     #[test]
     fn reentry_plan_refuses_a_non_claude_row() {
+        let (_tmp, home) = staged_home(&[]);
         let mut e = row("cx");
         e.harness = Some("codex".into());
         let err = resolve_reentry_with(
@@ -943,9 +1113,88 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            &home,
             None,
         )
         .unwrap_err();
         assert!(err.contains("claude-only"), "{err}");
+    }
+
+    #[test]
+    fn reentry_plan_respawn_refuses_and_names_the_picker_when_job_state_is_gone() {
+        let mut e = row("gone");
+        e.harness_session_id = Some("9a1b2c3d-eeee-ffff-0000-111122223333".into());
+        e.short_id = "9a1b2c3d".into();
+        e.launch_account = Some("default".into());
+        let (_tmp, home) = staged_home(&[]); // no jobs/<short>/state.json
+        let err = resolve_reentry_with(
+            &reg(vec![e]),
+            "gone",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap_err();
+        // The refusal must carry the picker route with no doc open: the bare
+        // `claude agents` invocation, the /resume gesture, and the full id.
+        assert!(err.contains("claude agents"), "{err}");
+        assert!(err.contains("/resume"), "{err}");
+        assert!(
+            err.contains("9a1b2c3d-eeee-ffff-0000-111122223333"),
+            "{err}"
+        );
+        assert!(err.contains("state.json"), "{err}");
+        assert!(err.contains("claude --bg --resume"), "{err}");
+    }
+
+    #[test]
+    fn reentry_plan_derives_the_selected_id_short_id() {
+        // A two-id row: `recover --session <related>` must resolve the
+        // RELATED transport key (the jobId IS sessionId[:8]), not the
+        // primary's cached short_id - a respawn on the wrong key revives the
+        // wrong session.
+        let mut e = row("forked");
+        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.related_session_id = Some("11111111-2222-3333-4444-555555555555".into());
+        e.short_id = "aaaaaaaa".into();
+        e.launch_account = Some("default".into());
+        let (_tmp, home) = staged_home(&["aaaaaaaa", "11111111"]);
+
+        let plan = resolve_reentry_with(
+            &reg(vec![e.clone()]),
+            "forked",
+            ReentryTransition::Recover,
+            Some("11111111-2222-3333-4444-555555555555"),
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.short_id, "11111111");
+        assert_eq!(
+            plan.argv,
+            vec![
+                "claude".to_string(),
+                "respawn".to_string(),
+                "11111111".to_string()
+            ]
+        );
+
+        // No selection: the primary keeps its cached short_id, byte-identical
+        // to the historical derivation.
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "forked",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.short_id, "aaaaaaaa");
+        assert_eq!(plan.session_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
     }
 }

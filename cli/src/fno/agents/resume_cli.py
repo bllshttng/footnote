@@ -44,8 +44,9 @@ Exit codes:
 - 13  - name not in registry / missing cwd / missing session_id /
   unsupported provider.
 - 14  - provider CLI not on ``$PATH``.
-- 16  - claude wake attempts ran but the live state never reached
-  Working.
+- 16  - claude wake attempts ran but the wake never landed: the live state
+  never reached Working AND the message never appeared in the transcript
+  after the pre-wake marker.
 """
 from __future__ import annotations
 
@@ -439,17 +440,21 @@ def _resume_claude_wake(
     ``fno agents attach`` already owns the interactive hand-off (exec into
     the TUI, hand the terminal to the operator); this is the headless
     counterpart -- allocate a pty, restore the row's own route, inject the
-    message, and confirm the live state moved to Working. Every step here
+    message, and confirm the message reached the transcript (or the live
+    state moved to Working). Every step here
     can exit 0 having done nothing; the verification read is what makes
     that detectable instead of a lie.
 
     ``claim_fn`` is acquired only once a wake attempt is actually about to
     run (gated on ``not skipped``, below), not for an already-Working/
-    Idle/Done row's no-op read: two concurrent no-op resumes on such a row
+    Done row's no-op read: two concurrent no-op resumes on such a row
     must both exit 0, not race each other into a spurious "held by another
     writer" over a lock that guards a pty write neither of them is making.
     """
-    from fno.agents.harnesses.claude import NOT_BLOCKED_STATUSES_LOWER
+    from fno.agents.harnesses.claude import (
+        NOT_BLOCKED_STATUSES_LOWER,
+        WAKE_SKIP_STATUSES_LOWER,
+    )
 
     def _state_of() -> str:
         row = agents_state_fn().get(short_id) or {}
@@ -458,23 +463,31 @@ def _resume_claude_wake(
     before = _state_of()
     after = before
     last_err = ""
-    # Already Working or Idle (a stale-registry race, the operator resuming
-    # the wrong name, or a live session that isn't actually blocked): don't
-    # inject anything into a session mid-turn. Skip straight to reporting;
-    # the loop below never runs. This check is only AT loop entry, not
-    # re-read immediately before each wake_fn call: if the session
-    # transitions out of a skip-eligible state during _default_wake_fn's
-    # ~7s pre-clear sleep, the keystrokes still land. Narrowing that window
-    # needs the wake subprocess itself to poll and abort mid-sleep, which
-    # would change the verified wake.sh recipe's timing; accepted as a
-    # residual few-second race rather than risk that.
+    # Already Working (a stale-registry race, the operator resuming the wrong
+    # name, or a live session that isn't actually blocked): don't inject
+    # anything into a session mid-turn. Done: no process to reach. Idle is
+    # NOT skipped -- it is between turns, exactly the silent session the wake
+    # lane exists to move. Skip straight to reporting; the loop below never
+    # runs. This check is only AT loop entry, not re-read immediately before
+    # each wake_fn call: if the session transitions out of a skip-eligible
+    # state during _default_wake_fn's ~7s pre-clear sleep, the keystrokes
+    # still land. Narrowing that window needs the wake subprocess itself to
+    # poll and abort mid-sleep, which would change the verified wake.sh
+    # recipe's timing; accepted as a residual few-second race rather than
+    # risk that.
+    #
+    # WAKE_SKIP_STATUSES_LOWER, not NOT_BLOCKED_STATUSES_LOWER: the wider set
+    # made an Idle row a green no-op, and an idle session between turns is
+    # the one state the unclaimed-mail hint points resume at. The mid-loop
+    # settle check below keeps the wider set on purpose -- it stops a SECOND
+    # injection after one already fired.
     #
     # Computed once here rather than re-derived at each of its five uses
     # below (claim gate, route_env gate, loop guard, exit-16 condition, emit
     # guard): a future edit to the skip condition that touches only some of
     # the five call sites would silently reintroduce the exact misreport bug
     # the surrounding comments already describe as fixed once.
-    skipped = before.lower() in NOT_BLOCKED_STATUSES_LOWER
+    skipped = before.lower() in WAKE_SKIP_STATUSES_LOWER
 
     # Claim before waking, gated on `not skipped` (see docstring): this
     # function is also a standalone entrypoint (FNO_AGENTS_RUNTIME=python, or
@@ -532,7 +545,7 @@ def _resume_claude_wake(
                 )
     # Gated on `not skipped`: route_env only feeds the wake attempts below,
     # which never run for a skip-eligible row. Restoring it unconditionally
-    # meant a row that needed no wake at all (already Working/Idle/Done) but
+    # meant a row that needed no wake at all (already Working/Done) but
     # happened to carry a stale route file got refused with exit 2 instead
     # of reporting the no-op success it actually was.
     if not skipped and route_settings_path:
@@ -550,6 +563,24 @@ def _resume_claude_wake(
                     f"default account.\n"
                 ),
             )
+
+    # Transcript timestamp BEFORE any wake fires: the marker confirm_wake_landed
+    # needs to tell a record the wake produced from one already there. A status
+    # poll cannot do this job -- one attempt is ~19s of wall clock, so a short
+    # turn can start AND finish inside it and the post-attempt state reads Idle
+    # again; "never woke" and "woke and already finished" are indistinguishable
+    # in the status word. Read under the same `not skipped` gate as the claim
+    # and the route: a skipped row launches nothing, so there is no marker to
+    # take. Lazy import matches every other import in this file; watchdog
+    # imports nothing from here, so the direction stays acyclic.
+    before_epoch: Optional[float] = None
+    if not skipped:
+        from fno.agents.watchdog import confirm_wake_landed, tail_facts
+
+        before_facts = tail_facts(session_id, cwd) if session_id else None
+        before_epoch = (
+            before_facts.last_event_epoch if before_facts is not None else None
+        )
 
     if not skipped:
         for _attempt in range(_WAKE_ATTEMPTS):
@@ -602,15 +633,25 @@ def _resume_claude_wake(
                 # immediately re-hammering the same session.
                 time.sleep(_WAKE_RETRY_BACKOFF_SEC)
 
-    # A skipped row (before already Working/Idle) reports success on its
+    # A skipped row (before already Working/Done) reports success on its
     # `before` state even when that state isn't the wake target: nothing was
     # attempted, so "did it reach Working" is the wrong question to ask.
+    #
+    # Landed means the transcript shows the wake, not that a status word
+    # said Working: a short turn starts and finishes inside one ~19s attempt,
+    # so the post-attempt state of a DELIVERED wake can read Idle again.
+    # Content is the marker the watchdog's own wake lane already trusts.
     #
     # Check the outcome BEFORE emitting: the event is named "agent_resumed",
     # so emitting it unconditionally would misreport a wake that never
     # reached Working as a success, the same pre-fix shape a sigma review
     # already caught below for the exec-based harnesses' chdir failure.
-    if not skipped and after.lower() != _WAKE_TARGET_STATUS.lower():
+    landed = False
+    if not skipped:
+        landed = after.lower() == _WAKE_TARGET_STATUS.lower()
+        if not landed and session_id:
+            landed = confirm_wake_landed(session_id, cwd, message, before_epoch)
+    if not skipped and not landed:
         # A wake cannot reach a session that has exited. An adopted row carries
         # a uuid and a short_id but no answering supervisor, so it takes the
         # live arm, burns every attempt against a process that is not there,
