@@ -671,7 +671,11 @@ def test_intake_with_frontmatter_claim_updates_idea_node(fixture_graph, tmp_path
     )
     _intake_impl(plan_paths=[str(plan)])
     out = capsys.readouterr().out
-    assert "claimed ab-1dea1234" in out
+    # The receipt states a link, never the bare word "claimed" - that word is
+    # the lockfile primitive's verb, and this write takes no lock.
+    assert "linked plan to ab-1dea1234" in out
+    assert "fno do target start ab-1dea1234" in out
+    assert "claimed" not in out
     entries = _read_entries(fixture_graph)
     # No new node appended.
     assert len(entries) == 3
@@ -692,7 +696,9 @@ def test_intake_with_node_only_frontmatter_claims_idea_node(fixture_graph, tmp_p
         node="ab-1dea1234",
     )
     _intake_impl(plan_paths=[str(plan)])
-    capsys.readouterr()
+    out = capsys.readouterr().out
+    assert "linked plan to ab-1dea1234" in out
+    assert "claimed" not in out
     entries = _read_entries(fixture_graph)
     # No new node appended; the named idea node took the binding.
     assert len(entries) == 3
@@ -919,7 +925,8 @@ def test_intake_claim_lane_allows_post_gate_plan_with_difficulty(
     )
     _intake_impl(plan_paths=[str(plan)])
     out = capsys.readouterr().out
-    assert "claimed ab-1dea1234" in out
+    assert "linked plan to ab-1dea1234" in out
+    assert "claimed" not in out
     target = next(e for e in _read_entries(fixture_graph) if e["id"] == "ab-1dea1234")
     assert target["difficulty"] == "high"
 
@@ -947,7 +954,9 @@ def test_intake_with_cli_claim_wins_over_frontmatter(fixture_graph, tmp_path, ca
     )
     _intake_impl(plan_paths=[str(plan)], claims="ab-0fff9999")
     out = capsys.readouterr().out
-    assert "claimed ab-0fff9999" in out
+    assert "linked plan to ab-0fff9999" in out
+    assert "fno do target start ab-0fff9999" in out
+    assert "claimed" not in out
     entries = _read_entries(fixture_graph)
     # ab-0fff9999 updated; ab-1dea1234 untouched.
     assert next(e for e in entries if e["id"] == "ab-0fff9999")["plan_path"] == str(plan)
@@ -1190,7 +1199,8 @@ def test_cli_runner_intake_with_claims_flag(tmp_path, monkeypatch):
         app, ["backlog", "intake", str(plan), "--claims", "ab-1dea1234"]
     )
     assert result.exit_code == 0, result.output
-    assert "claimed ab-1dea1234 via cli" in result.output
+    assert "linked plan to ab-1dea1234 via cli" in result.output
+    assert "fno do target start ab-1dea1234" in result.output
     after = json.loads(g.read_text())["entries"]
     target = next(e for e in after if e["id"] == "ab-1dea1234")
     assert target["plan_path"] == str(plan)
