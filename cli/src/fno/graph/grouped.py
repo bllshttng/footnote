@@ -17,7 +17,7 @@ GROUPED_FIELD_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "created_at",
             "touched_at",
-            "claimed_at",
+            "locked_at",
             "completed_at",
             "deferred_at",
             "reopened_at",
@@ -50,7 +50,6 @@ GROUPED_FIELD_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Execution",
         (
             "locked_by",
-            "locked_at",
             "locked_by_harness",
             "locked_by_harness_session",
             "session_id",

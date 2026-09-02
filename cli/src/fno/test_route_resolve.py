@@ -197,9 +197,14 @@ def test_effort_varies_with_band_within_the_same_inventory():
 
 
 def test_no_effort_surface_injects_no_effort_key():
-    """AC6-EDGE: agy has no effort surface - the candidate carries no effort."""
-    inv = _inv([{"name": "agy-x", "harness": "agy", "model": "a", "band": "high", "effort": "high"}])
-    candidate, chain = rr.resolve_grid("high", "p2", {"agy": "ok"}, inventory=inv)
+    """AC6-EDGE: gemini has no effort surface - the candidate carries no effort.
+
+    This was agy's test until agy was measured into the support set: its own
+    ``--help`` declares ``--effort (low|medium|high)`` on 1.1.24, so the grid
+    now injects effort for agy like it does for claude. gemini is the binary
+    the deny set actually names."""
+    inv = _inv([{"name": "gem-x", "harness": "gemini", "model": "g", "band": "high", "effort": "high"}])
+    candidate, chain = rr.resolve_grid("high", "p2", {"gemini": "ok"}, inventory=inv)
     assert candidate is not None
     assert "effort" not in candidate
     assert any("effort omitted" in step for step in chain)

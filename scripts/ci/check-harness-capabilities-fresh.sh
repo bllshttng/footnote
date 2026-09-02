@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # scripts/ci/check-harness-capabilities-fresh.sh
 #
-# Tripwire, not a sync step. `crates/fno-agents/build.rs` PRODUCES
-# cli/src/fno/agents/harness_capabilities.toml from the canonical
-# crates/fno-agents/src/harness_capabilities.toml on every build, so the only
-# way the two diverge now is a hand edit of the copy. This gate catches that.
-# The third copy, crates/fno/src/harness_capabilities.toml, is what the fno
-# crate embeds with include_str!; it lives inside the crate so the packaged
-# package builds standalone, and it is hand-synced, so it is gated too.
+# Tripwire, not a sync step. ONE canonical table is edited by humans:
+# `crates/fno-agents/src/harness_capabilities.toml`. Every build of
+# `crates/fno-agents` PRODUCES two downstream byte copies from it (`build.rs`):
+# `cli/src/fno/agents/harness_capabilities.toml` (loaded as Python package
+# data) and `crates/fno/src/harness_capabilities.toml` (`include_str!`ed by
+# the mux's registry reader; the crates publish independently, so it is
+# copy-fed, not dep-fed). Both copies stay tracked because their consumers
+# must compile/load without this repo's workspace.
+#
+# The only way a copy diverges now is a hand edit of a generated file that was
+# committed without a rebuild. This gate catches that.
 #
 # Modes:
 #   (default)    compare the COMMITTED bytes of every copy
@@ -42,7 +46,7 @@ fi
 
 for rel in "${COPY_RELS[@]}"; do
   if [[ ! -f "$REPO_ROOT/$rel" ]]; then
-    echo "ERROR: copy harness_capabilities.toml missing at $rel" >&2
+    echo "ERROR: generated harness_capabilities.toml copy missing at $rel" >&2
     exit 2
   fi
 done
@@ -51,7 +55,7 @@ if [[ "$MODE" == "write" ]]; then
   for rel in "${COPY_RELS[@]}"; do
     cp "$CANONICAL" "$REPO_ROOT/$rel"
   done
-  echo "harness capabilities copies written from $CANONICAL_REL"
+  echo "harness capabilities generated copy written from $CANONICAL_REL"
   exit 0
 fi
 
@@ -91,9 +95,9 @@ for rel in "${COPY_RELS[@]}"; do
     RIGHT="$REPO_ROOT/$rel"
   fi
   if ! cmp -s "$LEFT" "$RIGHT"; then
-    echo "ERROR: harness_capabilities.toml copies have diverged:" >&2
+    echo "ERROR: harness_capabilities.toml generated copy has diverged from the canonical:" >&2
     echo "  canonical: $CANONICAL_REL" >&2
-    echo "  copy:      $rel" >&2
+    echo "  generated: $rel" >&2
     echo "  compared:  $SCOPE bytes" >&2
     failed=1
   fi
@@ -102,12 +106,10 @@ done
 
 if [[ "$failed" != "0" ]]; then
   echo "" >&2
-  echo "The copies are kept in step with the canonical file. To resync, run:" >&2
+  echo "The generated copy is produced from the canonical file. To resync, run:" >&2
   echo "  cargo build -p fno-agents" >&2
   echo "or, with no cargo toolchain:" >&2
   echo "  bash scripts/ci/check-harness-capabilities-fresh.sh --write" >&2
-  echo "  cp $CANONICAL_REL ${COPY_RELS[0]}" >&2
-  echo "  cp $CANONICAL_REL ${COPY_RELS[1]}" >&2
   exit 1
 fi
 

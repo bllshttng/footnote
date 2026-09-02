@@ -61,12 +61,31 @@ def test_effort_mapping_passes_provider_values_verbatim(provider, value, expecte
     assert effort_tokens(provider, value) == expected
 
 
-@pytest.mark.parametrize("provider", ["gemini", "agy"])
+@pytest.mark.parametrize("provider", ["gemini"])
 def test_effort_mapping_refuses_only_harnesses_without_effort_surface(provider):
     with pytest.raises(DispatchAskError) as exc:
         effort_tokens(provider, "xhigh")
     assert exc.value.exit_code == 2
     assert "no reasoning-effort surface" in str(exc.value)
+
+
+def test_agy_effort_maps_like_claude():
+    """agy's own --help declares `--effort (low|medium|high)` (1.1.24, quoted
+    by `fno agents harness probe agy`). x-4e62's deny set said otherwise and
+    the probe's disagreement proved it wrong, so agy now translates like
+    claude - exact passthrough, like pi and claude: the vocabulary is the
+    binary's own, validated at the far end, and fno keeps no second copy."""
+    assert effort_tokens("agy", "low") == ["--effort", "low"]
+    assert effort_tokens("agy", "supersonic") == ["--effort", "supersonic"]
+
+
+def test_agy_pane_argv_carries_the_effort_flag(monkeypatch):
+    """AC1-HP (x-244c): a dispatch built for agy carries the effort flag, no
+    code change needed beyond the translation this test pins."""
+    monkeypatch.setattr("fno.agents.mux_spawn.worker_writable_dirs", lambda *a, **k: [])
+    argv = build_pane_argv("agy", "hi", CWD, False, None, effort="low")
+    effort_pos = argv.index("--effort")
+    assert argv[effort_pos:effort_pos + 2] == ["--effort", "low"]
 
 
 def test_pane_argv_threads_effort_and_unset_is_noop(monkeypatch):
