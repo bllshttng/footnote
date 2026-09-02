@@ -54,11 +54,13 @@ Two of the four are finished ports. Their bash oracles were deleted. Each case n
 
 ## The real dual set
 
-There are three, in retirement order.
+There are four, in retirement order.
 
-**The claim classifier.** Dual and UNGUARDED. It goes first for that reason. Nothing pins it, so it can drift silently. The other two cannot.
+**The claim classifier.** Dual and UNGUARDED. It goes first for that reason. Nothing pins it, so it can drift silently. The other three cannot.
 
 **The ask adapters.** `fno.agents.harnesses.claude` and `fno.agents.harnesses.codex`, pinned by the two differential harnesses above. `claude_ask_parity.rs` runs the genuine Python `_build_envelope` and `parse_short_id` and asserts byte-identity. `codex_ask_parity.rs` drives one fake `codex` binary through both legs. It asserts reply text, exit code, and event fields. This is one port with one production caller. That caller is `cli/src/fno/agents/cli.py`, the body of `fno agents ask`.
+
+**The native graph reader.** `crates/fno/src/backlog_view.rs`, 2140 lines of Rust parsing `graph.json` with no subprocess. Its own docstrings name the Python oracles it mirrors: `KANBAN_COLUMNS` (`cli/src/fno/graph/render.py:26`, mirrored at `backlog_view.rs:380`), `_kanban_column` (`render.py:71`, mirrored near `backlog_view.rs:390`), and `compute_readiness` (`cli/src/fno/graph/statuses.py:133`, mirrored near `backlog_view.rs:441`). Dual and UNGUARDED. The parity is a comment asking a human to remember, and the tests beside it run one side only. The earlier guard enumeration did not find this file. That is the limit the duplicate-discovery sweep exists to close. A mirror that declares itself in a docstring is invisible to a guard census keyed on parity-test files. It holds exactly one seam crossing, so a crossing count alone scores writing more of it as an improvement. The two-axis budget in [the seam doc](rust-python-seam.md) exists for exactly this shape.
 
 Nothing else in the tree is a confirmed dual implementation today.
 
@@ -91,6 +93,7 @@ Three of these need a note. A reader in a hurry can mistake them for port candid
 
 Use this. Do not invent another. The repo proved it on two migrations. The property that makes it good is simple. The safety net survives the deletion instead of dying with it.
 
+0. **Measure both budget axes.** Count the seam crossings and the dual set before step 1. A port that raises either axis is refused, however clean its diff. The reason and the gaming path are in [the seam doc](rust-python-seam.md). This page's hand list is the second axis until the duplicate-discovery sweep lands.
 1. **Differential parity while both legs exist.** Run both implementations over identical fixtures and assert byte-equality.
 2. **Capture goldens from the old leg first.** Do this before touching it, while it is still proven correct. Under `FNO_CAPTURE_GOLDEN=1` the helper runs the old leg, writes the goldens, and asserts new equals old before freezing. Goldens live at `crates/fno-agents/tests/golden/<subject>/<case>.{exit,out,err}`, keyed by a slug of the case label.
 3. **Delete the old leg and move its callers.** Both, in one change.
@@ -118,6 +121,8 @@ The header carries no node id and no PR number. `scripts/ci/check-no-internal-re
 ## Sequence
 
 The claim classifier goes first. It is the only dual implementation with no parity guard pinning it. A guarded leg cannot drift silently. An unguarded one can.
+
+Retirement order is subordinate to the crossing dependency order in [the seam doc](rust-python-seam.md). A leg with no guard still waits for the legs it feeds. Risk argues for a port. Dependency decides the safe order.
 
 The ask adapters go second. They already sit at step 1, with both harnesses passing. The work is steps 2 through 4, plus moving one caller.
 
