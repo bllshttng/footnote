@@ -130,6 +130,12 @@ class MuxSpawnResult:
     # Why this spawn is unbound, in the receipt whenever `bound` is False. Never
     # set when bound.
     unbound_reason: Optional[str] = None
+    # (x-b029, AC4-ERR) The session-id stamp never landed and the reconcile
+    # pass found nothing: the row is id-less for good, so the receipt names
+    # the defect instead of returning zero with a silent None. Set alongside
+    # `unbound_reason` (which says why the pane is unbound at receipt time);
+    # this says the stamp step itself failed and will not retry.
+    stamp_failure: Optional[str] = None
     # Captured pane output for a worker that died before binding. The pane's
     # scrollback dies with the pane (the mux drops the pane registry entry in
     # close_pane), so this file is the only evidence the death ever leaves.
@@ -4438,6 +4444,7 @@ def dispatch_spawn_pane(
         route_settings_path: Optional[str] = None
 
         stored_session_uuid: Optional[str] = None
+        stamp_failure: Optional[str] = None
         row_status: AgentStatus = "live"
         crown_declined = False
         crown_succeeded = False
@@ -4900,6 +4907,30 @@ def dispatch_spawn_pane(
                     f"failed: {cleanup_detail}; pane {pane_id} may still exist",
                     exit_code=1,
                 )
+            else:
+                # (x-b029, AC4-ERR) An OPTIONAL binding whose stamp never
+                # landed: this branch used to fall through and return zero
+                # with an id-less row and no journal entry, so the unstamped
+                # pane was a defect only a hand audit of `pane ls` found
+                # (pane 46 vs pane 50: identical argv, one stamped). The
+                # spawn still succeeds - the pane is alive and the row is
+                # written - but the failure is REPORTED here and on the
+                # receipt, never silent.
+                from fno.agents import events as _stamp_events
+
+                stamp_failure_detail = (
+                    f"session-id stamp never landed (binding-window-expired, "
+                    f"reconcile found nothing); row {name!r} stays id-less"
+                )
+                _stamp_events.emit(
+                    "agent_session_id_uncaptured",
+                    name=name,
+                    harness=provider,
+                    cwd=str(cwd),
+                    reason=stamp_failure_detail,
+                    pane_id=pane_id,
+                )
+                stamp_failure = stamp_failure_detail
 
         # Claude and Codex both resolve the canonical full harness id through the
         # generated mailbox handle. The row keeps short_id empty because mux is
@@ -4950,6 +4981,7 @@ def dispatch_spawn_pane(
         pane_alive=pane_alive,
         claim_store_writable=claim_store_writable,
         unbound_reason=_resolve_unbound_reason(bound_val, unbound_reason, provider),
+        stamp_failure=stamp_failure,
         log_path=death_log_path,
         effective_message=effective_message,
         placement=placement_receipt,

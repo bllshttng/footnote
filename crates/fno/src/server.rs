@@ -4028,6 +4028,19 @@ impl Core {
                 }
             }
         }
+        // (x-b029) The resume birthright. A pane the daemon itself re-homed
+        // (workspace restore, `pane run --worker`) is recorded in
+        // `worker_session_pane` with its (harness, session id) at spawn - the
+        // same id the resume argv carries. The registry FILE's row can still
+        // point at the pre-restart pane, so the join above misses and the
+        // pane read `-` while doing real work. This map is fno's own record,
+        // not an argv heuristic: the id was stamped at birth by the code that
+        // built the resume command. Single-identity rule unchanged.
+        for ((_, session_id), pane) in &self.worker_session_pane {
+            if *pane == pid {
+                ids.insert(session_id.clone());
+            }
+        }
         (ids.len() == 1).then(|| ids.into_iter().next()).flatten()
     }
 
@@ -26687,6 +26700,33 @@ mod tests {
         assert_eq!(core.member_pane(&first), Some(10));
         assert_eq!(core.member_pane(&second), Some(11));
         assert!(core.unique_worker_pane_by_name("reused-name").is_err());
+    }
+
+    #[test]
+    fn resumed_pane_resolves_fno_id_from_its_resume_birthright() {
+        // (x-b029) AC3-HP: a pane the daemon re-homed through the resume path
+        // resolves its fno_id from the (harness, session) record the resume
+        // stamped at birth, even though the registry FILE's row still points
+        // at the pre-restart pane. The id is the one the resume argv carries,
+        // never a guess.
+        let mut core = empty_core();
+        let uuid = "01a05fce-0000-7ccc-8000-000000000000";
+        let mut row = bg_row("t-resumed-agy", "/repo", None);
+        row.harness = Some("codex".into());
+        row.harness_session_id = Some(uuid.into());
+        row.mux = Some(("test".into(), 999));
+        core.agents = vec![row];
+        core.worker_session_pane
+            .insert(("codex".into(), uuid.into()), 77);
+        // The stale registry ref alone does not resolve the new pane...
+        assert_eq!(
+            core.fno_id_for_pane(999),
+            Some(uuid.to_string()),
+            "the stale row still resolves ITS OWN recorded pane"
+        );
+        assert_eq!(core.fno_id_for_pane(77), Some(uuid.to_string()));
+        // A pane the daemon never re-homed and no row hosts stays untracked.
+        assert_eq!(core.fno_id_for_pane(78), None);
     }
 
     #[test]
