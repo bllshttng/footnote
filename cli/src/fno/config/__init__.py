@@ -2227,6 +2227,11 @@ class AgentsBlock(BaseModel):
     max_fleet_cpu_share: float = 0.5
     hard_max_load_per_cpu: float = 40.0
     worker_qos: str = "utility"
+    # Absolute override for footprint's sustained-CPU threshold, in cores. Set
+    # it to pin a small box; unset, the threshold derives from measured CPU
+    # capacity (a fraction per core) instead of the old hardcoded 1.0, which
+    # asked a 12-core machine's fleet to idle at 8% utilisation.
+    footprint_sustained_cpu_cores: Optional[float] = None
     # Default permission/approval mode for AUTONOMOUS dispatchers only
     # (dispatch-node.sh / `fno backlog advance` / `/think dispatch`). Defaults to
     # bypass so a fire-and-forget worker enters its worktree without a prompt
@@ -3215,6 +3220,53 @@ class HealthMonitorBlock(BaseModel):
         A scalar typo (``thresholds: 3``) must not raise out of load_settings();
         an empty/non-dict value falls back to the default sub-block.
         """
+        if isinstance(v, dict):
+            return v
+        return {}
+
+
+class ResourceMeterThresholdsBlock(BaseModel):
+    """Whole-machine resource thresholds the meter may flag against.
+
+    ``swap_used_gb``: swap in use above this reads as memory pressure. It is
+    advisory for now - the meter renders readings, it gates nothing yet - but
+    the shape is here so a later gate does not re-derive the numbers.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    cpu_busy_fraction: float = 0.9
+    swap_used_gb: float = 1.0
+
+
+class ResourceMeterBlock(BaseModel):
+    """The whole-machine resource meter (config.resource_meter).
+
+    Same four parts as ``config.health_monitor``: an enable, thresholds, a
+    notification routing block, and a history block. ``enabled`` defaults to
+    FALSE - the feature needs the ``macmon`` binary on PATH, which fno core
+    does not depend on, and a meter that silently renders nothing on a machine
+    without it must not be on by default. This is a plain feature toggle by
+    operator ruling: no adapter interface, no plugin registry, no
+    discriminator.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    refresh_seconds: int = 5
+    thresholds: ResourceMeterThresholdsBlock = Field(
+        default_factory=ResourceMeterThresholdsBlock
+    )
+    notifications: HealthNotificationsBlock = Field(
+        default_factory=HealthNotificationsBlock
+    )
+    history: HealthHistoryBlock = Field(default_factory=HealthHistoryBlock)
+
+    @field_validator("thresholds", "notifications", "history", mode="before")
+    @classmethod
+    def coerce_subblock(cls, v: object) -> object:
+        """Fail-safe: a non-mapping sub-block degrades to its defaults."""
         if isinstance(v, dict):
             return v
         return {}
@@ -4237,6 +4289,7 @@ class ConfigBlock(BaseModel):
     evals: EvalsBlock = Field(default_factory=EvalsBlock)
     recovery: RecoveryBlock = Field(default_factory=RecoveryBlock)
     health_monitor: HealthMonitorBlock = Field(default_factory=HealthMonitorBlock)
+    resource_meter: ResourceMeterBlock = Field(default_factory=ResourceMeterBlock)
     collision: CollisionBlock = Field(default_factory=CollisionBlock)
     work: WorkBlock = Field(default_factory=WorkBlock)
     join: JoinBlock = Field(default_factory=JoinBlock)
@@ -4390,6 +4443,14 @@ class ConfigBlock(BaseModel):
     def _coerce_health_monitor(cls, v: object) -> object:
         """Fail-safe: a non-mapping ``health_monitor:`` degrades to defaults."""
         if isinstance(v, (dict, HealthMonitorBlock)):
+            return v
+        return {}
+
+    @field_validator("resource_meter", mode="before")
+    @classmethod
+    def _coerce_resource_meter(cls, v: object) -> object:
+        """Fail-safe: a non-mapping ``resource_meter:`` degrades to defaults."""
+        if isinstance(v, (dict, ResourceMeterBlock)):
             return v
         return {}
 

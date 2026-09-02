@@ -14,6 +14,7 @@ from fno.codemap_cli import app as codemap_app
 from fno.doctor import doctor_command, plugin_file_command
 from fno.agents.harness_probe import harness_probe_command
 from fno.doctor_footprint import footprint_command
+from fno.doctor_lanes import lanes_command
 from fno.evals.cli import evals_app
 from fno.events.cli import cli as event_app
 from fno.lint_cli import lint
@@ -60,6 +61,10 @@ doctor_app.add_typer(evals_app, name="evals")
 doctor_app.add_typer(doctor_event_app, name="event")
 doctor_app.command("lint")(lint)
 doctor_app.command("footprint", hidden=True)(footprint_command)
+# `doctor lanes` is the whole-machine lane advisor: one number and its
+# reasoning, or a refusal naming every dark sensor. Hidden per the new-verb
+# convention; `fno help doctor --all`.
+doctor_app.command("lanes", hidden=True)(lanes_command)
 doctor_app.command("harness", hidden=True)(harness_probe_command)
 doctor_app.command("plugin-file", hidden=True)(plugin_file_command)
 # `doctor route` is the reachability read: what this installation's declared

@@ -44,6 +44,30 @@ def _fake_runner(ps_output: str, roster: list[dict], calls: list[list[str]]):
     return run
 
 
+def _pin_load(monkeypatch, *, status: str, load: float = 1.0, ceiling: float = 96.0):
+    """Pin the spawn-load snapshot so a verdict test is hermetic: the real
+    snapshot reads the host's live load average, which no exit-code assertion
+    should ride on."""
+    from types import SimpleNamespace
+
+    from fno import doctor_footprint
+
+    snapshot = SimpleNamespace(
+        load_1m=load,
+        max_load_per_cpu=8.0,
+        load_ceiling=ceiling,
+        load_cpu_count=int(ceiling // 8),
+        spawn_load_status=status,
+    )
+    monkeypatch.setattr(doctor_footprint, "_spawn_load_snapshot", lambda: snapshot)
+
+
+def _pin_capacity(monkeypatch, cores: int):
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(doctor_footprint, "_cpu_capacity_cores", lambda: cores)
+
+
 def test_ac9_edge_ps_timeout_is_unavailable(monkeypatch) -> None:
     from fno import doctor_footprint
 
@@ -655,7 +679,12 @@ def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(
     payload = json.loads(result.stdout)
     assert payload["process_count"] == 2
     assert payload["fleet_cpu_cores"] == pytest.approx(1.0)
-    assert calls == [["ps", "-Ao", "pid,ppid,etime,%cpu,rss,command"]]
+    # Git calls the config-root resolver may shell are not the cause-only
+    # contract's subject; what it promises is ONE ps read and no roster walk.
+    assert [call for call in calls if call[0] == "ps"] == [
+        ["ps", "-Ao", "pid,ppid,etime,%cpu,rss,command"]
+    ]
+    assert not [call for call in calls if "agents" in call]
 
 
 def test_ac6_edge_cause_only_seeds_live_detached_registry_root(
@@ -720,11 +749,31 @@ def test_ac6_edge_cause_only_refuses_root_missing_from_snapshot(
     assert "missing from ps snapshot" in result.stdout
 
 
-def test_ac7_edge_fleet_cpu_threshold_includes_short_lived_descendant(
+def test_sustained_cpu_threshold_derives_from_capacity_and_honors_override(
+    monkeypatch,
+) -> None:
+    """The old absolute 1.0 asked a 12-core machine's fleet to idle at 8%.
+    The threshold is now a fraction of capacity; a config override pins it
+    absolutely for a small box."""
+    from fno import doctor_footprint as df
+
+    assert df.sustained_cpu_threshold(12) == pytest.approx(1.2)
+    assert df.sustained_cpu_threshold(1) == pytest.approx(
+        df.SUSTAINED_CPU_FLOOR_CORES
+    )
+    monkeypatch.setattr(df, "_footprint_cpu_override", lambda: 2.0)
+    assert df.sustained_cpu_threshold(12) == pytest.approx(2.0)
+
+
+def test_ac7_edge_short_lived_descendant_counts_in_fleet_cpu(
     monkeypatch, no_worker_roots
 ) -> None:
+    """A 100% descendant for 5s lands in the fleet's CPU reading. It no longer
+    decides the exit on its own: sustained CPU is reported against a derived
+    threshold, while the exit answers the two alarms (capacity, leak)."""
     from fno import doctor_footprint
 
+    _pin_load(monkeypatch, status="within")
     monkeypatch.setattr(
         doctor_footprint.subprocess,
         "run",
@@ -741,9 +790,9 @@ def test_ac7_edge_fleet_cpu_threshold_includes_short_lived_descendant(
 
     result = runner.invoke(app, ["doctor", "footprint"])
 
-    assert result.exit_code == 3, result.output
+    assert result.exit_code == 0, result.output
     assert "fleet CPU: 1.200 cores" in result.stdout
-    assert "verdict: over budget" in result.stdout
+    assert "verdict: within (exit 0)" in result.stdout
 
 
 def test_ac8_edge_descendants_do_not_consume_direct_process_threshold(
@@ -766,11 +815,13 @@ def test_ac8_edge_descendants_do_not_consume_direct_process_threshold(
         ),
     )
 
+    _pin_load(monkeypatch, status="within")
+
     result = runner.invoke(app, ["doctor", "footprint"])
 
     assert result.exit_code == 0, result.output
     assert "processes: 3" in result.stdout
-    assert "direct processes: 1 (threshold 2)" in result.stdout
+    assert "unexplained processes: 0 (1 direct, roster explains 2)" in result.stdout
 
 
 def test_ac9_edge_cpu_share_uses_constrained_capacity(
@@ -807,6 +858,8 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(
     from fno import doctor_footprint
 
     calls: list[list[str]] = []
+    _pin_load(monkeypatch, status="within")
+    _pin_capacity(monkeypatch, 4)
     monkeypatch.setattr(
         doctor_footprint.subprocess,
         "run",
@@ -825,9 +878,9 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(
     result = runner.invoke(app, ["doctor", "footprint"])
 
     assert result.exit_code == 0, result.output
-    assert "sustained CPU: 0.200 cores (threshold 1.000)" in result.stdout
+    assert "sustained CPU: 0.200 cores (threshold 0.400 from 4 cpus)" in result.stdout
     assert "processes: 2" in result.stdout
-    assert "direct processes: 2 (threshold 3)" in result.stdout
+    assert "unexplained processes: 0 (2 direct, roster explains 3)" in result.stdout
     assert "transient calls: 1" in result.stdout
     assert [call for call in calls if call[0] in {"ps", "/usr/local/bin/fno"}] == [
         ["ps", "-Ao", "pid,ppid,etime,%cpu,rss,command"],
@@ -835,11 +888,15 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(
     ]
 
 
-def test_ac4_edge_sustained_cpu_exits_three_and_names_top_consumers(
+def test_ac4_edge_capacity_over_exits_three_and_names_top_consumers(
     monkeypatch, no_worker_roots
 ) -> None:
+    """Capacity and leak BOTH fire; the capacity exit (3) wins as the more
+    urgent alarm and the leak still prints with its own words."""
     from fno import doctor_footprint
 
+    _pin_load(monkeypatch, status="exceeded")
+    _pin_capacity(monkeypatch, 4)
     monkeypatch.setattr(
         doctor_footprint.subprocess,
         "run",
@@ -858,16 +915,21 @@ def test_ac4_edge_sustained_cpu_exits_three_and_names_top_consumers(
     result = runner.invoke(app, ["doctor", "footprint"])
 
     assert result.exit_code == 3
-    assert "over budget" in result.stdout
+    assert "verdict: capacity over (exit 3)" in result.stdout
+    assert "unexplained processes: 1 (2 direct, roster explains 1)" in result.stdout
     assert "fno mux serve (80.0%)" in result.stdout
     assert "fno-agents-daemon --serve (40.0%)" in result.stdout
 
 
-def test_ac4_edge_process_count_also_exits_three(
+def test_ac4_edge_unexplained_processes_get_their_own_exit(
     monkeypatch, no_worker_roots
 ) -> None:
+    """A leak without a capacity breach exits 5 - the leak's own code, not the
+    capacity code the old merged verdict borrowed (defect 1 in the plan)."""
     from fno import doctor_footprint
 
+    _pin_load(monkeypatch, status="within")
+    _pin_capacity(monkeypatch, 4)
     monkeypatch.setattr(
         doctor_footprint.subprocess,
         "run",
@@ -885,10 +947,11 @@ def test_ac4_edge_process_count_also_exits_three(
 
     result = runner.invoke(app, ["doctor", "footprint"])
 
-    assert result.exit_code == 3
+    assert result.exit_code == 5
+    assert "verdict: leak (exit 5)" in result.stdout
     assert "sustained CPU: 0.200 cores" in result.stdout
     assert "processes: 2" in result.stdout
-    assert "direct processes: 2 (threshold 1)" in result.stdout
+    assert "unexplained processes: 1 (2 direct, roster explains 1)" in result.stdout
 
 
 def test_ac5_edge_roster_failure_degrades_the_threshold_not_the_reading(
@@ -913,11 +976,14 @@ def test_ac5_edge_roster_failure_degrades_the_threshold_not_the_reading(
 
     monkeypatch.setattr(doctor_footprint.subprocess, "run", failed_roster)
     monkeypatch.setattr(doctor_footprint.shutil, "which", lambda name: "/usr/local/bin/fno")
+    _pin_load(monkeypatch, status="within")
+    _pin_capacity(monkeypatch, 4)
 
     result = runner.invoke(app, ["doctor", "footprint"])
 
     assert result.exit_code == 0
     assert "roster unavailable" in result.stdout
+    assert "unexplained processes: unknown" in result.stdout
     assert "processes:" in result.stdout
     assert "degraded: roster unavailable" in result.stdout
     assert [call for call in calls if call[0] in {"ps", "/usr/local/bin/fno"}] == [
@@ -931,6 +997,8 @@ def test_ac7_edge_json_contains_thresholds_and_exit_meaning(
 ) -> None:
     from fno import doctor_footprint
 
+    _pin_load(monkeypatch, status="within")
+    _pin_capacity(monkeypatch, 10)
     monkeypatch.setattr(
         doctor_footprint.subprocess,
         "run",
@@ -951,8 +1019,11 @@ def test_ac7_edge_json_contains_thresholds_and_exit_meaning(
     payload = json.loads(result.stdout)
     assert payload["sustained_cpu_cores"] == 0.0
     assert payload["transient_call_count"] == 1
-    assert payload["sustained_cpu_threshold_cores"] == 1.0
+    # The threshold derives from capacity (0.1 x 10), not the old constant.
+    assert payload["sustained_cpu_threshold_cores"] == pytest.approx(1.0)
     assert payload["direct_process_count_threshold"] == 2
+    assert payload["leak_verdict"] == "clean"
+    assert payload["capacity_verdict"] == "within"
     assert payload["exit_code"] == 0
 
 

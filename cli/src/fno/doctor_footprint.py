@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
@@ -18,11 +19,60 @@ import typer
 from fno.footprint import Footprint, parse_footprint
 
 
-CPU_THRESHOLD_CORES = 1.0
+#: The sustained-CPU threshold derives from measured capacity at this fraction
+#: per core, not from the old absolute 1.0 - which on a 12-core M2 Max asked
+#: the fleet to idle at 8% utilisation. ``agents.footprint_sustained_cpu_cores``
+#: overrides it whole for a small box that wants the pin.
+SUSTAINED_CPU_CAPACITY_FRACTION = 0.1
+SUSTAINED_CPU_FLOOR_CORES = 0.25
 DAEMON_ALLOWANCE = 1
 _PS_COLUMNS = "pid,ppid,etime,%cpu,rss,command"
 PS_TIMEOUT_SECONDS = 5.0
 _NO_LOAD_SNAPSHOT = object()
+#: Exit codes. A capacity breach keeps 3 (existing readers depend on it); the
+#: leak alarm gets its own code so ``echo $?`` answers WHICH alarm fired. The
+#: two verdicts were merged into one exit and a competent reader misread the
+#: leak detector as a capacity ceiling repeatedly in one session.
+EXIT_CAPACITY_OVER = 3
+EXIT_LEAK = 5
+
+
+@lru_cache(maxsize=8)
+def _footprint_cpu_override_at(root: Path) -> float | None:
+    """``agents.footprint_sustained_cpu_cores`` read at ``root``, cached per root.
+
+    The settings load resolves config roots, which on a cold cache shells out
+    to git - the cause-only path (the spawn gate's hot lane, contractually one
+    ps call) must never pay that per call, so the read happens once per root.
+    Keyed on the root rather than cached bare: a zero-arg cache is a global
+    keyed on nothing, and the first caller would fix the answer for every
+    caller after it. Tests substitute the zero-arg wrapper."""
+    try:
+        from fno.config import load_settings_for_repo
+
+        override = load_settings_for_repo(root).agents.footprint_sustained_cpu_cores
+    except Exception:  # noqa: BLE001 - a broken settings value degrades, not dies
+        return None
+    return float(override) if override is not None and override > 0 else None
+
+
+def _footprint_cpu_override() -> float | None:
+    """The cwd-rooted read; the seam tests and callers substitute."""
+    return _footprint_cpu_override_at(Path.cwd())
+
+
+def sustained_cpu_threshold(capacity_cores: int | None = None) -> float:
+    """The sustained-CPU bar, derived from the machine, not hardcoded.
+
+    ``agents.footprint_sustained_cpu_cores`` pins it absolutely; unset, it is a
+    fraction of measured CPU capacity with a floor so a one-core box still has
+    a meaningful bar."""
+    if capacity_cores is None:
+        capacity_cores = _cpu_capacity_cores()
+    override = _footprint_cpu_override()
+    if override is not None:
+        return override
+    return max(SUSTAINED_CPU_FLOOR_CORES, SUSTAINED_CPU_CAPACITY_FRACTION * capacity_cores)
 
 
 def _cpu_capacity_cores() -> int:
@@ -499,6 +549,38 @@ def _roster_count() -> tuple[int | None, str | None]:
     return None, "roster unavailable: JSON did not contain a row list"
 
 
+def capacity_verdict(load_snapshot: Any) -> str:
+    """``within`` | ``near`` | ``over`` | ``unknown`` from the spawn-load
+    ceiling - the only reading here derived from hardware.
+
+    ``load_ceiling`` is ``max_load_per_cpu x ncpu``; 1-minute load against it
+    is a real ceiling in a way the roster-derived process arithmetic is not.
+    An unavailable snapshot is ``unknown``, never a verdict."""
+    status = getattr(load_snapshot, "spawn_load_status", "unavailable")
+    ceiling = getattr(load_snapshot, "load_ceiling", None)
+    load = getattr(load_snapshot, "load_1m", None)
+    if status not in ("within", "exceeded") or ceiling is None or load is None:
+        return "unknown"
+    if status == "exceeded":
+        return "over"
+    ratio = load / ceiling if ceiling > 0 else 0.0
+    if ratio > 1.0:
+        return "over"
+    if ratio >= 0.9:
+        return "near"
+    return "within"
+
+
+def leak_verdict(direct_processes: int, threshold: int | None) -> str:
+    """``clean`` | ``unexplained`` | ``unknown`` from the roster arithmetic.
+
+    This is a LEAK detector: processes the roster cannot explain. It is not a
+    capacity number and never gates the capacity exit."""
+    if threshold is None:
+        return "unknown"
+    return "unexplained" if direct_processes > threshold else "clean"
+
+
 def _payload(
     reading: Footprint,
     *,
@@ -511,6 +593,7 @@ def _payload(
     cpu_capacity = _cpu_capacity_cores()
     if load_snapshot is _NO_LOAD_SNAPSHOT:
         load_snapshot = _spawn_load_snapshot()
+    threshold_cores = sustained_cpu_threshold(cpu_capacity)
     measured_share = (
         reading.fleet_cpu_cores / reading.measured_cpu_cores * 100
         if reading.measured_cpu_cores > 0
@@ -520,8 +603,8 @@ def _payload(
         "sustained_cpu_cores": reading.sustained_cpu_cores,
         "descendant_cpu_cores": reading.descendant_cpu_cores,
         "fleet_cpu_cores": reading.fleet_cpu_cores,
-        "sustained_cpu_threshold_cores": CPU_THRESHOLD_CORES,
-        "fleet_cpu_threshold_cores": CPU_THRESHOLD_CORES,
+        "sustained_cpu_threshold_cores": threshold_cores,
+        "fleet_cpu_threshold_cores": threshold_cores,
         "transient_call_count": reading.transient_call_count,
         "process_count": reading.process_count,
         "direct_process_count_threshold": process_threshold,
@@ -531,6 +614,8 @@ def _payload(
         "cpu_capacity_cores": cpu_capacity,
         "fleet_percent_capacity": reading.fleet_cpu_cores / cpu_capacity * 100,
         "fleet_percent_measured_cpu": measured_share,
+        "leak_verdict": leak_verdict(reading.direct_process_count, process_threshold),
+        "capacity_verdict": capacity_verdict(load_snapshot),
         "load_1m": getattr(load_snapshot, "load_1m", None),
         "max_load_per_cpu": getattr(load_snapshot, "max_load_per_cpu", None),
         "load_ceiling": getattr(load_snapshot, "load_ceiling", None),
@@ -572,12 +657,22 @@ def _emit_result(
     cause_only: bool = False,
     note: str | None = None,
 ) -> NoReturn:
-    cpu_over = reading.fleet_cpu_cores > CPU_THRESHOLD_CORES
-    process_over = (
-        process_threshold is not None
-        and reading.direct_process_count > process_threshold
-    )
-    exit_code = 0 if cause_only else (3 if cpu_over or process_over else 0)
+    capacity = "unknown"
+    leak = "unknown"
+    exit_code = 0
+    # cause_only keeps passing None (never the sentinel) so _payload does not
+    # compute a load snapshot the cause-only contract promises not to spend.
+    load_snapshot = None if cause_only else _spawn_load_snapshot()
+    if not cause_only:
+        leak = leak_verdict(reading.direct_process_count, process_threshold)
+        capacity = capacity_verdict(load_snapshot)
+        # Capacity keeps the historical exit (callers depend on 3); the leak
+        # alarm gets its own code. When BOTH fire, capacity wins the exit as
+        # the more urgent alarm and the leak still prints.
+        if capacity == "over":
+            exit_code = EXIT_CAPACITY_OVER
+        elif leak == "unexplained":
+            exit_code = EXIT_LEAK
     # A gapped reading answers, but it does not clear the gate: --cause-only
     # keeps exit 4 (the Rust spawn gate takes stdout only on exit 0, so a
     # gapped undercount can never be admitted as headroom without a Rust
@@ -592,14 +687,14 @@ def _emit_result(
         exit_code=exit_code,
         top_limit=top_limit,
         command_limit=command_limit,
-        load_snapshot=None if cause_only else _spawn_load_snapshot(),
+        load_snapshot=load_snapshot,
     )
     if note is not None:
         payload["degraded"] = note
     if json_output:
         typer.echo(json.dumps(payload, sort_keys=True))
     else:
-        verdict = "over budget" if exit_code == 3 else "within budget"
+        threshold_cores = payload["sustained_cpu_threshold_cores"]
         typer.echo(
             f"fleet CPU: {reading.fleet_cpu_cores:.3f} cores "
             f"({payload['fleet_percent_capacity']:.1f}% capacity, "
@@ -624,7 +719,7 @@ def _emit_result(
                 )
         typer.echo(
             f"sustained CPU: {reading.sustained_cpu_cores:.3f} cores "
-            f"(threshold {CPU_THRESHOLD_CORES:.3f})"
+            f"(threshold {threshold_cores:.3f} from {payload['cpu_capacity_cores']} cpus)"
         )
         typer.echo(
             f"descendant CPU: {reading.descendant_cpu_cores:.3f} cores "
@@ -633,22 +728,35 @@ def _emit_result(
         typer.echo(
             f"processes: {reading.process_count}"
         )
-        typer.echo(
-            f"direct processes: {reading.direct_process_count} "
-            f"(threshold {process_threshold if process_threshold is not None else 'n/a'})"
-        )
+        if process_threshold is not None:
+            unexplained = max(0, reading.direct_process_count - process_threshold)
+            typer.echo(
+                f"unexplained processes: {unexplained} "
+                f"({reading.direct_process_count} direct, "
+                f"roster explains {process_threshold})"
+            )
+        else:
+            typer.echo(
+                f"unexplained processes: unknown "
+                f"({reading.direct_process_count} direct, roster unavailable)"
+            )
         typer.echo(f"transient calls: {reading.transient_call_count}")
         if reading.attribution_gap is not None:
             typer.echo(
                 f"attribution gap: {reading.attribution_gap} "
                 "(fleet share is an undercount, not headroom)"
             )
-        typer.echo(f"verdict: {verdict} (exit {exit_code})")
+        if exit_code == EXIT_CAPACITY_OVER:
+            typer.echo(f"verdict: capacity over (exit {exit_code})")
+        elif exit_code == EXIT_LEAK:
+            typer.echo(f"verdict: leak (exit {exit_code})")
+        else:
+            typer.echo(f"verdict: {capacity} (exit {exit_code})")
         if reading.unparsed_lines:
             typer.echo(f"unparsed lines: {reading.unparsed_lines}")
         if note is not None:
             typer.echo(f"degraded: {note}")
-        if exit_code == 3 or cause_only:
+        if exit_code != 0 or cause_only:
             typer.echo("top fleet consumers:")
             for cpu_percent, command in reading.top[: top_limit or 5]:
                 if command_limit is not None and len(command.encode("utf-8")) > command_limit:

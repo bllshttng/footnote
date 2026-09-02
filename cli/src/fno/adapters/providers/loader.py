@@ -257,6 +257,7 @@ _AGENTS_RESERVED_KEYS = frozenset(
         "dead_row_grace",
         "defaults",
         "fallback",
+        "footprint_sustained_cpu_cores",
         "gemini",
         "happy_routed_panes",
         "hard_max_load_per_cpu",

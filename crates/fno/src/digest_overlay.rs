@@ -95,6 +95,22 @@ pub fn status_row_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "status_row", true)
 }
 
+/// `config.resource_meter.enabled` (default OFF) - the whole-machine meter's
+/// toggle. OFF because the meter needs `macmon` on PATH, which fno core does
+/// not depend on; a meter that silently renders nothing must not ship on.
+pub fn resource_meter_enabled(cwd: &Path) -> bool {
+    section_bool(cwd, "resource_meter", "enabled", false)
+}
+
+/// `config.resource_meter.refresh_seconds` (default 5) - the meter's sample
+/// cadence. Saturating: an absurd value must not overflow the sleep.
+pub fn resource_meter_refresh_secs(cwd: &Path) -> u64 {
+    config_str(cwd, "resource_meter", "refresh_seconds")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(5)
+        .max(1)
+}
+
 /// `config.mux.show_missions` (default ON) - the `~ missions` progress band's
 /// off-switch. A mission can never hold a session, so an operator who runs no
 /// epics can drop the band entirely rather than dismiss it each session.
@@ -315,6 +331,14 @@ fn merge_key_layers(layers: impl Iterator<Item = Vec<(String, String)>>) -> Vec<
 /// are one line each now; the coercion lives in one place.
 fn mux_bool(cwd: &Path, key: &str, default: bool) -> bool {
     mux_str(cwd, key)
+        .and_then(|v| parse_bool(&v))
+        .unwrap_or(default)
+}
+
+/// A `config.<section>.<key>` boolean with a fail-open default - the same
+/// coercion as [`mux_bool`] for a non-mux section (`resource_meter`).
+fn section_bool(cwd: &Path, section: &str, key: &str, default: bool) -> bool {
+    config_str(cwd, section, key)
         .and_then(|v| parse_bool(&v))
         .unwrap_or(default)
 }

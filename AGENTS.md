@@ -215,4 +215,4 @@ Planning & ship: [lean blueprint](docs/architecture/lean-blueprint.md) · [plan 
 
 Coordination & providers: [coordination](docs/architecture/coordination.md) · [mux selector resolution](docs/architecture/mux-selector-resolution.md) · [provider rotation](docs/provider-rotation.md) · [cross-model review](docs/architecture/cross-model-review.md)
 
-Platform & ops: [harnesses](docs/HARNESSES.md) · [multi-CLI hooks](docs/architecture/multi-cli-hooks.md) · [path config](docs/path-config.md) · [workspace restore](docs/architecture/workspace-restore.md) · [disposable deletes](docs/architecture/disposable-deletes.md) · [thread lanes](docs/architecture/thread-lanes.md)
+Platform & ops: [harnesses](docs/HARNESSES.md) · [multi-CLI hooks](docs/architecture/multi-cli-hooks.md) · [path config](docs/path-config.md) · [workspace restore](docs/architecture/workspace-restore.md) · [disposable deletes](docs/architecture/disposable-deletes.md) · [thread lanes](docs/architecture/thread-lanes.md) · [resource meter](docs/architecture/resource-meter.md)
