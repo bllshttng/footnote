@@ -769,6 +769,14 @@ def resolve_owned_identity(
         if not identity.session_id or not identity.harness:
             return OwnedHarnessIdentity(None, None, present, "ambiguous")
         verdict = prove(identity.harness, identity.session_id) if prove else None
+        if verdict is True:
+            # PROOF is self, same as the marker loop below: a live row holding
+            # this id is the session's own row (spawn mints the stamp and the
+            # row in one act), not a foreign owner, so a proven marker is never
+            # decided by collision (x-6d6c).
+            return OwnedHarnessIdentity(
+                identity.session_id, identity.harness, present, "canonical"
+            )
         owner = collide(identity.harness, identity.session_id) if collide else None
         if owner:
             canonical_rejected = (

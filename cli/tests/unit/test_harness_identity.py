@@ -142,25 +142,102 @@ def test_canonical_pair_requires_process_proof_and_respects_collision():
     )
 
 
-def test_canonical_pair_does_not_skip_collision_on_family_proof():
+def test_canonical_proof_beats_own_row_collision():
+    """AC1-HP: proof is self. A spawned worker's stamped id is held in the
+    registry by the worker's OWN row (spawn mints both in one act), so a
+    proven canonical identity resolves even though a live row matches the
+    id (x-6d6c: the worker read as a competing holder of itself)."""
     session_id = "11111111-1111-4111-8111-111111111111"
     env = {
-        "FNO_HARNESS_NAME": "claude",
+        "FNO_HARNESS_NAME": "codex",
         "FNO_HARNESS_SESSION_ID": session_id,
-        "FNO_AGENT_SELF": "victim",
-        "CLAUDE_CODE_SESSION_ID": session_id,
+        "CODEX_THREAD_ID": session_id,
     }
 
     owned = resolve_owned_identity(
         env,
         prove=lambda _harness, _session: True,
-        collide=lambda _harness, _session: "victim",
+        collide=lambda _harness, _session: "t-32db-waves45",
+    )
+
+    assert owned.disposition == "canonical"
+    assert owned.session_id == session_id
+    assert owned.harness == "codex"
+    assert owned.rejected == ()
+
+
+def test_canonical_pair_without_proof_still_refuses_live_row():
+    """AC3-ERR: with no proof available a live row holding the id is still
+    contention, and the rejection names the owning row."""
+    session_id = "11111111-1111-4111-8111-111111111111"
+    env = {
+        "FNO_HARNESS_NAME": "codex",
+        "FNO_HARNESS_SESSION_ID": session_id,
+        "CODEX_THREAD_ID": session_id,
+    }
+
+    owned = resolve_owned_identity(
+        env,
+        prove=lambda _harness, _session: None,
+        collide=lambda _harness, _session: "other-live-row",
     )
 
     assert owned.disposition == "ambiguous"
     assert owned.session_id is None
     assert owned.harness is None
-    assert owned.rejected[0]["owner"] == "victim"
+    assert owned.rejected[0]["owner"] == "other-live-row"
+
+
+@pytest.mark.parametrize(
+    ("verdict", "owner"),
+    [
+        (True, "own-row"),
+        (None, "own-row"),
+        (False, "own-row"),
+        (True, None),
+    ],
+)
+def test_owned_branches_agree_on_proof_vs_collision(verdict, owner):
+    """AC9-EDGE: the canonical branch and the marker loop must reach the same
+    answer for the same proof/collision facts, so they can never disagree
+    about whether proof beats collision again. The (no proof, no collision)
+    cell is excluded on purpose: a canonical stamp alone is not proof (the
+    forged-pairing guard), while a lone vendor marker is the dominant
+    precedence case - that asymmetry has its own tests above."""
+    session_id = "11111111-1111-4111-8111-111111111111"
+    stamped = {
+        "FNO_HARNESS_NAME": "codex",
+        "FNO_HARNESS_SESSION_ID": session_id,
+        "CODEX_THREAD_ID": session_id,
+    }
+    bare = {"CODEX_THREAD_ID": session_id}
+
+    def run(env):
+        return resolve_owned_identity(
+            env,
+            prove=lambda _harness, _session: verdict,
+            collide=(lambda _harness, _session: owner) if owner else None,
+        )
+
+    stamped_result = run(stamped)
+    bare_result = run(bare)
+    resolved = {"canonical", "single", "proven"}
+    assert (stamped_result.disposition in resolved) == (
+        bare_result.disposition in resolved
+    )
+    if stamped_result.disposition in resolved:
+        assert (stamped_result.session_id, stamped_result.harness) == (
+            bare_result.session_id,
+            bare_result.harness,
+        )
+        assert stamped_result.rejected == ()
+        assert bare_result.rejected == ()
+    else:
+        assert stamped_result.session_id is None
+        assert bare_result.session_id is None
+        # Refusal reasons agree too: a collision is recorded by both branches
+        # or by neither.
+        assert bool(stamped_result.rejected) == bool(bare_result.rejected)
 
 
 def test_canonical_name_only_uses_same_family_vendor_session():
