@@ -145,3 +145,139 @@ pub fn seed_loss_shaped_registry(home: &fno_agents::paths::AgentsHome) -> PathBu
     .unwrap();
     path
 }
+
+// -------------------------------------------------------------------------
+// Golden capture: step 2 of the port protocol
+// (docs/architecture/dual-implementation-inventory.md), shared by every
+// `*_parity.rs` that freezes a Rust port against goldens. Under
+// FNO_CAPTURE_GOLDEN=1 the helper runs the OLD leg on the same fixture,
+// asserts Rust==old before freezing, and writes the goldens; in normal mode
+// the frozen golden IS the contract and the old leg never runs.
+// -------------------------------------------------------------------------
+
+/// Slug a case label into a filename-safe golden key (lowercase, every run of
+/// non-alphanumeric chars collapses to a single `_`, trimmed).
+pub fn slug(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    let mut prev_us = false;
+    for ch in label.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_us = false;
+        } else if !prev_us {
+            out.push('_');
+            prev_us = true;
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+/// Directory holding the frozen goldens for one subject
+/// (`tests/golden/<subject>/`).
+pub fn golden_dir(subject: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(subject)
+}
+
+/// Whether to (re)capture goldens from the live old leg this run.
+pub fn capture_mode() -> bool {
+    std::env::var("FNO_CAPTURE_GOLDEN").is_ok()
+}
+
+/// One frozen case: an optional exit code plus ordered text streams.
+///
+/// The exit freezes as `<key>.exit` (`"<code>\n"`); stream `i` freezes as
+/// `<key>.out` then `<key>.err` by position. This is the on-disk format the
+/// first two ports froze, so the kill_criteria and verify_evidence goldens
+/// stay byte-compatible through the hoist.
+pub struct Golden {
+    pub exit: Option<i32>,
+    pub streams: Vec<String>,
+}
+
+/// Assert the Rust outcome for one case against its frozen golden.
+///
+/// In capture mode `oracle` must carry the OLD leg's outcome on the same
+/// fixture (the caller builds it under `capture_mode().then(|| ..)`, so the
+/// old leg only runs in capture mode): the helper asserts Rust==old, then
+/// freezes the ORACLE's values, so a broken capture is caught at freeze time.
+/// In normal mode the oracle is never run and the golden read from disk is
+/// the contract. `oracle` is `None` once the old leg is deleted; capture is
+/// then a refusal, because a golden can only be captured from a live leg.
+pub fn assert_golden(subject: &str, label: &str, rust: &Golden, oracle: Option<Golden>) {
+    let key = slug(label);
+    let dir = golden_dir(subject);
+
+    if capture_mode() {
+        let golden = oracle.unwrap_or_else(|| {
+            panic!(
+                "[{label}] FNO_CAPTURE_GOLDEN=1 but no old leg was wired for \
+                 this case; a golden can only be captured while the old leg runs"
+            )
+        });
+        assert_eq!(
+            golden.exit, rust.exit,
+            "[{label}] capture: exit differs oracle={:?} rust={:?}",
+            golden.exit, rust.exit
+        );
+        assert_eq!(
+            golden.streams.len(),
+            rust.streams.len(),
+            "[{label}] capture: stream count differs"
+        );
+        for (i, (o, r)) in golden.streams.iter().zip(rust.streams.iter()).enumerate() {
+            assert_eq!(o, r, "[{label}] capture: stream {i} differs\noracle={o:?}\nrust={r:?}");
+        }
+        fs::create_dir_all(&dir).unwrap();
+        if let Some(code) = golden.exit {
+            fs::write(dir.join(format!("{key}.exit")), format!("{code}\n")).unwrap();
+        }
+        let suffixes = ["out", "err"];
+        for (i, s) in golden.streams.iter().enumerate() {
+            fs::write(dir.join(format!("{key}.{}", suffixes[i])), s).unwrap();
+        }
+        return;
+    }
+
+    let exit_path = dir.join(format!("{key}.exit"));
+    let golden_exit = if exit_path.exists() {
+        Some(
+            fs::read_to_string(&exit_path)
+                .unwrap_or_else(|e| panic!("[{label}] missing golden {exit_path:?}: {e}"))
+                .trim()
+                .parse()
+                .unwrap_or_else(|e| panic!("[{label}] bad golden exit in {exit_path:?}: {e}")),
+        )
+    } else {
+        None
+    };
+    let mut golden_streams = vec![
+        fs::read_to_string(dir.join(format!("{key}.out")))
+            .unwrap_or_else(|e| panic!("[{label}] missing golden {}.out: {e}", key)),
+    ];
+    let err_path = dir.join(format!("{key}.err"));
+    if err_path.exists() {
+        golden_streams.push(
+            fs::read_to_string(&err_path)
+                .unwrap_or_else(|e| panic!("[{label}] missing golden {err_path:?}: {e}")),
+        );
+    }
+
+    assert_eq!(
+        golden_exit, rust.exit,
+        "[{label}] exit differs from golden: golden={golden_exit:?} rust={:?}",
+        rust.exit
+    );
+    assert_eq!(
+        golden_streams.len(),
+        rust.streams.len(),
+        "[{label}] stream count differs from golden"
+    );
+    for (i, (g, r)) in golden_streams.iter().zip(rust.streams.iter()).enumerate() {
+        assert_eq!(
+            g, r,
+            "[{label}] stream {i} differs from golden:\ngolden={g:?}\nrust={r:?}"
+        );
+    }
+}
