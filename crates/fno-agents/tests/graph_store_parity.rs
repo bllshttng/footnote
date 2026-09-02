@@ -150,7 +150,11 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
     let mut json_out = serde_json::Map::new();
     json_out.insert("read".into(), Value::String(read_now(graph)));
 
-    match graph_store::read_defaulted(graph, false) {
+    // The STRICT probe: backup_on_corrupt=false is read_graph_strict's
+    // read-only diagnosis contract. The soft variant would swallow a
+    // malformed root to [] and the taxonomy arm below would see no error at
+    // all.
+    match graph_store::read_defaulted_opts(graph, false, false) {
         Ok(strict) => {
             json_out.insert(
                 "strict".into(),
