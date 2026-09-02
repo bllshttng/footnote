@@ -345,6 +345,21 @@ def test_render_self_review_invocation_names_the_final_pr_head_and_base():
     )
 
 
+def test_raw_codex_self_review_uses_native_slash_verb():
+    import fno.review_capability as rc
+
+    rendered = rc.render_self_review_invocation(
+        "codex",
+        project_root=None,
+        pr_number=123,
+        head_sha="abc1234",
+        base_branch="main",
+        raw_transport=True,
+    )
+
+    assert rendered == "/review <level> --comment 123 HEAD abc1234 against origin/main"
+
+
 def test_level_for_diff_sizes_from_both_dimensions():
     """Either dimension alone pushes the tier up: a tier holds only when both
     the file count and the line count sit inside its caps."""
