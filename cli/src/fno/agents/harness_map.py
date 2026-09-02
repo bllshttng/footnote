@@ -33,7 +33,6 @@ Verified facts, each dated where it differs from the 2026-07-13 spike:
 """
 from __future__ import annotations
 
-import os
 import re
 import tomllib
 from copy import deepcopy
