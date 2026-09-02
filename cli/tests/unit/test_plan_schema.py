@@ -84,24 +84,33 @@ def test_model_tier_field_is_gone():
     assert m.difficulty is None
 
 
-def test_orchestration_defaults_to_king_when_absent():
+def test_join_defaults_to_manual_when_absent():
     """AC5-HP: the key is opt-in. Every plan on disk omits it, so absence
-    must validate unchanged and read king - no existing plan changes
+    must validate unchanged and read manual - no existing plan changes
     behavior until its author writes the key."""
     m = PlanFrontmatter.model_validate(_fm())
-    assert m.orchestration == "king"
+    assert m.join == "manual"
 
 
-def test_orchestration_mechanical_is_legal_and_normalized():
-    m = PlanFrontmatter.model_validate(_fm(orchestration="Mechanical"))
-    assert m.orchestration == "mechanical"
+def test_join_auto_is_legal_and_normalized():
+    m = PlanFrontmatter.model_validate(_fm(join="Auto"))
+    assert m.join == "auto"
 
 
-def test_orchestration_outside_enum_refuses_naming_field():
+def test_join_outside_enum_refuses_naming_field():
     """AC6-ERR: the band enum's refusal shape - message names the field
     and its legal values, so a typo teaches the enum instead of puzzling."""
     with pytest.raises(ValidationError) as exc:
-        PlanFrontmatter.model_validate(_fm(orchestration="daemon"))
+        PlanFrontmatter.model_validate(_fm(join="daemon"))
     msg = str(exc.value)
-    assert "orchestration" in msg, msg
-    assert "king, mechanical" in msg, msg
+    assert "join" in msg, msg
+    assert "manual, auto" in msg, msg
+
+
+def test_retired_orchestration_spelling_is_gone():
+    """The rename landed while adoption was one plan, so no migration path
+    exists and none is owed: the old key must not survive as a silent
+    alias that keeps writing a field nothing reads."""
+    m = PlanFrontmatter.model_validate(_fm(orchestration="mechanical"))
+    assert not hasattr(m, "orchestration")
+    assert m.join == "manual"

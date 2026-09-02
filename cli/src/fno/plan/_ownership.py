@@ -34,6 +34,11 @@ BLUEPRINT_WRITE_ALLOWLIST: frozenset[str] = frozenset(
         # stamps that date, so the ownership model has to permit the floor
         # band the mint writes to satisfy its own validator.
         "difficulty",
+        # The plan's join posture, manual or auto. Its reader is
+        # `hooks/helpers/init-target-state.sh` at target init, which fires
+        # `fno backlog join` on `auto`. Absent from this set the key was
+        # hand-authored or nothing, which is why one plan in 1385 carried it.
+        "join",
     }
 )
 

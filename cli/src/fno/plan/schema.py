@@ -298,11 +298,13 @@ class PlanFrontmatter(BaseModel):
     priority: str | None = None
     blocks_everything: bool = False
     difficulty: str | None = None
-    # Who orchestrates the plan's remaining waves: a king reviews each
-    # dispatch (default), or target init fires join itself. Opt-in - king
-    # changes nothing, so every plan written before the key keeps its
-    # behavior.
-    orchestration: str = "king"
+    # Who hands out the plan's remaining waves: `manual` waits for a person or
+    # a /king-for-a-day session to run `fno backlog join` (default), or `auto`
+    # fires join at target init. Opt-in - `manual` changes nothing, so every
+    # plan written before the key keeps its behavior. Named for the verb it
+    # gates: `orchestration` already does four unrelated jobs in this repo, so
+    # a grep for the key returned mostly noise.
+    join: str = "manual"
     blocked_by: list[str] = []
     project: str | None = None
     executor: str | None = None
@@ -382,16 +384,16 @@ class PlanFrontmatter(BaseModel):
             raise ValueError("difficulty must be one of: low, medium, high")
         return band
 
-    @field_validator("orchestration", mode="before")
+    @field_validator("join", mode="before")
     @classmethod
-    def _validate_orchestration(cls, v: Any) -> Any:
+    def _validate_join(cls, v: Any) -> Any:
         # Same shape as the band enum above: normalize, then refuse with a
         # message that names the field and its legal values.
         if v is None:
-            return "king"
+            return "manual"
         mode = str(v).strip().lower()
-        if mode not in {"king", "mechanical"}:
-            raise ValueError("orchestration must be one of: king, mechanical")
+        if mode not in {"manual", "auto"}:
+            raise ValueError("join must be one of: manual, auto")
         return mode
 
     @model_validator(mode="after")

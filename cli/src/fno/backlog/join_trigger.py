@@ -1,6 +1,6 @@
 """The read-only probes `fno do target init` shells out to for join.
 
-Init's mechanical-orchestration trigger needs two facts before it fires
+Init's ``join: auto`` trigger needs two facts before it fires
 `fno backlog join`: the plan's ready-graph width, and whether auto-continue
 is armed. Both facts have exactly one canonical implementation each
 (``_width_from_graph`` and ``_auto_continue_resolve``, which layers the

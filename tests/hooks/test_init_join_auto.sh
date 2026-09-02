@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# test_init_mechanical_join.sh -- the mechanical-orchestration trigger in
+# test_init_join_auto.sh -- the join: auto trigger in
 # init-target-state.sh fires join, or parks with the width in the message.
 #
-# `orchestration: mechanical` is the plan's opt-in for init-driven join. The
+# `join: auto` is the plan's opt-in for init-driven join. The
 # trigger's decision matrix is the contract:
 #
-#   key absent/king            -> nothing, no probes at all
-#   mechanical + armed + w >= 2 -> `fno backlog join <node>` exactly once
-#   mechanical + not armed      -> PARKED, message names width
-#   mechanical + width 1        -> "nothing to join", no spawn attempted
+#   key absent/manual        -> nothing, no probes at all
+#   auto + armed + width >= 2  -> `fno backlog join <node>` exactly once
+#   auto + not armed          -> PARKED, message names width
+#   auto + width 1            -> "nothing to join", no spawn attempted
 #   width unmeasurable          -> join NOT fired (an absent answer is
 #                                  never width 1)
 #   join refused (rc 5 etc.)    -> init survives, refusal named
@@ -27,10 +27,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 INIT="${REPO_ROOT}/hooks/helpers/init-target-state.sh"
 
-log()  { printf '[mech-join] %s\n' "$*"; }
-fail() { printf '[mech-join] FAIL: %s\n' "$*" >&2; exit 1; }
-pass() { printf '[mech-join] PASS: %s\n' "$*"; }
-skip() { printf '[mech-join] SKIP: %s\n' "$*" >&2; exit 77; }
+log()  { printf '[join-auto] %s\n' "$*"; }
+fail() { printf '[join-auto] FAIL: %s\n' "$*" >&2; exit 1; }
+pass() { printf '[join-auto] PASS: %s\n' "$*"; }
+skip() { printf '[join-auto] SKIP: %s\n' "$*" >&2; exit 77; }
 
 command -v git &>/dev/null || skip "git not on PATH"
 [[ -f "$INIT" ]] || fail "init script not found at $INIT"
@@ -41,7 +41,7 @@ _ALL_TMPS=()
 trap 'rm -rf ${_ALL_TMPS[@]+"${_ALL_TMPS[@]}"}' EXIT
 
 _PLAN_BODY='---
-title: mechanical orchestration fixture
+title: join auto fixture
 status: ready
 created: 2026-09-02
 difficulty: medium
@@ -49,7 +49,7 @@ node: x-d4ab
 ORCH_LINE
 ---
 
-# Mechanical orchestration fixture
+# Join auto fixture
 
 ## Execution Strategy
 
@@ -76,7 +76,7 @@ tasks:
 '
 
 # make_repo <varname> <orch-line> <fake-width> <fake-armed> <join-rc>
-#   orch-line: the frontmatter line for orchestration, or "" for absent
+#   orch-line: the frontmatter line for join, or "" for absent
 #   fake-width / fake-armed: what the stub interpreter answers; "" = probe fails
 make_repo() {
   local _varname="$1" _orch="$2" _w="$3" _a="$4" _jrc="$5" _dir
@@ -139,22 +139,22 @@ _SCRUB_ENV=(-u CLAUDE_CODE_SESSION_ID -u CLAUDECODE_SESSION_ID -u CODEX_THREAD_I
             -u CODEX_SESSION_ID -u GEMINI_SESSION_ID -u OPENCODE_SESSION_ID
             -u TARGET_TRANSCRIPT_ID -u TARGET_SESSION_ID -u FNO_AUTO_CONTINUE)
 
-# ── Key absent (or king): the operator-reviewed path, untouched ──
-log "king: no orchestration key => no probes, no join"
-make_repo TMP_KING "" 3 "armed=true rank=config" 0
-_ALL_TMPS+=("$TMP_KING")
+# ── Key absent (or manual): the operator-reviewed path, untouched ──
+log "manual: no join key => no probes, no join"
+make_repo TMP_MANUAL "" 3 "armed=true rank=config" 0
+_ALL_TMPS+=("$TMP_MANUAL")
 
-run_init "$TMP_KING"
+run_init "$TMP_MANUAL"
 _RC=$?
-[[ "$_RC" -eq 0 ]] || fail "king: expected exit 0, got $_RC (err: $(tail -3 "$TMP_KING/err.log"))"
-[[ "$(joins "$TMP_KING")" == "0" ]] || fail "king: join fired without the key"
-grep -q "orchestration mechanical" "$TMP_KING/err.log" \
-  && fail "king: mechanical chatter leaked into a king plan"
-pass "king: silent, nothing fired"
+[[ "$_RC" -eq 0 ]] || fail "manual: expected exit 0, got $_RC (err: $(tail -3 "$TMP_MANUAL/err.log"))"
+[[ "$(joins "$TMP_MANUAL")" == "0" ]] || fail "manual: join fired without the key"
+grep -q "join auto" "$TMP_MANUAL/err.log" \
+  && fail "manual: join-auto chatter leaked into a manual plan"
+pass "manual: silent, nothing fired"
 
 # ── AC7: armed + width 3 => join once for the remainder ──
-log "mechanical armed: join fires once, receipt names width"
-make_repo TMP_ARMED "orchestration: mechanical" 3 "armed=true rank=config" 0
+log "auto armed: join fires once, receipt names width"
+make_repo TMP_ARMED "join: auto" 3 "armed=true rank=config" 0
 _ALL_TMPS+=("$TMP_ARMED")
 
 run_init "$TMP_ARMED"
@@ -168,8 +168,8 @@ grep -q "x-d4ab" "$TMP_ARMED/join-calls.log" \
 pass "armed: join fired once for node x-d4ab at width 3"
 
 # ── AC8: not armed => parked, reason AND width named ──
-log "mechanical disarmed: parked with reason and width"
-make_repo TMP_PARK "orchestration: mechanical" 3 "armed=false rank=config" 0
+log "auto disarmed: parked with reason and width"
+make_repo TMP_PARK "join: auto" 3 "armed=false rank=config" 0
 _ALL_TMPS+=("$TMP_PARK")
 
 run_init "$TMP_PARK"
@@ -180,8 +180,8 @@ grep -q "PARKED, auto_continue off (width 3)" "$TMP_PARK/err.log" \
 pass "parked: reason and width both named, nothing spawned"
 
 # ── Width 1: nothing to join, no spawn attempted ──
-log "mechanical armed narrow: nothing to join"
-make_repo TMP_NARROW "orchestration: mechanical" 1 "armed=true rank=config" 0
+log "auto armed narrow: nothing to join"
+make_repo TMP_NARROW "join: auto" 1 "armed=true rank=config" 0
 _ALL_TMPS+=("$TMP_NARROW")
 
 run_init "$TMP_NARROW"
@@ -192,8 +192,8 @@ grep -q "nothing to join (width 1)" "$TMP_NARROW/err.log" \
 pass "narrow: named, no spawn"
 
 # ── Unmeasurable width: join NOT fired ──
-log "mechanical unreadable width: join not fired"
-make_repo TMP_BLIND "orchestration: mechanical" "" "armed=true rank=config" 0
+log "auto unreadable width: join not fired"
+make_repo TMP_BLIND "join: auto" "" "armed=true rank=config" 0
 _ALL_TMPS+=("$TMP_BLIND")
 
 run_init "$TMP_BLIND"
@@ -205,8 +205,8 @@ pass "blind: absent answer never read as width 1"
 
 # ── Garbage width: join NOT fired (the probe contract is int-or-nothing,
 #    and the shell holds that invariant even when the probe breaks it) ──
-log "mechanical garbage width: join not fired"
-make_repo TMP_GARBAGE "orchestration: mechanical" "banana" "armed=true rank=config" 0
+log "auto garbage width: join not fired"
+make_repo TMP_GARBAGE "join: auto" "banana" "armed=true rank=config" 0
 _ALL_TMPS+=("$TMP_GARBAGE")
 
 run_init "$TMP_GARBAGE"
@@ -217,8 +217,8 @@ grep -q "width unreadable; join not fired" "$TMP_GARBAGE/err.log" \
 pass "garbage: non-numeric output never read as a width"
 
 # ── Join refused: init survives and names it ──
-log "mechanical join refused: non-fatal, named"
-make_repo TMP_REFUSED "orchestration: mechanical" 3 "armed=true rank=config" 5
+log "auto join refused: non-fatal, named"
+make_repo TMP_REFUSED "join: auto" 3 "armed=true rank=config" 5
 _ALL_TMPS+=("$TMP_REFUSED")
 
 run_init "$TMP_REFUSED"
