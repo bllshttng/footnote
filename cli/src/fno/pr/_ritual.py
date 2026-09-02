@@ -654,7 +654,7 @@ class Ritual:
             self._emit(
                 "archive",
                 _DEFERRED if order_written else _FAILED,
-                f"worktree={wt}; sweep-will-reap; {order}",
+                f"sweep-will-reap; worktree={wt}; {order}",
             )
             return
         script = self.canon / "scripts" / "setup" / "archive-worktree.sh"

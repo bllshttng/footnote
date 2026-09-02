@@ -165,8 +165,8 @@ def test_inside_own_worktree_defers_rather_than_advising(tmp_path: Path) -> None
     assert len(seen) == 1
     assert seen[0][0] == "archive"
     assert seen[0][1] == "deferred"
+    assert seen[0][2].startswith("sweep-will-reap; ")
     assert f"worktree={tmp_path}" in seen[0][2]
-    assert "sweep-will-reap; " in seen[0][2]
     assert "reap-order" in seen[0][2]
 
 
