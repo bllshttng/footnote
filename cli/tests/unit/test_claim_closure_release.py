@@ -126,7 +126,7 @@ class TestClosureReleaseHook:
         out = read_graph(graph)[0]
         assert out["status"] == "done"
         assert out["locked_by"] is None
-        assert out["claimed_at"] is None
+        assert out["locked_at"] is None
         # session_id on a done node is work/cost provenance, not a lock.
         assert out["session_id"] == HOLDER
         assert not claim_path("node:x-doen", root=global_root).exists()
@@ -448,7 +448,7 @@ class TestReapMirrorClear:
         assert summary["lock_mirror_cleared"] == 1
         out = read_graph(graph)[0]
         assert out["locked_by"] is None
-        assert out["claimed_at"] is None
+        assert out["locked_at"] is None
 
     def test_explicit_root_sweep_never_touches_the_graph(self, tmp_path, monkeypatch):
         """--root sweeps someone else's claims tree; the mirror belongs to
