@@ -205,12 +205,16 @@ pub fn attach_argv(chat_id: &str) -> Vec<String> {
     if let Some(error) = chat_id_error(chat_id) {
         panic!("{error}");
     }
+    // The RESUME lane, never interactive_attach: the row declares attach
+    // unsupported (a second --resume process is a rival TUI, not a join), and
+    // rendering an unsupported lane panics. Re-entry into the same remote
+    // chat IS the resume form; create and resume are one launch shape here.
     crate::harness_capabilities::render_session_argv(
         "cursor-agent",
-        "interactive_attach",
+        "interactive_resume",
         Some(chat_id),
     )
-    .expect("embedded cursor-agent interactive-attach capability")
+    .expect("embedded cursor-agent interactive-resume capability")
 }
 
 /// Cursor's pane is interactive, but it has no Rust-owned local drive lane.
@@ -237,7 +241,8 @@ impl Provider for CursorAgentProvider {
             Some(session_id),
         )
         .expect("embedded cursor-agent interactive-create capability");
-        argv.push("--trust".to_string());
+        // --trust rides the declared form itself; a second one is a
+        // duplicated flag, not a stronger one.
         if let Some(model) = std::env::var("FNO_CURSOR_AGENT_MODEL")
             .ok()
             .filter(|value| !value.is_empty())

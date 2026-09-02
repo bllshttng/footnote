@@ -167,7 +167,7 @@ def test_cursor_agent_pane_argv_is_trusted_and_never_native_worktree():
     argv = build_pane_argv(
         "cursor-agent", "", Path("/tmp/worktree"), False, chat_id
     )
-    assert "--trust" in argv
+    assert argv.count("--trust") == 1, "the declared form carries it once, never duplicated"
     assert chat_id in argv
     assert not any(token in {"-w", "--worktree", "--worktree-base"} for token in argv)
 

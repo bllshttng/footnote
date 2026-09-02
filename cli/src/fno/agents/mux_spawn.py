@@ -1537,12 +1537,13 @@ def build_pane_argv(
         # mode is output-only, so fno drives it through a hosted pty: the pane,
         # or the keeper that hosts the same argv on the thread lane.
         # create-chat mints the UUID before this builder runs; the declared
-        # resume form then joins that exact remote chat. --trust is NOT the
-        # bypass: in an untrusted cwd cursor-agent refuses with Workspace Trust
-        # Required and does no work, and fno always spawns into a fresh
-        # worktree. -w/--worktree is never passed; the worktree is fno's.
+        # form then joins that exact remote chat. --trust rides the DECLARED
+        # form itself (never appended here: a second --trust is a duplicated
+        # flag, not a stronger one) and is NOT the bypass: in an untrusted
+        # cwd cursor-agent refuses with Workspace Trust Required and does no
+        # work, and fno always spawns into a fresh worktree. -w/--worktree is
+        # never passed; the worktree is fno's.
         argv = identity
-        argv += ["--trust"]
         if model:
             argv += ["--model", model]
         if permission_mode:

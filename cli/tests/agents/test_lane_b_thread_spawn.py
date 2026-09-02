@@ -566,7 +566,7 @@ def test_stop_agent_stops_a_keeper_that_dies_between_probe_and_kill(lane_b_home)
     from fno.agents.dispatch import _stop_keeper_thread
     from fno.agents.registry import AgentEntry, load_registry, update_registry
 
-    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-"))
+    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-", dir="/tmp"))
     sock = short_state / "mux" / "threads" / "wk-vanish.sock"
     sock.parent.mkdir(parents=True, exist_ok=True)
     seen: dict[str, object] = {}
@@ -576,7 +576,11 @@ def test_stop_agent_stops_a_keeper_that_dies_between_probe_and_kill(lane_b_home)
     # Closing a listening AF_UNIX socket never unlinks its bound path.
     def _serve() -> None:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(str(sock))
+        try:
+            server.bind(str(sock))
+        except OSError as exc:
+            seen["error"] = repr(exc)
+            return
         server.listen(8)
         server.settimeout(5)
         seen["ready"] = True
@@ -591,8 +595,9 @@ def test_stop_agent_stops_a_keeper_that_dies_between_probe_and_kill(lane_b_home)
     thread = threading.Thread(target=_serve, daemon=True)
     thread.start()
     deadline = time.monotonic() + 5
-    while "ready" not in seen and time.monotonic() < deadline:
+    while "ready" not in seen and "error" not in seen and time.monotonic() < deadline:
         time.sleep(0.02)
+    assert "ready" in seen, f"the keeper never bound: {seen.get('error')}"
 
     entry = AgentEntry(
         name="wk-vanish",
@@ -632,13 +637,17 @@ def test_stop_agent_routes_a_cursor_thread_through_the_keeper_kill(
     from fno.agents.harnesses import cursor_agent as cursor_agent_mod
     from fno.agents.registry import AgentEntry, load_registry, update_registry
 
-    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-cursor-"))
+    # A SHORT bind root: AF_UNIX paths cap at ~104 bytes, and the default
+    # pytest tmpdir can exceed it, which would make bind fail and this test
+    # pass vacuously. The test asserts the bind and the accepted frames, so
+    # neither failure mode is silent.
+    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-cursor-", dir="/tmp"))
     sock = short_state / "mux" / "threads" / "wk-cursor-stop.sock"
     sock.parent.mkdir(parents=True, exist_ok=True)
     seen: dict[str, object] = {}
 
-    # The vanishing keeper, the same SIGKILLed-mid-stop shape the pi test
-    # pins: one accepted probe connection, then gone without unlinking.
+    # The keeper serves the liveness probe, then reads the Kill frame off a
+    # second connection before exiting - the real protocol, asserted.
     def _serve() -> None:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(sock))
@@ -648,8 +657,18 @@ def test_stop_agent_routes_a_cursor_thread_through_the_keeper_kill(
         try:
             conn, _ = server.accept()
             conn.close()
-        except OSError:
-            pass
+            conn2, _ = server.accept()
+            seen["accepted"] = True
+            frame = b""
+            while len(frame) < 5:
+                chunk = conn2.recv(5 - len(frame))
+                if not chunk:
+                    break
+                frame += chunk
+            seen["kill_frame"] = frame
+            conn2.close()
+        except OSError as exc:
+            seen["error"] = repr(exc)
         finally:
             server.close()
 
@@ -658,6 +677,8 @@ def test_stop_agent_routes_a_cursor_thread_through_the_keeper_kill(
     deadline = time.monotonic() + 5
     while "ready" not in seen and time.monotonic() < deadline:
         time.sleep(0.02)
+    assert "ready" in seen, "the keeper never bound; the test cannot run"
+    assert "error" not in seen, f"keeper socket error: {seen.get('error')}"
 
     entry = AgentEntry(
         name="wk-cursor-stop",
@@ -687,6 +708,10 @@ def test_stop_agent_routes_a_cursor_thread_through_the_keeper_kill(
     try:
         result = dispatch_mod.stop_agent("wk-cursor-stop")
         assert result.name == "wk-cursor-stop"
+        assert seen.get("accepted"), "no Kill connection ever reached the keeper"
+        assert seen.get("kill_frame") == b"\x03" + (0).to_bytes(
+            4, "little"
+        ), f"wrong frame: {seen.get('kill_frame')!r}"
         row = next(e for e in load_registry() if e.name == "wk-cursor-stop")
         assert row.status == "exited", "the Kill arm went terminal, not the pane arm's orphaned"
         assert reap_sizes == [0], "the census runs against the live keeper, then reaps after"
@@ -742,7 +767,7 @@ def test_lane_b_cursor_agent_keeper_argv_carries_trust_and_grant(
     argv = list(recorded["argv"])  # type: ignore[arg-type]
     tail = argv[argv.index("--") + 1 :]
     assert tail[:3] == ["cursor-agent", "--resume", minted]
-    assert "--trust" in tail
+    assert tail.count("--trust") == 1, "the declared form carries it once, never duplicated"
     assert "--add-dir" in tail, "the computed state-root grant rides the keeper argv"
     assert not any(t in {"-w", "--worktree", "--worktree-base"} for t in tail)
 

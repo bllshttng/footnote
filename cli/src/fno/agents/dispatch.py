@@ -2117,8 +2117,17 @@ def _keeper_seed_submit(
         # mid-marker would break a full-line match even after the strip.
         # Chars, not bytes - the Rust matcher takes 48 chars, and a byte cut
         # can split a multi-byte character into a partial codepoint that
-        # never appears in the complete-UTF-8 pty stream.
+        # never appears in the complete-UTF-8 pty stream. An empty first
+        # line yields an empty needle, and an empty needle matches
+        # anything, so it refuses instead of confirming nothing.
         marker = message.splitlines()[0][:48].encode("utf-8")
+        if not marker:
+            raise DispatchAskError(
+                f"the seed for keeper thread {name!r} starts with an empty "
+                "line, so its landing can never be confirmed; lead the seed "
+                "with the payload's first real line",
+                exit_code=2,
+            )
         base = len(text)
         deadline = _time.monotonic() + 120.0
         while _time.monotonic() < deadline:
@@ -5070,16 +5079,27 @@ def _teardown_harness_session(
                 existing.pid, existing.pid_start_time
             )
         except RuntimeError as exc:
-            print(
-                "cursor-agent worker-server cleanup unverified: "
-                f"{exc}; if a worker-server survives, kill it by pid",
-                flush=True,
-            )
-            return None
+            worker_servers = ()
+            census_unverified = str(exc)
+        else:
+            census_unverified = None
+        # A keeper-hosted thread row's session IS the keeper process, so the
+        # Kill frame is the teardown; without it rm orphans the hosted TUI.
+        # Census first (it wants a provable owner), kill second, reap last.
+        keeper_sock = getattr(existing, "messaging_socket_path", None)
+        if keeper_sock and "mux/threads/" in keeper_sock:
+            _stop_keeper_thread(name, existing, keeper_sock)
         try:
             reaped = reap_detached_worker_servers(worker_servers)
         except RuntimeError as exc:
             return _fail(str(exc), exit_code=1)
+        if census_unverified:
+            print(
+                "cursor-agent worker-server cleanup unverified: "
+                f"{census_unverified}; if a worker-server survives, kill it "
+                "by pid",
+                flush=True,
+            )
         print(
             f"cursor-agent worker-server processes reaped: {reaped}", flush=True
         )
