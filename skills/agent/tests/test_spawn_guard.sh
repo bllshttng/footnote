@@ -73,6 +73,13 @@ calllog() { cat "$TMP/calls.log" 2>/dev/null; }
 
 NODE="x-7777"
 
+# --- codex code without -Y -> refusal before any registry-minting call -------
+out="$(run --name codex-code-no-yolo --provider codex --payload-mode passthrough \
+  --message '$fno:target x-816b')"
+ok 'codex code without -Y -> failed' "$(field "$out")" 'failed'
+has 'codex code refusal names -Y' "$out" 'Pass -Y'
+no  'codex code refusal minted no registry row' "$(calllog)" 'agents spawn'
+
 # --- dispatchable -> proceeds to spawn, honest launched receipt --------------
 out="$(STUB_VERDICT='{"verdict":"dispatchable","reservation_key":"dispatch:'"$NODE"'","reservation_holder":"dispatch-skill:1"}' \
   run --name w1 --provider claude --message '/target x' --node "$NODE")"
@@ -255,7 +262,7 @@ ok 'bg slug -> failed'             "$(field "$out")" 'failed'
 # AC-HP: pane launch -> launched, pane coords + mux-attach hint, NOT `agents logs`.
 out="$(STUB_MUX=1 STUB_MUX_NAME=paneW STUB_MUX_PROVIDER=codex STUB_MUX_SESSION=main \
   STUB_MUX_SHORT_ID=019fb024 STUB_MUX_SESSION_ID=019fb024-2327-75f3-8b80-06e9d5ade05f \
-  run --name paneW --provider codex --message 'Implement x')"
+  run --name paneW --provider codex --yolo --message 'Implement x')"
 ok  'pane launch -> launched'        "$(field "$out")" 'launched'
 has 'pane coords surfaced'           "$out" 'pane="main:1"'
 has 'pane hint is mux attach'        "$out" 'fno mux attach main'
@@ -263,42 +270,42 @@ no  'pane hint is NOT agents logs'   "$out" 'fno agents logs'
 
 # AC2-CON: a created Codex pane without a thread ID is pending, not launched.
 out="$(STUB_MUX=1 STUB_MUX_NAME=paneP STUB_MUX_PROVIDER=codex STUB_MUX_STATUS=spawning \
-  STUB_MUX_SESSION=main run --name paneP --provider codex --message 'Implement x')"
+  STUB_MUX_SESSION=main run --name paneP --provider codex --yolo --message 'Implement x')"
 ok  'pane pending -> pending'         "$(field "$out")" 'pending'
 has 'pane pending coords surfaced'    "$out" 'pane="main:1"'
 no  'pane pending is not launched'    "$out" 'result=launched'
 
 out="$(STUB_MUX=1 STUB_MUX_NAME=paneI STUB_MUX_PROVIDER=codex STUB_MUX_STATUS=live \
-  STUB_MUX_SESSION=main run --name paneI --provider codex --message 'Implement x')"
+  STUB_MUX_SESSION=main run --name paneI --provider codex --yolo --message 'Implement x')"
 ok  'pane idless live -> failed'       "$(field "$out")" 'failed'
 
 out="$(STUB_MUX=1 STUB_MUX_NAME=paneB STUB_MUX_PROVIDER=codex STUB_MUX_STATUS=live \
   STUB_MUX_SESSION=main STUB_MUX_SHORT_ID=deadbeef \
-  run --name paneB --provider codex --message 'Implement x')"
+  run --name paneB --provider codex --yolo --message 'Implement x')"
 ok  'pane live partial identity -> failed' "$(field "$out")" 'failed'
 
 out="$(STUB_MUX=1 STUB_MUX_NAME=paneT STUB_MUX_PROVIDER=codex STUB_MUX_STATUS=spawning \
   STUB_MUX_SESSION=main STUB_MUX_SHORT_ID=deadbeef \
-  run --name paneT --provider codex --message 'Implement x')"
+  run --name paneT --provider codex --yolo --message 'Implement x')"
 ok  'pane pending torn identity -> failed' "$(field "$out")" 'failed'
 
 # AC-EDGE: a session name with a space -> ref quoted so it can't split the line.
 out="$(STUB_MUX=1 STUB_MUX_NAME=paneS STUB_MUX_PROVIDER=codex STUB_MUX_SESSION='work 1' \
   STUB_MUX_SHORT_ID=019fb024 STUB_MUX_SESSION_ID=019fb024-2327-75f3-8b80-06e9d5ade05f \
-  run --name paneS --provider codex --message 'Implement x')"
+  run --name paneS --provider codex --yolo --message 'Implement x')"
 ok  'pane spaced session -> launched' "$(field "$out")" 'launched'
 has 'pane spaced ref quoted'          "$out" 'pane="work 1:1"'
 
 # AC-ERR: identity mismatch (receipt name != launch name) -> failed, no fake handle.
 out="$(STUB_MUX=1 STUB_MUX_NAME=someone-else STUB_MUX_PROVIDER=codex \
-  run --name paneM --provider codex --message 'Implement x')"
+  run --name paneM --provider codex --yolo --message 'Implement x')"
 ok 'pane identity mismatch -> failed' "$(field "$out")" 'failed'
 
 # Regression: a long requested name must not replace the Codex thread handle.
 LONGNAME='spawn-x-7624-dedup-check-before-target-disp'
 out="$(STUB_MUX=1 STUB_MUX_NAME="$LONGNAME" STUB_MUX_PROVIDER=codex STUB_MUX_SESSION=main \
   STUB_MUX_SHORT_ID=019fb024 STUB_MUX_SESSION_ID=019fb024-2327-75f3-8b80-06e9d5ade05f \
-  run --name "$LONGNAME" --provider codex --message 'Implement x')"
+  run --name "$LONGNAME" --provider codex --yolo --message 'Implement x')"
 ok  'pane long name -> launched'      "$(field "$out")" 'launched'
 has 'pane long name short_id'         "$out" 'short_id=019fb024'
 
