@@ -2082,20 +2082,20 @@ def cmd_spawn(
                     f"record is a {rec_harness or '<no harness>'} account but "
                     f"the spawn resolves {harness}"
                 )
-            overlay = (
+            dispatch_overlay = (
                 proven_env if proven_env is not None
                 else dispatch_env(dispatch_account, repo_root=workdir)
             )
             account_env = {
                 **(account_env or {}),
-                **overlay,
+                **dispatch_overlay,
             }
             if proven_env is not None:
                 credential_source = "canary-proven carrier"
                 credential_env_keys = sorted(proven_env)
             else:
                 credential_source = "record-derived"
-                credential_env_keys = sorted(overlay)
+                credential_env_keys = sorted(dispatch_overlay)
         except Exception as exc:  # noqa: BLE001 - never spawn onto an unresolved record
             print(
                 f"refusing --dispatch-account {dispatch_account!r}: {exc}; "

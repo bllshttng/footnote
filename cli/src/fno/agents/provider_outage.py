@@ -269,16 +269,16 @@ def collect_transcript_evidence(
                 "count": 1,
             })
             continue
-        parsed: list[dict] = []
+        lines_parsed: list[dict] = []
         for line in lines:
             try:
                 raw = json.loads(line)
             except (TypeError, ValueError):
                 continue
             if isinstance(raw, dict):
-                parsed.append(raw)
+                lines_parsed.append(raw)
         records.extend(_outage_records_from_parsed(
-            parsed, identity, now_s=now_s,
+            lines_parsed, identity, now_s=now_s,
             evidence_freshness_s=evidence_freshness_s,
         ))
     return records, refusals
