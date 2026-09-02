@@ -10,6 +10,7 @@ duplicating. See internal/fno/plans/2026-05-24-epic-scoped-execution.md.
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import date as _date
 from pathlib import Path
@@ -271,8 +272,16 @@ def extract_why_digest(doc_text: str) -> tuple[str, Optional[str]]:
 
 
 def _yaml_str(value: str) -> str:
-    """A double-quoted YAML scalar, safe for a title carrying a colon or quote."""
-    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """A double-quoted YAML scalar, safe for a title carrying a colon or quote.
+
+    ``json.dumps`` rather than hand-rolled escaping: a double-quoted YAML
+    scalar is JSON-compatible, and hand-escaping only ``\\`` and ``"`` left
+    every control character raw. An epic whose task carries a block-scalar
+    ``verify: |`` arrives here as a string with a real newline, which emitted
+    a newline at column 0 inside the quotes and made the scaffolded child's
+    Execution Strategy unparseable.
+    """
+    return json.dumps(str(value))
 
 
 def wave_numbers(spec: str) -> list[int]:
@@ -366,9 +375,17 @@ def epic_wave_slice(
         lines.append(f"    mode: {w.get('mode') or 'sequential'}")
         if w.get("name"):
             lines.append(f"    name: {_yaml_str(w['name'])}")
-        if w.get("difficulty"):
-            lines.append(f"    difficulty: {w['difficulty']}")
-        ids = [str(t) for t in (w.get("tasks") or [])]
+        # The child is stamped `created: <today>`, so it is post-difficulty-gate
+        # and `validate_execution` requires a band on EVERY wave. Emitting the
+        # key only when the epic wave has one mints an unvalidatable child out
+        # of any pre-band epic, so fall back to the same floor band the
+        # scaffold's own frontmatter carries.
+        lines.append(f"    difficulty: {w.get('difficulty') or 'low'}")
+        # Only ids that resolve to a real task row: the tasks block below skips
+        # an id absent from `by_id`, and naming it here anyway would leave a
+        # dangling reference and a `wave references unknown task` violation on
+        # a child nobody mis-authored.
+        ids = [str(t) for t in (w.get("tasks") or []) if str(t) in by_id]
         lines.append("    tasks: [" + ", ".join(f"'{i}'" for i in ids) + "]")
 
     lines.append("tasks:")

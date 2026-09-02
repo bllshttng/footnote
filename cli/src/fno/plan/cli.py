@@ -362,6 +362,13 @@ def validate(
             raise typer.Exit(code=1)
 
         result = validate_execution(doc)
+        # `warnings` was hardcoded empty in all three branches below, so a
+        # warning the validator emitted reached nobody and existed only under
+        # unit test. A channel nothing prints is not a channel.
+        warnings = [
+            {"field": warning.field, "message": warning.message}
+            for warning in result.warnings
+        ]
         if result.violations:
             violations = [
                 {"field": violation.field, "message": violation.message}
@@ -373,7 +380,7 @@ def validate(
                     "path": str(resolved),
                     "scope": "execution",
                     "violations": violations,
-                    "warnings": [],
+                    "warnings": warnings,
                 }))
             else:
                 typer.echo(
@@ -385,6 +392,11 @@ def validate(
                         f"  {violation['field']}: {violation['message']}",
                         err=True,
                     )
+                for warning in warnings:
+                    typer.echo(
+                        f"  warning: {warning['field']}: {warning['message']}",
+                        err=True,
+                    )
             raise typer.Exit(code=1)
 
         if json_out:
@@ -393,9 +405,16 @@ def validate(
                 "path": str(resolved),
                 "scope": "execution",
                 "violations": [],
-                "warnings": [],
+                "warnings": warnings,
             }))
         else:
+            # A warning never changes the verdict, so the plan still reads
+            # valid; it prints on stderr so the author sees it beside the pass.
+            for warning in warnings:
+                typer.echo(
+                    f"  warning: {warning['field']}: {warning['message']}",
+                    err=True,
+                )
             typer.echo(f"valid execution: {resolved}")
         return
 

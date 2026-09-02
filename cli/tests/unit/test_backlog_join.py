@@ -498,9 +498,14 @@ def test_join_spawns_one_worker_per_distinct_band(tmp_path, monkeypatch):
     assert receipt["lanes"] == {
         "j-x-8d1d-1": {"band": "high", "harness": "claude", "model": "glm-x",
                        "sandbox": "off"},
+        # The grid PICKED codex here, and the thread substrate is claude-only,
+        # so the pick is unusable and reads as declined. That decline now
+        # carries its reason too: it is the one most likely to puzzle a reader,
+        # because the grid had no complaint of its own.
         "j-x-8d1d-2": {"band": "medium", "harness": None, "model": None,
                        "sandbox": "off",
-                       "grid": "declined"},
+                       "grid": "declined",
+                       "grid_reason": "grid=harness-not-claude (codex)"},
         "j-x-8d1d-3": {"band": "low", "harness": "claude", "model": "glm-sm",
                        "sandbox": "off"},
     }
@@ -1113,3 +1118,50 @@ def test_parallel_wave_same_file_still_measures_one(tmp_path):
     )
 
     assert _plan_parallel_width(plan) == 1
+
+
+def test_sandbox_on_caps_lanes_at_the_band_count(tmp_path, monkeypatch):
+    """REGRESSION, caught in review. `render_join_write_policy` is keyed by
+    BAND, so two lanes sharing a band share one `allow_write` set and get an
+    EMPTY `deny_edit` (the deny list is the peer bands' surfaces, and a reused
+    band has no peer). Uncapping the lane count under enforcement therefore
+    hands several sessions byte-identical, mutually unrestricted policies -
+    the isolation the partition exists to provide, silently gone.
+
+    With enforcement ON the band cardinality legitimately caps the count. The
+    uncap that this PR ships is for the enforcement-OFF default, which is
+    where the 34 lost joiner slots were.
+    """
+    from fno.config import SettingsModel
+
+    settings = SettingsModel()
+    settings.join.sandbox = True
+    calls = _wire(monkeypatch, tmp_path, SINGLE_BAND_WIDE_PLAN)
+    monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: settings)
+    monkeypatch.setattr(
+        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None)
+    )
+
+    receipt = join_node("x-8d1d", 4)
+
+    assert len(calls) == 1, (
+        "one distinct band under enforcement must yield one lane; more lanes "
+        "would share a write policy and an empty deny_edit"
+    )
+    assert receipt["spawned"] == ["j-x-8d1d-1"]
+
+
+def test_sandbox_off_leaves_the_lane_count_uncapped(tmp_path, monkeypatch):
+    """The other half of the pair: with enforcement off (the default) the band
+    cardinality caps nothing, which is the whole point of the fix."""
+    calls = _wire(monkeypatch, tmp_path, SINGLE_BAND_WIDE_PLAN)
+    monkeypatch.setattr(
+        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None)
+    )
+
+    receipt = join_node("x-8d1d", 4)
+
+    assert len(calls) == 4
+    assert receipt["spawned"] == [
+        "j-x-8d1d-1", "j-x-8d1d-2", "j-x-8d1d-3", "j-x-8d1d-4",
+    ]

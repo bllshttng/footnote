@@ -125,15 +125,22 @@ def _total_chain_warning(tasks: list) -> ExecutionViolation | None:
         if not tid:
             return None
         ids.append(tid)
-        declared = task.get("blocked_by")
         # An absent key inherits the previous wave and is the shape this check
-        # exists to preserve, so only an EXPLICIT list counts. The head of a
-        # real chain declares `blocked_by: []` (the live specimen does exactly
-        # that), so an empty list is the chain's start, not a disqualifier -
-        # demanding one blocker from every task rejects the very head that
-        # makes the order total.
+        # exists to preserve, so only an EXPLICIT declaration counts.
+        # `parse_execution_strategy` normalizes `blocked_by` to a list either
+        # way and records the presence of the key separately, so testing the
+        # value's type reads an undeclared task as an empty list and counts it
+        # as the chain head - a "total order" whose first edge nobody authored.
+        # `blocked_by_declared` is the only honest absence marker.
+        if not task.get("blocked_by_declared", "blocked_by" in task):
+            return None
+        declared = task.get("blocked_by")
         if not isinstance(declared, list):
             return None
+        # The head of a real chain declares `blocked_by: []` (the live specimen
+        # does exactly that), so an empty list is the chain's start, not a
+        # disqualifier - demanding one blocker from every task rejects the very
+        # head that makes the order total.
         if not declared:
             unblocked.append(tid)
             continue
@@ -410,8 +417,17 @@ def validate_execution(
             # parallelism. Pre-gate plans keep the hatch; backfilling their
             # topology would fabricate waves nobody authored.
             quick = _validate_quick(doc)
+            # AUTHORING scope, so undatable frontmatter DEFERS rather than
+            # refusing - the same split `plan/cli.py` applies one line above
+            # when it calls `difficulty_gate_error(..., undatable_refuses=False)`
+            # in this very branch's caller. validate-plan.sh dates those plans
+            # itself from the filename, and refusing here would preempt its
+            # dating: a `status: ready` quick-plan with no `created:` key would
+            # be refused for a date the validator was about to supply.
             gate_error = waves_gate_error(
-                doc.frontmatter, has_execution_strategy=False
+                doc.frontmatter,
+                has_execution_strategy=False,
+                undatable_refuses=False,
             )
             if gate_error:
                 return ExecutionValidationResult(

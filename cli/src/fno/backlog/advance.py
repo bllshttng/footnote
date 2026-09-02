@@ -2633,14 +2633,6 @@ def _join_node(
     #
     # The width rule still caps, and it is the real one: the node holder is one
     # of the width workers, so joiners stay under it.
-    count = min(max(1, workers), width - 1)
-    if bands:
-        # Cycle rather than truncate, so lane count and band assignment stop
-        # being the same number. `bands` is highest-first, so the lead keeps
-        # the highest band and extra lanes reuse the available ones in order.
-        worker_bands = [bands[k % len(bands)] for k in range(count)]
-    else:
-        worker_bands = [""] * count
     # One switch covers BOTH enforcement layers (the OS allowlist and the
     # Edit/Write guard): partial enforcement that reads as enforcement is the
     # failure mode this feature exists to prevent, so they are not separately
@@ -2648,6 +2640,34 @@ def _join_node(
     from fno.config import load_settings
 
     sandbox_on = bool(load_settings().join.sandbox)
+
+    count = min(max(1, workers), width - 1)
+    if bands:
+        # THE BAND IS THE ISOLATION UNIT WHEN ENFORCEMENT IS ON.
+        # `render_join_write_policy` is keyed by BAND, so two lanes sharing a
+        # band share one `allow_write` set and get an EMPTY `deny_edit` (the
+        # deny list is the peer bands' surfaces, and a reused band has no
+        # peer). Cycling under enforcement would hand several sessions
+        # byte-identical, mutually unrestricted policies - the isolation the
+        # partition exists to provide, silently gone. So the band cardinality
+        # legitimately caps the lane count HERE, and only here.
+        #
+        # With enforcement off (the default) it does not, and that is the
+        # whole point of the fix: `len(bands)` used to sit in this min
+        # unconditionally, so a single-band plan of width 6 got one joiner and
+        # `--workers` could not override it. Bands ROUTE difficulty - a pulling
+        # worker takes only tasks at or below its own band - and their
+        # cardinality was never a capacity. Measured over the 45 joinable
+        # banded plans since bands existed, 14 were capped below width - 1,
+        # losing 34 of 197 joiner slots in a fortnight.
+        if sandbox_on:
+            count = min(count, len(bands))
+        # Cycle rather than truncate, so lane count and band assignment stop
+        # being the same number. `bands` is highest-first, so the lead keeps
+        # the highest band and extra lanes reuse the available ones in order.
+        worker_bands = [bands[k % len(bands)] for k in range(count)]
+    else:
+        worker_bands = [""] * count
     policies = render_join_write_policy(graph, worker_bands) if sandbox_on else {}
 
     lead = f"j-{node_id}-1"
@@ -2777,6 +2797,14 @@ def _join_node(
             )
             if grid_h in (None, "claude"):
                 lane_h, lane_m = grid_h, grid_m
+            else:
+                # The grid PICKED, and the pick is unusable here: the thread
+                # substrate is claude-only, so a foreign harness reads as
+                # declined. That path left `grid_why` None (the grid had no
+                # complaint), so the receipt said `declined` with no reason -
+                # the exact ambiguity this field exists to remove, on the
+                # decline most likely to puzzle a reader.
+                grid_why = f"grid=harness-not-claude ({grid_h})"
         cmd = [
             *_subprocess_util.fno_py_cmd(),
             # `thread`, deliberately, overriding spawn's own `pane` default.

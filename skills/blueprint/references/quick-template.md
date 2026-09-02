@@ -188,7 +188,7 @@ tasks:
 
 Each `### N.` change becomes one task. Its `**Files:**` line becomes that task's `surface`. All tasks go into ONE wave with `mode: parallel`.
 
-`mode: parallel` is load-bearing, not cosmetic. The collision partition runs only for parallel waves, and it is the only mode that reads the same-file case correctly. Three tasks naming one file measure 1 under `parallel` and 3 under `sequential`, which over-reports.
+`mode: parallel` says these tasks may run at once. The collision partition now runs for EVERY wave, so a same-file trio measures 1 under either mode and the width is honest whichever you write. `mode` carries only its intra-wave meaning, which is subagent fan-out inside one worker.
 
 Declare NO per-task `blocked_by` here. A declared blocker wins outright over wave inheritance, and a reflex chain forecloses the parallelism the wave just declared.
 
