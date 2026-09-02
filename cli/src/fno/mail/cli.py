@@ -3611,6 +3611,7 @@ def _raw_send(
                 "audit_payload": stripped[:512],
                 "audit_sender": transport_sender,
                 "audit_target_cwd": getattr(entry, "cwd", None),
+                "self_send": self_ok,
             }
             if origin is not None:
                 review_kwargs["origin"] = origin
@@ -3748,6 +3749,7 @@ def _raw_send(
             review=review is not None,
             review_invocation_id=invocation_id,
             failure_out=failure_reasons,
+            self_send=self_ok,
         )
     else:  # claude control.sock - the only other keystroke lane
         delivered = _mail_inject_claude(
@@ -3755,6 +3757,7 @@ def _raw_send(
             stripped,
             sender=transport_sender,
             origin=origin,
+            self_send=self_ok,
         )
 
     failure_receipt = failure_reasons[-1] if failure_reasons else None

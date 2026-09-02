@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 
@@ -96,6 +98,197 @@ def _read_manifest_fields(state_path: Path) -> dict[str, str]:
                 if val and val != "null":
                     fields.setdefault(key, val)
     return fields
+
+
+_QUERY_FIELDS = ("type", "kind", "event")
+_ROTATED_SUFFIX = re.compile(r"\.\d+$")
+
+
+def _event_kind(row: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return the first non-empty kind field, preserving its field name."""
+    for field in _QUERY_FIELDS:
+        value = row.get(field)
+        if isinstance(value, str) and value:
+            return value, field
+    return None, None
+
+
+def _event_field(row: dict[str, Any], field: str) -> tuple[Any, bool]:
+    """Read a field from an envelope or either supported nested payload."""
+    if field in row:
+        return row[field], True
+    for envelope in ("data", "payload"):
+        nested = row.get(envelope)
+        if isinstance(nested, dict) and field in nested:
+            return nested[field], True
+    return None, False
+
+
+def _parse_event_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_find_since(raw: str | None) -> datetime | None:
+    if raw is None:
+        return None
+    match = re.fullmatch(r"(\d+)([smhd])", raw.strip().lower())
+    if match:
+        amount = int(match.group(1))
+        unit = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}[match.group(2)]
+        return datetime.now(timezone.utc) - timedelta(**{unit: amount})
+    parsed = _parse_event_timestamp(raw)
+    if parsed is None:
+        raise ValueError(f"--since must be ISO-8601 or a duration such as 7d: {raw!r}")
+    return parsed
+
+
+def _parse_find_fields(raw_fields: list[str]) -> list[tuple[str, str]]:
+    parsed: list[tuple[str, str]] = []
+    for raw in raw_fields:
+        field, separator, value = raw.partition("=")
+        if not separator or not field:
+            raise ValueError(f"--field must use FIELD=VALUE: {raw!r}")
+        parsed.append((field, value))
+    return parsed
+
+
+def _field_matches(actual: Any, expected: str) -> bool:
+    if isinstance(actual, str):
+        return actual == expected
+    if isinstance(actual, bool):
+        return str(actual).lower() == expected.lower()
+    if actual is None:
+        return expected.lower() == "null"
+    return json.dumps(actual, ensure_ascii=False, separators=(",", ":")) == expected
+
+
+def _find_row_matches(
+    row: dict[str, Any],
+    *,
+    kind: str | None,
+    field_filters: list[tuple[str, str]],
+    since: datetime | None,
+    session: str | None,
+) -> bool:
+    event_kind, _key = _event_kind(row)
+    if event_kind is None or (kind is not None and event_kind != kind):
+        return False
+    if since is not None:
+        timestamp = _parse_event_timestamp(row.get("ts") or row.get("timestamp"))
+        if timestamp is None or timestamp < since:
+            return False
+    if session is not None and not any(
+        _field_matches(_event_field(row, field)[0], session)
+        for field in ("session_id", "target_session", "target_session_id", "to_session_id")
+        if _event_field(row, field)[1]
+    ):
+        return False
+    return all(
+        _field_matches(_event_field(row, field)[0], expected)
+        and _event_field(row, field)[1]
+        for field, expected in field_filters
+    )
+
+
+def _find_file_stats(
+    path: Path,
+    *,
+    kind: str | None,
+    field_filters: list[tuple[str, str]],
+    since: datetime | None,
+    session: str | None,
+    limit: int,
+) -> dict[str, Any]:
+    stats: dict[str, Any] = {
+        "path": str(path),
+        "status": "readable",
+        "rows": 0,
+        "matches": 0,
+        "keys": {field: 0 for field in _QUERY_FIELDS},
+        "span": {"earliest": None, "latest": None},
+        "kind_counts": {},
+        "matching_rows": [],
+    }
+    timestamps: list[tuple[datetime, str]] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                stats["rows"] += 1
+                try:
+                    row = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    stats["malformed"] = stats.get("malformed", 0) + 1
+                    continue
+                if not isinstance(row, dict):
+                    stats["malformed"] = stats.get("malformed", 0) + 1
+                    continue
+                event_name, key = _event_kind(row)
+                if key is not None:
+                    stats["keys"][key] += 1
+                raw_timestamp = row.get("ts") or row.get("timestamp")
+                timestamp = _parse_event_timestamp(raw_timestamp)
+                if timestamp is not None and isinstance(raw_timestamp, str):
+                    timestamps.append((timestamp, raw_timestamp))
+                if _find_row_matches(
+                    row,
+                    kind=kind,
+                    field_filters=field_filters,
+                    since=since,
+                    session=session,
+                ):
+                    stats["matches"] += 1
+                    if len(stats["matching_rows"]) < limit:
+                        stats["matching_rows"].append({"row": row, "key": key})
+                    if event_name is not None:
+                        counts = stats["kind_counts"].setdefault(
+                            event_name,
+                            {"count": 0, "keys": {field: 0 for field in _QUERY_FIELDS}},
+                        )
+                        counts["count"] += 1
+                        if key is not None:
+                            counts["keys"][key] += 1
+    except OSError as exc:
+        stats["status"] = "rotated-away" if not path.exists() else "unreadable"
+        stats["error"] = str(exc)
+        stats["rows"] = 0
+        stats["matches"] = 0
+        stats["keys"] = {field: 0 for field in _QUERY_FIELDS}
+        stats["kind_counts"] = {}
+        stats["matching_rows"] = []
+        return stats
+    if timestamps:
+        timestamps.sort(key=lambda item: item[0])
+        stats["span"] = {
+            "earliest": timestamps[0][1],
+            "latest": timestamps[-1][1],
+        }
+    return stats
+
+
+def _find_span(stats: list[dict[str, Any]]) -> dict[str, str] | None:
+    spans: list[tuple[datetime, str]] = []
+    for item in stats:
+        span = item.get("span") or {}
+        for key in ("earliest", "latest"):
+            raw = span.get(key)
+            parsed = _parse_event_timestamp(raw)
+            if parsed is not None and isinstance(raw, str):
+                spans.append((parsed, raw))
+    if not spans:
+        return None
+    spans.sort(key=lambda item: item[0])
+    return {"earliest": spans[0][1], "latest": spans[-1][1]}
 
 
 def _stamp_protocol_envelope(
@@ -700,6 +893,157 @@ def gc(
             f"scanned={result['scanned']} deleted={result['deleted']} "
             f"kept={result['kept']} malformed={result['malformed']}"
         )
+
+
+@cli.command("find")
+def find(
+    ctx: typer.Context,
+    kind: Optional[str] = typer.Argument(None, help="Event kind to match."),
+    field: list[str] = typer.Option(
+        [], "--field", help="Field filter FIELD=VALUE; may be repeated."
+    ),
+    since: Optional[str] = typer.Option(
+        None, "--since", help="Lower timestamp bound as ISO-8601 or a duration such as 7d."
+    ),
+    session: Optional[str] = typer.Option(None, "--session", help="Session id to match."),
+    limit: int = typer.Option(50, "--limit", min=1, help="Maximum matching rows to print."),
+    kinds: bool = typer.Option(False, "--kinds", help="Summarize every event kind."),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit one structured result."),
+) -> None:
+    """Query every event journal and retained rotation with a denominator.
+
+    The reader accepts the three envelopes in the store. It names every file
+    it covered and reports unreadable segments separately from a measured zero.
+    """
+    from fno.paths import event_journals
+
+    if kind and kinds:
+        typer.echo("error: pass KIND or --kinds, not both", err=True)
+        raise typer.Exit(code=2)
+    try:
+        field_filters = _parse_find_fields(field)
+        since_dt = _parse_find_since(since)
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    try:
+        journal_paths = event_journals()
+    except OSError as exc:
+        typer.echo(f"error: could not resolve event journals: {exc}", err=True)
+        raise typer.Exit(code=3) from exc
+
+    stats = [
+        _find_file_stats(
+            path,
+            kind=kind,
+            field_filters=field_filters,
+            since=since_dt,
+            session=session,
+            limit=limit,
+        )
+        for path in journal_paths
+    ]
+    match_count = sum(int(item["matches"]) for item in stats)
+    row_count = sum(int(item["rows"]) for item in stats)
+    unreadable = [item for item in stats if item["status"] != "readable"]
+    window = _find_span(stats)
+    journal_count = sum(
+        1 for item in stats if not _ROTATED_SUFFIX.search(Path(item["path"]).name)
+    )
+    rotated_count = len(stats) - journal_count
+
+    kind_counts: dict[str, dict[str, Any]] = {}
+    for item in stats:
+        for name, counts in item["kind_counts"].items():
+            total = kind_counts.setdefault(
+                name,
+                {"count": 0, "keys": {field_name: 0 for field_name in _QUERY_FIELDS}, "files": {}},
+            )
+            total["count"] += counts["count"]
+            for field_name in _QUERY_FIELDS:
+                total["keys"][field_name] += counts["keys"][field_name]
+            total["files"][item["path"]] = counts["count"]
+
+    returned = [entry for item in stats for entry in item["matching_rows"]][:limit]
+    if json_out or bool(ctx.obj and ctx.obj.get("json", False)):
+        files = []
+        for item in stats:
+            files.append({key: value for key, value in item.items() if key != "matching_rows"})
+        payload = {
+            "kind": kind,
+            "kinds": kinds,
+            "match_count": match_count,
+            "returned_count": len(returned),
+            "row_count": row_count,
+            "file_count": len(stats),
+            "journal_count": journal_count,
+            "rotated_count": rotated_count,
+            "window": window,
+            "fields_searched": list(_QUERY_FIELDS),
+            "files": files,
+            "matches": [entry["row"] for entry in returned],
+            "kind_counts": kind_counts,
+            "unreadable_files": [
+                {"path": item["path"], "status": item["status"], "error": item.get("error", "")}
+                for item in unreadable
+            ],
+        }
+        typer.echo(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        if unreadable:
+            raise typer.Exit(code=3)
+        return
+
+    if kinds:
+        if kind_counts:
+            typer.echo("event kinds:")
+            for name in sorted(kind_counts):
+                entry = kind_counts[name]
+                key_text = ", ".join(
+                    f"{field_name}={entry['keys'][field_name]}"
+                    for field_name in _QUERY_FIELDS
+                    if entry["keys"][field_name]
+                )
+                file_text = ", ".join(
+                    f"{path}: {count}" for path, count in sorted(entry["files"].items())
+                )
+                typer.echo(f"  {name} (key: {key_text}) {entry['count']} [{file_text}]")
+        else:
+            typer.echo("event kinds: none")
+    else:
+        for entry in returned:
+            typer.echo(
+                f"match (key: {entry['key'] or 'unknown'}): "
+                f"{json.dumps(entry['row'], ensure_ascii=False, separators=(',', ':'))}"
+            )
+        if not returned:
+            typer.echo("no matches")
+
+    if unreadable:
+        for item in unreadable:
+            typer.echo(f"{item['status']}: {item['path']}: {item.get('error', '')}")
+    if window is None:
+        typer.echo("window unavailable (no readable timestamps)")
+    else:
+        typer.echo(f"window {window['earliest']} .. {window['latest']}; fields searched: {', '.join(_QUERY_FIELDS)}")
+    typer.echo(
+        f"{match_count} matches in {row_count} rows across {len(stats)} files "
+        f"({journal_count} journals, {rotated_count} retained rotations)"
+    )
+    for item in stats:
+        span = item.get("span") or {}
+        span_text = (
+            f"{span.get('earliest')}..{span.get('latest')}"
+            if span.get("earliest") and span.get("latest")
+            else "unavailable"
+        )
+        key_text = ", ".join(f"{field_name}={item['keys'][field_name]}" for field_name in _QUERY_FIELDS)
+        typer.echo(
+            f"  {item['path']} {item['matches']} / {item['rows']} "
+            f"(keys: {key_text}) {item['status']} span {span_text}"
+        )
+    if unreadable:
+        raise typer.Exit(code=3)
 
 
 @cli.command()

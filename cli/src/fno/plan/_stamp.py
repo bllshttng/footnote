@@ -471,6 +471,55 @@ def write_plan_file(
     _atomic_write(target, new_content)
 
 
+def _plan_node_id(fields: dict[str, Any]) -> str | None:
+    claims = fields.get("claims")
+    if isinstance(claims, str) and claims.strip():
+        return claims.strip()
+    if isinstance(claims, list):
+        for claim in claims:
+            if isinstance(claim, str) and claim.strip():
+                return claim.strip()
+    return None
+
+
+def _plan_urls(fields: dict[str, Any]) -> list[str]:
+    urls = fields.get("urls", [])
+    if isinstance(urls, str):
+        return [urls] if urls else []
+    return [url for url in urls if isinstance(url, str)] if isinstance(urls, list) else []
+
+
+def _plan_expected_url_count(fields: dict[str, Any]) -> int | None:
+    raw = fields.get("expected_url_count")
+    try:
+        value = int(str(raw))
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 1 else None
+
+
+def _latest_plan_session(fields: dict[str, Any]) -> str | None:
+    sessions = fields.get("session_ids", [])
+    if isinstance(sessions, str):
+        return sessions or None
+    if isinstance(sessions, list):
+        for session in reversed(sessions):
+            if isinstance(session, str) and session:
+                return session
+    return None
+
+
+def _emit_plan_event(event_type: str, **kwargs: Any) -> None:
+    """Report telemetry failure without changing the durable plan outcome."""
+    try:
+        from fno.events import append_event, plan_graduated, plan_stamped
+
+        builder = plan_stamped if event_type == "plan_stamped" else plan_graduated
+        append_event(builder(**kwargs))
+    except Exception as exc:  # noqa: BLE001 - the plan write already succeeded
+        print(f"warning: failed to emit {event_type}: {exc}", file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # Stamp subcommand
 # ---------------------------------------------------------------------------
@@ -508,6 +557,7 @@ def _do_stamp(args: argparse.Namespace, plan_path: Path) -> int:
         return 1
 
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    status_from = fields.get("status")
 
     # Idempotency: check if this (session_id, url) pair is already present
     existing_urls: list[str] = fields.get("urls", [])
@@ -527,6 +577,19 @@ def _do_stamp(args: argparse.Namespace, plan_path: Path) -> int:
 
     if all_urls_present and sid_present:
         # Fully idempotent - no-op
+        if not args.dry_run:
+            _emit_plan_event(
+                "plan_stamped",
+                plan_path=str(target),
+                session_id=session_id,
+                node_id=_plan_node_id(fields),
+                outcome="idempotent_noop",
+                status_from=str(status_from) if status_from is not None else None,
+                status_to=str(fields.get("status")) if fields.get("status") is not None else None,
+                urls=_plan_urls(fields),
+                expected_url_count=_plan_expected_url_count(fields),
+                reason="stamp already contains the session and URL",
+            )
         return 0
 
     # Not a full duplicate - merge new data in
@@ -565,6 +628,19 @@ def _do_stamp(args: argparse.Namespace, plan_path: Path) -> int:
     # Write the updated plan file
     write_plan_file(target, fields, rest, dry_run=args.dry_run)
 
+    if not args.dry_run:
+        _emit_plan_event(
+            "plan_stamped",
+            plan_path=str(target),
+            session_id=session_id,
+            node_id=_plan_node_id(fields),
+            outcome="stamped",
+            status_from=str(status_from) if status_from is not None else None,
+            status_to=str(fields.get("status")) if fields.get("status") is not None else None,
+            urls=_plan_urls(fields),
+            expected_url_count=_plan_expected_url_count(fields),
+        )
+
     return 0
 
 
@@ -590,13 +666,25 @@ def _do_graduate(args: argparse.Namespace, plan_path: Path) -> int:
         return 1
 
     status = fields.get("status", "")
+    status_from = str(status) if status else None
+    session_id = _latest_plan_session(fields)
+    urls = _plan_urls(fields)
+    expected_count = _plan_expected_url_count(fields)
     if canonical_status(status) != "in_review":
-        # Nothing to do
+        if not args.dry_run:
+            _emit_plan_event(
+                "plan_graduated",
+                plan_path=str(target),
+                session_id=session_id,
+                node_id=_plan_node_id(fields),
+                outcome="idempotent_noop",
+                status_from=status_from,
+                status_to=status_from,
+                urls=urls,
+                expected_url_count=expected_count,
+                reason=f"status is {status or '(unset)'}",
+            )
         return 0
-
-    urls = fields.get("urls", [])
-    if isinstance(urls, str):
-        urls = [urls] if urls else []
 
     expected_raw = fields.get("expected_url_count", "1")
     try:
@@ -617,6 +705,31 @@ def _do_graduate(args: argparse.Namespace, plan_path: Path) -> int:
         if not fields.get("done_at"):
             fields["done_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         write_plan_file(target, fields, rest, dry_run=args.dry_run)
+        if not args.dry_run:
+            _emit_plan_event(
+                "plan_graduated",
+                plan_path=str(target),
+                session_id=session_id,
+                node_id=_plan_node_id(fields),
+                outcome="graduated",
+                status_from=status_from,
+                status_to="done",
+                urls=urls,
+                expected_url_count=expected,
+            )
+    elif not args.dry_run:
+        _emit_plan_event(
+            "plan_graduated",
+            plan_path=str(target),
+            session_id=session_id,
+            node_id=_plan_node_id(fields),
+            outcome="not_met",
+            status_from=status_from,
+            status_to=status_from,
+            urls=urls,
+            expected_url_count=expected,
+            reason=f"{len(urls)} URL(s) present; {expected} required",
+        )
 
     return 0
 

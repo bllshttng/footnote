@@ -714,6 +714,51 @@ def project_events_json() -> Path:
     return _guard_state_path(resolve_repo_root() / ".fno" / "events.jsonl")
 
 
+def event_journals() -> list[Path]:
+    """Return every event journal and retained rotation, oldest first.
+
+    The three live journals have different owners, but each uses the same
+    ``events.jsonl`` rotation convention. Resolve and de-duplicate after
+    expansion because a worktree journal may be a symlink to the project log.
+    """
+    from fno.agents.events import daemon_lifecycle_log
+
+    live_paths = (global_events_json(), daemon_lifecycle_log(), project_events_json())
+    resolved: list[Path] = []
+    seen: set[Path] = set()
+    for live in live_paths:
+        try:
+            resolved_live = live.resolve()
+        except OSError:
+            resolved_live = live.absolute()
+        parent = resolved_live.parent
+        prefix = resolved_live.name + "."
+        rotated: list[tuple[int, Path]] = []
+        try:
+            entries = parent.iterdir()
+        except OSError:
+            entries = ()
+        for candidate in entries:
+            if not candidate.name.startswith(prefix):
+                continue
+            suffix = candidate.name[len(prefix) :]
+            if suffix.isdigit() and candidate.exists():
+                rotated.append((int(suffix), candidate))
+        rotated.sort(key=lambda item: item[0], reverse=True)
+        candidates = [path for _, path in rotated]
+        if resolved_live.exists():
+            candidates.append(resolved_live)
+        for candidate in candidates:
+            try:
+                path = candidate.resolve()
+            except OSError:
+                path = candidate.absolute()
+            if path not in seen:
+                seen.add(path)
+                resolved.append(path)
+    return resolved
+
+
 def repo_identity_from_remote_url(url: str) -> Optional[str]:
     """Full repository identity ``host/owner/repo`` from a git remote, lowercased.
 

@@ -174,6 +174,8 @@ pub struct MailInjectArgs {
     pub sender: Option<String>,
     /// Classified origin for the audit event; absent for legacy direct callers.
     pub origin: Option<String>,
+    /// The sender explicitly addressed its own session with --self-send.
+    pub self_send: bool,
     /// `--probe`: run resolution ONLY and report whether an injection path
     /// exists, injecting nothing and reading no stdin. Answers the question a
     /// caller has to ask BEFORE it prescribes an inject to someone.
@@ -219,6 +221,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     let mut harness_flag: Option<String> = None;
     let mut sender: Option<String> = None;
     let mut origin: Option<String> = None;
+    let mut self_send = false;
     let mut probe = false;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
@@ -266,6 +269,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                         .to_string(),
                 );
             }
+            "--self-send" => self_send = true,
             "--attempts" => {
                 attempts = it.next().and_then(|v| v.parse().ok()).ok_or((
                     2,
@@ -321,6 +325,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
         enter_delay_ms,
         sender,
         origin,
+        self_send,
         probe,
     })
 }
@@ -364,6 +369,7 @@ pub fn emit_raw_inject_audit(
         provider,
         confirmed,
         None,
+        false,
     );
 }
 
@@ -375,6 +381,7 @@ pub fn emit_raw_inject_audit_with_origin(
     provider: MailInjectProvider,
     confirmed: bool,
     origin: Option<&str>,
+    self_send: bool,
 ) {
     if is_framed_envelope(text) {
         return;
@@ -393,6 +400,11 @@ pub fn emit_raw_inject_audit_with_origin(
     fields.insert("harness".into(), harness.into());
     fields.insert("lane".into(), lane.into());
     fields.insert("confirmed".into(), confirmed.into());
+    let verb = text
+        .strip_prefix('/')
+        .and_then(|_| text.split_whitespace().next());
+    fields.insert("verb".into(), verb.map(str::to_string).into());
+    fields.insert("self_send".into(), self_send.into());
     if let Some(s) = sender {
         fields.insert("sender".into(), s.to_string().into());
     }
@@ -1358,6 +1370,7 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
         args.provider,
         result.is_ok(),
         args.origin.as_deref(),
+        args.self_send,
     );
 
     match result {
@@ -1408,8 +1421,11 @@ mod tests {
         assert_eq!(a.sender.as_deref(), Some("0ab49ebc"));
         let b = parse_args(&argv(&["--session", "s1", "--harness", "codex"])).unwrap();
         assert!(b.sender.is_none(), "sender defaults to absent");
+        assert!(!b.self_send, "self-send defaults to false");
         let c = parse_args(&argv(&["--session", "s1", "--origin", "scheduler"])).unwrap();
         assert_eq!(c.origin.as_deref(), Some("scheduler"));
+        let d = parse_args(&argv(&["--session", "s1", "--self-send"])).unwrap();
+        assert!(d.self_send);
     }
 
     #[test]
@@ -1467,17 +1483,21 @@ mod tests {
         assert_eq!(v["data"]["lane"], "control.sock");
         assert_eq!(v["data"]["sender"], "0ab49ebc");
         assert_eq!(v["data"]["confirmed"], true);
+        assert_eq!(v["data"]["verb"], "/code-review");
+        assert_eq!(v["data"]["self_send"], false);
 
         // A not-delivered send is still audited (the bytes may have landed past
         // the confirm budget) but records confirmed:false, so an auditor reading
         // the ledger as ground truth cannot overcount phantom injections.
-        emit_raw_inject_audit(
+        emit_raw_inject_audit_with_origin(
             &path,
             None,
             "ses-9",
             "/compact",
             MailInjectProvider::Claude,
             false,
+            None,
+            true,
         );
         let last: serde_json::Value = serde_json::from_str(
             std::fs::read_to_string(&path)
@@ -1488,6 +1508,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(last["data"]["confirmed"], false);
+        assert_eq!(last["data"]["verb"], "/compact");
+        assert_eq!(last["data"]["self_send"], true);
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
