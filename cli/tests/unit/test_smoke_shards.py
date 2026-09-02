@@ -1,4 +1,4 @@
-"""CI runs the smoke suite as two shards. They must cover the whole registry.
+"""CI runs each full smoke lane as four shards. They must cover the whole registry.
 
 The workflow splits `smoke` into shard jobs that run in parallel on separate
 runners. That halves wall clock only if nothing is lost in the split, so this
@@ -16,7 +16,12 @@ from pathlib import Path
 
 import yaml
 
-from fno.test_cmd import _RUST_BUILD_STEP, _name_matches, smoke_steps
+from fno.test_cmd import (
+    _RUST_BUILD_STEP,
+    _name_matches,
+    _shard_selected_indices,
+    smoke_steps,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "cli-ci.yml"
@@ -25,23 +30,28 @@ _SMOKE_SETUP = _REPO_ROOT / ".github" / "actions" / "smoke-setup" / "action.yml"
 
 # `--only 'a,b'` / `--skip 'a'`, quoted or bare, as the workflow writes them.
 _SELECTOR = re.compile(r"--(only|skip)[= ]+'([^']*)'|--(only|skip)[= ]+(\S+)")
+_SHARD = re.compile(r"--shard\s+\$\{\{\s*matrix\.shard\s*\}\}/(\d+)")
 
 
-def _shard_selectors() -> list[tuple[str, str, str]]:
-    """(job name, 'only'|'skip', globs) for every job the `smoke` gate needs."""
+def _shard_selectors() -> list[tuple[str, int, int, str, str]]:
+    """(job, index, total, mode, globs) for every full-gate matrix leg."""
     workflow = yaml.safe_load(_WORKFLOW.read_text())
     jobs = workflow["jobs"]
     needs = jobs["smoke"].get("needs") or []
     if isinstance(needs, str):
         needs = [needs]
 
-    found: list[tuple[str, str, str]] = []
+    found: list[tuple[str, int, int, str, str]] = []
     for name in needs:
-        run = "\n".join(step.get("run", "") for step in jobs[name].get("steps", []))
+        job = jobs[name]
+        run = "\n".join(step.get("run", "") for step in job.get("steps", []))
+        shard = _SHARD.search(run)
+        matrix = job.get("strategy", {}).get("matrix", {}).get("shard", [])
+        legs = [(int(index), int(shard.group(1))) for index in matrix] if shard else [(0, 0)]
         for match in _SELECTOR.finditer(run):
             flag = match.group(1) or match.group(3)
             globs = match.group(2) if match.group(1) else match.group(4)
-            found.append((name, flag, globs))
+            found.extend((name, index, total, flag, globs) for index, total in legs)
     return found
 
 
@@ -49,10 +59,17 @@ def _names() -> list[str]:
     return [name for name, _cwd, _cmd in smoke_steps(_REPO_ROOT)]
 
 
-def _selected(names: list[str], flag: str, globs: str) -> list[str]:
+def _selected(
+    names: list[str], flag: str, globs: str, shard: int = 0, total: int = 0
+) -> list[str]:
     if flag == "only":
-        return [n for n in names if _name_matches(n, globs)]
-    return [n for n in names if not _name_matches(n, globs)]
+        indices = [i for i, name in enumerate(names) if _name_matches(name, globs)]
+    else:
+        indices = [i for i, name in enumerate(names) if not _name_matches(name, globs)]
+    if total:
+        steps = [(name, ".", "") for name in names]
+        indices = _shard_selected_indices(steps, indices, shard, total)
+    return [names[i] for i in indices]
 
 
 def _command_lines(run: str) -> list[str]:
@@ -68,7 +85,41 @@ def test_the_workflow_actually_shards_the_gate() -> None:
     """
     selectors = _shard_selectors()
     assert selectors, "the smoke gate needs no shard jobs carrying --only/--skip"
-    assert len(selectors) >= 2, f"expected at least two shards, found {selectors}"
+    assert len(selectors) == 8, f"expected four legs per full lane, found {selectors}"
+
+
+def test_matrix_legs_enumerate_the_denominator_in_each_command() -> None:
+    workflow = yaml.safe_load(_WORKFLOW.read_text())
+    jobs = workflow["jobs"]
+    needs = jobs["smoke"].get("needs") or []
+    if isinstance(needs, str):
+        needs = [needs]
+
+    checked = 0
+    for name in needs:
+        job = jobs[name]
+        run = "\n".join(step.get("run", "") for step in job.get("steps", []))
+        match = _SHARD.search(run)
+        if not match:
+            continue
+        total = int(match.group(1))
+        values = job.get("strategy", {}).get("matrix", {}).get("shard", [])
+        assert values, f"{name} writes /{total} but declares no matrix legs"
+        assert values == list(range(1, total + 1)), (
+            f"{name} is missing shard index from 1..{total}: {values}"
+        )
+        checked += 1
+
+    assert checked == 2, "both full-gate lanes must declare shard matrices"
+
+
+def test_full_gate_shards_cover_main_changed_packet_is_pr_only() -> None:
+    workflow = yaml.safe_load(_WORKFLOW.read_text())
+    jobs = workflow["jobs"]
+
+    assert jobs["smoke-pytest"].get("if") is None
+    assert jobs["smoke-rest"].get("if") is None
+    assert jobs["changed-smoke"].get("if") == "github.event_name == 'pull_request'"
 
 
 def test_the_shards_cover_every_step() -> None:
@@ -82,21 +133,27 @@ def test_the_shards_cover_every_step() -> None:
     assert names, "the smoke registry is empty; this test would pass vacuously"
 
     covered: set[str] = set()
-    for _job, flag, globs in _shard_selectors():
-        covered |= set(_selected(names, flag, globs))
+    for _job, shard, total, flag, globs in _shard_selectors():
+        covered |= set(_selected(names, flag, globs, shard, total))
 
     for name in names:
         assert name in covered, f"step {name!r} runs in no CI shard"
 
 
-def test_pytest_runs_in_exactly_one_shard() -> None:
-    """The expensive half must not run twice; it is 49 percent of the suite."""
+def test_pytest_runs_in_every_pytest_shard() -> None:
+    """The expensive half runs once in each of the four pytest legs."""
     names = _names()
     step = "Pytest (unit + integration)"
     assert step in names, "the pytest step was renamed; re-check the shard seam"
-    carriers = [job for job, flag, globs in _shard_selectors()
-                if step in _selected(names, flag, globs)]
-    assert len(carriers) == 1, f"pytest runs in {carriers}, expected exactly one shard"
+    carriers = [
+        (job, shard)
+        for job, shard, total, flag, globs in _shard_selectors()
+        if step in _selected(names, flag, globs, shard, total)
+    ]
+    assert carriers == [
+        ("smoke-pytest", 1), ("smoke-pytest", 2),
+        ("smoke-pytest", 3), ("smoke-pytest", 4),
+    ]
 
 
 def test_the_rust_binary_is_built_in_the_shard_that_needs_it() -> None:
@@ -112,8 +169,8 @@ def test_the_rust_binary_is_built_in_the_shard_that_needs_it() -> None:
     pytest_step = "Pytest (unit + integration)"
     assert build in names, "the build step was renamed; re-check the shard seam"
 
-    for job, flag, globs in _shard_selectors():
-        selected = _selected(names, flag, globs)
+    for job, shard, total, flag, globs in _shard_selectors():
+        selected = _selected(names, flag, globs, shard, total)
         if pytest_step in selected:
             assert build not in selected, (
                 f"{job} runs pytest and the rust build together; pytest deletes "
@@ -129,12 +186,13 @@ def test_only_prerequisites_run_in_more_than_one_shard() -> None:
     """
     names = _names()
     counts: dict[str, int] = {}
-    for _job, flag, globs in _shard_selectors():
-        for name in _selected(names, flag, globs):
+    for _job, shard, total, flag, globs in _shard_selectors():
+        for name in _selected(names, flag, globs, shard, total):
             counts[name] = counts.get(name, 0) + 1
     duplicated = sorted(n for n, c in counts.items() if c > 1)
-    assert duplicated == ["Sync + build"], (
-        f"steps running in more than one shard: {duplicated}")
+    assert set(duplicated) <= {
+        "Sync + build", "Pytest (unit + integration)", _RUST_BUILD_STEP
+    }, f"steps running in more than one shard: {duplicated}"
 
 
 def test_every_shard_clears_the_rust_binary_before_it_starts() -> None:
@@ -148,8 +206,8 @@ def test_every_shard_clears_the_rust_binary_before_it_starts() -> None:
     """
     names = _names()
     triggers = {"Pytest (unit + integration)", _RUST_BUILD_STEP}
-    for job, flag, globs in _shard_selectors():
-        selected = set(_selected(names, flag, globs))
+    for job, shard, total, flag, globs in _shard_selectors():
+        selected = set(_selected(names, flag, globs, shard, total))
         assert triggers & selected, (
             f"{job} selects neither pytest nor the rust build, so it never "
             "clears the binary and its pre-build steps run with it present")
