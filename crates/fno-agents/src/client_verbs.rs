@@ -4688,7 +4688,7 @@ pub async fn run_report(rest: &[String], home: &AgentsHome) -> i32 {
 // claim (hidden debug verb over the native claims module)
 // ---------------------------------------------------------------------------
 
-/// `fno-agents claim <acquire|release|status> <key> [flags]` — a thin front
+/// `fno-agents claim <acquire|release|status|list> <key> [flags]` — a thin front
 /// over [`crate::claims`], the native lockfile-protocol implementation.
 ///
 /// Purpose: (a) the cross-impl compatibility matrix
@@ -4703,11 +4703,14 @@ pub async fn run_report(rest: &[String], home: &AgentsHome) -> i32 {
 /// another live writer, 2 usage/validation/io error.
 pub fn run_claim(args: &[String]) -> i32 {
     let Some(op) = args.first().map(String::as_str) else {
-        eprintln!("fno-agents: claim requires an operation: acquire|release|status|sweep");
+        eprintln!("fno-agents: claim requires an operation: acquire|release|status|list|sweep");
         return 2;
     };
     if op == "sweep" {
         return run_claim_sweep(&args[1..]);
+    }
+    if op == "list" {
+        return run_claim_list(&args[1..]);
     }
     let Some(key) = args.get(1).filter(|k| !k.starts_with("--")).cloned() else {
         eprintln!("fno-agents: claim {op} requires a key argument");
@@ -4863,11 +4866,92 @@ pub fn run_claim(args: &[String]) -> i32 {
         }
         other => {
             eprintln!(
-                "fno-agents: unknown claim operation: {other} (use acquire|release|status|sweep)"
+                "fno-agents: unknown claim operation: {other} (use acquire|release|status|list|sweep)"
             );
             2
         }
     }
+}
+
+/// `fno-agents claim list [--prefix <prefix>] [--include-stale] [--root <dir>]`
+/// — return the same status-shaped rows as the Python list verb, after one
+/// native read of both global and repository claim roots.
+fn run_claim_list(args: &[String]) -> i32 {
+    let mut prefix: Option<String> = None;
+    let mut root: Option<PathBuf> = None;
+    let mut include_stale = false;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--prefix" => match it.next() {
+                Some(value) => prefix = Some(value.clone()),
+                None => {
+                    eprintln!("fno-agents: claim list: --prefix requires a value");
+                    return 2;
+                }
+            },
+            "--root" => match it.next() {
+                Some(value) => root = Some(PathBuf::from(value)),
+                None => {
+                    eprintln!("fno-agents: claim list: --root requires a value");
+                    return 2;
+                }
+            },
+            "--include-stale" => include_stale = true,
+            "--json" | "-J" => {}
+            other => {
+                eprintln!("fno-agents: claim list: unknown flag {other}");
+                return 2;
+            }
+        }
+    }
+    let local_root = root.or_else(|| std::env::current_dir().ok());
+    let rows = crate::claims::list(prefix.as_deref(), local_root.as_deref(), include_stale);
+    let rows: Vec<Value> = rows.iter().map(claim_status_value).collect();
+    println!("{}", Value::Array(rows));
+    0
+}
+
+fn claim_status_value(rec: &crate::claims::ClaimRecord) -> Value {
+    let (state, basis) =
+        crate::claims::classify_with_basis(rec, None, &|pid| crate::claims::probe_pid(pid));
+    let mut out = serde_json::Map::new();
+    out.insert("key".into(), Value::String(rec.key.clone()));
+    out.insert("state".into(), Value::String(state.as_str().into()));
+    out.insert("basis".into(), Value::String(basis.into()));
+    out.insert("holder".into(), Value::String(rec.holder.clone()));
+    out.insert(
+        "schema_version".into(),
+        Value::Number(rec.schema_version.into()),
+    );
+    out.insert(
+        "pid".into(),
+        rec.pid.map(Value::from).unwrap_or(Value::Null),
+    );
+    out.insert("pid_unavailable".into(), Value::Bool(rec.pid_unavailable));
+    out.insert("host".into(), Value::String(rec.host.clone()));
+    out.insert(
+        "machine_id".into(),
+        rec.machine_id
+            .clone()
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+    );
+    out.insert("acquired_at".into(), Value::Number(rec.acquired_at.into()));
+    out.insert(
+        "expires_at".into(),
+        rec.expires_at.map(Value::from).unwrap_or(Value::Null),
+    );
+    if let Some(reason) = &rec.reason {
+        out.insert("reason".into(), Value::String(reason.clone()));
+    }
+    if let Some(harness) = &rec.harness {
+        out.insert("harness".into(), Value::String(harness.clone()));
+    }
+    if !rec.metadata.is_empty() {
+        out.insert("metadata".into(), Value::Object(rec.metadata.clone()));
+    }
+    Value::Object(out)
 }
 
 /// `fno-agents claim sweep [--json] [--root <dir>]` — read every `node:` /

@@ -304,6 +304,73 @@ pub(crate) fn claims_dir_for(root: Option<&Path>) -> Option<PathBuf> {
     }
 }
 
+/// Enumerate readable claims from the global store and an optional repository
+/// store. The caller supplies the repository root; both stores are one logical
+/// view because a global node claim and a worktree-local claim can describe the
+/// same coordination key. A root read failure returns an empty view so callers
+/// fail toward report-only rather than applying on partial facts.
+pub fn list(prefix: Option<&str>, root: Option<&Path>, include_stale: bool) -> Vec<ClaimRecord> {
+    let mut dirs = Vec::new();
+    if let Some(global) = global_claims_root() {
+        dirs.push(global.join(CLAIMS_DIRNAME));
+    }
+    if let Some(local) = root {
+        dirs.push(local.join(CLAIMS_DIRNAME));
+    }
+
+    let mut seen_dirs = std::collections::BTreeSet::new();
+    let mut best: std::collections::BTreeMap<String, (u8, ClaimRecord)> =
+        std::collections::BTreeMap::new();
+    for dir in dirs {
+        let identity = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if !seen_dirs.insert(identity) {
+            continue;
+        }
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Vec::new(),
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return Vec::new();
+            };
+            let Ok(file_type) = entry.file_type() else {
+                return Vec::new();
+            };
+            if !file_type.is_file() || !entry.file_name().to_string_lossy().ends_with(".lock") {
+                continue;
+            }
+            let Ok(rec) = read_claim_file(&entry.path()) else {
+                // The list contract is records, not diagnostics. Corrupted
+                // rows are withheld exactly as an unreadable root is: they
+                // cannot authorize an apply pass.
+                continue;
+            };
+            if prefix.is_some_and(|wanted| !rec.key.starts_with(wanted)) {
+                continue;
+            }
+            let state = classify(&rec, None);
+            let priority = match state {
+                ClaimState::Live => 0,
+                ClaimState::Suspect => 1,
+                ClaimState::Stale => 2,
+                ClaimState::Free | ClaimState::Corrupted => continue,
+            };
+            if !include_stale && priority > 1 {
+                continue;
+            }
+            let replace = best
+                .get(&rec.key)
+                .is_none_or(|(current, _)| priority < *current);
+            if replace {
+                best.insert(rec.key.clone(), (priority, rec));
+            }
+        }
+    }
+    best.into_values().map(|(_, rec)| rec).collect()
+}
+
 // ---------------------------------------------------------------------------
 // Time, host, and process liveness
 // ---------------------------------------------------------------------------
@@ -3813,6 +3880,43 @@ mod tests {
         let rec = rec.unwrap();
         assert_eq!(rec.holder, "pty:me");
         assert_eq!(rec.metadata, meta);
+    }
+
+    #[test]
+    fn list_reads_global_and_local_roots_and_filters_by_prefix() {
+        let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let global = TempDir::new().unwrap();
+        let local = TempDir::new().unwrap();
+        let previous = std::env::var_os("FNO_CLAIMS_ROOT");
+        std::env::set_var("FNO_CLAIMS_ROOT", global.path());
+
+        let mut global_opts = opts_in(&global);
+        global_opts.pid = Some(std::process::id());
+        assert!(matches!(
+            acquire("reap:global", "global-holder", global_opts),
+            AcquireOutcome::Acquired(_)
+        ));
+        let mut local_opts = opts_in(&local);
+        local_opts.pid = Some(std::process::id());
+        assert!(matches!(
+            acquire("reap:local", "local-holder", local_opts),
+            AcquireOutcome::Acquired(_)
+        ));
+        let mut filtered_opts = opts_in(&local);
+        filtered_opts.pid = Some(std::process::id());
+        assert!(matches!(
+            acquire("node:not-reap", "node-holder", filtered_opts),
+            AcquireOutcome::Acquired(_)
+        ));
+
+        let rows = list(Some("reap:"), Some(local.path()), false);
+        let keys: Vec<_> = rows.iter().map(|row| row.key.as_str()).collect();
+        assert_eq!(keys, vec!["reap:global", "reap:local"]);
+
+        match previous {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
     }
 
     // ---- recovery mutex (contract item 6) ---------------------------------

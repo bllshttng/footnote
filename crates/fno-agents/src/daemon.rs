@@ -4160,42 +4160,17 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                             // Compatibility with requests minted by older
                             // rituals: a standing claim still authorizes the
                             // guarded report/apply sweep during the deploy window.
-                            std::process::Command::new("fno")
-                                .current_dir(root)
-                                .args(["agents", "claim", "list", "--prefix", "reap:", "-J"])
-                                .output()
-                                .map_or_else(
-                                    |error| WorktreeSweepOrderRead {
-                                        standing: None,
-                                        exit_code: None,
-                                        stderr: error.to_string(),
-                                    },
-                                    |output| {
-                                        if !output.status.success() {
-                                            return WorktreeSweepOrderRead {
-                                                standing: None,
-                                                exit_code: output.status.code(),
-                                                stderr: String::from_utf8_lossy(&output.stderr)
-                                                    .into_owned(),
-                                            };
-                                        }
-                                        match serde_json::from_slice::<Value>(&output.stdout) {
-                                            Ok(Value::Array(rows)) => (!rows.is_empty()).into(),
-                                            Ok(_) => WorktreeSweepOrderRead {
-                                                standing: None,
-                                                exit_code: output.status.code(),
-                                                stderr: "claim list returned non-array JSON".into(),
-                                            },
-                                            Err(error) => WorktreeSweepOrderRead {
-                                                standing: None,
-                                                exit_code: output.status.code(),
-                                                stderr: format!(
-                                                    "claim list returned invalid JSON: {error}"
-                                                ),
-                                            },
-                                        }
-                                    },
-                                )
+                            // Live reap orders anywhere (both claim roots are
+                            // read by `list`): each is minted only by a ritual
+                            // that gh-confirmed MERGED, so its standing is the
+                            // merge-trigger for this tick's apply pass.
+                            (!crate::claims::list(
+                                Some("reap:"),
+                                Some(std::path::Path::new(root)),
+                                false,
+                            )
+                            .is_empty())
+                                .into()
                         }, &|root, apply| {
                             let mut cmd = std::process::Command::new("fno");
                             cmd.current_dir(root)
