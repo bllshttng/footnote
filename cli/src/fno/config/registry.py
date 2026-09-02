@@ -536,6 +536,28 @@ FIELD_META: dict[str, Meta] = {
     "routing.prefer_harness": Meta(
         "advanced", "The harness the prefer-harness objective favors. A tiebreaker WITHIN a band, never a reason to lower one.",
     ),
+    # --- config.sideline.colors (x-1b35, the mux sideline lane color) ---
+    # Four axis tables, every key naming its axis. A bare key under
+    # [sideline.colors] is REFUSED (extra=forbid): it is ambiguous between
+    # account, route and model. Resolution is one fixed cascade, most
+    # specific first: a matching [[routing.models]] row carrying a `color`
+    # field (or named in sideline.colors.row), then model, then route, then
+    # harness, then the built-in table (route-keyed: zai green, openrouter
+    # magenta, openai blue, anthropic cyan). First declaration wins; no
+    # precedence knob. Values: ANSI-16 names, indexed(<n>), or #rrggbb; an
+    # unknown name falls through to the next cascade level.
+    "sideline.colors.harness": Meta(
+        "advanced", "Lane colors keyed by harness name (e.g. codex = \"cyan\"). The cascade's coarsest config key; see sideline.colors.route.",
+    ),
+    "sideline.colors.route": Meta(
+        "advanced", "Lane colors keyed by the vendor lane the row bills (route, else provider), e.g. openrouter = \"magenta\". The DEFAULT colored axis: it separates bills where harness and model each fail alone.",
+    ),
+    "sideline.colors.model": Meta(
+        "advanced", "Lane colors keyed by the recorded model string, quoted (\"glm-5.3-flash[1m]\" = \"green\"). Rendered verbatim; never imply an alias resolved.",
+    ),
+    "sideline.colors.row": Meta(
+        "advanced", "Lane colors keyed by a [[routing.models]] row NAME (row.zai-glm-flash = \"orange\"). A row's own `color` field outranks this table for the same row.",
+    ),
     # --- config.model_routing.* (role-based per-spawn model routing, x-d2fe) ---
     "model_routing.enabled": Meta(
         "advanced", "Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) and the opt-in build lane to a secondary provider at spawn.",

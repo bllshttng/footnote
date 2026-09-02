@@ -37,6 +37,16 @@ pub struct RegistryAgent {
     /// harnesses own one, and which argv it builds. `None` when the row names
     /// neither key.
     pub harness: Option<String>,
+    /// (x-1b35) The spawn-recorded model string, raw. Rendered verbatim - a
+    /// recorded value may name an alias rather than a resolved id (the
+    /// openrouter ALIASES config), so the sideline never implies resolution.
+    pub model: Option<String>,
+    /// (x-1b35) The vendor lane the row bills: the registry row's `route`
+    /// key when it names one, else its `provider` key (live rows carry the
+    /// vendor there). The FIELD names the axis - the value is never re-classed
+    /// (opencode is legally both harness and provider). This is the
+    /// bill-separating axis the lane color keys on by default.
+    pub route: Option<String>,
     /// (x-d865) The row's own fno session id - the durable identity `pane ls`
     /// reports as `fno_id` and `fno mux where <id>` resolves. `None` for a row
     /// the registry wrote without one. Distinct from `mux.0` (the mux server's
@@ -2263,6 +2273,44 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        // (x-1b35) The vendor lane: `route` is the declared spelling, `provider`
+        // the live fallback (live rows carry the vendor there; `route` exists
+        // on disk but is null everywhere today, so a NULL route must still
+        // reach the fallback - hence the or_else after the string read, not
+        // after the key read). The fallback is SHAPE-gated on the row also
+        // naming `harness`: a pre-v10 row carries the HARNESS under `provider`
+        // (the review finding), and reading it as a vendor lane would mount
+        // the harness name on the route axis.
+        let route = row
+            .get("route")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                if row.get("harness").is_none() {
+                    return None; // pre-v10 shape: provider WAS the harness axis
+                }
+                row.get("provider")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
+        let model = row
+            .get("model")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                // The daemon's probe-verified model (`{"kind": "observed",
+                // "model": ...}`) fills rows the spawn receipt left null, so
+                // the model tier resolves on every probed row, not only the
+                // requested ones.
+                row.get("observed_model")
+                    .and_then(|m| m.get("model"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
         out.push(RegistryAgent {
             name: name.to_string(),
             cwd: cwd.to_string(),
@@ -2272,6 +2320,8 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
+            model,
+            route,
             session_id,
             harness_session_id,
             predecessor_session_ids,
@@ -2371,6 +2421,9 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
             harness: Some("claude".to_string()),
+            // A roster worker carries no lane stamps; the roster records none.
+            model: None,
+            route: None,
             name: w.name.clone(),
             cwd: w.cwd.clone(),
             exited: false,
@@ -3255,6 +3308,69 @@ mod tests {
             Some("12345678-1234-1234-1234-1234567890ab")
         );
         assert_eq!(get("cx").claude_session_uuid, None, "codex carries no uuid");
+    }
+
+    #[test]
+    fn derive_rows_carries_model_and_the_vendor_route() {
+        // (x-1b35) AC1: the lane axes survive the tolerant read. `route` is
+        // the declared spelling with `provider` as the live fallback - a NULL
+        // route key must still reach the fallback (key-present-but-null is the
+        // shape every live row carries today). A row naming neither derives
+        // route=None; the harness read is untouched.
+        let raw = reg(
+            r#"{"name":"z","cwd":"/w","status":"live","harness":"claude","provider":"zai",
+                "route":null,"model":"glm-5.3-flash[1m]"},
+               {"name":"r","cwd":"/w","status":"live","harness":"codex","provider":"openai",
+                "route":"openrouter","model":"gpt-5.6-luna"},
+               {"name":"bare","cwd":"/w","status":"live","harness":"opencode"},
+               {"name":"obs","cwd":"/w","status":"live","harness":"claude",
+                "model":null,"observed_model":{"kind":"observed","model":"gpt-5.6-luna"}}"#,
+        );
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        assert_eq!(
+            get("z").route.as_deref(),
+            Some("zai"),
+            "null route falls to provider"
+        );
+        assert_eq!(get("z").model.as_deref(), Some("glm-5.3-flash[1m]"));
+        assert_eq!(
+            get("r").route.as_deref(),
+            Some("openrouter"),
+            "declared route wins"
+        );
+        assert_eq!(get("bare").route, None);
+        assert_eq!(get("bare").model, None);
+        assert_eq!(
+            get("obs").model.as_deref(),
+            Some("gpt-5.6-luna"),
+            "null model falls to observed_model.model"
+        );
+    }
+
+    #[test]
+    fn pre_v10_provider_rows_do_not_mount_the_harness_as_the_route() {
+        // (x-1b35 review finding) A pre-v10 row carried the HARNESS under
+        // `provider` and no `harness` key at all; the route fallback is
+        // shape-gated on the row naming `harness`, so such a row derives
+        // route=None instead of route=Some("claude").
+        let raw = reg(
+            r#"{"name":"old","cwd":"/w","status":"live","provider":"claude"},
+               {"name":"new","cwd":"/w","status":"live","harness":"claude","provider":"zai"}"#,
+        );
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        assert_eq!(
+            get("old").harness.as_deref(),
+            Some("claude"),
+            "provider still feeds the harness read"
+        );
+        assert_eq!(
+            get("old").route,
+            None,
+            "pre-v10 provider is not a vendor lane"
+        );
+        assert_eq!(get("new").route.as_deref(), Some("zai"));
     }
 
     /// AC11-HP, AC12-EDGE, AC13-EDGE (x-6678): `attach_id` is derived PER
@@ -4526,6 +4642,8 @@ config_dir = "~/.claude-alt"
     // -------------------------------------------------------------------
     fn plain_row(name: &str, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
         RegistryAgent {
+            model: None,
+            route: None,
             spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
