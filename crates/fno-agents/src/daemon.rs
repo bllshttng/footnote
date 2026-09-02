@@ -790,9 +790,9 @@ fn registry_repo_roots(home: &AgentsHome) -> Vec<String> {
     seen.into_iter().collect()
 }
 
-/// How long between worktree report sweeps. Long on purpose: this is the
-/// backstop for what the merge-triggered ritual missed, not a control loop.
-const WORKTREE_SWEEP_INTERVAL_SECS: u64 = 86_400;
+/// How long between worktree report sweeps. A 24-hour reap order spans at
+/// least three complete windows even when its mint cannot clear the stamp.
+const WORKTREE_SWEEP_INTERVAL_SECS: u64 = 21_600;
 
 /// How long between stale-question reconciles. Stale rows are measured in
 /// hundreds of hours, so the interval bounds discovery lag, not freshness:
@@ -11900,7 +11900,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     }
 
     #[test]
-    fn sweep_honours_its_own_24h_floor() {
+    fn sweep_honours_its_own_6h_floor() {
         let home = tmp_home("wt-sweep-floor");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let out = |_: &str, _: bool| Some(REAL_SUMMARY.to_string());
@@ -11910,7 +11910,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             worktree_sweep(&home, &emitter, now, &["/repo/a".into()], &|| false, &out),
             1
         );
-        // Same day: skipped entirely, no second reading.
+        // Same window: skipped entirely, no second reading.
         assert_eq!(
             worktree_sweep(
                 &home,
@@ -11922,12 +11922,12 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             ),
             0
         );
-        // A day later: fires again.
+        // A little over six hours later: fires again.
         assert_eq!(
             worktree_sweep(
                 &home,
                 &emitter,
-                now + 86_401,
+                now + 21_601,
                 &["/repo/a".into()],
                 &|| false,
                 &out

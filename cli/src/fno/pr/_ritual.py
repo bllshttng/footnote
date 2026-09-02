@@ -48,6 +48,7 @@ import typer
 from fno._subprocess_util import fno_py_cmd
 from fno.agents.events import _emit_daemon_envelope
 from fno.config import load_settings_for_repo
+from fno.paths import agents_home_dir
 from fno.pr._proc import Result, ToolMissing, run as _run
 
 # Cross-runner mutex (Step 0.5): a global TTL claim so an attended `/fno:pr
@@ -58,10 +59,10 @@ _CLAIM_TTL = "15m"
 # Reap order: minted only by this ritual against a gh-confirmed MERGED state,
 # consumed by the daemon's periodic worktree sweep (which runs its pass with
 # --apply while any order stands). 24h is the claim TTL ceiling AND the sweep
-# interval, so an order pairs the merge proof with at most one sweep window; a
-# tree still protected at that sweep waits for the next merge's order rather
-# than a timer's authority. "7d"-style day units are rejected TTL syntax
-# (verified: only m/h/s parse, and the ms range caps at one day).
+# interval ceiling. Minting clears the cadence stamp, and the six-hour fallback
+# leaves at least three complete payment windows inside the order's lifetime.
+# "7d"-style day units are rejected TTL syntax (verified: only m/h/s parse,
+# and the ms range caps at one day).
 _REAP_ORDER_TTL = "24h"
 # x-0d66: bound the advance leg. advance dispatches successors inline and can
 # spend minutes with no output; a bounded run with progress lines surfaces
@@ -605,6 +606,14 @@ class Ritual:
             )
         except (ToolMissing, subprocess.SubprocessError) as exc:
             return f"reap-order-unwritten ({exc})"
+        if r.returncode in (0, 1):
+            # Minting makes the next idle tick the order's first payment
+            # window; the six-hour cadence remains the fallback if this
+            # best-effort reset cannot be written.
+            try:
+                (agents_home_dir() / "worktree-sweep.stamp").unlink(missing_ok=True)
+            except OSError:
+                pass
         if r.returncode == 0:
             return f"reap-order {key} standing ({why})"
         if r.returncode == 1:

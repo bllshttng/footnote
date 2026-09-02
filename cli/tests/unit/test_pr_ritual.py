@@ -10,6 +10,7 @@ from __future__ import annotations
 import subprocess
 from types import SimpleNamespace
 
+import pytest
 
 from fno.config import PostMergeBlock
 from fno.pr import _ritual
@@ -778,6 +779,37 @@ def test_reap_order_already_standing_is_not_a_failure(tmp_path, capsys, monkeypa
     out = capsys.readouterr().out
     assert "step=archive status=deferred" in out
     assert "already standing" in out
+
+
+@pytest.mark.parametrize("claim_rc", [0, 1])
+def test_standing_reap_order_clears_the_sweep_stamp(
+    tmp_path, monkeypatch, claim_rc
+):
+    agents_home = tmp_path / "agents"
+    agents_home.mkdir()
+    stamp = agents_home / "worktree-sweep.stamp"
+    stamp.write_text("123")
+    monkeypatch.setattr(_ritual, "agents_home_dir", lambda: agents_home, raising=False)
+    r = _bare(tmp_path, FakeRunner(claim_rc=claim_rc))
+
+    receipt = r._register_reap_order("test")
+
+    assert "standing" in receipt
+    assert not stamp.exists()
+
+
+def test_unwritten_reap_order_leaves_the_sweep_stamp(tmp_path, monkeypatch):
+    agents_home = tmp_path / "agents"
+    agents_home.mkdir()
+    stamp = agents_home / "worktree-sweep.stamp"
+    stamp.write_text("123")
+    monkeypatch.setattr(_ritual, "agents_home_dir", lambda: agents_home, raising=False)
+    r = _bare(tmp_path, FakeRunner(claim_rc=2))
+
+    receipt = r._register_reap_order("test")
+
+    assert "reap-order-unwritten" in receipt
+    assert stamp.read_text() == "123"
 
 
 def test_archive_runs_script_when_worktree_found(tmp_path, capsys, monkeypatch):
