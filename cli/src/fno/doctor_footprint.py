@@ -37,21 +37,28 @@ EXIT_CAPACITY_OVER = 3
 EXIT_LEAK = 5
 
 
-@lru_cache(maxsize=1)
-def _footprint_cpu_override() -> float | None:
-    """``agents.footprint_sustained_cpu_cores``, cached per process.
+@lru_cache(maxsize=8)
+def _footprint_cpu_override_at(root: Path) -> float | None:
+    """``agents.footprint_sustained_cpu_cores`` read at ``root``, cached per root.
 
     The settings load resolves config roots, which on a cold cache shells out
     to git - the cause-only path (the spawn gate's hot lane, contractually one
-    ps call) must never pay that, so the read happens once and is remembered.
-    Tests substitute this function rather than fighting the cache."""
+    ps call) must never pay that per call, so the read happens once per root.
+    Keyed on the root rather than cached bare: a zero-arg cache is a global
+    keyed on nothing, and the first caller would fix the answer for every
+    caller after it. Tests substitute the zero-arg wrapper."""
     try:
-        from fno.config import load_settings
+        from fno.config import load_settings_for_repo
 
-        override = load_settings().agents.footprint_sustained_cpu_cores
+        override = load_settings_for_repo(root).agents.footprint_sustained_cpu_cores
     except Exception:  # noqa: BLE001 - a broken settings value degrades, not dies
         return None
     return float(override) if override is not None and override > 0 else None
+
+
+def _footprint_cpu_override() -> float | None:
+    """The cwd-rooted read; the seam tests and callers substitute."""
+    return _footprint_cpu_override_at(Path.cwd())
 
 
 def sustained_cpu_threshold(capacity_cores: int | None = None) -> float:
