@@ -168,7 +168,8 @@ is_code_payload() {
   esac
 }
 
-if [[ "$PROVIDER" == "codex" && "$YOLO" -eq 0 ]] && is_code_payload; then
+if [[ "$PROVIDER" == "codex" && "$YOLO" -eq 0 && "$PERMISSION_MODE" != "yolo" ]] \
+  && is_code_payload; then
   fail "Codex code payloads require an unsandboxed launch so target init can write shared .git metadata. Pass -Y/--yolo; no worker launched"
 fi
 

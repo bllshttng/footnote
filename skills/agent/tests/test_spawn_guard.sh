@@ -80,6 +80,13 @@ ok 'codex code without -Y -> failed' "$(field "$out")" 'failed'
 has 'codex code refusal names -Y' "$out" 'Pass -Y'
 no  'codex code refusal minted no registry row' "$(calllog)" 'agents spawn'
 
+# --- codex permission-mode yolo -> equivalent unsandboxed launch ------------
+out="$(run --name codex-code-permission-yolo --provider codex \
+  --permission-mode yolo --payload-mode passthrough --message '$fno:target x-816b')"
+ok 'codex permission-mode yolo -> launched' "$(field "$out")" 'launched'
+no  'codex permission-mode yolo did not refuse' "$out" 'Pass -Y/--yolo'
+has 'codex permission-mode yolo spawned' "$(calllog)" 'agents spawn'
+
 # --- dispatchable -> proceeds to spawn, honest launched receipt --------------
 out="$(STUB_VERDICT='{"verdict":"dispatchable","reservation_key":"dispatch:'"$NODE"'","reservation_holder":"dispatch-skill:1"}' \
   run --name w1 --provider claude --message '/target x' --node "$NODE")"
