@@ -769,9 +769,12 @@ def _report_deprecated_dispatch_harness() -> None:
     for candidate, scope_flag, scope, legacy in _deprecated_dispatch_file_rows():
         if "harness" not in legacy:
             continue
-        agents = scope.get("agents") if isinstance(scope.get("agents"), dict) else {}
-        profiles = agents.get("profiles") if isinstance(agents.get("profiles"), dict) else {}
-        target_profile = profiles.get("target") if isinstance(profiles.get("target"), dict) else {}
+        raw_agents = scope.get("agents")
+        agents = raw_agents if isinstance(raw_agents, dict) else {}
+        raw_profiles = agents.get("profiles")
+        profiles = raw_profiles if isinstance(raw_profiles, dict) else {}
+        raw_target = profiles.get("target")
+        target_profile = raw_target if isinstance(raw_target, dict) else {}
         if "provider" in target_profile:
             typer.echo(
                 f"warn: {candidate} still sets the deprecated `dispatch.harness`, "
