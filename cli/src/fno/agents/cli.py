@@ -653,7 +653,12 @@ def _release_dispatch_claims(*claims) -> None:
             continue
         key, holder = pair
         try:
-            release_claim(key, holder, root=claims_root_for(key))
+            release_claim(
+                key,
+                holder,
+                root=claims_root_for(key),
+                sync_graph_mirror=key.startswith("node:"),
+            )
         except Exception as exc:  # noqa: BLE001 - must not mask the real error
             print(
                 f"WARNING: could not release {key} held by {holder} ({exc}); "

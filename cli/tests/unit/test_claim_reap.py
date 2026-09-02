@@ -10,6 +10,7 @@ nothing about the leak that was measured.
 """
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -31,6 +32,7 @@ from fno.claims.core import (
     list_claims_with_counts,
     reap_dead_claims,
     refresh_claim,
+    release_claim,
 )
 from fno.claims.io import archive_claim, claim_path, claims_dir, read_claim_file, serialize_claim
 from fno.claims.staleness import classify_for_sweep, is_provably_dead, now_ms
@@ -275,6 +277,55 @@ class TestReapDeadClaims:
         expired = list((claims_dir(tmp_path) / ".expired").glob("*.lock"))
         assert len(expired) == 1, "the file must be present under .expired/"
         assert expired[0].name.startswith("node%3Ax-killed."), expired[0].name
+
+
+    def test_AC3_HP_confirmed_node_release_clears_configured_graph_mirror(
+        self, tmp_path, monkeypatch
+    ):
+        """A confirmed explicit node release is the graph mirror clear trigger."""
+        node_id = "x-release-mirror"
+        holder = "target-session:release-mirror"
+        graph_path = tmp_path / "configured-graph.json"
+        graph_path.write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "id": node_id,
+                            "title": "Release mirror",
+                            "plan_path": "plans/release-mirror.md",
+                            "locked_by": holder,
+                            "session_id": holder,
+                            "claimed_at": "2026-01-01T00:00:00+00:00",
+                            "status": "in_progress",
+                        }
+                    ]
+                }
+            )
+            + "\n"
+        )
+        monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
+        monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
+
+        claim = acquire_claim(f"node:{node_id}", holder, pid=os.getpid(), root=tmp_path)
+        assert claim_status(claim.key, root=tmp_path)["state"] == "live"
+        before = json.loads(graph_path.read_text())["entries"][0]
+        assert before["locked_by"] == holder
+        assert before["session_id"] == holder
+
+        released = release_claim(
+            claim.key,
+            holder,
+            root=tmp_path,
+            sync_graph_mirror=True,
+        )
+
+        assert isinstance(released, Claim)
+        assert claim_status(claim.key, root=tmp_path)["state"] == "free"
+        after = json.loads(graph_path.read_text())["entries"][0]
+        assert after["locked_by"] is None
+        assert after["session_id"] is None
+        assert after["claimed_at"] is None
 
     def test_AC2_FR_both_roots_swept_in_one_run(self, tmp_path):
         root_a = tmp_path / "a"

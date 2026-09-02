@@ -72,14 +72,13 @@ def test_live_claim_read_can_fail_open_for_display_or_raise_for_mutation(monkeyp
         live_claimed_node_ids(strict=True)
 
 
-def test_baseline_recompute_clears_live_in_review_graph_mirror(
+def test_live_in_review_old_lock_preserves_mirror_until_claim_transition(
     tmp_path, monkeypatch
 ):
-    """Baseline pin for the pre-Task-2.2 live-owner loss defect.
+    """A live claim keeps its graph mirror until lifecycle confirmation.
 
-    A real live ``node:<id>`` claim does not stop today's clock-only
-    recompute path from clearing the graph mirror. Task 2.2 should invert the
-    mirror assertions while preserving the positive live-claim assertion.
+    The old graph timestamp is diagnostic only; the positive claim remains the
+    authority for owner preservation.
     """
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     node_id = "ab-live-review-owner"
@@ -102,9 +101,10 @@ def test_baseline_recompute_clears_live_in_review_graph_mirror(
         result = recompute_statuses([entry])
 
         assert result[0]["status"] == "in_review"
-        assert result[0]["locked_by"] is None
-        assert result[0]["session_id"] is None
-        assert result[0]["claimed_at"] is None
+        assert result[0]["locked_by"] == holder
+        assert result[0]["session_id"] == holder
+        assert result[0]["claimed_at"] == old
+        assert result[0]["ownership_defect"]["liveness"] == "unverified"
         assert claim_status(claim.key)["state"] == "live"
     finally:
         assert release_claim(claim.key, holder) is not None
@@ -305,8 +305,8 @@ def test_ac1_hp_recompute_claimed():
     assert result[0]["status"] == "in_progress"
 
 
-def test_ac1_hp_recompute_stale_lock_cleared():
-    """AC1-HP: stale lock is cleared and entry reverts to ready."""
+def test_ac3_err_recompute_stale_lock_preserved_until_claim_transition():
+    """Graph age alone cannot clear an owner awaiting claim authority."""
     old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
     entries = [
         _entry(
@@ -323,10 +323,11 @@ def test_ac1_hp_recompute_stale_lock_cleared():
     ]
     result = recompute_statuses(entries)
     e = result[0]
-    assert e["status"] == "ready"
-    assert e["session_id"] is None
-    assert e["claimed_at"] is None
-    assert "ownership_defect" not in e
+    assert e["status"] == "in_progress"
+    assert e["session_id"] == "old-sess"
+    assert e["locked_by"] == "old-sess"
+    assert e["claimed_at"] == old
+    assert e["ownership_defect"]["liveness"] == "unverified"
 
 
 def test_old_lock_on_in_progress_node_is_unknown_and_preserved():
@@ -352,6 +353,24 @@ def test_old_lock_on_in_progress_node_is_unknown_and_preserved():
     assert entry["locked_by"] == "worker-unverified"
     assert entry["session_id"] == "worker-unverified"
     assert entry["claimed_at"] == old
+
+
+@pytest.mark.parametrize("claimed_at", [None, "not-a-date"])
+def test_unreadable_lock_timestamp_preserves_owner_with_defect(claimed_at):
+    """Missing and malformed lock times are unknown, never clear signals."""
+    entry = _entry(
+        "ab-unreadable-lock",
+        locked_by="worker-unverified",
+        session_id="worker-unverified",
+        claimed_at=claimed_at,
+    )
+
+    result = recompute_statuses([entry])[0]
+
+    assert result["status"] == "in_progress"
+    assert result["locked_by"] == "worker-unverified"
+    assert result["session_id"] == "worker-unverified"
+    assert result["ownership_defect"]["kind"] == "lock-timestamp-unreadable"
 
 
 def test_old_lock_on_legacy_claimed_node_is_migrated_and_preserved():
@@ -507,12 +526,10 @@ def test_in_review_survives_stale_claim():
     e = _entry("ab-prreview2", pr_number=358, session_id="dead-sess", claimed_at=old)
     result = recompute_statuses([e])
     assert result[0]["status"] == "in_review"
-    # The stale lock must still be reaped (not leaked): otherwise
-    # _normalize_lock_fields re-mirrors it into session_id at done time and
-    # clobbers merge-time provenance.
-    assert result[0]["session_id"] is None
-    assert result[0]["claimed_at"] is None
-    assert result[0]["locked_by"] is None
+    assert result[0]["session_id"] == "dead-sess"
+    assert result[0]["claimed_at"] == old
+    assert result[0]["locked_by"] == "dead-sess"
+    assert result[0]["ownership_defect"]["liveness"] == "unverified"
 
 
 def test_in_review_reachable_through_typed_entry():

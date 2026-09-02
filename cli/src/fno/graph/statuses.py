@@ -191,22 +191,31 @@ def readiness_status(entry: dict, id_to_entry: dict[str, dict]) -> tuple[str | N
     return "blocked", f"{kind}:{blocker_id}"
 
 
-def is_stale_lock(task: dict) -> bool:
-    """Check if a feature's claim has expired (>TTL hours)."""
+def _lock_timestamp_quality(task: dict) -> str:
+    """Classify the graph lock timestamp without deciding owner death."""
     lock_time_str = task.get("claimed_at")
     # locked_by-first; tolerate a raw legacy (session_id-only) task not yet
     # normalized (read-only staleness check, so no resurrection risk).
     if not (task.get("locked_by") or task.get("session_id")):
-        return False
+        return "fresh"
     if not lock_time_str:
-        return False
+        return "unreadable"
     try:
         lock_time = datetime.fromisoformat(lock_time_str.replace("Z", "+00:00"))
         now = datetime.now(timezone.utc)
         hours_elapsed = (now - lock_time).total_seconds() / 3600
-        return hours_elapsed > LOCK_TTL_HOURS
+        return "old" if hours_elapsed > LOCK_TTL_HOURS else "fresh"
     except (ValueError, TypeError):
-        return True  # Unparseable timestamp = treat as stale
+        return "unreadable"
+
+
+def is_stale_lock(task: dict) -> bool:
+    """Compatibility bool for callers that only need an old/bad timestamp."""
+    quality = _lock_timestamp_quality(task)
+    # Preserve the historical malformed-value result for this compatibility
+    # helper. Missing data remains false here; recompute_statuses uses the
+    # diagnostic quality directly so both unreadable shapes preserve owners.
+    return quality == "old" or (quality == "unreadable" and bool(task.get("claimed_at")))
 
 
 def is_open_phase_row(row: object, phase: str) -> bool:
@@ -341,25 +350,23 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
             e["status"] = "deferred"
             continue
 
-        # Reap a stale lock BEFORE the in_review branch: a PR-bearing node with
-        # an expired claim (the stampede case) must still shed the dead owner,
-        # else `_normalize_lock_fields` later mirrors the stale `locked_by` back
-        # into `session_id` at canonicalize/done time and overwrites the
-        # merge-time provenance. A persisted in-progress state is different:
-        # claimed_at age alone cannot prove the owner died, so preserve that
-        # pointer until an explicit repair replaces or clears it.
-        if e.get("locked_by") and is_stale_lock(e):
-            if e.get("status") == "in_progress":
+        # A graph timestamp is diagnostic only. Claim release/reap is the
+        # liveness authority; age, missing data, or malformed data cannot clear
+        # an owner that may still be working. Preserve the mirror and record
+        # the uncertainty until that lifecycle emits a confirmed transition.
+        if e.get("locked_by"):
+            timestamp_quality = _lock_timestamp_quality(e)
+            if timestamp_quality in {"old", "unreadable"}:
                 e["ownership_defect"] = {
-                    "kind": "stale-active-owner-unverified",
+                    "kind": (
+                        "stale-active-owner-unverified"
+                        if timestamp_quality == "old"
+                        else "lock-timestamp-unreadable"
+                    ),
                     "node_id": e["id"],
                     "holder": e["locked_by"],
                     "liveness": "unverified",
                 }
-            else:
-                e["locked_by"] = None
-                e["session_id"] = None  # keep the one-release mirror in sync
-                e["claimed_at"] = None
 
         # A node carrying a PR that has not closed (merge sets completed_at, so
         # `done` wins above) is IN REVIEW: hold it out of the dispatch pool
