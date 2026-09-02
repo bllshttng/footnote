@@ -435,15 +435,17 @@ FNO_SPAWN_SIGNATURE_FLAGS: tuple[str, ...] = (
 )
 
 
-def _argv_of_pid(pid: int) -> Optional[str]:
-    """One pane child's argv WITH its direct children's, or None when ps
-    cannot answer. Never raises.
+def _process_tree() -> dict[int, str]:
+    """One `ps -axo` snapshot: pid -> that process's argv joined with every
+    DESCENDANT's argv, or an empty dict when ps cannot answer. Never raises.
 
-    The tree read, not just the child: a pane's child_pid is usually the pane
-    SHELL and the harness runs one level under it, so a child-only probe
-    reads `/bin/zsh` for a pane holding a live fno worker and direction 2
-    never fires. `--dangerously-skip-permissions` on the shell line is rare;
-    on the harness line under it, it is the spawn signature itself.
+    Two reasons for the shape. The tree read, not just the child: a pane's
+    child_pid is usually the pane SHELL and the harness runs under it, so a
+    child-only probe reads `/bin/zsh` for a pane holding a live fno worker
+    and direction 2 never fires. And transitive, not one level: a launcher
+    script between the shell and the harness must not hide the signature
+    either. One snapshot serves every pane in a listing, so the cost is one
+    process-table read per verb run, not per pane.
     """
     import subprocess
 
@@ -455,11 +457,11 @@ def _argv_of_pid(pid: int) -> Optional[str]:
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return {}
     if out.returncode != 0:
-        return None
-    own: list[str] = []
-    children: list[str] = []
+        return {}
+    args_by_pid: dict[int, str] = {}
+    children_of: dict[int, list[int]] = {}
     for line in out.stdout.splitlines():
         parts = line.strip().split(None, 2)
         if len(parts) < 3:
@@ -469,12 +471,23 @@ def _argv_of_pid(pid: int) -> Optional[str]:
             ppid, child = int(ppid_s), int(pid_s)
         except ValueError:
             continue
-        if child == pid:
-            own.append(args)
-        elif ppid == pid:
-            children.append(args)
-    lines = own + children
-    return "\n".join(lines).strip() or None
+        args_by_pid[child] = args
+        children_of.setdefault(ppid, []).append(child)
+    trees: dict[int, str] = {}
+    for pid, own in args_by_pid.items():
+        lines = [own]
+        stack = list(children_of.get(pid, ()))
+        seen: set[int] = set()
+        while stack:
+            descendant = stack.pop()
+            if descendant in seen:
+                continue
+            seen.add(descendant)
+            if descendant in args_by_pid:
+                lines.append(args_by_pid[descendant])
+            stack.extend(children_of.get(descendant, ()))
+        trees[pid] = "\n".join(lines).strip()
+    return trees
 
 
 def pane_identity_crosscheck(
@@ -495,7 +508,9 @@ def pane_identity_crosscheck(
     registry or the mux.
     """
     if argv_of is None:
-        argv_of = _argv_of_pid
+        # One process-table read for the whole listing, not one per pane.
+        tree = _process_tree()
+        argv_of = tree.get
 
     pane_by_id = {p.get("pane_id"): p for p in panes}
     rows_with_mux = [r for r in rows if getattr(r, "mux", None)]

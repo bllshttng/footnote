@@ -224,3 +224,28 @@ def test_every_signature_flag_alone_raises_the_mismatch(flag) -> None:
         panes, [], "main", argv_of=lambda pid: f"claude --model x {flag}"
     )
     assert len(out["pane_mismatches"]) == 1
+
+
+def test_process_tree_walks_transitive_descendants(monkeypatch) -> None:
+    """The snapshot joins a pane's whole descendant subtree, not just direct
+    children: shell -> launcher -> codex must still carry the signature."""
+    import subprocess
+
+    import fno.agents.reachability as r
+
+    fake = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=(
+            "    1  100 /bin/zsh\n"
+            "  100  101 /bin/sh -c launcher\n"
+            "  101  102 codex --dangerously-bypass-approvals-and-sandbox\n"
+        ),
+        stderr="",
+    )
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: fake)
+    tree = r._process_tree()
+    assert "--dangerously-bypass-approvals-and-sandbox" in tree[100]
+    assert "codex" in tree[100]
+    # A pid with no descendants carries only its own argv.
+    assert tree[102].startswith("codex")
