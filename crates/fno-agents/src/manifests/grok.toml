@@ -1,9 +1,8 @@
 # grok readiness manifest (x-fd31) - rules pinned against a live grok 1.0.13
 # [stable] TUI on 2026-09-02, replacing the reference-derived port this file
-# carried while grok was manifest-only (x-83e7). The former INERT header said
-# scrape_targets never selects grok; the capability row landed in the same
-# change, so the manifest is live-selected and every rule below is one the
-# live TUI actually painted.
+# carried while grok was manifest-only (x-83e7). The capability row landed in
+# the same change, so the manifest is live-selected and every rule below is
+# one the live TUI actually painted.
 #
 # Measured vocabulary: the idle composer carries the status bar
 # `Shift+Tab:mode | Ctrl+x:shortcuts`; while a turn runs the mode hint is
