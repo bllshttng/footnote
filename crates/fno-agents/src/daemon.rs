@@ -3522,8 +3522,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                             // read by `list`): each is minted only by a ritual
                             // that gh-confirmed MERGED, so its standing is the
                             // merge-trigger for this tick's apply pass.
-                            let mut cmd = std::process::Command::new("fno");
-                            match cmd.current_dir(root)
+                            match std::process::Command::new("fno")
+                                .current_dir(root)
                                 .args(["agents", "claim", "list", "--prefix", "reap:", "-J"])
                                 .output()
                             {
