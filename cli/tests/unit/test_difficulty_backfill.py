@@ -67,3 +67,20 @@ def test_migrate_difficulty_backfill_cli_writes_positive_sample(tmp_graph):
     row = json.loads(tmp_graph.read_text())["entries"][0]
     assert row["difficulty"] == "high"
     assert row["difficulty_history"][-1]["source"] == "backfill"
+
+
+def test_difficulty_backfill_skips_retired_model_tier_rows():
+    from fno.graph.migrations import backfill_difficulty
+
+    row = {
+        "id": "x-retired-tier",
+        "model_tier": "low",
+        "priority": "p1",
+        "difficulty": None,
+    }
+
+    receipt = backfill_difficulty([row], apply=True)
+
+    assert row["difficulty"] is None
+    assert row["model_tier"] == "low"
+    assert receipt["skipped"] == ["x-retired-tier"]

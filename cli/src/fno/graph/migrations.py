@@ -257,6 +257,9 @@ def backfill_difficulty(entries: list[dict], *, apply: bool = False) -> dict:
     planned: list[tuple[dict, str]] = []
     skipped: list[str] = []
     for row in pending:
+        if row.get("model_tier") is not None:
+            skipped.append(str(row.get("id", "?")))
+            continue
         band = _backfill_band(row)
         if band is None:
             skipped.append(str(row.get("id", "?")))
