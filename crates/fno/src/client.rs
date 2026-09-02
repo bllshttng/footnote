@@ -24455,9 +24455,14 @@ mod tests {
         assert!(
             matches!(
                 inert.as_slice(),
-                [PopupRow::Entry { label, hint, .. }] if label == "Remove" && hint == "stop first"
+                [PopupRow::Entry { label, hint, .. }]
+                    if label == "Remove"
+                        && hint == &format!(
+                            "{} stop first",
+                            crate::keys::menu_key_for("remove-row").unwrap_or_default()
+                        )
             ),
-            "exactly one greyed Remove naming its precondition: {inert:?}"
+            "exactly one greyed Remove naming its key and precondition: {inert:?}"
         );
         assert!(
             !menu.actions.contains(&super::MenuAction::Remove),
