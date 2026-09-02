@@ -3178,10 +3178,10 @@ def dispatch_spawn(
     # overlay the worker will actually launch with.
     #
     # This is ONE of the two Python spawn seams: `cmd_spawn` routes the default
-    # `pane` substrate to `dispatch_spawn_pane` and never reaches here, so the
-    # pane path calls the same helper itself. Two seams, one implementation -
-    # putting it in cli.py instead would miss every in-process caller that
-    # bypasses argument parsing.
+    # `pane` substrate to `dispatch_spawn_bounded_pane` and never reaches here,
+    # so the pane path calls the same helper itself. Two seams, one
+    # implementation - putting it in cli.py instead would miss every in-process
+    # caller that bypasses argument parsing.
     # A --resume spawn is never picked for, the same seam rule `_pick_account_at_seam`
     # applies to the CLI argv: the transcript being resumed lives under the config
     # dir it was created in, so a picked CLAUDE_CONFIG_DIR points at a directory

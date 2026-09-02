@@ -11,7 +11,8 @@ machinery:
   ``max_load_per_cpu``), the same gate every ``fno agents spawn`` passes -
   exactly one fleet ceiling, not two disjoint caps each blind to the other's
   workers (x-3f84 W5)
-- spawn: ``dispatch_spawn_pane`` (pane substrate, into THIS session)
+- spawn: ``dispatch_spawn_bounded_pane`` (pane substrate, into THIS session,
+  under the shared mux placement lease and tab-capacity cap)
 
 Never double-claims: the guard takes ``dispatch:<id>`` and the handover
 ``node:<id>`` claim, and the spawned worker's own ``fno do target start``
@@ -29,7 +30,7 @@ from typing import Optional
 
 import typer
 
-from fno.agents.mux_spawn import dispatch_spawn_pane, resolve_provenance
+from fno.agents.mux_spawn import dispatch_spawn_bounded_pane, resolve_provenance
 from fno.backlog.advance import (
     _next_node,
     _worker_agent_name,
@@ -805,8 +806,13 @@ def _dispatch_one(
             # The guard rides into the spawn as provider_gate, so the provider
             # admission the pane consumes is one the caller actually obtained
             # (AC2-EDGE) - not the ungated launch dispatch used to perform.
+            # The bounded wrapper, not a bare dispatch_spawn_pane: it holds the
+            # mux placement lease and the tab-capacity cap, the ONE placement
+            # policy every pane spawn takes - the outage successor spawn took
+            # it first and this path silently skipped both, so two spawn paths
+            # could overfill the same session in the same tick.
             if parent_id is None:
-                result = dispatch_spawn_pane(
+                result = dispatch_spawn_bounded_pane(
                     name=_worker_agent_name(node_id, slug),
                     message=message,
                     provider=spawn_harness,
@@ -818,7 +824,7 @@ def _dispatch_one(
                     provider_gate=gate,
                 )
             else:
-                result = dispatch_spawn_pane(
+                result = dispatch_spawn_bounded_pane(
                     name=_worker_agent_name(node_id, slug),
                     message=message,
                     provider=spawn_harness,
