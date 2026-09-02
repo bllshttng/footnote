@@ -86,19 +86,19 @@ def lane_rows() -> list[dict]:
     out: list[dict] = []
     for provider in sorted(set(limits) | observed):
         cap = provider_lanes_cap(limits.get(provider))
-        row: dict = {"provider": provider, "cap": cap, "holders": []}
+        lane: dict = {"provider": provider, "cap": cap, "holders": []}
         counted: set[str] = set()
         try:
-            row["count"] = provider_live_count(provider, counted)
+            lane["count"] = provider_live_count(provider, counted)
         except ProviderCountUnavailable as exc:
-            row["count"] = None
-            row["unreadable"] = str(exc)
+            lane["count"] = None
+            lane["unreadable"] = str(exc)
         else:
-            row["full"] = cap is not None and row["count"] >= cap
+            lane["full"] = cap is not None and lane["count"] >= cap
             # Holders come from the counter's own tally, never a second walk:
             # printing rows the count did not include reads as "0 of these 5".
-            row["holders"] = sorted(counted)
-        out.append(row)
+            lane["holders"] = sorted(counted)
+        out.append(lane)
     return out
 
 

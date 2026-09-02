@@ -64,7 +64,8 @@ def run_cascade(candidates: list[dict], filters: list[SelectionFilter]) -> Casca
         gone = before - after
         result.drops.append((f.name, len(gone)))
         for node_id in gone:
-            result.dropped_by.setdefault(node_id, f.name)
+            if node_id:
+                result.dropped_by.setdefault(node_id, f.name)
     result.survivors = current
     return result
 
@@ -826,10 +827,11 @@ def build_lane_fill_report(
         )
         rank = next((i for i, nid in enumerate(selected_ids) if nid == node_id), None)
         reason = reasons_by_id.get(node_id)
-        if excluded_row is not None or reason is not None:
+        dropped = reason or (excluded_row or {}).get("reason")
+        if dropped:
             asked = {
                 "id": node_id,
-                "dropped_by": reason or excluded_row.get("reason"),
+                "dropped_by": dropped,
                 "rank": None,
             }
         elif rank is not None:
