@@ -298,6 +298,11 @@ class PlanFrontmatter(BaseModel):
     priority: str | None = None
     blocks_everything: bool = False
     difficulty: str | None = None
+    # Who orchestrates the plan's remaining waves: a king reviews each
+    # dispatch (default), or target init fires join itself. Opt-in - king
+    # changes nothing, so every plan written before the key keeps its
+    # behavior.
+    orchestration: str = "king"
     blocked_by: list[str] = []
     project: str | None = None
     executor: str | None = None
@@ -376,6 +381,18 @@ class PlanFrontmatter(BaseModel):
         if band not in {"low", "medium", "high"}:
             raise ValueError("difficulty must be one of: low, medium, high")
         return band
+
+    @field_validator("orchestration", mode="before")
+    @classmethod
+    def _validate_orchestration(cls, v: Any) -> Any:
+        # Same shape as the band enum above: normalize, then refuse with a
+        # message that names the field and its legal values.
+        if v is None:
+            return "king"
+        mode = str(v).strip().lower()
+        if mode not in {"king", "mechanical"}:
+            raise ValueError("orchestration must be one of: king, mechanical")
+        return mode
 
     @model_validator(mode="after")
     def _require_difficulty_after_gate(self) -> Self:
