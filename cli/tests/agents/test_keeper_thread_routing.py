@@ -36,6 +36,15 @@ def test_grok_thread_spawn_diverts_to_python() -> None:
     )
 
 
+def test_glued_short_harness_diverts_too() -> None:
+    """``-Hgrok`` is a spelling Click parses and the Rust client does not
+    (it matches ``-H`` as an exact token), so the carve-out must read it or
+    the spawn routes to the binary and never reaches grok's lane."""
+    assert _is_keeper_thread_spawn(
+        "spawn", ["spawn", "wk-grok", "-Hgrok", "--substrate", "thread", "seed"]
+    )
+
+
 def test_sibling_keeper_harnesses_divert_too() -> None:
     """pi and cursor-agent carried the same latent gap; the predicate names
     them, not just the harness that found it."""

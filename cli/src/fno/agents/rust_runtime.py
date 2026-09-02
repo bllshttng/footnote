@@ -765,17 +765,16 @@ _ROUTE_NAMING_FLAGS = ("--route", "--provider", "-P", "--account")
 
 
 def _spawn_flag_value(args: Sequence[str], *names: str) -> Optional[str]:
-    """The value of the first of ``names`` present in ``args`` (``--f v`` or
-    ``--f=v``), or None. Scans only the fno-arg head, like every other flag scan
-    here, so a payload token can never masquerade as our flag."""
-    head = list(_args_before_argv(args))
-    for i, a in enumerate(head):
-        if a in names:
-            return head[i + 1] if i + 1 < len(head) else ""
-        for n in names:
-            if a.startswith(f"{n}="):
-                return a.split("=", 1)[1]
-    return None
+    """The value of the first of ``names`` present in ``args`` (``--f v``,
+    ``--f=v``, or the glued short ``-Hv``), or None. Scans only the fno-arg
+    head, like every other flag scan here, so a payload token can never
+    masquerade as our flag. Delegates to the ONE value-flag scanner
+    (:func:`fno.agents.spawn_defaults._flag_value`): a local copy here missed
+    the glued short form, so ``-Hgrok`` routed to the Rust client, whose own
+    parser matches ``-H`` as an exact token only."""
+    from fno.agents.spawn_defaults import _flag_value
+
+    return _flag_value(args, *names)
 
 
 def inherited_tier_remap(
