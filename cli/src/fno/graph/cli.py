@@ -3009,7 +3009,8 @@ def _intake_impl(
 
         locked_mutate_graph(_graph_path(), claim_mutator)
         typer.echo(
-            f'claimed {claim_id} via {claim_source}: "{spec["title"]}"'
+            f'linked plan to {claim_id} via {claim_source}: "{spec["title"]}" - '
+            f"take the work lock: fno do target start {claim_id}"
         )
         # Mirror nav fields onto the just-linked plan of the CLAIMED node too -
         # this branch returns early, so the append-path projection never runs.
