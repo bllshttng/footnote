@@ -66,7 +66,7 @@ Two traps carry the rest. `rpc` exits on stdin EOF mid-turn with status 0. `--pr
 
 ## Machine-readable interactive capabilities
 
-The support probe is the onboarding gate for this table. Run `fno doctor harness <name> --live` before treating a row as supported. It must produce a positive marker for every non-skipped line. A missing credential is a named `skip`, not a pass or fail. Run `scripts/ci/check-harness-capabilities-fresh.sh` alongside the honesty sweep for the three committed table copies.
+The support probe is the onboarding gate for this table. Run `fno doctor harness <name> --live` before treating a row as supported. It must produce a positive marker for every non-skipped line. A missing credential is a named `skip`, not a pass or fail. Run `scripts/ci/check-harness-capabilities-fresh.sh` alongside the honesty sweep to catch a hand edit of the generated Rust copy: the canonical table is the Python tree's, and every build regenerates the copy from it (x-244c).
 
 Run `fno agents dispatch capabilities <h> --json` to read one harness without dispatch configuration. The JSON includes versioned data for permissions, sessions, readiness, input, stop, and removal. Missing or malformed fields stop contract loading. A harness never inherits Claude defaults.
 

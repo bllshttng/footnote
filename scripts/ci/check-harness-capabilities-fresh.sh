@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
 # scripts/ci/check-harness-capabilities-fresh.sh
 #
-# Tripwire, not a sync step. `crates/fno-agents/build.rs` PRODUCES
-# cli/src/fno/agents/harness_capabilities.toml from the canonical
-# crates/fno-agents/src/harness_capabilities.toml on every build, so the only
-# way the two diverge now is a hand edit of the copy. This gate catches that.
-# The third copy, crates/fno/src/harness_capabilities.toml, is what the fno
-# crate embeds with include_str!; it lives inside the crate so the packaged
-# package builds standalone, and it is hand-synced, so it is gated too.
+# Tripwire, not a sync step. ONE canonical table is edited by humans:
+# `cli/src/fno/agents/harness_capabilities.toml` (x-244c, operator ruling
+# 2026-09-02, which collapsed the old three-copy arrangement). Every build of
+# `crates/fno-agents` PRODUCES its in-crate byte copy from the canonical
+# (`build.rs`), and `crates/fno` reads the table through the fno-agents dep
+# instead of carrying a third copy. The copy stays tracked because the
+# crates.io tarball must compile standalone, where no `cli/` exists - the
+# events_limits.toml precedent.
+#
+# The only way the copy diverges now is a hand edit of the generated file that
+# was committed without a rebuild. This gate catches that.
 #
 # Modes:
-#   (default)    compare the COMMITTED bytes of every copy
+#   (default)    compare the COMMITTED bytes of both files
 #   --worktree   compare the working-tree bytes
-#   --write      copy canonical over every copy and exit 0
+#   --write      copy canonical over the generated copy and exit 0
 #
 # Comparing HEAD by default closes an ordering hazard the producer creates: a
 # CI job that builds Rust before running this gate would resync the WORKTREE
-# copies and launder a hand edit that is still committed. HEAD is
+# copy and launder a hand edit that is still committed. HEAD is
 # order-independent.
 #
 # Exit codes: 0 fresh, 1 diverged, 2 misuse (a file is missing).
@@ -27,10 +31,9 @@ gate_parse_mode "$@"
 gate_resolve_repo_root
 MODE="$GATE_MODE"
 
-CANONICAL_REL="crates/fno-agents/src/harness_capabilities.toml"
+CANONICAL_REL="cli/src/fno/agents/harness_capabilities.toml"
 COPY_RELS=(
-  "cli/src/fno/agents/harness_capabilities.toml"
-  "crates/fno/src/harness_capabilities.toml"
+  "crates/fno-agents/src/harness_capabilities.toml"
 )
 
 CANONICAL="$REPO_ROOT/$CANONICAL_REL"
@@ -42,7 +45,7 @@ fi
 
 for rel in "${COPY_RELS[@]}"; do
   if [[ ! -f "$REPO_ROOT/$rel" ]]; then
-    echo "ERROR: copy harness_capabilities.toml missing at $rel" >&2
+    echo "ERROR: generated harness_capabilities.toml copy missing at $rel" >&2
     exit 2
   fi
 done
@@ -51,7 +54,7 @@ if [[ "$MODE" == "write" ]]; then
   for rel in "${COPY_RELS[@]}"; do
     cp "$CANONICAL" "$REPO_ROOT/$rel"
   done
-  echo "harness capabilities copies written from $CANONICAL_REL"
+  echo "harness capabilities generated copy written from $CANONICAL_REL"
   exit 0
 fi
 
@@ -91,9 +94,9 @@ for rel in "${COPY_RELS[@]}"; do
     RIGHT="$REPO_ROOT/$rel"
   fi
   if ! cmp -s "$LEFT" "$RIGHT"; then
-    echo "ERROR: harness_capabilities.toml copies have diverged:" >&2
+    echo "ERROR: harness_capabilities.toml generated copy has diverged from the canonical:" >&2
     echo "  canonical: $CANONICAL_REL" >&2
-    echo "  copy:      $rel" >&2
+    echo "  generated: $rel" >&2
     echo "  compared:  $SCOPE bytes" >&2
     failed=1
   fi
@@ -102,12 +105,10 @@ done
 
 if [[ "$failed" != "0" ]]; then
   echo "" >&2
-  echo "The copies are kept in step with the canonical file. To resync, run:" >&2
+  echo "The generated copy is produced from the canonical file. To resync, run:" >&2
   echo "  cargo build -p fno-agents" >&2
   echo "or, with no cargo toolchain:" >&2
   echo "  bash scripts/ci/check-harness-capabilities-fresh.sh --write" >&2
-  echo "  cp $CANONICAL_REL ${COPY_RELS[0]}" >&2
-  echo "  cp $CANONICAL_REL ${COPY_RELS[1]}" >&2
   exit 1
 fi
 

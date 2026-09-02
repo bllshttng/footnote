@@ -272,10 +272,8 @@ fn stream_fixtures_map_into_the_sealed_vocabulary() {
     ));
 }
 
-#[test]
-fn capability_copies_are_byte_identical() {
-    assert_eq!(
-        CAPABILITY_TOML,
-        include_str!("../../../cli/src/fno/agents/harness_capabilities.toml")
-    );
-}
+// The old `capability_copies_are_byte_identical` twin test is gone (x-244c,
+// operator ruling 2026-09-02): the embedded table is a build-generated copy
+// of the Python-tree canonical, so the byte check degenerated into comparing
+// the file with itself. `check-harness-capabilities-fresh.sh` watches the
+// generated copy instead.

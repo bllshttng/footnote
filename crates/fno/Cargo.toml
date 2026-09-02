@@ -24,6 +24,13 @@ name = "fno"
 path = "src/main.rs"
 
 [dependencies]
+# x-244c (operator ruling 2026-09-02): the capability table lives once, in the
+# Python tree (cli/src/fno/agents/harness_capabilities.toml); fno-agents
+# generates its in-crate copy from it, and this crate reads the table through
+# that dep instead of carrying a third copy. Version is an exact pin: the
+# crates publish in lockstep (one release number), and a dry-run of this crate
+# resolves the published fno-agents, so a bump must land fno-agents first.
+fno-agents = { path = "../fno-agents", version = "=0.3.1" }
 # `fno mux serve --web` (x-6a14): the read-only web bridge's HTTP + WebSocket
 # surface. axum handles the untrusted-input HTTP parsing and WS handshake so
 # the web-facing bridge does not hand-roll that security-sensitive code.
