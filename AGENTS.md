@@ -58,7 +58,7 @@ An absence has three explanations: the real outcome, "the instrument never ran",
 
 ### Codex RPC
 
-`fno agents mail send <full-session-id> --raw '/review'` or `'/code-review'` fires daemon RPC. Other verbs: `fno mux pane send --raw --submit`. Read pane for silent verbs.
+`fno agents mail send <full-session-id> --raw '/review'` fires daemon RPC: NATIVE verbs only. --raw types verbatim. fno verbs want $fno:target. A /fno: reads as prose.
 
 - specimens: mail_inject.rs, mux_cli.rs
 - graduates-to: submit receipt
