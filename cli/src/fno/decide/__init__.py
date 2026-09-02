@@ -419,15 +419,22 @@ def record_decision(
     provenance = _resolve_decider(decided_by, authority_source, origin=origin)
 
     # A waiver subject is operator-evidence-only (see WAIVER_SUBJECT_PREFIX).
-    # The check reads the RESOLVED authority, never the caller's claim, so the
-    # one thing it keys on is the thing the identity walk proved.
+    # The family is the exact standing subject and the colon-delimited scoped
+    # form, the two shapes the gate reads: a free-form law subject that merely
+    # begins with the text (review-coverage-waiver-policy) is ordinary law and
+    # stays open to every authority. The check reads the RESOLVED authority,
+    # never the caller's claim, so the one thing it keys on is the thing the
+    # identity walk proved.
+    subject_text = str(subject or "")
     if (
-        subject
-        and str(subject).startswith(WAIVER_SUBJECT_PREFIX)
+        (
+            subject_text == WAIVER_SUBJECT_PREFIX
+            or subject_text.startswith(WAIVER_SUBJECT_PREFIX + ":")
+        )
         and provenance.authority_source != "operator"
     ):
         raise WaiverAuthorityRefusedError(
-            subject, provenance.authority_source
+            subject_text, provenance.authority_source
         )
 
     if supersedes:

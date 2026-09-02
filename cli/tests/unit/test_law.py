@@ -559,3 +559,30 @@ def test_library_refuses_chat_attested_at_both_waiver_subject_shapes(
         # catch RefusedAuthorityError keep working.
         assert issubclass(WaiverAuthorityRefusedError, RefusedAuthorityError)
     assert index.read_text() == ""
+
+
+def test_a_lookalike_subject_is_ordinary_law(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The family is the exact standing subject and the colon-delimited
+    scoped form, the two shapes the gate reads. A free-form law subject that
+    merely begins with the text records under chat_attested like any other
+    ordinary law, and the refusal never touches it."""
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+
+    result = _run(
+        [
+            "set",
+            "review-coverage-waiver-policy",
+            "Waiver requests route through the operator",
+            "--rationale",
+            "policy about waivers, not a waiver",
+        ]
+    )
+
+    assert result.exit_code == LAW_RECORDED_EXIT, result.output
+    rows = [json.loads(line) for line in index.read_text().splitlines() if line.strip()]
+    assert len(rows) == 1
+    assert rows[0]["data"]["subject"] == "review-coverage-waiver-policy"
+    assert rows[0]["data"]["authority_source"] == "chat_attested"
