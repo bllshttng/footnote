@@ -113,14 +113,20 @@ def _write_quick_plan(
     tmp_path: Path,
     title: str = "New plan title",
     *,
-    claims: str | None = None,
+    claims: str | list[str] | None = None,
+    node: str | None = None,
     difficulty: str | None = None,
     created: str = "2026-05-05T04:35",
 ) -> Path:
     plan = tmp_path / "plan.md"
     fm_lines = ["---"]
     if claims:
-        fm_lines.append(f"claims: {claims}")
+        if isinstance(claims, list):
+            fm_lines.append(f"claims: [{', '.join(claims)}]")
+        else:
+            fm_lines.append(f"claims: {claims}")
+    if node:
+        fm_lines.append(f"node: {node}")
     if difficulty:
         fm_lines.append(f"difficulty: {difficulty}")
     fm_lines += [f"created: {created}", "---"]
@@ -508,7 +514,86 @@ def test_resolve_claim_invalid_frontmatter_value_ignored(fixture_graph, tmp_path
     Only the CLI path raises on malformed input; frontmatter is best-effort
     parsed and a non-matching value falls through to the no-claim path.
     """
-    plan = _write_quick_plan(tmp_path, claims="not-an-id")
+    for bad in ("not-an-id", "TBD"):
+        plan = _write_quick_plan(tmp_path, claims=bad)
+        entries = _read_entries(fixture_graph)
+        node, source = _resolve_claim(None, str(plan), entries)
+        assert node is None
+        assert source is None
+
+
+def test_resolve_claim_reads_node_key_when_claims_absent(fixture_graph, tmp_path):
+    """`node` is the required singular claim field, so a plan carrying only it
+    claims that node. The old reader read only `claims:`, so every node-only
+    plan resolved to no claim and intake minted a duplicate node instead."""
+    plan = _write_quick_plan(tmp_path, node="ab-1dea1234")
+    entries = _read_entries(fixture_graph)
+    node, source = _resolve_claim(None, str(plan), entries)
+    assert node is not None
+    assert node["id"] == "ab-1dea1234"
+    assert source == "frontmatter"
+
+
+def test_resolve_claim_reads_single_element_claims_list(fixture_graph, tmp_path):
+    """A one-element `claims:` list is a claim, not unsupported frontmatter
+    that silently resolves to nothing."""
+    plan = _write_quick_plan(tmp_path, claims=["ab-1dea1234"])
+    entries = _read_entries(fixture_graph)
+    node, source = _resolve_claim(None, str(plan), entries)
+    assert node is not None
+    assert node["id"] == "ab-1dea1234"
+    assert source == "frontmatter"
+
+
+def test_resolve_claim_dedupes_node_and_claims_naming_the_same_id(fixture_graph, tmp_path):
+    """`node:` and `claims:` carrying the same id is one claim, not two - the
+    shared parser returns a set, so the deprecated duplicate key absorbs."""
+    plan = _write_quick_plan(tmp_path, node="ab-1dea1234", claims="ab-1dea1234")
+    entries = _read_entries(fixture_graph)
+    node, source = _resolve_claim(None, str(plan), entries)
+    assert node is not None
+    assert node["id"] == "ab-1dea1234"
+
+
+def test_resolve_claim_refuses_two_distinct_ids_across_node_and_claims(fixture_graph, tmp_path):
+    """A plan file is one delivery unit (one plan, one PR, one node), so two
+    well-formed ids across `node:` and `claims:` refuse, naming every id read
+    and the --claims flag that overrides. Silence here is how a duplicate node
+    gets minted while both named nodes stay unclaimed."""
+    plan = _write_quick_plan(tmp_path, node="ab-1dea1234", claims=["ab-0fff9999"])
+    entries = _read_entries(fixture_graph)
+    with pytest.raises(ValueError) as exc:
+        _resolve_claim(None, str(plan), entries)
+    msg = str(exc.value)
+    assert "ab-1dea1234" in msg and "ab-0fff9999" in msg
+    assert "--claims" in msg
+
+
+def test_resolve_claim_refuses_two_element_claims_list(fixture_graph, tmp_path):
+    plan = _write_quick_plan(tmp_path, claims=["ab-1dea1234", "ab-0fff9999"])
+    entries = _read_entries(fixture_graph)
+    with pytest.raises(ValueError) as exc:
+        _resolve_claim(None, str(plan), entries)
+    msg = str(exc.value)
+    assert "ab-1dea1234" in msg and "ab-0fff9999" in msg
+    assert "--claims" in msg
+
+
+def test_resolve_claim_research_assertion_dicts_claim_nothing(fixture_graph, tmp_path):
+    """`claims:` overloaded as research assertions (a list of dicts) declares
+    no node claim: the shared parser filters on element type, so behavior is
+    unchanged - no claim, and no refusal either."""
+    plan = tmp_path / "research.md"
+    plan.write_text(
+        "---\n"
+        "claims:\n"
+        "  - id: c1\n"
+        "    text: the reader drops list-shaped claims\n"
+        "    verdict: refuted\n"
+        "created: 2026-05-05T04:35\n"
+        "---\n# Research\n\n"
+        f"{_SURFACE}\n\nBody.\n"
+    )
     entries = _read_entries(fixture_graph)
     node, source = _resolve_claim(None, str(plan), entries)
     assert node is None
@@ -595,6 +680,25 @@ def test_intake_with_frontmatter_claim_updates_idea_node(fixture_graph, tmp_path
     assert target["title"] == "Backlog intake honors plan claims (final)"
     # claimed_at is reset to None as part of the idea -> ready promotion.
     assert target["claimed_at"] is None
+
+
+def test_intake_with_node_only_frontmatter_claims_idea_node(fixture_graph, tmp_path, capsys):
+    """`node:` is the required singular claim field, so a plan carrying only it
+    binds the existing idea node in place. The old reader ignored the key, so
+    intake minted a duplicate node and left the named idea unclaimed."""
+    plan = _write_quick_plan(
+        tmp_path,
+        title="Node-only frontmatter claims in place",
+        node="ab-1dea1234",
+    )
+    _intake_impl(plan_paths=[str(plan)])
+    capsys.readouterr()
+    entries = _read_entries(fixture_graph)
+    # No new node appended; the named idea node took the binding.
+    assert len(entries) == 3
+    target = next(e for e in entries if e["id"] == "ab-1dea1234")
+    assert target["plan_path"] == str(plan)
+    assert target["title"] == "Node-only frontmatter claims in place"
 
 
 def test_intake_claim_records_blueprint_difficulty(fixture_graph, tmp_path, capsys):

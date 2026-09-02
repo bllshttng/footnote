@@ -1043,22 +1043,36 @@ def _resolve_claim(
     the CLI flag is set, the frontmatter is not read - matches operator
     workflows where the plan may not have parseable frontmatter at all.
 
+    Frontmatter is read through ``plan_claims``, the single parser for this
+    fact, so every claim spelling the other readers accept (``claims:`` as a
+    scalar or a list, and the required ``node:`` key) resolves identically
+    here. The parser accepts any non-empty string, so its output is filtered
+    through ``is_wellformed_node_id`` first: that tolerance is what keeps a
+    frontmatter typo from becoming a claim that then blocks intake.
+
     Raises:
         ValueError: when the supplied id is malformed or names a node that
             does not exist on the graph. Malformed frontmatter values are
             silently ignored (treated as no claim) so an unrelated typo in
             an existing plan never blocks intake; the CLI flag is the
-            authoritative path and is strict.
+            authoritative path and is strict. Two or more DISTINCT
+            well-formed ids across ``node:``/``claims:`` refuse loudly: a
+            plan file is one delivery unit, so the silence that claims
+            nothing (and mints a duplicate) would be the worse failure.
     """
     fm_claim: str | None = None
     if cli_claim is None:
-        fm = _read_plan_frontmatter(plan_path)
-        fm_claim_raw = fm.get("claims")
-        if isinstance(fm_claim_raw, str):
-            stripped = fm_claim_raw.strip()
-            if is_wellformed_node_id(stripped):
-                fm_claim = stripped
-            # Malformed frontmatter -> treat as "no claim", do not raise.
+        claimed = {c for c in plan_claims(plan_path) if is_wellformed_node_id(c)}
+        if len(claimed) > 1:
+            raise ValueError(
+                f"plan {plan_path} names {len(claimed)} nodes across node:/claims: "
+                f"({', '.join(sorted(claimed))}); a plan file is one delivery unit, "
+                f"one plan is one PR is one node; pass --claims <id> to name the "
+                f"one node this plan claims"
+            )
+        if claimed:
+            fm_claim = claimed.pop()
+        # Every remaining unreadable frontmatter shape -> "no claim", no raise.
 
     raw = (cli_claim or fm_claim or "").strip()
     if not raw:
