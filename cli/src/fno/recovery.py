@@ -65,7 +65,7 @@ import shlex
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 from fno import _subprocess_util
 from fno.agents.harnesses.claude import ProviderSocketError

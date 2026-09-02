@@ -66,9 +66,12 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)["source"]
-    assert payload["declared_count"] == 48
+    # v25 added the three spawn-stamped route-identity fields
+    # (route_provider_id, model_name, account_record_id): 45 -> 48 declared,
+    # all accounted as storage_only in schemas/agents-list-row.json.
+    assert payload["declared_count"] == 51
     assert payload["required_count"] == 41
-    assert payload["accounted_count"] == 48
+    assert payload["accounted_count"] == 51
     assert payload["known_gaps"] == {}
 
 

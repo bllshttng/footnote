@@ -555,6 +555,17 @@ def production_handoff_dependencies(
         release_claim(key, holder=holder, root=claims_root_for(key), strict=True)
 
     def read_snapshot(request: HandoffRequest) -> HandoffSnapshot:
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() != "graph":
+            # The graph read below verifies the node record the handoff moves.
+            # Under an external tracker backend that record lives elsewhere, so
+            # the store-backed verification (and the whole leg) stands down
+            # rather than read a store it does not understand.
+            raise ValueError(
+                "provider handoff requires the graph tracker backend; "
+                f"active backend is {active_backend_name()!r}"
+            )
         matches = [
             entry for entry in load_registry()
             if entry.session_id == request.source_row_id
