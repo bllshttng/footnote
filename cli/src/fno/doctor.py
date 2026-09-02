@@ -1871,12 +1871,13 @@ def _blockers(result: dict[str, Any]) -> list[str]:
     """The findings that mean the fleet will misbehave, in the order a new
     user should act on them. Pure: reads only the assembled result dict.
 
-    The set is not a taste call. Three of these already flip doctor's exit
-    code (staleness, dead LaunchAgents, archive id collisions). The other
-    three fail silently: a low fd limit starves every spawned worker while
-    the login shell reads healthy, a hook that cannot launch fails open with
-    no signal, and a stale plugin cache runs pre-HEAD hook bytes. Everything
-    else doctor prints is advisory and stays in the advisory stream.
+    The set is not a taste call. Four of these already flip doctor's exit
+    code (staleness, source-checkout lag, dead LaunchAgents, archive id
+    collisions). The other three fail silently: a low fd limit starves every
+    spawned worker while the login shell reads healthy, a hook that cannot
+    launch fails open with no signal, and a stale plugin cache runs pre-HEAD
+    hook bytes. Everything else doctor prints is advisory and stays in the
+    advisory stream.
     """
     blockers: list[str] = []
 

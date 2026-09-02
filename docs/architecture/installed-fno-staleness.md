@@ -25,7 +25,7 @@ For the Rust side, `doctor` reports which `fno-agents` binary `auto` mode resolv
 
 Plus an advisory **mux front-door** check: now that the Rust mux binary (`crates/fno`) is meant to own `fno` on PATH, `doctor` reports whether it does. `mux_front_door` is `active` (mux cargo-installed and `fno` on PATH resolves to it), `shadowed` (installed but a Python `fno-py`, or nothing, wins PATH), or `not-installed`. It never changes the status or exit code. A front-door setup problem is distinct from source-vs-installed staleness.
 
-Flags: `--json` emits one stdout object and sends human text to stderr. The object carries status, revision, binary, and mux-front-door fields. For Python staleness, `--fix` delegates to `fno doctor update`, whose Rust leg also refreshes the bins. For Rust-only staleness, it runs the cargo refresh helper without reinstalling Python. Under `--json`, `--fix` performs no repair and prints a skip message. `--source` overrides the source checkout.
+Flags: `--json` emits one stdout object and sends human text to stderr. The object carries status, revision, binary, mux-front-door, and source-checkout sync fields. For Python staleness, `--fix` delegates to `fno doctor update`, whose Rust leg also refreshes the bins. For Rust-only staleness, it runs the cargo refresh helper without reinstalling Python. Under `--json`, `--fix` performs no repair and prints a skip message. `--source` overrides the source checkout.
 
 ```bash
 fno doctor            # human verdict; exit non-zero on proven staleness or source lag
