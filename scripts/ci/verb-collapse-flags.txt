@@ -39,6 +39,8 @@ do target init !--provider
 do target resolve-model !--provider
 do target start !--provider
 doctor footprint !--cause-only
+doctor event find !--session
+event find !--session
 mail hold-release !--poll-s
 mail pane-prepare !--session
 mail send !--origin

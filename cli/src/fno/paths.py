@@ -750,8 +750,7 @@ def event_journals() -> list[Path]:
                 rotated.append((int(suffix), candidate))
         rotated.sort(key=lambda item: item[0], reverse=True)
         candidates = [path for _, path in rotated]
-        if resolved_live.exists():
-            candidates.append(resolved_live)
+        candidates.append(resolved_live)
         for candidate in candidates:
             try:
                 path = candidate.resolve()

@@ -849,6 +849,9 @@ def _find_file_stats(
         "kind_counts": {},
         "matching_rows": [],
     }
+    if not path.exists() and not _ROTATED_SUFFIX.search(path.name):
+        stats["status"] = "absent"
+        return stats
     timestamps: list[tuple[datetime, str]] = []
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -933,7 +936,10 @@ def find(
     since: Optional[str] = typer.Option(
         None, "--since", help="Lower timestamp bound as ISO-8601 or a duration such as 7d."
     ),
-    session: Optional[str] = typer.Option(None, "--session", help="Session id to match."),
+    session_id: Optional[str] = typer.Option(None, "--session-id", help="Session id to match."),
+    session_legacy: Optional[str] = typer.Option(
+        None, "--session", hidden=True, help="[DEPRECATED] alias for --session-id."
+    ),
     limit: int = typer.Option(50, "--limit", min=1, help="Maximum matching rows to print."),
     kinds: bool = typer.Option(False, "--kinds", help="Summarize every event kind."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit one structured result."),
@@ -945,6 +951,7 @@ def find(
     """
     from fno.paths import event_journals
 
+    session = session_id or session_legacy
     if kind and kinds:
         typer.echo("error: pass KIND or --kinds, not both", err=True)
         raise typer.Exit(code=2)
@@ -974,7 +981,7 @@ def find(
     ]
     match_count = sum(int(item["matches"]) for item in stats)
     row_count = sum(int(item["rows"]) for item in stats)
-    unreadable = [item for item in stats if item["status"] != "readable"]
+    unreadable = [item for item in stats if item["status"] not in {"readable", "absent"}]
     window = _find_span(stats)
     journal_count = sum(
         1 for item in stats if not _ROTATED_SUFFIX.search(Path(item["path"]).name)
