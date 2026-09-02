@@ -668,7 +668,8 @@ def resolve_dispatch_model(
     ``model`` is None only when everything falls through to the provider default.
     ``decision_source`` is the receipt vocabulary
     (``explicit`` / ``task-pin`` / ``task-difficulty(<band>)`` / ``plan-default`` /
-    ``plan-difficulty(<band>)`` / ``provider-default``). ``provider`` scopes band
+    ``plan-difficulty(<band>)`` / ``provider-default(no-difficulty)``).
+    ``provider`` scopes band
     resolution to one harness; pins (``explicit`` / ``task_model`` / ``plan_model``)
     bypass the filter - operator authority outranks routing (Locked Decision 4).
     """
@@ -688,7 +689,7 @@ def resolve_dispatch_model(
             plan_difficulty, snapshot=snapshot, provider=provider, inventory=inventory
         )
         return model, f"plan-difficulty({plan_difficulty.strip().lower()})", chain
-    return None, "provider-default", ["provider-default"]
+    return None, "provider-default(no-difficulty)", ["provider-default(no-difficulty)"]
 
 
 def node_model(

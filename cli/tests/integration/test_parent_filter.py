@@ -32,7 +32,7 @@ def tmp_graph(tmp_path, monkeypatch):
 
 
 def _add(title, **opts) -> str:
-    args = ["backlog", "add", title]
+    args = ["backlog", "add", title, "--difficulty", "medium"]
     for k, v in opts.items():
         args += [f"--{k}", str(v)]
     r = runner.invoke(app, args, catch_exceptions=False)

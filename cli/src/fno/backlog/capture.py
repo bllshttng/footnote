@@ -636,7 +636,15 @@ def _replace_item_line(text: str, fu_id: str, new_line: str) -> str:
     return new_text
 
 
-def _create_graph_node(*, title: str, priority: str, domain: str = "code", graph_path: Optional[Path] = None, blocks_everything: bool = False) -> str:
+def _create_graph_node(
+    *,
+    title: str,
+    priority: str,
+    difficulty: Optional[str],
+    domain: str = "code",
+    graph_path: Optional[Path] = None,
+    blocks_everything: bool = False,
+) -> str:
     """Create a plan-less idea node on the graph; return its ab-id.
 
     Reuses the canonical node-build path so a schema addition shows up here
@@ -663,6 +671,7 @@ def _create_graph_node(*, title: str, priority: str, domain: str = "code", graph
         node = _build_backlog_node(
             title=title,
             priority=priority,
+            difficulty=difficulty,
             blocks_everything=blocks_everything,
             domain=domain,
             project=project,
@@ -682,6 +691,7 @@ def promote_item(
     fu_id: str,
     *,
     priority: Optional[str] = None,
+    difficulty: Optional[str],
     blocks_everything: bool = False,
     graph_path: Optional[Path] = None,
 ) -> dict:
@@ -700,6 +710,20 @@ def promote_item(
         raise InboxValidationError(
             f"--priority must be one of {sorted(VALID_PRIORITIES)}, got {priority!r}"
         )
+    from fno.graph._constants import DIFFICULTY_HELP, normalize_difficulty
+
+    if difficulty is None:
+        raise InboxValidationError(
+            "non-interactive filing requires --difficulty "
+            f"(low, medium, high). {DIFFICULTY_HELP}"
+        )
+    try:
+        normalized_difficulty = normalize_difficulty(difficulty)
+        if normalized_difficulty is None:
+            raise ValueError("difficulty must not be empty")
+        difficulty = normalized_difficulty
+    except ValueError as exc:
+        raise InboxValidationError(f"{exc}. {DIFFICULTY_HELP}") from exc
     path = Path(path)
     lock_path = path.with_name(path.name + ".lock")
     fd = _acquire_lock(lock_path, 50)
@@ -728,6 +752,7 @@ def promote_item(
         node_id = _create_graph_node(
             title=title,
             priority=node_priority,
+            difficulty=difficulty,
             graph_path=graph_path,
             blocks_everything=blocks_everything,
         )
@@ -1604,12 +1629,29 @@ def cmd_capture_pass(
 def cmd_promote(
     fu_id: str = typer.Argument(..., help="The fu-XXXXXX id to promote."),
     priority: Optional[str] = typer.Option(None, "--priority", help="Override node priority (else inherits the item's)."),
+    difficulty: Optional[str] = typer.Option(None, "--difficulty", help="Intrinsic work difficulty: low|medium|high."),
     blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
 ) -> None:
     """Promote an inbox item to a graph node (idempotent)."""
+    if difficulty is None:
+        if not sys.stdin.isatty():
+            from fno.graph._constants import DIFFICULTY_HELP
+
+            typer.echo(
+                "Error: non-interactive filing requires --difficulty "
+                f"(low, medium, high). {DIFFICULTY_HELP}",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        from fno.graph.cli import _prompt_difficulty_value
+
+        difficulty = typer.prompt(
+            "Difficulty (low|medium|high)", value_proc=_prompt_difficulty_value
+        )
     try:
         result = promote_item(
             _inbox_path(), fu_id, priority=priority,
+            difficulty=difficulty,
             blocks_everything=blocks_everything,
         )
     except InboxValidationError as exc:

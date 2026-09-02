@@ -557,7 +557,7 @@ def test_build_backlog_node_stamps_ambient(monkeypatch):
         "source_node_id": "ab-parent01",
         "source_plan_path": "plan.md",
     })
-    node = gcli._build_backlog_node(title="child")
+    node = gcli._build_backlog_node(title="child", difficulty=None)
     assert node["source_session_id"] == "S"
     assert node["source_harness"] == "claude"
     assert node["source_cwd"] == "/wt/sess"

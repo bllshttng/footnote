@@ -968,7 +968,9 @@ def test_triage_pr_with_commit_dates_and_author_login(tmp_path: Path):
 
     landed = []
 
-    def fake_create(*, title, details, priority, project, cwd, domain="code", queued=False):
+    def fake_create(
+        *, title, details, priority, difficulty, project, cwd, domain="code", queued=False
+    ):
         # Capture the title so we can identify which candidate landed.
         landed.append(title)
         return "fake-id"

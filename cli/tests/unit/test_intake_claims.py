@@ -1434,14 +1434,16 @@ def test_backlog_add_records_canonical_cwd(tmp_path):
          patch("fno.graph._intake._git_repo_root", return_value=str(canonical)), \
          patch("os.getcwd", return_value=str(worktree)):
         # AC1: no --cwd -> canonical, not the worktree.
-        result = runner.invoke(cli, ["add", "Durable node"])
+        result = runner.invoke(cli, ["add", "Durable node", "--difficulty", "medium"])
         assert result.exit_code == 0, result.output
         node = _read_entries(graph_file)[-1]
         assert node["cwd"] == str(canonical)
         assert node["cwd"] != str(worktree)
 
         # AC2: explicit --cwd preserved verbatim (abspath of the caller intent).
-        result = runner.invoke(cli, ["add", "Pinned node", "--cwd", str(worktree)])
+        result = runner.invoke(
+            cli, ["add", "Pinned node", "--cwd", str(worktree), "--difficulty", "medium"]
+        )
         assert result.exit_code == 0, result.output
         node = _read_entries(graph_file)[-1]
         assert node["cwd"] == str(worktree)

@@ -42,7 +42,12 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 def _invoke(*args, input=None):
-    return runner.invoke(app, list(args), input=input, catch_exceptions=False)
+    argv = list(args)
+    if "backlog" in argv:
+        index = argv.index("backlog")
+        if argv[index : index + 2] == ["backlog", "add"] and "--difficulty" not in argv:
+            argv.extend(["--difficulty", "medium"])
+    return runner.invoke(app, argv, input=input, catch_exceptions=False)
 
 
 def _read_entries(g: Path) -> list[dict]:
@@ -731,7 +736,9 @@ def test_backlog_idea_wave_rejects_terminal_target_and_topology_flags(tmp_graph)
 
 def test_backlog_idea_offers_fold_before_minting_noninteractive(tmp_graph, monkeypatch, tmp_path):
     """AC7-HP: a related live sibling produces a choice-required receipt."""
-    target = _invoke("--json", "backlog", "add", "Difficulty routing filing surface")
+    target = _invoke(
+        "--json", "backlog", "add", "Difficulty routing filing surface", "--difficulty", "medium"
+    )
     target_id = json.loads(target.stdout)["id"]
     sidecar = tmp_path / "relatedness.json"
     sidecar.write_text(json.dumps({target_id: []}))

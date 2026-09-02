@@ -293,7 +293,7 @@ def test_add_epic_depth_cap_refused(tmp_graph, tmp_path):
         _epic("x-0e02", "epic", parent="x-0a01"),
     ])
     res = runner.invoke(
-        app, ["backlog", "add", "Third level epic", "--type", "epic", "--parent", "x-0e02"]
+        app, ["backlog", "add", "Third level epic", "--type", "epic", "--parent", "x-0e02", "--difficulty", "medium"]
     )
     assert res.exit_code != 0
     assert "cap" in res.output.lower()
@@ -306,7 +306,7 @@ def test_add_leaf_under_epic_still_allowed(tmp_graph, tmp_path):
     """A non-epic child under an epic is unaffected by the create-path cap."""
     _seed(tmp_graph, [_epic("x-0a01", "mission"), _epic("x-0e02", "epic", parent="x-0a01")])
     res = runner.invoke(
-        app, ["backlog", "add", "A feature", "--type", "feature", "--parent", "x-0e02"]
+        app, ["backlog", "add", "A feature", "--type", "feature", "--parent", "x-0e02", "--difficulty", "medium"]
     )
     assert res.exit_code == 0, res.output
 
@@ -372,7 +372,7 @@ def test_add_child_repaints_parent_epic(tmp_graph, tmp_path):
     """codex P2: creating a child via `add --parent <epic>` repaints the epic."""
     epic, e_doc = _epic_with_plan(tmp_path, "x-0e0e", "epic")
     _seed(tmp_graph, [epic])
-    res = runner.invoke(app, ["backlog", "add", "A child", "--parent", "x-0e0e"])
+    res = runner.invoke(app, ["backlog", "add", "A child", "--parent", "x-0e0e", "--difficulty", "medium"])
     assert res.exit_code == 0, res.output
     _, fe, _ = read_plan_file(e_doc)
     assert fe["children_total"] == "1"

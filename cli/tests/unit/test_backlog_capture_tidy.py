@@ -416,7 +416,9 @@ def test_tidy_normalized_fu_line_still_promotable(tmp_path: Path) -> None:
     assert "- [ ] fu-abc123 - promote me" in body  # normalized to hyphen
     assert any(i["id"] == "fu-abc123" for i in parse_items(body))  # legacy parser sees it
 
-    result = promote_item(inbox, "fu-abc123", graph_path=graph)  # legacy write path finds it
+    result = promote_item(
+        inbox, "fu-abc123", difficulty="medium", graph_path=graph
+    )  # legacy write path finds it
     assert result["status"] == "promoted"
     assert result["node_id"].startswith("ab-")
 

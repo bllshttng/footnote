@@ -27,6 +27,10 @@ _NODE_SEVERITIES = {"critical", "high", "medium"}
 # give, so a p0 mapping made every critical external finding fail to land and
 # re-fail on every harvest. The finding body keeps the severity verbatim.
 _SEVERITY_PRIORITY = {"critical": "p1", "high": "p1", "medium": "p2", "low": "p3"}
+# Severity is the only intrinsic work signal available when retro files a
+# finding. Keep critical/high expensive, preserve medium, and retain low's
+# cheap lane; severity-less deliberate work gets the named medium default.
+_SEVERITY_DIFFICULTY = {"critical": "high", "high": "high", "medium": "medium", "low": "low"}
 
 DEFAULT_PRIORITY = "p3"
 TITLE_CAP = 100
@@ -40,6 +44,10 @@ _MD_TRAIL = re.compile(r"[\*`\s]+$")  # trailing bold/code markers (_MD_LEAD is 
 
 def severity_to_priority(severity: str | None) -> str:
     return _SEVERITY_PRIORITY.get((severity or "").lower(), DEFAULT_PRIORITY)
+
+
+def severity_to_difficulty(severity: str | None) -> str:
+    return _SEVERITY_DIFFICULTY.get((severity or "").lower(), "medium")
 
 
 def severity_to_tier(severity: str | None) -> str:

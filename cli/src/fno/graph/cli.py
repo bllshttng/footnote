@@ -977,7 +977,8 @@ def _build_backlog_node(
     cwd: Optional[str] = None,
     priority: str = "p2",
     blocks_everything: bool = False,
-    difficulty: Optional[str] = None,
+    difficulty: Optional[str],
+    difficulty_source: str = "filed",
     domain: str = "code",
     blocked_by: Optional[list[str]] = None,
     roadmap_id: Optional[str] = None,
@@ -999,9 +1000,12 @@ def _build_backlog_node(
     strip it cannot persist it into the graph.
 
     Centralizes the field set so a schema addition (e.g. a new graph
-    field) shows up in every entry-creating verb at once. The returned
-    dict has no ``id`` - the caller assigns one inside its locked mutator
-    so duplicate-ID checks happen against the live snapshot.
+    field) shows up in every entry-creating verb at once. ``difficulty`` is
+    required so every caller makes the routing decision explicitly instead of
+    silently minting an unroutable node. ``difficulty_source`` names the writer
+    in the history entry. The returned dict has no ``id`` - the caller assigns
+    one inside its locked mutator so duplicate-ID checks happen against the
+    live snapshot.
     """
     from fno.graph._constants import ID_PREFIX  # noqa: F401
 
@@ -1023,7 +1027,7 @@ def _build_backlog_node(
         "blocks_everything": blocks_everything,
         "difficulty": difficulty,
         "difficulty_history": (
-            [{"value": difficulty, "source": "filed", "ts": datetime.now(timezone.utc).isoformat()}]
+            [{"value": difficulty, "source": difficulty_source, "ts": datetime.now(timezone.utc).isoformat()}]
             if difficulty is not None
             else []
         ),
@@ -1571,6 +1575,7 @@ def cmd_add(
         source_node=source_node,
         related=related,
         evidence=evidence,
+        require_difficulty=True,
     )
 
 
@@ -2273,6 +2278,7 @@ def cmd_decompose(
                     cwd=route_cwd if route_cwd is not None else live_epic.get("cwd"),
                     priority=live_epic.get("priority", "p2"),
                     blocks_everything=bool(live_epic.get("blocks_everything")),
+                    difficulty=live_epic.get("difficulty"),
                     domain=live_epic.get("domain", "code"),
                     plan_path=None,
                     known_ids={e.get("id") for e in graph_entries},
@@ -13518,13 +13524,18 @@ def cmd_migrate_difficulty(
     apply: bool = typer.Option(
         False, "--apply", help="Move each model_tier band onto difficulty and drop the retired key."
     ),
+    backfill: bool = typer.Option(
+        False, "--backfill", help="Backfill missing bands from size, priority, or type."
+    ),
 ) -> None:
-    """Dry-run or apply the one-shot model_tier -> difficulty migration."""
-    from fno.graph.migrations import migrate_model_tier
+    """Dry-run or apply the difficulty migrations."""
+    from fno.graph.migrations import backfill_difficulty, migrate_model_tier
     from fno.graph.store import locked_mutate_graph, read_graph
 
     def _run(entries: list[dict]) -> dict:
         try:
+            if backfill:
+                return backfill_difficulty(entries, apply=apply)
             return migrate_model_tier(entries, apply=apply)
         except ValueError as exc:
             typer.echo(f"fno backlog migrate-difficulty: {exc}", err=True)
@@ -14868,6 +14879,9 @@ def cmd_new(
         help="Project name. Defaults to current git repo's basename; pass --unscoped to skip auto-scope.",
     ),
     priority: str = typer.Option("p2", "--priority", help="p0|p1|p2|p3"),
+    difficulty: str = typer.Option(
+        "medium", "--difficulty", help="Intrinsic work difficulty: low|medium|high."
+    ),
     blocks_everything: bool = typer.Option(
         False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."
     ),
@@ -14903,7 +14917,12 @@ def cmd_new(
     --project always overrides the auto-detected name when both are present.
     """
     _refuse_create_on_external_backend()
-    from fno.graph._constants import PRIORITY_ORDER, mint_node_id, validate_priority_write
+    from fno.graph._constants import (
+        PRIORITY_ORDER,
+        mint_node_id,
+        normalize_difficulty,
+        validate_priority_write,
+    )
     from fno.graph.fuzzy import suggest_domain
     from fno.graph.store import read_graph, locked_mutate_graph
 
@@ -14924,6 +14943,14 @@ def cmd_new(
         raise typer.Exit(code=1)
     try:
         validate_priority_write(priority, blocks_everything=blocks_everything)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        normalized_difficulty = normalize_difficulty(difficulty)
+        if normalized_difficulty is None:
+            raise ValueError("difficulty must not be empty")
+        difficulty = normalized_difficulty
     except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2)
@@ -14988,6 +15015,14 @@ def cmd_new(
             "cwd": resolved_cwd,
             "priority": priority,
             "blocks_everything": blocks_everything,
+            "difficulty": difficulty,
+            "difficulty_history": [
+                {
+                    "value": difficulty,
+                    "source": "filed",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
             "domain": domain,
             "blocked_by": [],
             "session_id": None,

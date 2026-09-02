@@ -41,7 +41,12 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 def _invoke(*args, input=None):
-    return runner.invoke(app, list(args), input=input, catch_exceptions=False)
+    argv = list(args)
+    if "backlog" in argv:
+        index = argv.index("backlog")
+        if argv[index : index + 2] == ["backlog", "add"] and "--difficulty" not in argv:
+            argv.extend(["--difficulty", "medium"])
+    return runner.invoke(app, argv, input=input, catch_exceptions=False)
 
 
 def _read_entries(g: Path) -> list[dict]:

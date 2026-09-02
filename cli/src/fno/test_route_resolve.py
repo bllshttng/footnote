@@ -471,7 +471,7 @@ def test_precedence_chain_labels_sources():
     )
     assert model == "glm-5.3-flash" and source == "task-difficulty(low)"
     model, source, _ = rr.resolve_dispatch_model(inventory=inv)
-    assert model is None and source == "provider-default"
+    assert model is None and source == "provider-default(no-difficulty)"
 
 
 # --- the built-in fallback (config overrides AND extends it) ---------------- #

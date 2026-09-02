@@ -763,7 +763,7 @@ def test_resolve_node_model_defers_difficulty_to_grid(monkeypatch):
     )
     model, source = target_cli._resolve_node_model("x-def1")
     assert model is None
-    assert source == "provider-default"
+    assert source == "provider-default(no-difficulty)"
 
     from fno.adapters.providers import benchmarks as _bm
 
@@ -773,7 +773,7 @@ def test_resolve_node_model_defers_difficulty_to_grid(monkeypatch):
     )
     model, source = target_cli._resolve_node_model("x-def2")
     assert model is None
-    assert source == "provider-default"
+    assert source == "provider-default(no-difficulty)"
 
 
 def test_resolve_model_command_resolves_difficulty_band(monkeypatch):

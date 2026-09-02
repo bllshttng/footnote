@@ -139,7 +139,9 @@ def test_land_omits_caused_by_when_unknown(tmp_path):
     """A fixed-signature create_fn (no caused_by kwarg) stays call-compatible."""
     seen: list[str] = []
 
-    def create(*, title, details, priority, project, cwd, domain="code", queued=False):
+    def create(
+        *, title, details, priority, difficulty, project, cwd, domain="code", queued=False
+    ):
         seen.append(title)
         return "ab-new1"
 
@@ -157,7 +159,7 @@ def test_default_create_stamps_caused_by_in_graph(tmp_graph):
     _seed(tmp_graph, [_node("ab-00000001")])
     nid = _default_create(
         title="follow-up", details="d", priority="p2",
-        project=None, cwd=None, caused_by="ab-00000001",
+        difficulty="medium", project=None, cwd=None, caused_by="ab-00000001",
     )
     created = next(n for n in _read(tmp_graph) if n["id"] == nid)
     assert created["caused_by"] == "ab-00000001"
@@ -169,7 +171,7 @@ def test_default_create_skips_stale_caused_by(tmp_graph):
 
     nid = _default_create(
         title="follow-up", details="d", priority="p2",
-        project=None, cwd=None, caused_by="ab-deadbeef",
+        difficulty="medium", project=None, cwd=None, caused_by="ab-deadbeef",
     )
     created = next(n for n in _read(tmp_graph) if n["id"] == nid)
     assert created.get("caused_by") is None

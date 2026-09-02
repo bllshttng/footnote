@@ -58,7 +58,12 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 def _invoke(*args, input=None):
     """Invoke the fno CLI and return the result."""
-    return runner.invoke(app, list(args), input=input, catch_exceptions=False)
+    argv = list(args)
+    if "backlog" in argv:
+        index = argv.index("backlog")
+        if argv[index : index + 2] == ["backlog", "add"] and "--difficulty" not in argv:
+            argv.extend(["--difficulty", "medium"])
+    return runner.invoke(app, argv, input=input, catch_exceptions=False)
 
 
 def _read_graph(g: Path) -> list[dict]:
@@ -290,21 +295,21 @@ def test_update_model_tier_refuses_and_names_difficulty(tmp_graph):
     retired key, not a history entry. The old handler wrote BOTH keys and
     skipped difficulty_history; a refusal is the one behavior that replaces
     all three spellings of that write."""
-    r = _invoke("backlog", "add", "Tiered Feature")
+    r = _invoke("backlog", "add", "Tiered Feature", "--difficulty", "medium")
     nid = json.loads(r.output)["id"]
     r2 = runner.invoke(app, ["backlog", "update", nid, "--model-tier", "high"])
     assert r2.exit_code == 2
     assert "--difficulty" in r2.output
     node = _read_graph(tmp_graph)[0]
     assert "model_tier" not in node
-    assert node.get("difficulty") is None
-    assert not node.get("difficulty_history")
+    assert node["difficulty"] == "medium"
+    assert node["difficulty_history"][-1]["source"] == "filed"
 
 
 def test_update_difficulty_records_history(tmp_graph):
     """A manual difficulty revision carries the same attributable trail the
     birth paths keep; a same-value rewrite records nothing."""
-    r = _invoke("backlog", "add", "Hard Feature")
+    r = _invoke("backlog", "add", "Hard Feature", "--difficulty", "medium")
     nid = json.loads(r.output)["id"]
     _invoke("backlog", "update", nid, "--difficulty", "medium")
     _invoke("backlog", "update", nid, "--difficulty", "high")
@@ -323,7 +328,7 @@ def test_update_difficulty_supersedes_retired_model_tier(tmp_graph):
     following the tombstone's own prescription can never manufacture a
     both-spellings row the migration would then refuse batch-wide; a null
     difficulty_history row also survives the write instead of crashing it."""
-    r = _invoke("backlog", "add", "Legacy Band")
+    r = _invoke("backlog", "add", "Legacy Band", "--difficulty", "medium")
     nid = json.loads(r.output)["id"]
     entries = _read_graph(tmp_graph)
     entries[0]["model_tier"] = "high"

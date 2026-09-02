@@ -195,7 +195,7 @@ def test_ac7_hp_related_at_filing_time(tmp_graph):
 def test_filing_time_dangling_peer_refuses_the_whole_filing(tmp_graph):
     before = len(json.loads(tmp_graph.read_text())["entries"])
     result = runner.invoke(
-        app, ["backlog", "add", "co-delivered work", "--related", "x-zzzz"]
+        app, ["backlog", "add", "co-delivered work", "--related", "x-zzzz", "--difficulty", "medium"]
     )
     assert result.exit_code != 0
     assert len(json.loads(tmp_graph.read_text())["entries"]) == before

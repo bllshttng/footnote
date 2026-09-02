@@ -58,7 +58,7 @@ def test_promote_creates_node_and_strikes_checkbox(tmp_path: Path) -> None:
     # deleted dir, which makes the _constants helpers fail-open to ~/.fno).
     gp = tmp_path / "graph.json"
 
-    res = promote_item(inbox, item["id"], graph_path=gp)
+    res = promote_item(inbox, item["id"], difficulty="medium", graph_path=gp)
     assert res["id"] == item["id"]
     assert res["node_id"].startswith("ab-")
     assert res["status"] == "promoted"
@@ -80,7 +80,7 @@ def test_promote_rejects_invalid_priority_override(tmp_path: Path) -> None:
     inbox = tmp_path / "inbox.md"
     gp = tmp_path / "graph.json"
     with pytest.raises(InboxValidationError):
-        promote_item(inbox, item["id"], priority="p9", graph_path=gp)
+        promote_item(inbox, item["id"], priority="p9", difficulty="medium", graph_path=gp)
     # No node created, item still open.
     assert not gp.exists() or "p9" not in gp.read_text(encoding="utf-8")
     assert f"- [ ] {item['id']}" in inbox.read_text(encoding="utf-8")
@@ -94,7 +94,7 @@ def test_promote_p0_requires_blocks_everything_ack(tmp_path: Path) -> None:
     inbox = tmp_path / "inbox.md"
     gp = tmp_path / "graph.json"
     with pytest.raises(InboxValidationError, match="p0 blocks everything else"):
-        promote_item(inbox, item["id"], graph_path=gp)
+        promote_item(inbox, item["id"], difficulty="medium", graph_path=gp)
     assert not gp.exists() or '"priority": "p0"' not in gp.read_text(encoding="utf-8")
 
 
@@ -104,7 +104,7 @@ def test_promote_unknown_id_raises(tmp_path: Path) -> None:
     inbox = tmp_path / "inbox.md"
     inbox.write_text("# empty\n", encoding="utf-8")
     with pytest.raises(InboxValidationError):
-        promote_item(inbox, "fu-zzzzzz")
+        promote_item(inbox, "fu-zzzzzz", difficulty="medium")
 
 
 def test_promote_is_idempotent(tmp_path: Path) -> None:
@@ -115,10 +115,10 @@ def test_promote_is_idempotent(tmp_path: Path) -> None:
     inbox = tmp_path / "inbox.md"
     gp = tmp_path / "graph.json"
 
-    first = promote_item(inbox, item["id"], graph_path=gp)
+    first = promote_item(inbox, item["id"], difficulty="medium", graph_path=gp)
     count_after_first = len(read_graph(gp))
 
-    second = promote_item(inbox, item["id"], graph_path=gp)
+    second = promote_item(inbox, item["id"], difficulty="medium", graph_path=gp)
     assert second["node_id"] == first["node_id"]
     assert second["status"] == "already_promoted"
     assert len(read_graph(gp)) == count_after_first  # no duplicate node
@@ -199,7 +199,7 @@ def test_cli_promote_emits_event(tmp_path: Path) -> None:
         cli, ["add", "promote via cli", "--source", "PR#1", "--why", "w", "--where", "x"]
     )
     fu = json.loads(add.stdout)["id"]
-    res = runner.invoke(cli, ["promote", fu])
+    res = runner.invoke(cli, ["promote", fu, "--difficulty", "medium"])
     assert res.exit_code == 0, res.output
     events = (tmp_path / ".fno" / "events.jsonl").read_text().splitlines()
     types = [json.loads(l)["type"] for l in events if l.strip()]
