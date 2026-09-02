@@ -818,7 +818,7 @@ def review(
     this group (the lane's emit step depends on them). Every panel surface
     refuses here: the replacement is named and NO attestation is emitted -
     a removed producer must never leave a path that still writes gate
-    evidence  (AC8-ERR).
+    evidence (AC8-ERR).
     """
     # Under ``fno do review`` this body is the GROUP's default callback, so a
     # subcommand invocation (``fno do review classify``) reaches this line
