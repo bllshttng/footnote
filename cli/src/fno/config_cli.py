@@ -604,6 +604,10 @@ def doctor_cmd(
         _report_deprecated_auto_merge()
     except Exception:  # noqa: BLE001 - advisory, same wrap as the three above
         pass
+    try:
+        _report_deprecated_dispatch_harness()
+    except Exception:  # noqa: BLE001 - advisory, same wrap as the three above
+        pass
     raise typer.Exit(rc)
 
 
@@ -738,6 +742,62 @@ def _report_deprecated_auto_merge() -> None:
             f"      It reads as `auto_merge.grant = \"{reads_as}\"` for one release.\n"
             f"      Migrate: fno config set auto_merge.grant {reads_as}{scope_flag} && "
             f"fno config unset dispatch.auto_merge{scope_flag}"
+        )
+
+
+def _report_deprecated_dispatch_harness() -> None:
+    """Name every config file still setting the deprecated ``dispatch.harness``.
+
+    The stage table (``agents.profiles.<verb>.provider``) is the home for the
+    harness axis; this key reads as the fallback rung beneath it for one
+    release. Same contract as :func:`_report_deprecated_auto_merge`: name the
+    file, print the exact migration, and when a same-file stage-table provider
+    already masks the legacy key, say so instead of printing a migration that
+    would re-arm a value the file overrode.
+    """
+    from fno.config import _candidate_paths, _global_settings_path, _load_raw
+
+    global_dir = _global_settings_path().parent
+    for candidate in _candidate_paths():
+        if not candidate.is_file():
+            continue
+        parsed, ok = _load_raw(candidate)
+        if not ok:
+            continue
+        # Either shape: flat config.toml (top-level dispatch) or a pre-migration
+        # settings.yaml (config-wrapped dispatch).
+        legacy = parsed.get("dispatch")
+        if not isinstance(legacy, dict):
+            wrapped = parsed.get("config")
+            legacy = wrapped.get("dispatch") if isinstance(wrapped, dict) else None
+        if not (isinstance(legacy, dict) and "harness" in legacy):
+            continue
+        # Migration commands must target THE SAME FILE this warning names.
+        scope_flag = "" if candidate.parent == global_dir else " --local"
+        agents = parsed.get("agents")
+        if not isinstance(agents, dict):
+            wrapped = parsed.get("config")
+            agents = wrapped.get("agents") if isinstance(wrapped, dict) else None
+        profiles = agents.get("profiles") if isinstance(agents, dict) else None
+        target_profile = (
+            profiles.get("target") if isinstance(profiles, dict) else None
+        )
+        if isinstance(target_profile, dict) and "provider" in target_profile:
+            typer.echo(
+                f"warn: {candidate} still sets the deprecated `dispatch.harness`, "
+                "but a stage-table `agents.profiles.target.provider` in the same "
+                "file masks it (the file reads as the stage-table value). "
+                "Remove the legacy line.\n"
+                f"      Migrate: fno config unset dispatch.harness{scope_flag}"
+            )
+            continue
+        reads_as = str(legacy.get("harness") or "").strip() or "claude"
+        typer.echo(
+            f"warn: {candidate} sets the deprecated `dispatch.harness`.\n"
+            "      It reads as the fallback harness rung for one release, below "
+            "the stage table.\n"
+            f"      Migrate: fno config set agents.profiles.target.provider {reads_as}{scope_flag} && "
+            f"fno config unset dispatch.harness{scope_flag}"
         )
 
 

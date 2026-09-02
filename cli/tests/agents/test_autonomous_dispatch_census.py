@@ -155,6 +155,20 @@ def test_resolver_failure_refusal_carries_no_substrate_assertions() -> None:
     assert "=headless" not in refusal
 
 
+def test_dispatch_harness_registry_entry_carries_its_migration() -> None:
+    """The registry description of the deprecated key must teach the migration
+    itself, matching the sibling `dispatch.auto_merge` entry's shape (AC8)."""
+    registry = _read_with_positive_control(
+        "cli/src/fno/config/registry.py",
+        '"dispatch.auto_merge"',
+    )
+    entry = next(
+        line for line in registry.splitlines() if '"dispatch.harness"' in line
+    )
+    assert "DEPRECATED" in entry
+    assert "fno config set agents.profiles.target.provider" in entry
+
+
 def test_context_think_legacy_substrate_is_compatibility_only() -> None:
     config = _read_with_positive_control(
         "cli/src/fno/config/__init__.py",
