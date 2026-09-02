@@ -2745,20 +2745,26 @@ def _reclaim_under_lock_then_release(
         _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
         _P(ready_path).write_text("held")
         time.sleep(hold_seconds)
+        # The override lives ONLY for this write: the thread mutates the real
+        # process env, so a leak here would redirect every later test in the
+        # worker to a tmp registry that no longer exists.
         _os.environ["FNO_AGENTS_REGISTRY"] = registry_path
-        from fno.agents.registry import AgentEntry, write_registry
+        try:
+            from fno.agents.registry import AgentEntry, write_registry
 
-        write_registry([
-            AgentEntry(
-                name="red",
-                harness="claude",
-                harness_session_id="99999999-1111-7222-8333-444455556666",
-                cwd="/tmp",
-                log_path="/tmp/red.log",
-                short_id="99999999",
-                status="live",
-            )
-        ])
+            write_registry([
+                AgentEntry(
+                    name="red",
+                    harness="claude",
+                    harness_session_id="99999999-1111-7222-8333-444455556666",
+                    cwd="/tmp",
+                    log_path="/tmp/red.log",
+                    short_id="99999999",
+                    status="live",
+                )
+            ])
+        finally:
+            _os.environ.pop("FNO_AGENTS_REGISTRY", None)
         _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
 
 
