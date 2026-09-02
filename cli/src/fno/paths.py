@@ -722,9 +722,11 @@ def event_journals() -> list[Path]:
     ``events.jsonl`` rotation convention. Resolve and de-duplicate after
     expansion because a worktree journal may be a symlink to the project log.
     """
-    from fno.agents.events import daemon_lifecycle_log
-
-    live_paths = (global_events_json(), daemon_lifecycle_log(), project_events_json())
+    live_paths = (
+        global_events_json(),
+        agents_home_dir() / "events.jsonl",
+        project_events_json(),
+    )
     resolved: list[Path] = []
     seen: set[Path] = set()
     for live in live_paths:

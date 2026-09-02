@@ -14,12 +14,11 @@ def _row(path: Path, row: dict) -> None:
 
 
 def _patch_live_journals(monkeypatch, live: Path) -> None:
-    import fno.agents.events as agent_events
     import fno.paths as paths
 
     monkeypatch.setattr(paths, "global_events_json", lambda: live)
     monkeypatch.setattr(paths, "project_events_json", lambda: live)
-    monkeypatch.setattr(agent_events, "daemon_lifecycle_log", lambda: live)
+    monkeypatch.setattr(paths, "agents_home_dir", lambda: live.parent)
 
 
 def test_find_counts_rotated_rows_and_reports_denominator(tmp_path: Path, monkeypatch) -> None:
