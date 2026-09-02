@@ -1161,6 +1161,41 @@ def request_self_review_cmd(
         raise typer.Exit(code=2)
 
 
+def _registry_self_proof(
+    harness: str,
+    sid: str,
+    *,
+    true_harness: Optional[str],
+    own_binding: Optional[tuple[str, str]],
+    owning_row_harness: Callable[[str], Optional[str]],
+) -> Optional[bool]:
+    """The verb's proof policy: True proves the marker is this process's, False
+    contradicts it, None cannot tell.
+
+    Process-tree proof first (``true_harness`` - the direct walk, or the
+    launcher stamp ``FNO_SESSION_HARNESS``/``FNO_SESSION_PID`` when a sandbox
+    denies the deeper walk). A registry row alone is NEVER self-proof: a row
+    proves only that some live session owns the id, so an env marker copied
+    from another live same-harness session must keep failing closed to
+    collision-elimination (round-1 P1). Only the spawn-minted canonical
+    binding - the stamp and a same-harness live row agreeing on both halves -
+    proves self without the tree.
+    """
+    if true_harness is not None:
+        return harness == (true_harness or "").strip().lower()
+    from fno.harness_identity import session_identity_key
+
+    key = session_identity_key
+    if (
+        own_binding
+        and own_binding[0] == harness
+        and key(own_binding[1]) == key(sid)
+        and owning_row_harness(sid) == own_binding[0]
+    ):
+        return True
+    return None
+
+
 @target_app.command("resolve-owned-identity", hidden=True)
 def resolve_owned_identity_cmd() -> None:
     """Resolve the harness identity this process can PROVE it owns.
@@ -1190,7 +1225,6 @@ def resolve_owned_identity_cmd() -> None:
     from fno.harness_identity import (
         parse_canonical_identity,
         resolve_owned_identity,
-        session_identity_key,
     )
 
     true_harness = resolve_session_harness()
@@ -1238,20 +1272,13 @@ def resolve_owned_identity_cmd() -> None:
         # foreign), None (no harness ancestor found - CI / degraded - cannot
         # tell). Only True skips the collision check; None falls through to
         # collision-elimination so the verb still resolves in a headless runner.
-        if true_harness is None:
-            # No ancestor to walk: the spawn-minted registry binding is the
-            # remaining proof - the stamp and a live row of the same harness
-            # agree on this id. Without it (no stamp, or no backing row) the
-            # answer stays None so collision-elimination decides.
-            if (
-                own_binding
-                and own_binding[0] == (harness or "").strip().lower()
-                and session_identity_key(own_binding[1]) == session_identity_key(_sid)
-                and _owning_row_harness(_sid) == own_binding[0]
-            ):
-                return True
-            return None
-        return harness == true_harness
+        return _registry_self_proof(
+            (harness or "").strip().lower(),
+            _sid,
+            true_harness=true_harness,
+            own_binding=own_binding,
+            owning_row_harness=_owning_row_harness,
+        )
 
     # The COLLIDER stays wired HERE and is deliberately not hoisted into the
     # shared resolver every stamp site uses. A live registry row holding an id
@@ -1816,6 +1843,26 @@ def init(
     # script runs it again (x-4a60). Not free to repeat: resolve_github_apps
     # probes GitHub with two 30s-timeout `gh` calls per unrecognized login.
     env["FNO_TARGET_INIT_GATED"] = "1"
+
+    # Stamp the launcher's process-bound harness proof for the script and the
+    # owned-identity verb it spawns (x-a0cd). THIS process is the outermost
+    # spawn of the command, where os.getppid() is still readable; under the
+    # codex sandbox every DEEPER fork (the script bash, the verb inside it)
+    # hits PermissionError reading its parent's ppid, so their walk returns
+    # None and collision-elimination then rejects the worker's own registry
+    # row. FNO_SESSION_PID is the existing launcher-override seam
+    # (resolve_session_pid honors it); FNO_SESSION_HARNESS rides the same
+    # trust and resolve_session_harness honors the pair only while the pid is
+    # alive. A dead or forged pair fails closed to the walk's own answer.
+    if "FNO_SESSION_HARNESS" not in env:
+        from fno.claims.session_pid import resolve_session_harness, resolve_session_pid
+
+        _proven_harness = resolve_session_harness()
+        if _proven_harness:
+            env["FNO_SESSION_HARNESS"] = _proven_harness
+            _proven_pid = resolve_session_pid()
+            if _proven_pid:
+                env["FNO_SESSION_PID"] = str(_proven_pid)
 
     proc = subprocess.run(["bash", str(script_path)], check=False, env=env)
     if proc.returncode == 0:

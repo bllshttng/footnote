@@ -366,10 +366,21 @@ def ambient_identity_strip_flags(
         ):
             continue
         value = (environ.get(name) or "").strip()
+        # A foreign-family value that names the keep-family session is a
+        # companion pointer AT this session, not lineage FROM a foreign one
+        # (x-a0cd): the claude-side codex plugin exports
+        # CODEX_COMPANION_TRANSCRIPT_PATH naming THIS session's transcript, and
+        # x-38c6's full-value equality missed it because the PATH embeds the id
+        # as a substring. Any path or pointer for this session embeds this
+        # session's id, so the substring test is the general form; a value
+        # embedding a DIFFERENT session's id stays foreign evidence.
+        self_referential = keep_session_id is not None and (
+            value == keep_session_id or keep_session_id in value
+        )
         # Resolver markers remain removable: equal values across families still
         # leave the resolver ambiguous, so the remedy must clear that marker.
         if not value or (
-            value == keep_session_id and name not in _RESOLVER_IDENTITY_NAMES
+            self_referential and name not in _RESOLVER_IDENTITY_NAMES
         ):
             continue
         flags += ["-u", name]
