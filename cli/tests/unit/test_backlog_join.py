@@ -188,6 +188,12 @@ def test_join_spawns_width_minus_one_workers_with_lead_hub(tmp_path, monkeypatch
         "node": "x-8d1d",
         "worktree": str(tmp_path / "wt"),
         "width": 3,
+        # The entry carries no priority, so the receipt names the p2 default
+        # and the medium band an unbanded plan sizes as.
+        "priority": "p2",
+        "band": "medium",
+        "workers": 3,
+        "workers_source": "explicit",
         "spawned": ["j-x-8d1d-1", "j-x-8d1d-2"],
         "lead": "j-x-8d1d-1",
         # An unbanded plan degrades to joiner 2's shapeless spawn: no grid
@@ -753,3 +759,184 @@ def test_flag_on_overlapping_refuses_to_narrow_but_spawns(tmp_path, monkeypatch)
         lane["sandbox"] == "overlapping" for lane in receipt["lanes"].values()
     )
     assert len(calls) == len(receipt["spawned"])
+
+
+# ---------------------------------------------------------------------------
+# The bare-join derivation: the sizing table, and a default that stopped
+# being 1. A bare join on a wide plan used to ask for exactly one joiner,
+# which is why nothing in production ever joined.
+# ---------------------------------------------------------------------------
+
+
+def _two_wave_plan(mode: str) -> str:
+    return f"""---
+title: t
+status: ready
+---
+
+## Execution Strategy
+
+```yaml
+execution_mode: {mode}
+waves:
+  - wave: 1
+    mode: {mode}
+    tasks: ['1.1', '1.2']
+  - wave: 2
+    mode: {mode}
+    tasks: ['2.1']
+tasks:
+  - id: '1.1'
+    title: a
+    surface: ['src/a.py']
+  - id: '1.2'
+    title: b
+    surface: ['src/b.py']
+  - id: '2.1'
+    title: c
+    surface: ['src/c.py']
+```
+"""
+
+
+WIDE_PLAN = """---
+title: t
+status: ready
+---
+
+## Execution Strategy
+
+```yaml
+execution_mode: sequential
+waves:
+  - wave: 1
+    mode: sequential
+    tasks: ['1.1', '1.2', '1.3', '1.4', '1.5', '1.6', '1.7']
+tasks:
+  - id: '1.1'
+    title: a
+  - id: '1.2'
+    title: b
+  - id: '1.3'
+    title: c
+  - id: '1.4'
+    title: d
+  - id: '1.5'
+    title: e
+  - id: '1.6'
+    title: f
+  - id: '1.7'
+    title: g
+```
+"""
+
+NARROW_PLAN = """---
+title: t
+status: ready
+---
+
+## Execution Strategy
+
+```yaml
+execution_mode: sequential
+waves:
+  - wave: 1
+    mode: sequential
+    tasks: ['1.1']
+tasks:
+  - id: '1.1'
+    title: a
+```
+"""
+
+
+def _entry_priority(monkeypatch, tmp_path, priority):
+    """Re-stub the graph read with a priority-carrying node entry."""
+    entry = {
+        "id": "x-8d1d",
+        "slug": "joiner-2",
+        "plan_path": str(tmp_path / "plan.md"),
+        "priority": priority,
+    }
+    monkeypatch.setattr("fno.graph.store.read_graph", lambda *_a, **_k: [entry])
+
+
+def test_width_invariant_under_flipping_waves_to_parallel(tmp_path):
+    """The refuted premise, pinned. An all-sequential multi-task plan
+    measures above 1 (the positive marker, not an absence), and flipping
+    every wave to parallel never raises the measurement: parallel waves
+    only ever ADD derived edges, so mode is intra-wave fan-out and never a
+    width lever."""
+    seq = tmp_path / "seq.md"
+    par = tmp_path / "par.md"
+    seq.write_text(_two_wave_plan("sequential"))
+    par.write_text(_two_wave_plan("parallel"))
+    seq_width = _plan_parallel_width(seq)
+    assert seq_width > 1
+    assert _plan_parallel_width(par) == seq_width
+
+
+def test_derivation_answers_the_operator_sizing_example():
+    """Width 7, priority p1, highest band medium -> 3, the operator's own
+    worked example. Corners pin the table's shape."""
+    count, band = advance._derive_join_workers(
+        advance._PlanTaskGraph([], {}, ["medium"], {}), "p1"
+    )
+    assert (count, band) == (3, "medium")
+    count, _ = advance._derive_join_workers(
+        advance._PlanTaskGraph([], {}, ["high"], {}), "p0"
+    )
+    assert count == 4
+    count, _ = advance._derive_join_workers(
+        advance._PlanTaskGraph([], {}, ["low"], {}), "p3"
+    )
+    assert count == 1
+
+
+def test_derivation_defaults_an_unbanded_plan_to_medium():
+    count, band = advance._derive_join_workers(
+        advance._PlanTaskGraph([], {}, [], {}), "p1"
+    )
+    assert (count, band) == (3, "medium")
+
+
+def test_bare_join_on_narrow_plan_refuses_unchanged(tmp_path, monkeypatch):
+    """Width below 2 with no --workers refuses exit 3 with the same
+    message as before the derivation existed."""
+    _wire(monkeypatch, tmp_path, NARROW_PLAN)
+    with pytest.raises(JoinRefuse) as excinfo:
+        join_node("x-8d1d", None)
+    assert excinfo.value.code == 3
+    assert "nothing to pull" in excinfo.value.message
+
+
+def test_bare_join_derives_workers_and_names_the_inputs(tmp_path, monkeypatch):
+    calls = _wire(monkeypatch, tmp_path, WIDE_PLAN)
+    _entry_priority(monkeypatch, tmp_path, "p1")
+    receipt = join_node("x-8d1d", None)
+    assert receipt["width"] == 7
+    assert receipt["priority"] == "p1"
+    assert receipt["band"] == "medium"  # unbanded plan sizes as medium
+    assert receipt["workers"] == 3
+    assert receipt["workers_source"] == "derived"
+    assert len(receipt["spawned"]) == 3
+    assert calls
+
+
+def test_explicit_workers_wins_over_the_derivation(tmp_path, monkeypatch):
+    _wire(monkeypatch, tmp_path, WIDE_PLAN)
+    _entry_priority(monkeypatch, tmp_path, "p1")
+    receipt = join_node("x-8d1d", 5)
+    assert receipt["workers"] == 5
+    assert receipt["workers_source"] == "explicit"
+    assert len(receipt["spawned"]) == 5
+    receipt = join_node("x-8d1d", 99)
+    assert receipt["workers_source"] == "explicit"
+    assert len(receipt["spawned"]) == 6  # width - 1 stays the only width cap
+
+
+def test_derivation_defaults_to_p2_without_a_node_priority(tmp_path, monkeypatch):
+    _wire(monkeypatch, tmp_path, WIDE_PLAN)
+    receipt = join_node("x-8d1d", None)
+    assert receipt["priority"] == "p2"
+    assert receipt["workers"] == 2

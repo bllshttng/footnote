@@ -82,3 +82,26 @@ def test_model_tier_field_is_gone():
     m = PlanFrontmatter.model_validate(_fm(model_tier="low"))
     assert not hasattr(m, "model_tier")
     assert m.difficulty is None
+
+
+def test_orchestration_defaults_to_king_when_absent():
+    """AC5-HP: the key is opt-in. Every plan on disk omits it, so absence
+    must validate unchanged and read king - no existing plan changes
+    behavior until its author writes the key."""
+    m = PlanFrontmatter.model_validate(_fm())
+    assert m.orchestration == "king"
+
+
+def test_orchestration_mechanical_is_legal_and_normalized():
+    m = PlanFrontmatter.model_validate(_fm(orchestration="Mechanical"))
+    assert m.orchestration == "mechanical"
+
+
+def test_orchestration_outside_enum_refuses_naming_field():
+    """AC6-ERR: the band enum's refusal shape - message names the field
+    and its legal values, so a typo teaches the enum instead of puzzling."""
+    with pytest.raises(ValidationError) as exc:
+        PlanFrontmatter.model_validate(_fm(orchestration="daemon"))
+    msg = str(exc.value)
+    assert "orchestration" in msg, msg
+    assert "king, mechanical" in msg, msg

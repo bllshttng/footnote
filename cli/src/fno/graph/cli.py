@@ -5491,9 +5491,11 @@ def cmd_dispatch_lanes(
 @cli.command("join", hidden=True)
 def cmd_join(
     node: str = typer.Argument(..., help="Node id (slug / bare hex resolve)."),
-    workers: int = typer.Option(
-        1, "--workers",
-        help="Requested joiner count; the plan's ready-graph width bounds it.",
+    workers: Optional[int] = typer.Option(
+        None, "--workers",
+        help="Requested joiner count. Empty derives it from the node priority "
+        "and the plan's highest wave band; the plan's ready-graph width "
+        "bounds it either way.",
     ),
     model: Optional[str] = typer.Option(
         None, "--model", "-m",
@@ -5510,8 +5512,11 @@ def cmd_join(
     the node claim. One worker per wave band when the plan carries bands
     (highest band first, the lead; each lane resolved per band), else
     ``min(workers, width - 1)`` shapeless workers; the width rule caps the
-    count either way. Prints one JSON receipt:
-    ``{"node", "worktree", "width", "spawned", "lead", "lanes"}``.
+    count either way. An omitted --workers derives the ask from the node
+    priority and the plan's highest wave band instead of asking for one
+    joiner. Prints one JSON receipt:
+    ``{"node", "worktree", "width", "priority", "band", "workers",
+    "workers_source", "spawned", "lead", "lanes"}``.
 
     Refusals: exit 2 nothing to join (no live claim), exit 3 width 1, exit 4
     no usable bound plan, exit 5 already joined (live j-<node>-* workers).
@@ -5526,7 +5531,7 @@ def cmd_join(
         raise typer.Exit(code=2)
 
     try:
-        receipt = join_node(match.id, max(1, workers), model=model)
+        receipt = join_node(match.id, workers, model=model)
     except JoinRefuse as exc:
         typer.echo(f"backlog join: {exc.message}", err=True)
         raise typer.Exit(code=exc.code)

@@ -524,6 +524,74 @@ def _build_execution_strategy(sections: OrderedDict[str, str], difficulty: str =
     return f"```yaml\n{yaml_block}```"
 
 
+def _wave_mode_from_surfaces(surface_sets: list[set[str]]) -> str:
+    """Intra-wave fan-out call: parallel only when every task names files and
+    no two tasks name the same one.
+
+    Any empty surface means fan-out was never assessed for that task, so the
+    honest answer is sequential, not a guess. This is a fan-out decision
+    inside one wave and nothing more: wave mode never widens a plan's join
+    width, because the width function only ever ADDS derived edges for
+    parallel waves.
+    """
+    if not surface_sets:
+        return "sequential"
+    seen: set[str] = set()
+    for surfaces in surface_sets:
+        if not surfaces or (surfaces & seen):
+            return "sequential"
+        seen |= surfaces
+    return "parallel"
+
+
+_STRATEGY_FENCE_RE = re.compile(
+    r"(^## Execution Strategy\s*$.*?^```yaml[ \t]*$\n)(.*?)(^```[ \t]*$)",
+    re.M | re.S,
+)
+
+
+def _apply_wave_modes(doc_text: str) -> tuple[str, list[str]]:
+    """Recompute every wave's ``mode`` in the Execution Strategy fence.
+
+    The mint writes ``sequential`` because its single wave has no surfaces
+    to compare; finalize runs where surfaces are filled. Only a changed mode
+    rewrites the fence, and an unreadable or missing fence is left exactly
+    as written - the execution validator owns refusals, this owns fan-out.
+    """
+    match = _STRATEGY_FENCE_RE.search(doc_text)
+    if match is None:
+        return doc_text, []
+    try:
+        strategy = yaml.safe_load(match.group(2))
+    except yaml.YAMLError:
+        return doc_text, []
+    if not isinstance(strategy, dict):
+        return doc_text, []
+    surfaces_by_task = {
+        str(task.get("id")): {str(p) for p in (task.get("surface") or [])}
+        for task in strategy.get("tasks") or []
+        if isinstance(task, dict) and task.get("id") is not None
+    }
+    waves = strategy.get("waves")
+    if not isinstance(waves, list):
+        return doc_text, []
+    notes: list[str] = []
+    changed = False
+    for wave in waves:
+        if not isinstance(wave, dict):
+            continue
+        ids = [str(i) for i in wave.get("tasks") or []]
+        mode = _wave_mode_from_surfaces([surfaces_by_task.get(i, set()) for i in ids])
+        if wave.get("mode") != mode:
+            wave["mode"] = mode
+            changed = True
+        notes.append(f"wave {wave.get('wave')}: {mode}")
+    if not changed:
+        return doc_text, notes
+    redumped = yaml.dump(strategy, Dumper=_IndentDumper, default_flow_style=False, sort_keys=False, allow_unicode=True, width=float("inf"))
+    return doc_text[: match.start(2)] + redumped + doc_text[match.end(2):], notes
+
+
 def _build_file_ownership_map(arch_section: str | None, repo_root: Path) -> str:
     """Build ## File Ownership Map table for brownfield mode."""
     if not arch_section:
@@ -1123,6 +1191,10 @@ def finalize(doc_path: Path, no_emit: bool = False) -> tuple[int, str]:
     if schema_err is not None:
         return 3, schema_err
     original = resolved.read_text(encoding="utf-8")
+    # Wave fan-out is decided here, at the first point surfaces exist - the
+    # mint wrote the block with none. Best-effort: an unreadable fence
+    # promotes unchanged rather than blocking a valid plan.
+    original, _mode_notes = _apply_wave_modes(original)
     proposed = _replace_frontmatter(original, frontmatter)
     if no_emit:
         return 0, proposed

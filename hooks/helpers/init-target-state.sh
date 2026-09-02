@@ -1655,6 +1655,55 @@ PYEOF
     # Unconditional: this whole block is already inside `-n "$_NODE_ID"`, so the
     # null arm that used to sit here could never run.
     echo "graph_node_id: $_NODE_ID" >> "$STATE_FILE"
+
+    # ── Mechanical orchestration: fire join or park ──────────────────────
+    # `orchestration: mechanical` in the plan frontmatter hands the plan's
+    # remaining waves to `fno backlog join` here, at init: this session is
+    # the holder (one worker) and join spawns the remainder into this
+    # worktree. The key is opt-in - absent or `king` is the
+    # operator-reviewed path and does nothing, so plans written before the
+    # key keep their behavior. Both facts come from the canonical probes in
+    # fno.backlog.join_trigger: bash re-implementing the auto-continue
+    # precedence chain (autonomy master, env, config, default) is how the
+    # two drift. Every failure mode is non-fatal and named: an unmeasured
+    # width never fires join, and a parked trigger names the measured width
+    # so a narrow plan stays distinguishable from a switched-off feature.
+    if [[ "$_NODE_OWNED" -eq 1 && -n "${INITIAL_PLAN_PATH:-}" && -f "${INITIAL_PLAN_PATH%%#*}" ]]; then
+      _jt_plan="${INITIAL_PLAN_PATH%%#*}"
+      _jt_fm="$(sed -n 's/^orchestration:[[:space:]]*//p' "$_jt_plan" 2>/dev/null | head -1 | tr -d '"' | tr -d "'" | xargs)"
+      if [[ "${_jt_fm:-king}" == "mechanical" ]]; then
+        _jt_root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+        if [[ -z "${FNO_PYTHON:-}" && -f "$_jt_root/scripts/lib/fno-python.sh" ]]; then
+          # shellcheck source=/dev/null
+          source "$_jt_root/scripts/lib/fno-python.sh" && fno_python_init "$_jt_root"
+        fi
+        _jt_width=""
+        _jt_armed_line=""
+        if [[ -n "${FNO_PYTHON:-}" && -d "$_jt_root/cli/src" ]]; then
+          _jt_width="$(PYTHONPATH="$_jt_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" "$FNO_PYTHON" -m fno.backlog.join_trigger width "$_jt_plan" 2>/dev/null)" || _jt_width=""
+          _jt_armed_line="$(PYTHONPATH="$_jt_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" "$FNO_PYTHON" -m fno.backlog.join_trigger armed "$REPO_ROOT" 2>/dev/null)" || _jt_armed_line=""
+        fi
+        case "$_jt_armed_line" in
+          armed=true*) _jt_armed=1 ;;
+          *) _jt_armed="" ;;
+        esac
+        if [[ -z "$_jt_width" ]] || [[ ! "$_jt_width" =~ ^[1-9][0-9]*$ ]]; then
+          echo "target: orchestration mechanical: plan width unreadable; join not fired" >&2
+        elif [[ -z "$_jt_armed" ]]; then
+          echo "target: orchestration mechanical: PARKED, auto_continue off (width $_jt_width)" >&2
+        elif [[ "$_jt_width" -lt 2 ]]; then
+          echo "target: orchestration mechanical: nothing to join (width $_jt_width)" >&2
+        else
+          echo "target: orchestration mechanical: firing join for the remainder (width $_jt_width)" >&2
+          _jt_log="$STATE_DIR/.init-join.log"
+          if fno backlog join "$_NODE_ID" >"$_jt_log" 2>&1; then
+            echo "target: orchestration mechanical: join dispatched (receipt in $_jt_log)" >&2
+          else
+            echo "target: orchestration mechanical: join refused, non-fatal (see $_jt_log)" >&2
+          fi
+        fi
+      fi
+    fi
   else
     echo "graph_node_id: null" >> "$STATE_FILE"
   fi
