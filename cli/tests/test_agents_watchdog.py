@@ -2504,6 +2504,69 @@ def test_ac5_hlth_production_candidate_uses_policy_order_and_observed_health(tmp
     assert canaries == ["good"]
 
 
+def test_production_pane_occupancy_counts_per_harness(tmp_path, monkeypatch):
+    """x-581b AC6-HP: occupancy is a per-harness number, not session-wide.
+
+    The old read measured the whole mux session (min tab occupancy) and
+    dropped its harness argument, so claude's full tab told a codex candidate
+    the session was at capacity. Two harnesses in ONE session must report
+    DIFFERENT numbers; a one-harness test would pass against the broken
+    implementation. The join key is the ``harness_session_id`` the pane
+    listing already carries - never a cwd or title guess.
+    """
+    from fno.agents import registry as registry_mod
+    from fno.agents import mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "resolve_mux_session", lambda _arg: "stable-session")
+
+    pane_listing = json.dumps([
+        {"pane_id": 1, "harness_session_id": "claude-one"},
+        {"pane_id": 2, "harness_session_id": "claude-two"},
+        {"pane_id": 3, "harness_session_id": "codex-one"},
+        {"pane_id": 4, "harness_session_id": None},
+    ])
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=pane_listing, stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        registry_mod,
+        "load_registry",
+        lambda: [
+            SimpleNamespace(harness="claude", harness_session_id="claude-one"),
+            SimpleNamespace(harness="claude", harness_session_id="claude-two"),
+            SimpleNamespace(harness="codex", harness_session_id="codex-one"),
+        ],
+    )
+
+    assert watchdog._production_pane_occupancy("claude") == 2
+    assert watchdog._production_pane_occupancy("codex") == 1
+    assert watchdog._production_pane_occupancy("claude") != (
+        watchdog._production_pane_occupancy("codex")
+    )
+    # A pane with no harness session (a plain shell) counts toward nothing,
+    # and an unknown harness reads zero rather than inheriting the session.
+    assert watchdog._production_pane_occupancy("agy") == 0
+
+
+def test_production_pane_occupancy_answers_at_capacity_when_unreadable(tmp_path, monkeypatch):
+    """An unreadable listing answers 4, not 0: the route gate must skip a
+    candidate whose occupancy it could not measure."""
+    from fno.agents import mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "resolve_mux_session", lambda _arg: "stable-session")
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=7, stdout="", stderr="boom"),
+    )
+
+    assert watchdog._production_pane_occupancy("claude") == 4
+
+
 def test_ac5_hlth_production_candidate_canaries_configured_route_without_registry_row(
     tmp_path, monkeypatch,
 ):

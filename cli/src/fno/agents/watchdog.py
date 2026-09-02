@@ -2394,7 +2394,11 @@ def supervise_provider_handoffs(
 
     if candidate_for is None:
         candidate_for = production_handoff_candidate
-    handoff_fn = handoff_fn or recover_provider_outage
+    handoff_fn = handoff_fn or (
+        lambda request, deps, journal_root: recover_provider_outage(
+            request, deps=deps, journal_root=journal_root, settings=settings
+        )
+    )
     deps_factory = deps_factory or production_handoff_dependencies
     if decision_fn is None:
         from fno.decide import record_decision
@@ -2774,30 +2778,56 @@ def _persisted_open_breakers() -> list[dict[str, Any]]:
     return [item for item in (breakers or []) if isinstance(item, dict)]
 
 
-def _production_pane_occupancy(_harness: str) -> int:
+def _production_pane_occupancy(harness: str) -> int:
+    """Live pane count for ONE harness in the resolved mux session.
+
+    The pane listing already carries each pane's ``harness_session_id`` (the
+    server joins it off the registry row by mux ref), so the harness axis is
+    one dict join away - never derived from a cwd or title guess. Panes with
+    no harness session (plain shells, foreign panes) count toward nothing.
+
+    An unreadable listing answers 4, the at-capacity value: the route gate
+    skips a candidate whose occupancy it could not measure, which is the
+    fail-closed direction - refusing a healthy route costs a missed handoff,
+    while counting an unreadable mux as empty overfills the session with
+    recovery spawns.
+    """
     from fno import _subprocess_util
     from fno.agents.mux_spawn import resolve_mux_session
 
     session = resolve_mux_session(None)
     proc = subprocess.run(
-        [*_subprocess_util.fno_py_cmd(), "mux", "tab", "ls",
+        [*_subprocess_util.fno_py_cmd(), "mux", "pane", "ls",
          "--session", session, "--json"],
         capture_output=True, text=True, timeout=10, check=False,
     )
     if proc.returncode != 0:
         return 4
     try:
-        tabs = json.loads(proc.stdout or "")
+        panes = json.loads(proc.stdout or "")
     except (TypeError, ValueError):
         return 4
-    if not isinstance(tabs, list):
+    if not isinstance(panes, list):
         return 4
-    counts = [
-        len(item["pane_ids"])
-        for item in tabs
-        if isinstance(item, dict) and isinstance(item.get("pane_ids"), list)
+    session_ids = [
+        sid
+        for sid in (
+            str(item.get("harness_session_id") or "")
+            for item in panes
+            if isinstance(item, dict)
+        )
+        if sid
     ]
-    return min(counts) if counts else 0
+    if not session_ids:
+        return 0
+    from fno.agents.registry import load_registry
+
+    harness_by_sid: dict[str, str] = {}
+    for entry in load_registry():
+        sid = str(getattr(entry, "harness_session_id", "") or "")
+        if sid:
+            harness_by_sid[sid] = str(getattr(entry, "harness", "") or "")
+    return sum(1 for sid in session_ids if harness_by_sid.get(sid) == harness)
 
 
 def run_sweep(
