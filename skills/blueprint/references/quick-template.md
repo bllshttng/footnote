@@ -149,13 +149,50 @@ _Optional — omit this section entirely if no relevant patterns exist._
 2. `pnpm test src/server/file.test.ts` — tests pass
 3. Navigate to /page → verify [specific behavior]
 4. Check database: `SELECT ... FROM table WHERE ...` → [expected result]
+
+## Execution Strategy
+
+```yaml
+execution_mode: sequential
+waves:
+  - wave: 1
+    mode: parallel                 # load-bearing; see Guidelines below
+    name: [what this plan delivers]
+    difficulty: <low | medium | high>   # the frontmatter band unless this wave differs
+    tasks: ['1.1', '1.2', '1.3']   # one id per numbered change, in order
+tasks:
+  - id: '1.1'
+    title: [change 1's heading, verbatim]
+    surface: ['path/to/file.ts']   # change 1's **Files:** list, verbatim
+    verify: [the runnable check from ## Verification that covers change 1]
+    acceptance:
+      - [change 1's first **Acceptance:** line]
+      - [change 1's error-case line]
+  - id: '1.2'
+    title: [change 2's heading, verbatim]
+    surface: ['path/to/other.ts']
+    verify: [the runnable check that covers change 2]
+    acceptance:
+      - [change 2's happy-path line]
+      - [change 2's error-case line]
+```
 ```
 
 ---
 
 ## Guidelines
 
-**Length:** 50-100 lines. A larger multi-wave feature still stays one `.md` - use the design-doc mutation path (`/blueprint <design-doc>` after `/think`), which appends an `## Execution Strategy` waves block. Drop `quick` for the fuller section set on an idea input.
+**Length:** 50-100 lines. A larger multi-wave feature still stays one `.md` - use the design-doc mutation path (`/blueprint <design-doc>` after `/think`), which builds its `## Execution Strategy` from the design. Drop `quick` for the fuller section set on an idea input.
+
+**Execution Strategy:** Emit one. Transcribe the numbered changes rather than re-deriving them, because both inputs the rule needs are already written above.
+
+Each `### N.` change becomes one task. Its `**Files:**` line becomes that task's `surface`. All tasks go into ONE wave with `mode: parallel`.
+
+`mode: parallel` is load-bearing, not cosmetic. The collision partition runs only for parallel waves, and it is the only mode that reads the same-file case correctly. Three tasks naming one file measure 1 under `parallel` and 3 under `sequential`, which over-reports.
+
+Declare NO per-task `blocked_by` here. A declared blocker wins outright over wave inheritance, and a reflex chain forecloses the parallelism the wave just declared.
+
+A genuinely single-change plan emits one task and measures width 1. Join still refuses it, now for a reason the file states rather than a flag it was handed.
 
 **Changes:** Number them. Each change should target 1-3 files. If a single change touches 5+ files, break it into smaller changes. Each change gets 1-2 BDD acceptance criteria (happy path + primary error case) in the `**Acceptance:**` field.
 

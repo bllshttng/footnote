@@ -458,7 +458,7 @@ When the input to `/blueprint` is a path to an existing design doc (produced by 
 
 | Modifier | Effect |
 |---|---|
-| `quick` | Skip ## Execution Strategy (single-task; stamp status + kill_criteria) |
+| `quick` | Emit ## Execution Strategy as one parallel wave, one task per numbered change (stamp status + kill_criteria) |
 | `group N` | Bounded epic decomposition: after intake, partition the waves into at most `N` cohesive delivery groups (one child node + PR each). See [references/epic-decomposition.md](references/epic-decomposition.md). Omit `N` to fall back to the epic's `max_children`, else `config.blueprint.max_prs_per_epic`. Auto-enabled for `scope: epic` docs. |
 | `no-group` | Opt OUT of auto-decomposition on a `scope: epic` doc: run the single-doc lean mutation (one epic node, one PR), the pre-auto-group behavior. |
 | `greenfield` | Skip File Ownership Map + Patterns to Reuse regardless of codebase state |
