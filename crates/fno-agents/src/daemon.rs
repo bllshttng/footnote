@@ -898,6 +898,23 @@ pub struct WorktreeSweepOutput {
     pub stderr: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeSweepOrderRead {
+    pub standing: Option<bool>,
+    pub exit_code: Option<i32>,
+    pub stderr: String,
+}
+
+impl From<bool> for WorktreeSweepOrderRead {
+    fn from(standing: bool) -> Self {
+        Self {
+            standing: Some(standing),
+            exit_code: Some(0),
+            stderr: String::new(),
+        }
+    }
+}
+
 /// Parse `fno agents workspace worktree cleanup --merged`'s summary line.
 ///
 /// Returns `None` rather than a zeroed report when the line is absent. A sweep
@@ -943,7 +960,7 @@ pub fn worktree_sweep(
     emitter: &EventEmitter,
     now: i64,
     roots: &[String],
-    orders: &dyn Fn(&str) -> bool,
+    orders: &dyn Fn(&str) -> WorktreeSweepOrderRead,
     run: &dyn Fn(&str, bool) -> WorktreeSweepOutput,
 ) -> usize {
     let stamp = home.root().join("worktree-sweep.stamp");
@@ -956,7 +973,20 @@ pub fn worktree_sweep(
     }
     let mut swept = 0;
     for root in roots {
-        let apply = orders(root);
+        let order_read = orders(root);
+        let Some(apply) = order_read.standing else {
+            let stderr = order_read.stderr.lines().next().unwrap_or("");
+            let _ = emitter.emit(
+                "worktree_sweep",
+                &json!({
+                    "repo": root,
+                    "error": "unreadable-orders",
+                    "exit_code": order_read.exit_code,
+                    "stderr": stderr,
+                }),
+            );
+            continue;
+        };
         let mode = if apply { "apply-orders" } else { "report-only" };
         // Emit for EVERY repo, including the ones that read zero. A tick that
         // stays silent when it finds nothing cannot be told from a tick that
@@ -3493,14 +3523,36 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                             // that gh-confirmed MERGED, so its standing is the
                             // merge-trigger for this tick's apply pass.
                             let mut cmd = std::process::Command::new("fno");
-                            cmd.current_dir(root)
+                            match cmd.current_dir(root)
                                 .args(["agents", "claim", "list", "--prefix", "reap:", "-J"])
                                 .output()
-                                .ok()
-                                .filter(|o| o.status.success())
-                                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                                .map(|out| out.trim() != "[]" && !out.trim().is_empty())
-                                .unwrap_or(false)
+                            {
+                                Ok(output) if output.status.success() => {
+                                    match serde_json::from_slice::<Value>(&output.stdout) {
+                                        Ok(Value::Array(rows)) => (!rows.is_empty()).into(),
+                                        Ok(_) => WorktreeSweepOrderRead {
+                                            standing: None,
+                                            exit_code: output.status.code(),
+                                            stderr: "claim list returned non-array JSON".into(),
+                                        },
+                                        Err(error) => WorktreeSweepOrderRead {
+                                            standing: None,
+                                            exit_code: output.status.code(),
+                                            stderr: format!("claim list returned invalid JSON: {error}"),
+                                        },
+                                    }
+                                }
+                                Ok(output) => WorktreeSweepOrderRead {
+                                    standing: None,
+                                    exit_code: output.status.code(),
+                                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                                },
+                                Err(error) => WorktreeSweepOrderRead {
+                                    standing: None,
+                                    exit_code: None,
+                                    stderr: error.to_string(),
+                                },
+                            }
                         }, &|root, apply| {
                             let mut cmd = std::process::Command::new("fno");
                             cmd.current_dir(root).args([
@@ -11888,7 +11940,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &emitter,
             1_000_000,
             &["/repo/a".into(), "/repo/b".into()],
-            &|_| false,
+            &|_| false.into(),
             &|_, _| WorktreeSweepOutput {
                 exit_code: Some(0),
                 stdout: quiet.into(),
@@ -11917,7 +11969,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &emitter,
             1_000_000,
             &["/repo/a".into()],
-            &|_| true,
+            &|_| true.into(),
             &|_, apply| {
                 assert!(apply, "a standing order must reach the verb as --apply");
                 WorktreeSweepOutput {
@@ -11947,7 +11999,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &emitter,
             1_000_000,
             &["/repo/a".into(), "/repo/b".into()],
-            &|root| root == "/repo/b",
+            &|root| (root == "/repo/b").into(),
             &|root, apply| {
                 seen.lock().unwrap().push((root.to_string(), apply));
                 WorktreeSweepOutput {
@@ -11966,6 +12018,38 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     }
 
     #[test]
+    fn sweep_skips_a_repo_when_its_order_probe_is_unreadable() {
+        let home = tmp_home("wt-sweep-order-unreadable");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let ran_cleanup = std::sync::atomic::AtomicBool::new(false);
+
+        let swept = worktree_sweep(
+            &home,
+            &emitter,
+            1_000_000,
+            &["/repo/a".into()],
+            &|_| WorktreeSweepOrderRead {
+                standing: None,
+                exit_code: Some(7),
+                stderr: "claim store unreadable\nextra detail\n".into(),
+            },
+            &|_, _| {
+                ran_cleanup.store(true, std::sync::atomic::Ordering::Relaxed);
+                unreachable!("an unreadable order probe must skip cleanup")
+            },
+        );
+
+        assert_eq!(swept, 0);
+        assert!(!ran_cleanup.load(std::sync::atomic::Ordering::Relaxed));
+        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(log.contains("\"error\":\"unreadable-orders\""));
+        assert!(log.contains("\"exit_code\":7"));
+        assert!(log.contains("\"stderr\":\"claim store unreadable\""));
+        assert!(!log.contains("extra detail"));
+        assert!(!log.contains("report-only"));
+    }
+
+    #[test]
     fn sweep_honours_its_own_6h_floor() {
         let home = tmp_home("wt-sweep-floor");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
@@ -11977,7 +12061,14 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let now = 1_000_000;
 
         assert_eq!(
-            worktree_sweep(&home, &emitter, now, &["/repo/a".into()], &|_| false, &out),
+            worktree_sweep(
+                &home,
+                &emitter,
+                now,
+                &["/repo/a".into()],
+                &|_| false.into(),
+                &out,
+            ),
             1
         );
         // Same window: skipped entirely, no second reading.
@@ -11987,7 +12078,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 &emitter,
                 now + 60,
                 &["/repo/a".into()],
-                &|_| false,
+                &|_| false.into(),
                 &out
             ),
             0
@@ -11999,7 +12090,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 &emitter,
                 now + 21_601,
                 &["/repo/a".into()],
-                &|_| false,
+                &|_| false.into(),
                 &out
             ),
             1
@@ -12029,7 +12120,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &emitter,
             1_000_000,
             &["/repo/a".into()],
-            &|_| false,
+            &|_| false.into(),
             &|_, _| WorktreeSweepOutput {
                 exit_code: None,
                 stdout: String::new(),
@@ -12058,7 +12149,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &emitter,
             1_000_000,
             &["/repo/a".into()],
-            &|_| false,
+            &|_| false.into(),
             &|_, _| output.clone(),
         );
 
@@ -12079,7 +12170,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &emitter,
             1_000_000,
             &["/repo/a".into()],
-            &|_| false,
+            &|_| false.into(),
             &|_, _| WorktreeSweepOutput {
                 exit_code: Some(0),
                 stdout: "no summary here\n".into(),
