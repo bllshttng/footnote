@@ -1970,10 +1970,32 @@ def _lane_b_thread_spawn(
     }
 
 
+def _strip_ansi(raw: bytes) -> bytes:
+    """Drop ANSI escape sequences from pty output so a marker match cannot be
+    broken by the TUI painting one character per escape-wrapped write. Mirrors
+    the Rust matcher input in mail_inject.rs; lossy on purpose."""
+    out = bytearray()
+    i = 0
+    n = len(raw)
+    while i < n:
+        b = raw[i]
+        if b == 0x1B:
+            if i + 1 < n and raw[i + 1 : i + 2] == b"[":
+                i += 2
+                while i < n and not 0x40 <= raw[i] <= 0x7E:
+                    i += 1
+                i += 1
+            else:
+                i += 2
+        else:
+            out.append(b)
+            i += 1
+    return bytes(out)
+
+
 def _keeper_seed_submit(
     *,
     name: str,
-    harness: str,
     session_id: str,
     sock: Path,
     message: str,
@@ -1981,49 +2003,100 @@ def _keeper_seed_submit(
     """Deliver a thread spawn's seed to its keeper-hosted TUI.
 
     A spawn that leaves the worker idle is the x-f22f shape: a row that did
-    nothing. The keeper child's composer is not painted the instant the
-    keeper answers Identify, so this waits for the harness's idle marker on
-    the keeper pty stream (the same read the journey proves; there is no
-    screen to scrape on a pane-less keeper) and only then hands the payload
-    to the mail lane's keeper injector, which types it with the row's own
-    settle delay. A marker that never paints is a raised error, not a silent
-    drop: the caller refuses the spawn rather than report a worker that will
-    never start.
+    nothing. The keeper honors Input only from its ONE subscriber seat
+    (first come, first seated) and never replays its ring to a late
+    connection, so this drives the whole seed dance on ONE connection taken
+    as soon as the spawn returns: a Resize frame forces the TUI to repaint
+    whatever already painted, the idle marker read off the stream proves the
+    composer is up, and only then is the payload pasted and submitted. The
+    repaint of the submitted turn is the landing proof; a miss is a raised
+    error, never a silent drop - the caller refuses the spawn rather than
+    report a worker that will never start.
     """
-    import socket
-    import time
+    import socket as _socket
+    import time as _time
 
-    deadline = time.monotonic() + 60.0
-    buf = b""
-    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    # Frame protocol (crates/fno-agents/src/pane_keeper.rs): u8 tag | u32 LE
+    # length | payload; Input is tag 1, Resize is tag 2 with rows/cols u16.
+    tag_input = 1
+    tag_resize = 2
+
+    def frame(tag: int, payload: bytes) -> bytes:
+        return bytes([tag]) + len(payload).to_bytes(4, "little") + payload
+
+    conn = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
     conn.settimeout(2.0)
+    text = bytearray()  # ANSI-stripped view: the TUI paints one character
+    # per escape-wrapped write, so no marker matches the raw stream.
     try:
         conn.connect(str(sock))
-        while time.monotonic() < deadline and b"Add a follow-up" not in buf:
+        # The boot paint may have happened while nobody held the seat (the
+        # ring is not replayed to a late subscriber) and a same-size Resize
+        # fires no SIGWINCH, so the wait alternates sizes every few seconds
+        # to force a repaint until the marker arrives.
+        ready_marker = b"Plan, search, build anything"
+        deadline = _time.monotonic() + 60.0
+        flip = False
+        last_nudge = 0.0
+        while _time.monotonic() < deadline:
+            if ready_marker in bytes(text):
+                break
+            now = _time.monotonic()
+            if now - last_nudge >= 4.0:
+                flip = not flip
+                size = (25, 81) if flip else (24, 80)
+                conn.sendall(
+                    frame(
+                        tag_resize,
+                        size[0].to_bytes(2, "little") + size[1].to_bytes(2, "little"),
+                    )
+                )
+                last_nudge = now
             try:
-                chunk = conn.recv(4096)
-            except socket.timeout:
+                chunk = conn.recv(65536)
+            except _socket.timeout:
                 continue
             if not chunk:
-                time.sleep(0.2)
+                _time.sleep(0.2)
                 continue
-            buf += chunk
+            text.extend(_strip_ansi(chunk))
+        else:
+            raise DispatchAskError(
+                f"keeper thread for {name!r} never painted its idle composer "
+                f"within 60s; the seed was not delivered. Inspect with "
+                f"'fno agents peek {name}' and send the prompt by mail.",
+                exit_code=1,
+            )
+
+        payload = message.encode("utf-8")
+        conn.sendall(frame(tag_input, payload))
+        _time.sleep(0.1)  # the row's measured settle delay is 0ms; a beat
+        conn.sendall(frame(tag_input, b"\r"))
+
+        # A composer-wide prefix: the TUI wraps long lines, and a newline
+        # mid-marker would break a full-line match even after the strip.
+        marker = message.splitlines()[0].encode("utf-8")[:48]
+        base = len(text)
+        deadline = _time.monotonic() + 120.0
+        while _time.monotonic() < deadline:
+            if marker in bytes(text[base:]):
+                return
+            try:
+                chunk = conn.recv(65536)
+            except _socket.timeout:
+                continue
+            if not chunk:
+                _time.sleep(0.2)
+                continue
+            text.extend(_strip_ansi(chunk))
+        raise DispatchAskError(
+            f"the seed for keeper thread {name!r} never repainted after "
+            "submit; the worker may be idle. Send it by mail: "
+            f"fno agents mail send {name}",
+            exit_code=1,
+        )
     finally:
         conn.close()
-    if b"Add a follow-up" not in buf:
-        raise DispatchAskError(
-            f"keeper thread for {name!r} never painted its idle composer "
-            f"within 60s; the seed was not delivered. Inspect with "
-            f"'fno agents peek {name}' and send the prompt by mail.",
-            exit_code=1,
-        )
-    delivered = _mail_inject_keeper(session_id, message, harness=harness)
-    if not delivered:
-        raise DispatchAskError(
-            f"the seed for keeper thread {name!r} did not land; the worker "
-            f"is idle. Send it by mail: fno agents mail send {name}",
-            exit_code=1,
-        )
 
 
 def _claude_create_path(
@@ -3585,7 +3658,6 @@ def dispatch_spawn(
         if message.strip():
             _keeper_seed_submit(
                 name=name,
-                harness="cursor-agent",
                 session_id=session_id,
                 sock=Path(receipt["keeper_socket"]),
                 message=message,

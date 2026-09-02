@@ -306,6 +306,17 @@ impl Keeper {
 /// BEFORE launch (`pi --session-id <id>`), so this is a read of state the
 /// keeper already holds, not a second field to keep in sync. `None` when
 /// the argv names no id - never a guess.
+/// A full UUID: 36 chars with dashes at 8, 13, 18 and 23. The shape check is
+/// the point: a bare `--resume` opens a picker and a truncated handle
+/// addresses nothing, and neither may ever be read as an identity.
+fn is_full_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.as_bytes()[8] == b'-'
+        && value.as_bytes()[13] == b'-'
+        && value.as_bytes()[18] == b'-'
+        && value.as_bytes()[23] == b'-'
+}
+
 fn session_id_from_argv(argv: &[String]) -> Option<String> {
     let mut it = argv.iter();
     while let Some(arg) = it.next() {
@@ -318,6 +329,17 @@ fn session_id_from_argv(argv: &[String]) -> Option<String> {
         }
         if let Some(value) = arg.strip_prefix("--session-id=") {
             return (!value.is_empty()).then(|| value.to_string());
+        }
+        // cursor-agent's create form (callee-minted-read-back): the chat id
+        // rides `--resume <uuid>`. The UUID-shape filter keeps a bare
+        // `--resume` (an interactive picker) and a truncated handle answering
+        // None, never a guess.
+        if arg == "--resume" {
+            return it
+                .next()
+                .map(String::as_str)
+                .filter(|s| is_full_uuid(s))
+                .map(str::to_string);
         }
     }
     None
@@ -764,5 +786,30 @@ mod tests {
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
         assert_eq!(session_id_from_argv(&empty_value), None);
+    }
+
+    #[test]
+    fn keeper_lane_reads_the_cursor_resume_shape_as_a_full_uuid_only() {
+        let cursor_shape = ["cursor-agent", "--resume", "0f9e63ed-861d-4f9f-8efa-3e40c5e01266", "--trust"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            session_id_from_argv(&cursor_shape),
+            Some("0f9e63ed-861d-4f9f-8efa-3e40c5e01266".to_string()),
+            "the callee-minted create form rides --resume"
+        );
+        // A bare --resume opens an interactive picker: no identity.
+        let picker = ["cursor-agent", "--resume"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(session_id_from_argv(&picker), None);
+        // A head-8 is an fno session handle, not a chat id: no identity.
+        let truncated = ["cursor-agent", "--resume", "74db359a"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(session_id_from_argv(&truncated), None);
     }
 }

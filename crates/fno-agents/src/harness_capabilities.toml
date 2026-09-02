@@ -710,7 +710,17 @@ status_pattern = ""
 [harness.cursor-agent]
 permission_bypass = ["--force"]
 resume = "native-session"
-thread = false
+# TRUE, and the live journey is the evidence
+# (cli/scripts/smoke/cursor-agent-keeper-journey.py, journey wk-cursor, first
+# green 2026-09-01 on cursor-agent v2026.08.31-4057e58): fno's keeper hosts
+# the TUI's pty on x-61bc's generic keeper lane, the child survived SIGKILL
+# of BOTH the mux server and the daemon with pid, cwd and session id
+# unchanged, the restart sweep re-bound the same row, the chat id appeared in
+# no file under ~/.cursor (the store is remote), and a fresh turn recalled a
+# prior turn's codeword. The row is a statement about the lane dispatch
+# resolves onto - the same field pi's row carries - never a claim that the
+# harness grew a transport.
+thread = true
 autonomous_pane = false
 route_on_pane = false
 loop_participation = "extension"
@@ -719,14 +729,17 @@ loop_participation = "extension"
 loop_extension = ""
 command_surface = "slash"
 slash_prefix = ""
-ready_marker = "idle_follow_up"
-ready_rule_ids = ["idle_follow_up"]
-manifest_rules = [{ id = "idle_follow_up", state = "idle" }]
+ready_marker = "idle_plan_build"
+ready_rule_ids = ["idle_plan_build"]
+manifest_rules = [{ id = "idle_plan_build", state = "idle" }]
 # Three 6KB-class / 43-line pastes followed immediately by Enter all returned
-# their marker with the composer clear; a single-line control also returned.
+# their marker with the composer clear on v2026.08.25 (a single-line control
+# also returned); the keeper journey re-measures the same shape on every run.
 # This is the live pane measurement, so the delay is 0 rather than a borrowed
-# default. The observed idle marker was `→ Add a follow-up`; working screens
-# carried a braille spinner and `Working` or `Running`.
+# default. The idle marker moved under a self-update: v2026.08.25 rendered
+# `-> Add a follow-up`, v2026.08.31-4057e58 renders
+# `-> Plan, search, build anything`. The old working rule (braille spinner
+# beside Working/Running) was deleted with the rot rather than kept unfired.
 send_keys_enter_delay_ms = 0
 submit_keys = ["enter"]
 # Stop is pane teardown; remove also runs cursor-agent's detached worker-server
@@ -736,8 +749,14 @@ remove_strategy = "registry-only"
 session_binding = { strategy = "callee-minted-read-back", required = true, timeout_ms = 60000 }
 
 [harness.cursor-agent.state_root_grant]
+# pane earned its marker on 2026-08-30: --add-dir carried the grant and a
+# write under the granted path landed. thread carries the same argv carrier
+# (the keeper spawn pins --add-dir in its argv test) but no write-marker has
+# been captured on that lane; the carrier is argv-proven, the write is not.
+# headless stays unmeasured: nothing has ever run there and no dispatch arm
+# reaches it.
 pane = "argv-add-dir"
-thread = "unmeasured"
+thread = "argv-add-dir"
 headless = "unmeasured"
 
 [harness.cursor-agent.permission_response.allow_once]

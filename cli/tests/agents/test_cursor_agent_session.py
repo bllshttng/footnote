@@ -13,9 +13,13 @@ def test_cursor_agent_capability_contract_is_pty_hosted_and_callee_minted():
 
     caps = capabilities("cursor-agent")
 
-    assert caps["thread"] is False  # flips with the keeper journey; see below
-    assert caps["ready_marker"] == "idle_follow_up"
-    assert caps["ready_rule_ids"] == ["idle_follow_up"]
+    # TRUE behind the live keeper journey (journey wk-cursor,
+    # cli/scripts/smoke/cursor-agent-keeper-journey.py, first green
+    # 2026-09-01): the keeper hosts the TUI across supervisor death and a
+    # fresh turn recalls a prior turn's codeword.
+    assert caps["thread"] is True
+    assert caps["ready_marker"] == "idle_plan_build"
+    assert caps["ready_rule_ids"] == ["idle_plan_build"]
     assert caps["send_keys_enter_delay_ms"] == 0
     assert caps["session_binding"] == {
         "strategy": "callee-minted-read-back",
@@ -127,6 +131,33 @@ def test_cursor_agent_registry_session_id_mapping_is_explicit():
     from fno.agents.registry import HARNESS_SESSION_ID_FIELDS
 
     assert HARNESS_SESSION_ID_FIELDS["cursor-agent"] == "harness_session_id"
+
+
+def test_cursor_agent_thread_dispatch_resolves_on_the_journey_backed_bit():
+    """The thread bit reads true behind the live keeper journey
+    (cli/scripts/smoke/cursor-agent-keeper-journey.py), so a one-shot
+    dispatch resolves onto the keeper lane and the row's lane answer is
+    keeper. The autonomous /target template still refuses at the loop gate:
+    loop_participation stays extension until a stop-hook firing marker is
+    proven, so a looping command cannot resolve."""
+    from fno.agents.harness_map import (
+        DispatchResolveError,
+        capabilities,
+        resolve_dispatch,
+        thread_lane,
+    )
+
+    assert thread_lane("cursor-agent") == "keeper"
+    assert capabilities("cursor-agent")["thread"] is True
+    resolved = resolve_dispatch(
+        harness="cursor-agent",
+        substrate="thread",
+        command="cursor-agent --version",
+    )
+    assert resolved["substrate"] == "thread"
+    assert resolved["thread"] is True
+    with pytest.raises(DispatchResolveError, match="Dispatch a one-shot instead"):
+        resolve_dispatch(harness="cursor-agent", substrate="thread")
 
 
 def test_cursor_agent_pane_argv_is_trusted_and_never_native_worktree():

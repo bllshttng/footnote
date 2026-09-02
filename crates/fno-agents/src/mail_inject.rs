@@ -664,13 +664,11 @@ enum KeeperConfirm {
     /// The hosted harness keeps its transcript REMOTELY (cursor-agent: the
     /// chat store lives server-side; nothing lands under its state root), so
     /// no local file can ever confirm. The pty stream is the only local
-    /// evidence: the TUI paints the pasted payload into its composer, so a
-    /// reader connected BEFORE the first keystroke sees the marker in the
-    /// keeper's `Output` frames. The accumulator only grows, so a composer
-    /// that redraws after submit never un-confirms a landed turn.
-    Pty {
-        received: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-    },
+    /// evidence: the TUI repaints the submitted turn into its scrollback, so
+    /// the SUBSCRIBER connection (this inject's own - first come, first
+    /// seated, and the only seat whose Input the keeper honors) sees the
+    /// marker in `Output` frames after the submit.
+    Pty,
     Refused(&'static str),
 }
 
@@ -678,11 +676,9 @@ fn resolve_keeper_confirm(target: &KeeperTarget, session: &str, pi_root: &Path) 
     match target.hosted_harness.as_str() {
         // cursor-agent's chat store is remote (measured: the id appears in no
         // file under its state root after two live turns), so there is no
-        // transcript to grep. Its TUI paints what it receives, which the pty
-        // variant confirms against.
-        "cursor-agent" => KeeperConfirm::Pty {
-            received: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-        },
+        // transcript to grep. Its TUI repaints the submitted turn, which the
+        // pty variant confirms against.
+        "cursor-agent" => KeeperConfirm::Pty,
         "pi" => match crate::pi::lookup_sessions_under(pi_root, &target.cwd, session) {
             crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
                 baseline: transcript_len(&file),
@@ -752,41 +748,6 @@ fn strip_ansi(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Open a second keeper connection and drain its `Output` frames into
-/// `received` forever. Detached on purpose: a one-shot CLI exits, the stream
-/// closes, the thread's read returns, and the accumulator is the only shared
-/// state. The frame tags and lengths interleaved in the raw bytes are harmless
-/// to a substring confirm.
-fn spawn_pty_reader(sock: &Path, received: std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
-    let Ok(mut stream) = std::os::unix::net::UnixStream::connect(sock) else {
-        return;
-    };
-    let _ = stream.set_nonblocking(true);
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        loop {
-            match stream.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if let Ok(mut acc) = received.lock() {
-                        acc.extend_from_slice(&buf[..n]);
-                        if acc.len() > 4 * 1024 * 1024 {
-                            // The composer redraw can loop; the marker only
-                            // ever needs the most recent window.
-                            let excess = acc.len() - 1024 * 1024;
-                            acc.drain(..excess);
-                        }
-                    }
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(_) => break,
-            }
-        }
-    });
-}
-
 fn deliver_via_keeper_socket_in(
     home: &crate::paths::AgentsHome,
     pi_root: &Path,
@@ -809,14 +770,12 @@ fn deliver_via_keeper_socket_in(
         // honest outcome, and the reason names why nothing was pasted.
         return Err(reason);
     }
-    // The pty reader must exist BEFORE the first keystroke, so the Pty variant
-    // opens its second connection now: a thread drains the keeper's Output
-    // frames into a growing accumulator the confirm closure greps. The thread
-    // is detached on purpose - this is a one-shot CLI, the accumulator is the
-    // only shared state, and the stream dies with the process.
-    if let KeeperConfirm::Pty { received } = &confirm {
-        spawn_pty_reader(&target.sock, Arc::clone(received));
-    }
+    // The pty variant confirms on THIS connection: it is the subscriber
+    // (first come, first seated - and the only seat whose Input the keeper
+    // honors), so the keeper relays the TUI's repaints to it. The accumulator
+    // starts empty at inject time: only paint that happened after OUR submit
+    // can confirm, which is exactly the claim.
+    let pty_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut transport = KeeperTransport { stream };
     let marker = text.lines().next().unwrap_or(text);
     inject_with_submit(&mut transport, text, Duration::from_millis(enter_delay_ms)).map_err(
@@ -829,7 +788,14 @@ fn deliver_via_keeper_socket_in(
     // first turn attempt, and THIS inject is that attempt, so the file (and
     // then the marker) appears within the budget; every line a fresh file has
     // is new signal, hence the zero baseline.
-    let confirmed = || -> bool {
+    let confirm_stream = transport.stream.try_clone().ok();
+    // The drain reads must time out, never block the confirm loop past its
+    // cadence. SO_RCVTIMEO shapes reads only, so the inject writes above are
+    // unaffected.
+    if let Some(cs) = confirm_stream.as_ref() {
+        let _ = cs.set_read_timeout(Some(Duration::from_millis(50)));
+    }
+    let confirmed = move || -> bool {
         match &confirm {
             KeeperConfirm::Transcript { path, baseline } => {
                 confirm_content_after(path, marker, *baseline).unwrap_or(false)
@@ -842,17 +808,38 @@ fn deliver_via_keeper_socket_in(
                     _ => false,
                 }
             }
-            KeeperConfirm::Pty { received } => {
-                let escaped = escaped_marker(marker);
-                if escaped.is_empty() {
+            KeeperConfirm::Pty => {
+                // Drain whatever the keeper has relayed since the last poll,
+                // then match the marker in the ANSI-stripped text. The
+                // needle is the payload's first line TRUNCATED to a
+                // composer-wide prefix: the TUI wraps long lines in the
+                // composer, and a newline mid-marker would break a full-line
+                // match even after the escape strip.
+                if let (Some(stream), Ok(mut acc)) =
+                    (confirm_stream.as_ref(), pty_seen.lock())
+                {
+                    let mut buf = [0u8; 8192];
+                    let mut reader = stream;
+                    loop {
+                        match std::io::Read::read(&mut reader, &mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => acc.extend_from_slice(&buf[..n]),
+                            Err(ref e)
+                                if e.kind() == io::ErrorKind::WouldBlock =>
+                            {
+                                break
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+                let prefix: String = marker.chars().take(48).collect();
+                if prefix.is_empty() {
                     return false;
                 }
-                let acc = received
-                    .lock()
-                    .map(|m| strip_ansi(&m))
-                    .unwrap_or_default();
-                let hay = String::from_utf8_lossy(&acc);
-                hay.contains(&escaped)
+                let snapshot = pty_seen.lock().map(|m| strip_ansi(&m)).unwrap_or_default();
+                let hay = String::from_utf8_lossy(&snapshot);
+                hay.contains(&prefix)
             }
             KeeperConfirm::Refused(_) => false,
         }
