@@ -939,6 +939,53 @@ def _name_matches(name: str, globs: str) -> bool:
     return any(fnmatch.fnmatch(name, g.strip()) for g in globs.split(",") if g.strip())
 
 
+def _parse_smoke_shard(spec: str) -> tuple[int, int]:
+    parts = spec.strip().split("/")
+    if len(parts) != 2:
+        raise ValueError(
+            f"smoke: --shard must be I/N with 1 <= I <= N, got {spec!r}"
+        )
+    try:
+        index, total = (int(part) for part in parts)
+    except ValueError:
+        raise ValueError(
+            f"smoke: --shard must be I/N with 1 <= I <= N, got {spec!r}"
+        ) from None
+    if total < 1 or index < 1 or index > total:
+        raise ValueError(
+            f"smoke: --shard must be I/N with 1 <= I <= N, got {spec!r}"
+        )
+    return index, total
+
+
+def _shard_selected_indices(
+    steps: Sequence[tuple[str, str, str]], selected: Sequence[int],
+    index: int, total: int,
+) -> list[int]:
+    """Partition selected registry steps while retaining shared prerequisites."""
+    names = [name for name, _cwd, _cmd in steps]
+    pytest_step = "Pytest (unit + integration)"
+    build_index = next(
+        (step_index for step_index, name in enumerate(names)
+         if name == _RUST_BUILD_STEP),
+        None,
+    )
+    selected_set = set(selected)
+    kept = {
+        step_index for step_index in selected
+        if names[step_index] == "Sync + build"
+        or names[step_index] == pytest_step
+        or step_index % total == index - 1
+    }
+    if build_index in selected_set and any(
+        step_index > build_index and step_index in selected_set
+        and step_index % total == index - 1
+        for step_index in selected
+    ):
+        kept.add(build_index)
+    return sorted(kept)
+
+
 def _parse_smoke_args(args: Sequence[str]) -> dict:
     """Parse smoke flags into an options dict.
 
@@ -948,10 +995,11 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
     opts: dict = {
         "list": False, "keep_going": False, "retry_failed": False,
         "verbose": False, "only": "", "skip": "", "changed": False,
-        "base": "", "head": "", "ambient": "clean", "state": "clean",
+        "base": "", "head": "", "shard": "", "ambient": "clean", "state": "clean",
     }
     valued = {
         "--only": "only", "--skip": "skip", "--base": "base", "--head": "head",
+        "--shard": "shard",
         "--ambient": "ambient", "--state": "state",
     }
     pending = ""
@@ -1000,8 +1048,13 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
                 ("--retry-failed", opts["retry_failed"])) if on]
     if len(subsets) > 1:
         raise ValueError(f"smoke: {' and '.join(subsets)} are separate subset modes - pick one")
+    if opts["shard"] and (opts["changed"] or opts["retry_failed"]):
+        partial = "--changed" if opts["changed"] else "--retry-failed"
+        raise ValueError(f"smoke: {partial} and --shard are separate subset modes - pick one")
     if (opts["base"] or opts["head"]) and not opts["changed"]:
         raise ValueError("smoke: --base/--head only apply to --changed")
+    if opts["shard"]:
+        _parse_smoke_shard(opts["shard"])
     if opts["ambient"] not in _AMBIENT_MODES:
         raise ValueError(
             f"smoke: --ambient {opts['ambient']!r} is not one of "
@@ -1435,7 +1488,8 @@ def _planned_step_lines(
 
 
 def _execute_steps(
-    root: Path, env: dict, steps: Sequence[tuple[str, str, str]], keep_going: bool
+    root: Path, env: dict, steps: Sequence[tuple[str, str, str]], keep_going: bool,
+    pytest_shard: str = "",
 ) -> tuple[list[tuple[str, str, float]], int]:
     """Run steps in order -> (per-step results, first non-zero child rc).
 
@@ -1451,10 +1505,14 @@ def _execute_steps(
             print(f"\n=== {name} ===", flush=True)
         t0 = time.monotonic()
         try:
+            step_env = dict(env)
+            step_env.pop("FNO_PYTEST_SHARD", None)
+            if pytest_shard and name == "Pytest (unit + integration)":
+                step_env["FNO_PYTEST_SHARD"] = pytest_shard
             proc = subprocess.run(
                 ["bash", "-eo", "pipefail", "-c", cmd],
                 cwd=str(root / cwd) if cwd != "." else str(root),
-                env=env,
+                env=step_env,
             )
             rc = proc.returncode
         except OSError as exc:
@@ -1591,6 +1649,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     list_mode, keep_going = opts["list"], opts["keep_going"]
     retry_failed, verbose, only_glob = opts["retry_failed"], opts["verbose"], opts["only"]
     skip_glob = opts["skip"]
+    shard_spec = opts["shard"]
 
     env = _smoke_env(root)
 
@@ -1656,6 +1715,18 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     else:
         selected = list(range(total))
 
+    shard_index, shard_total = (0, 0)
+    if shard_spec:
+        shard_index, shard_total = _parse_smoke_shard(shard_spec)
+        if shard_total > 1:
+            selected = _shard_selected_indices(
+                steps, selected, shard_index, shard_total
+            )
+
+    if not selected:
+        sys.stderr.write("smoke: shard selected zero steps - never green\n")
+        return 1
+
     if list_mode:
         for i in selected:
             if verbose:
@@ -1673,8 +1744,15 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         label = "ONLY SUBSET"
     elif skip_glob:
         label = "SKIP SUBSET"
+    if shard_total > 1:
+        label = "SHARD SUBSET"
     kg = " keep-going" if keep_going else ""
-    print(f"smoke: mode={label} steps={len(selected)}/{total}{kg}", flush=True)
+    shard_header = ""
+    if shard_total > 1:
+        pytest_name = "Pytest (unit + integration)"
+        pytest_marker = " pytest=split" if pytest_name in [names[i] for i in selected] else ""
+        shard_header = f" shard={shard_index}/{shard_total}{pytest_marker}"
+    print(f"smoke: mode={label}{shard_header} steps={len(selected)}/{total}{kg}", flush=True)
     # One line per planned step: fail-fast means later steps never run, and a
     # reader diffing these lines against the `smoke: pass|fail` lines below can
     # name what was unreached from the log alone. Per-line, never a joined
@@ -1715,18 +1793,18 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
             except OSError:
                 pass
 
-    if not selected:
-        sys.stderr.write("smoke: zero steps selected - never green\n")
-        return 1
-
-    results, first_rc = _execute_steps(root, env, [steps[i] for i in selected], keep_going)
+    results, first_rc = _execute_steps(
+        root, env, [steps[i] for i in selected], keep_going,
+        pytest_shard=shard_spec if shard_total > 1 else "",
+    )
     failed = sum(1 for _, s, _ in results if s == "fail")
     if first_rc != 0 and not keep_going:
         _write_failure_record(failure_record, [n for n, s, _ in results if s == "fail"])
         return 1
 
     print("", flush=True)
-    kind = ("retry-subset" if retry_failed else "only-subset" if only_glob
+    kind = ("shard-subset" if shard_total > 1 else
+            "retry-subset" if retry_failed else "only-subset" if only_glob
             else "skip-subset" if skip_glob else "full")
     print(f"smoke: summary ({kind}, {len(results)} steps)", flush=True)
     for n, s, d in results:
