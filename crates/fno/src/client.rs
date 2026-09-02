@@ -17006,6 +17006,9 @@ mod tests {
         assert_eq!(agent_lattice_state(&unseen), LatticeState::DoneUnseen);
         assert_eq!(lattice_glyph(agent_lattice_state(&unseen)).0, '✓');
         let seen = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             seen: true,
             ..tab_agent(None, Some(AgentBadge::Done), false)
         };
@@ -17025,6 +17028,9 @@ mod tests {
         assert_eq!(lattice_glyph(agent_lattice_state(&confirmed_dead)).0, '✗');
 
         let uncorroborated = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             unmeasured: true,
             ..tab_agent(None, None, true)
         };
@@ -17047,6 +17053,9 @@ mod tests {
         // at all renders Unmeasured for the absence, which is the new
         // predicate, not the old bug.)
         let live_with_stale_bit = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             unmeasured: true,
             pane_activity: Some(crate::vt::ShellActivity::Idle),
             ..tab_agent(None, None, false)
@@ -17105,6 +17114,9 @@ mod tests {
         // The shared seam (x-653d): a keyboard goto and a mouse click resolve an
         // agent to the SAME ChromeHit. pane > attach > notice.
         let hosted = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -17144,6 +17156,9 @@ mod tests {
         // dedicated thread pane: one AttachAgent with the thread_pane flag,
         // no placement dialog. The server owns the tier.
         let bg = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             pane_id: None,
             attach_id: Some("job1".into()),
             ..hosted.clone()
@@ -17159,6 +17174,9 @@ mod tests {
         // so the reach arm gates on !exited: a dead agent never reaches, it
         // notices.
         let dead = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             pane_id: None,
             attach_id: Some("job1".into()),
             exited: true,
@@ -17171,6 +17189,9 @@ mod tests {
         // A live paneless row with NO attach id reaches BY NAME - the Follow
         // and Locate tiers (the dedicated pane tails or explains).
         let orphan = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             name: "t-live-paneless".into(),
             pane_id: None,
             attach_id: None,
@@ -17205,6 +17226,9 @@ mod tests {
             (AgentNoPaneReason::UnsupportedHarness, "unsupported harness"),
         ] {
             let dead = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                 name: "t-dead-paneless".into(),
                 exited: true,
                 no_pane_reason: Some(reason),
@@ -17233,6 +17257,9 @@ mod tests {
         // still wins while a claude bg row is live and carries a jobId;
         // resumable takes the dead-and-nameless cases the notice used to eat.
         let row = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -17274,6 +17301,9 @@ mod tests {
         // session, attaching is the cheaper truth, and resuming a live row
         // would mint a second writer (the LivePaneless warning).
         let attachable = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             attach_id: Some("c19cd2c3".into()),
             exited: false,
             resumable: true,
@@ -17298,6 +17328,9 @@ mod tests {
         // placement gestures (picker `p`, menu splits, open-here, drag) still
         // pin a persisted pane when the operator wants one.
         let row = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Drive,
             spawned_by_session: None,
             harness_session_id: None,
@@ -17563,6 +17596,9 @@ mod tests {
     // x-df4c US4 helper: an AgentRow in squad 1 with the given tab/badge/exit.
     fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
         AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -18092,6 +18128,9 @@ mod tests {
     // An agent row hosting a given pane, under squad 1.
     fn focus_agent(pane: u64) -> AgentRow {
         AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -18353,6 +18392,9 @@ mod tests {
         let mut view = two_pane_view();
         for p in 100..140u64 {
             view.layout.agents.push(AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                 name: format!("w{p}"),
                 // (x-c5ee) Working, not idle, so the top-K cap never folds them:
                 // this test needs a long, fully-rendered scrollable list.
@@ -20053,6 +20095,9 @@ mod tests {
     // (squad, exited) matter; badge/seen round out a plausible row.
     fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
         AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -20733,6 +20778,9 @@ mod tests {
     // tri-state filtering tests below.
     fn view_with_dead_interleaved() -> View {
         let row = |name: &str, exited: bool| AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -20925,6 +20973,9 @@ mod tests {
     #[test]
     fn section_header_is_clickable_but_never_selector_selectable() {
         let view = view_with_agents(vec![AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -21243,6 +21294,9 @@ mod tests {
     #[test]
     fn elsewhere_section_live_only_hides_exited_orphans() {
         let orphan = |name: &str, exited: bool| AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -21302,6 +21356,9 @@ mod tests {
     #[test]
     fn section_header_caret_tracks_all_three_states() {
         let orphan = |name: &str, exited: bool| AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -21419,6 +21476,9 @@ mod tests {
     #[test]
     fn chrome_hit_agent_rows_focus_or_hint() {
         let hosted = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -21454,6 +21514,9 @@ mod tests {
         // dedicated thread pane (x-07c2); a row with no attach id reaches
         // BY NAME (Follow/Locate tiers).
         let bg_attach = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Drive,
             spawned_by_session: None,
             harness_session_id: None,
@@ -21488,6 +21551,9 @@ mod tests {
         // A watch-only row with no attach target: its reach opens the
         // dedicated pane by name (Follow tails it, Locate explains it).
         let bg_plain = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Follow,
             spawned_by_session: None,
             harness_session_id: None,
@@ -21566,6 +21632,9 @@ mod tests {
         // top-K cap, so all 40 render and the list still reaches the bottom.
         let agents: Vec<AgentRow> = (0..40)
             .map(|i| AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
@@ -22117,6 +22186,9 @@ mod tests {
         // row gets focus and NO splits (already placed); an exited row gets
         // remove and no stop.
         let mk = |name: &str, pane_id: Option<u64>, attach: Option<&str>, exited: bool| AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -23350,6 +23422,9 @@ mod tests {
         // identity (pane_id/attach_id) so Focus acts on the row it was opened on,
         // never the other same-named row.
         let mk = |name: &str, pane_id: Option<u64>| AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -25180,6 +25255,9 @@ mod tests {
     /// A pane-hosted sideline row, the shape the move/break-out menu acts on.
     fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
         AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -25217,6 +25295,9 @@ mod tests {
     /// Split grid, the Move grid's twin.
     fn attachable_row(name: &str, attach_id: &str) -> AgentRow {
         AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             pane_id: None,
             attach_id: Some(attach_id.into()),
             ..pane_hosted_row(name, 0)
@@ -26321,6 +26402,9 @@ mod tests {
             area: (29, 72),
             agents: vec![
                 AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                     reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
@@ -26353,6 +26437,9 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                     reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
@@ -26385,6 +26472,9 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                     reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
@@ -26493,6 +26583,9 @@ mod tests {
         // all-exited squad keeps its ✗ count so dead agents stay discoverable.
         fn ar(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
             AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
@@ -26700,11 +26793,17 @@ mod tests {
         footnote.tabs[1].name = "reviews".into();
         footnote.tabs[1].named = true;
         let here = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             name: "here".into(),
             tab: Some(0), // the viewer's active tab -> no badge
             ..focus_agent(0)
         };
         let elsewhere = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             name: "elsewhere".into(),
             tab: Some(1), // a background tab -> badge
             ..focus_agent(0)
@@ -26751,6 +26850,9 @@ mod tests {
         let panes = view.layout.panes.clone();
         let agents: Vec<AgentRow> = (0..8)
             .map(|i| AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                 name: format!("a{i}"),
                 pane_id: Some(100 + i),
                 ..focus_agent(0)
@@ -26801,6 +26903,9 @@ mod tests {
         let panes = view.layout.panes.clone();
         let agents: Vec<AgentRow> = (0..8)
             .map(|i| AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                 name: format!("a{i}"),
                 pane_id: Some(100 + i),
                 ..focus_agent(0)
@@ -26908,6 +27013,9 @@ mod tests {
             area: (29, 72),
             agents: vec![
                 AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                     reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
@@ -26940,6 +27048,9 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                     reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
@@ -26972,6 +27083,9 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                     reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
@@ -27007,6 +27121,9 @@ mod tests {
                 // load-bearing "attention is never dimmed" branch. The accent
                 // must win over the external DIM modifier.
                 AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                     reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
@@ -27517,6 +27634,9 @@ mod tests {
     /// 10 "~ backlog" · 11 ready card · 12 blocked card · 13 in-flight card.
     fn unified_rows_view() -> View {
         let agent = |squad: Option<u64>, name: &str, pane_id, attach_id: Option<&str>| AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -28249,6 +28369,9 @@ mod tests {
     #[test]
     fn peek_overlay_renders_loading_transcript_and_answerable() {
         let row = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -28690,6 +28813,9 @@ mod tests {
         // AC4-EDGE (client half): x on a tombstone member row sends
         // DismissMember for its squad + attach_id (not a squad remove).
         let tomb = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -28743,6 +28869,9 @@ mod tests {
     /// A plain (non-tombstone) registry agent row under squad 1, varied by state.
     fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRow {
         AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -29789,6 +29918,9 @@ mod tests {
         let mut v = two_pane_view();
         v.layout.agents = vec![
             AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
@@ -29821,6 +29953,9 @@ mod tests {
                 pane_activity: None,
             },
             AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
@@ -29892,6 +30027,9 @@ mod tests {
         // that path is covered by pane_activity_folds_*, this one pins the
         // rollup with a measured idle pane.)
         let row = |name: &str, pane, badge| AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -29924,6 +30062,9 @@ mod tests {
             pane_activity: None,
         };
         let bare = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             pane_activity: Some(ShellActivity::Idle),
             ..row("zsh", 10, None)
         };
@@ -29967,6 +30108,9 @@ mod tests {
         // so a [blocked] chip leaves only the blocked agent.
         let mut v = two_pane_view();
         v.layout.agents = vec![AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -30093,6 +30237,9 @@ mod tests {
         let mut v = two_pane_view();
         v.layout.agents = vec![
             AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
@@ -30125,6 +30272,9 @@ mod tests {
                 pane_activity: None,
             },
             AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
@@ -30350,6 +30500,9 @@ mod tests {
         // SelectSquad then FocusPane in order, and closes the navigator.
         let mut v = two_pane_view(); // active squad = 1 (footnote)
         v.layout.agents = vec![AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -30813,6 +30966,9 @@ mod tests {
             },
         ];
         v.layout.agents = vec![AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -30983,6 +31139,9 @@ mod tests {
 
     fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow {
         AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
@@ -31184,16 +31343,25 @@ mod tests {
     #[test]
     fn sort_toggle_reorders_by_attention_and_relabels() {
         let stale = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             basis: Some("transcript".into()),
             last_activity_age_s: Some(1800),
             ..agent_row("stale-live", 4, Some(AgentBadge::Working), false)
         };
         let fresh = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             basis: Some("transcript".into()),
             last_activity_age_s: Some(30),
             ..agent_row("fresh-live", 5, Some(AgentBadge::Working), false)
         };
         let sunk = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
             basis: Some("process-gone".into()),
             last_activity_age_s: Some(40000),
             ..agent_row("gone", 6, None, true)
@@ -31370,6 +31538,9 @@ mod tests {
             .iter()
             .map(|r| {
                 let row = AgentRow {
+            harness: None,
+            model: None,
+            route: None,
                     basis: r["basis"].as_str().map(str::to_string),
                     last_activity_age_s: r["last_activity_age_s"].as_u64(),
                     exited: r["exited"].as_bool().unwrap_or(false),

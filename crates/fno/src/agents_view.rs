@@ -2293,7 +2293,18 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .get("model")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .map(str::to_string);
+            .map(str::to_string)
+            .or_else(|| {
+                // The daemon's probe-verified model (`{"kind": "observed",
+                // "model": ...}`) fills rows the spawn receipt left null, so
+                // the model tier resolves on every probed row, not only the
+                // requested ones.
+                row.get("observed_model")
+                    .and_then(|m| m.get("model"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
         out.push(RegistryAgent {
             name: name.to_string(),
             cwd: cwd.to_string(),
@@ -3305,7 +3316,9 @@ mod tests {
                 "route":null,"model":"glm-5.3-flash[1m]"},
                {"name":"r","cwd":"/w","status":"live","harness":"codex","provider":"openai",
                 "route":"openrouter","model":"gpt-5.6-luna"},
-               {"name":"bare","cwd":"/w","status":"live","harness":"opencode"}"#,
+               {"name":"bare","cwd":"/w","status":"live","harness":"opencode"},
+               {"name":"obs","cwd":"/w","status":"live","harness":"claude",
+                "model":null,"observed_model":{"kind":"observed","model":"gpt-5.6-luna"}}"#,
         );
         let rows = derive_rows(&raw, NOW).unwrap();
         let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
@@ -3314,6 +3327,11 @@ mod tests {
         assert_eq!(get("r").route.as_deref(), Some("openrouter"), "declared route wins");
         assert_eq!(get("bare").route, None);
         assert_eq!(get("bare").model, None);
+        assert_eq!(
+            get("obs").model.as_deref(),
+            Some("gpt-5.6-luna"),
+            "null model falls to observed_model.model"
+        );
     }
 
     /// AC11-HP, AC12-EDGE, AC13-EDGE (x-6678): `attach_id` is derived PER

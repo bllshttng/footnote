@@ -10333,6 +10333,9 @@ impl Core {
                                 && !pane_dead
                                 && a.liveness == agents_view::Liveness::Unmeasured;
                             AgentRow {
+                                harness: a.harness.clone(),
+                                model: a.model.clone(),
+                                route: a.route.clone(),
                                 spawned_by_session: a.spawned_by_session.clone(),
                                 harness_session_id: a.harness_session_id.clone(),
                                 squad: Some(squad.id),
@@ -10391,6 +10394,9 @@ impl Core {
                             // pane labels (v22) so the two agree.
                             let e = pane_entry;
                             AgentRow {
+                                harness: None,
+                                model: None,
+                                route: None,
                                 spawned_by_session: None,
                                 harness_session_id: None,
                                 squad: Some(squad.id),
@@ -10480,6 +10486,9 @@ impl Core {
                         .member_squad_for_agent(a)
                         .or_else(|| self.session.find_by_cwd(&a.cwd));
                     out.push(AgentRow {
+                        harness: a.harness.clone(),
+                        model: a.model.clone(),
+                        route: a.route.clone(),
                         spawned_by_session: a.spawned_by_session.clone(),
                         harness_session_id: a.harness_session_id.clone(),
                         squad,
@@ -10536,6 +10545,9 @@ impl Core {
                     // exception subline.
                     let cwd_base = cwd_basename(&a.cwd);
                     out.push(AgentRow {
+                        harness: a.harness.clone(),
+                        model: a.model.clone(),
+                        route: a.route.clone(),
                         spawned_by_session: a.spawned_by_session.clone(),
                         harness_session_id: a.harness_session_id.clone(),
                         squad,
@@ -10599,6 +10611,11 @@ impl Core {
                     continue;
                 }
                 out.push(AgentRow {
+                    // A tombstoned member row carries no registry read, so no
+                    // lane axes (the render falls back to the default color).
+                    harness: None,
+                    model: None,
+                    route: None,
                     spawned_by_session: None,
                     harness_session_id: None,
                     squad: Some(sid),
@@ -10673,6 +10690,11 @@ impl Core {
             // still renders (the "every row" wire contract; codex review).
             let cwd_base = cwd_basename(&r.cwd);
             out.push(AgentRow {
+                // squads.json records no lane axes (ExternalLifecycle carries
+                // none), so the row renders default-colored.
+                harness: None,
+                model: None,
+                route: None,
                 spawned_by_session: None,
                 harness_session_id: None,
                 squad,
