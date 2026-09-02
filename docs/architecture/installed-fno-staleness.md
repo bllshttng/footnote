@@ -4,37 +4,26 @@ The `fno` on a developer's PATH is a snapshot, not a live repo view. `uv tool in
 
 The concrete failure involved a new capture group. The `deferrals_captured` gate depended on an event from that group. Older installed CLIs lacked the subcommand. The documented invocation then failed with `No such command`. No event landed, so the documented path was unable to satisfy the gate.
 
-That group was reachable as both `fno backlog capture` and `fno backlog inbox` at the time.
-The duplicate `inbox` spelling has since been removed, and the surviving spelling is `capture`.
-The staleness failure is unchanged by that: it is about a deployed binary predating a verb, not about which name the verb has.
+That group was reachable as both `fno backlog capture` and `fno backlog inbox` at the time. The duplicate `inbox` spelling has since been removed, and the surviving spelling is `capture`. The staleness failure is unchanged by that: it is about a deployed binary predating a verb, not about which name the verb has.
 
 ## `fno doctor` (detection)
 
-`fno doctor` reports skew between the installed `fno` and a resolvable source
-checkout. It is **network-free** and exits non-zero only when staleness is
-*proven*. Two independent signals, each degrading to `unknown` rather than
-crying wolf:
+`fno doctor` reports skew between the installed `fno` and a resolvable source checkout. It is **network-free**. When staleness is *proven*, it exits non-zero. Two independent signals, each degrading to `unknown` rather than crying wolf:
+
+The resolved local source checkout is the comparison boundary. Doctor does not fetch or compare against remote state. A local checkout can therefore trail `origin/main`. Doctor reports that measured distance as a blocker so a binary fresh against stale source cannot authorize downstream verification. The `origin/main` value is the local remote-tracking ref, so it can itself need a fetch before the operator treats the distance as current.
 
 - **Revision compare (high-signal).** `fno doctor update` records source `git rev-parse HEAD` into `~/.fno/installed-rev` after a successful install. Source precedence is `--source`, `$FNO_SOURCE`, `~/.fno/source-path`, then well-known paths. `doctor` reads and compares source HEAD. A marker behind source means stale. An absent marker means "rev unknown" and falls back to the probe.
-- **Capability probe (always available).** Runs `fno backlog capture --help`
-  (the capture-tier verb, formerly named `backlog inbox`)
-  against the installed CLI; a `No such command` failure proves the verb is
-  missing regardless of any marker. The probe outcome is a three-valued
-  `present | missing | unknown` so a "could not probe" result can never be
-  conflated with "proven missing".
+- **Capability probe (always available).** Runs `fno backlog capture --help` (the capture-tier verb, formerly named `backlog inbox`) against the installed CLI. A `No such command` failure proves the verb is missing regardless of any marker. The probe outcome is a three-valued `present | missing | unknown` so a "could not probe" result can never be conflated with "proven missing".
+
+The source-checkout sync field is independent of installed-binary freshness. `source_checkout_sync.status` is `current`, `behind`, or `unknown`. A `behind` result carries the positive `behind` commit count plus both heads. Unknown source-sync evidence never invents a distance or changes the binary freshness fields.
 
 The hidden `fno doctor plugin-file <active-skill-path>` diagnostic compares the active `skills/<name>/SKILL.md` bytes with the matching source file. When both files are readable, it reports `PLUGIN_FILE_FRESH`, `PLUGIN_FILE_STALE`, or `PLUGIN_FILE_UNKNOWN` with SHA-256 values. It exits 0, 3, or 4 respectively. A proven stale Claude cache names `claude plugin update fno@footnote`, session restart, and the fact that `fno doctor update` does not refresh the Claude plugin registry.
 
 Review instructions run this diagnostic before argument routing. A stale active skill stops the review before any lane marker or attestation can be produced. When comparison is unknown, the diagnostic warns and continues. This keeps a green CLI and a green emitter from hiding stale instructions that route the review elsewhere.
 
-For the Rust side, `doctor` reports which `fno-agents` binary `auto` mode resolves (wheel-bundled or `~/.cargo/bin`). It proves Rust staleness through the `installed-rust-rev` marker (see below). `rust_stale` requires four known facts: a cargo binary, marker, crates-subtree revision, and mismatch. Anything less degrades to `unknown`, never false `fresh`. Proven Rust staleness sets the overall status to `stale` and exits 1. A binary-embedded commit cross-check remains planned for machines without a marker.
+For the Rust side, `doctor` reports which `fno-agents` binary `auto` mode resolves (wheel-bundled or `~/.cargo/bin`). It proves Rust staleness from the binary's embedded `crates_rev` compared with the source `crates/` tip. A missing binary, unknown revision, or unknown source tip degrades to `unknown`, never false `fresh`. Proven Rust staleness sets the overall status to `stale` and exits 1.
 
-Plus an advisory **mux front-door** check: now that the Rust mux binary
-(`crates/fno`) is meant to own `fno` on PATH, `doctor` reports whether it does -
-`mux_front_door` is `active` (mux cargo-installed and `fno` on PATH resolves to
-it), `shadowed` (installed but a Python `fno-py`, or nothing, wins PATH), or
-`not-installed`. It never changes the status or exit code: a front-door setup
-problem is distinct from source-vs-installed staleness.
+Plus an advisory **mux front-door** check: now that the Rust mux binary (`crates/fno`) is meant to own `fno` on PATH, `doctor` reports whether it does. `mux_front_door` is `active` (mux cargo-installed and `fno` on PATH resolves to it), `shadowed` (installed but a Python `fno-py`, or nothing, wins PATH), or `not-installed`. It never changes the status or exit code. A front-door setup problem is distinct from source-vs-installed staleness.
 
 Flags: `--json` emits one stdout object and sends human text to stderr. The object carries status, revision, binary, and mux-front-door fields. For Python staleness, `--fix` delegates to `fno doctor update`, whose Rust leg also refreshes the bins. For Rust-only staleness, it runs the cargo refresh helper without reinstalling Python. Under `--json`, `--fix` performs no repair and prints a skip message. `--source` overrides the source checkout.
 
@@ -62,10 +51,7 @@ If the installed `crates_rev` matches source and the build is clean, the **`fno 
 
 **`fno doctor` verdict:** `rust_source_rev` is the last commit touching `crates/`. The binary's `crates_rev` becomes `rust_installed_rev`. With a cargo binary and both revisions known, the verdict compares them. A mismatch sets `rust_stale: true`. `git_rev` is labeled build provenance and is never compared with source. Therefore, "rust bins fresh" cannot coexist with a mismatch. A Python-only commit after the last `crates/` change is not a mismatch.
 
-**Legacy `~/.fno/installed-rust-rev` marker:** update still writes it as an
-inert breadcrumb, but NO freshness verdict reads it anymore. Both consumers read
-the binary's embedded `crates_rev` instead, which is correct for a bare
-`cargo install` that the marker never tracked.
+**Legacy `~/.fno/installed-rust-rev` marker:** update still writes it as an inert breadcrumb, but NO freshness verdict reads it anymore. Both consumers read the binary's embedded `crates_rev` instead, which is correct for a bare `cargo install` that the marker never tracked.
 
 **`fno doctor update` Rust leg gating table:**
 
@@ -77,10 +63,7 @@ the binary's embedded `crates_rev` instead, which is correct for a bare
 | auto: binary stale / dirty / unparseable / absent | yes (rebuild + verify) |
 | auto: rebuild needed but cargo not on PATH | warn and skip the Rust leg |
 
-On cargo failure the Rust leg warns and continues to the Python reinstall
-rather than aborting the entire update; a post-deploy verify mismatch or a
-triad-sync failure, by contrast, HALTS update (a silently stale or split deploy
-is the stale-deploy outage class this section exists to prevent).
+On cargo failure the Rust leg warns and continues to the Python reinstall rather than aborting the entire update. A post-deploy verify mismatch or triad-sync failure halts update. A silently stale or split deploy is the outage class this section prevents.
 
 `fno doctor update --rust / --no-rust` let you force or skip the Rust leg explicitly.
 
@@ -106,11 +89,8 @@ fno doctor update --check --json   # the one resolver, the mux TUI's only consum
 
 ## Locked decisions
 
-1. `fno doctor` is the primary mechanism, not reinstall-on-ship. Detection plus
-   explicit repair beats implicit mutation that races a running pipeline.
-2. Detection is network-free: local `git rev-parse` + local command trees, no
-   PyPI / crates.io calls. No source checkout yields `unknown`, never a false
-   `stale`.
+1. `fno doctor` is the primary mechanism, not reinstall-on-ship. Detection plus explicit repair beats implicit mutation that races a running pipeline.
+2. Detection is network-free: local git refs + local command trees, no PyPI / crates.io calls. No source checkout or unreadable `origin/main` yields `unknown`. It never invents a distance or false `stale`.
 3. The gate path instructs, it never executes the fix.
 4. When all four facts are present, the `installed-rust-rev` marker proves Rust staleness. Anything less degrades to `unknown`. `doctor` still reports the resolved binary. A binary-embedded commit cross-check remains planned for environments without the marker.
 5. The `installed-rev` marker is written only after a successful install. Absence means "rev unknown", never "fresh".

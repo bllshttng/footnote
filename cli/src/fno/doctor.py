@@ -1169,6 +1169,85 @@ def _post_merge_sync_health() -> dict[str, Any]:
         return {"state": "unknown", "stale": False, "behind": None, "detail": ""}
 
 
+def _source_checkout_sync(source: Optional[Path]) -> dict[str, Any]:
+    """Measure whether the resolved source checkout is behind local ``origin/main``.
+
+    This is deliberately network-free. A source checkout can match its
+    installed binary while both predate a merged change; reporting the measured
+    local remote-ref distance prevents that pair from reading as current. A
+    missing or non-ancestor remote ref is unknown, never a fabricated distance.
+    """
+    report: dict[str, Any] = {
+        "status": "unknown",
+        "behind": None,
+        "source_head": None,
+        "remote_head": None,
+        "detail": "",
+    }
+    if source is None:
+        report["detail"] = "source checkout not resolved"
+        return report
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(source), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    try:
+        source_head_proc = git("rev-parse", "HEAD")
+        remote_head_proc = git("rev-parse", "--verify", "origin/main^{commit}")
+    except (OSError, subprocess.SubprocessError) as exc:
+        report["detail"] = f"git source-sync probe failed ({exc})"
+        return report
+
+    source_head = source_head_proc.stdout.strip()
+    remote_head = remote_head_proc.stdout.strip()
+    if source_head_proc.returncode != 0 or not source_head:
+        report["detail"] = "source checkout HEAD is unreadable"
+        return report
+    report["source_head"] = source_head
+    if remote_head_proc.returncode != 0 or not remote_head:
+        report["detail"] = "origin/main ref is unreadable"
+        return report
+    report["remote_head"] = remote_head
+
+    if source_head == remote_head:
+        report["status"] = "current"
+        report["behind"] = 0
+        return report
+
+    try:
+        ancestor = git("merge-base", "--is-ancestor", "HEAD", "origin/main")
+    except (OSError, subprocess.SubprocessError) as exc:
+        report["detail"] = f"source-sync ancestry probe failed ({exc})"
+        return report
+    if ancestor.returncode != 0:
+        report["detail"] = "source HEAD is not an ancestor of origin/main"
+        return report
+
+    try:
+        distance = git("rev-list", "--count", "HEAD..origin/main")
+    except (OSError, subprocess.SubprocessError) as exc:
+        report["detail"] = f"source-sync distance probe failed ({exc})"
+        return report
+    raw_distance = distance.stdout.strip()
+    try:
+        behind = int(raw_distance)
+    except ValueError:
+        report["detail"] = "origin/main distance is not an integer"
+        return report
+    if distance.returncode != 0 or behind <= 0:
+        report["detail"] = "origin/main distance is unavailable"
+        return report
+
+    report["status"] = "behind"
+    report["behind"] = behind
+    return report
+
+
 def _self_attested_coverage_report() -> dict[str, Any]:
     """Per merged PR in the recent window: did coverage rest on the author's
     own attestation alone?
@@ -1807,6 +1886,16 @@ def _blockers(result: dict[str, Any]) -> list[str]:
             "Fix: fno doctor --fix"
         )
 
+    source_sync = result.get("source_checkout_sync") or {}
+    if source_sync.get("status") == "behind":
+        behind = source_sync.get("behind")
+        unit = "commit" if behind == 1 else "commits"
+        blockers.append(
+            f"resolved source checkout is {behind} {unit} behind origin/main; "
+            "freshness is relative to stale local source. Sync the checkout before "
+            "trusting verification."
+        )
+
     for agent in (result.get("launch_agents") or {}).get("dead") or []:
         blockers.append(
             f"LaunchAgent {agent.get('label')} last exited {agent.get('exit')}."
@@ -1940,6 +2029,21 @@ def _emit_human(
     out = (lambda m: typer.echo(m, err=True)) if err else typer.echo
     for line in _review_invocation_report():
         out(line)
+    source_sync = result.get("source_checkout_sync") or {}
+    if source_sync.get("status") == "behind":
+        behind = source_sync.get("behind")
+        unit = "commit" if behind == 1 else "commits"
+        out(
+            f"fno doctor: resolved source checkout is {behind} {unit} behind "
+            "origin/main; freshness is relative to stale local source. "
+            "Sync the checkout before trusting verification."
+        )
+    elif source_sync.get("status") == "unknown" and source_sync.get("source_head"):
+        out(
+            "fno doctor: source checkout sync is unknown "
+            f"({source_sync.get('detail') or 'no detail'}); "
+            "freshness against origin/main is unmeasured."
+        )
     status = result["status"]
     if status == "fresh":
         # Naming WHICH source is load-bearing. The comparison is against
@@ -3793,6 +3897,7 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
         source_config_keys=source_config_keys,
         content_drift_count=content_drift,
     )
+    result["source_checkout_sync"] = _source_checkout_sync(src)
     # Advisory front-door fields (x-c267); never change status/exit.
     result.update(_mux_front_door_report())
     result["daemon_drift"] = _daemon_drift_warning()
@@ -4209,4 +4314,14 @@ def doctor_command(
         (result.get("archive_id_collisions") or {}).get("count")
         or (result.get("archive_id_collisions") or {}).get("unreadable")
     )
-    raise typer.Exit(1 if result["status"] == "stale" or dead_agents or id_collisions else 0)
+    source_checkout_blocked = (
+        (result.get("source_checkout_sync") or {}).get("status") == "behind"
+    )
+    raise typer.Exit(
+        1
+        if result["status"] == "stale"
+        or source_checkout_blocked
+        or dead_agents
+        or id_collisions
+        else 0
+    )

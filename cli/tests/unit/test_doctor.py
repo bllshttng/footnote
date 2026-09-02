@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,7 @@ def _stub_signals(
     deployed_config_keys: frozenset[str] | None = frozenset({"backlog.id_prefix"}),
     source_config_keys: frozenset[str] | None = frozenset({"backlog.id_prefix"}),
     content_drift: int | None = 0,
+    source_checkout_sync: dict | None = None,
 ) -> None:
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: src)
     # Content-drift ground truth. Default 0 = "check ran, byte-identical" so a
@@ -53,6 +55,17 @@ def _stub_signals(
     # exercise no drift; drift tests pass differing sets explicitly.
     monkeypatch.setattr(doctor, "_deployed_config_keys", lambda: deployed_config_keys)
     monkeypatch.setattr(doctor, "_source_config_keys", lambda source: source_config_keys)
+    monkeypatch.setattr(
+        doctor,
+        "_source_checkout_sync",
+        lambda source: source_checkout_sync or {
+            "status": "current",
+            "behind": 0,
+            "source_head": "abc123",
+            "remote_head": "abc123",
+            "detail": "",
+        },
+    )
     # Post ab-716cd330 `revision` carries the binary's self-reported crates/ rev
     # (the verdict driver), not the installed-rust-rev marker. `rust_marker` is
     # the value the resolved binary reports here.
@@ -119,6 +132,107 @@ def test_ac1_err_missing_verb_reports_skew_and_exits_nonzero(
     assert result.exit_code != 0
     assert "missing: backlog capture" in result.stdout
     assert "fno doctor update" in result.stdout
+
+
+def test_source_checkout_sync_reports_positive_origin_main_distance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "cli"
+    source.mkdir()
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        if cmd[-2:] == ["rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="local\n", stderr="")
+        if cmd[-3:] == ["rev-parse", "--verify", "origin/main^{commit}"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="remote\n", stderr="")
+        if cmd[-4:] == ["merge-base", "--is-ancestor", "HEAD", "origin/main"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[-3:] == ["rev-list", "--count", "HEAD..origin/main"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="117\n", stderr="")
+        raise AssertionError(f"unexpected git command: {cmd}")
+
+    monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+
+    report = doctor._source_checkout_sync(source)
+
+    assert report == {
+        "status": "behind",
+        "behind": 117,
+        "source_head": "local",
+        "remote_head": "remote",
+        "detail": "",
+    }
+    assert not any("fetch" in call for call in calls)
+
+
+def test_source_checkout_sync_degrades_unknown_without_origin_main(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "cli"
+    source.mkdir()
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[-2:] == ["rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="local\n", stderr="")
+        return subprocess.CompletedProcess(
+            cmd, 128, stdout="", stderr="unknown revision"
+        )
+
+    monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+
+    report = doctor._source_checkout_sync(source)
+
+    assert report["status"] == "unknown"
+    assert report["behind"] is None
+    assert "origin/main" in report["detail"]
+
+
+def test_source_checkout_behind_is_a_doctor_blocker() -> None:
+    blockers = doctor._blockers(
+        {
+            "status": "fresh",
+            "source_checkout_sync": {
+                "status": "behind",
+                "behind": 117,
+                "source_head": "local",
+                "remote_head": "remote",
+            },
+        }
+    )
+
+    assert len(blockers) == 1
+    assert "117 commits behind origin/main" in blockers[0]
+    assert "freshness is relative" in blockers[0]
+
+
+def test_source_checkout_behind_makes_doctor_exit_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+        source_checkout_sync={
+            "status": "behind",
+            "behind": 117,
+            "source_head": "local",
+            "remote_head": "remote",
+            "detail": "",
+        },
+    )
+
+    result = runner.invoke(app, ["doctor", "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "fresh"
+    assert payload["source_checkout_sync"]["status"] == "behind"
+    assert payload["source_checkout_sync"]["behind"] == 117
+    assert "source checkout" in result.stderr
 
 
 # ---------------------------------------------------------------------------
