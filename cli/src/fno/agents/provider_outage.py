@@ -42,8 +42,12 @@ class OutagePolicy:
     health_marker_ttl_s: float = PANE_FRESHNESS_S
 
     def __post_init__(self) -> None:
-        if self.quorum < 2:
-            raise ValueError("provider outage quorum must be at least 2")
+        # The FLOOR is 1, not 2: an operator who configures quorum=1 has
+        # positively decided a lone worker's outage is authority enough, and
+        # the recovery lane reads this value. The DEFAULT stays 2 - nobody
+        # who set nothing sees a behavior change.
+        if self.quorum < 1:
+            raise ValueError("provider outage quorum must be at least 1")
 
     @classmethod
     def from_settings(cls, settings: Any) -> "OutagePolicy":

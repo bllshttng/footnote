@@ -3117,7 +3117,7 @@ class RecoveryBlock(BaseModel):
     watchdog_reap: bool = False
     startup_destructive: bool = False
     retire_grace_s: int = Field(default=900, ge=0)
-    provider_outage_quorum: int = Field(default=2, ge=2)
+    provider_outage_quorum: int = Field(default=2, ge=1)
     provider_outage_fup_window_seconds: int = Field(default=300, ge=300)
     provider_outage_529_count: int = Field(default=3, ge=3)
     provider_outage_529_span_seconds: int = Field(default=120, ge=120)

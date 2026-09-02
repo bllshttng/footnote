@@ -1180,10 +1180,38 @@ def _redispatch(
         return False
 
 
-def recover_provider_outage(request, *, deps, journal_root: Path):
-    """Run the durable path only for a positively quorum-backed outage."""
-    if getattr(request, "quorum_evidence_count", 0) < 2:
-        raise ValueError("provider outage handoff requires quorum evidence")
+def recover_provider_outage(
+    request, *, deps, journal_root: Path, settings: Any = None
+):
+    """Run the durable path only for a positively quorum-backed outage.
+
+    The floor is the CONFIGURED ``OutagePolicy.quorum``, never a literal: a
+    knob that silently stopped applying to the one action that moves provider
+    ownership is the defect this lane exists to retire. Default stays 2, so
+    an operator who set nothing sees no behavior change; an explicit quorum
+    of 1 lets a lone worker's outage through."""
+    if settings is None:
+        try:
+            from fno.config import load_settings
+
+            settings = load_settings()
+        except Exception:  # noqa: BLE001 - a config miss falls to the schema floor
+            settings = None
+    try:
+        from fno.agents.provider_outage import OutagePolicy
+
+        required = (
+            OutagePolicy.from_settings(settings).quorum
+            if settings is not None
+            else OutagePolicy().quorum
+        )
+    except Exception:  # noqa: BLE001 - a policy miss falls to the default
+        required = 2
+    if getattr(request, "quorum_evidence_count", 0) < required:
+        raise ValueError(
+            f"provider outage handoff requires quorum evidence "
+            f"({getattr(request, 'quorum_evidence_count', 0)} of {required})"
+        )
     from fno.agents.outage_handoff import run_outage_handoff
 
     return run_outage_handoff(request, deps=deps, journal_root=journal_root)
