@@ -504,7 +504,7 @@ fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
         }
     };
     let mut dropped = 0usize;
-    let squads = file
+    let loaded = file
         .squads
         .into_iter()
         .map(|mut sq| {
@@ -519,7 +519,51 @@ fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
             dropped += before - sq.members.len();
             sq
         })
-        .collect();
+        .collect::<Vec<_>>();
+    // (x-6b0b) Repair rows carrying both a name and a key - a rename of an
+    // unnamed squad used to mint exactly that and leave the old key row alive
+    // beside it. Clearing the key is reversible without loss (clearing a name
+    // re-derives it from origins). Two collapse shapes: the row's key twins an
+    // unnamed row (the minted duplicate - fold the twin in, the named row is
+    // the one the operator chose), or its name twins another row once the key
+    // is gone (merge members, keep the earlier stamp). Every repair lands in
+    // the notice; never folded silently.
+    let mut repaired = 0usize;
+    let mut folded = 0usize;
+    let mut squads: Vec<StoredSquad> = Vec::with_capacity(loaded.len());
+    for mut sq in loaded {
+        if !sq.name.is_empty() && !sq.key.is_empty() {
+            repaired += 1;
+            let key = std::mem::take(&mut sq.key);
+            if let Some(pos) = squads
+                .iter()
+                .position(|s| s.name.is_empty() && s.key == key)
+            {
+                folded += 1;
+                let twin = squads.remove(pos);
+                let mut members = twin.members;
+                members.retain(|m| !sq.members.contains(m));
+                sq.members.extend(members);
+                if sq.created_at.is_empty()
+                    || (!twin.created_at.is_empty() && twin.created_at < sq.created_at)
+                {
+                    sq.created_at = twin.created_at;
+                }
+            } else if let Some(existing) = squads.iter_mut().find(|s| s.name == sq.name) {
+                folded += 1;
+                let mut members = sq.members.drain(..).collect::<Vec<_>>();
+                members.retain(|m| !existing.members.contains(m));
+                existing.members.extend(members);
+                if existing.created_at.is_empty()
+                    || (!sq.created_at.is_empty() && sq.created_at < existing.created_at)
+                {
+                    existing.created_at = sq.created_at;
+                }
+                continue;
+            }
+        }
+        squads.push(sq);
+    }
     // Same argv-safety gate for lifecycle records: a malformed attach_id never
     // survives load, so a reconcile / rm can never shell it (epic Boundaries).
     let before_lc = file.external_lifecycle.len();
@@ -529,14 +573,26 @@ fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
         .filter(|r| valid_attach_id(&r.attach_id))
         .collect();
     let dropped_lc = before_lc - external_lifecycle.len();
-    let notice = match (dropped, dropped_lc) {
-        (0, 0) => None,
-        (s, 0) => Some(format!("dropped {s} malformed squad member(s)")),
-        (0, l) => Some(format!("dropped {l} malformed lifecycle record(s)")),
-        (s, l) => Some(format!(
+    let mut notice_parts = Vec::new();
+    match (dropped, dropped_lc) {
+        (0, 0) => {}
+        (s, 0) => notice_parts.push(format!("dropped {s} malformed squad member(s)")),
+        (0, l) => notice_parts.push(format!("dropped {l} malformed lifecycle record(s)")),
+        (s, l) => notice_parts.push(format!(
             "dropped {s} malformed squad member(s) and {l} lifecycle record(s)"
         )),
-    };
+    }
+    if repaired > 0 {
+        let folded_note = if folded > 0 {
+            format!(", {folded} folded into their twin")
+        } else {
+            String::new()
+        };
+        notice_parts.push(format!(
+            "repaired {repaired} squad row(s) carrying both a name and a key{folded_note}"
+        ));
+    }
+    let notice = (!notice_parts.is_empty()).then(|| notice_parts.join("; "));
     Loaded {
         squads,
         next_pane_id: file.next_pane_id,
@@ -585,6 +641,12 @@ pub fn upsert(
     if name.is_empty() && key.is_empty() {
         return Ok(());
     }
+    // (x-6b0b) A named squad keys by name and leaves the key empty (the
+    // struct's own contract at `StoredSquad::key`). Enforced here, where every
+    // write funnels through, for the same reason the identity-less skip above
+    // lives here: a caller passing both minted a row that matched by name
+    // while its key-keyed twin stayed alive.
+    let key = if name.is_empty() { key } else { "" };
     mutate(|squads| {
         let existing = squads.iter().find(|s| same_squad(s, name, key));
         let created_at = existing
@@ -731,6 +793,12 @@ pub struct MemberEvidence {
     dead: std::collections::HashSet<String>,
     live_pairs: std::collections::HashSet<(String, String)>,
     dead_pairs: std::collections::HashSet<(String, String)>,
+    /// (x-6b0b) Worker names a journal row positively records as never bound.
+    /// Kept separate from `dead` because the name is the identity of LAST
+    /// resort: it may only kill a member with no harness and no session id -
+    /// the one case where the name is all the member has. A member carrying
+    /// either stronger key keeps using it (AC7-EDGE).
+    dead_names: std::collections::HashSet<String>,
     complete_attach_set: bool,
 }
 
@@ -744,6 +812,7 @@ impl MemberEvidence {
             dead,
             live_pairs: std::collections::HashSet::new(),
             dead_pairs: std::collections::HashSet::new(),
+            dead_names: std::collections::HashSet::new(),
             complete_attach_set: false,
         }
     }
@@ -757,12 +826,20 @@ impl MemberEvidence {
             dead: std::collections::HashSet::new(),
             live_pairs: std::collections::HashSet::new(),
             dead_pairs: std::collections::HashSet::new(),
+            dead_names: std::collections::HashSet::new(),
             complete_attach_set: true,
         }
     }
 
     pub fn add_dead(&mut self, identity: impl Into<String>) {
         self.dead.insert(identity.into());
+    }
+
+    /// (x-6b0b) A name-keyed never-bound removal marker. Only ever reached by
+    /// a member with no harness and no session id (`verdict` scopes it), so a
+    /// reused name cannot kill a member that carries a stronger identity.
+    pub fn add_dead_name(&mut self, name: impl Into<String>) {
+        self.dead_names.insert(name.into());
     }
 
     pub fn add_live(&mut self, identity: impl Into<String>) {
@@ -817,6 +894,11 @@ impl MemberEvidence {
                 .into_iter()
                 .flatten()
                 .any(|key| self.dead.contains(key))
+            || (member.harness.is_none()
+                && member
+                    .worker
+                    .as_deref()
+                    .is_some_and(|w| self.dead_names.contains(w)))
         {
             MemberLiveness::Dead
         } else {
@@ -2360,6 +2442,174 @@ mod tests {
         let loaded = load();
         assert_eq!(loaded.squads[0].members, vec![m("c19cd2c3")]);
         assert!(loaded.notice.as_deref().unwrap().contains("dropped 3"));
+    }
+
+    #[test]
+    fn upsert_never_persists_a_key_on_a_named_row() {
+        // (x-6b0b) The invariant, enforced at the one write path every caller
+        // funnels through: a named squad keys by name and leaves the key empty.
+        let _s = Scratch::new("x6b0b-upsert-invariant");
+        upsert("w", "stalekey", &["/repo".into()], &[m("c19cd2c3")]).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.squads.len(), 1);
+        assert_eq!(loaded.squads[0].name, "w");
+        assert!(
+            loaded.squads[0].key.is_empty(),
+            "a named row never carries a key"
+        );
+    }
+
+    #[test]
+    fn two_unnamed_squads_with_different_keys_remain_two_rows() {
+        // AC15-EDGE: unnamed squads share the empty name and must never be
+        // merged by it - the key is their only identity.
+        let _s = Scratch::new("x6b0b-unnamed-distinct");
+        upsert("", "aaaa1111bbbb2222", &["/a".into()], &[]).unwrap();
+        upsert("", "cccc3333dddd4444", &["/b".into()], &[]).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.squads.len(), 2);
+        let mut keys: Vec<&str> = loaded.squads.iter().map(|sq| sq.key.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["aaaa1111bbbb2222", "cccc3333dddd4444"]);
+    }
+
+    #[test]
+    fn load_repairs_a_name_and_key_row_by_folding_its_unnamed_twin() {
+        // AC14-EDGE + the live-store shape (x-6b0b): a rename of an unnamed
+        // squad minted a named row that KEPT the key, leaving the old key row
+        // alive beside it. Load clears the key, folds the twin into the named
+        // row (the one the operator chose), keeps the EARLIER created_at, and
+        // says so in the notice.
+        let s = Scratch::new("x6b0b-fold-twin");
+        let file = StoreFile {
+            version: STORE_VERSION,
+            squads: vec![
+                StoredSquad {
+                    name: String::new(),
+                    key: "c5bf8f5419a350e8".into(),
+                    origins: vec!["/repo".into()],
+                    members: vec![m("c19cd2c3")],
+                    created_at: "2026-09-01T10:00:00Z".into(),
+                    tab_specs: vec![],
+                    tab_trees: Vec::new(),
+                    active_tab: None,
+                },
+                StoredSquad {
+                    name: "oss".into(),
+                    key: "c5bf8f5419a350e8".into(),
+                    origins: vec!["/repo".into()],
+                    members: vec![m("deadbeef")],
+                    created_at: "2026-09-01T10:01:21Z".into(),
+                    tab_specs: vec![],
+                    tab_trees: Vec::new(),
+                    active_tab: None,
+                },
+            ],
+            ..StoreFile::default()
+        };
+        std::fs::write(s.file(), serde_json::to_string(&file).unwrap()).unwrap();
+        let loaded = load();
+        assert!(loaded.notice.as_deref().unwrap().contains("repaired 1"));
+        assert_eq!(loaded.squads.len(), 1, "the key twin folds away");
+        let row = &loaded.squads[0];
+        assert_eq!(row.name, "oss", "the named row survives");
+        assert!(row.key.is_empty());
+        assert_eq!(row.members.len(), 2, "members from both rows survive");
+        assert_eq!(
+            row.created_at, "2026-09-01T10:00:00Z",
+            "the earlier stamp wins"
+        );
+    }
+
+    #[test]
+    fn load_repairs_a_name_and_key_row_onto_its_name_twin_without_a_key_twin() {
+        let s = Scratch::new("x6b0b-fold-name-twin");
+        let file = StoreFile {
+            version: STORE_VERSION,
+            squads: vec![
+                StoredSquad {
+                    name: "oss".into(),
+                    key: String::new(),
+                    origins: vec!["/a".into()],
+                    members: vec![m("c19cd2c3")],
+                    created_at: "2026-09-01T10:00:00Z".into(),
+                    tab_specs: vec![],
+                    tab_trees: Vec::new(),
+                    active_tab: None,
+                },
+                StoredSquad {
+                    name: "oss".into(),
+                    key: "leftover".into(),
+                    origins: vec!["/a".into()],
+                    members: vec![m("deadbeef")],
+                    created_at: "2026-09-01T09:00:00Z".into(),
+                    tab_specs: vec![],
+                    tab_trees: Vec::new(),
+                    active_tab: None,
+                },
+            ],
+            ..StoreFile::default()
+        };
+        std::fs::write(s.file(), serde_json::to_string(&file).unwrap()).unwrap();
+        let loaded = load();
+        assert!(loaded.notice.as_deref().unwrap().contains("repaired 1"));
+        assert_eq!(loaded.squads.len(), 1);
+        let row = &loaded.squads[0];
+        assert_eq!(row.name, "oss");
+        assert!(row.key.is_empty());
+        assert_eq!(row.members.len(), 2);
+        assert_eq!(row.created_at, "2026-09-01T09:00:00Z");
+    }
+
+    #[test]
+    fn a_name_marker_kills_only_an_identity_less_member() {
+        // AC4/AC5/AC7-EDGE: the name is the identity of LAST resort. It kills
+        // a member with no harness and no session id; absence keeps Unknown;
+        // a member carrying either stronger key never reads the name set.
+        use std::collections::HashSet;
+        let never_bound = StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("residue".into()),
+            harness: None,
+            harness_session_id: None,
+        };
+        let mut evidence = MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        assert_eq!(
+            evidence.verdict(&never_bound),
+            MemberLiveness::Unknown,
+            "AC5-EDGE: absence of a marker never prunes"
+        );
+        evidence.add_dead_name("residue");
+        assert_eq!(
+            evidence.verdict(&never_bound),
+            MemberLiveness::Dead,
+            "AC4-HP: the name marker reaches the prune verdict"
+        );
+        let mut bound = never_bound.clone();
+        bound.harness = Some("codex".into());
+        bound.harness_session_id = Some("s".into());
+        assert_eq!(
+            evidence.verdict(&bound),
+            MemberLiveness::Unknown,
+            "AC7-EDGE: a session-keyed member ignores the name marker"
+        );
+        evidence.add_dead_pair("codex", "s");
+        assert_eq!(
+            evidence.verdict(&bound),
+            MemberLiveness::Dead,
+            "AC7-EDGE: session-keyed evidence decides for the bound member"
+        );
+        let mut harness_only = never_bound.clone();
+        harness_only.harness = Some("codex".into());
+        assert_eq!(
+            evidence.verdict(&harness_only),
+            MemberLiveness::Unknown,
+            "AC7-EDGE: a harness-only member keeps its own (unknown) path"
+        );
     }
 
     #[test]

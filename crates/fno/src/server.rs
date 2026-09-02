@@ -868,6 +868,15 @@ fn node_from_argv(argv: &[String]) -> Option<String> {
     env_token_from_argv(argv, "FNO_NODE=")
 }
 
+/// (x-6b0b) The refused worker a restore placeholder was minted for, from the
+/// same `env(1)` wrapper (`FNO_REFUSED_WORKER=<name>`). The refusal marker then
+/// travels in the pane's own argv like every other durable pane fact, so a
+/// later server re-derives it on keeper re-adoption and can sweep a
+/// placeholder it did not mint - no stored state to go stale.
+fn refused_worker_from_argv(argv: &[String]) -> Option<String> {
+    env_token_from_argv(argv, "FNO_REFUSED_WORKER=")
+}
+
 /// Resolve the `fno-agents-worker` binary the keeper lane execs. Shared
 /// shape with `fno_agents_bin` via `paired_bin`: env override, installed
 /// sibling, dev-tree target dir, PATH.
@@ -2219,15 +2228,139 @@ fn parse_spawn_receipts(raw: &str) -> HashMap<(String, String), HeldWorker> {
     receipts
 }
 
-fn load_spawn_receipts() -> Result<HashMap<(String, String), HeldWorker>, String> {
-    let path = agents_view::registry_path().with_file_name("events.jsonl");
-    match std::fs::read_to_string(&path) {
-        Ok(raw) => Ok(parse_spawn_receipts(&raw)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
-        Err(error) => Err(format!(
-            "spawn receipt store unreadable at {}: {error}",
-            path.display()
-        )),
+/// (x-6b0b) Worker names the journal positively records as never bound, with
+/// the removal reason each carries: a `registry_row_removed` row whose own
+/// `harness_session_id` is absent or empty and whose reason names the missing
+/// identity. An `agent_removed` row with a null session is deliberately NOT a
+/// marker - that shape also fires for probe workers (py3probe) that must stay
+/// `Unknown`. The set is keyed on the worker NAME because a never-bound member
+/// has no other identity; `parse_spawn_receipts`'s reuse warning applies, so
+/// every consumer re-checks recency against `agent_spawned` rows for the name.
+fn parse_never_bound_removals(raw: &str) -> HashMap<String, String> {
+    // Recency, not presence: a removal older than the name's latest spawn is a
+    // dead name that came back to life.
+    let mut last_spawn: HashMap<String, usize> = HashMap::new();
+    let mut removals: HashMap<String, (usize, String)> = HashMap::new();
+    for (idx, line) in raw.lines().enumerate() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(data) = value.get("data").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        let Some(name) = data.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        match value.get("type").and_then(|v| v.as_str()) {
+            Some("agent_spawned") => {
+                last_spawn.insert(name.to_string(), idx);
+            }
+            Some("registry_row_removed") => {
+                let sessionless = data
+                    .get("harness_session_id")
+                    .map(|v| v.as_str().unwrap_or_default().is_empty())
+                    .unwrap_or(true);
+                let names_identity = data
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|reason| reason.contains("identity"));
+                if sessionless && names_identity {
+                    let reason = data
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    removals.insert(name.to_string(), (idx, reason));
+                }
+            }
+            _ => {}
+        }
+    }
+    removals
+        .into_iter()
+        // No spawn on record: the name was never spawned in this journal, so
+        // the removal is trivially the newest fact about it (a journal whose
+        // FIRST line is the removal must still mark).
+        .filter(|(name, (idx, _))| last_spawn.get(name).is_none_or(|spawn| idx > spawn))
+        .map(|(name, (_, reason))| (name, reason))
+        .collect()
+}
+
+/// The journal's retained segment paths, OLDEST first: `<stem>.<N>` with `N`
+/// all digits ordered high `N` first (rotation renames the live file to `.1`,
+/// so a higher generation is older), the live file last. Enumerated, never a
+/// hardcoded `.1` - the emitter keeps one generation today
+/// (fno-agents `events.rs` ROTATE_AT_BYTES), and a reader that survives a
+/// retention change is free.
+fn spawn_receipt_segments(dir: &std::path::Path, stem: &str) -> Vec<std::path::PathBuf> {
+    let prefix = format!("{stem}.");
+    let mut segments: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let generation = name.strip_prefix(&prefix)?.parse::<u64>().ok()?;
+            Some((generation, entry.path()))
+        })
+        .collect();
+    segments.sort_by(|(a, _), (b, _)| b.cmp(a));
+    segments.into_iter().map(|(_, path)| path).collect()
+}
+
+/// What one pass over the agent journal yields for restore: the still-held
+/// spawn receipts, the never-bound removal markers (x-6b0b), and the first
+/// read error. Segments are concatenated OLDEST FIRST before parsing, because
+/// `parse_spawn_receipts` revokes in file order - a revocation in the live
+/// file must land on a receipt from `.1`, and reading newest-first would
+/// resurrect reaped sessions.
+struct SpawnJournal {
+    receipts: HashMap<(String, String), HeldWorker>,
+    never_bound: HashMap<String, String>,
+    error: Option<String>,
+}
+
+fn scan_spawn_journal() -> SpawnJournal {
+    let live = agents_view::registry_path().with_file_name("events.jsonl");
+    scan_journal_at(&live)
+}
+
+/// The path-injected core of [`scan_spawn_journal`], so the segment walk is
+/// unit-testable without touching the operator's registry location.
+fn scan_journal_at(live: &std::path::Path) -> SpawnJournal {
+    let dir = live.parent().map(std::path::Path::to_path_buf);
+    let mut paths = dir
+        .map(|dir| spawn_receipt_segments(&dir, "events.jsonl"))
+        .unwrap_or_default();
+    paths.push(live.to_path_buf());
+    let mut combined = String::new();
+    let mut error = None;
+    for path in &paths {
+        match std::fs::read_to_string(path) {
+            // A segment whose last row lacks its newline would fuse with the
+            // next segment's first row into one unparseable line - every
+            // segment is newline-terminated before the next begins.
+            Ok(raw) => {
+                combined.push_str(&raw);
+                if !raw.ends_with('\n') {
+                    combined.push('\n');
+                }
+            }
+            // A missing segment is skipped; an unreadable one surfaces its
+            // error while the readable segments still contribute - unreadable
+            // is not missing, and neither folds into "no receipt".
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                error.get_or_insert_with(|| {
+                    format!("spawn receipt store unreadable at {}: {e}", path.display())
+                });
+            }
+        }
+    }
+    SpawnJournal {
+        receipts: parse_spawn_receipts(&combined),
+        never_bound: parse_never_bound_removals(&combined),
+        error,
     }
 }
 
@@ -2745,6 +2878,7 @@ fn restore_worker_refusal_reason(
     row: Option<&RegistryAgent>,
     receipt_store_error: Option<&str>,
     receipts: &HashMap<(String, String), HeldWorker>,
+    never_bound: &HashMap<String, String>,
 ) -> String {
     if let Some(reason) = row
         .and_then(Core::row_no_pane_reason)
@@ -2753,6 +2887,14 @@ fn restore_worker_refusal_reason(
         return reason.to_string();
     }
     let Some(session_id) = member.harness_session_id.as_deref() else {
+        // (x-6b0b) No session id and no harness is the never-bound shape; when
+        // the journal carries the name's removal marker, say why the member
+        // can never bind instead of only that it did not.
+        if member.harness.is_none() {
+            if let Some(reason) = member.worker.as_deref().and_then(|w| never_bound.get(w)) {
+                return format!("never bound: {reason}");
+            }
+        }
         return "session id is missing".into();
     };
     if let Some(error) = receipt_store_error {
@@ -3658,6 +3800,7 @@ impl Core {
             None,
             None,
             None,
+            None,
         );
         Ok(id)
     }
@@ -3752,6 +3895,7 @@ impl Core {
             cmd,
             account,
             resume_target,
+            refused_worker_from_argv(argv),
         );
         // The keeper's handshake replay carries everything the child printed
         // before the reader thread existed; the VT only now exists, so feed
@@ -3813,6 +3957,7 @@ impl Core {
         cmd: Option<String>,
         account: Option<String>,
         resume_target: Option<String>,
+        refused_worker: Option<String>,
     ) {
         self.next_pane_id = self.next_pane_id.max(id.saturating_add(1));
         e2e_log(format_args!("pane {id} registered ({rows}x{cols})"));
@@ -3828,7 +3973,7 @@ impl Core {
                 cmd,
                 account,
                 resume_target,
-                refused_worker: None,
+                refused_worker,
                 last_output: Instant::now(),
                 stats: Arc::clone(&stats),
             },
@@ -6762,7 +6907,23 @@ impl Core {
         cols: u16,
         cwd: &str,
     ) -> Result<u64, String> {
-        let pid = self.spawn_pane(rows, cols, cwd)?;
+        // Spawn through the argv path with the refusal in an env wrapper
+        // token (x-6b0b): the pane's own argv then says what it is, so a
+        // later server re-derives `refused_worker` on re-adoption and can
+        // sweep a placeholder it did not mint. Stored state would go stale;
+        // argv cannot. The shell stays a plain shell - the title carries the
+        // human-readable half.
+        let shell = self
+            .shells
+            .first()
+            .map(|s| s.to_string_lossy().into_owned())
+            .ok_or_else(|| "no shell candidate for refused placeholder".to_string())?;
+        let argv = vec![
+            "env".to_string(),
+            format!("FNO_REFUSED_WORKER={name}"),
+            shell,
+        ];
+        let pid = self.spawn_pane_cmd(&argv, rows, cols, cwd)?;
         if let Some(entry) = self.panes.get_mut(&pid) {
             entry.name = Some(format!("{name} ({reason})"));
             entry.refused_worker = Some(name.to_string());
@@ -6858,10 +7019,8 @@ impl Core {
             }
             Ok(None) => {}
         }
-        let (fresh_receipts, receipt_error) = match load_spawn_receipts() {
-            Ok(receipts) => (receipts, None),
-            Err(error) => (HashMap::new(), Some(error)),
-        };
+        let journal = scan_spawn_journal();
+        let (fresh_receipts, receipt_error) = (journal.receipts, journal.error);
         let mut row_name: Option<String> = None;
         let facts = {
             let candidates: Vec<&RegistryAgent> = self
@@ -8157,6 +8316,11 @@ impl Core {
         for (_, worker) in &refused {
             evidence.add_dead(worker.clone());
         }
+        // (x-6b0b) A never-bound member has no refused pane and no session
+        // row: its death marker lives in the journal under its worker name.
+        for name in scan_spawn_journal().never_bound.into_keys() {
+            evidence.add_dead_name(name);
+        }
         let live_cwds: Vec<String> = self.panes.values().map(|p| p.cwd.clone()).collect();
         let origin_exists = |path: &str| Path::new(path).exists();
         let now = crate::squad_store::now_epoch_secs();
@@ -8314,6 +8478,7 @@ impl Core {
                         cmd_from_argv(&argv),
                         account_from_argv(&argv),
                         resume_target_from_argv(&argv),
+                        refused_worker_from_argv(&argv),
                     );
                     // The detached window (AC3-HP): the keeper replayed its
                     // ring during the handshake; feed it before any layout
@@ -8517,13 +8682,15 @@ impl Core {
         // bulk driver at the end, so startup never silently respawns unless
         // the operator asked for exactly that (AC4-EDGE).
         let hold_workers = policy == crate::digest_overlay::MuxRestorePolicy::Hold;
-        let (spawn_receipts, receipt_store_error) = match load_spawn_receipts() {
-            Ok(receipts) => (receipts, None),
-            Err(error) => {
-                self.notice_all(format!("restore: {error}"));
-                (HashMap::new(), Some(error))
-            }
-        };
+        let journal = scan_spawn_journal();
+        if let Some(error) = journal.error.as_deref() {
+            self.notice_all(format!("restore: {error}"));
+        }
+        let SpawnJournal {
+            receipts: spawn_receipts,
+            never_bound,
+            error: receipt_store_error,
+        } = journal;
         let mut worker_members_total = 0usize;
         let mut held_workers_total = 0usize;
         let mut refused_workers_total = 0usize;
@@ -8582,8 +8749,13 @@ impl Core {
                     // client triggers restore, but must not import that same
                     // member again or create a held placeholder beside it.
                     let existing = self.member_pane(m).or_else(|| {
+                        // (x-6b0b) The refused placeholder's TITLE carries the
+                        // refusal reason, so an exact-name scan misses it and a
+                        // second restore pass minted a twin pane. Its
+                        // `refused_worker` IS the binding: same pane reused.
                         self.panes.iter().find_map(|(pid, entry)| {
-                            (entry.name.as_deref() == Some(worker_name)
+                            ((entry.name.as_deref() == Some(worker_name)
+                                || entry.refused_worker.as_deref() == Some(worker_name))
                                 && self.session.find_pane(*pid).is_some())
                             .then_some(*pid)
                         })
@@ -8669,6 +8841,7 @@ impl Core {
                                 row,
                                 receipt_store_error.as_deref(),
                                 &spawn_receipts,
+                                &never_bound,
                             );
                             self.refused_worker_pane(worker_name, &reason, rows, cols, &cwd0)
                                 .inspect(|_| {
@@ -13183,9 +13356,33 @@ impl Core {
                                     self.persist_remove(&old, "");
                                     self.persist_squad(squad);
                                 }
-                                // No old name (already unnamed): just persist under
-                                // the durable key.
-                                (None, _) => self.persist_squad(squad),
+                                (None, Some(_)) => {
+                                    // Unnamed -> named is a rename of an identity,
+                                    // not a first persist (x-6b0b): drop the old
+                                    // key-keyed row, clear the live key, then
+                                    // persist under the name. Falling through to a
+                                    // plain persist upserted with the new name AND
+                                    // the old key - `same_squad` matches the named
+                                    // row by name alone, so the retain never removed
+                                    // the old key row, and one rename left two live
+                                    // rows, the new one violating the store's own
+                                    // "named squads key by name" contract.
+                                    let old_key = self
+                                        .session
+                                        .squad(squad)
+                                        .map(|s| s.key.clone())
+                                        .unwrap_or_default();
+                                    if !old_key.is_empty() {
+                                        self.persist_remove("", &old_key);
+                                    }
+                                    if let Some(s) = self.session.squad_mut(squad) {
+                                        s.key = String::new();
+                                    }
+                                    self.persist_squad(squad);
+                                }
+                                // No old name and no new name: still unnamed, so
+                                // just persist under the durable key.
+                                (None, None) => self.persist_squad(squad),
                             }
                         }
                     }
@@ -19960,6 +20157,66 @@ mod tests {
     }
 
     #[test]
+    fn rename_unnamed_to_named_mutates_the_row_instead_of_minting_a_second() {
+        // AC12/AC13-HP (x-6b0b): an unnamed->named rename used to fall through
+        // the plain persist: upsert wrote the new name AND the old key, and
+        // `same_squad` matching named rows by name alone left the old key row
+        // alive - one rename, two rows. Now the old key row is removed, the
+        // live key is cleared, and every shape holds exactly one row.
+        let _s = StoreScratch::new("x6b0b-rename-unnamed");
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/repo".into()], None, leaf_tab(5, 1));
+        core.squad_members.insert(1, vec![]);
+        core.persist_squad(1);
+        let key_before = crate::squad_store::load().squads[0].key.clone();
+        assert!(
+            !key_before.is_empty(),
+            "the unnamed squad persists under a durable key"
+        );
+
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.command(
+            1,
+            Command::RenameSquad {
+                squad: 1,
+                name: "oss".into(),
+            },
+        );
+
+        let loaded = crate::squad_store::load();
+        assert_eq!(
+            loaded.squads.len(),
+            1,
+            "AC12-HP: one row, not a minted twin"
+        );
+        assert_eq!(loaded.squads[0].name, "oss");
+        assert!(
+            loaded.squads[0].key.is_empty(),
+            "AC12-HP: a named row keys by name"
+        );
+        assert_eq!(core.session.squads[0].key, String::new());
+
+        // AC13-HP: clearing the name re-derives the key from origins.
+        core.clients.push(client(1, 5, (24, 80), false));
+        core.command(
+            1,
+            Command::RenameSquad {
+                squad: 1,
+                name: "   ".into(),
+            },
+        );
+        let loaded = crate::squad_store::load();
+        assert_eq!(loaded.squads.len(), 1, "AC13-HP: still exactly one row");
+        assert_eq!(loaded.squads[0].name, "");
+        assert_eq!(
+            loaded.squads[0].key,
+            crate::squad_store::origin_key(&["/repo".to_string()]),
+            "AC13-HP: the key re-derives from origins"
+        );
+    }
+
+    #[test]
     fn remove_squad_reanchors_then_last_ends_the_session() {
         // AC2-HP / AC2-EDGE (server half): removing a squad drops it and re-
         // anchors active_squad; removing the last squad ends the session.
@@ -20976,6 +21233,235 @@ mod tests {
         assert_eq!(receipts.len(), 2);
     }
 
+    /// A throwaway journal directory that never touches the operator's
+    /// registry location (same per-test isolation rule as StoreScratch).
+    struct JournalScratch(std::path::PathBuf);
+    impl JournalScratch {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("fno-journal-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            JournalScratch(dir)
+        }
+        fn segment(&self, name: &str) -> std::path::PathBuf {
+            self.0.join(name)
+        }
+    }
+    impl Drop for JournalScratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn spawn_receipt_segments_read_oldest_generation_first() {
+        // Rotation renames the live file to `.1`, so a higher generation is
+        // older; the live file parses LAST.
+        let s = JournalScratch::new("segments");
+        for name in ["events.jsonl.2", "events.jsonl.1", "events.jsonl"] {
+            std::fs::write(s.segment(name), "").unwrap();
+        }
+        let paths = spawn_receipt_segments(&s.0, "events.jsonl");
+        let names: Vec<String> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        // Only the retained `.N` segments; the live file is appended by the
+        // scan itself, always last.
+        assert_eq!(names, vec!["events.jsonl.2", "events.jsonl.1"]);
+    }
+
+    #[test]
+    fn journal_scan_crosses_rotation_and_honors_live_file_revocation() {
+        // AC1-HP: a receipt in a rotated segment is still a receipt. AC2-HP:
+        // its revocation in the LIVE file still lands on it - segments are
+        // concatenated oldest first, so parse's revoke-in-file-order keeps
+        // applying. Reading newest first would resurrect the reaped session.
+        let s = JournalScratch::new("rotation");
+        std::fs::write(
+            s.segment("events.jsonl.2"),
+            r#"{"type":"agent_spawned","data":{"name":"ancient","provider":"codex","harness_session_id":"ancient-session","substrate":"pane"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            s.segment("events.jsonl.1"),
+            r#"{"type":"agent_spawned","data":{"name":"rotated","provider":"codex","harness_session_id":"rotated-session","substrate":"pane"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            s.segment("events.jsonl"),
+            concat!(
+                r#"{"type":"agent_removed","data":{"name":"rotated","provider":"codex","harness_session_id":"rotated-session"}}"#,
+                "\n",
+                r#"{"type":"agent_spawned","data":{"name":"live","provider":"codex","harness_session_id":"live-session","substrate":"pane"}}"#,
+            ),
+        )
+        .unwrap();
+        let journal = scan_journal_at(&s.segment("events.jsonl"));
+        assert!(journal.error.is_none());
+        assert!(
+            journal
+                .receipts
+                .contains_key(&(String::from("codex"), String::from("ancient-session"))),
+            "AC1-HP: the rotated segment's receipt survives"
+        );
+        assert!(
+            !journal
+                .receipts
+                .contains_key(&(String::from("codex"), String::from("rotated-session"))),
+            "AC2-HP: the live file's revocation lands on the rotated receipt"
+        );
+        assert!(journal
+            .receipts
+            .contains_key(&(String::from("codex"), String::from("live-session"))));
+    }
+
+    #[test]
+    fn journal_scan_surfaces_an_unreadable_segment_and_keeps_readable_receipts() {
+        // AC3-EDGE: unreadable is not missing. The unreadable segment's error
+        // surfaces; the readable segments still contribute their receipts.
+        let s = JournalScratch::new("unreadable");
+        std::fs::create_dir_all(s.segment("events.jsonl.1")).unwrap();
+        std::fs::write(
+            s.segment("events.jsonl"),
+            r#"{"type":"agent_spawned","data":{"name":"rescued","provider":"codex","harness_session_id":"rescued-session","substrate":"pane"}}"#,
+        )
+        .unwrap();
+        let journal = scan_journal_at(&s.segment("events.jsonl"));
+        assert!(
+            journal.error.as_deref().unwrap().contains("events.jsonl.1"),
+            "the unreadable segment is named, not folded into no-receipt"
+        );
+        assert!(journal
+            .receipts
+            .contains_key(&(String::from("codex"), String::from("rescued-session"))));
+    }
+
+    #[test]
+    fn never_bound_markers_come_only_from_sessionless_registry_removals() {
+        let raw = concat!(
+            // The live marker shape (t-a0cd-identity-residue-gpt):
+            r#"{"type":"registry_row_removed","data":{"name":"residue","harness":"codex","harness_session_id":"","reason":"row 'residue' carries no resumable identity (harness='codex', session=False)"}}"#,
+            "\n",
+            // The daemon shape (t-b783-verb-prefix-agy):
+            r#"{"type":"registry_row_removed","data":{"name":"verb-prefix","harness":"agy","harness_session_id":"","reason":"missing harness session identity"}}"#,
+            "\n",
+            // A row WITH a session id is a normal removal, never a name marker:
+            r#"{"type":"registry_row_removed","data":{"name":"normal","harness":"claude","harness_session_id":"has-session","reason":"missing harness session identity"}}"#,
+            "\n",
+            // Generic write bookkeeping names no identity gap:
+            r#"{"type":"registry_row_removed","data":{"name":"write","harness":"claude","harness_session_id":"","reason":"removed by an update_registry write"}}"#,
+            "\n",
+            // py3probe's shape: an agent_removed with a null session is NOT a
+            // never-bound marker - probe workers stay Unknown and unswept.
+            r#"{"type":"agent_removed","data":{"name":"py3probe","harness":"python3","harness_session_id":null}}"#,
+            "\n",
+        );
+        let markers = parse_never_bound_removals(raw);
+        assert_eq!(
+            markers.get("residue").map(String::as_str),
+            Some("row 'residue' carries no resumable identity (harness='codex', session=False)")
+        );
+        assert_eq!(
+            markers.get("verb-prefix").map(String::as_str),
+            Some("missing harness session identity")
+        );
+        assert!(!markers.contains_key("normal"));
+        assert!(!markers.contains_key("write"));
+        assert!(!markers.contains_key("py3probe"));
+    }
+
+    #[test]
+    fn never_bound_marker_requires_the_removal_newer_than_the_last_spawn() {
+        // AC6-EDGE: a name respawned after its removal is live again.
+        let respawned = concat!(
+            r#"{"type":"agent_spawned","data":{"name":"w","provider":"codex","harness_session_id":"s1","substrate":"pane"}}"#,
+            "\n",
+            r#"{"type":"registry_row_removed","data":{"name":"w","harness_session_id":"","reason":"missing harness session identity"}}"#,
+            "\n",
+            r#"{"type":"agent_spawned","data":{"name":"w","provider":"codex","harness_session_id":"s2","substrate":"pane"}}"#,
+            "\n",
+        );
+        assert!(parse_never_bound_removals(respawned).is_empty());
+        let removed_last = concat!(
+            r#"{"type":"agent_spawned","data":{"name":"v","provider":"codex","harness_session_id":"s1","substrate":"pane"}}"#,
+            "\n",
+            r#"{"type":"registry_row_removed","data":{"name":"v","harness_session_id":"","reason":"missing harness session identity"}}"#,
+            "\n",
+        );
+        assert_eq!(
+            parse_never_bound_removals(removed_last)
+                .get("v")
+                .map(String::as_str),
+            Some("missing harness session identity")
+        );
+    }
+
+    #[test]
+    fn restore_refusal_names_the_never_bound_marker() {
+        let never_bound = crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("residue".into()),
+            harness: None,
+            harness_session_id: None,
+        };
+        let markers = HashMap::from([(
+            String::from("residue"),
+            String::from("missing harness session identity"),
+        )]);
+        assert_eq!(
+            restore_worker_refusal_reason(&never_bound, None, None, &HashMap::new(), &markers),
+            "never bound: missing harness session identity",
+            "the placeholder pane says WHY the member can never bind"
+        );
+        // AC7-EDGE: a member carrying a session id keeps the session-keyed
+        // path; the name marker is last-resort identity only.
+        let mut bound = never_bound.clone();
+        bound.harness = Some("codex".into());
+        bound.harness_session_id = Some("s".into());
+        let receipts = HashMap::from([(
+            (String::from("codex"), String::from("s")),
+            HeldWorker {
+                name: "residue".into(),
+                harness: "codex".into(),
+                harness_session_id: "s".into(),
+                cwd: String::new(),
+            },
+        )]);
+        assert_eq!(
+            restore_worker_refusal_reason(&bound, None, None, &receipts, &markers),
+            "codex session s is not resumable"
+        );
+    }
+
+    #[test]
+    fn refused_placeholder_marker_roundtrips_through_argv() {
+        // AC8-HP: the keeper re-adoption parse recovers the refused worker.
+        let argv = vec![
+            "env".to_string(),
+            "FNO_REFUSED_WORKER=t-a0cd-identity-residue-gpt".to_string(),
+            "/bin/sh".to_string(),
+        ];
+        assert_eq!(
+            refused_worker_from_argv(&argv).as_deref(),
+            Some("t-a0cd-identity-residue-gpt")
+        );
+        // AC11-EDGE: a bare shell is never mistaken for a placeholder.
+        assert_eq!(refused_worker_from_argv(&["/bin/sh".to_string()]), None);
+        // An unrelated env token does not match either.
+        let other = vec![
+            "env".to_string(),
+            "FNO_NODE=ab-1234".to_string(),
+            "/bin/sh".to_string(),
+        ];
+        assert_eq!(refused_worker_from_argv(&other), None);
+    }
+
     #[test]
     fn restore_legacy_member_uses_unique_receipt_harness() {
         let member = crate::squad_store::StoredMember {
@@ -21000,7 +21486,7 @@ mod tests {
         let receipt = receipt_for_member(&receipts, &member).expect("unique receipt");
         assert_eq!(receipt.harness, "codex");
         assert_eq!(
-            restore_worker_refusal_reason(&member, None, None, &receipts),
+            restore_worker_refusal_reason(&member, None, None, &receipts, &HashMap::new()),
             "codex session full-session is not resumable"
         );
     }
@@ -29125,6 +29611,7 @@ mod tests {
                 None,
                 None,
                 "/tmp".into(),
+                None,
                 None,
                 None,
                 None,
