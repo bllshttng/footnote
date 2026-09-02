@@ -766,7 +766,7 @@ def test_archive_refusal_leaves_a_standing_order(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "step=archive status=failed" in out
     assert "exit=2" in out
-    assert "reap-order reap:pr-7 standing" in out
+    assert "reap-order reap:pr-7 standing" in r.ctx.receipts[-1].detail
 
 
 def test_reap_order_already_standing_is_not_a_failure(tmp_path, capsys, monkeypatch):
