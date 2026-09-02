@@ -92,24 +92,25 @@ def test_pi_is_registered_at_every_seam_a_spawn_reads():
     assert "pi" in KNOWN_HARNESSES
     assert "pi" in READABLE_PROVIDERS
 
-    # pi is NOT in SPAWN_HARNESSES, and that absence is asserted rather than
-    # merely true. That tuple is the thread/headless gate, and `dispatch_spawn`
-    # has no pi arm behind it: listing pi there sent a `--substrate thread`
-    # spawn past the gate into the terminal else-branch, which refuses by
-    # naming gemini's retirement - a harness the operator never mentioned. The
-    # name goes back when the spawn arm ships, and this assertion is what makes
-    # someone add it deliberately rather than by widening a roster.
-    assert "pi" not in SPAWN_HARNESSES
+    # pi IS in SPAWN_HARNESSES, and that membership is asserted rather than
+    # merely true. The spawn arm shipped (x-43bd): `dispatch_spawn` has a pi
+    # branch driving the keeper lane behind this tuple. The name was removed
+    # once before, deliberately, when the arm was absent - the membership
+    # assertion is what keeps the name tied to a shipped arm rather than to
+    # roster growth. The headless lane is a different story: pi's
+    # state_root_grant reads `unmeasured` there and the seam refuses it by
+    # stance (asserted in test_dispatch_spawn.py).
+    assert "pi" in SPAWN_HARNESSES
 
     from fno.agents.harness_map import capabilities
 
-    # The bit and the roster now answer DIFFERENT questions, and both answers
+    # The bit and the roster now answer the SAME question, and both answers
     # are asserted. The bit backs dispatch-resolve: pi's keeper-hosted thread
     # lane is journey-proven (test_thread_keeper_journey.py), so resolving
     # `--substrate thread` is honest. SPAWN_HARNESSES backs the dispatch_spawn
-    # seam, whose pi arm has not shipped - the journey spawned through the
-    # lane-B driver directly - so a `fno agents spawn --substrate thread` on pi
-    # still refuses. The roster widens only when that arm ships.
+    # seam, whose pi arm shipped - the spawn journey
+    # (test_pi_spawn_journey.py) enters through the public surface the arm
+    # serves.
     assert capabilities("pi")["thread"] is True, (
         "the capability bit must agree with the journey: a false bit refuses a "
         "restart-survival the keeper lane has already proven"

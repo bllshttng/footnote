@@ -481,9 +481,34 @@ class DispatchAskError(RuntimeError):
         self.exit_code = exit_code
 
 
-def _check_spawn_harness(name: str) -> None:
-    """Validate a harness at the thread/headless spawn seam."""
+def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
+    """Validate a harness at the thread/headless spawn seam.
+
+    Substrate-aware (x-43bd): membership in ``SPAWN_HARNESSES`` says a seam
+    arm exists, and the capability row says which of the two lanes it opens.
+    A harness whose ``state_root_grant`` stance for the requested substrate
+    reads ``"unmeasured"`` is refused here rather than silently inheriting a
+    stance from the lanes that have run - the state-root gate downstream only
+    refuses an ABSENT key, so an ``"unmeasured"`` value would pass it.
+    """
     if name in SPAWN_HARNESSES:
+        substrate = "headless" if headless else "thread"
+        from fno.agents.harness_map import capabilities_or_undeclared
+
+        stance = capabilities_or_undeclared(name).get("state_root_grant", {}).get(
+            substrate
+        )
+        if stance == "unmeasured":
+            raise DispatchAskError(
+                f"{name!r} has a spawn arm, but its {substrate} lane is not "
+                "measured: the capability row records state_root_grant."
+                f"{substrate} = \"unmeasured\", and nothing has run that lane "
+                "unattended. An unattended journey for the lane is what clears "
+                f"it (pi's thread journey is the shape: "
+                "cli/tests/agents/test_pi_spawn_journey.py). "
+                f"Use --substrate pane, which every harness hosts.",
+                exit_code=2,
+            )
         return
     from fno.agents.harness_map import is_declared
 
@@ -1767,11 +1792,12 @@ def _lane_b_thread_spawn(
     ships resolves the id into a Drive-tier attach id with no
     ``agents_view.rs`` edit.
 
-    NOT wired into :func:`dispatch_spawn`: pi's ``thread`` capability row
-    stays false, so the public dispatch surface still refuses this lane
-    (AC4-ERR) and the only callers are the test harness and a later
-    group's journey. Lane A (claude, codex; ``thread_lane`` ==
-    ``"attach"``) is refused here and never spawns a keeper (AC3-EDGE).
+    Wired into :func:`dispatch_spawn` as of x-43bd: the pi thread branch
+    calls this after the seam check, and the journey
+    (cli/tests/agents/test_pi_spawn_journey.py) enters through the public
+    ``fno agents spawn -H pi --substrate thread`` surface. Lane A (claude,
+    codex; ``thread_lane`` == ``"attach"``) is refused here and never
+    spawns a keeper (AC3-EDGE).
 
     Returns the spawn receipt dict (session id, keeper socket, pids,
     rendered argv).
@@ -1890,6 +1916,11 @@ def _lane_b_thread_spawn(
         # IDENTITY; the keeper passes its own env through to the harness
         # child unchanged, so the scrub has to happen here.
         scrub_ambient_identity(env)
+        # The loop extension's spawn binding: the presence of this variable
+        # marks THIS process as one fno spawned into the loop lane, so the
+        # global footnote extension gates only here and never hijacks a
+        # native session that merely sits in a cwd with a stale manifest.
+        env["FNO_AGENT_SESSION_ID"] = session_id
         stderr_fh = open(log_path, "ab")
         try:
             proc = subprocess.Popen(
@@ -2018,6 +2049,7 @@ def _keeper_seed_submit(
     session_id: str,
     sock: Path,
     message: str,
+    ready_marker: bytes = b"Plan, search, build anything",
 ) -> None:
     """Deliver a thread spawn's seed to its keeper-hosted TUI.
 
@@ -2034,6 +2066,11 @@ def _keeper_seed_submit(
     stronger proof by waiting out the reply. A miss is a raised
     error, never a silent drop - the caller refuses the spawn rather than
     report a worker that will never start.
+
+    ``ready_marker`` is the HOSTED TUI's own composer-up paint, which is
+    per-harness: cursor-agent's status line reads "Plan, search, build
+    anything"; pi's subscription tag renders only once its model session is
+    wired (the same marker the journeys wait on).
     """
     import socket as _socket
     import time as _time
@@ -2071,7 +2108,6 @@ def _keeper_seed_submit(
         # ring is not replayed to a late subscriber) and a same-size Resize
         # fires no SIGWINCH, so the wait alternates sizes every few seconds
         # to force a repaint until the marker arrives.
-        ready_marker = b"Plan, search, build anything"
         deadline = _time.monotonic() + 60.0
         flip = False
         last_nudge = 0.0
@@ -3574,8 +3610,9 @@ def dispatch_spawn(
     _validate_from_name(from_name)
 
     # 2. Harness validation. The thread/headless accept-set is separate from
-    # the narrower ask vocabulary and the wider pane-hostable set.
-    _check_spawn_harness(harness)
+    # the narrower ask vocabulary and the wider pane-hostable set, and the
+    # check is substrate-aware: pi passes on thread and refuses on headless.
+    _check_spawn_harness(harness, headless=headless)
 
     effective_message: Optional[str] = None
     if message.strip().startswith(("/", "$fno:")):
@@ -3728,6 +3765,85 @@ def dispatch_spawn(
             kind="created",
             name=name,
             provider="cursor-agent",
+            short_id=session_id,
+            effective_message=effective_message,
+        )
+
+    # 3b-3. pi thread spawns are hosted by the keeper lane (x-43bd), the
+    # same lane the restart journey proved (wk-x61bc). pi's headless lane
+    # never reached this point: _check_spawn_harness refused the unmeasured
+    # stance above. The lane driver mints the caller-assigned session id and
+    # appends pi's provider/model pair itself, so every option that would
+    # ride another lane's argv is refused by name rather than silently
+    # dropped.
+    if harness == "pi" and not headless:
+        unsupported = next(
+            (
+                flag
+                for flag, value in (
+                    ("--model", model),
+                    ("--yolo", yolo),
+                    ("--role", launch_role),
+                    ("--add-dir", add_dir),
+                    ("--agent", agent),
+                    ("--tools", tools),
+                    ("--deny-tools", deny_tools),
+                    ("--effort", effort),
+                )
+                if value
+            ),
+            None,
+        )
+        if unsupported is not None:
+            raise DispatchAskError(
+                f"{unsupported} is not supported on the pi thread lane; "
+                "drop it or use --substrate pane",
+                exit_code=2,
+            )
+        if resume_session_id:
+            raise DispatchAskError(
+                f"--resume {resume_session_id} is not supported on the pi "
+                "thread lane yet; the keeper row resumes by name (fno agents "
+                "ask/resume <name>). Refusing rather than silently spawning "
+                "a fresh session.",
+                exit_code=2,
+            )
+        if once:
+            raise DispatchAskError(
+                "--once is not supported on the pi thread lane (it is "
+                "persistent); pi has no one-shot lane - its headless stance "
+                "is unmeasured",
+                exit_code=2,
+            )
+        receipt = _lane_b_thread_spawn(
+            name=name,
+            harness="pi",
+            cwd=cwd,
+            lock_timeout=lock_timeout,
+        )
+        session_id = receipt["session_id"]
+        if message.strip():
+            # The seed rides the same keeper paste the cursor lane uses: the
+            # pi status bar's subscription tag is the composer-ready marker,
+            # and the repaint of the submitted line is the landing proof.
+            _keeper_seed_submit(
+                name=name,
+                session_id=session_id,
+                sock=Path(receipt["keeper_socket"]),
+                message=message,
+                ready_marker=b"(sub)",
+            )
+        _emit_ev(
+            "agent_ask_done",
+            stage="dispatch",
+            name=name,
+            provider="pi",
+            substrate="thread",
+        )
+        return SpawnResult(
+            kind="created",
+            name=name,
+            provider="pi",
             short_id=session_id,
             effective_message=effective_message,
         )
