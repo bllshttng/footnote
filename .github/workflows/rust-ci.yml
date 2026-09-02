@@ -37,6 +37,11 @@ on:
       # leg without converting its parity test is the exact case the gate
       # exists to catch, and such a PR need not touch crates/ at all.
       - cli/src/fno/agents/harnesses/**
+      # The claim classifier parity harness's differential oracle. A PR that
+      # deletes the Python classifier without converting the parity test is
+      # exactly the case the provenance gate exists to catch, and it need not
+      # touch crates/ at all.
+      - cli/src/fno/claims/staleness.py
       - scripts/ci/preflight.sh
       - scripts/tests/stress-rust-e2e-concurrency.sh
       - cli/src/fno/config/__init__.py
@@ -155,7 +160,7 @@ jobs:
         working-directory: cli
         run: uv sync
 
-      - name: Install PyYAML for the bare python3 (verify_evidence_parity)
+      - name: Install PyYAML + psutil for the bare python3 (parity oracles)
         # verify_evidence.rs shells to a bare-PATH `python3 -c "import yaml,..."`
         # for byte-parity with the deleted bash oracle. `uv sync` installs pyyaml
         # only into cli/.venv, which the cargo-test step does not activate, so the
@@ -163,7 +168,12 @@ jobs:
         # "settings.yaml unparseable". Install pyyaml onto the setup-python
         # interpreter (the one which_python3() resolves) so the parity check sees
         # the same parser its frozen goldens were captured with.
-        run: python3 -m pip install "pyyaml>=6"
+        #
+        # psutil is here for the same reason: the claim classifier parity
+        # harness imports fno.claims.staleness, whose module-level psutil import
+        # would fail on a bare interpreter and turn the differential harness
+        # into a permanent silent skip - a guard that never fires.
+        run: python3 -m pip install "pyyaml>=6" "psutil>=5"
 
       - name: Clean cached Rust package artifacts
         # The cache key follows Cargo.lock, so source-only changes can restore

@@ -1,0 +1,347 @@
+//! parity-stage: differential
+//! parity-oracle: fno.claims.staleness
+//!
+//! Differential harness for the claim classifier. Python's
+//! `fno.claims.staleness.classify` and this crate's `claims::classify` each
+//! carry a docstring claiming to mirror the other; this file is the instrument
+//! that makes that claim checkable. One fixture corpus drives BOTH legs
+//! through the four liveness branch conditions (pid unavailable, off-machine,
+//! pid unreported by the OS, pid reused) plus the expired-TTL, hybrid and
+//! suspect arms, and asserts identical states for every case.
+//!
+//! Excluded from the corpus, on purpose, one line each:
+//!
+//! - `classify_for_sweep`: Python-only, has no Rust counterpart, so it is not
+//!   a dual implementation and there is nothing to pin it against.
+//! - `pid_exclusive=False`: an input only the Python signature can express
+//!   (Rust callers cannot pass it), so no reachable disagreement exists.
+//!
+//! Skips (does not fail) when `python3` is absent or the oracle is not
+//! importable (its `psutil` dependency included), mirroring
+//! `claude_ask_parity.rs`'s skip-when-unavailable policy. Set
+//! `FNO_CLAIMS_PARITY_PYTHON` to point the harness at an interpreter that has
+//! `psutil` installed (a bare `python3` often does not); CI installs it.
+
+use fno_agents::claims::{classify, now_ms, ClaimRecord};
+use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::process::Command;
+
+/// A pid no OS can have assigned: above every platform's pid ceiling (macOS
+/// caps at 99998, Linux pid_max at 2^22), so both legs read it as unreported.
+const ABSENT_PID: i64 = 2_000_000_000;
+
+/// Repo `cli/src` so Python can import the real `fno` package.
+fn pythonpath() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cli/src")
+}
+
+fn parity_python() -> String {
+    std::env::var("FNO_CLAIMS_PARITY_PYTHON").unwrap_or_else(|_| "python3".to_string())
+}
+
+fn python_available() -> bool {
+    let probe = Command::new(parity_python())
+        .arg("-c")
+        .arg("import fno.claims.staleness")
+        .env("PYTHONPATH", pythonpath())
+        .output();
+    matches!(probe, Ok(o) if o.status.success())
+}
+
+/// Read THIS machine's identity from the genuine Python oracle, so the
+/// same-machine fixtures carry values both legs agree are local. Returns
+/// (machine_id, hostname); machine_id is empty when the OS exposes none.
+fn local_identity() -> (String, String) {
+    let code = r#"
+from fno.claims.hostid import machine_id
+import socket
+print(machine_id())
+print(socket.gethostname())
+"#;
+    let out = Command::new(parity_python())
+        .arg("-c")
+        .arg(code)
+        .env("PYTHONPATH", pythonpath())
+        .output()
+        .expect("run python hostid identity probe");
+    assert!(
+        out.status.success(),
+        "python identity probe failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let machine = lines.next().unwrap_or("").trim().to_string();
+    let hostname = lines.next().unwrap_or("").trim().to_string();
+    (machine, hostname)
+}
+
+/// One fixture case. Every field travels to both legs unchanged; the Python
+/// subprocess rebuilds the equivalent `Claim` from the same JSON.
+struct Case {
+    label: &'static str,
+    pid: Option<i64>,
+    pid_unavailable: bool,
+    /// Same-machine cases carry the live identity so the machine arm decides;
+    /// foreign cases carry an id that matches nothing.
+    machine_id: Option<String>,
+    host: String,
+    acquired_at: i64,
+    expires_at: Option<i64>,
+    pid_provenance: Option<&'static str>,
+}
+
+fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
+    let past = now - 60_000;
+    let future = now + 3_600_000;
+    let (machine, hostname) = identity;
+    // With a readable machine id, same-machine fixtures compare machine ids
+    // (the production path). Without one, both legs fall back to the hostname
+    // compare, which reaches the same decision on the same host.
+    let local_machine: Option<String> = if machine.is_empty() {
+        None
+    } else {
+        Some(machine.clone())
+    };
+    let local_host = if machine.is_empty() {
+        hostname.clone()
+    } else {
+        "this-host.invalid".to_string()
+    };
+
+    vec![
+        Case {
+            label: "live_pid_liveness",
+            pid: Some(self_pid),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: None,
+            pid_provenance: None,
+        },
+        Case {
+            label: "live_ttl_unexpired",
+            pid: Some(self_pid),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: Some(future),
+            pid_provenance: None,
+        },
+        Case {
+            label: "pid_absent_pid_liveness",
+            pid: Some(ABSENT_PID),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: None,
+            pid_provenance: None,
+        },
+        Case {
+            label: "pid_reused_pid_liveness",
+            // The live harness pid with acquired_at=0: whatever create time
+            // the OS reports is AFTER the claim was filed, which is the
+            // reuse condition, deterministically.
+            pid: Some(self_pid),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: 0,
+            expires_at: None,
+            pid_provenance: None,
+        },
+        Case {
+            label: "offhost_pid_liveness",
+            pid: Some(self_pid),
+            pid_unavailable: false,
+            machine_id: Some("parity-not-this-machine-0000".to_string()),
+            host: "somewhere-else.invalid".to_string(),
+            acquired_at: now,
+            expires_at: None,
+            pid_provenance: None,
+        },
+        Case {
+            label: "offhost_ttl_unexpired",
+            pid: Some(self_pid),
+            pid_unavailable: false,
+            machine_id: Some("parity-not-this-machine-0000".to_string()),
+            host: "somewhere-else.invalid".to_string(),
+            acquired_at: now,
+            expires_at: Some(future),
+            pid_provenance: None,
+        },
+        Case {
+            label: "pid_unavailable_ttl_unexpired",
+            pid: None,
+            pid_unavailable: true,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: Some(future),
+            pid_provenance: None,
+        },
+        Case {
+            label: "suspect_ttl_unexpired_dead_pid",
+            pid: Some(ABSENT_PID),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: Some(future),
+            pid_provenance: None,
+        },
+        Case {
+            label: "stale_ttl_expired_unproven_live_pid",
+            // A live pid under any other provenance loses at expiry: the TTL
+            // is a lease, and an unproven pid cannot corroborate it.
+            pid: Some(self_pid),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: Some(past),
+            pid_provenance: None,
+        },
+        Case {
+            label: "hybrid_live_expired_proven_live_pid",
+            pid: Some(self_pid),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: Some(past),
+            pid_provenance: Some("session-prover"),
+        },
+        Case {
+            label: "stale_ttl_expired_proven_dead_pid",
+            pid: Some(ABSENT_PID),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: Some(past),
+            pid_provenance: Some("session-prover"),
+        },
+    ]
+}
+
+fn to_json(c: &Case, now: i64) -> Value {
+    json!({
+        "label": c.label,
+        "schema_version": if c.pid_unavailable { 2 } else { 1 },
+        "pid": c.pid,
+        "pid_unavailable": c.pid_unavailable,
+        "host": c.host,
+        "machine_id": c.machine_id,
+        "acquired_at": c.acquired_at,
+        "expires_at": c.expires_at,
+        "pid_provenance": c.pid_provenance,
+        "now": now,
+    })
+}
+
+fn record(c: &Case) -> ClaimRecord {
+    ClaimRecord {
+        schema_version: if c.pid_unavailable { 2 } else { 1 },
+        key: "parity".to_string(),
+        holder: "parity".to_string(),
+        acquired_at: c.acquired_at,
+        pid: c.pid.map(|p| p as i32),
+        host: c.host.clone(),
+        pid_unavailable: c.pid_unavailable,
+        expires_at: c.expires_at,
+        reason: None,
+        harness: None,
+        pid_provenance: c.pid_provenance.map(str::to_string),
+        machine_id: c.machine_id.clone(),
+        metadata: Default::default(),
+    }
+}
+
+/// Run the genuine Python `classify` over the corpus and return
+/// `{label: state}` for every case.
+fn py_classify_all(cases_json: &str) -> Value {
+    let code = r#"
+import json, sys
+from fno.claims.staleness import classify
+from fno.claims.types import Claim
+
+cases = json.load(sys.stdin)
+rows = {}
+for c in cases:
+    claim = Claim(
+        schema_version=c["schema_version"],
+        key="parity",
+        holder="parity",
+        acquired_at=c["acquired_at"],
+        pid=c["pid"],
+        pid_unavailable=c["pid_unavailable"],
+        host=c["host"],
+        machine_id=c["machine_id"],
+        expires_at=c["expires_at"],
+        pid_provenance=c["pid_provenance"],
+    )
+    state = classify(claim, now=c["now"])
+    rows[c["label"]] = state.value
+json.dump(rows, sys.stdout)
+"#;
+    use std::io::Write;
+    let mut child = Command::new(parity_python())
+        .arg("-c")
+        .arg(code)
+        .env("PYTHONPATH", pythonpath())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn python classify");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(cases_json.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "python classify failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("python returned a JSON object")
+}
+
+#[test]
+fn classify_state_parity_with_real_python() {
+    if !python_available() {
+        eprintln!(
+            "SKIP: no python3 with fno.claims.staleness importable; parity not verified here"
+        );
+        return;
+    }
+    let now = now_ms();
+    let self_pid = std::process::id() as i64;
+    let cases = corpus(now, self_pid, &local_identity());
+    let cases_json =
+        serde_json::to_string(&cases.iter().map(|c| to_json(c, now)).collect::<Vec<_>>()).unwrap();
+    let py = py_classify_all(&cases_json);
+
+    let mut compared = 0;
+    for c in &cases {
+        let py_state = py[c.label]
+            .as_str()
+            .unwrap_or_else(|| panic!("python leg returned no state for case {}", c.label));
+        let rust_state = classify(&record(c), Some(now)).as_str();
+        assert_eq!(
+            py_state, rust_state,
+            "state drift for corpus case {}",
+            c.label
+        );
+        compared += 1;
+    }
+    // A zero-case pass is an absence, not a verdict: the corpus must actually
+    // have driven both legs.
+    assert!(compared >= 8, "corpus compared only {compared} cases");
+}
