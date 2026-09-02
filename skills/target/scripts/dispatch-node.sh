@@ -214,13 +214,14 @@ if [[ "$ALL_READY" -eq 1 ]]; then
 fi
 
 # ---- resolve provider + substrate from the harness-capability map (x-567d) ---
-# Provider + substrate are NO LONGER hardcoded claude/bg. `fno agents dispatch resolve`
-# reads config.dispatch.harness and returns the autonomous substrate: claude->bg
-# (today's path, byte-identical) or codex/gemini/agy/opencode->headless. Three
+# Provider + substrate are NO LONGER hardcoded. `fno agents dispatch resolve`
+# reads config.dispatch.harness and returns the autonomous substrate: a detached
+# thread lane (claude, codex) or headless. Three
 # outcomes, all LOUD, never a silent claude default:
-#   - substrate=bg      : the detached `claude --bg` thread (unchanged).
-#   - substrate=headless: a one-shot that runs to completion; a fallback event is
-#     emitted so an operator sees the downgrade (epic AC1-EDGE).
+#   - substrate=thread  : the detached thread (claude's is the `claude --bg`
+#     subscription lane; `bg` is its deprecated CLI alias).
+#   - substrate=headless: a one-shot that runs to completion; a downgrade event is
+#     emitted so an operator sees it (epic AC1-EDGE).
 #   - resolve fails      : an unknown/misconfigured harness has NO autonomous
 #     substrate -> hard fail naming config.dispatch.harness; every node stays
 #     ready, nothing launches, a failure event is recorded (epic AC2-ERR).
@@ -238,18 +239,20 @@ DISPATCH_SUBSTRATE="$(printf '%s' "$resolve_json" | jq -r '.substrate | select(.
 # --allow-merge), so a missing template only matters for the non-claude lanes.
 DISPATCH_COMMAND="$(printf '%s' "$resolve_json" | jq -r '.command | select(. != null and . != "")' 2>/dev/null)"
 if [[ "$resolve_rc" -ne 0 || -z "$DISPATCH_PROVIDER" || -z "$DISPATCH_SUBSTRATE" ]]; then
-  reason="no autonomous substrate resolved (rc=$resolve_rc); set config.dispatch.harness to a harness with one (claude=bg, codex/gemini/agy/opencode=headless)"
+  reason="no autonomous substrate resolved (rc=$resolve_rc); set config.agents.profiles.target.provider to a harness with an autonomous substrate (deprecated config.dispatch.harness still reads for one release; run fno agents dispatch resolve --harness <name> to see what each supports)"
   fno doctor event emit -t dispatch_no_autonomous_substrate -s backlog \
-    -d "{\"reason\":\"dispatch resolve rc=$resolve_rc\",\"config_key\":\"config.dispatch.harness\"}" >/dev/null 2>&1 || true
+    -d "{\"reason\":\"dispatch resolve rc=$resolve_rc\",\"config_key\":\"config.agents.profiles.target.provider\"}" >/dev/null 2>&1 || true
   for id in "${NODES[@]}"; do echo "failed $id reason=\"$reason\""; done
   echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=${#NODES[@]} capped=0"
   exit 1
 fi
-# Loud, once: a non-bg harness dispatches via headless (a one-shot, not detached).
-if [[ "$DISPATCH_SUBSTRATE" != "bg" ]]; then
-  echo "note: harness '$DISPATCH_PROVIDER' has no bg substrate; dispatching via headless (one-shot runs to completion, not a detached thread)" >&2
+# Loud, once: the resolved substrate is the one-shot lane, so the launch is not
+# a detached thread. Reads the RESOLVED value's meaning (never a spelling that
+# can drift), and both message and event name what actually resolved.
+if [[ "$DISPATCH_SUBSTRATE" == "headless" ]]; then
+  echo "note: harness '$DISPATCH_PROVIDER' resolved substrate '$DISPATCH_SUBSTRATE' (one-shot runs to completion, not a detached thread)" >&2
   fno doctor event emit -t dispatch_substrate_fallback -s backlog \
-    -d "{\"harness\":\"$DISPATCH_PROVIDER\",\"from\":\"bg\",\"to\":\"$DISPATCH_SUBSTRATE\"}" >/dev/null 2>&1 || true
+    -d "{\"harness\":\"$DISPATCH_PROVIDER\",\"from\":\"$DISPATCH_SUBSTRATE\",\"to\":\"headless\"}" >/dev/null 2>&1 || true
 fi
 
 # The resolve above is node-agnostic, so it is the BASE every node starts from.

@@ -11,6 +11,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from fno.config_cli import _report_deprecated_auto_merge
+from fno.config_cli import _report_deprecated_dispatch_harness
 
 runner = CliRunner()
 
@@ -117,3 +118,84 @@ def test_project_file_migration_carries_local_flag(monkeypatch, tmp_path):
     assert str(proj / "config.toml") in text
     assert "--local" in text
     assert "fno config unset dispatch.auto_merge --local" in text
+
+
+def test_legacy_dispatch_harness_names_file_and_migration(monkeypatch, tmp_path):
+    """The stage table is the home for the harness axis; a file still setting
+    `dispatch.harness` gets the same file + migration-command treatment the
+    sibling `dispatch.auto_merge` gets."""
+    glob = _pin_global(monkeypatch, tmp_path, '[dispatch]\nharness = "codex"\n')
+    out: list[str] = []
+    import typer
+
+    monkeypatch.setattr(typer, "echo", lambda m, **k: out.append(m))
+    _report_deprecated_dispatch_harness()
+    text = "\n".join(out)
+    assert str(glob) in text
+    assert "dispatch.harness" in text
+    assert "agents.profiles.target.provider" in text
+    assert "fno config set agents.profiles.target.provider codex" in text
+    assert "fno config unset dispatch.harness" in text
+
+
+def test_stage_table_in_same_file_masks_legacy_harness(monkeypatch, tmp_path):
+    """A canonical `agents.profiles.target.provider` in the same file wins, so
+    the legacy line is inert: the advisory says remove it and never prints a
+    migration target that would re-arm a value the file already overrode."""
+    glob = _pin_global(
+        monkeypatch,
+        tmp_path,
+        '[dispatch]\nharness = "claude"\n'
+        '[agents.profiles.target]\nprovider = "codex"\n',
+    )
+    out: list[str] = []
+    import typer
+
+    monkeypatch.setattr(typer, "echo", lambda m, **k: out.append(m))
+    _report_deprecated_dispatch_harness()
+    text = "\n".join(out)
+    assert str(glob) in text
+    assert "masks it" in text
+    assert "fno config set agents.profiles" not in text
+    assert "fno config unset dispatch.harness" in text
+
+
+def test_no_legacy_harness_key_is_silent(monkeypatch, tmp_path):
+    _pin_global(monkeypatch, tmp_path, '[agents.profiles.target]\nprovider = "codex"\n')
+    out: list[str] = []
+    import typer
+
+    monkeypatch.setattr(typer, "echo", lambda m, **k: out.append(m))
+    _report_deprecated_dispatch_harness()
+    assert out == []
+
+
+def test_legacy_harness_project_file_migration_carries_local_flag(
+    monkeypatch, tmp_path
+):
+    _pin_global(monkeypatch, tmp_path, "schema_version = 1\n")
+    monkeypatch.delenv("FNO_CONFIG", raising=False)
+    monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
+    proj = tmp_path / "proj" / ".fno"
+    proj.mkdir(parents=True)
+    (proj / "config.toml").write_text('[dispatch]\nharness = "codex"\n', encoding="utf-8")
+    glob = tmp_path / "elsewhere-config.toml"
+    glob.write_text("schema_version = 1\n", encoding="utf-8")
+
+    import fno.paths as paths_mod
+    from fno import config as config_mod
+
+    monkeypatch.setattr(paths_mod, "resolve_repo_root", lambda: tmp_path / "proj")
+    monkeypatch.setattr(paths_mod, "resolve_canonical_repo_root", lambda: tmp_path / "proj")
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(glob))
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+
+    out: list[str] = []
+    import typer
+
+    monkeypatch.setattr(typer, "echo", lambda m, **k: out.append(m))
+    _report_deprecated_dispatch_harness()
+    text = "\n".join(out)
+    assert str(proj / "config.toml") in text
+    assert "--local" in text
+    assert "fno config unset dispatch.harness --local" in text

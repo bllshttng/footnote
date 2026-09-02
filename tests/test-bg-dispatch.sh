@@ -698,14 +698,14 @@ echo "$out" | grep -q "^already-running ab-aaaa1111 reason=\"skipped: duplicate-
   && pass "codex-P1: peer-held reservation -> already-running, no ask (race closed pre-injection)" \
   || fail "codex-P1: reservation race not closed: $out (asks=$(ask_count))"
 
-# ---- x-567d AC1-EDGE: a non-bg harness resolves to headless with a loud note,
-#      spawning --harness <h> --substrate headless (not the claude bg lane) ----
+# ---- x-567d AC1-EDGE: a headless-resolving harness prints the loud one-shot
+#      note, spawning --harness <h> --substrate headless (not the thread lane) ----
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
 echo "codex/headless" > "$MOCKSTATE/resolve_pair"
 out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
-echo "$out" | grep -q "note: harness 'codex' has no bg substrate; dispatching via headless" \
-  && pass "x-567d AC1-EDGE: non-bg harness prints the loud headless-fallback note" \
-  || fail "x-567d AC1-EDGE: missing fallback note: $out"
+echo "$out" | grep -q "note: harness 'codex' resolved substrate 'headless' (one-shot runs to completion, not a detached thread)" \
+  && pass "x-567d AC1-EDGE: headless-resolving harness prints the loud one-shot note" \
+  || fail "x-567d AC1-EDGE: missing one-shot note: $out"
 echo "$out" | grep -q -- "--harness codex --substrate headless" \
   && pass "x-567d AC1-EDGE: dispatch resolves --harness codex --substrate headless" \
   || fail "x-567d AC1-EDGE: wrong harness/substrate: $out"

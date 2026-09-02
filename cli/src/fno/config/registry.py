@@ -306,7 +306,7 @@ FIELD_META: dict[str, Meta] = {
     "agents.codex.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless codex workers."),
     "agents.gemini.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless gemini workers."),
     # --- config.dispatch.* (harness-capability map overlay; `fno agents dispatch resolve`) ---
-    "dispatch.harness": Meta("advanced", "Default dispatch harness (claude|codex|gemini|agy|opencode); empty = claude. Overlays the harness-capability map.", default_source="default"),
+    "dispatch.harness": Meta("advanced", "DEPRECATED: the stage table (config.agents.profiles.<verb>.provider) is the home for the harness axis; this key reads as the fallback rung beneath it for one release. Migrate with `fno config set agents.profiles.target.provider <harness>`. Formerly the configured harness for autonomous dispatch.", default_source="default"),
     "dispatch.substrate": Meta("advanced", "Default dispatch substrate (thread|headless|pane); bg is a deprecated alias for thread for one release. Empty = per-harness default (claude=thread, else headless; a harness's thread bit must be journey-proven).", default_source="default"),
     "dispatch.command": Meta("advanced", "Dispatch command template with a single {id}. Empty = '/target --no-merge {id}'. Written in canonical claude slash syntax and normalized per-harness at resolve. A leading /verb becomes $fno:verb on codex and /fno:verb on opencode. The deprecated gemini is refused. A non-slash template passes through literally.", default_source="default"),
     "dispatch.allowed_verbs": Meta("advanced", "Verb allowlist a node's dispatch_verb must match or the resolver refuses (default: /target, /think).", default_source="default"),

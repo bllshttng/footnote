@@ -604,6 +604,10 @@ def doctor_cmd(
         _report_deprecated_auto_merge()
     except Exception:  # noqa: BLE001 - advisory, same wrap as the three above
         pass
+    try:
+        _report_deprecated_dispatch_harness()
+    except Exception:  # noqa: BLE001 - advisory, same wrap as the three above
+        pass
     raise typer.Exit(rc)
 
 
@@ -685,14 +689,15 @@ def _report_state_roots() -> None:
         )
 
 
-def _report_deprecated_auto_merge() -> None:
-    """Name every config file still setting the deprecated ``dispatch.auto_merge``.
+def _deprecated_dispatch_file_rows():
+    """One walk over the config chain for both deprecated-[dispatch] advisories.
 
-    The migration arm of x-4be1: the alias keeps old files working for one
-    release, and this line tells the operator WHICH file to move. Reads the
-    raw candidate chain (not the merged model) so each file is named
-    individually - the merged model cannot tell them apart, which is exactly
-    the home-vs-project confusion the node exists to end.
+    Yields ``(path, scope_flag, scope, dispatch)`` per parseable file carrying a
+    ``[dispatch]`` block, either flat or config-wrapped; ``scope`` is the dict
+    the canonical keys live in. Reads the raw candidate chain (not the merged
+    model) so each file is named individually - the merged model cannot tell
+    them apart, which is exactly the home-vs-project confusion the advisories
+    exist to end.
     """
     from fno.config import _candidate_paths, _global_settings_path, _load_raw
 
@@ -703,22 +708,32 @@ def _report_deprecated_auto_merge() -> None:
         parsed, ok = _load_raw(candidate)
         if not ok:
             continue
-        # Either shape: flat config.toml (top-level dispatch) or a pre-migration
-        # settings.yaml (config-wrapped dispatch); the canonical grant lives in
-        # the same scope so the masked check uses the file's real shape.
-        scope = parsed if isinstance(parsed.get("dispatch"), dict) else parsed.get("config")
-        legacy = parsed.get("dispatch")
-        if not isinstance(legacy, dict):
+        dispatch = parsed.get("dispatch")
+        if isinstance(dispatch, dict):
+            scope = parsed
+        else:
             wrapped = parsed.get("config")
-            legacy = wrapped.get("dispatch") if isinstance(wrapped, dict) else None
-        if not (isinstance(legacy, dict) and "auto_merge" in legacy):
+            dispatch = wrapped.get("dispatch") if isinstance(wrapped, dict) else None
+            scope = wrapped if isinstance(dispatch, dict) else None
+        if not isinstance(dispatch, dict):
             continue
-        # Migration commands must target THE SAME FILE this warning names:
+        # Migration commands must target THE SAME FILE the warning names:
         # `fno config set/unset` defaults to the global scope, so a project
-        # file needs --local or the operator edits the wrong file. The removal
-        # must also drop the legacy key, or the warning recurs forever.
+        # file needs --local or the operator edits the wrong file.
         scope_flag = "" if candidate.parent == global_dir else " --local"
-        canonical = scope.get("auto_merge") if isinstance(scope, dict) else None
+        yield candidate, scope_flag, scope or {}, dispatch
+
+
+def _report_deprecated_auto_merge() -> None:
+    """Name every config file still setting the deprecated ``dispatch.auto_merge``.
+
+    The migration arm of x-4be1: the alias keeps old files working for one
+    release, and this line tells the operator WHICH file to move.
+    """
+    for candidate, scope_flag, scope, legacy in _deprecated_dispatch_file_rows():
+        if "auto_merge" not in legacy:
+            continue
+        canonical = scope.get("auto_merge")
         if isinstance(canonical, dict) and "grant" in canonical:
             # Canonical wins in this file (`_alias_am_grant` refuses to fold), so
             # the legacy line is INERT. Never print its fold value as a migration
@@ -738,6 +753,44 @@ def _report_deprecated_auto_merge() -> None:
             f"      It reads as `auto_merge.grant = \"{reads_as}\"` for one release.\n"
             f"      Migrate: fno config set auto_merge.grant {reads_as}{scope_flag} && "
             f"fno config unset dispatch.auto_merge{scope_flag}"
+        )
+
+
+def _report_deprecated_dispatch_harness() -> None:
+    """Name every config file still setting the deprecated ``dispatch.harness``.
+
+    The stage table (``agents.profiles.<verb>.provider``) is the home for the
+    harness axis; this key reads as the fallback rung beneath it for one
+    release. Same contract as :func:`_report_deprecated_auto_merge`: name the
+    file, print the exact migration, and when a same-file stage-table provider
+    already masks the legacy key, say so instead of printing a migration that
+    would re-arm a value the file overrode.
+    """
+    for candidate, scope_flag, scope, legacy in _deprecated_dispatch_file_rows():
+        if "harness" not in legacy:
+            continue
+        raw_agents = scope.get("agents")
+        agents = raw_agents if isinstance(raw_agents, dict) else {}
+        raw_profiles = agents.get("profiles")
+        profiles = raw_profiles if isinstance(raw_profiles, dict) else {}
+        raw_target = profiles.get("target")
+        target_profile = raw_target if isinstance(raw_target, dict) else {}
+        if "provider" in target_profile:
+            typer.echo(
+                f"warn: {candidate} still sets the deprecated `dispatch.harness`, "
+                "but a stage-table `agents.profiles.target.provider` in the same "
+                "file masks it (the file reads as the stage-table value). "
+                "Remove the legacy line.\n"
+                f"      Migrate: fno config unset dispatch.harness{scope_flag}"
+            )
+            continue
+        reads_as = str(legacy.get("harness") or "").strip() or "claude"
+        typer.echo(
+            f"warn: {candidate} sets the deprecated `dispatch.harness`.\n"
+            "      It reads as the fallback harness rung for one release, below "
+            "the stage table.\n"
+            f"      Migrate: fno config set agents.profiles.target.provider {reads_as}{scope_flag} && "
+            f"fno config unset dispatch.harness{scope_flag}"
         )
 
 

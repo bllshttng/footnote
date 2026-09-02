@@ -1915,6 +1915,14 @@ class DispatchBlock(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+    # DEPRECATED (x-b2c7): the harness axis lives in the stage table
+    # (`agents.profiles.<verb>.provider`), which AGENTS.md already documents as
+    # reaching autonomous dispatch. This key reads as the fallback rung beneath
+    # the stage table for one release, so an installation setting only it is
+    # unchanged. No config-load alias: the fold runs at resolution time
+    # (`fno.agents.harness_map`), because materializing a profile here would
+    # change the attended spawn door's rung occupancy, not only dispatch. The
+    # operator-facing deprecation surface is `fno config doctor`.
     harness: str = ""
     substrate: str = ""
     command: str = ""
