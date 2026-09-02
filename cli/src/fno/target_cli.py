@@ -1183,8 +1183,7 @@ def resolve_owned_identity_cmd() -> None:
     Read-only; writes no state. Always exits 0 - it is a resolver, not a gate.
     """
     from fno.agents.registry import (
-        _OWNERSHIP_LIVE_STATUSES,
-        load_registry,
+        live_row_holding_session_id,
         row_owning_session_id,
     )
     from fno.claims.session_pid import resolve_session_harness
@@ -1225,18 +1224,10 @@ def resolve_owned_identity_cmd() -> None:
 
     def _owning_row_harness(sid: str) -> Optional[str]:
         """Harness of the live registry row holding ``sid``, if any."""
-        try:
-            entries = load_registry()
-        except Exception:
+        entry = live_row_holding_session_id(sid)
+        if entry is None:
             return None
-        needle = session_identity_key(sid)
-        for entry in entries:
-            if entry.status not in _OWNERSHIP_LIVE_STATUSES:
-                continue
-            held = getattr(entry, "harness_session_id", None)
-            if held and session_identity_key(held) == needle:
-                return (getattr(entry, "harness", "") or "").strip().lower()
-        return None
+        return (getattr(entry, "harness", "") or "").strip().lower()
 
     def _collide(harness: str, sid: str) -> Optional[str]:
         return row_owning_session_id(sid, self_binding=own_binding)

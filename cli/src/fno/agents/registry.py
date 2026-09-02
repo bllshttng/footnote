@@ -1423,6 +1423,36 @@ _OWNERSHIP_LIVE_STATUSES = frozenset(
 )
 
 
+def live_row_holding_session_id(
+    session_id: str, registry_path: Optional[Path] = None
+) -> Optional[AgentEntry]:
+    """The live registry row whose ``harness_session_id`` is ``session_id``.
+
+    The one ownership match loop: the ownership-live status filter plus the
+    identity-key comparison, shared by every caller that must read the row
+    itself (:func:`row_owning_session_id` reports the row's name; the owned-
+    identity prover reads its harness). Degrades to None on an absent,
+    unreadable, or alien-shape registry, the same contract as the detector.
+    """
+    if not session_id:
+        return None
+    from fno.harness_identity import session_identity_key
+
+    needle = session_identity_key(session_id)
+    try:
+        entries = load_registry(registry_path)
+    except Exception:
+        # Unreadable / wrong-schema / absent: cannot prove ownership either way.
+        return None
+    for entry in entries:
+        if entry.status not in _OWNERSHIP_LIVE_STATUSES:
+            continue
+        candidate = getattr(entry, "harness_session_id", None)
+        if candidate and session_identity_key(candidate) == needle:
+            return entry
+    return None
+
+
 def row_owning_session_id(
     session_id: str,
     registry_path: Optional[Path] = None,
@@ -1466,20 +1496,16 @@ def row_owning_session_id(
             (self_binding[0] or "").strip().lower(),
             session_identity_key(self_binding[1] or ""),
         )
-    try:
-        entries = load_registry(registry_path)
-    except Exception:
-        # Unreadable / wrong-schema / absent: cannot prove a collision.
+    entry = live_row_holding_session_id(session_id, registry_path)
+    if entry is None:
         return None
-    for entry in entries:
-        if entry.status not in _OWNERSHIP_LIVE_STATUSES:
-            continue
-        candidate = getattr(entry, "harness_session_id", None)
-        if candidate and session_identity_key(candidate) == needle:
-            if own and own[1] == needle and own[0] == (getattr(entry, "harness", "") or "").strip().lower():
-                return None
-            return entry.name
-    return None
+    if (
+        own
+        and own[1] == needle
+        and own[0] == (getattr(entry, "harness", "") or "").strip().lower()
+    ):
+        return None
+    return entry.name
 
 
 class LoadedRegistry(list[AgentEntry]):
