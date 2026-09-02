@@ -57,6 +57,7 @@ from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
+from fno.agents.reachability import mux_ref_names_a_pane
 from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
@@ -3720,6 +3721,10 @@ class ReconcileResult:
     # harness store (x-ec59). Empty list (not absent) distinguishes "ran, nothing
     # to heal" from "healed": each entry is {name, provider, harness_session_id}.
     backfilled: list[dict] = field(default_factory=list)
+    # x-d914: rows whose structurally impossible mux ref reconcile cleared. Each
+    # entry is {name, provider, harness, cleared_mux}; empty list = ran, nothing
+    # to clear.
+    mux_cleared: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -5022,6 +5027,9 @@ def reconcile_agents(
     skipped: list[dict] = []
     errors: list[dict] = []
     backfilled: list[dict] = []
+    # x-d914: rows whose structurally impossible mux ref was cleared (each
+    # entry carries the cleared ref), with one ``mux_ref_cleared`` event each.
+    mux_cleared: list[dict] = []
     # name -> (probed short_id, resolved harness_session_id) for a live row
     # whose canonical id never landed (x-ec59). Folded into the SAME batched
     # update_registry write as the status flips, so no new write cycle or lock
@@ -5052,6 +5060,15 @@ def reconcile_agents(
     # bypasses the post-loop ``update_registry`` call. The on-disk
     # registry mtime never changes.
     pending_updates: dict[str, tuple[AgentEntry, AgentStatus]] = {}
+
+    # x-d914: a mux ref that names no pane (a default-zero, an empty dict) is a
+    # wrong value, and a wrong value is worse than no value -- 49 of 51 live
+    # rows carry ``mux: None`` and every reader handles that, while the broken
+    # shape made six live workers unreachable in every mux path. Queue the
+    # clear for the SAME batched write as the status flips. Keyed by name with
+    # the probed ref so the under-lock apply can compare-and-set against a
+    # same-name replacement, exactly like the backfills above.
+    pending_mux_clear: dict[str, dict] = {}
 
     # Read codex's session index ONCE outside the loop so a registry with
     # N codex agents only pays the I/O cost once. Mirror the same one-shot
@@ -5125,6 +5142,14 @@ def reconcile_agents(
 
     for entry in entries:
         new_status: AgentStatus
+        if entry.mux is not None and not mux_ref_names_a_pane(entry.mux):
+            # Structurally impossible ref: queue the heal, then probe this row
+            # as the null-mux row it is about to become. Only an IMPOSSIBLE ref
+            # is cleared here -- a ref that names a real pane is never touched,
+            # alive or dead, and neither is one that merely could not be
+            # probed (that distinction belongs to the pane falsifier's
+            # False-vs-None split, not to validity).
+            pending_mux_clear[entry.name] = entry.mux
         if entry.harness == "gemini":
             sys.stderr.write(
                 f"WARN: agent {entry.name!r} references retired provider 'gemini'; "
@@ -5142,8 +5167,10 @@ def reconcile_agents(
         elif entry.harness == "codex":
             # An id-less persistent pane can be healthy while Codex is still
             # creating its rollout. Heal it from the pane's own process tree;
-            # the session index is not needed for this correlation.
-            if not entry.harness_session_id and entry.mux:
+            # the session index is not needed for this correlation. Gated on
+            # ref VALIDITY, not truthiness (x-d914): a ref that names no pane
+            # must not send the row down the pane arm.
+            if not entry.harness_session_id and mux_ref_names_a_pane(entry.mux):
                 if entry.status in _TERMINAL_AGENT_STATUSES:
                     continue
 
@@ -5356,8 +5383,10 @@ def reconcile_agents(
             #
             # Deliberately ahead of the claude-on-PATH guard: this probes the mux
             # and the pid, never the claude CLI, so a host where claude was
-            # removed can still retire a provably dead pane.
-            if entry.mux:
+            # removed can still retire a provably dead pane. Gated on ref
+            # VALIDITY, not truthiness (x-d914): a ref that names no pane is
+            # not a pane row and must not be pane-probed.
+            if mux_ref_names_a_pane(entry.mux):
                 if entry.status in _TERMINAL_AGENT_STATUSES:
                     continue
 
@@ -5599,12 +5628,13 @@ def reconcile_agents(
     # a partial split. The all-or-nothing atomicity is enforced by
     # update_registry's own atomic-rename semantics — the closure is
     # pure, so an OSError mid-write leaves the registry untouched.
-    if pending_updates or pending_backfill or pending_codex_backfill:
+    if pending_updates or pending_backfill or pending_codex_backfill or pending_mux_clear:
 
         codex_backfill_applied: set[str] = set()
         status_updates_applied: set[str] = set()
         codex_ids_claimed: set[str] = set()
         claude_backfill_applied: set[str] = set()
+        mux_clears_applied: set[str] = set()
 
         def _apply(current_entries: list[AgentEntry]) -> list[AgentEntry]:
             # Reset per call: update_registry may re-run _apply against a fresh
@@ -5614,6 +5644,7 @@ def reconcile_agents(
             status_updates_applied.clear()
             codex_ids_claimed.clear()
             claude_backfill_applied.clear()
+            mux_clears_applied.clear()
             # Build the new entries from the CURRENT (under-lock) entries,
             # overriding only the ``status`` field from pending_updates.
             # Pre-fix this returned ``pending_updates.get(e.name, e)`` which
@@ -5624,6 +5655,15 @@ def reconcile_agents(
             out: list[AgentEntry] = []
             for e in current_entries:
                 updates: dict = {}
+                if e.name in pending_mux_clear:
+                    # Compare-and-set against the probed ref: a same-name
+                    # re-register during the probe loop may have written a
+                    # fresh hosting ref, and this stale heal must never wipe
+                    # it. Change NO other field here -- a heal that becomes a
+                    # second bug is the exact failure this narrowness prevents.
+                    if e.mux == pending_mux_clear[e.name]:
+                        updates["mux"] = None
+                        mux_clears_applied.add(e.name)
                 if e.name in pending_updates:
                     probed, target_status = pending_updates[e.name]
                     if (
@@ -5728,6 +5768,15 @@ def reconcile_agents(
                         "reason": write_error,
                     }
                 )
+            for name in pending_mux_clear:
+                errors.append(
+                    {
+                        "name": name,
+                        "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
+                        "id": None,
+                        "reason": write_error,
+                    }
+                )
         else:
             for name, (_probed_short, hsid) in pending_backfill.items():
                 if name in claude_backfill_applied:
@@ -5782,6 +5831,36 @@ def reconcile_agents(
                         "reason": "registry-status-update-raced",
                     }
                 )
+            for name, probed_mux in pending_mux_clear.items():
+                if name in mux_clears_applied:
+                    # AC6: the heal is spoken. One event per cleared ref, naming
+                    # exactly what was removed, so the heal is auditable from
+                    # events.jsonl alone.
+                    mux_cleared.append(
+                        {
+                            "name": name,
+                            "provider": _vendor_for_name(name),
+                            "harness": _harness_for_name(name),
+                            "cleared_mux": probed_mux,
+                        }
+                    )
+                    events.emit(
+                        "mux_ref_cleared",
+                        name=name,
+                        provider=_vendor_for_name(name),
+                        harness=_harness_for_name(name),
+                        cleared_mux=probed_mux,
+                    )
+                else:
+                    errors.append(
+                        {
+                            "name": name,
+                            "provider": _vendor_for_name(name),
+                            "harness": _harness_for_name(name),
+                            "id": None,
+                            "reason": "mux-ref-clear-raced",
+                        }
+                    )
 
     events.emit(
         "reconcile_done",
@@ -5791,6 +5870,7 @@ def reconcile_agents(
         skipped=len(skipped),
         errors=len(errors),
         backfilled=len(backfilled),
+        mux_cleared=len(mux_cleared),
     )
     return ReconcileResult(
         scanned=len(entries),
@@ -5799,6 +5879,7 @@ def reconcile_agents(
         skipped=skipped,
         errors=errors,
         backfilled=backfilled,
+        mux_cleared=mux_cleared,
     )
 
 
