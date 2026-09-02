@@ -453,7 +453,7 @@ def test_review_invocation_verb_prints_the_render(monkeypatch, tmp_path):
     assert portable.output.strip() == f"/fno:review {sized} --comment"
 
 
-# --- automerge_floor_refusal (x-f324): one wording, every arming surface ---
+# --- automerge_floor_refusal: one wording, every arming surface ---
 
 
 def test_automerge_floor_refuses_below_rung_three() -> None:

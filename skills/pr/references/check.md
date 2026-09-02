@@ -28,7 +28,7 @@ done < <("${SKILL_DIR}/scripts/list-reviewers.sh")
 EXTERNAL_REVIEW_ENABLED=1
 if [[ ${#REVIEWER_TYPES[@]} -eq 0 ]]; then
     EXTERNAL_REVIEW_ENABLED=0
-    echo "External review disabled in settings; checking the sigma artifact source."
+    echo "External review disabled in settings; the local review lane is the only source."
 fi
 ```
 
@@ -146,7 +146,7 @@ is a preference, never a paywall.
 fno do pr info
 ```
 
-Resolve the current head and live node, then inspect the sigma artifact as a second source before any zero-reviewer return or polling decision:
+Resolve the current head and live node, then read the local review surface as a second source before any zero-reviewer return or polling decision:
 
 ```bash
 PR_INFO=$(fno do pr info)
@@ -155,19 +155,18 @@ PR_HEAD=$(printf '%s' "$PR_INFO" | jq -er .head_sha)
 REPO_SLUG=$(git config --get remote.origin.url | sed -E 's#.*github.com[:/]##; s#\.git$##')
 OWNER=${REPO_SLUG%%/*}
 REPO=${REPO_SLUG#*/}
-NODE_ID=$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md | head -1 | xargs)
-SIGMA_JSON=$(fno do review --inspect-sigma --sigma-node "$NODE_ID" \
-  --sigma-pr "$PR_NUMBER" --sigma-head "$PR_HEAD" --json)
-SIGMA_STATUS=$(printf '%s' "$SIGMA_JSON" | jq -r .status)
+LOCAL_STATUS=$(fno do pr status "$PR_NUMBER")
+LOCAL_POSTURE=$(printf '%s' "$LOCAL_STATUS" | jq -r '.review_posture // empty')
 ```
 
-Print the artifact path, head, finding count, and acceptance or rejection reason.
-A missing artifact is simply an absent second source; a mismatched node, PR, head, or malformed artifact is rejected and must not drive changes.
-If there are no configured external reviewers and `SIGMA_STATUS` is not `accepted`, report both sources absent and return without scheduling external-review cron checks.
+Print the resolved posture name, rank, and satisfaction (`posture_satisfied`, `posture_gaps`) alongside the head.
+A row with no posture verdict is simply an absent second source (a producer from before the field wrote it); it must not drive changes.
+The local second source is satisfied only when `posture_satisfied` is `true`.
+If there are no configured external reviewers and the local second source is not satisfied, report both sources absent and return without scheduling external-review cron checks.
 
 ### 2. Wait for Review (Cron-Based, external source only)
 
-Skip this step when `EXTERNAL_REVIEW_ENABLED=0` or when an accepted sigma artifact already provides work to drain.
+Skip this step when `EXTERNAL_REVIEW_ENABLED=0` or when the local review lane's findings are already posted and being drained.
 Otherwise schedule two one-shot cron checks instead of a blocking poll loop. This frees
 the session to do other work while waiting.
 
@@ -246,10 +245,10 @@ done
 When only one reviewer is configured, this loop iterates once and behavior
 is identical to the single-reviewer path.
 
-Also read `.body` from accepted `SIGMA_JSON` and append its findings to the same in-memory collection as the bot comments.
-Assign stable ids as `sigma:<review_round>:<ordinal>` and deduplicate a PR-comment projection carrying the same sigma marker.
-Before appending each artifact finding, search existing PR issue comments for `<!-- fno-sigma-disposition id=$STABLE_ID head=$PR_HEAD -->`; when a matching marker exists, exclude that stable id from the unresolved collection.
-Do not create a second implementation loop: artifact findings continue directly into Step 4 and the existing verify, decide, implement, push, and response sequence.
+The local review lane posts its findings as inline PR comments on the reviewed head, so they are collected by the same comment loop whenever the lane's findings exist on the PR.
+No separate local artifact is read: the sigma artifact source this step once drained is retired, and no new artifact findings are minted.
+Historical `<!-- fno-sigma-disposition ... -->` markers on PRs reviewed before the retirement are consumed exactly as before, so a re-check never re-implements an already-dispositioned finding.
+Do not create a second implementation loop: local findings continue directly into Step 4 and the existing verify, decide, implement, push, and response sequence.
 
 ### 4. Parse Review Priority
 
@@ -277,7 +276,7 @@ different conventions; normalize them to one of `critical | high | medium | low`
 # Parse and normalize per reviewer.
 ```
 
-Apply this same badge parser to sigma artifact lines (`P1`/`P2`/`P3` and critical/high/medium/low); do not add an artifact-only severity parser.
+Apply this same badge parser to local lane findings (`P1`/`P2`/`P3` and critical/high/medium/low); do not add a source-only severity parser.
 
 ### 4b. Verify Before Implementing (Critical Step)
 
@@ -390,8 +389,8 @@ gh api "repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments" \
   and silently claiming success would strand the session.
 - **Scope:** only BLOCKING findings gate the loop. Medium/low/P2/P3 findings
   do not require an in-thread reply (though one never hurts).
-- **Artifact findings:** when the artifact carries a real GitHub thread id, use the same in-thread reply path; when no thread exists, include the stable sigma finding id and disposition in the consolidated response rather than inventing a thread.
-- **Threadless artifact idempotency:** for every fixed or declined threadless artifact finding, include `<!-- fno-sigma-disposition id=$STABLE_ID head=$PR_HEAD -->` beside its disposition in the consolidated response; later checks consume that durable marker and exclude that stable id instead of implementing it again.
+- **Local findings:** the review lane's findings live on real PR comment threads, so they use the same in-thread reply path as any reviewer; never invent a thread for one.
+- **Historical marker idempotency:** for every fixed or declined finding carrying a legacy `<!-- fno-sigma-disposition id=$STABLE_ID head=$PR_HEAD -->` marker, include that marker beside its disposition in the consolidated response; later checks consume the durable marker and exclude that stable id instead of implementing it again.
 - The reply must be in-thread (`in_reply_to`), not a new top-level comment:
   the gate reads `in_reply_to_id` chains on `/pulls/N/comments`.
 

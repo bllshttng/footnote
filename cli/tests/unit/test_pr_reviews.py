@@ -161,6 +161,16 @@ def _covered_row(ts, head=_H, pr=1242):
             "review_state": "reviewed",
             "reviewed_count": 1,
             "head_sha": head,
+            # A modern producer resolves a rung on every covered row; a row
+            # without this key reads as written by a pre-posture producer and
+            # the gate demands a recompute, which is its own test below.
+            "review_posture": {
+                "posture": "self_review",
+                "rank": 3,
+                "source": "legacy",
+                "posture_satisfied": True,
+                "posture_gaps": [],
+            },
             # The shaper refuses a covered row carrying no verdict proof, so a
             # fixture without this shapes back to uncovered and the test would
             # read as "the recompute did not help" when it did.
@@ -191,6 +201,44 @@ def _pass_attestation(ts, head=_H):
             "branch": "feature/x-e555",
         },
     }
+
+
+class TestPosturelessRowRecomputeScope:
+    """A covered row with no review_posture is unusable to a GATE (the
+    producer predates the field), but only a caller that can act on the
+    producer-upgrade refusal pays the recompute; a receipt surface reports
+    the row as-is instead of rewriting the same postureless row every read."""
+
+    def _postureless_world(self, monkeypatch, tmp_path):
+        _isolate_logs(monkeypatch, tmp_path)
+        row = _covered_row("2026-08-28T08:00:00Z")
+        del row["data"]["review_posture"]
+        _write_log(tmp_path, row)
+        fired = []
+        monkeypatch.setattr(
+            _reviews,
+            "_fire_review_coverage_verb",
+            lambda *a, **k: (fired.append(a) or (True, "")),
+        )
+        return fired
+
+    def test_gate_default_recomputes_a_postureless_row(self, monkeypatch, tmp_path):
+        fired = self._postureless_world(monkeypatch, tmp_path)
+        data, note = _reviews.review_coverage_for_gate(1242, str(tmp_path), _H)
+        assert fired, "the gate must demand a posture-capable producer"
+        assert "recomputed" in note
+
+    def test_receipt_surface_does_not_recompute_a_postureless_row(
+        self, monkeypatch, tmp_path
+    ):
+        fired = self._postureless_world(monkeypatch, tmp_path)
+        data, note = _reviews.review_coverage_for_gate(
+            1242, str(tmp_path), _H, recompute_postureless=False
+        )
+        assert not fired
+        assert note == ""
+        assert data["coverage"] == "covered"
+        assert "review_posture" not in data
 
 
 def _isolate_logs(monkeypatch, tmp_path):

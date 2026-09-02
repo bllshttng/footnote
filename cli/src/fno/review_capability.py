@@ -712,11 +712,11 @@ def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:
 def automerge_floor_refusal(resolved: "ResolvedReviewPosture") -> Optional[str]:
     """The refusal when a merge grant arms below the posture floor, or None.
 
-    One wording, every arming surface (config write, environment grant, stale
-    manifest, finalize, GitHub-native arming): the rung that failed, the rung
-    the floor requires, and the exact remedy. Routing the merge to a human is
-    NOT a remedy - an unconstrained human merge is rung 1, and the floor's
-    whole point is that code always gets some review.
+    One wording, every merge-grant surface (the merge verb's manifest arm, the
+    durable-grant resolver, and the finalize arming gate): the rung that
+    failed, the rung the floor requires, and the exact remedy. Routing the
+    merge to a human is NOT a remedy - an unconstrained human merge is rung 1,
+    and the floor's whole point is that code always gets some review.
     """
     if not resolved.automerge_blocked:
         return None

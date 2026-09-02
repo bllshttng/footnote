@@ -275,6 +275,16 @@ class FakeRun:
 def enabled(monkeypatch, tmp_path):
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=True))
     monkeypatch.setattr(_merge.shutil, "which", lambda _x: "/usr/bin/gh")
+    # The posture floor (merge step 1b) reads live settings; hermetic tests
+    # resolve to the shipped default rung (self_review), never the operator's
+    # real config, and never through the real loader (some tests break the
+    # paths layer underneath it).
+    from fno.config import ReviewBlock as _ReviewBlock, SettingsModel as _Settings
+
+    monkeypatch.setattr(
+        "fno.config.load_settings_for_repo",
+        lambda _p: _Settings(review=_ReviewBlock()),
+    )
     # Hermetic merge-lock: route the LD#9 serialization claim (and the lane
     # probe) to a tmp claims root so tests never touch the repo's .fno/claims
     # or contend with a real in-flight merge.
@@ -3289,7 +3299,7 @@ def test_a_waiver_does_not_bypass_red_ci(
     assert len(fake.merge_cmds) == 0
 
 
-# --- review posture verdict (x-f324): the gate reads the Rust verdict ---
+# --- review posture verdict : the gate reads the Rust verdict ---
 
 
 def _covered_row(posture):

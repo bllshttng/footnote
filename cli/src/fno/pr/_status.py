@@ -880,7 +880,11 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         review_lane = code_review_required or _review_lane(pr, cwd)
         try:
             coverage = read_review_coverage(
-                int(pr), cwd, head=pr_json.get("headRefOid"), recompute=review_lane
+                int(pr),
+                cwd,
+                head=pr_json.get("headRefOid"),
+                recompute=review_lane,
+                recompute_postureless=False,
             )
         except Exception:
             # The producer's own sentinel, not a copy of it: a second literal

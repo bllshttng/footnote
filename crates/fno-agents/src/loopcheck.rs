@@ -304,7 +304,7 @@ pub(crate) struct Settings {
     /// an other_session attestation is still not "independent", but it is a
     /// SECOND session, which is what this key demands.
     require_corroboration: Option<bool>,
-    /// config.review.posture (x-f324): the named rung of the review ladder.
+    /// config.review.posture : the named rung of the review ladder.
     /// None = unset, which resolves through the legacy inference (mirroring
     /// `fno.config.resolve_review_posture`) or the shipped self_review floor.
     /// A value the ladder does not carry stays None here: the Python loader
@@ -1417,7 +1417,7 @@ struct PrInfo {
     /// report `DonePRGreen` at coverage 0/Unknown reports `DoneUnreviewed`
     /// instead (x-0eaf). Never cached, never inferred from `reviewed`.
     coverage: CoverageReport,
-    /// The resolved review-posture verdict (x-f324), computed alongside
+    /// The resolved review-posture verdict , computed alongside
     /// coverage when the caller supplied a resolved `review.posture`. None on
     /// the no-PR early return and on callers without settings context.
     posture: Option<PostureVerdict>,
@@ -2899,7 +2899,7 @@ fn read_pr_info(
     require_corroboration: bool,
     github_approval_satisfies: bool,
     max_rounds: i64,
-    // The resolved `review.posture` (x-f324), computed by the caller from the
+    // The resolved `review.posture` , computed by the caller from the
     // parsed settings. None on callers that have no settings context.
     posture: Option<&PostureConfig>,
     // The local reviewer names allowed to satisfy the peer posture component
@@ -4895,7 +4895,7 @@ const DEFAULT_REQUIRED_BOTS: &[&str] = &[];
 
 /// Stable reviewer key emitted by every identity-free peer. Multiple configured
 /// peer harnesses are alternatives for one composite gate, not N required votes.
-// ── review.posture (x-f324) ──────────────────────────────────────────────────
+// ── review.posture  ──────────────────────────────────────────────────
 //
 // The nine-rung ladder, mirrored from `fno.config.REVIEW_POSTURES`. One leaf
 // names how much review a code PR must have; coverage resolves the rung and
@@ -5028,7 +5028,10 @@ fn resolve_posture_config(settings: &Settings) -> PostureConfig {
     let peers = !settings.peers.is_empty();
     let floor_off = settings.self_review_required == Some(false);
     let self_named = settings.reviewers.iter().any(|r| {
-        let n = r.trim_start_matches('/');
+        // strip() then lstrip('/'), the exact two passes Python's inference
+        // applies: a padded or slash-prefixed excluded name must read excluded
+        // on both sides, or the two resolvers disagree on the rung.
+        let n = r.trim().trim_start_matches('/');
         n != "declare" && n != "sigma"
     });
     let corroboration = settings.require_corroboration.unwrap_or(false);
@@ -6134,7 +6137,7 @@ pub struct ReviewerVerdict {
     /// (`reviewer_context`: fresh | shared | unknown); None when the event
     /// predates the field. Measures context independence, never who invoked
     /// the verb. The coverage count never reads it; the posture verdict's
-    /// `independent` component does (x-f324 AC4-ERR: only a positive fresh
+    /// `independent` component does (AC4-ERR: only a positive fresh
     /// marker satisfies rung 4 - `other_session` or unknown never does).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reviewer_context: Option<String>,
@@ -9141,7 +9144,7 @@ pub(crate) fn resolve_review_inputs(
                 merged.require_corroboration = local.require_corroboration;
             }
             if local.posture.is_some() {
-                // Same presence rule (x-f324): the rung is a project policy
+                // Same presence rule : the rung is a project policy
                 // leaf like corroboration, so a local explicit posture must
                 // override the global file and the inference must not silently
                 // read the global-only view.

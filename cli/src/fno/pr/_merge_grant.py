@@ -105,8 +105,16 @@ def _malformed_grant_reason(grant: Mapping[str, Any]) -> Optional[str]:
         value = grant.get(key)
         if not isinstance(value, str) or not value.strip():
             return f"merge_grant.{key} is not a non-empty string"
-    if not _utc_stamp(grant["recorded_at"]):
-        return f"merge_grant.recorded_at is not a UTC timestamp: {grant['recorded_at']!r}"
+    # The writer mints exactly the canonical "...Z" shape, and newest-wins
+    # orders receipts by RAW string comparison: a non-canonical but valid UTC
+    # spelling ("+00:00") would read well-formed here yet sort arbitrarily
+    # against canonical rows, letting a same-instant disagreement slip the
+    # tiebreak below. Only the exact canonical form is a receipt.
+    if _utc_stamp(grant["recorded_at"]) != grant["recorded_at"].strip():
+        return (
+            f"merge_grant.recorded_at is not the canonical UTC stamp the "
+            f"writer mints: {grant['recorded_at']!r}"
+        )
     return None
 
 
@@ -231,7 +239,8 @@ def resolve_durable_grant(
         from fno.config import load_settings_for_repo
         from pathlib import Path
 
-        am = load_settings_for_repo(Path(repo)).auto_merge
+        settings = load_settings_for_repo(Path(repo))
+        am = settings.auto_merge
     except Exception as exc:  # noqa: BLE001 - an execution decision fails closed
         return GrantVerdict(
             UNKNOWN,
@@ -260,10 +269,39 @@ def resolve_durable_grant(
             grant=receipt,
             claim_state=claim_state,
         )
+
+    # The automerge floor: a stored receipt widens WHO may execute, never WHAT
+    # review the merge needs. A repo resolved below the self_review rung holds
+    # even with a perfect receipt, and an unreadable posture verdict is not a
+    # pass (an execution decision fails closed, same as the config arm above).
+    from fno.config import resolve_review_posture
+    from fno.review_capability import automerge_floor_refusal
+
+    try:
+        resolved_posture = resolve_review_posture(settings.review)
+        floor_refusal = automerge_floor_refusal(resolved_posture)
+    except Exception as exc:  # noqa: BLE001 - a floor verdict fails closed
+        return GrantVerdict(
+            UNKNOWN,
+            f"review posture unreadable ({type(exc).__name__}: {exc}); refusing "
+            "to execute against an unverifiable floor",
+            node_id=node_id,
+            grant=receipt,
+            claim_state=claim_state,
+        )
+    if floor_refusal:
+        return GrantVerdict(
+            HELD,
+            floor_refusal,
+            node_id=node_id,
+            grant=receipt,
+            claim_state=claim_state,
+        )
     return GrantVerdict(
         GRANTED,
         f"newest durable grant approved (source: {receipt['source']}, recorded "
-        f"{newest_stamp}), claim {claim_state}, live config grants dispatch",
+        f"{newest_stamp}), claim {claim_state}, live config grants dispatch, "
+        f"posture {resolved_posture.value} clears the floor",
         node_id=node_id,
         grant=receipt,
         claim_state=claim_state,

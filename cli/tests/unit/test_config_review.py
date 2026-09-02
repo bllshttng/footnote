@@ -779,7 +779,7 @@ def test_max_rounds_registry_row_documents_the_key() -> None:
     assert "review.max_rounds" in FIELD_META
 
 
-# --- review.posture: the nine-rung ladder (x-f324) ---
+# --- review.posture: the nine-rung ladder ---
 
 
 def _review(content: str):

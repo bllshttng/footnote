@@ -73,7 +73,7 @@ def _arm_world(
     checks_pending: bool,
 ) -> FakeRun:
     """The real merge core over a faked gh/git transport and claim probe."""
-    from fno.config import AutoMergeBlock
+    from fno.config import AutoMergeBlock, ReviewBlock
     import fno.claims.core as claims_core
     import fno.config as config_mod
     import fno.pr._coverage_gate as coverage_gate
@@ -86,7 +86,10 @@ def _arm_world(
     monkeypatch.setattr(
         "fno.config.load_settings_for_repo",
         lambda path: config_mod.load_settings().model_copy(
-            update={"auto_merge": AutoMergeBlock(enabled=True, grant="dispatch")}
+            update={
+                "auto_merge": AutoMergeBlock(enabled=True, grant="dispatch"),
+                "review": ReviewBlock(),
+            }
         ),
     )
     monkeypatch.setattr(merge_mod, "_load_auto_merge", lambda: AutoMergeBlock(enabled=True))

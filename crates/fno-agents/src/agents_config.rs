@@ -494,6 +494,90 @@ pub fn auto_merge_enabled(cwd: &Path) -> bool {
     false
 }
 
+/// The arming-time automerge floor: `Some(why)` when the live config resolves
+/// to a review posture below the self_review floor (rank 3), so GitHub-native
+/// auto-merge must NOT be armed.
+///
+/// This is the GitHub-native arm of the floor the Python merge verb enforces
+/// on every granted merge (`automerge_floor_refusal` in
+/// `fno/review_capability.py`, applied by the manifest arm and the
+/// durable-grant resolver). Without it a below-floor repo that can never pass
+/// the merge verb could still hand the merge to GitHub at the green terminal.
+///
+/// The below-floor set is derived from the legacy-inference mirror in
+/// `loopcheck::resolve_posture_config`: only three cells resolve below rank 3
+/// - an explicit `review.posture` of `no_review`/`tests_pass`, an explicit
+/// `self_review_required = false` with no other review lane (no_review), and
+/// a declared-empty `github_apps` with no peers (tests_pass). Every other
+/// inference branch lands at rank 3 or higher. Per-leaf fold semantics match
+/// `auto_merge_enabled`: the first candidate file carrying a leaf decides it,
+/// and only a real TOML value counts (a non-bool `self_review_required` is
+/// not a floor opt-out; a non-array `github_apps`/`peers` is not a lane).
+pub fn automerge_posture_floor_block_reason(cwd: &Path) -> Option<String> {
+    const FLOOR_REMEDY: &str = "Remedy: set a real review posture, e.g. \
+`fno config set review.posture self_review --local`.";
+    let floor_refusal = |what: &str| {
+        Some(format!(
+            "auto-merge refused: review.posture resolves to {what}, below the \
+merge floor self_review (rank 3). A merge needs at least one real \
+final-head code review. {FLOOR_REMEDY}"
+        ))
+    };
+
+    // Explicit leaf wins, mirroring `resolve_review_posture`'s first arm.
+    let explicit_posture: Option<String> = resolve(cwd, |t| {
+        t.get("review")?
+            .as_table()?
+            .get("posture")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+    });
+    if let Some(name) = explicit_posture {
+        if name == "no_review" {
+            return floor_refusal("no_review (rank 1)");
+        }
+        if name == "tests_pass" {
+            return floor_refusal("tests_pass (rank 2)");
+        }
+        return None;
+    }
+
+    let self_review_required: Option<bool> = resolve(cwd, |t| {
+        t.get("review")?
+            .as_table()?
+            .get("self_review_required")
+            .and_then(|v| v.as_bool())
+    });
+    let floor_off = self_review_required == Some(false);
+
+    let github_named: Option<bool> = resolve(cwd, |t| {
+        t.get("review")?
+            .as_table()?
+            .get("github_apps")
+            .and_then(|v| v.as_array())
+            .map(|a| !a.is_empty())
+    });
+    let github = github_named.unwrap_or(false);
+    let declared_none = github_named == Some(false);
+
+    let peers: Option<bool> = resolve(cwd, |t| {
+        t.get("review")?
+            .as_table()?
+            .get("peers")
+            .and_then(|v| v.as_array())
+            .map(|a| !a.is_empty())
+    });
+    let peers = peers.unwrap_or(false);
+
+    if declared_none && !peers {
+        return floor_refusal("tests_pass (rank 2, inferred from github_apps=[])");
+    }
+    if floor_off && !github && !peers {
+        return floor_refusal("no_review (rank 1, inferred from self_review_required=false)");
+    }
+    None
+}
+
 /// Resolve `review.optional_apps`, the GitHub App logins whose findings are
 /// honored when present but whose absence never blocks `DonePRGreen`.
 ///
@@ -954,6 +1038,50 @@ mod tests {
         clear_config_env();
         let cwd = write_project_settings("optout", "[agents.gemini]\nheadless_yolo = false\n");
         assert!(!headless_yolo_enabled("gemini", &cwd));
+    }
+
+    // --- arming-time automerge floor (the GitHub-native arm) -------------
+
+    #[test]
+    fn floor_blocks_explicit_below_floor_posture() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("floor-explicit", "[review]\nposture = \"tests_pass\"\n");
+        let reason = automerge_posture_floor_block_reason(&cwd)
+            .expect("tests_pass is below the floor");
+        assert!(reason.contains("tests_pass"), "{reason}");
+        assert!(reason.contains("self_review"), "{reason}");
+    }
+
+    #[test]
+    fn floor_blocks_inferred_no_review_cell() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd =
+            write_project_settings("floor-noreview", "[review]\nself_review_required = false\n");
+        let reason = automerge_posture_floor_block_reason(&cwd)
+            .expect("an explicit floor opt-out with no lane is no_review");
+        assert!(reason.contains("no_review"), "{reason}");
+    }
+
+    #[test]
+    fn floor_allows_explicit_self_review() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("floor-ok", "[review]\nposture = \"self_review\"\n");
+        assert!(automerge_posture_floor_block_reason(&cwd).is_none());
+    }
+
+    #[test]
+    fn floor_allows_declared_none_with_peers() {
+        // github_apps=[] with peers resolves peer_review (rank 6): above the floor.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings(
+            "floor-peers",
+            "[review]\ngithub_apps = []\npeers = [\"codex\"]\n",
+        );
+        assert!(automerge_posture_floor_block_reason(&cwd).is_none());
     }
 
     #[test]

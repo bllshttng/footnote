@@ -23,8 +23,8 @@ Two load-bearing invariants, both from the epic:
 
 Pure and total: no I/O, never raises for the two functions above. The thin
 production accessor that feeds them from the real ledger/provider substrate
-(``review_assurance``, below) lives here too since x-f324 removed the sigma
-panel: it assesses the policy against the reviewer capacity that will
+(``review_assurance``, below) lives here too since the sigma
+panel's removal: it assesses the policy against the reviewer capacity that will
 actually run, which after the panel's removal is the lane's own runtime plus
 the configured cross-model provider kinds.
 """
@@ -195,7 +195,7 @@ def assess_assurance(
     )
 
 
-# ── production accessors (x-f324: moved here from the deleted panel worker) ──
+# ── production accessors (moved here from the deleted panel worker) ──
 
 
 def _read_state(state_path: Path) -> dict:

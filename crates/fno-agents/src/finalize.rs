@@ -903,6 +903,14 @@ the operator's shell"
                 .to_string();
             eprintln!("finalize: native auto-merge withheld: {blocked}");
             (false, Some(blocked))
+        } else if let Some(blocked) =
+            crate::agents_config::automerge_posture_floor_block_reason(&cwd)
+        {
+            // The arming-time automerge floor: the merge verb refuses a
+            // granted merge below the self_review rung, so arming GitHub to
+            // merge on green must refuse it too (one floor, every arm).
+            eprintln!("finalize: native auto-merge withheld: {blocked}");
+            (false, Some(blocked))
         } else {
             match optional_review_block_reason(&cwd) {
                 None => arm_auto_merge(&cwd),

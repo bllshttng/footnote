@@ -91,7 +91,7 @@ def review() -> None:
     """Refuse: the sigma panel is removed; the review lane is bare /fno:review.
 
     No attestation is emitted here - a removed producer must never leave a
-    path that still writes gate evidence (x-f324 AC8-ERR).
+    path that still writes gate evidence (AC8-ERR).
     """
     typer.secho(
         "sigma is removed: the review is bare /fno:review (the fno review "

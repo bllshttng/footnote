@@ -654,7 +654,7 @@ class CrossModelBlock(BaseModel):
     """Cross-model review opt-in (nested under 'config.review.cross_model').
 
     Gates the diversity axis of review (ab-6c8f4c61; the sigma panel it once
-    routed is removed by x-f324): when `enabled` is true, reviewer capacity
+    routed is removed): when `enabled` is true, reviewer capacity
     may include a different provider (codex/gemini) than wrote the code,
     catching model-specific blind spots - the peer rung's substrate and the
     assurance resolver's effective kinds. Default False: existing all-claude
@@ -898,7 +898,7 @@ def resolvable_reviewers(
     return {**registry, **_RESOLVABLE_REVIEWERS}
 
 
-# ── review.posture (x-f324) ──────────────────────────────────────────────────
+# ── review.posture ──────────────────────────────────────────────────
 #
 # One leaf that names how much review a code PR must have before it may merge.
 # Two settings that must be coupled (`may the fleet merge` and `what review
@@ -1317,7 +1317,7 @@ class ReviewBlock(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    # The LADDER (x-f324): one leaf naming how much review a code PR needs
+    # The LADDER: one leaf naming how much review a code PR needs
     # before it may merge. One of the nine REVIEW_POSTURES values; None (the
     # default) means "infer one visible posture from the legacy settings, or
     # fall to the shipped self_review floor", which `resolve_review_posture`

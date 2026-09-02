@@ -111,7 +111,7 @@ def test_node_size_is_guarded_metadata(external_store, contradictory_graph, monk
     """Reader class: footnote-minted metadata (size pin) reads the default
     store through the guarded reader and never leaks under an external
     backend - the graph carries GRAPH-SIZE, external must yield None. The
-    panel's size-pin accessor is gone (x-f324), so the seam reads the same
+    panel's size-pin accessor is gone , so the seam reads the same
     guarded reader directly."""
     from fno.tracker import metadata
 

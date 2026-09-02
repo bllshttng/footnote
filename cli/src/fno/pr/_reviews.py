@@ -412,6 +412,8 @@ def review_coverage_for_gate(
     pr_number: int,
     cwd: Optional[str] = None,
     head: Optional[str] = None,
+    *,
+    recompute_postureless: bool = True,
 ) -> tuple[Optional[dict], str]:
     """The coverage event a gate should act on, recomputed at most ONCE (x-3a3f).
 
@@ -467,12 +469,17 @@ def review_coverage_for_gate(
     # matters: the producer that wrote it resolved no rung (an fno-agents
     # binary from before review.posture), so the merge gate would refuse on an
     # unknown posture a fresh recompute might satisfy. The recompute is paid
-    # only on this covered arm, where it can change the answer.
+    # only on this covered arm, where it can change the answer - and only by a
+    # caller that can ACT on the producer-upgrade refusal (the merge gate).
+    # Receipt surfaces (status) report the row as-is: recomputing under them
+    # rewrites the same postureless row every read until the binary upgrades,
+    # a per-read cost that changes no answer the receipt can print.
     unusable = data is not None and (
         data.get("coverage") == "unknown"
         or (
             data.get("coverage") == "covered"
             and "review_posture" not in data
+            and recompute_postureless
         )
     )
     overtaken = _uncovered_row_overtaken(data, raw_ts, cwd, head)
@@ -1131,6 +1138,7 @@ def read_review_coverage(
     head: Optional[str] = None,
     *,
     recompute: bool = False,
+    recompute_postureless: bool = True,
 ) -> dict:
     """The ``review_coverage`` verdict for a PR, recomputed once when there is
     no usable row and ``recompute`` is set (x-3a3f). The default stays a pure
@@ -1150,7 +1158,9 @@ def read_review_coverage(
     """
     try:
         if recompute:
-            latest, note = review_coverage_for_gate(pr_number, cwd, head)
+            latest, note = review_coverage_for_gate(
+                pr_number, cwd, head, recompute_postureless=recompute_postureless
+            )
         else:
             latest, note = review_coverage_for_head(pr_number, cwd, head), ""
     except Exception:  # noqa: BLE001 - additive signal, never hard-fails

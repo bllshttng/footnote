@@ -18,7 +18,7 @@ import json
 
 import pytest
 
-from fno.config import AutoMergeBlock
+from fno.config import AutoMergeBlock, ReviewBlock
 from fno.pr import _merge
 from fno.pr._merge_grant import (
     ABSENT,
@@ -83,7 +83,13 @@ def _config(monkeypatch, enabled=True, grant="dispatch", boom=False):
     else:
         def loader(path):
             return config_mod.load_settings().model_copy(
-                update={"auto_merge": real(enabled=enabled, grant=grant)}
+                update={
+                    "auto_merge": real(enabled=enabled, grant=grant),
+                    # Hermetic: the floor arm resolves the review block too,
+                    # and it must see the shipped default rung, never the
+                    # operator's real config.
+                    "review": ReviewBlock(),
+                }
             )
     monkeypatch.setattr("fno.config.load_settings_for_repo", loader)
 
@@ -113,6 +119,48 @@ def test_free_claim_is_also_positively_not_live(tmp_path, monkeypatch):
     _config(monkeypatch)
 
     assert resolve_durable_grant(PR, str(tmp_path)).state == GRANTED
+
+
+def test_below_floor_posture_holds_even_a_valid_grant(tmp_path, monkeypatch):
+    """The floor is an execution arm of its own: a perfect receipt over a
+    no_review repo holds, because a stored grant widens WHO may execute,
+    never WHAT review the merge needs."""
+    import fno.config as config_mod
+
+    _grant_node(tmp_path, monkeypatch, [_do_row(_receipt())])
+    _claim(monkeypatch, state="stale")
+    monkeypatch.setattr(
+        "fno.config.load_settings_for_repo",
+        lambda path: config_mod.load_settings().model_copy(
+            update={
+                "auto_merge": AutoMergeBlock(enabled=True, grant="dispatch"),
+                "review": ReviewBlock(self_review_required=False),
+            }
+        ),
+    )
+
+    verdict = resolve_durable_grant(PR, str(tmp_path))
+
+    assert verdict.state == HELD
+    assert "below the merge floor" in verdict.reason
+    assert "no_review" in verdict.reason
+
+
+def test_non_canonical_receipt_stamp_reads_unknown(tmp_path, monkeypatch):
+    """Only the canonical Z stamp the writer mints is a receipt: a valid-UTC
+    but non-canonical spelling must not order receipts by raw-string luck."""
+    _grant_node(
+        tmp_path,
+        monkeypatch,
+        [_do_row({**_receipt(), "recorded_at": "2026-09-02T10:00:00+00:00"})],
+    )
+    _claim(monkeypatch, state="stale")
+    _config(monkeypatch)
+
+    verdict = resolve_durable_grant(PR, str(tmp_path))
+
+    assert verdict.state == UNKNOWN
+    assert "canonical" in verdict.reason
 
 
 # ---------------------------------------------------------------------------
