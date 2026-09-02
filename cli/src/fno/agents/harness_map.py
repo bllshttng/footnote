@@ -42,6 +42,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Mapping, Optional
 
+from fno.config_io import _global_settings_path
 from fno.harness_names import KNOWN_HARNESSES
 
 # Command surface: HOW a footnote slash `/verb` is natively invoked on a harness.
@@ -705,15 +706,11 @@ _LANE_ALIAS_PATHS = {
 def _override_config_candidates() -> list[Path]:
     """The same candidate chain the Rust reader uses
     (agents_view.rs ``config_toml_candidates``): ``$PWD/.fno/config.toml``
-    first, then the ``FNO_GLOBAL_SETTINGS_PATH`` sibling ``config.toml``, else
-    ``~/.fno/config.toml``. An empty env var reads as unset, matching
-    ``config_io._global_settings_path``."""
+    first, then the ``config_io`` global settings path's sibling
+    ``config.toml`` (``FNO_GLOBAL_SETTINGS_PATH`` when set, else the state
+    dir; an empty env var reads as unset there too)."""
     candidates = [Path.cwd() / ".fno" / "config.toml"]
-    env = os.environ.get("FNO_GLOBAL_SETTINGS_PATH")
-    if env:
-        candidates.append(Path(env).with_name("config.toml"))
-    else:
-        candidates.append(Path.home() / ".fno" / "config.toml")
+    candidates.append(_global_settings_path().with_name("config.toml"))
     return candidates
 
 
