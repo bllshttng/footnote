@@ -458,7 +458,7 @@ fn platform_machine_id() -> String {
 ///
 /// Cached: the macOS arm shells out to `ioreg`, and a sweep reads many
 /// lockfiles against one machine identity.
-fn machine_id() -> String {
+pub fn machine_id() -> String {
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CACHE.get_or_init(platform_machine_id).clone()
 }

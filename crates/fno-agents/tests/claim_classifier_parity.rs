@@ -1,35 +1,27 @@
-//! parity-stage: differential
+//! parity-stage: characterization
 //! parity-oracle: fno.claims.staleness
 //!
-//! Differential harness for the claim classifier. Python's
-//! `fno.claims.staleness.classify` and this crate's `claims::classify` each
-//! carry a docstring claiming to mirror the other; this file is the instrument
-//! that makes that claim checkable. One fixture corpus drives BOTH legs
-//! through the four liveness branch conditions (pid unavailable, off-machine,
+//! Characterization harness for the Rust claim classifier. The corpus was
+//! driven through both implementations before the Python leg was deleted, and
+//! its state+basis map is now the frozen contract for the sole implementation.
+//! It covers the four liveness branch conditions (pid unavailable, off-machine,
 //! pid unreported by the OS, pid reused, and their refused-inspection split)
-//! plus the expired-TTL, hybrid and suspect arms, and asserts identical
-//! states AND identical bases for every case - the basis vocabulary cannot
-//! drift the way the state once could.
+//! plus the expired-TTL, hybrid and suspect arms.
 //!
-//! Excluded from the corpus, on purpose, one line each:
+//! The former exclusions are now covered by the port:
 //!
-//! - `classify_for_sweep`: Python-only, has no Rust counterpart, so it is not
-//!   a dual implementation and there is nothing to pin it against.
-//! - `pid_exclusive=False`: an input only the Python signature can express
-//!   (Rust callers cannot pass it), so no reachable disagreement exists.
+//! - `classify_for_sweep` is owned by Rust and feeds the native sweep door.
+//! - PID exclusivity is computed across the scanned set by the Rust client.
 //!
-//! Skips (does not fail) when `python3` is absent or the oracle is not
-//! importable (its `psutil` dependency included), mirroring
-//! `claude_ask_parity.rs`'s skip-when-unavailable policy. Set
-//! `FNO_CLAIMS_PARITY_PYTHON` to point the harness at an interpreter that has
-//! `psutil` installed (a bare `python3` often does not); CI installs it.
+//! Goldens live under `tests/golden/claim_classifier/corpus.out`. They were
+//! captured from the proven-correct Python leg before deletion; normal runs
+//! never invoke Python.
 
-use fno_agents::claims::{now_ms, ClaimRecord};
+use fno_agents::claims::{machine_id, now_ms, ClaimRecord};
 use serde_json::{json, Value};
-use std::path::PathBuf;
 use std::process::Command;
 
-use common::{assert_golden as assert_golden_common, capture_mode, Golden};
+use common::{assert_golden as assert_golden_common, Golden};
 
 mod common;
 
@@ -37,80 +29,30 @@ mod common;
 /// caps at 99998, Linux pid_max at 2^22), so both legs read it as unreported.
 const ABSENT_PID: i64 = 2_000_000_000;
 
-/// Repo `cli/src` so Python can import the real `fno` package.
-fn pythonpath() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cli/src")
-}
-
-/// The interpreter that runs the oracle. An explicit `FNO_CLAIMS_PARITY_PYTHON`
-/// wins; otherwise the repo's own `cli/.venv` is preferred over a bare
-/// `python3`, because the oracle needs `psutil` and a bare `python3` usually
-/// lacks it. Without that preference this harness SKIPS on a normal dev
-/// machine and prints `ok` for a corpus it never compared - a green that means
-/// "not verified here". It skipped through the very disagreement the
-/// shared-host cases below now pin.
-fn parity_python() -> String {
-    if let Ok(explicit) = std::env::var("FNO_CLAIMS_PARITY_PYTHON") {
-        return explicit;
-    }
-    let venv = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cli/.venv/bin/python");
-    if venv.is_file() {
-        return venv.to_string_lossy().into_owned();
-    }
-    "python3".to_string()
-}
-
-fn python_available() -> bool {
-    let probe = Command::new(parity_python())
-        .arg("-c")
-        .arg("import fno.claims.staleness")
-        .env("PYTHONPATH", pythonpath())
-        .output();
-    matches!(probe, Ok(o) if o.status.success())
-}
-
-/// Read THIS machine's identity from the genuine Python oracle, so the
-/// same-machine fixtures carry values both legs agree are local. Returns
-/// (machine_id, hostname); machine_id is empty when the OS exposes none.
+/// Read THIS machine's identity from the native fact readers so same-machine
+/// fixtures exercise the production machine-id arm without a second runtime.
 fn local_identity() -> (String, String) {
-    let code = r#"
-from fno.claims.hostid import machine_id
-import socket
-print(machine_id())
-print(socket.gethostname())
-"#;
-    let out = Command::new(parity_python())
-        .arg("-c")
-        .arg(code)
-        .env("PYTHONPATH", pythonpath())
+    let out = Command::new("hostname")
         .output()
-        .expect("run python hostid identity probe");
-    assert!(
-        out.status.success(),
-        "python identity probe failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut lines = text.lines();
-    let machine = lines.next().unwrap_or("").trim().to_string();
-    let hostname = lines.next().unwrap_or("").trim().to_string();
-    (machine, hostname)
+        .expect("run native hostname probe");
+    assert!(out.status.success(), "hostname probe failed");
+    (
+        machine_id(),
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    )
 }
 
 /// The probe behavior a case wants. `Real` lets both legs ask the OS (the
 /// self-pid and impossible-pid cases read identically on both); the injected
 /// kinds drive the arms a live OS cannot produce deterministically - the
-/// Refused arm above all. Injection happens at each leg's own seam: the
-/// `probe` parameter here, `_probe_create_time` monkeypatched there.
+/// Refused arm above all. Injection happens at the Rust probe seam.
 #[derive(Clone, Copy)]
 enum ProbeSpec {
     Real,
-    Absent,
     Refused,
 }
 
-/// One fixture case. Every field travels to both legs unchanged; the Python
-/// subprocess rebuilds the equivalent `Claim` from the same JSON.
+/// One fixture case in the frozen characterization corpus.
 struct Case {
     label: &'static str,
     pid: Option<i64>,
@@ -348,28 +290,6 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
     ]
 }
 
-fn to_json(c: &Case, now: i64) -> Value {
-    let probe = match c.probe {
-        ProbeSpec::Real => json!(null),
-        ProbeSpec::Absent => json!({"kind": "absent"}),
-        ProbeSpec::Refused => json!({"kind": "refused"}),
-    };
-    json!({
-        "label": c.label,
-        "schema_version": if c.pid_unavailable { 2 } else { 1 },
-        "pid": c.pid,
-        "pid_unavailable": c.pid_unavailable,
-        "host": c.host,
-        "machine_id": c.machine_id,
-        "acquired_at": c.acquired_at,
-        "expires_at": c.expires_at,
-        "pid_provenance": c.pid_provenance,
-        "harness": c.harness,
-        "probe": probe,
-        "now": now,
-    })
-}
-
 fn record(c: &Case) -> ClaimRecord {
     ClaimRecord {
         schema_version: if c.pid_unavailable { 2 } else { 1 },
@@ -388,80 +308,14 @@ fn record(c: &Case) -> ClaimRecord {
     }
 }
 
-/// Run the genuine Python classifier over the corpus and return
-/// `{label: {state, basis}}` for every case.
-fn py_classify_all(cases_json: &str) -> Value {
-    let code = r#"
-import json, sys
-from fno.claims import staleness
-from fno.claims.staleness import classify_with_basis
-from fno.claims.types import Claim
-
-REAL_PROBE = staleness._probe_create_time
-cases = json.load(sys.stdin)
-rows = {}
-for c in cases:
-    spec = c.get("probe")
-    if spec is not None:
-        kind = spec["kind"]
-        if kind == "absent":
-            staleness._probe_create_time = lambda pid: (None, "pid-absent")
-        elif kind == "refused":
-            staleness._probe_create_time = lambda pid: (None, "access-denied")
-        else:
-            staleness._probe_create_time = lambda pid: (spec["ms"], "")
-    else:
-        staleness._probe_create_time = REAL_PROBE
-    claim = Claim(
-        schema_version=c["schema_version"],
-        key="parity",
-        holder="parity",
-        acquired_at=c["acquired_at"],
-        pid=c["pid"],
-        pid_unavailable=c["pid_unavailable"],
-        host=c["host"],
-        machine_id=c["machine_id"],
-        expires_at=c["expires_at"],
-        pid_provenance=c["pid_provenance"],
-        harness=c["harness"],
-    )
-    state, basis = classify_with_basis(claim, now=c["now"])
-    rows[c["label"]] = {"state": state.value, "basis": basis}
-json.dump(rows, sys.stdout)
-"#;
-    use std::io::Write;
-    let mut child = Command::new(parity_python())
-        .arg("-c")
-        .arg(code)
-        .env("PYTHONPATH", pythonpath())
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn python classify");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(cases_json.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
-    assert!(
-        out.status.success(),
-        "python classify failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    serde_json::from_slice(&out.stdout).expect("python returned a JSON object")
-}
-
-/// Classify the corpus with the Rust leg and return the same JSON shape as the
-/// Python oracle. Keeping the whole corpus in one golden makes the frozen
-/// contract include every case's state and basis.
+/// Classify the corpus with Rust and return the same JSON shape as the frozen
+/// oracle. Keeping the whole corpus in one golden includes every case's state
+/// and basis in the characterization contract.
 fn rust_classify_all(cases: &[Case], now: i64) -> Value {
     let mut rows = serde_json::Map::new();
     for c in cases {
         let probe: &dyn Fn(i32) -> fno_agents::claims::PidProbe = match c.probe {
             ProbeSpec::Real => &|pid| fno_agents::claims::probe_pid(pid),
-            ProbeSpec::Absent => &|_| fno_agents::claims::PidProbe::Absent,
             ProbeSpec::Refused => &|_| fno_agents::claims::PidProbe::Refused,
         };
         let (state, basis) = fno_agents::claims::classify_with_basis(&record(c), Some(now), probe);
@@ -474,31 +328,16 @@ fn rust_classify_all(cases: &[Case], now: i64) -> Value {
 }
 
 #[test]
-fn classify_state_and_basis_parity_with_real_python() {
-    if capture_mode() && !python_available() {
-        eprintln!(
-            "SKIP: no python3 with fno.claims.staleness importable; parity not verified here"
-        );
-        return;
-    }
+fn classify_state_and_basis_matches_frozen_golden() {
     let now = now_ms();
     let self_pid = std::process::id() as i64;
     let cases = corpus(now, self_pid, &local_identity());
-    let cases_json =
-        serde_json::to_string(&cases.iter().map(|c| to_json(c, now)).collect::<Vec<_>>()).unwrap();
     let rust = rust_classify_all(&cases, now);
-    let oracle = capture_mode().then(|| {
-        let py = py_classify_all(&cases_json);
-        Golden {
-            exit: None,
-            streams: vec![serde_json::to_string(&py).unwrap()],
-        }
-    });
     let rust_golden = Golden {
         exit: None,
         streams: vec![serde_json::to_string(&rust).unwrap()],
     };
-    assert_golden_common("claim_classifier", "corpus", &rust_golden, oracle);
+    assert_golden_common("claim_classifier", "corpus", &rust_golden, None);
     // A zero-case pass is an absence, not a verdict: the corpus must actually
     // carry every state and basis into the frozen contract.
     assert!(
