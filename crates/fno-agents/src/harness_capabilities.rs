@@ -60,6 +60,15 @@ pub struct HarnessCapabilities {
     pub command_surface: String,
     #[serde(default)]
     pub slash_prefix: String,
+    /// This harness's own TUI slash verbs, measured. The verb normalizer
+    /// rewrites a leading-slash token only when it names a shipped footnote
+    /// verb absent from this list; absent means the harness declares none.
+    #[serde(default)]
+    pub native_verbs: Vec<String>,
+    /// The subset the mail lane maps to a structured review RPC on a daemon
+    /// thread; empty when the harness has no such transport.
+    #[serde(default)]
+    pub review_verbs: Vec<String>,
     pub ready_marker: String,
     pub ready_rule_ids: Vec<String>,
     pub manifest_rules: Vec<ManifestRuleRef>,

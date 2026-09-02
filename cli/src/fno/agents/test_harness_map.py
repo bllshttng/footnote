@@ -1058,3 +1058,96 @@ def test_internal_slash_guard_lives_inside_normalize_command():
     assert '"/" in first_word[1:]' in norm_src
     resolve_src = inspect.getsource(harness_map.resolve_dispatch)
     assert "'/' not in first_word[1:]" not in resolve_src
+
+
+# The measured rows from the operator's one-call table (bare verbs an operator
+# drives at a codex prompt line). The roster here is the minimal shipped
+# surface the rows exercise; the real-reader tests below pin the loader.
+_MEASURED_ROWS = [
+    ("/fno:target x-32db", "$fno:target x-32db"),
+    ("/target x-32db", "$fno:target x-32db"),
+    ("$fno:target x-1", "$fno:target x-1"),
+    ("/review", "/review"),
+    ("/code-review", "/code-review"),
+    ("/model gpt-5.6-luna", "/model gpt-5.6-luna"),
+    ("/status", "/status"),
+    ("/compact", "/compact"),
+    # neither a footnote verb nor native: an unrecognized verb stays literal
+    ("/frobnicate", "/frobnicate"),
+]
+
+
+@pytest.mark.parametrize(("command", "expected"), _MEASURED_ROWS)
+def test_codex_normalizer_rewrites_only_footnote_verbs(command, expected, monkeypatch):
+    """A leading-slash token is rewritten only when it names a shipped footnote
+    verb that is not also a declared native verb: native and unknown verbs
+    pass through literally instead of being captured into a phantom skill."""
+    from fno.agents import harness_map
+
+    monkeypatch.setattr(
+        harness_map, "footnote_verbs", lambda: frozenset({"target", "review", "think"})
+    )
+    assert harness_map.normalize_command(command, "codex") == expected
+
+
+def test_codex_review_collision_spells_both_ways(monkeypatch):
+    """`review` is BOTH a shipped footnote skill and a native codex verb. The
+    bare spelling stays native; the fno lane is reached namespaced."""
+    from fno.agents import harness_map
+
+    monkeypatch.setattr(
+        harness_map, "footnote_verbs", lambda: frozenset({"target", "review"})
+    )
+    assert harness_map.normalize_command("/review", "codex") == "/review"
+    assert harness_map.normalize_command("/fno:review", "codex") == "$fno:review"
+
+
+def test_native_and_review_verbs_come_from_the_capability_table():
+    """The native-verb knowledge lives in ONE place: the codex row of the
+    capability table. The mail lane's review subset is read from the same
+    row, so no second hand-written enumeration can drift."""
+    from fno.agents.harness_map import capabilities
+    from fno.mail.cli import _CODEX_REVIEW_VERBS
+
+    caps = capabilities("codex")
+    assert set(caps["native_verbs"]) == {
+        "/review", "/code-review", "/model", "/status", "/compact",
+    }
+    assert _CODEX_REVIEW_VERBS == {"/review", "/code-review"}
+    assert _CODEX_REVIEW_VERBS <= set(caps["native_verbs"])
+
+
+def test_roster_is_read_from_the_shipped_plugin(monkeypatch):
+    """Positive control for the roster loader: pointed at this checkout, the
+    real reader sees the shipped skills - `target` among them, which is what
+    keeps the bare `/target` spelling normalizing on codex."""
+    from fno.agents import harness_map
+
+    repo_root = Path(__file__).resolve().parents[4]
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(repo_root))
+    harness_map.footnote_verbs.cache_clear()
+    try:
+        roster = harness_map.footnote_verbs()
+    finally:
+        harness_map.footnote_verbs.cache_clear()
+    assert {"target", "review", "think", "mail"} <= roster
+
+
+def test_new_skill_normalizes_without_a_normalizer_edit(monkeypatch):
+    """Adding a verb to the plugin surface must not require touching the
+    normalizer: the roster is read, never retyped."""
+    from fno.agents import harness_map
+
+    monkeypatch.setattr(harness_map, "footnote_verbs", lambda: frozenset({"brandnewverb"}))
+    assert harness_map.normalize_command("/brandnewverb run", "codex") == "$fno:brandnewverb run"
+
+
+def test_real_roster_rewrites_target_on_codex():
+    """End to end over the real cached roster and the real capability row:
+    the two footnote rows of the measured table rewrite, unchanged from the
+    day the normalizer shipped."""
+    from fno.agents.harness_map import footnote_verbs, normalize_command
+
+    assert "target" in footnote_verbs()
+    assert normalize_command("/target x-1", "codex") == "$fno:target x-1"
+    assert normalize_command("/fno:target x-1", "codex") == "$fno:target x-1"

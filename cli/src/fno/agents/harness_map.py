@@ -36,6 +36,7 @@ from __future__ import annotations
 import re
 import tomllib
 from copy import deepcopy
+from functools import cache
 from importlib.resources import files
 from typing import Mapping, Optional
 
@@ -69,6 +70,34 @@ _AUTONOMOUS_COMMAND_MERGE = "/target {id}"
 # args of another slash verb would mutate its instruction text, and prose is
 # not a control input (x-9d11).
 _TARGET_FAMILY = ("/target", "/fno:target", "$fno:target")
+
+
+@cache
+def footnote_verbs() -> frozenset:
+    """The shipped footnote verb roster: every ``skills/<name>/SKILL.md`` and
+    every ``commands/<name>.md`` the plugin ships.
+
+    Read from the shipped plugin surface, never a retyped literal: a literal
+    copy goes stale the first time a verb ships, and the failure is silent -
+    the new verb simply stops normalizing on codex and nothing notices.
+    Cached once per process. Empty on any resolution or read failure, which
+    on the codex surface leaves every bare ``/verb`` literal - pass-through is
+    the safe direction - while the plugin-qualified ``/fno:verb`` spelling
+    keeps working, since its namespace alone proves it is a footnote verb."""
+    from fno.paths import resolve_plugin_script
+
+    verbs: set[str] = set()
+    try:
+        skills = resolve_plugin_script("skills")
+        verbs.update(p.name for p in skills.iterdir() if (p / "SKILL.md").is_file())
+    except OSError:
+        pass
+    try:
+        commands = resolve_plugin_script("commands")
+        verbs.update(p.stem for p in commands.glob("*.md") if p.is_file())
+    except OSError:
+        pass
+    return frozenset(verbs)
 
 
 def normalize_legacy_no_merge(command: str) -> str:
@@ -457,8 +486,19 @@ def normalize_command(command: str, harness: str) -> str:
         # skill surface is ``$fno:target`` in both cases. Strip the optional
         # slash namespace before swapping the surface marker so repeated
         # normalization at independent dispatch choke points is idempotent.
-        verb = cmd[len("/fno:") :] if cmd.startswith("/fno:") else cmd[1:]
-        return "$fno:" + verb
+        if cmd.startswith("/fno:"):
+            return "$fno:" + cmd[len("/fno:") :]
+        verb = first_word[1:]
+        # A bare ``/verb`` is rewritten only when it names a shipped footnote
+        # verb that is not also a declared native verb of this harness: an
+        # unknown or native verb stays literal instead of being captured into
+        # a phantom ``$fno:`` skill. ``review`` is the collision case - bare
+        # ``/review`` on codex is the NATIVE verb, and the fno lane is reached
+        # namespaced, as ``/fno:review``.
+        native = {v for v in caps.get("native_verbs") or () if isinstance(v, str)}
+        if "/" + verb in native or verb not in footnote_verbs():
+            return cmd
+        return "$fno:" + verb + cmd[len(first_word):]
     if surface == _SLASH and cmd.startswith("/"):
         # Plugin-namespace prefix swap only (never re-tokenize): claude/agy inject
         # the skill natively (""), opencode's fno plugin exposes it as `/fno:verb`.
