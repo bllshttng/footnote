@@ -489,7 +489,7 @@ select { background:var(--surface-2); color:var(--ink); border:1px solid var(--l
 .rmain:hover { background:var(--surface-2) }
 body[data-local="true"] .rid { cursor:copy; border-radius:4px }
 body[data-local="true"] .rid:hover { background:var(--accent-soft); color:var(--accent) }
-.rid.ok, .pbtn.ok { background:var(--done-bg); color:var(--done); border-color:var(--done) }
+.rid.ok, .ridtxt.ok, .pbtn.ok { background:var(--done-bg); color:var(--done); border-color:var(--done) }
 /* A public board emits an empty .rid, so the fixed id column would be a
    permanent empty gutter on every row. Remove the TRACK, not just its width:
    a zero-width column still takes the 11px grid gap, leaving a smaller gutter
@@ -745,10 +745,15 @@ _DASHBOARD_JS = """\
   // the operator uses it most. Dropping the fallback would make the buttons
   // dead on the surface they matter on.
   function flash(btn, msg) {
-    var prev = btn.dataset.label || btn.textContent;
+    // innerHTML, not textContent: the .rid gutter now carries children (the
+    // line break and the vote pill under it), and a text write would destroy
+    // them, so one id-copy click would flatten the pill into plain text.
+    // Both strings are trusted: msg is a constant, prev is the element's own
+    // esc()'d markup.
+    var prev = btn.dataset.label || btn.innerHTML;
     btn.dataset.label = prev;
-    btn.textContent = msg; btn.classList.add('ok');
-    setTimeout(function () { btn.textContent = prev; btn.classList.remove('ok'); }, 1200);
+    btn.innerHTML = msg; btn.classList.add('ok');
+    setTimeout(function () { btn.innerHTML = prev; btn.classList.remove('ok'); }, 1200);
   }
   function legacyCopy(text) {
     try {
@@ -862,7 +867,7 @@ _DASHBOARD_JS = """\
         // Click order matters: the pill's handler stops propagation, which also
         // keeps the .rid copy-id handler beneath it from firing, so one click
         // copies the command and nothing else.
-        main.innerHTML = (LOCAL ? '<span class=\"rid\">' + esc(n.id) + '<br>' + votePill + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\">' + typeBadge(n.ty) + '<span class=\"pill s-' + esc(n.s) + '\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill' + (n.p === 'p0' || n.p === 'p1' ? ' pr-p1' : '') + '\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + '</span><span class=\"dot\">' + kidBar(n) + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
+        main.innerHTML = (LOCAL ? '<span class=\"rid\"><span class=\"ridtxt\">' + esc(n.id) + '</span><br>' + votePill + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\">' + typeBadge(n.ty) + '<span class=\"pill s-' + esc(n.s) + '\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill' + (n.p === 'p0' || n.p === 'p1' ? ' pr-p1' : '') + '\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + '</span><span class=\"dot\">' + kidBar(n) + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
         main.setAttribute('aria-expanded', 'false');
         // The id is the thing most often copied out of this board, so it is
         // one click ON the id rather than a trip through the detail. A span,
@@ -872,7 +877,11 @@ _DASHBOARD_JS = """\
         // Copy button instead; this is the pointer shortcut to it.
         if (LOCAL && n.id) { var rid = main.querySelector('.rid');
           if (rid) { rid.title = 'Copy node id';
-            rid.addEventListener('click', function (ev) { ev.stopPropagation(); copyText(n.id, rid); }); } }
+            // The flash target is the id's own leaf span, never .rid itself:
+            // an innerHTML write on .rid would re-parse the vote pill beneath
+            // the id and the replacement node would carry no click listener,
+            // so one id copy would leave the pill permanently dead.
+            rid.addEventListener('click', function (ev) { ev.stopPropagation(); copyText(n.id, rid.querySelector('.ridtxt') || rid); }); } }
         if (LOCAL) { var votes = main.querySelector('.votes');
           if (votes) votes.addEventListener('click', function (ev) { ev.stopPropagation(); copyText(voteCommand(n), votes); }); }
         main.addEventListener('click', function () { var old = row.querySelector('.detail');

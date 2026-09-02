@@ -1105,16 +1105,25 @@ def _encounter_provenance(harness: str | None) -> dict[str, str]:
     claude shell inherits them; writing them onto a codex vote would attribute
     it to a model that did not cast it, which reads as measured. A harness with
     nothing to report omits the keys rather than writing a plausible default.
+
+    The two names are not equally first-party. CLAUDE_EFFORT lives in the
+    claude binary's own namespace, so its presence is claude's doing.
+    ANTHROPIC_MODEL is a provider SDK name a shell can export for unrelated
+    tooling, so it counts only when ANTHROPIC_BASE_URL is exported beside it:
+    the launcher that owns the model string owns the endpoint and sets the
+    pair, and a lone model string says nothing about the route this session
+    actually ran on.
     """
     provenance: dict[str, str] = {}
     if harness != "claude":
         return provenance
-    model = (os.environ.get("ANTHROPIC_MODEL") or "").strip()
     effort = (os.environ.get("CLAUDE_EFFORT") or "").strip()
-    if model:
-        provenance["model"] = model
     if effort:
         provenance["effort"] = effort
+    if (os.environ.get("ANTHROPIC_BASE_URL") or "").strip():
+        model = (os.environ.get("ANTHROPIC_MODEL") or "").strip()
+        if model:
+            provenance["model"] = model
     return provenance
 
 

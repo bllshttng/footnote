@@ -468,7 +468,34 @@ def test_a_vote_carries_its_model_and_effort(probe):
     """An encounter names WHO cast it; model and effort say ON WHAT.
 
     Read from the harness's own env, so a vote and its provenance cannot
-    disagree about who cast it.
+    disagree about who cast it. The model counts only beside the launcher's
+    base URL, the pair that names the route this session ran on.
+    """
+    _seed(probe, _node())
+    result = probe(
+        "backlog",
+        "encounter",
+        "zz-0001",
+        "--evidence",
+        "cost a CI cycle.",
+        extra_env={
+            "ANTHROPIC_MODEL": "glm-5.3-flash[1m]",
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+            "CLAUDE_EFFORT": "xhigh",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    record = _encounters(probe)[0]
+    assert record["model"] == "glm-5.3-flash[1m]"
+    assert record["effort"] == "xhigh"
+
+
+def test_a_lone_anthropic_model_is_not_provenance(probe):
+    """ANTHROPIC_MODEL is a provider SDK name shells export for other tooling.
+
+    With no ANTHROPIC_BASE_URL beside it, the string names nothing about the
+    route this claude session ran on, so recording it would read as measured.
+    CLAUDE_EFFORT stays: it lives in the claude binary's own namespace.
     """
     _seed(probe, _node())
     result = probe(
@@ -481,7 +508,7 @@ def test_a_vote_carries_its_model_and_effort(probe):
     )
     assert result.returncode == 0, result.stderr
     record = _encounters(probe)[0]
-    assert record["model"] == "glm-5.3-flash[1m]"
+    assert "model" not in record
     assert record["effort"] == "xhigh"
 
 
@@ -498,7 +525,10 @@ def test_an_unreportable_effort_is_omitted_not_guessed(probe):
         "zz-0001",
         "--evidence",
         "cost a CI cycle.",
-        extra_env={"ANTHROPIC_MODEL": "glm-5.3-flash[1m]"},
+        extra_env={
+            "ANTHROPIC_MODEL": "glm-5.3-flash[1m]",
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        },
     )
     assert result.returncode == 0, result.stderr
     record = _encounters(probe)[0]

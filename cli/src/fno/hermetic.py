@@ -132,6 +132,10 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_MODEL",
+    # Same launch-context family: the router exports it beside the model and
+    # base URL, and the encounter verb reads it for vote provenance. A test
+    # must not see the developer's effort value.
+    "CLAUDE_EFFORT",
     "DATABASE_URL",
     # Shell-prompt config the mux integration reads.
     "STARSHIP_CONFIG",

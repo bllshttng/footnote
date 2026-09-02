@@ -1071,12 +1071,17 @@ def test_the_vote_pill_sits_in_the_id_gutter_not_the_right_cluster(tmp_path: Pat
     render_graph_html([entry], tmp_path / "local.html")
     local = (tmp_path / "local.html").read_text()
 
-    # The pill hangs INSIDE the rid span, under the id, on its own line.
+    # The pill hangs INSIDE the rid span, under the id, on its own line. The
+    # id itself sits in a leaf span so the copy flash can be scoped to it.
     builder = re.search(r"main\.innerHTML = (.*?);$", local, re.MULTILINE)
     assert builder, "row builder not found, so nothing was checked"
-    assert "esc(n.id) + '<br>' + votePill" in builder.group(1), (
+    assert "esc(n.id) + '</span><br>' + votePill" in builder.group(1), (
         "the pill is not concatenated under the id inside the rid segment"
     )
+    # The flash target is the id's leaf span, never .rid: an innerHTML write
+    # on .rid re-parses the pill and the replacement node carries no click
+    # listener, so one id copy would leave the vote pill permanently dead.
+    assert "copyText(n.id, rid.querySelector('.ridtxt') || rid)" in local
 
     # And the .dot cluster no longer carries it: the segment between the dot
     # span and its closing quote must not mention votePill at all. The dot
@@ -1090,6 +1095,16 @@ def test_the_vote_pill_sits_in_the_id_gutter_not_the_right_cluster(tmp_path: Pat
     # Positive control on the same segment: the kid bar's neighbor is now the
     # plan marker, proving the segment was read and not merely failed to match.
     assert dot_segment.group(1).startswith("kidBar(n) + (n.pl ?")
+
+    # The copy flash must round-trip innerHTML, not text: the rid span now
+    # carries children (the line break and this pill), and a text write would
+    # destroy them, so one id-copy click would flatten the pill into plain
+    # text forever.
+    flash_body = re.search(r"function flash\(btn, msg\) \{(.*?)\n  \}", local, re.DOTALL)
+    assert flash_body, "flash() not found, so nothing was checked"
+    assert "btn.dataset.label || btn.innerHTML" in flash_body.group(1)
+    assert "btn.innerHTML = msg;" in flash_body.group(1)
+    assert "btn.innerHTML = prev;" in flash_body.group(1)
 
 
 def test_the_board_counts_recompute_from_the_filtered_set(tmp_path: Path):
