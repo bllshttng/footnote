@@ -59,7 +59,7 @@ esac
 
 ## Step 1: Resolve the mode (ALWAYS announce it)
 
-The grammar is `[level] [--comment] [--fix] [<pr#>|<branch>|<path>]`, with `prove-it`, `cleanup`, `peer`, `research`, and `declare` as leading mode tokens. Strip the flags first, then read the first remaining token:
+The grammar is `[level] [--comment] [--fix] [<pr#>|<branch>|<path>]`, with `prove-it`, `cleanup`, `peer`, `research`, and `declare` as leading mode tokens. A flag is a token in any accepted spelling of a known flag name: `--comment`, bare `comment`, or the em-dash `—comment` (what a phone autocorrects the double hyphen into), and the same three spellings for `fix`. The accepted set is the `canonical_flag` vocabulary in `cli/src/fno/review/invocation.py` - the one list both this router and the invocation telemetry read, so a spelling accepted here is also recorded there, and no fourth spelling is invented. Strip the flags BEFORE reading the first remaining token; the order is load-bearing, because stripping after the target test hands the flag tokens to the target slot, where they resolve to nothing and the run dies having posted nothing. Then read the first remaining token:
 
 - **no argument** -> mode is the default lane at a level sized from the diff. Print exactly: `running fno review lane (default, level from diff)` and continue to Step 2.
 - **a level token** (`low` `medium` `high` `xhigh` `max`) -> mode is the default lane at that explicit level. Print `running fno review lane (level <token>)`. Any remaining tokens are the target. Continue to Step 2.
@@ -78,6 +78,8 @@ The grammar is `[level] [--comment] [--fix] [<pr#>|<branch>|<path>]`, with `prov
   ```
 
   and stop with a non-zero result (emit no review, dispatch no agents). This is the locked router contract: an unknown non-empty mode never silently falls through to a default. A number, a resolvable ref, or a path-like token is a TARGET, never a mode.
+
+- **a target-slot token that resolves to nothing but matches a known flag name** -> REFUSE loudly. If the token survives the flag strip and then resolves to no PR, no branch, and no path, print exactly `refused: '<token>' looks like a misspelled flag; accepted spellings are --comment, bare comment, or em-dash —comment (same three for fix)` and stop with a non-zero result. A flag that reached the target slot unstripped must never be silently absorbed as a target; the silent absorption is what made the misspelling invisible.
 
 > A level is never inherited from a previous invocation: an explicit token records `explicit`, a bare invocation sizes from the diff, and no run reuses a typed level (that upstream behavior is a hazard, not a feature).
 
