@@ -2140,6 +2140,40 @@ def _plan_parallel_width(plan_path: Path) -> int:
     return _width_from_graph(_plan_task_graph(plan_path))
 
 
+# The operator's sizing for a bare join, as one table: workers asked for,
+# indexed by the node's priority and the plan's highest wave band. Code in
+# one function's table, never config - the audit measured config files
+# already contradicting each other on three keys, and a second decider is
+# how that happens. The width rule caps whatever this asks for.
+_JOIN_WORKER_TABLE = {
+    "p0": {"low": 3, "medium": 4, "high": 4},
+    "p1": {"low": 2, "medium": 3, "high": 4},
+    "p2": {"low": 1, "medium": 2, "high": 3},
+    "p3": {"low": 1, "medium": 1, "high": 2},
+}
+
+
+def _highest_wave_band(graph: _PlanTaskGraph) -> str:
+    """The strongest band the plan carries, or the medium default when it
+    carries none (an unbanded plan sizes like the default band everywhere
+    else in fno)."""
+    ranked = [b for b in graph.wave_bands if b in _BAND_RANK]
+    if not ranked:
+        return "medium"
+    return max(ranked, key=lambda b: _BAND_RANK[b])
+
+
+def _derive_join_workers(graph: _PlanTaskGraph, priority: str) -> tuple[int, str]:
+    """The worker count a bare join asks for, plus the band it read so the
+    receipt can name its inputs. An unknown priority sizes as p2, the
+    backlog default."""
+    band = _highest_wave_band(graph)
+    row = _JOIN_WORKER_TABLE.get(str(priority or "").strip().lower())
+    if row is None:
+        row = _JOIN_WORKER_TABLE["p2"]
+    return row[band], band
+
+
 # Write roots every joiner legitimately needs regardless of band: version
 # control, fno's own per-worktree state (claims, briefs, join state), and the
 # build/cache directories a test run touches. ``.git/hooks`` and ``.git/config``
@@ -2382,7 +2416,9 @@ def _sandbox_block(worktree: Path, policy: JoinWritePolicy) -> dict:
     }
 
 
-def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dict:
+def join_node(
+    node_id: str, workers: Optional[int] = None, *, model: Optional[str] = None
+) -> dict:
     """Spawn width-bounded joiners into a held node's worktree (x-8d1d).
 
     Resolves the holder's worktree from the LIVE ``node:<id>`` claim (never a
@@ -2392,7 +2428,11 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
     bands (highest band first, the lead; each lane resolved per band by
     ``_grid_lane_for``), else ``min(workers, width - 1)`` shapeless workers
     (joiner 2). Either way the width rule caps the count: the node holder is
-    one of the width workers. The brief rides TWO channels: the file
+    one of the width workers. ``workers`` is the requested joiner count;
+    ``None`` (the CLI default) derives the ask from the sizing table - the
+    node's priority against the plan's highest wave band - instead of
+    defaulting to one joiner, which is the default that kept bare joins
+    from ever being worth running. The brief rides TWO channels: the file
     ``<worktree>/.fno/join-briefs/<node>.md`` (reaches daemon-forked workers,
     which the waves.md joiner posture reads) and TARGET_BRIEF (reaches lanes
     that inherit the spawner's env, e.g. panes); a banded brief also carries
@@ -2404,8 +2444,11 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
     an explicit ``--model``: a typed model with no vendor implication
     overrides a config-injected default whose lane would refuse.
 
-    Returns the receipt ``{"node", "worktree", "width", "spawned", "lead",
-    "lanes"}`` - ``lanes`` maps each spawned name to its ``band``/``harness``/
+    Returns the receipt ``{"node", "worktree", "width", "priority", "band",
+    "workers", "workers_source", "spawned", "lead", "lanes"}`` - the three
+    sizing inputs ride beside the requested count and where it came from
+    (``derived`` | ``explicit``), so the receipt answers "why this many".
+    ``lanes`` maps each spawned name to its ``band``/``harness``/
     ``model``/``sandbox`` (``enforced`` | ``overlapping`` | ``unevaluated`` |
     ``off``, from ``config.join.sandbox`` and the plan's band partition; plus
     ``"grid": "declined"`` when the grid declined that band
@@ -2464,6 +2507,18 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
         raise JoinRefuse(
             3, f"width {width}: a second worker has nothing to pull"
         )
+    # A bare join derives its ask from the sizing table; an explicit count
+    # passes through untouched. Both paths print the inputs beside the
+    # count, so the receipt answers "why this many" without re-deriving.
+    priority = str(entry.get("priority") or "").strip().lower()
+    if workers is None:
+        workers, sizing_band = _derive_join_workers(graph, priority)
+        workers_source = "derived"
+    else:
+        sizing_band = _highest_wave_band(graph)
+        workers_source = "explicit"
+    if priority not in _JOIN_WORKER_TABLE:
+        priority = "p2"
     # One worker per band present, highest first (x-dadc); an unbanded plan
     # keeps joiner 2's shapeless count. The width rule still caps: the node
     # holder is one of the width workers, so joiners stay under it.
@@ -2653,6 +2708,10 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
         "node": node_id,
         "worktree": worktree,
         "width": width,
+        "priority": priority,
+        "band": sizing_band,
+        "workers": workers,
+        "workers_source": workers_source,
         "spawned": spawned,
         "lead": lead,
         "lanes": lanes,
