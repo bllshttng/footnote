@@ -307,11 +307,10 @@ def gates_for(node: Optional[dict], grid_harness: Optional[str] = None) -> list[
         except Exception as exc:  # noqa: BLE001
             out.append(_unreadable("node-claim", exc))
 
-    # Per-project lanes. Reported with its own deprecation because a display is
-    # an implicit endorsement: x-3f84 ordered parallel.max_lanes deleted, and a
-    # reader seeing it beside live caps would reasonably assume it survived.
+    # Per-project occupancy is now context, not a cap: the epic advance's
+    # width derives from spawn-gate headroom (the fleet and provider rows
+    # above), and a configured parallel.max_lanes is deprecated and ignored.
     try:
-        max_lanes = adv._max_lanes()
         by_project = adv._live_workers_by_project()
         proj = (node or {}).get("project") or "-"
         occupied = by_project.get(proj, 0)
@@ -319,10 +318,10 @@ def gates_for(node: Optional[dict], grid_harness: Optional[str] = None) -> list[
             Gate(
                 "project-lane",
                 f"{occupied} ({proj})",
-                str(max_lanes),
-                "refuse" if max_lanes >= 0 and occupied >= max_lanes else "pass",
+                "ignored",
+                "pass",
                 key="parallel.max_lanes",
-                note="x-3f84 ordered this knob deleted; it still gates the epic advance",
+                note="deprecated and ignored (the deletion ruling); width is spawn-gate headroom",
             )
         )
     except Exception as exc:  # noqa: BLE001
@@ -764,7 +763,7 @@ def build_lane_fill_report(
     from fno.backlog import advance as adv
     from fno.claims.lanes import active_lane_count
 
-    max_lanes = adv._max_lanes()
+    max_lanes = adv._spawn_headroom()
     fill_report: dict = {}
     selected = adv.select_lane_fill(
         max_lanes, project, mission=epic, claim=False, report=fill_report

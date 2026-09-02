@@ -3756,18 +3756,53 @@ def _live_workers_by_project() -> dict[str, int]:
     return counts
 
 
-def _max_lanes() -> int:
-    """Per-project concurrency cap for the epic advance, from ``config.parallel.max_lanes``.
+def _spawn_headroom(provider: Optional[str] = None) -> int:
+    """Dispatch width from the spawn gate's own counters.
 
-    Default 1 (the conservative single lane). A seam so the cap read is
-    patchable in tests without stubbing the whole settings object. Fail-safe: any
-    read fault degrades to 1.
+    ``config.parallel.max_lanes`` once gated the epic advance here, but it was
+    a second concurrency authority beside the real one: a spawn is refused by
+    the spawn gate's ``max_live`` and per-provider ``lanes``, and those are the
+    caps that actually bind. The knob is retired (the deletion ruling stands;
+    the key stays parseable for one release with a deprecation line), and the
+    width now derives from the gate's own counters through the SAME functions
+    ``fno agents top`` and ``advance --explain`` read, so no surface can
+    disagree with the refusal that follows it:
+
+    - fleet: ``agents.max_live`` minus the live census slot count
+    - provider: ``lanes`` minus the live count for ``provider``; with no pin,
+      the most-constrained CONFIGURED provider bounds the next spawn, because
+      the grid may route it anywhere
+
+    The number is advisory width, not the refusal - the gate still refuses at
+    spawn time. Fleet or provider headroom at or below zero returns 0: the
+    fleet is full, and dispatching would only manufacture refusals. A failed
+    reading degrades to 1 (the conservative single lane the retired config
+    default carried) with a warning naming what could not be read.
     """
     try:
+        from fno.agents import spawn_gate
         from fno.config import load_settings
 
-        return int(load_settings().parallel.max_lanes)
-    except Exception:  # noqa: BLE001 - fail-safe to the conservative single lane
+        agents_cfg = load_settings().agents
+        fleet_remaining = int(agents_cfg.max_live) - spawn_gate.census().slot_count
+        limits = dict(agents_cfg.provider_limits)
+        budgets = (
+            {provider: limits.get(provider)} if provider is not None else limits
+        )
+        provider_remaining: Optional[int] = None
+        for name, budget in budgets.items():
+            cap = spawn_gate.provider_lanes_cap(budget)
+            if cap is None:
+                continue  # an uncapped provider cannot bound the width
+            remaining = cap - spawn_gate.provider_live_count(name)
+            if provider_remaining is None or remaining < provider_remaining:
+                provider_remaining = remaining
+        bound = [fleet_remaining]
+        if provider_remaining is not None:
+            bound.append(provider_remaining)
+        return max(0, min(bound))
+    except Exception as exc:  # noqa: BLE001 - degrade to the conservative lane, loudly
+        _LOG.warning("spawn headroom unreadable, degrading to 1 lane: %s", exc)
         return 1
 
 
@@ -3920,11 +3955,13 @@ def advance_epic(
             child_results=(AdvanceResult("skipped", EVENT_SKIPPED, reason="children-error"),),
         )
 
-    # Per-project cap: config.parallel.max_lanes (default 1), seeded with the
-    # project's already-live workers so the cap counts total concurrency, not just
-    # this pass. An overall --max caps total dispatches this run.
-    max_lanes = _max_lanes()
-    per_project = _live_workers_by_project()
+    # Width: spawn-gate headroom (fleet + provider). Live workers already
+    # consumed their capacity inside the read (the census and provider counts
+    # subtract them), so the bound here is how many MORE spawns this pass may
+    # make - not a per-project threshold. A --provider pin reads that
+    # provider's lanes; unpinned, the most constrained configured provider
+    # bounds it. An overall --max caps total dispatches this run.
+    max_lanes = _spawn_headroom(provider)
 
     results: list[AdvanceResult] = []
     dispatched: list[str] = []
@@ -3956,13 +3993,15 @@ def advance_epic(
         if not root:
             results.append(_converge_skip_unmapped(child, proj, canon, ev_path, rank=rank))
             continue
-        # Per-project max_lanes cap (0 = paused project; skip). Counts live workers
-        # + this pass's dispatches.
-        if max_lanes >= 0 and per_project.get(proj, 0) >= max_lanes:
+        # Spawn-gate headroom exhausted this pass (0 = the fleet or the
+        # binding provider is already full). The remaining ready children wait
+        # for a drain / re-run; the gate itself still refuses at spawn time if
+        # the world changed since the read.
+        if total >= max_lanes:
             _emit(
                 EVENT_SKIPPED,
                 {"reason": "lane-cap", "node_id": child["id"], "mission": canon,
-                 "detail": f"{proj}: max_lanes={max_lanes}", "rank": rank},
+                 "detail": f"{proj}: headroom={max_lanes} (spawn gate)", "rank": rank},
                 ev_path,
             )
             results.append(
@@ -3976,7 +4015,6 @@ def advance_epic(
         results.append(res)
         if res.decision == "dispatched":
             dispatched.append(res.node_id or child["id"])
-            per_project[proj] = per_project.get(proj, 0) + 1
             total += 1
 
     return AdvanceEpicResult(

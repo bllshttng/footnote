@@ -203,6 +203,10 @@ operating at different granularity. A session may flip a gate without
 holding any claim (e.g. a one-shot tool) and a claim may be held by
 a session whose gates are all false (it just started).
 
+## Dispatch width has one authority: the spawn gate
+
+Concurrency is bounded where the spawn is refused: `agents.max_live` over the live fleet census, and `agents.provider_limits.<provider>.lanes` per provider. The epic advance derives its dispatch width from those same counters (spawn-gate headroom) through the same functions `fno agents top` and `advance --explain` read, so no two surfaces can disagree about why a launch did not happen. The retired `config.parallel.max_lanes` knob was a second concurrency authority beside the real one; it stays parseable for one release, prints a deprecation line when set, and is otherwise ignored. Delete it from config.
+
 ## Selection-time enforcement (node claims)
 
 `node:<id>` claims are the cross-session mutex that stops two `/target`

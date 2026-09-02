@@ -10820,7 +10820,7 @@ def cmd_advance(
     max_dispatch: Optional[int] = typer.Option(
         None,
         "--max",
-        help="With --epic: cap the total workers this epic advance dispatches (per-project cap is config.parallel.max_lanes).",
+        help="With --epic: cap the total workers this epic advance dispatches (width derives from spawn-gate headroom).",
     ),
     project: Optional[str] = typer.Option(
         None, "--project", "-p", help="Restrict next-node selection to this project."
@@ -10867,8 +10867,9 @@ def cmd_advance(
 
     ``--epic <id>`` switches to the epic advance / converge path (x-9608 K1):
     mark the epic's mission active and fan out every currently-ready LEAF child
-    across all projects. Idempotent; respects config.parallel.max_lanes per
-    project + ``--max`` overall. ``--stop`` deactivates instead.
+    across all projects. Idempotent; the width derives from spawn-gate headroom
+    (fleet max_live and provider lanes) + ``--max`` overall. ``--stop``
+    deactivates instead.
     """
     from fno.dispatch_flags import (
         DispatchFlagError,

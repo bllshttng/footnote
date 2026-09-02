@@ -62,8 +62,9 @@ def _patch_map(monkeypatch, mapping: dict[str, str]):
     )
 
 
-def _patch_max_lanes(monkeypatch, n: int):
-    monkeypatch.setattr(adv, "_max_lanes", lambda: n)
+def _patch_headroom(monkeypatch, n: int):
+    """Width seam: the epic advance reads spawn-gate headroom, not config."""
+    monkeypatch.setattr(adv, "_spawn_headroom", lambda provider=None: n)
 
 
 def _read_epic(epic_id="x-EPIC"):
@@ -160,7 +161,7 @@ def test_fans_out_one_per_mapped_project(iso, tmp_path, monkeypatch):
     """AC1-HP: epic advance dispatches exactly one worker per ready child in each mapped project."""
     _epic_graph(tmp_path, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
-    _patch_max_lanes(monkeypatch, 4)
+    _patch_headroom(monkeypatch, 4)
     calls = _patch_spawn(monkeypatch)
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
@@ -185,7 +186,7 @@ def test_fans_out_one_per_mapped_project(iso, tmp_path, monkeypatch):
 def test_mission_active_field_set(iso, tmp_path, monkeypatch):
     _epic_graph(tmp_path, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
-    _patch_max_lanes(monkeypatch, 4)
+    _patch_headroom(monkeypatch, 4)
     _patch_spawn(monkeypatch)
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
@@ -204,7 +205,7 @@ def test_unmapped_project_loud_skip_others_dispatch(iso, tmp_path, monkeypatch):
     """AC1-ERR: an unmapped project -> loud skip naming the config key; others still dispatch."""
     _epic_graph(tmp_path, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web")})  # etl unmapped
-    _patch_max_lanes(monkeypatch, 4)
+    _patch_headroom(monkeypatch, 4)
     _patch_spawn(monkeypatch)
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
@@ -224,7 +225,7 @@ def test_project_less_child_skips_no_project(iso, tmp_path, monkeypatch):
     """A child with no project is skipped `no-project` (not a misleading unmapped-project)."""
     _epic_graph(tmp_path, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web")})
-    _patch_max_lanes(monkeypatch, 4)
+    _patch_headroom(monkeypatch, 4)
     _patch_spawn(monkeypatch)
     monkeypatch.setattr(
         adv, "_ready_leaf_children",
@@ -244,7 +245,7 @@ def test_spawn_failure_isolated_reservation_released(iso, tmp_path, monkeypatch)
     """AC2-ERR: a spawn failure -> failed receipt, no stale node:<id>, reservation released, others dispatch."""
     _epic_graph(tmp_path, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
-    _patch_max_lanes(monkeypatch, 4)
+    _patch_headroom(monkeypatch, 4)
     _patch_spawn(monkeypatch, fail_on="x-web")
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
@@ -274,7 +275,7 @@ def test_rerun_dispatches_nothing_already_claimed(iso, tmp_path, monkeypatch):
     """AC1-EDGE: an immediate re-run dispatches nothing already node:<id>-claimed."""
     _epic_graph(tmp_path, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
-    _patch_max_lanes(monkeypatch, 4)
+    _patch_headroom(monkeypatch, 4)
     calls = _patch_spawn(monkeypatch)  # claims node:<id> like a real worker
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
@@ -299,7 +300,7 @@ def test_idempotence_not_ttl_dependent(iso, tmp_path, monkeypatch):
     """
     _epic_graph(tmp_path, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
-    _patch_max_lanes(monkeypatch, 4)
+    _patch_headroom(monkeypatch, 4)
     calls = _patch_spawn(monkeypatch, fail_on="x-etl")
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
@@ -370,7 +371,7 @@ def test_overall_max_caps_dispatch(iso, tmp_path, monkeypatch):
     """--max caps total dispatches this pass."""
     _epic_graph(tmp_path, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
-    _patch_max_lanes(monkeypatch, 4)
+    _patch_headroom(monkeypatch, 4)
     calls = _patch_spawn(monkeypatch)
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
@@ -381,8 +382,14 @@ def test_overall_max_caps_dispatch(iso, tmp_path, monkeypatch):
     assert len(calls) == 1
 
 
-def test_per_project_lane_cap(iso, tmp_path, monkeypatch):
-    """config.parallel.max_lanes bounds per-project concurrency (both children same project)."""
+def test_headroom_bounds_dispatches_this_pass(iso, tmp_path, monkeypatch):
+    """Width = spawn-gate headroom; each dispatch consumes one unit of it.
+
+    Both children share a project and the headroom is 1, so the second waits
+    for a drain / re-run with a lane-cap skip naming the gate. The bound is
+    how many MORE spawns this pass may make, not a per-project threshold:
+    live workers already consumed their capacity inside the headroom read.
+    """
     entries = [
         {"id": "x-EPIC", "title": "mission", "project": "fno"},
         {"id": "x-a", "parent": "x-EPIC", "project": "web", "slug": "a", "status": "ready"},
@@ -390,22 +397,27 @@ def test_per_project_lane_cap(iso, tmp_path, monkeypatch):
     ]
     _write_graph(tmp_path, entries, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web")})
-    _patch_max_lanes(monkeypatch, 1)
+    _patch_headroom(monkeypatch, 1)
     _patch_spawn(monkeypatch)
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-a", "web"), ("x-b", "web")))
 
     res = adv.advance_epic("x-EPIC", events_path=iso)
 
-    assert len(res.dispatched) == 1  # max_lanes=1 for project web
+    assert len(res.dispatched) == 1
     lane_caps = [e for e in _events(iso)
                  if e["type"] == "advance_skipped" and e["data"]["reason"] == "lane-cap"]
     assert len(lane_caps) == 1
+    assert "headroom=1" in lane_caps[0]["data"]["detail"]
 
 
-def test_lane_cap_counts_boot_window_reservation(iso, tmp_path, monkeypatch):
-    """A live dispatch:<id> reservation (boot window, no node claim yet) occupies a
-    lane: a same-project child is lane-capped (codex P2), not over-dispatched."""
+def test_boot_window_reservation_no_longer_caps_a_sibling(iso, tmp_path, monkeypatch):
+    """A dispatch:<id> reservation (boot window, no node claim yet) does not
+    cap a DIFFERENT node's dispatch: the width bound moved to spawn-gate
+    headroom, and the gate itself refuses at spawn time if the fleet filled
+    while the first worker was still booting. The reservation's remaining job
+    is per-NODE dedup (never re-dispatch x-a while its spawn is in flight).
+    """
     entries = [
         {"id": "x-EPIC", "title": "mission", "project": "fno"},
         {"id": "x-a", "parent": "x-EPIC", "project": "web", "slug": "a"},
@@ -413,7 +425,7 @@ def test_lane_cap_counts_boot_window_reservation(iso, tmp_path, monkeypatch):
     ]
     _write_graph(tmp_path, entries, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web")})
-    _patch_max_lanes(monkeypatch, 1)
+    _patch_headroom(monkeypatch, 2)
     # x-a is mid boot-window: it holds ONLY a dispatch:<id> reservation, no node claim.
     acquire_claim("dispatch:x-a", "advance:999", ttl_ms=60_000,
                   root=adv._claims_root_for("dispatch:x-a"))
@@ -423,27 +435,29 @@ def test_lane_cap_counts_boot_window_reservation(iso, tmp_path, monkeypatch):
 
     res = adv.advance_epic("x-EPIC", events_path=iso)
 
-    assert res.dispatched == ()  # web lane already held by x-a's reservation
+    assert res.dispatched == ("x-b",)
     lane_caps = [e for e in _events(iso)
                  if e["type"] == "advance_skipped" and e["data"]["reason"] == "lane-cap"]
-    assert len(lane_caps) == 1
+    assert lane_caps == []
 
 
-def test_lane_cap_seeds_live_workers(iso, tmp_path, monkeypatch):
-    """A project already at max_lanes (a live worker) dispatches zero more."""
+def test_exhausted_headroom_skips_the_fleet_full_pass(iso, tmp_path, monkeypatch):
+    """Headroom 0 (the fleet or the binding provider is full) skips with the
+    gate named - live workers per project do not bound anything by themselves."""
     _epic_graph(tmp_path, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
-    _patch_max_lanes(monkeypatch, 1)
-    # web already has one live worker
-    monkeypatch.setattr(adv, "_live_workers_by_project", lambda: {"web": 1})
+    _patch_headroom(monkeypatch, 0)
     _patch_spawn(monkeypatch)
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
 
     res = adv.advance_epic("x-EPIC", events_path=iso)
 
-    # web is capped by the pre-existing live worker; only etl dispatches
-    assert res.dispatched == ("x-etl",)
+    assert res.dispatched == ()
+    lane_caps = [e for e in _events(iso)
+                 if e["type"] == "advance_skipped" and e["data"]["reason"] == "lane-cap"]
+    assert len(lane_caps) == 2
+    assert all("spawn gate" in e["data"]["detail"] for e in lane_caps)
 
 
 # ---------------------------------------------------------------------------
@@ -566,7 +580,7 @@ def test_continuation_refuses_inactive_mission(iso, tmp_path, monkeypatch):
     drain loop retires)."""
     _epic_graph(tmp_path, monkeypatch)  # x-EPIC has no mission_active -> inactive
     _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
-    _patch_max_lanes(monkeypatch, 4)
+    _patch_headroom(monkeypatch, 4)
     calls = _patch_spawn(monkeypatch)
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))
@@ -587,7 +601,7 @@ def test_continuation_drains_active_without_reactivating(iso, tmp_path, monkeypa
     entries[0]["mission_active"] = True  # operator kickoff already activated it
     _write_graph(tmp_path, entries, monkeypatch)
     _patch_map(monkeypatch, {"web": str(tmp_path / "web"), "etl": str(tmp_path / "etl")})
-    _patch_max_lanes(monkeypatch, 4)
+    _patch_headroom(monkeypatch, 4)
     calls = _patch_spawn(monkeypatch)
     monkeypatch.setattr(adv, "_ready_leaf_children",
                         lambda e: _ready(("x-web", "web"), ("x-etl", "etl")))

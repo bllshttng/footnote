@@ -187,7 +187,7 @@ def _lane_fill_world(monkeypatch, ready, *, high_collision_for=None, max_lanes=2
     from fno.backlog import advance as adv
     from types import SimpleNamespace
 
-    monkeypatch.setattr(adv, "_max_lanes", lambda: max_lanes)
+    monkeypatch.setattr(adv, "_spawn_headroom", lambda *a, **k: max_lanes)
     monkeypatch.setattr(adv, "_ready_nodes", lambda project, mission: ready)
     monkeypatch.setattr(adv, "_live_lane_domains", lambda *a, **k: set())
     monkeypatch.setattr(adv, "_live_worked_entries", lambda *a, **k: [])
