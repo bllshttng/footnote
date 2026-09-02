@@ -105,9 +105,15 @@ def _route(tmp_path, monkeypatch) -> tuple[Path, Path]:
 
     g = tmp_path / "graph.json"
     g.write_text('{"entries": []}\n')
-    monkeypatch.setattr(gc, "GRAPH_JSON", g)
-    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
-    monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json")
+    # _constants serves these names through module __getattr__, so they are
+    # NOT real attributes. monkeypatch.setattr would save the resolved value
+    # and its undo would setattr it back, BAKING a frozen path into the module
+    # for every later test in the process (the closure-release tests failed on
+    # exactly that). setitem undoes by deleting the key, so the lazy
+    # __getattr__ keeps answering after this test.
+    monkeypatch.setitem(vars(gc), "GRAPH_JSON", g)
+    monkeypatch.setitem(vars(gc), "GRAPH_MD", tmp_path / "graph.md")
+    monkeypatch.setitem(vars(gc), "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json")
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
     # Seam readers (guarded metadata/display reads) resolve paths.graph_json
     # at call time; pin the resolver to the same hermetic file.

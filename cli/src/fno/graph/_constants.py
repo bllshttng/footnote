@@ -75,6 +75,13 @@ def _briefs_dir() -> Path:
 # still work but are evaluated on first access, not at module import.
 # We define them as regular names for backward-compat; they resolve state_dir()
 # lazily by calling the helpers above.
+#
+# TEST TRAP: these names are NOT real module attributes. Patch them with
+# ``monkeypatch.setitem(vars(module), NAME, value)``, never ``setattr``: a
+# setattr's undo restores via setattr, which BAKES the resolved path into the
+# module as a concrete attribute and defeats the lazy resolution for every
+# later test in the process. Load-bearing consumers (the store's canonicality
+# check) therefore read the resolver, ``paths.graph_json()``, not this facade.
 
 def __getattr__(name: str) -> Path:
     _lazy = {
