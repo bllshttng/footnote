@@ -500,6 +500,12 @@ def release(
     except HolderMismatch as exc:
         typer.echo(f"holder mismatch: {exc}", err=True)
         raise typer.Exit(code=4)
+    except ClaimContended as exc:
+        # A losing racer in a two-process release: the recovery-dir mutex
+        # timed out. A clean named exit, not a traceback - and never the
+        # exit 0 that would read as a release that did not happen.
+        typer.echo(f"claim contended: {exc}", err=True)
+        raise typer.Exit(code=3)
     except ClaimValidationError as exc:
         typer.echo(f"validation error: {exc}", err=True)
         raise typer.Exit(code=2)

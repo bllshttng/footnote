@@ -2166,6 +2166,7 @@ def test_cmd_spawn_pane_refuses_unbound_codex_receipt(tmp_path: Path, monkeypatc
 
     def dispatch_with_fake_mux(**kwargs):
         kwargs.pop("workspace", None)
+        kwargs.pop("bounded_placement", None)
         return real_dispatch(**kwargs, runner=fake_runner)
 
     monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", dispatch_with_fake_mux)
@@ -2567,10 +2568,10 @@ def test_cmd_spawn_threads_stable_tab_id_to_dispatch(tmp_path: Path, monkeypatch
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     result = CliRunner().invoke(
         agents_cli.agents_app,
-        ["spawn", "--name", "peer", "--harness", "claude", "--tab-id", "id:12"],
+        ["spawn", "--name", "peer", "--harness", "claude", "--tab", "id:12"],
     )
     assert result.exit_code == 0, result.output
-    assert captured["tab_id"] == "id:12"
+    assert captured["tab"] == "id:12"
 
 
 def test_cmd_spawn_codex_successor_uses_bounded_dispatch_without_claude_route(
@@ -2622,7 +2623,7 @@ def test_cmd_spawn_codex_successor_uses_bounded_dispatch_without_claude_route(
     assert captured["account_record_id"] == "work"
     assert captured["model_name"] == "gpt-5.6-sol"
     assert captured["workspace"] is None
-    assert captured["tab_id"] is None
+    assert captured["tab"] is None
 
 
 def test_cmd_spawn_default_pane_uses_global_bounded_dispatch(monkeypatch) -> None:
@@ -2684,25 +2685,6 @@ def test_cmd_spawn_explicit_split_still_uses_global_placement_lease(monkeypatch)
 
     assert result.exit_code == 0, result.output
     assert captured["split"] == "right"
-
-
-def test_cmd_spawn_refuses_ordinal_tab_id_before_dispatch(tmp_path: Path, monkeypatch) -> None:
-    from typer.testing import CliRunner
-
-    import fno.agents.cli as agents_cli
-    import fno.agents.mux_spawn as mux_spawn
-
-    monkeypatch.setattr(
-        mux_spawn, "dispatch_spawn_pane",
-        lambda **_kwargs: pytest.fail("dispatch must not run"),
-    )
-    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
-    result = CliRunner().invoke(
-        agents_cli.agents_app,
-        ["spawn", "--name", "peer", "--harness", "claude", "--tab-id", "12"],
-    )
-    assert result.exit_code == 2
-    assert "id:<stable-id>" in result.output
 
 
 def test_cmd_spawn_placement_rejected_on_bg_substrate(tmp_path: Path, monkeypatch) -> None:
@@ -3571,6 +3553,7 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
 
     def dispatch_with_fake_mux(**kwargs):
         kwargs.pop("workspace", None)
+        kwargs.pop("bounded_placement", None)
         return real_dispatch(**kwargs, runner=fake_runner)
 
     monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", dispatch_with_fake_mux)

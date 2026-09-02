@@ -25,6 +25,7 @@ from __future__ import annotations
 import fcntl
 import functools
 import json
+import logging
 import os
 import re
 import shutil
@@ -3437,6 +3438,10 @@ def dispatch_spawn_bounded_pane(
             f"{', '.join(PANE_HOSTABLE_PROVIDERS)}",
             exit_code=2,
         )
+    # The wrapper's own control flag, never a pane-spawn argument: the CLI
+    # passes it on every pane lane, and forwarding it would TypeError the
+    # half below.
+    spawn_kwargs.pop("bounded_placement", None)
     session = resolve_mux_session(spawn_kwargs.pop("session", None))
     holder = placement_holder or f"mux-placement:{os.getpid()}:{_uuid.uuid4()}"
     key = f"placement:{session}:global"
@@ -3453,7 +3458,8 @@ def dispatch_spawn_bounded_pane(
         ) from exc
     try:
         explicit_geometry = any(
-            spawn_kwargs.get(key) is not None for key in ("split", "at", "tab_id")
+            spawn_kwargs.get(key) is not None
+            for key in ("split", "at", "tab_id", "tab")
         )
         if explicit_geometry:
             return dispatch_spawn_pane(
@@ -3476,8 +3482,15 @@ def dispatch_spawn_bounded_pane(
     finally:
         try:
             release_claim(key, holder, strict=True, root=root)
-        except Exception:  # noqa: BLE001 - a stale lease release must not mask the spawn result
-            pass
+        except Exception as exc:  # noqa: BLE001 - a stale lease release must not mask the spawn result
+            # The swallow stays (the spawn already succeeded; aborting it over
+            # a lease release would be a worse failure), but it is LOUD: a
+            # lease held past its TTL with no diagnostic trail is a silent
+            # custody loss on the placement path.
+            logging.getLogger(__name__).warning(
+                "mux placement lease %s release failed after spawn: %s: %s",
+                key, type(exc).__name__, exc,
+            )
 
 
 def dispatch_spawn_pane(
