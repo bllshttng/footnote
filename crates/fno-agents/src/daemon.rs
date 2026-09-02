@@ -1486,6 +1486,97 @@ fn worktree_clean_probe(cwd: &str) -> Option<bool> {
     None
 }
 
+/// (x-d545) The reapable gate's answer for a removed row's worktree: the
+/// verdict, plus the reason a kept tree names in its receipt.
+enum WorktreeGate {
+    Reapable,
+    Blocked(String),
+    Unanswerable(String),
+}
+
+/// Ask `fno agents workspace worktree reapable` - the same verb the `--merged`
+/// sweep, `archive-worktree.sh` and the GC probe ask - and read BOTH the
+/// literal marker and the reason, so a kept tree's receipt can name why.
+fn worktree_gate(cwd: &str) -> WorktreeGate {
+    let out = match std::process::Command::new("fno")
+        .args(["agents", "workspace", "worktree", "reapable", cwd])
+        .output()
+    {
+        Ok(out) => out,
+        Err(_) => {
+            return WorktreeGate::Unanswerable("the reapable probe could not run".into());
+        }
+    };
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let reason = |fallback: &str| -> String {
+        text.split("reason=")
+            .nth(1)
+            .and_then(|r| r.split_whitespace().next())
+            .unwrap_or(fallback)
+            .to_string()
+    };
+    // The literal marker, never a bare exit code a shim could swallow - the
+    // same double permission `worktree_clean_probe` needs.
+    if out.status.success() && text.contains("reapable=yes") {
+        return WorktreeGate::Reapable;
+    }
+    if text.contains("reapable=no") {
+        return WorktreeGate::Blocked(reason("blocked"));
+    }
+    WorktreeGate::Unanswerable("the reapable probe could not answer".into())
+}
+
+/// (x-d545) A human removed ONE named row: its worktree goes with it, but
+/// only through the reapable gate - the same three buckets the `--merged`
+/// sweep and the watchdog honor (DIRTY untouched, clean-and-unmerged never
+/// auto-pruned, clean loses the TREE and keeps the BRANCH: `git worktree
+/// remove` never deletes branches). A gate that cannot answer keeps the
+/// tree - removal never guesses. The row is removed either way; a protected
+/// worktree must not wedge the row on the sideline. `None`: the row owned no
+/// linked worktree, a clean no-op.
+fn rm_take_worktree_with(
+    entry: &state::RegistryEntry,
+    gate: &dyn Fn(&str) -> WorktreeGate,
+    remove: &dyn Fn(&str) -> Result<(), String>,
+) -> Option<String> {
+    let cwd = entry.cwd.as_str();
+    if !is_linked_worktree(cwd) {
+        return None;
+    }
+    match gate(cwd) {
+        WorktreeGate::Reapable => match remove(cwd) {
+            Ok(()) => Some(format!("worktree removed: {cwd}")),
+            Err(e) => Some(format!(
+                "worktree kept: {cwd} (git worktree remove failed: {e})"
+            )),
+        },
+        WorktreeGate::Blocked(reason) => {
+            Some(format!("worktree kept: {cwd} (the gate said no: {reason})"))
+        }
+        WorktreeGate::Unanswerable(why) => Some(format!("worktree kept: {cwd} ({why})")),
+    }
+}
+
+fn rm_take_worktree(entry: &state::RegistryEntry) -> Option<String> {
+    rm_take_worktree_with(entry, &worktree_gate, &|cwd| {
+        std::process::Command::new("git")
+            .args(["worktree", "remove", "--force", cwd])
+            .output()
+            .map_err(|e| e.to_string())
+            .and_then(|out| {
+                if out.status.success() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "exited {}: {}",
+                        out.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ))
+                }
+            })
+    })
+}
+
 /// Wall-clock epoch seconds, for GC grace math. Degrades to 0 (a pre-1970 clock
 /// makes every stamped row look in-grace -> nothing reaped, the safe direction).
 fn now_epoch_secs() -> i64 {
@@ -8310,6 +8401,10 @@ async fn handle_rm_with(
         );
     }
     cleanup_king_manifest(&entry);
+    // (x-d545) The row is gone from the registry: take its worktree, but only
+    // as far as the reapable gate allows. The receipt rides the event and the
+    // result; a refusal never blocks the removal that already happened.
+    let worktree_receipt = rm_take_worktree(&entry);
     let pane_session = entry.mux.as_ref().map(|mux| mux.session.clone());
     let pane_id = entry.mux.as_ref().map(|mux| mux.pane_id);
     let event = json!({
@@ -8324,6 +8419,7 @@ async fn handle_rm_with(
         "pane_id": pane_id,
         "pane_removed": pane_outcome.removed_json(),
         "pane_reason": pane_outcome.reason(),
+        "worktree_receipt": worktree_receipt,
         "was_orphaned": was_orphaned,
     });
     let event_payload_len = serde_json::to_string(&event)
@@ -8353,6 +8449,7 @@ async fn handle_rm_with(
         "pane_id": pane_id,
         "pane_removed": pane_outcome.removed_json(),
         "pane_reason": pane_outcome.reason(),
+        "worktree_receipt": worktree_receipt,
         "event_written": event_error.is_none(),
         "event_reason": event_error,
         "was_orphaned": was_orphaned,
@@ -10957,6 +11054,94 @@ mod tests {
             .entries
             .is_empty());
         std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// A temp dir whose `.git` is a FILE: linked-worktree shape, no real repo
+    /// behind it (the gate and the removal are injected, so none is needed).
+    fn fake_worktree(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fno-rm-wt-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".git"), "gitdir: /elsewhere/worktrees/x.git\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn rm_take_worktree_removes_when_the_gate_answers_yes() {
+        // AC5-HP: a clean tree goes. The branch survives by git's own
+        // contract (`worktree remove` never deletes branches) - the command
+        // choice is the sweep's, not a second policy.
+        let wt = fake_worktree("clean");
+        let mut row = ask_row("wt1", Some("2020-01-01T00:00:00Z"));
+        row.cwd = wt.to_string_lossy().into_owned();
+        let receipt = rm_take_worktree_with(&row, &|_| WorktreeGate::Reapable, &|_| Ok(()));
+        assert_eq!(
+            receipt.as_deref().map(|s| s.to_string()),
+            Some(format!("worktree removed: {}", wt.to_string_lossy()))
+        );
+        std::fs::remove_dir_all(&wt).ok();
+    }
+
+    #[test]
+    fn rm_take_worktree_keeps_a_blocked_tree_and_names_the_reason() {
+        // AC6-EDGE: DIRTY or clean-and-unmerged keeps the tree; the receipt
+        // names the path and the gate's reason. The ROW was already removed
+        // by the caller - the receipt never blocks that.
+        let wt = fake_worktree("dirty");
+        let mut row = ask_row("wt2", Some("2020-01-01T00:00:00Z"));
+        row.cwd = wt.to_string_lossy().into_owned();
+        let receipt = rm_take_worktree_with(
+            &row,
+            &|_| WorktreeGate::Blocked("modified-tracked".into()),
+            &|_| Ok(()),
+        );
+        assert_eq!(
+            receipt.as_deref().map(|s| s.to_string()),
+            Some(format!(
+                "worktree kept: {} (the gate said no: modified-tracked)",
+                wt.to_string_lossy()
+            ))
+        );
+        std::fs::remove_dir_all(&wt).ok();
+    }
+
+    #[test]
+    fn rm_take_worktree_keeps_the_tree_when_the_probe_cannot_answer() {
+        // AC7-ERR: an unanswerable probe keeps the tree. Removal never guesses.
+        let wt = fake_worktree("mute");
+        let mut row = ask_row("wt3", Some("2020-01-01T00:00:00Z"));
+        row.cwd = wt.to_string_lossy().into_owned();
+        let receipt = rm_take_worktree_with(
+            &row,
+            &|_| WorktreeGate::Unanswerable("the reapable probe could not answer".into()),
+            &|_| Ok(()),
+        );
+        assert_eq!(
+            receipt.as_deref().map(|s| s.to_string()),
+            Some(format!(
+                "worktree kept: {} (the reapable probe could not answer)",
+                wt.to_string_lossy()
+            ))
+        );
+        std::fs::remove_dir_all(&wt).ok();
+    }
+
+    #[test]
+    fn rm_take_worktree_is_a_noop_for_a_row_without_a_linked_worktree() {
+        // A row that ran in a plain directory owns nothing removable: the
+        // gate is never consulted, the receipt is None, nothing fails.
+        let mut row = ask_row("wt4", Some("2020-01-01T00:00:00Z"));
+        row.cwd = "/tmp/plain-cwd".into();
+        let asked = std::cell::Cell::new(0);
+        let receipt = rm_take_worktree_with(
+            &row,
+            &|_| {
+                asked.set(asked.get() + 1);
+                WorktreeGate::Reapable
+            },
+            &|_| Ok(()),
+        );
+        assert_eq!(receipt, None);
+        assert_eq!(asked.get(), 0, "the gate was never consulted");
     }
 
     #[tokio::test]

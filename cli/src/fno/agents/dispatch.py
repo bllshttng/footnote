@@ -3864,6 +3864,61 @@ class RmResult:
     claude_exit: Optional[int] = None
     force: bool = False
     registry_changed: bool = False
+    worktree_receipt: Optional[str] = None
+
+
+def _prune_row_worktree(entry: Any) -> Optional[str]:
+    """Take a removed row's worktree with it, through the reapable gate only.
+
+    A human removed ONE named row, so its worktree may go with it - but a
+    row removal must never become a fourth door around the three buckets in
+    ``.claude/rules/worktrees.md``. Every decision routes through
+    :func:`fno.worktree_reapable.reapable` (the classifier behind
+    ``fno agents workspace worktree reapable``): DIRTY is never touched,
+    clean-and-unmerged is never auto-pruned, and clean loses the TREE while
+    the branch stays (``git worktree remove`` never deletes branches, the
+    ``--merged`` sweep's own command with the gate already passed).
+
+    A gate that cannot answer keeps the tree - removal never guesses. A
+    refusal prints a receipt naming the path and the gate's reason, and the
+    ROW is removed either way: a protected worktree must not wedge the row
+    on the sideline. ``None``: the row owned no linked worktree, a clean
+    no-op.
+    """
+    cwd = entry.cwd or ""
+    if not cwd:
+        return None
+    try:
+        owns_worktree = (Path(cwd) / ".git").is_file()
+    except OSError:
+        owns_worktree = False
+    if not owns_worktree:
+        return None
+
+    from fno.worktree_reapable import reapable as classify_reapable
+
+    verdict = classify_reapable(cwd)
+    if not verdict.reapable:
+        if verdict.reason == "probe-failed":
+            return (
+                f"worktree kept: {cwd} "
+                f"(the reapable probe could not answer: {verdict.detail or verdict.reason})"
+            )
+        return f"worktree kept: {cwd} (the gate said no: {verdict.reason})"
+    try:
+        removed = subprocess.run(
+            ["git", "worktree", "remove", "--force", cwd],
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"worktree kept: {cwd} (git worktree remove failed: {exc})"
+    if removed.returncode != 0:
+        detail = (removed.stderr or "").strip().splitlines()
+        why = detail[0] if detail else f"exited {removed.returncode}"
+        return f"worktree kept: {cwd} (git worktree remove failed: {why})"
+    return f"worktree removed: {cwd}"
 
 
 @dataclass(frozen=True)
@@ -4941,6 +4996,14 @@ def rm_agent(
                     ),
                 )
 
+            # (x-d545) The row is gone from the registry: now take its
+            # worktree, but only as far as the reapable gate allows. The
+            # receipt rides stdout, the event, and RmResult; a refusal never
+            # blocks the removal that already happened.
+            worktree_receipt = _prune_row_worktree(existing)
+            if worktree_receipt:
+                print(worktree_receipt, flush=True)
+
             # Stdout "removed:" prints come AFTER update_registry succeeds so
             # a write failure cannot leave the operator with a misleading
             # confirmation. (Sigma-review C3 finding.)
@@ -4960,6 +5023,7 @@ def rm_agent(
                 force=force,
                 registry_changed=True,
                 teardown_error=teardown_error,
+                worktree_receipt=worktree_receipt,
             )
             return RmResult(
                 name=name,
@@ -4967,6 +5031,7 @@ def rm_agent(
                 claude_exit=claude_exit,
                 force=force,
                 registry_changed=True,
+                worktree_receipt=worktree_receipt,
             )
     except AgentLockTimeout as exc:
         # Symmetric with stop_agent's lock-timeout emit so forensics can
