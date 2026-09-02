@@ -120,15 +120,17 @@ def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit(monkeypatch) -> N
 
 def test_lane_b_spawn_wiring_names_every_wired_keeper_harness() -> None:
     """The public dispatch_spawn body reaches the keeper entry point through
-    BOTH wired arms - cursor-agent (callee-minted) and pi (caller-assigned,
-    x-43bd) - and this keeps either wiring from being dropped by accident.
-    (pi's half inverts the pre-arm guard, which asserted the public body did
-    NOT reference the driver while the arm was unbuilt.)
+    the wired arms - cursor-agent (callee-minted), pi (caller-assigned,
+    x-43bd) and grok (caller-assigned, x-fd31) - and this keeps any wiring
+    from being dropped by accident. (pi's half inverts the pre-arm guard,
+    which asserted the public body did NOT reference the driver while the
+    arm was unbuilt.)
     """
     source = inspect.getsource(dispatch_mod.dispatch_spawn)
     assert "_lane_b_thread_spawn" in source
     assert 'harness="cursor-agent"' in source
     assert 'harness="pi"' in source
+    assert 'harness="grok"' in source
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +199,58 @@ def test_lane_b_spawn_renders_the_contract_argv_and_registers_the_row(
     assert row.pid == 4242
     assert row.mux is None, "a thread row is pane-less: no mux ref"
     assert row.origin == "spawn"
+
+
+def test_lane_b_spawn_renders_grok_argv_and_registers_the_row(
+    lane_b_home, monkeypatch
+) -> None:
+    """grok's keeper arm (x-fd31): the minted caller-assigned uuid rides the
+    create argv (the row's interactive_create render) and the keeper's
+    --pane-key; the bypass, model and effort axes ride the arm, the same
+    completion build_pane_argv's grok arm composes for the pane lane."""
+    recorded = _fake_keeper(monkeypatch, lane_b_home)
+    receipt = _lane_b_thread_spawn(
+        name="wk-grok",
+        harness="grok",
+        cwd=lane_b_home,
+        yolo=True,
+        model="grok-4.6",
+        effort="high",
+    )
+
+    argv = list(recorded["argv"])  # type: ignore[arg-type]
+    assert argv[0] == "/fake/fno-agents-worker"
+    assert argv[1] == "--keeper", "the pane-less spelling is canonical"
+    worker_tail = argv[argv.index("--") + 1 :]
+    session_id = receipt["session_id"]
+    expected_tail = [
+        *render_session_argv("grok", "interactive_create", session_id),
+        "--always-approve",
+        "--model",
+        "grok-4.6",
+        "--reasoning-effort",
+        "high",
+    ]
+    assert worker_tail == expected_tail, (
+        "the provider argv is the contract's render plus the axes the pane "
+        "lane appends, never hand-assembled"
+    )
+    assert argv[argv.index("--pane-key") + 1] == session_id
+
+    entries = load_registry()
+    assert [e.name for e in entries] == ["wk-grok"]
+    row = entries[0]
+    assert row.harness == "grok"
+    assert row.harness_session_id == session_id
+    assert row.messaging_socket_path == receipt["keeper_socket"]
+    assert row.mux is None, "a thread row is pane-less: no mux ref"
+
+
+def test_grok_is_a_keeper_lane_harness() -> None:
+    """The row's resume forms make grok a keeper-lane harness (interactive
+    attach unsupported, resume supported), the same lane pi and cursor-agent
+    resolve onto."""
+    assert thread_lane("grok") == "keeper"
 
 
 def test_lane_b_socket_follows_the_agents_home_the_sweep_derives_from(

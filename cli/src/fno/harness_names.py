@@ -35,6 +35,7 @@ KNOWN_HARNESSES: tuple[str, ...] = (
     "hermes",
     "openclaw",
     "cursor-agent",
+    "grok",
 )
 
 # Thread/headless accepts opencode through its launch seam, and the
@@ -56,4 +57,19 @@ KNOWN_HARNESSES: tuple[str, ...] = (
 # dispatch_spawn arm mints the chat id through `create-chat`, hosts the TUI
 # under `fno-agents-worker --keeper`, and the journey backs it. Its `thread`
 # row reads true behind that same journey.
-SPAWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode", "cursor-agent", "pi")
+#
+# grok joins the same keeper lane (x-fd31): the dispatch_spawn arm mints the
+# caller-assigned `--session-id` uuid, hosts the TUI under
+# `fno-agents-worker --keeper`, and the live measurement (create, SIGKILL,
+# `--resume` recall) backs the row. kimi is deliberately ABSENT: its ACP
+# mint lane is built and unit-tested, but the binary refuses every turn
+# until its provider is configured (the operator's who-pays axis), so no
+# row and no SPAWN_HARNESSES seat can stand behind an unmeasured lane.
+SPAWN_HARNESSES: tuple[str, ...] = (
+    "claude",
+    "codex",
+    "opencode",
+    "cursor-agent",
+    "pi",
+    "grok",
+)

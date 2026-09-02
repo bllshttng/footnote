@@ -1593,6 +1593,76 @@ pub fn gemini_session_id_from_blob(blob: &str) -> Option<String> {
 /// the spawn gates in `bin/client.rs` and [`for_name`] ride THIS list (x-51f6
 /// US1: one source of truth, no per-site `matches!` copies).
 ///
+/// grok provider, roster parity like cursor's: the lanes fno dispatches on
+/// (pane, keeper-hosted thread) are composed in Python (`build_pane_argv`,
+/// `_lane_b_thread_spawn`); the row's argv lives in the capability contract
+/// both languages embed. What lives HERE is the interactive-lane rendering
+/// the provider contract exercises and an honest reachability answer.
+pub struct GrokProvider;
+
+impl Provider for GrokProvider {
+    fn name(&self) -> &'static str {
+        "grok"
+    }
+
+    fn create_argv(&self, ctx: &CreateContext) -> Vec<String> {
+        let session_id = ctx
+            .session_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| panic!("grok create requires a caller-assigned session uuid"));
+        crate::harness_capabilities::render_session_argv(
+            "grok",
+            "interactive_create",
+            Some(session_id),
+        )
+        .expect("embedded grok interactive-create capability")
+    }
+
+    fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
+        // The declared form only. The documented [PROMPT] positional is an
+        // unfenced seed seam and no grok lane consumes this argv - Python
+        // owns grok's lanes and its seed rides the keeper paste, which
+        // fences through Input frames rather than argv - so no message is
+        // appended here.
+        crate::harness_capabilities::render_session_argv(
+            "grok",
+            "interactive_resume",
+            Some(&ctx.session_id),
+        )
+        .expect("embedded grok interactive-resume capability")
+    }
+
+    fn parse_stream_event(&self, chunk: &str) -> ParsedEvent {
+        // `grok -p` prints plain text (exercised once in the x-fd31
+        // measurement); a chunk is reply text, same reading as pi's.
+        if chunk.trim().is_empty() {
+            ParsedEvent::Unknown {
+                raw: chunk.to_string(),
+            }
+        } else {
+            ParsedEvent::ReplyComplete {
+                text: chunk.to_string(),
+                duration_ms: 0,
+            }
+        }
+    }
+
+    fn reachability(
+        &self,
+        _entry: &AgentEntry,
+        _timeout: Duration,
+    ) -> Result<bool, ReachabilityProbeError> {
+        // The session store (`grok sessions`) is cwd-scoped and its layout is
+        // unwired; an inconclusive answer is the honest one until a probe is
+        // measured against it.
+        Err(ReachabilityProbeError::new(
+            "grok",
+            "session store layout unwired; reachability requires live cross-process recall",
+        ))
+    }
+}
+
 /// NAMING SKEW (x-8dfc, Discretion 4 — commented, not lockstep-renamed, to keep
 /// the diff small): this 5-name list mirrors Python's `READABLE_PROVIDERS` (the
 /// spawn/pane read-tolerance roster), NOT Python's narrower 3-name
@@ -1609,6 +1679,7 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
     "opencode",
     "pi",
     "cursor-agent",
+    "grok",
 ];
 
 /// The roster joined for error messages ("claude, codex, gemini, agy, opencode, pi").
@@ -1630,6 +1701,7 @@ pub fn for_name(name: &str) -> Option<Box<dyn Provider>> {
         "opencode" => Some(Box::new(OpencodeProvider)),
         "pi" => Some(Box::new(PiProvider)),
         "cursor-agent" => Some(Box::new(crate::cursor_agent::CursorAgentProvider)),
+        "grok" => Some(Box::new(GrokProvider)),
         _ => None,
     }
 }

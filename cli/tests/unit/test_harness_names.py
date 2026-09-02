@@ -26,7 +26,7 @@ def test_capability_keys_are_a_nonempty_subset_of_the_complete_roster():
 
 
 def test_the_complete_roster_carries_the_evidence_backed_hosts():
-    """AC1-HP: KNOWN_HARNESSES is the COMPLETE supported roster - the seven
+    """AC1-HP: KNOWN_HARNESSES is the COMPLETE supported roster - the eight
     capability-backed names plus hermes and openclaw, which host real sessions
     per docs/SETUP-*.md. scripts/ci/check-harness-roster-parity.py holds this
     union against the shipped evidence surfaces in CI."""
@@ -40,12 +40,13 @@ def test_the_complete_roster_carries_the_evidence_backed_hosts():
         "opencode",
         "pi",
         "cursor-agent",
+        "grok",
         "hermes",
         "openclaw",
     }
     from fno.agents.harness_map import known_harnesses
 
-    # The capability-backed roster stays at seven; the wider names ride the
+    # The capability-backed roster stays at eight; the wider names ride the
     # roster only, which is the asymmetry this change exists to declare.
     assert set(known_harnesses()) == {
         "claude",
@@ -55,6 +56,7 @@ def test_the_complete_roster_carries_the_evidence_backed_hosts():
         "opencode",
         "pi",
         "cursor-agent",
+        "grok",
     }
 
 

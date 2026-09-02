@@ -139,6 +139,7 @@ HARNESS_SESSION_ID_FIELDS = {
     "opencode": "harness_session_id",
     "pi": "harness_session_id",
     "cursor-agent": "harness_session_id",
+    "grok": "harness_session_id",
 }
 
 # The registry's legacy per-harness session-id keys (x-ec59). Distinct from the
