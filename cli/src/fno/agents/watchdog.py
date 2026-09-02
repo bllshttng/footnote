@@ -2294,10 +2294,16 @@ def measure_provider_outages(
         transcript_path_for=transcript_path_for,
         evidence_freshness_s=policy.evidence_freshness_s,
     )
+    # Rows whose transcript cannot be read fall back to the pane buffer: both
+    # a MISSING transcript and an UNSUPPORTED transcript SHAPE leave the pane
+    # as the only instrument that can see a 429/529. Without the second
+    # reason in this set, every codex or opencode pane row reads as a named
+    # refusal and the quorum never hears it - the exact shape that made the
+    # non-Claude fleet invisible.
     unreadable_rows = {
         str(item.get("row_id"))
         for item in refusals
-        if item.get("reason") == "transcript_unreadable"
+        if item.get("reason") in ("transcript_unreadable", "transcript_shape_unsupported")
     }
     if unreadable_rows:
         if pane_read_fn is None:
@@ -2329,7 +2335,7 @@ def measure_provider_outages(
         refusals = [
             item for item in refusals
             if not (
-                item.get("reason") == "transcript_unreadable"
+                item.get("reason") in ("transcript_unreadable", "transcript_shape_unsupported")
                 and str(item.get("row_id")) in successful_rows
             )
         ]

@@ -134,6 +134,12 @@ class EvidenceIdentity:
     cwd: str
 
 
+# Shapes this module can actually parse. Anything else refuses by name before
+# a single line is read - a foreign shape pushed through a Claude JSONL parser
+# fails every line and reads as a healthy, quiet fleet.
+_PARSABLE_TRANSCRIPT_SHAPES = frozenset({"claude"})
+
+
 def _message_text(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
@@ -162,7 +168,12 @@ def collect_transcript_evidence(
     transcript_path_for: Callable[[EvidenceIdentity], Path | None] | None = None,
     evidence_freshness_s: float = 600,
 ) -> tuple[list["OutageEvidence"], list[dict[str, Any]]]:
-    """Read raw assistant records without consulting liveness projections."""
+    """Read raw assistant records without consulting liveness projections.
+
+    Dispatches on harness: only shapes with a parser here are read. A harness
+    whose transcript shape has no parser is a NAMED refusal carrying the
+    harness and the resolved path - never an empty result that reads as a
+    quiet, healthy fleet."""
     if transcript_path_for is None:
         from fno.provenance.observed import resolve_transcript_path
 
@@ -178,22 +189,27 @@ def collect_transcript_evidence(
             refusals.append({
                 "row_id": identity.row_id,
                 "reason": "unknown_route_identity",
+                "harness": identity.harness,
                 "count": 1,
             })
             continue
-        if identity.harness == "codex":
-            # resolve_transcript_path resolves a real file for codex too, but
-            # the parser below reads Claude Code's own JSONL shape - codex
-            # writes a different on-disk shape (fno.agents.discover), so
-            # every line would fail silently and read as a healthy
-            # zero-evidence row instead of a harness this instrument cannot
-            # see. Refusing here replaces that silent no-op with a named one.
-            # gemini/opencode never reach this point: resolve_transcript_path
-            # already returns no path for them, which refuses upstream as
-            # transcript_unreadable.
+        if identity.harness not in _PARSABLE_TRANSCRIPT_SHAPES:
+            # resolve_transcript_path resolves a real file for codex too, and
+            # every other harness may still have a path on disk; the parser
+            # below reads Claude Code's own JSONL shape only. Reading a
+            # foreign shape through it would fail every line silently and
+            # read as a healthy zero-evidence row. Refusing here - with the
+            # harness and the path named - replaces that silent no-op for
+            # codex, gemini, opencode, and anything unlisted.
+            try:
+                path = transcript_path_for(identity)
+            except Exception:  # noqa: BLE001 - the path read must not mask the refusal
+                path = None
             refusals.append({
                 "row_id": identity.row_id,
                 "reason": "transcript_shape_unsupported",
+                "harness": identity.harness,
+                "path": str(path) if path is not None else None,
                 "count": 1,
             })
             continue
@@ -215,6 +231,8 @@ def collect_transcript_evidence(
             refusals.append({
                 "row_id": identity.row_id,
                 "reason": "transcript_unreadable",
+                "harness": identity.harness,
+                "path": str(path) if path is not None else None,
                 "count": 1,
             })
             continue

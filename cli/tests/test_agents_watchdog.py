@@ -1294,12 +1294,31 @@ def test_an_open_429_window_never_retires():
     """A session waiting out a rate limit is silent and is NOT finished. Retire
     sits above the reroute lane, so without this it stops exactly the rows
     reroute exists to move onto a fresh account, and stops them without
-    rotating anything. `reap_decision` refuses on the same reading."""
+    rotating anything. `reap_decision` refuses on the same reading. Reroute
+    itself needs a quorum-confirmed breaker: a lone 429 is terminal for the
+    session but is not provider-wide authority, so without one the row reads
+    LEAVE, named as waiting for positive quorum."""
     row = Row("dddd4444-0000", "bp-worker", "blocked", None, "/tmp/bp", "spawn")
     tail = f"{FINISHED_TAIL}\n{RATE_LIMIT_TAIL}"
-    [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=20)})
+    facts = {row.row_id: _facts(tail, age_min=20)}
+    [v] = _retire_run([row], facts)
     assert v.verdict != watchdog.RETIRE
-    assert v.verdict == REROUTE, "the row belongs to reroute, not retire"
+    assert v.verdict == LEAVE, "a lone 429 has no provider-wide authority"
+    assert "quorum" in v.basis
+    breaker_outages = {"breakers": [{
+        "provider": "zai", "account": "acct-a", "outage_epoch": "1",
+        "row_ids": [row.row_id],
+    }]}
+    [v] = verdicts(
+        [row],
+        transcript_for=lambda sid: facts.get(sid),
+        claim_for=lambda node: {},
+        node_state_for=lambda node: None,
+        now_s=NOW_1840,
+        retire_grace_s_value=RETIRE_GRACE,
+        provider_outages=breaker_outages,
+    )
+    assert v.verdict == REROUTE, "a quorum-confirmed breaker moves the row"
 
 
 def test_the_predicate_is_the_only_route_to_a_retire_verdict():
@@ -2359,14 +2378,14 @@ def test_ac1_det_readable_transcript_is_not_duplicated_as_a_pane_vote(tmp_path):
         "message": {"role": "assistant", "content": "API Error 429: Fair Usage Policy"},
     }) + "\n", encoding="utf-8")
     entry = SimpleNamespace(
-        harness_session_id="session-1", harness="agy",
+        harness_session_id="session-1", harness="claude",
         route_provider_id="zai", account_record_id="acct-a", cwd=str(tmp_path),
         mux={"session": "stable-session", "pane_id": 9},
     )
     reads = []
 
     report = watchdog.measure_provider_outages(
-        [Row("session-1", "agy", "working", "x-abcd", str(tmp_path))],
+        [Row("session-1", "claude", "working", "x-abcd", str(tmp_path))],
         now_s=NOW_1840,
         entries_provider=lambda: [entry],
         transcript_path_for=lambda _identity: transcript,
@@ -2377,6 +2396,33 @@ def test_ac1_det_readable_transcript_is_not_duplicated_as_a_pane_vote(tmp_path):
 
     assert report["counts"]["accepted"] == 1
     assert reads == []
+
+
+def test_ac1_det_shape_unsupported_row_votes_once_through_the_pane(tmp_path):
+    """A row whose transcript shape has no parser refuses the transcript lane
+    BY NAME and votes once through its pane - the pane is the only instrument
+    that can see a 429 on that row. Without the fallback, every non-claude
+    pane row reads as a named refusal and the quorum never hears it."""
+    entry = SimpleNamespace(
+        harness_session_id="session-1", harness="agy",
+        route_provider_id="zai", account_record_id="acct-a", cwd=str(tmp_path),
+        mux={"session": "stable-session", "pane_id": 9},
+    )
+    reads = []
+
+    report = watchdog.measure_provider_outages(
+        [Row("session-1", "agy", "working", "x-abcd", str(tmp_path))],
+        now_s=NOW_1840,
+        entries_provider=lambda: [entry],
+        transcript_path_for=lambda _identity: tmp_path / "absent.jsonl",
+        pane_read_fn=lambda *args: reads.append(args) or "API Error 429: Fair Usage Policy",
+        pane_snapshot_dir=tmp_path / "snapshots",
+        journal=tmp_path / "provider-outages.json",
+    )
+
+    assert report["instrument"] == "measured"
+    assert report["counts"]["accepted"] == 1
+    assert len(reads) == 1  # one pane read, never a duplicated vote
 
 
 def test_production_measure_applies_validated_outage_policy_settings(tmp_path):

@@ -279,7 +279,62 @@ def test_ac1_det_quoted_user_record_and_missing_route_identity_do_not_vote(tmp_p
     assert [record.row_id for record in records] == ["quoted"]
     assert all(record.role == "assistant" for record in records)
     assert refusals == [{
-        "row_id": "unknown", "reason": "unknown_route_identity", "count": 1,
+        "row_id": "unknown", "reason": "unknown_route_identity",
+        "harness": "claude", "count": 1,
+    }]
+
+
+def test_ac3_err_unparsed_shape_refuses_by_name_carrying_harness_and_path(tmp_path):
+    """A harness whose transcript shape has no parser is a NAMED refusal with
+    the harness and the resolved path - never an empty result that reads as a
+    quiet, healthy fleet. codex, gemini, and opencode all land here."""
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text('{"not":"a claude record"}\n', encoding="utf-8")
+    identities = [
+        EvidenceIdentity("codex-row", "codex", "openai", "acct-a", "s1", str(tmp_path)),
+        EvidenceIdentity("gemini-row", "gemini", "google", "acct-b", "s2", str(tmp_path)),
+        EvidenceIdentity("opencode-row", "opencode", "opencode", "acct-c", "s3", str(tmp_path)),
+    ]
+
+    records, refusals = collect_transcript_evidence(
+        identities, now_s=NOW,
+        transcript_path_for=lambda _identity: transcript,
+    )
+
+    assert records == []
+    by_row = {item["row_id"]: item for item in refusals}
+    assert set(by_row) == {"codex-row", "gemini-row", "opencode-row"}
+    for row_id, harness in (
+        ("codex-row", "codex"),
+        ("gemini-row", "gemini"),
+        ("opencode-row", "opencode"),
+    ):
+        item = by_row[row_id]
+        assert item["reason"] == "transcript_shape_unsupported"
+        assert item["harness"] == harness
+        assert item["path"] == str(transcript)
+        assert item["count"] == 1
+
+
+def test_ac3_err_shape_refusal_names_null_path_when_none_resolves():
+    """No resolved path is still a named shape refusal; the path field says
+    so explicitly instead of disappearing."""
+    identities = [
+        EvidenceIdentity("gemini-row", "gemini", "google", "acct-b", "s2", "/w"),
+    ]
+
+    records, refusals = collect_transcript_evidence(
+        identities, now_s=NOW,
+        transcript_path_for=lambda _identity: None,
+    )
+
+    assert records == []
+    assert refusals == [{
+        "row_id": "gemini-row",
+        "reason": "transcript_shape_unsupported",
+        "harness": "gemini",
+        "path": None,
+        "count": 1,
     }]
 
 

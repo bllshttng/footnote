@@ -4264,6 +4264,7 @@ fn build_claude_stream_entry(
     // and no session parent is claimable from here. A daemon that somehow
     // still carries a marker attributes nothing rather than laundering it.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
+    let launch_account = crate::state::launch_account_from_env();
     RegistryEntry {
         node: None,
         // Stream-json adoption is gated on host_mode plus mode, not on a
@@ -4293,11 +4294,15 @@ fn build_claude_stream_entry(
         // x-d285: the daemon env is what this claude child inherits, so the
         // three-valued env read is the honest account fact (a daemon carrying
         // an ambient config dir stamps unknown, never "default").
-        launch_account: crate::state::launch_account_from_env(),
+        launch_account: launch_account.clone(),
         related_session_id: None,
+        // v25: the vendor route is unobserved on this lane (it may be routed,
+        // and `provider` above stays None for the same reason), so it stays
+        // unknown here rather than guessing "anthropic". The account record
+        // mirrors the launch read - unknown stays unknown.
         route_provider_id: None,
         model_name: None,
-        account_record_id: None,
+        account_record_id: launch_account.clone(),
         cwd: cwd_s.clone(),
         project_root: cwd_s,
         session_id: None,
@@ -4728,9 +4733,11 @@ fn build_codex_thread_entry(
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     RegistryEntry {
         node: None,
-        route_provider_id: None,
-        model_name: None,
-        account_record_id: None,
+        // v25: the route axes this lane actually used. Codex's ambient auth
+        // is the account it positively pinned nothing past, so "default".
+        route_provider_id: Some("openai".into()),
+        model_name: model.filter(|m| !m.is_empty()).map(str::to_string),
+        account_record_id: Some("default".into()),
         // The daemon-hosted codex app-server thread lane.
         substrate: Some("thread".into()),
         name: name.into(),
@@ -15249,6 +15256,13 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert_eq!(modeled.model.as_deref(), Some("gpt-5.6-sol"));
         assert_eq!(modeled.model_basis.as_deref(), Some("requested"));
         assert_eq!(bounded.model_basis, None);
+        // v25 positive marker: the route identity the spawn actually used,
+        // read back non-empty from the minted row - the provider-outage
+        // collector refuses evidence on a row whose axes are absent, so an
+        // all-None stamp here would keep every daemon codex thread blind.
+        assert_eq!(modeled.route_provider_id.as_deref(), Some("openai"));
+        assert_eq!(modeled.model_name.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(modeled.account_record_id.as_deref(), Some("default"));
     }
 
     /// AC12: a PRE-v19 row (no posture key) still parses and reads the safe
@@ -17045,6 +17059,16 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             "a claude row must be matched by its claude_session_uuid"
         );
         assert!(!entry_holds_session(&row, "other-uuid"));
+        // v25: the vendor route stays UNKNOWN on this lane (it may be routed;
+        // the row's `provider` is None for the same reason), but the account
+        // record mirrors the launch read rather than sitting at None by
+        // omission - with no ambient config dir this env resolves "default".
+        assert_eq!(row.route_provider_id, None);
+        assert_eq!(row.model_name, None);
+        assert_eq!(
+            row.account_record_id.as_deref(),
+            crate::state::launch_account_from_env().as_deref()
+        );
     }
 
     /// A stub family-1 probe answer for the tests that only pin the state.

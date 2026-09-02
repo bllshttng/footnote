@@ -1088,9 +1088,11 @@ fn dispatch_create(
         harness_session_id: Some(session_id.clone()),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
-        route_provider_id: None,
-        model_name: None,
-        account_record_id: None,
+        // v25: the route axes this lane actually used - the gemini CLI talks
+        // to Google with its own ambient auth, so "default".
+        route_provider_id: Some("google".to_string()),
+        model_name: model.filter(|m| !m.is_empty()).map(str::to_string),
+        account_record_id: Some("default".to_string()),
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,
