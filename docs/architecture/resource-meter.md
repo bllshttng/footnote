@@ -16,7 +16,7 @@ Two arms still work, because they read fno's own numbers. The spawn-load arm com
 
 ## Which memory signal is authoritative, and which state is dark
 
-Swap is the pressure signal, but only for a machine that has a swap file. On the machine this feature was specified against, `ram_usage` read 81.5 GB of 103 GB. `swap_usage` and `swap_total` were both 0, and `sysctl vm.swapusage` confirmed no swap file exists. A swap-only rule reports infinite headroom there. A free-RAM rule is no better: `memory_pressure` called that same machine 87 percent free while the compressor held 7.3 GB. So the memory arm reads `swap_usage` for a machine with a swap file. On a machine without one it falls back to `memory_pressure`, and it goes dark if neither sensor answers. Neither number alone is the answer.
+Swap is the pressure signal, but only for a machine that has a swap file. On the machine this feature was specified against, `ram_usage` read 81.5 GB of 103 GB. `swap_usage` and `swap_total` were both 0, and `sysctl vm.swapusage` confirmed no swap file exists. A swap-only rule reports infinite headroom there. A free-RAM rule is no better: `memory_pressure` called that same machine 87 percent free while the compressor held 7.3 GB. So the memory arm reads `swap_usage` for a machine with a swap file. On a machine without one, `memory_pressure` is the arm, and a machine where neither sensor answers gets no reading at all. Neither number alone is the answer.
 
 ## The two verdicts are different alarms
 
