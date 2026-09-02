@@ -29,7 +29,6 @@ real CLI drift. When ``claude`` changes its stdin convention, only the
 
 from __future__ import annotations
 
-import html
 import json
 import os
 import re
@@ -38,18 +37,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Literal, Mapping, Optional, Sequence
 
 from fno.agents.harnesses._claude_session_registry import (
-    TERMINAL_STATES,
-    SessionLocator,
-    _jobs_dir_for,
     locate_session,
-    read_state_json,
-    read_timeline_tail,
     resolve_session_uuid,
-    roster_live,
 )
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.writable_dirs import worker_writable_dirs
