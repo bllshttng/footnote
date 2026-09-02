@@ -102,24 +102,29 @@ def test_partial_lane_thread_dispatch_still_refuses_at_the_gate(lane_b_home) -> 
 def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit() -> None:
     """pi's `thread` row is true behind its passing restart journey
     (test_thread_keeper_journey.py), so a one-shot dispatch resolves onto the
-    lane this file builds. The autonomous `/target` template still refuses at
-    the loop gate until pi's loop extension ships."""
+    lane this file builds. The autonomous `/target` template resolves too
+    since x-43bd shipped pi's loop extension - the loop gate that used to
+    refuse it here now passes."""
     assert capabilities("pi")["thread"] is True
     resolved = resolve_dispatch(harness="pi", substrate="thread", command="pi --version")
     assert resolved["substrate"] == "thread"
     assert resolved["thread"] is True
-    with pytest.raises(DispatchResolveError, match="Dispatch a one-shot instead"):
-        resolve_dispatch(harness="pi", substrate="thread")
+    resolved_loop = resolve_dispatch(harness="pi", substrate="thread")
+    assert resolved_loop["substrate"] == "thread"
+    assert resolved_loop["loop_participation"] == "extension"
 
 
-def test_lane_b_spawn_wiring_names_only_the_wired_keeper_harness() -> None:
-    """The public dispatch_spawn body reaches the keeper entry point only
-    through the cursor-agent arm. pi's arm is still unbuilt, so pi must not
-    appear in the wiring: its spawn arm ships with its own journey."""
+def test_lane_b_spawn_wiring_names_every_wired_keeper_harness() -> None:
+    """The public dispatch_spawn body reaches the keeper entry point through
+    BOTH wired arms - cursor-agent (callee-minted) and pi (caller-assigned,
+    x-43bd) - and this keeps either wiring from being dropped by accident.
+    (pi's half inverts the pre-arm guard, which asserted the public body did
+    NOT reference the driver while the arm was unbuilt.)
+    """
     source = inspect.getsource(dispatch_mod.dispatch_spawn)
-    assert 'harness="cursor-agent"' in source
     assert "_lane_b_thread_spawn" in source
-    assert 'harness="pi"' not in source
+    assert 'harness="cursor-agent"' in source
+    assert 'harness="pi"' in source
 
 
 # ---------------------------------------------------------------------------
