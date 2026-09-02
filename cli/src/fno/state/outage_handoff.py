@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import argparse
 import json
-import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -170,23 +169,30 @@ def archive_target_manifest(
 
 
 def _archive_exact(state_path: Path, archive_path: Path, content: bytes) -> str:
-    """Persist exact bytes once, then remove the live manifest."""
+    """Persist exact bytes once, then remove the live manifest.
+
+    The exclusive create goes through claims/io's atomic_create_exclusive,
+    not a hand-rolled O_CREAT|O_EXCL: the hand-rolled form wins the create
+    and only then writes, so a concurrent reader could observe a
+    created-but-partial archive and hash it into a spurious collision. The
+    helper publishes through a same-directory hardlink, so a reader sees no
+    file or the full file, never the in-between. The manifest is UTF-8 text
+    (inspection parsed it before this point), so the helper's str encode
+    round-trips the exact bytes.
+    """
     digest = hashlib.sha256(content).hexdigest()
     archive_path.parent.mkdir(parents=True, exist_ok=True)
+    from fno.claims.io import ClaimAlreadyHeld, atomic_create_exclusive
+
     try:
-        fd = os.open(archive_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
+        atomic_create_exclusive(archive_path, content.decode("utf-8"))
+    except ClaimAlreadyHeld:
         try:
             existing_hash = hashlib.sha256(archive_path.read_bytes()).hexdigest()
         except OSError as exc:
             raise ManifestArchiveCollision(str(archive_path)) from exc
         if existing_hash != digest:
             raise ManifestArchiveCollision(str(archive_path))
-    else:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
     state_path.unlink()
     return digest
 
@@ -194,7 +200,11 @@ def _archive_exact(state_path: Path, archive_path: Path, content: bytes) -> str:
 def _restore_target_manifest(
     worktree: Path, archive_path: Path, content_hash: str
 ) -> bool:
-    """Restore identical bytes without replacing a concurrently-created file."""
+    """Restore identical bytes without replacing a concurrently-created file.
+
+    Same exclusive-create contract as the archive write: the shared helper's
+    hardlink publish keeps a concurrent custody reader from ever observing a
+    half-written live manifest."""
     state_path = Path(worktree).resolve() / ".fno" / "target-state.md"
     try:
         content = archive_path.read_bytes()
@@ -202,24 +212,15 @@ def _restore_target_manifest(
         return False
     if hashlib.sha256(content).hexdigest() != content_hash:
         return False
+    from fno.claims.io import ClaimAlreadyHeld, atomic_create_exclusive
+
     try:
-        fd = os.open(state_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
+        atomic_create_exclusive(state_path, content.decode("utf-8"))
+    except ClaimAlreadyHeld:
         try:
             return hashlib.sha256(state_path.read_bytes()).hexdigest() == content_hash
         except OSError:
             return False
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except BaseException:
-        try:
-            state_path.unlink()
-        except OSError:
-            pass
-        raise
     return True
 
 
