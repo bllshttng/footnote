@@ -4954,10 +4954,10 @@ fn claim_status_value(rec: &crate::claims::ClaimRecord) -> Value {
     Value::Object(out)
 }
 
-/// `fno-agents claim sweep [--json] [--root <dir>]` — read every `node:` /
-/// `dispatch:` lockfile in the claims dir, classify each with the canonical
-/// [`crate::claims::classify`], and print ONE JSON object:
-/// `{"claims": [{"key", "state", "holder", "host", "pid"}, ...]}`.
+/// `fno-agents claim sweep [--json] [--root <dir>]` — read matching claim
+/// lockfiles, classify each with the canonical [`crate::claims`] decision, and
+/// print ONE JSON object. The bare form keeps its historical `node:` /
+/// `dispatch:` filter; `--prefix`, repeated `--key`, and `--all` widen it.
 ///
 /// The mux shells this (bounded, fail-open) to overlay in-flight state onto
 /// work-queue cards — the verdict shape above is a pinned contract (additive
@@ -4969,6 +4969,9 @@ fn claim_status_value(rec: &crate::claims::ClaimRecord) -> Value {
 /// excluded from the payload and logged to stderr (never fatal).
 fn run_claim_sweep(args: &[String]) -> i32 {
     let mut root: Option<PathBuf> = None;
+    let mut prefix: Option<String> = None;
+    let mut keys: Vec<String> = Vec::new();
+    let mut all = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -4979,6 +4982,21 @@ fn run_claim_sweep(args: &[String]) -> i32 {
                     return 2;
                 }
             },
+            "--prefix" => match it.next() {
+                Some(value) => prefix = Some(value.clone()),
+                None => {
+                    eprintln!("fno-agents: claim sweep: --prefix requires a value");
+                    return 2;
+                }
+            },
+            "--key" => match it.next() {
+                Some(value) => keys.push(value.clone()),
+                None => {
+                    eprintln!("fno-agents: claim sweep: --key requires a value");
+                    return 2;
+                }
+            },
+            "--all" => all = true,
             "--json" | "-J" => {} // output is always JSON; accepted for symmetry
             other => {
                 eprintln!("fno-agents: claim sweep: unknown flag {other}");
@@ -4986,63 +5004,120 @@ fn run_claim_sweep(args: &[String]) -> i32 {
             }
         }
     }
-    let Some(dir) = crate::claims::claims_dir_for(root.as_deref()) else {
-        // No resolvable claims root: same as an empty dir (fail-open).
-        println!("{}", serde_json::json!({"claims": []}));
-        return 0;
-    };
-    println!("{}", claim_sweep_payload(&dir));
+    let local_root = root.or_else(|| std::env::current_dir().ok());
+    let records = crate::claims::list(None, local_root.as_deref(), true);
+    println!(
+        "{}",
+        claim_sweep_payload_from_records(&records, prefix.as_deref(), &keys, all)
+    );
     0
 }
 
-/// Pure(ish) core of `claim sweep`: scan `dir` for `node:` / `dispatch:`
-/// lockfiles and build the pinned verdict object. Separated from
-/// [`run_claim_sweep`] so tests can drive it against a temp dir.
-fn claim_sweep_payload(dir: &Path) -> Value {
-    // Filename prefilter: keys are percent-encoded (`:` -> `%3A`), so only
-    // read files that can be node/dispatch claims; `.expired/` is a subdir
-    // and non-`.lock` names are skipped by the same test.
-    let node_pfx = crate::claims::encode_key("node:");
-    let dispatch_pfx = crate::claims::encode_key("dispatch:");
-    let mut claims: Vec<Value> = Vec::new();
+/// Read every parseable lockfile in one claims directory. The caller applies
+/// the historical prefix filter after parsing the record, so a filename cannot
+/// widen or narrow the decision by lying about its encoded key.
+#[cfg(test)]
+fn claim_records_from_dir(dir: &Path) -> Vec<crate::claims::ClaimRecord> {
     let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return serde_json::json!({ "claims": [] }),
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
     };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if !name.ends_with(".lock")
-            || !(name.starts_with(&node_pfx) || name.starts_with(&dispatch_pfx))
-        {
+    entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+                && entry.file_name().to_string_lossy().ends_with(".lock")
+        })
+        .filter_map(
+            |entry| match crate::claims::read_claim_file(&entry.path()) {
+                Ok(rec) => Some(rec),
+                Err(crate::claims::ReadError::GoneAway) => None,
+                Err(crate::claims::ReadError::Corrupted(error)) => {
+                    eprintln!(
+                        "fno-agents: claim sweep: skipping {}: {error}",
+                        entry.file_name().to_string_lossy()
+                    );
+                    None
+                }
+            },
+        )
+        .collect()
+}
+
+/// Pure(ish) core of `claim sweep`: build the pinned verdict object from a
+/// complete record set. `claim_sweep_payload` keeps the old single-directory
+/// test seam; the command path supplies the both-root set from `claims::list`.
+fn claim_sweep_payload_from_records(
+    records: &[crate::claims::ClaimRecord],
+    prefix: Option<&str>,
+    keys: &[String],
+    all: bool,
+) -> Value {
+    let key_set: std::collections::BTreeSet<&str> = keys.iter().map(String::as_str).collect();
+    let full_scan = key_set.is_empty();
+    let exclusivity = full_scan
+        .then(|| crate::claims::pid_exclusivity(records))
+        .unwrap_or_default();
+    let now = crate::claims::now_ms();
+    let mut claims: Vec<Value> = Vec::new();
+    for rec in records {
+        let selected = if !key_set.is_empty() {
+            key_set.contains(rec.key.as_str())
+        } else if let Some(prefix) = prefix {
+            rec.key.starts_with(prefix)
+        } else if all {
+            true
+        } else {
+            rec.key.starts_with("node:") || rec.key.starts_with("dispatch:")
+        };
+        if !selected {
             continue;
         }
-        match crate::claims::read_claim_file(&entry.path()) {
-            Ok(rec) => {
-                // Trust the record's own key over the filename decode; a
-                // record whose key does not carry a sweep prefix is excluded
-                // (filename lied — treat like corruption, minus the noise).
-                if !(rec.key.starts_with("node:") || rec.key.starts_with("dispatch:")) {
-                    continue;
-                }
-                let state = crate::claims::classify(&rec, None);
-                claims.push(serde_json::json!({
-                    "key": rec.key,
-                    "state": state.as_str(),
-                    "holder": rec.holder,
-                    "host": rec.host,
-                    "pid": rec.pid,
-                }));
-            }
-            Err(crate::claims::ReadError::GoneAway) => continue,
-            Err(crate::claims::ReadError::Corrupted(e)) => {
-                eprintln!("fno-agents: claim sweep: skipping {name}: {e}");
-                continue;
-            }
-        }
+        let identity = rec.machine_id.clone().unwrap_or_else(|| rec.host.clone());
+        let pid_exclusive = full_scan
+            .then(|| {
+                rec.pid
+                    .and_then(|pid| exclusivity.get(&(identity, pid)).copied())
+            })
+            .flatten();
+        let probe = &|pid| crate::claims::probe_pid(pid);
+        let (state, basis) = crate::claims::classify_with_basis_and_exclusivity(
+            rec,
+            Some(now),
+            probe,
+            pid_exclusive,
+        );
+        let (provably_dead, bucket) =
+            crate::claims::classify_for_sweep(rec, Some(now), probe, pid_exclusive);
+        let expired = rec.expires_at.is_some_and(|expires_at| now >= expires_at);
+        claims.push(serde_json::json!({
+            "key": rec.key,
+            "state": state.as_str(),
+            "holder": rec.holder,
+            "host": rec.host,
+            "pid": rec.pid,
+            "basis": basis,
+            "expired": expired,
+            "provably_dead": provably_dead,
+            "bucket": bucket,
+            "machine_id": rec.machine_id,
+            "pid_unavailable": rec.pid_unavailable,
+            "pid_provenance": rec.pid_provenance,
+            "acquired_at": rec.acquired_at,
+            "expires_at": rec.expires_at,
+        }));
     }
     claims.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     serde_json::json!({ "claims": claims })
+}
+
+#[cfg(test)]
+fn claim_sweep_payload(dir: &Path) -> Value {
+    let records = claim_records_from_dir(dir);
+    claim_sweep_payload_from_records(&records, None, &[], false)
 }
 
 #[cfg(test)]
@@ -7342,6 +7417,56 @@ mod tests {
             assert_eq!(c["pid"], std::process::id());
             assert!(c["host"].as_str().is_some_and(|h| !h.is_empty()));
         }
+    }
+
+    #[test]
+    fn claim_sweep_reports_classifier_basis_and_claim_facts() {
+        let td = tempfile::TempDir::new().unwrap();
+        sweep_acquire(td.path(), "node:x-facts");
+        let claims = claim_sweep_payload(&sweep_dir(td.path()))["claims"]
+            .as_array()
+            .unwrap()
+            .to_vec();
+        let row = claims
+            .iter()
+            .find(|claim| claim["key"] == "node:x-facts")
+            .expect("the acquired claim is present");
+        assert_eq!(row["state"], "live");
+        assert_eq!(row["basis"], "live");
+        assert_eq!(row["expired"], false);
+        assert_eq!(row["provably_dead"], false);
+        assert_eq!(row["bucket"], "live");
+        assert_eq!(row["pid_unavailable"], false);
+        assert!(row["acquired_at"].as_i64().is_some());
+        assert!(row.get("machine_id").is_some());
+        assert!(row.get("pid_provenance").is_some());
+        assert!(row.get("expires_at").is_some());
+    }
+
+    #[test]
+    fn claim_sweep_filters_by_prefix_key_and_all() {
+        let td = tempfile::TempDir::new().unwrap();
+        sweep_acquire(td.path(), "node:x-filter");
+        sweep_acquire(td.path(), "dispatch:x-filter");
+        sweep_acquire(td.path(), "session:x-filter");
+        let records = claim_records_from_dir(&sweep_dir(td.path()));
+
+        let prefix = claim_sweep_payload_from_records(&records, Some("session:"), &[], false);
+        assert_eq!(prefix["claims"].as_array().unwrap().len(), 1);
+        assert_eq!(prefix["claims"][0]["key"], "session:x-filter");
+
+        let keys = vec!["node:x-filter".to_string(), "session:x-filter".to_string()];
+        let selected = claim_sweep_payload_from_records(&records, None, &keys, false);
+        let selected_keys: Vec<_> = selected["claims"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|claim| claim["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(selected_keys, vec!["node:x-filter", "session:x-filter"]);
+
+        let all = claim_sweep_payload_from_records(&records, None, &[], true);
+        assert_eq!(all["claims"].as_array().unwrap().len(), 3);
     }
 
     #[test]

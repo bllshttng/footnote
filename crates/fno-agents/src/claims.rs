@@ -702,10 +702,13 @@ pub fn classify_with_basis(
     now: Option<i64>,
     probe: &dyn Fn(i32) -> PidProbe,
 ) -> (ClaimState, &'static str) {
-    classify_with_basis_exclusive(rec, now, probe, None)
+    classify_with_basis_and_exclusivity(rec, now, probe, None)
 }
 
-fn classify_with_basis_exclusive(
+/// Classify with optional sweep-time sibling evidence. `None` is the honest
+/// value for single-key reads; a full scan passes the PID exclusivity map's
+/// result for the record being classified.
+pub fn classify_with_basis_and_exclusivity(
     rec: &ClaimRecord,
     now: Option<i64>,
     probe: &dyn Fn(i32) -> PidProbe,
@@ -779,7 +782,7 @@ pub fn classify_for_sweep(
     if !same_machine && !(unidentifiable && is_expired(rec, now)) {
         return (false, basis::OFFHOST);
     }
-    let (state, _) = classify_with_basis_exclusive(rec, Some(now), probe, pid_exclusive);
+    let (state, _) = classify_with_basis_and_exclusivity(rec, Some(now), probe, pid_exclusive);
     if state == ClaimState::Stale {
         return (true, "");
     }
