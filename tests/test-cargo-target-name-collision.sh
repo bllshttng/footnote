@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Pins the target-name collision behind the worktrees.md cargo note: three
 # source dirs are literally named target, so a name-only match is destructive,
-# while CACHEDIR.TAG and crates/*/target discriminate. Measured 2026-09-02: a
-# name-based sweep deleted 66 source dirs across 26 worktrees.
+# while CACHEDIR.TAG and crates/*/target discriminate. CACHEDIR.TAG is written
+# by cargo into every target dir it owns, so its presence is the positive
+# marker; a name is not. Measured 2026-09-02: a name-based sweep deleted 66
+# source dirs across 26 worktrees, and the same sweep's du counted 84
+# name-matched dirs where 18 were cargo, 4.7x inflated - the name match also
+# poisons measurement.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

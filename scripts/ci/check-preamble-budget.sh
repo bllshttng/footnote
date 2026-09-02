@@ -120,7 +120,12 @@ set -euo pipefail
 # for the whole-machine lane advisor and status-row meter. The link is index
 # text, not corpus growth, and the floor test above confirms no entry gave it
 # room; the ceiling follows the measurement up, zero spare, per doctrine.
-CEILING_BYTES=38868
+# +43 (38868 -> 38911), measured 2026-09-02: the cargo-target collision note in
+# .claude/rules/worktrees.md. A name-based sweep deleted 66 source dirs across
+# 26 worktrees, so the rule must reach every session before it writes a sweep;
+# compressed from a +451 first draft to +224 net, and this residue is the three
+# source-dir paths plus the incident and the marker recipe, zero spare.
+CEILING_BYTES=38911
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
