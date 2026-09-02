@@ -849,7 +849,7 @@ def test_a_pane_spawn_still_holds_the_reservation_for_its_worker(
 
     monkeypatch.setattr(
         mux_spawn,
-        "dispatch_spawn_pane",
+        "dispatch_spawn_bounded_pane",
         lambda **kw: MuxSpawnResult(
             name="w1",
             provider=_FIXTURE_HARNESS,

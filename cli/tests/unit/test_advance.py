@@ -2033,7 +2033,7 @@ def _dispatch_one_capture(monkeypatch, tmp_path):
     monkeypatch.setattr(ar, "_healthy_alternate_exists", lambda: False)
     monkeypatch.setattr(
         dispatch_mod,
-        "dispatch_spawn_pane",
+        "dispatch_spawn_bounded_pane",
         # `bound` too: the dispatcher's `launched` return reports whether the
         # worker actually bound a session, not just whether a pane was created.
         lambda **kw: captured.update(kw) or SimpleNamespace(pane_id="p1", bound=True),
@@ -2093,7 +2093,7 @@ def test_unresolvable_harness_never_reaches_the_dispatch_spawn(tmp_path, monkeyp
     _destination(monkeypatch, ("ghost-acct", "no-such-harness", {"X": "1"}))
     monkeypatch.setattr(
         dispatch_mod,
-        "dispatch_spawn_pane",
+        "dispatch_spawn_bounded_pane",
         lambda **kw: pytest.fail("an unresolvable destination must not spawn"),
     )
     verdict, _ = _dispatch_one_capture(monkeypatch, tmp_path)
