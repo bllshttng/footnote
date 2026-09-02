@@ -6,8 +6,10 @@
 //! carry a docstring claiming to mirror the other; this file is the instrument
 //! that makes that claim checkable. One fixture corpus drives BOTH legs
 //! through the four liveness branch conditions (pid unavailable, off-machine,
-//! pid unreported by the OS, pid reused) plus the expired-TTL, hybrid and
-//! suspect arms, and asserts identical states for every case.
+//! pid unreported by the OS, pid reused, and their refused-inspection split)
+//! plus the expired-TTL, hybrid and suspect arms, and asserts identical
+//! states AND identical bases for every case - the basis vocabulary cannot
+//! drift the way the state once could.
 //!
 //! Excluded from the corpus, on purpose, one line each:
 //!
@@ -22,7 +24,7 @@
 //! `FNO_CLAIMS_PARITY_PYTHON` to point the harness at an interpreter that has
 //! `psutil` installed (a bare `python3` often does not); CI installs it.
 
-use fno_agents::claims::{classify, now_ms, ClaimRecord};
+use fno_agents::claims::{now_ms, ClaimRecord};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::Command;
@@ -77,6 +79,18 @@ print(socket.gethostname())
     (machine, hostname)
 }
 
+/// The probe behavior a case wants. `Real` lets both legs ask the OS (the
+/// self-pid and impossible-pid cases read identically on both); the injected
+/// kinds drive the arms a live OS cannot produce deterministically - the
+/// Refused arm above all. Injection happens at each leg's own seam: the
+/// `probe` parameter here, `_probe_create_time` monkeypatched there.
+#[derive(Clone, Copy)]
+enum ProbeSpec {
+    Real,
+    Absent,
+    Refused,
+}
+
 /// One fixture case. Every field travels to both legs unchanged; the Python
 /// subprocess rebuilds the equivalent `Claim` from the same JSON.
 struct Case {
@@ -90,6 +104,7 @@ struct Case {
     acquired_at: i64,
     expires_at: Option<i64>,
     pid_provenance: Option<&'static str>,
+    probe: ProbeSpec,
 }
 
 fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
@@ -120,6 +135,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: None,
             pid_provenance: None,
+            probe: ProbeSpec::Real,
         },
         Case {
             label: "live_ttl_unexpired",
@@ -130,6 +146,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: Some(future),
             pid_provenance: None,
+            probe: ProbeSpec::Real,
         },
         Case {
             label: "pid_absent_pid_liveness",
@@ -140,6 +157,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: None,
             pid_provenance: None,
+            probe: ProbeSpec::Real,
         },
         Case {
             label: "pid_reused_pid_liveness",
@@ -153,6 +171,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: 0,
             expires_at: None,
             pid_provenance: None,
+            probe: ProbeSpec::Real,
         },
         Case {
             label: "offhost_pid_liveness",
@@ -163,6 +182,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: None,
             pid_provenance: None,
+            probe: ProbeSpec::Real,
         },
         Case {
             label: "offhost_ttl_unexpired",
@@ -173,6 +193,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: Some(future),
             pid_provenance: None,
+            probe: ProbeSpec::Real,
         },
         Case {
             label: "pid_unavailable_ttl_unexpired",
@@ -183,6 +204,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: Some(future),
             pid_provenance: None,
+            probe: ProbeSpec::Real,
         },
         Case {
             label: "suspect_ttl_unexpired_dead_pid",
@@ -193,6 +215,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: Some(future),
             pid_provenance: None,
+            probe: ProbeSpec::Real,
         },
         Case {
             label: "stale_ttl_expired_unproven_live_pid",
@@ -205,6 +228,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: Some(past),
             pid_provenance: None,
+            probe: ProbeSpec::Real,
         },
         Case {
             label: "hybrid_live_expired_proven_live_pid",
@@ -215,6 +239,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: Some(past),
             pid_provenance: Some("session-prover"),
+            probe: ProbeSpec::Real,
         },
         Case {
             label: "stale_ttl_expired_proven_dead_pid",
@@ -225,11 +250,42 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: Some(past),
             pid_provenance: Some("session-prover"),
+            probe: ProbeSpec::Real,
+        },
+        Case {
+            // The holder EXISTS and refuses inspection: never a proof of
+            // death, so this is SUSPECT where the gone-pid case above is
+            // STALE - the split the probe fix delivered.
+            label: "access_denied_pid_liveness",
+            pid: Some(self_pid),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: None,
+            pid_provenance: None,
+            probe: ProbeSpec::Refused,
+        },
+        Case {
+            label: "access_denied_ttl_unexpired",
+            pid: Some(self_pid),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: Some(future),
+            pid_provenance: None,
+            probe: ProbeSpec::Refused,
         },
     ]
 }
 
 fn to_json(c: &Case, now: i64) -> Value {
+    let probe = match c.probe {
+        ProbeSpec::Real => json!(null),
+        ProbeSpec::Absent => json!({"kind": "absent"}),
+        ProbeSpec::Refused => json!({"kind": "refused"}),
+    };
     json!({
         "label": c.label,
         "schema_version": if c.pid_unavailable { 2 } else { 1 },
@@ -240,6 +296,7 @@ fn to_json(c: &Case, now: i64) -> Value {
         "acquired_at": c.acquired_at,
         "expires_at": c.expires_at,
         "pid_provenance": c.pid_provenance,
+        "probe": probe,
         "now": now,
     })
 }
@@ -262,17 +319,30 @@ fn record(c: &Case) -> ClaimRecord {
     }
 }
 
-/// Run the genuine Python `classify` over the corpus and return
-/// `{label: state}` for every case.
+/// Run the genuine Python classifier over the corpus and return
+/// `{label: {state, basis}}` for every case.
 fn py_classify_all(cases_json: &str) -> Value {
     let code = r#"
 import json, sys
-from fno.claims.staleness import classify
+from fno.claims import staleness
+from fno.claims.staleness import classify_with_basis
 from fno.claims.types import Claim
 
+REAL_PROBE = staleness._probe_create_time
 cases = json.load(sys.stdin)
 rows = {}
 for c in cases:
+    spec = c.get("probe")
+    if spec is not None:
+        kind = spec["kind"]
+        if kind == "absent":
+            staleness._probe_create_time = lambda pid: (None, "pid-absent")
+        elif kind == "refused":
+            staleness._probe_create_time = lambda pid: (None, "access-denied")
+        else:
+            staleness._probe_create_time = lambda pid: (spec["ms"], "")
+    else:
+        staleness._probe_create_time = REAL_PROBE
     claim = Claim(
         schema_version=c["schema_version"],
         key="parity",
@@ -285,8 +355,8 @@ for c in cases:
         expires_at=c["expires_at"],
         pid_provenance=c["pid_provenance"],
     )
-    state = classify(claim, now=c["now"])
-    rows[c["label"]] = state.value
+    state, basis = classify_with_basis(claim, now=c["now"])
+    rows[c["label"]] = {"state": state.value, "basis": basis}
 json.dump(rows, sys.stdout)
 "#;
     use std::io::Write;
@@ -314,7 +384,7 @@ json.dump(rows, sys.stdout)
 }
 
 #[test]
-fn classify_state_parity_with_real_python() {
+fn classify_state_and_basis_parity_with_real_python() {
     if !python_available() {
         eprintln!(
             "SKIP: no python3 with fno.claims.staleness importable; parity not verified here"
@@ -330,18 +400,34 @@ fn classify_state_parity_with_real_python() {
 
     let mut compared = 0;
     for c in &cases {
-        let py_state = py[c.label]
+        let py_row = &py[c.label];
+        let py_state = py_row["state"]
             .as_str()
             .unwrap_or_else(|| panic!("python leg returned no state for case {}", c.label));
-        let rust_state = classify(&record(c), Some(now)).as_str();
+        let py_basis = py_row["basis"]
+            .as_str()
+            .unwrap_or_else(|| panic!("python leg returned no basis for case {}", c.label));
+        let probe: &dyn Fn(i32) -> fno_agents::claims::PidProbe = match c.probe {
+            ProbeSpec::Real => &|pid| fno_agents::claims::probe_pid(pid),
+            ProbeSpec::Absent => &|_| fno_agents::claims::PidProbe::Absent,
+            ProbeSpec::Refused => &|_| fno_agents::claims::PidProbe::Refused,
+        };
+        let (rust_state, rust_basis) =
+            fno_agents::claims::classify_with_basis(&record(c), Some(now), probe);
         assert_eq!(
-            py_state, rust_state,
+            py_state,
+            rust_state.as_str(),
             "state drift for corpus case {}",
+            c.label
+        );
+        assert_eq!(
+            py_basis, rust_basis,
+            "basis drift for corpus case {}",
             c.label
         );
         compared += 1;
     }
     // A zero-case pass is an absence, not a verdict: the corpus must actually
-    // have driven both legs.
-    assert!(compared >= 8, "corpus compared only {compared} cases");
+    // have driven both legs, state AND basis.
+    assert!(compared >= 10, "corpus compared only {compared} cases");
 }
