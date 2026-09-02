@@ -33,11 +33,13 @@ Verified facts, each dated where it differs from the 2026-07-13 spike:
 """
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from copy import deepcopy
 from functools import cache
 from importlib.resources import files
+from pathlib import Path
 from typing import Mapping, Optional
 
 from fno.harness_names import KNOWN_HARNESSES
@@ -210,6 +212,223 @@ def _contract_error(harness: str, field: str, detail: str) -> "DispatchResolveEr
     )
 
 
+def _validate_row(harness: str, caps: dict) -> None:
+    """Validate ONE capability row against the contract.
+
+    The per-harness loop body of :func:`parse_capability_contract`,
+    extracted so the config-override merge can gate a candidate row
+    through the SAME validation the bundled table ships under (x-244c).
+    Raises :class:`DispatchResolveError` naming harness + field on the
+    first bad field."""
+    required = {
+        "permission_bypass", "resume", "thread", "autonomous_pane", "route_on_pane",
+        "loop_participation", "command_surface", "permission_response", "resume_strategy",
+        "model_switch_strategy",
+        "ready_marker", "ready_rule_ids", "send_keys_enter_delay_ms", "submit_keys",
+        "stop_strategy", "remove_strategy", "manifest_rules", "session_binding",
+    }
+    if not isinstance(caps, dict) or not required <= caps.keys():
+        missing = sorted(required - set(caps or {}))
+        raise _contract_error(harness, "contract", f"missing fields: {', '.join(missing)}")
+    responses = caps["permission_response"]
+    if not isinstance(responses, dict) or set(responses) != _RESPONSE_ACTIONS:
+        raise _contract_error(harness, "permission_response", "needs all three actions")
+    for action, response in responses.items():
+        if not isinstance(response, dict) or not isinstance(response.get("supported"), bool):
+            raise _contract_error(harness, f"permission_response.{action}", "bad support flag")
+        keys = response.get("keys")
+        rules = response.get("rule_ids")
+        if not isinstance(keys, list) or not all(key in _KEY_TOKENS for key in keys):
+            raise _contract_error(harness, "permission_response", f"bad keys for {action}")
+        if not isinstance(rules, list) or not all(isinstance(rule, str) and rule for rule in rules):
+            raise _contract_error(harness, "permission_response", f"bad rule ids for {action}")
+        if response["supported"] and (not keys or not rules):
+            raise _contract_error(harness, "permission_response", f"empty supported {action}")
+    marker = caps["ready_marker"]
+    ready_rules = caps["ready_rule_ids"]
+    manifest_rules = caps["manifest_rules"]
+    if not isinstance(marker, str) or not isinstance(ready_rules, list) or not isinstance(
+        manifest_rules, list
+    ):
+        raise _contract_error(harness, "ready_marker", "must name a rule or unsupported")
+    parsed_rules = {
+        rule.get("id"): rule.get("state")
+        for rule in manifest_rules
+        if isinstance(rule, dict)
+        and isinstance(rule.get("id"), str)
+        and rule.get("state") in {"idle", "blocked"}
+    }
+    if len(parsed_rules) != len(manifest_rules):
+        raise _contract_error(harness, "manifest_rules", "contains a malformed rule")
+    if marker != "unsupported" and marker not in ready_rules:
+        raise _contract_error(harness, "ready_marker", f"unknown rule {marker!r}")
+    if marker != "unsupported" and parsed_rules.get(marker) != "idle":
+        raise _contract_error(harness, "ready_marker", f"unknown positive rule {marker!r}")
+    for action, response in responses.items():
+        for rule_id in response["rule_ids"]:
+            if parsed_rules.get(rule_id) != "blocked":
+                raise _contract_error(
+                    harness,
+                    "permission_response",
+                    f"{action} names unknown blocked rule {rule_id!r}",
+                )
+    delay = caps["send_keys_enter_delay_ms"]
+    submit = caps["submit_keys"]
+    if not isinstance(delay, int) or isinstance(delay, bool) or delay < 0:
+        raise _contract_error(harness, "send_keys_enter_delay_ms", "must be non-negative")
+    if not isinstance(submit, list) or not submit or not all(key in _KEY_TOKENS for key in submit):
+        raise _contract_error(harness, "submit_keys", "has an invalid key token")
+    # A lane that never submits must not carry a delay: the number would
+    # describe a wait nothing performs. The CONVERSE does not hold and was
+    # asserted here until codex disproved it. A supported contract may
+    # legitimately need no wait - measured against codex 0.148.0, a
+    # carriage return sent immediately after the text submits correctly,
+    # while claude needs 800ms. The old rule read a coincidence across the
+    # then-current harnesses as an invariant.
+    if submit == ["unsupported"] and delay != 0:
+        raise _contract_error(
+            harness,
+            "send_keys_enter_delay_ms",
+            "an unsupported submit contract cannot carry a nonzero delay",
+        )
+    strategy = caps["resume_strategy"]
+    forms = strategy.get("forms") if isinstance(strategy, dict) else None
+    if not isinstance(forms, dict) or set(forms) != _SESSION_LANES:
+        raise _contract_error(harness, "resume_strategy", "needs every session lane")
+    for lane, form in forms.items():
+        kind = form.get("kind") if isinstance(form, dict) else None
+        tokens = form.get("tokens") if isinstance(form, dict) else None
+        if kind not in _RESUME_KINDS or not isinstance(tokens, list) or not all(
+            isinstance(token, str) and token for token in tokens
+        ):
+            raise _contract_error(harness, "resume_strategy", f"malformed {lane}")
+        if kind == "unsupported" and tokens:
+            raise _contract_error(harness, "resume_strategy", f"unsupported {lane} has tokens")
+        if (
+            lane == "interactive_attach"
+            and kind != "unsupported"
+            and "{short_id}" not in tokens
+            and "{session_id}" not in tokens
+        ):
+            # An attach form must name the id its harness's own attach
+            # command takes: claude's short jobId, or a full session id
+            # where a short one would collide (a codex UUIDv7 head-8 is a
+            # ~65.5s bucket).
+            raise _contract_error(harness, "resume_strategy", f"{lane} drops its attach id")
+        if lane.endswith("resume") and kind != "unsupported" and "{session_id}" not in tokens:
+            raise _contract_error(harness, "resume_strategy", f"{lane} drops session id")
+    model_switch = caps["model_switch_strategy"]
+    expected_switch_fields = {
+        "kind", "tokens", "effort_labels", "status_command", "status_pattern",
+    }
+    if not isinstance(model_switch, dict) or set(model_switch) != expected_switch_fields:
+        raise _contract_error(harness, "model_switch_strategy", "malformed strategy")
+    switch_kind = model_switch["kind"]
+    switch_tokens = model_switch["tokens"]
+    effort_labels = model_switch["effort_labels"]
+    status_command = model_switch["status_command"]
+    status_pattern = model_switch["status_pattern"]
+    if switch_kind not in _MODEL_SWITCH_KINDS:
+        raise _contract_error(harness, "model_switch_strategy", "unknown kind")
+    if not isinstance(switch_tokens, list) or not all(
+        isinstance(token, str) and token for token in switch_tokens
+    ):
+        raise _contract_error(harness, "model_switch_strategy", "malformed tokens")
+    if not isinstance(effort_labels, dict) or not all(
+        effort in _MODEL_SWITCH_EFFORTS
+        and isinstance(label, str)
+        and label
+        for effort, label in effort_labels.items()
+    ):
+        raise _contract_error(harness, "model_switch_strategy", "malformed effort labels")
+    placeholders: list[str] = []
+    for token in switch_tokens:
+        token_placeholders = re.findall(r"\{([^{}]+)\}", token)
+        remainder = re.sub(r"\{[^{}]+\}", "", token)
+        if "{" in remainder or "}" in remainder:
+            raise _contract_error(harness, "model_switch_strategy", "malformed placeholder")
+        placeholders.extend(token_placeholders)
+    unknown = set(placeholders) - _MODEL_SWITCH_PLACEHOLDERS
+    if unknown:
+        raise _contract_error(
+            harness, "model_switch_strategy", f"unknown placeholder {sorted(unknown)[0]!r}"
+        )
+    if switch_kind == "unsupported":
+        if switch_tokens or effort_labels or status_command or status_pattern:
+            raise _contract_error(
+                harness, "model_switch_strategy", "unsupported strategy has executable data"
+            )
+    else:
+        if not isinstance(status_command, str) or not status_command.startswith("/"):
+            raise _contract_error(harness, "model_switch_strategy", "missing status command")
+        if not isinstance(status_pattern, str) or not status_pattern:
+            raise _contract_error(harness, "model_switch_strategy", "missing status pattern")
+        try:
+            compiled_status = re.compile(status_pattern)
+        except re.error as exc:
+            raise _contract_error(
+                harness, "model_switch_strategy", f"invalid status pattern: {exc}"
+            ) from exc
+        if not {"model", "effort"} <= compiled_status.groupindex.keys():
+            raise _contract_error(
+                harness, "model_switch_strategy", "status pattern needs model and effort groups"
+            )
+        if switch_kind == "direct":
+            if placeholders.count("model") != 1 or placeholders.count("effort") != 1:
+                raise _contract_error(
+                    harness, "model_switch_strategy", "direct needs model and effort placeholders"
+                )
+            if "effort_label" in placeholders or effort_labels:
+                raise _contract_error(
+                    harness, "model_switch_strategy", "direct cannot carry menu labels"
+                )
+        elif (
+            placeholders.count("model") != 1
+            or placeholders.count("effort_label") != 1
+            or "effort" in placeholders
+            or placeholders.index("model") > placeholders.index("effort_label")
+            or set(effort_labels) != _MODEL_SWITCH_EFFORTS
+        ):
+            raise _contract_error(
+                harness,
+                "model_switch_strategy",
+                "menu_walk needs ordered model and effort targets",
+            )
+    if caps["loop_participation"] not in _LOOP_PARTICIPATION:
+        raise _contract_error(harness, "loop_participation", "unknown member")
+    # Only an `extension` row may name an artifact: a `native` row closes its
+    # loop through a shell hook and a `none` row closes it through nothing.
+    # The converse is legal and load-bearing - an `extension` row with an
+    # EMPTY path is a harness whose extension fno has not written yet, and
+    # :func:`check_loop_participation` refuses a looping dispatch at it.
+    if caps["loop_participation"] != "extension" and caps.get("loop_extension"):
+        raise _contract_error(
+            harness, "loop_extension",
+            "only an extension harness may name a loop artifact",
+        )
+    if caps["stop_strategy"] not in _STOP_STRATEGIES:
+        raise _contract_error(harness, "stop_strategy", "unknown strategy")
+    if caps["remove_strategy"] not in _REMOVE_STRATEGIES:
+        raise _contract_error(harness, "remove_strategy", "unknown strategy")
+    binding = caps["session_binding"]
+    if not isinstance(binding, dict) or set(binding) != {"strategy", "required", "timeout_ms"}:
+        raise _contract_error(harness, "session_binding", "malformed strategy")
+    if binding["strategy"] not in {
+        "preassigned-or-session-start", "rollout-fd-or-daemon",
+        # caller-assigned-cwd-scoped: the caller mints the id AND the
+        # harness scopes its lookup by cwd, so the identity is the PAIR and
+        # the id alone addresses nothing. Distinct from "preassigned",
+        # where the id is the whole handle.
+        "preassigned", "caller-assigned-cwd-scoped",
+        "store-lookup", "unsupported",
+    }:
+        raise _contract_error(harness, "session_binding", "unknown strategy")
+    if not isinstance(binding["required"], bool) or not isinstance(binding["timeout_ms"], int):
+        raise _contract_error(harness, "session_binding", "bad required/timeout values")
+    if binding["timeout_ms"] < 0 or (binding["required"] and binding["timeout_ms"] == 0):
+        raise _contract_error(harness, "session_binding", "required binding needs a timeout")
+
+
 def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
     """Parse the packaged per-harness contract and reject partial defaults."""
     try:
@@ -234,214 +453,8 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
             "harness capability contract harness set contains names absent "
             f"from KNOWN_HARNESSES: {', '.join(sorted(absent))}"
         )
-    required = {
-        "permission_bypass", "resume", "thread", "autonomous_pane", "route_on_pane",
-        "loop_participation", "command_surface", "permission_response", "resume_strategy",
-        "model_switch_strategy",
-        "ready_marker", "ready_rule_ids", "send_keys_enter_delay_ms", "submit_keys",
-        "stop_strategy", "remove_strategy", "manifest_rules", "session_binding",
-    }
     for harness, caps in harnesses.items():
-        if not isinstance(caps, dict) or not required <= caps.keys():
-            missing = sorted(required - set(caps or {}))
-            raise _contract_error(harness, "contract", f"missing fields: {', '.join(missing)}")
-        responses = caps["permission_response"]
-        if not isinstance(responses, dict) or set(responses) != _RESPONSE_ACTIONS:
-            raise _contract_error(harness, "permission_response", "needs all three actions")
-        for action, response in responses.items():
-            if not isinstance(response, dict) or not isinstance(response.get("supported"), bool):
-                raise _contract_error(harness, f"permission_response.{action}", "bad support flag")
-            keys = response.get("keys")
-            rules = response.get("rule_ids")
-            if not isinstance(keys, list) or not all(key in _KEY_TOKENS for key in keys):
-                raise _contract_error(harness, "permission_response", f"bad keys for {action}")
-            if not isinstance(rules, list) or not all(isinstance(rule, str) and rule for rule in rules):
-                raise _contract_error(harness, "permission_response", f"bad rule ids for {action}")
-            if response["supported"] and (not keys or not rules):
-                raise _contract_error(harness, "permission_response", f"empty supported {action}")
-        marker = caps["ready_marker"]
-        ready_rules = caps["ready_rule_ids"]
-        manifest_rules = caps["manifest_rules"]
-        if not isinstance(marker, str) or not isinstance(ready_rules, list) or not isinstance(
-            manifest_rules, list
-        ):
-            raise _contract_error(harness, "ready_marker", "must name a rule or unsupported")
-        parsed_rules = {
-            rule.get("id"): rule.get("state")
-            for rule in manifest_rules
-            if isinstance(rule, dict)
-            and isinstance(rule.get("id"), str)
-            and rule.get("state") in {"idle", "blocked"}
-        }
-        if len(parsed_rules) != len(manifest_rules):
-            raise _contract_error(harness, "manifest_rules", "contains a malformed rule")
-        if marker != "unsupported" and marker not in ready_rules:
-            raise _contract_error(harness, "ready_marker", f"unknown rule {marker!r}")
-        if marker != "unsupported" and parsed_rules.get(marker) != "idle":
-            raise _contract_error(harness, "ready_marker", f"unknown positive rule {marker!r}")
-        for action, response in responses.items():
-            for rule_id in response["rule_ids"]:
-                if parsed_rules.get(rule_id) != "blocked":
-                    raise _contract_error(
-                        harness,
-                        "permission_response",
-                        f"{action} names unknown blocked rule {rule_id!r}",
-                    )
-        delay = caps["send_keys_enter_delay_ms"]
-        submit = caps["submit_keys"]
-        if not isinstance(delay, int) or isinstance(delay, bool) or delay < 0:
-            raise _contract_error(harness, "send_keys_enter_delay_ms", "must be non-negative")
-        if not isinstance(submit, list) or not submit or not all(key in _KEY_TOKENS for key in submit):
-            raise _contract_error(harness, "submit_keys", "has an invalid key token")
-        # A lane that never submits must not carry a delay: the number would
-        # describe a wait nothing performs. The CONVERSE does not hold and was
-        # asserted here until codex disproved it. A supported contract may
-        # legitimately need no wait - measured against codex 0.148.0, a
-        # carriage return sent immediately after the text submits correctly,
-        # while claude needs 800ms. The old rule read a coincidence across the
-        # then-current harnesses as an invariant.
-        if submit == ["unsupported"] and delay != 0:
-            raise _contract_error(
-                harness,
-                "send_keys_enter_delay_ms",
-                "an unsupported submit contract cannot carry a nonzero delay",
-            )
-        strategy = caps["resume_strategy"]
-        forms = strategy.get("forms") if isinstance(strategy, dict) else None
-        if not isinstance(forms, dict) or set(forms) != _SESSION_LANES:
-            raise _contract_error(harness, "resume_strategy", "needs every session lane")
-        for lane, form in forms.items():
-            kind = form.get("kind") if isinstance(form, dict) else None
-            tokens = form.get("tokens") if isinstance(form, dict) else None
-            if kind not in _RESUME_KINDS or not isinstance(tokens, list) or not all(
-                isinstance(token, str) and token for token in tokens
-            ):
-                raise _contract_error(harness, "resume_strategy", f"malformed {lane}")
-            if kind == "unsupported" and tokens:
-                raise _contract_error(harness, "resume_strategy", f"unsupported {lane} has tokens")
-            if (
-                lane == "interactive_attach"
-                and kind != "unsupported"
-                and "{short_id}" not in tokens
-                and "{session_id}" not in tokens
-            ):
-                # An attach form must name the id its harness's own attach
-                # command takes: claude's short jobId, or a full session id
-                # where a short one would collide (a codex UUIDv7 head-8 is a
-                # ~65.5s bucket).
-                raise _contract_error(harness, "resume_strategy", f"{lane} drops its attach id")
-            if lane.endswith("resume") and kind != "unsupported" and "{session_id}" not in tokens:
-                raise _contract_error(harness, "resume_strategy", f"{lane} drops session id")
-        model_switch = caps["model_switch_strategy"]
-        expected_switch_fields = {
-            "kind", "tokens", "effort_labels", "status_command", "status_pattern",
-        }
-        if not isinstance(model_switch, dict) or set(model_switch) != expected_switch_fields:
-            raise _contract_error(harness, "model_switch_strategy", "malformed strategy")
-        switch_kind = model_switch["kind"]
-        switch_tokens = model_switch["tokens"]
-        effort_labels = model_switch["effort_labels"]
-        status_command = model_switch["status_command"]
-        status_pattern = model_switch["status_pattern"]
-        if switch_kind not in _MODEL_SWITCH_KINDS:
-            raise _contract_error(harness, "model_switch_strategy", "unknown kind")
-        if not isinstance(switch_tokens, list) or not all(
-            isinstance(token, str) and token for token in switch_tokens
-        ):
-            raise _contract_error(harness, "model_switch_strategy", "malformed tokens")
-        if not isinstance(effort_labels, dict) or not all(
-            effort in _MODEL_SWITCH_EFFORTS
-            and isinstance(label, str)
-            and label
-            for effort, label in effort_labels.items()
-        ):
-            raise _contract_error(harness, "model_switch_strategy", "malformed effort labels")
-        placeholders: list[str] = []
-        for token in switch_tokens:
-            token_placeholders = re.findall(r"\{([^{}]+)\}", token)
-            remainder = re.sub(r"\{[^{}]+\}", "", token)
-            if "{" in remainder or "}" in remainder:
-                raise _contract_error(harness, "model_switch_strategy", "malformed placeholder")
-            placeholders.extend(token_placeholders)
-        unknown = set(placeholders) - _MODEL_SWITCH_PLACEHOLDERS
-        if unknown:
-            raise _contract_error(
-                harness, "model_switch_strategy", f"unknown placeholder {sorted(unknown)[0]!r}"
-            )
-        if switch_kind == "unsupported":
-            if switch_tokens or effort_labels or status_command or status_pattern:
-                raise _contract_error(
-                    harness, "model_switch_strategy", "unsupported strategy has executable data"
-                )
-        else:
-            if not isinstance(status_command, str) or not status_command.startswith("/"):
-                raise _contract_error(harness, "model_switch_strategy", "missing status command")
-            if not isinstance(status_pattern, str) or not status_pattern:
-                raise _contract_error(harness, "model_switch_strategy", "missing status pattern")
-            try:
-                compiled_status = re.compile(status_pattern)
-            except re.error as exc:
-                raise _contract_error(
-                    harness, "model_switch_strategy", f"invalid status pattern: {exc}"
-                ) from exc
-            if not {"model", "effort"} <= compiled_status.groupindex.keys():
-                raise _contract_error(
-                    harness, "model_switch_strategy", "status pattern needs model and effort groups"
-                )
-            if switch_kind == "direct":
-                if placeholders.count("model") != 1 or placeholders.count("effort") != 1:
-                    raise _contract_error(
-                        harness, "model_switch_strategy", "direct needs model and effort placeholders"
-                    )
-                if "effort_label" in placeholders or effort_labels:
-                    raise _contract_error(
-                        harness, "model_switch_strategy", "direct cannot carry menu labels"
-                    )
-            elif (
-                placeholders.count("model") != 1
-                or placeholders.count("effort_label") != 1
-                or "effort" in placeholders
-                or placeholders.index("model") > placeholders.index("effort_label")
-                or set(effort_labels) != _MODEL_SWITCH_EFFORTS
-            ):
-                raise _contract_error(
-                    harness,
-                    "model_switch_strategy",
-                    "menu_walk needs ordered model and effort targets",
-                )
-        if caps["loop_participation"] not in _LOOP_PARTICIPATION:
-            raise _contract_error(harness, "loop_participation", "unknown member")
-        # Only an `extension` row may name an artifact: a `native` row closes its
-        # loop through a shell hook and a `none` row closes it through nothing.
-        # The converse is legal and load-bearing - an `extension` row with an
-        # EMPTY path is a harness whose extension fno has not written yet, and
-        # :func:`check_loop_participation` refuses a looping dispatch at it.
-        if caps["loop_participation"] != "extension" and caps.get("loop_extension"):
-            raise _contract_error(
-                harness, "loop_extension",
-                "only an extension harness may name a loop artifact",
-            )
-        if caps["stop_strategy"] not in _STOP_STRATEGIES:
-            raise _contract_error(harness, "stop_strategy", "unknown strategy")
-        if caps["remove_strategy"] not in _REMOVE_STRATEGIES:
-            raise _contract_error(harness, "remove_strategy", "unknown strategy")
-        binding = caps["session_binding"]
-        if not isinstance(binding, dict) or set(binding) != {"strategy", "required", "timeout_ms"}:
-            raise _contract_error(harness, "session_binding", "malformed strategy")
-        if binding["strategy"] not in {
-            "preassigned-or-session-start", "rollout-fd-or-daemon",
-            # caller-assigned-cwd-scoped: the caller mints the id AND the
-            # harness scopes its lookup by cwd, so the identity is the PAIR and
-            # the id alone addresses nothing. Distinct from "preassigned",
-            # where the id is the whole handle.
-            "preassigned", "caller-assigned-cwd-scoped",
-            "store-lookup", "unsupported",
-        }:
-            raise _contract_error(harness, "session_binding", "unknown strategy")
-        if not isinstance(binding["required"], bool) or not isinstance(binding["timeout_ms"], int):
-            raise _contract_error(harness, "session_binding", "bad required/timeout values")
-        if binding["timeout_ms"] < 0 or (binding["required"] and binding["timeout_ms"] == 0):
-            raise _contract_error(harness, "session_binding", "required binding needs a timeout")
+        _validate_row(harness, caps)
     return version, harnesses
 
 
@@ -578,12 +591,127 @@ class DispatchResolveError(ValueError):
     so the failure is loud and actionable (AC1-ERR)."""
 
 
-MAP_VERSION, _HARNESS_CAPS = parse_capability_contract(
+MAP_VERSION, _BUNDLED_CAPS = parse_capability_contract(
     files("fno.agents").joinpath("harness_capabilities.toml").read_text(encoding="utf-8")
 )
 # Non-empty subset of the complete roster, mirroring parse_capability_contract:
 # the roster (KNOWN_HARNESSES) is wider than the capability table on purpose.
-assert _HARNESS_CAPS and set(_HARNESS_CAPS) <= set(KNOWN_HARNESSES)
+assert _BUNDLED_CAPS and set(_BUNDLED_CAPS) <= set(KNOWN_HARNESSES)
+
+#: Fail-open report of every override block a reader declined, naming the
+#: config file and the reason (AC1-ERR). A warning never un-configures a
+#: working harness: the bundled row stays and the mistake is on the record.
+OVERRIDE_WARNINGS: list[str] = []
+
+# The x-6678 shallow lane keys an override may still use, mapped into the
+# bundled row's nested paths so ONE override shape feeds both readers.
+_LANE_ALIAS_PATHS = {
+    "attach": ("resume_strategy", "forms", "interactive_attach"),
+    "resume": ("resume_strategy", "forms", "interactive_resume"),
+}
+
+
+def _override_config_candidates() -> list[Path]:
+    """The same candidate chain the Rust reader uses
+    (agents_view.rs ``config_toml_candidates``): ``$PWD/.fno/config.toml``
+    first, then the ``FNO_GLOBAL_SETTINGS_PATH`` sibling ``config.toml``, else
+    ``~/.fno/config.toml``. An empty env var reads as unset, matching
+    ``config_io._global_settings_path``."""
+    candidates = [Path.cwd() / ".fno" / "config.toml"]
+    env = os.environ.get("FNO_GLOBAL_SETTINGS_PATH")
+    if env:
+        candidates.append(Path(env).with_name("config.toml"))
+    else:
+        candidates.append(Path.home() / ".fno" / "config.toml")
+    return candidates
+
+
+def _lane_alias_normalized(override: dict) -> dict:
+    """Translate the shallow lane keys into the nested bundled paths, so
+    ``[harness.<name>.attach]`` lands on ``resume_strategy.forms.
+    interactive_attach`` exactly as it does in the Rust reader."""
+    out = {key: value for key, value in override.items() if key not in _LANE_ALIAS_PATHS}
+    for alias, path in _LANE_ALIAS_PATHS.items():
+        if alias not in override:
+            continue
+        node = out
+        for key in path[:-1]:
+            node = node.setdefault(key, {})
+        node[path[-1]] = deepcopy(override[alias])
+    return out
+
+
+def _deep_merge_row(base: dict, override: dict) -> dict:
+    """Recursive per-field merge, config winning: the ``_DEFAULT_PROVIDERS``
+    precedent, one level deeper so a dotted table header
+    (``[harness.x.resume_strategy.forms.interactive_attach]``) can correct one
+    lane without rewriting the other four. A non-dict value replaces whole."""
+    merged = deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_row(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def _apply_capability_overrides() -> None:
+    """Overlay ``[harness.<name>]`` blocks from the config chain onto
+    ``_HARNESS_CAPS``, in place, first candidate wins per harness name
+    (project-local before global - the loader's record precedence). Every
+    candidate row passes through :func:`_validate_row` BEFORE it lands, so an
+    override obeys the same contract the bundled table ships under; a rejected
+    override keeps the bundled row and names itself in
+    :data:`OVERRIDE_WARNINGS` (AC1-ERR, fail-open). A row for a name the
+    roster does not carry is refused by name (AC1-ERR, never advertise an
+    unmeasured dispatch lane)."""
+    _HARNESS_CAPS.clear()
+    _HARNESS_CAPS.update(deepcopy(_BUNDLED_CAPS))
+    OVERRIDE_WARNINGS.clear()
+    overridden: set[str] = set()
+    for path in _override_config_candidates():
+        try:
+            body = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            doc = tomllib.loads(body)
+        except tomllib.TOMLDecodeError as exc:
+            OVERRIDE_WARNINGS.append(f"{path}: invalid TOML: {exc}")
+            continue
+        table = doc.get("harness")
+        if not isinstance(table, dict):
+            continue
+        for name, override in table.items():
+            if name in overridden or not isinstance(override, dict):
+                continue
+            if name not in KNOWN_HARNESSES:
+                OVERRIDE_WARNINGS.append(
+                    f"{path}: harness {name!r} override rejected: absent from KNOWN_HARNESSES"
+                )
+                continue
+            candidate = _deep_merge_row(
+                _HARNESS_CAPS.get(name, {}), _lane_alias_normalized(override)
+            )
+            try:
+                _validate_row(name, candidate)
+            except DispatchResolveError as exc:
+                OVERRIDE_WARNINGS.append(f"{path}: harness {name!r} override rejected: {exc}")
+                continue
+            _HARNESS_CAPS[name] = candidate
+            overridden.add(name)
+
+
+def reload_capability_overrides() -> None:
+    """Re-read the config chain over the bundled rows. Import time applies it
+    once (the Rust reader's contract is the same: its OnceLock resolves a
+    config edit at the next process start); this is the test and tool
+    re-entry."""
+    _apply_capability_overrides()
+
+
+_HARNESS_CAPS: dict[str, dict] = {}
+_apply_capability_overrides()
 
 
 def known_harnesses() -> list[str]:

@@ -3,6 +3,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use regex::Regex;
 use serde::Deserialize;
 
+/// The capability contract. This in-crate TOML is a GENERATED artifact
+/// (x-244c, operator ruling 2026-09-02): `build.rs` copies the canonical
+/// Python-tree table (`cli/src/fno/agents/harness_capabilities.toml`) over it
+/// on every build, so the canonical is the only file a human edits. It stays
+/// tracked because the crates.io tarball must compile standalone, where no
+/// `cli/` exists (the events_limits.toml precedent).
 pub const CAPABILITY_TOML: &str = include_str!("harness_capabilities.toml");
 
 const SESSION_LANES: [&str; 5] = [
@@ -165,6 +171,18 @@ impl HarnessContract {
         Self::parse(CAPABILITY_TOML)
     }
 
+    /// Gate ONE merged candidate row (bundled + config override) through the
+    /// same per-row contract the bundled table ships under (x-244c). The row
+    /// arrives as generic TOML so an override reader hands over its merged
+    /// candidate without assembling a whole contract. `deny_unknown_fields`
+    /// still applies: a key the row vocabulary does not carry is a
+    /// rejection, not a silent keep.
+    pub fn validate_merged_row(harness: &str, row: &toml::Value) -> Result<(), ContractError> {
+        let caps = HarnessCapabilities::deserialize(row.clone())
+            .map_err(|error| ContractError(error.to_string()))?;
+        validate_row(harness, &caps)
+    }
+
     /// [`HarnessCapabilities::state_root_stance`] for an unknown-harness name.
     /// An unknown harness declares nothing, so it too is refused.
     pub fn state_root_stance(&self, harness: &str, substrate: &str) -> Option<&str> {
@@ -186,252 +204,8 @@ impl HarnessContract {
                 "harness set diverges from provider::KNOWN_PROVIDERS".into(),
             ));
         }
-        let allowed_keys: BTreeSet<&str> = [
-            "1",
-            "2",
-            "3",
-            "4",
-            "5",
-            "6",
-            "7",
-            "8",
-            "9",
-            "enter",
-            "left",
-            "right",
-            "up",
-            "down",
-            "tab",
-            "esc",
-            "y",
-            "a",
-            "d",
-            "unsupported",
-        ]
-        .into_iter()
-        .collect();
         for (harness, caps) in &self.harness {
-            let manifest = crate::manifest::load_manifest(harness, None)
-                .ok_or_else(|| field_error(harness, "ready_marker", "no bundled manifest"))?
-                .map_err(|error| field_error(harness, "ready_marker", &error.to_string()))?;
-            for declared in &caps.manifest_rules {
-                // The declared state vocabulary is idle/blocked ONLY, matching
-                // the Python validator in `fno.agents.harness_map`. A manifest
-                // may carry other states (`working`, and the engine's
-                // skip_state_update), but a capability ROW declaring one would
-                // parse here and be refused there, so a harness would load in
-                // one language and brick the other.
-                if !DECLARABLE_RULE_STATES.contains(&declared.state.as_str()) {
-                    return Err(field_error(
-                        harness,
-                        "manifest_rules",
-                        &format!(
-                            "state {:?} is not declarable here; use idle or blocked",
-                            declared.state
-                        ),
-                    ));
-                }
-                if !manifest
-                    .rules()
-                    .iter()
-                    .any(|rule| rule.id == declared.id && rule.state == declared.state)
-                {
-                    return Err(field_error(
-                        harness,
-                        "manifest_rules",
-                        &format!(
-                            "unknown manifest rule {:?}/{:?}",
-                            declared.id, declared.state
-                        ),
-                    ));
-                }
-            }
-            let actions: BTreeSet<&str> = caps
-                .permission_response
-                .keys()
-                .map(String::as_str)
-                .collect();
-            if actions != RESPONSE_ACTIONS.into_iter().collect() {
-                return Err(field_error(
-                    harness,
-                    "permission_response",
-                    "needs all three actions",
-                ));
-            }
-            for (action, response) in &caps.permission_response {
-                if response
-                    .keys
-                    .iter()
-                    .any(|key| !allowed_keys.contains(key.as_str()))
-                {
-                    return Err(field_error(
-                        harness,
-                        "permission_response",
-                        &format!("bad keys for {action}"),
-                    ));
-                }
-                if response.supported
-                    && (response.keys.is_empty() || response.rule_ids.iter().any(String::is_empty))
-                {
-                    return Err(field_error(
-                        harness,
-                        "permission_response",
-                        &format!("empty supported {action}"),
-                    ));
-                }
-                for rule_id in &response.rule_ids {
-                    if !manifest
-                        .rules()
-                        .iter()
-                        .any(|rule| rule.id == *rule_id && rule.state == "blocked")
-                    {
-                        return Err(field_error(
-                            harness,
-                            "permission_response",
-                            &format!("{action} names unknown blocked rule {rule_id:?}"),
-                        ));
-                    }
-                }
-            }
-            if caps.ready_marker != "unsupported"
-                && !caps.ready_rule_ids.contains(&caps.ready_marker)
-            {
-                return Err(field_error(
-                    harness,
-                    "ready_marker",
-                    &format!("unknown rule {:?}", caps.ready_marker),
-                ));
-            }
-            if caps.ready_marker != "unsupported"
-                && !manifest
-                    .rules()
-                    .iter()
-                    .any(|rule| rule.id == caps.ready_marker && rule.state == "idle")
-            {
-                return Err(field_error(
-                    harness,
-                    "ready_marker",
-                    &format!("unknown positive manifest rule {:?}", caps.ready_marker),
-                ));
-            }
-            if caps.send_keys_enter_delay_ms < 0 {
-                return Err(field_error(
-                    harness,
-                    "send_keys_enter_delay_ms",
-                    "must be non-negative",
-                ));
-            }
-            if caps.submit_keys.is_empty()
-                || caps
-                    .submit_keys
-                    .iter()
-                    .any(|key| !allowed_keys.contains(key.as_str()))
-            {
-                return Err(field_error(harness, "submit_keys", "invalid key token"));
-            }
-            // A lane that never submits must not carry a delay: the number
-            // would describe a wait nothing performs. The CONVERSE does not
-            // hold and was asserted here until codex disproved it. A supported
-            // contract may legitimately need no wait - measured against codex
-            // 0.148.0, a carriage return sent immediately after the text
-            // submits correctly, while claude needs 800ms. Kept identical to
-            // the Python validator in cli/src/fno/agents/harness_map.py so the
-            // two runtimes cannot disagree about which contracts are legal.
-            if caps.submit_keys == ["unsupported"] && caps.send_keys_enter_delay_ms != 0 {
-                return Err(field_error(
-                    harness,
-                    "send_keys_enter_delay_ms",
-                    "an unsupported submit contract cannot carry a nonzero delay",
-                ));
-            }
-            let lanes: BTreeSet<&str> = caps
-                .resume_strategy
-                .forms
-                .keys()
-                .map(String::as_str)
-                .collect();
-            if lanes != SESSION_LANES.into_iter().collect() {
-                return Err(field_error(
-                    harness,
-                    "resume_strategy",
-                    "needs every session lane",
-                ));
-            }
-            for (lane, form) in &caps.resume_strategy.forms {
-                if !RESUME_KINDS.contains(&form.kind.as_str())
-                    || form.tokens.iter().any(String::is_empty)
-                    || (form.kind == "unsupported" && !form.tokens.is_empty())
-                    || (lane.ends_with("resume")
-                        && form.kind != "unsupported"
-                        && !form.tokens.iter().any(|token| token == "{session_id}"))
-                {
-                    return Err(field_error(
-                        harness,
-                        "resume_strategy",
-                        &format!("malformed {lane}"),
-                    ));
-                }
-                // An attach form must name the id its harness's own attach
-                // command takes: claude's short jobId, or a full session id
-                // where a short one would collide (a codex UUIDv7 head-8 is a
-                // ~65.5s clock bucket). A form naming NEITHER cannot address a
-                // session, so it is not one.
-                if lane == "interactive_attach"
-                    && form.kind != "unsupported"
-                    && !form
-                        .tokens
-                        .iter()
-                        .any(|token| token == "{short_id}" || token == "{session_id}")
-                {
-                    return Err(field_error(
-                        harness,
-                        "resume_strategy",
-                        &format!("{lane} drops its attach id"),
-                    ));
-                }
-            }
-            validate_model_switch_strategy(harness, &caps.model_switch_strategy)?;
-            if !LOOP_PARTICIPATION.contains(&caps.loop_participation.as_str()) {
-                return Err(field_error(harness, "loop_participation", "unknown member"));
-            }
-            // Only an `extension` row may name an artifact: a `native` row
-            // closes its loop through a shell hook and a `none` row closes it
-            // through nothing, so a path on either is a claim the member
-            // contradicts. The converse is legal and load-bearing - an
-            // `extension` row with an EMPTY path is a harness whose extension
-            // fno has not written yet, and the dispatch seam refuses it.
-            if caps.loop_participation != "extension" && !caps.loop_extension.is_empty() {
-                return Err(field_error(
-                    harness,
-                    "loop_extension",
-                    "only an extension harness may name a loop artifact",
-                ));
-            }
-            if !STOP_STRATEGIES.contains(&caps.stop_strategy.as_str()) {
-                return Err(field_error(harness, "stop_strategy", "unknown strategy"));
-            }
-            if !REMOVE_STRATEGIES.contains(&caps.remove_strategy.as_str()) {
-                return Err(field_error(harness, "remove_strategy", "unknown strategy"));
-            }
-            if ![
-                "preassigned-or-session-start",
-                "rollout-fd-or-daemon",
-                "preassigned",
-                // The caller mints the id AND the harness scopes its lookup by
-                // cwd, so the identity is the PAIR and the id alone addresses
-                // nothing. Distinct from "preassigned", where the id is the
-                // whole handle: a resume issued from the wrong directory finds
-                // no session here and, on pi, CREATES a second one under the
-                // same id rather than failing.
-                "caller-assigned-cwd-scoped",
-                "store-lookup",
-                "unsupported",
-            ]
-            .contains(&caps.session_binding.strategy.as_str())
-                || (caps.session_binding.required && caps.session_binding.timeout_ms == 0)
-            {
-                return Err(field_error(harness, "session_binding", "invalid strategy"));
-            }
+            validate_row(harness, caps)?;
         }
         Ok(())
     }
@@ -725,6 +499,240 @@ fn validate_model_switch_strategy(
             "model_switch_strategy",
             "menu_walk needs ordered model and effort targets",
         ));
+    }
+    Ok(())
+}
+
+/// The per-harness half of [`HarnessContract::validate`], extracted so an
+/// override reader can gate ONE merged candidate row through the same
+/// contract the bundled table ships under (x-244c).
+fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), ContractError> {
+    let allowed_keys: BTreeSet<&str> = [
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "enter", "left", "right", "up", "down",
+        "tab", "esc", "y", "a", "d", "unsupported",
+    ]
+    .into_iter()
+    .collect();
+    let manifest = crate::manifest::load_manifest(harness, None)
+        .ok_or_else(|| field_error(harness, "ready_marker", "no bundled manifest"))?
+        .map_err(|error| field_error(harness, "ready_marker", &error.to_string()))?;
+    for declared in &caps.manifest_rules {
+        // The declared state vocabulary is idle/blocked ONLY, matching
+        // the Python validator in `fno.agents.harness_map`. A manifest
+        // may carry other states (`working`, and the engine's
+        // skip_state_update), but a capability ROW declaring one would
+        // parse here and be refused there, so a harness would load in
+        // one language and brick the other.
+        if !DECLARABLE_RULE_STATES.contains(&declared.state.as_str()) {
+            return Err(field_error(
+                harness,
+                "manifest_rules",
+                &format!(
+                    "state {:?} is not declarable here; use idle or blocked",
+                    declared.state
+                ),
+            ));
+        }
+        if !manifest
+            .rules()
+            .iter()
+            .any(|rule| rule.id == declared.id && rule.state == declared.state)
+        {
+            return Err(field_error(
+                harness,
+                "manifest_rules",
+                &format!(
+                    "unknown manifest rule {:?}/{:?}",
+                    declared.id, declared.state
+                ),
+            ));
+        }
+    }
+    let actions: BTreeSet<&str> = caps
+        .permission_response
+        .keys()
+        .map(String::as_str)
+        .collect();
+    if actions != RESPONSE_ACTIONS.into_iter().collect() {
+        return Err(field_error(
+            harness,
+            "permission_response",
+            "needs all three actions",
+        ));
+    }
+    for (action, response) in &caps.permission_response {
+        if response
+            .keys
+            .iter()
+            .any(|key| !allowed_keys.contains(key.as_str()))
+        {
+            return Err(field_error(
+                harness,
+                "permission_response",
+                &format!("bad keys for {action}"),
+            ));
+        }
+        if response.supported
+            && (response.keys.is_empty() || response.rule_ids.iter().any(String::is_empty))
+        {
+            return Err(field_error(
+                harness,
+                "permission_response",
+                &format!("empty supported {action}"),
+            ));
+        }
+        for rule_id in &response.rule_ids {
+            if !manifest
+                .rules()
+                .iter()
+                .any(|rule| rule.id == *rule_id && rule.state == "blocked")
+            {
+                return Err(field_error(
+                    harness,
+                    "permission_response",
+                    &format!("{action} names unknown blocked rule {rule_id:?}"),
+                ));
+            }
+        }
+    }
+    if caps.ready_marker != "unsupported"
+        && !caps.ready_rule_ids.contains(&caps.ready_marker)
+    {
+        return Err(field_error(
+            harness,
+            "ready_marker",
+            &format!("unknown rule {:?}", caps.ready_marker),
+        ));
+    }
+    if caps.ready_marker != "unsupported"
+        && !manifest
+            .rules()
+            .iter()
+            .any(|rule| rule.id == caps.ready_marker && rule.state == "idle")
+    {
+        return Err(field_error(
+            harness,
+            "ready_marker",
+            &format!("unknown positive manifest rule {:?}", caps.ready_marker),
+        ));
+    }
+    if caps.send_keys_enter_delay_ms < 0 {
+        return Err(field_error(
+            harness,
+            "send_keys_enter_delay_ms",
+            "must be non-negative",
+        ));
+    }
+    if caps.submit_keys.is_empty()
+        || caps
+            .submit_keys
+            .iter()
+            .any(|key| !allowed_keys.contains(key.as_str()))
+    {
+        return Err(field_error(harness, "submit_keys", "invalid key token"));
+    }
+    // A lane that never submits must not carry a delay: the number
+    // would describe a wait nothing performs. The CONVERSE does not
+    // hold and was asserted here until codex disproved it. A supported
+    // contract may legitimately need no wait - measured against codex
+    // 0.148.0, a carriage return sent immediately after the text
+    // submits correctly, while claude needs 800ms. Kept identical to
+    // the Python validator in cli/src/fno/agents/harness_map.py so the
+    // two runtimes cannot disagree about which contracts are legal.
+    if caps.submit_keys == ["unsupported"] && caps.send_keys_enter_delay_ms != 0 {
+        return Err(field_error(
+            harness,
+            "send_keys_enter_delay_ms",
+            "an unsupported submit contract cannot carry a nonzero delay",
+        ));
+    }
+    let lanes: BTreeSet<&str> = caps
+        .resume_strategy
+        .forms
+        .keys()
+        .map(String::as_str)
+        .collect();
+    if lanes != SESSION_LANES.into_iter().collect() {
+        return Err(field_error(
+            harness,
+            "resume_strategy",
+            "needs every session lane",
+        ));
+    }
+    for (lane, form) in &caps.resume_strategy.forms {
+        if !RESUME_KINDS.contains(&form.kind.as_str())
+            || form.tokens.iter().any(String::is_empty)
+            || (form.kind == "unsupported" && !form.tokens.is_empty())
+            || (lane.ends_with("resume")
+                && form.kind != "unsupported"
+                && !form.tokens.iter().any(|token| token == "{session_id}"))
+        {
+            return Err(field_error(
+                harness,
+                "resume_strategy",
+                &format!("malformed {lane}"),
+            ));
+        }
+        // An attach form must name the id its harness's own attach
+        // command takes: claude's short jobId, or a full session id
+        // where a short one would collide (a codex UUIDv7 head-8 is a
+        // ~65.5s clock bucket). A form naming NEITHER cannot address a
+        // session, so it is not one.
+        if lane == "interactive_attach"
+            && form.kind != "unsupported"
+            && !form
+                .tokens
+                .iter()
+                .any(|token| token == "{short_id}" || token == "{session_id}")
+        {
+            return Err(field_error(
+                harness,
+                "resume_strategy",
+                &format!("{lane} drops its attach id"),
+            ));
+        }
+    }
+    validate_model_switch_strategy(harness, &caps.model_switch_strategy)?;
+    if !LOOP_PARTICIPATION.contains(&caps.loop_participation.as_str()) {
+        return Err(field_error(harness, "loop_participation", "unknown member"));
+    }
+    // Only an `extension` row may name an artifact: a `native` row
+    // closes its loop through a shell hook and a `none` row closes it
+    // through nothing, so a path on either is a claim the member
+    // contradicts. The converse is legal and load-bearing - an
+    // `extension` row with an EMPTY path is a harness whose extension
+    // fno has not written yet, and the dispatch seam refuses it.
+    if caps.loop_participation != "extension" && !caps.loop_extension.is_empty() {
+        return Err(field_error(
+            harness,
+            "loop_extension",
+            "only an extension harness may name a loop artifact",
+        ));
+    }
+    if !STOP_STRATEGIES.contains(&caps.stop_strategy.as_str()) {
+        return Err(field_error(harness, "stop_strategy", "unknown strategy"));
+    }
+    if !REMOVE_STRATEGIES.contains(&caps.remove_strategy.as_str()) {
+        return Err(field_error(harness, "remove_strategy", "unknown strategy"));
+    }
+    if ![
+        "preassigned-or-session-start",
+        "rollout-fd-or-daemon",
+        "preassigned",
+        // The caller mints the id AND the harness scopes its lookup by
+        // cwd, so the identity is the PAIR and the id alone addresses
+        // nothing. Distinct from "preassigned", where the id is the
+        // whole handle: a resume issued from the wrong directory finds
+        // no session here and, on pi, CREATES a second one under the
+        // same id rather than failing.
+        "caller-assigned-cwd-scoped",
+        "store-lookup",
+        "unsupported",
+    ]
+    .contains(&caps.session_binding.strategy.as_str())
+        || (caps.session_binding.required && caps.session_binding.timeout_ms == 0)
+    {
+        return Err(field_error(harness, "session_binding", "invalid strategy"));
     }
     Ok(())
 }

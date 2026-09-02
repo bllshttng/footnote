@@ -16,6 +16,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::proto::{AgentBadge, AnswerablePrompt, Reach};
+// x-244c (operator ruling 2026-09-02): ONE table is edited by humans, the
+// Python-tree canonical (`cli/src/fno/agents/harness_capabilities.toml`);
+// fno-agents generates its in-crate copy from it at build time, and this
+// crate reaches the table through that dep instead of carrying a third byte
+// copy. The dep is deliberate: the old "the mux shells fno-agents, it does
+// not link it" posture covered the registry read, which stays Value-parsed.
+use fno_agents::harness_capabilities::CAPABILITY_TOML;
 
 /// One registry row as the sideline consumes it: badge already TTL-derived
 /// (the reader knows "now"); the pane-exit fact is joined later, on the core
@@ -257,12 +264,6 @@ fn shell_join(tokens: &[String]) -> String {
         .join(" ")
 }
 
-/// The bundled capability contract. `fno` does not link `fno-agents` (it shells
-/// the binary), so the table is embedded rather than called for. The three TOML
-/// copies are byte-identical (`check-harness-capabilities-fresh.sh`); this one
-/// lives inside the crate so the packaged package builds standalone.
-const CAPABILITY_TOML: &str = include_str!("harness_capabilities.toml");
-
 /// The two interactive-form lanes [`declared_form`] serves. The lane names
 /// the bundled form it reads, the config key that may override it, and how
 /// strict the parse is: a resume lane fills exactly `{session_id}` (the
@@ -281,14 +282,6 @@ impl FormLane {
         match self {
             FormLane::Attach => "interactive_attach",
             FormLane::Resume => "interactive_resume",
-        }
-    }
-
-    /// The shallower `harness.<name>.<key>` block a config override uses.
-    fn config_key(self) -> &'static str {
-        match self {
-            FormLane::Attach => "attach",
-            FormLane::Resume => "resume",
         }
     }
 }
@@ -314,11 +307,11 @@ impl FormLane {
 /// which is the safe direction. Read once per process: a config edit takes
 /// effect at the next mux server start.
 ///
-/// The merge is ONE `insert` per harness over the map the bundled contract
-/// produced. That placement is load-bearing beyond this lane: a general
-/// per-field override (x-244c) widens this from the attach lane to every
-/// capability field by moving the same merge up a level, not by growing a
-/// second reader beside it.
+/// The merge covers the WHOLE `harness.<name>` row, per field, config
+/// winning - the attach lane was its first surface (x-6678) and x-244c moved
+/// it up a level rather than growing a second reader beside it. The Python
+/// reader (harness_map.py) implements the same rules, so an override answers
+/// identically on both runtimes.
 pub fn attach_form(harness: &str) -> Option<AttachForm> {
     declared_form(FormLane::Attach, harness)
 }
@@ -334,85 +327,175 @@ pub fn resume_form(harness: &str) -> Option<AttachForm> {
 }
 
 /// The ONE reader of the declared capability table, behind the two lane
-/// front doors. Reads the bundled contract once per process, merges config
-/// overrides, and parses the winner through the lane's rules.
+/// front doors: the bundled row with the config chain merged over it, parsed
+/// through the lane's rules.
 fn declared_form(lane: FormLane, harness: &str) -> Option<AttachForm> {
-    static FORMS: std::sync::OnceLock<[toml::map::Map<String, toml::Value>; 2]> =
-        std::sync::OnceLock::new();
-    let forms = &FORMS
-        .get_or_init(|| [build_forms(FormLane::Attach), build_forms(FormLane::Resume)])
-        [lane as usize];
-    parse_form(lane, forms.get(harness)?)
+    let row = resolved_rows().get(harness)?;
+    let block = row
+        .get("resume_strategy")?
+        .get("forms")?
+        .get(lane.bundled_key())?;
+    parse_form(lane, block)
 }
 
-/// The bundled-plus-override map for one lane: name -> the harness's form
-/// block. The bundled contract's rows live under
-/// `harness.<name>.resume_strategy.forms`; config overrides use the shallower
-/// `harness.<name>.<lane key>`. Both land in this map as the same shape, so
-/// ONE parse path serves both sources and ONE `insert` is the whole merge.
-fn build_forms(lane: FormLane) -> toml::map::Map<String, toml::Value> {
-    let bundled_block = |caps: &toml::Value| -> Option<toml::Value> {
-        caps.get("resume_strategy")?
-            .get("forms")?
-            .get(lane.bundled_key())
-            .cloned()
-    };
-    let mut forms: toml::map::Map<String, toml::Value> =
-        toml::from_str::<toml::Value>(CAPABILITY_TOML)
-            .ok()
-            .and_then(|v| {
-                let harnesses = v.get("harness")?.as_table()?.clone();
-                let mut out = toml::map::Map::new();
-                for (name, caps) in &harnesses {
-                    if let Some(block) = bundled_block(caps) {
-                        out.insert(name.clone(), block);
-                    }
-                }
-                Some(out)
-            })
-            .unwrap_or_default();
-    // Fail-open at every layer: an unreadable file, an unparseable file, a
-    // missing `harness` table and an unparseable block each skip rather
-    // than clearing what was already there. A typo in one harness's block
-    // cannot un-attach a working harness.
+/// The bundled rows with every `harness.<name>` config block merged over
+/// them, whole row per field, config winning. The ONE merged view every
+/// capability read in this file goes through; `attach_form` and
+/// `resume_form` are lane doors onto it. Resolved once per process - a
+/// config edit takes effect at the next mux server start.
+///
+/// The merge rules, mirrored by the Python reader so the two runtimes answer
+/// overrides identically: candidates in `config_toml_candidates` order with
+/// FIRST candidate winning per harness name (project-local before global);
+/// the shallow lane keys (`attach`, `resume`) translating into the nested
+/// `resume_strategy.forms.*` paths; the merge recursive on tables and
+/// replace on everything else; and every candidate row gated through
+/// `validate_merged_row`, the SAME per-row contract the bundled table ships
+/// under. Fail-open at every layer: an unreadable or unparseable config
+/// file, a missing `harness` table and a rejected block each skip rather
+/// than clearing what was already there, so a typo in one harness's block
+/// cannot un-attach a working harness.
+fn resolved_rows() -> &'static std::collections::BTreeMap<String, toml::Value> {
+    static ROWS: std::sync::OnceLock<std::collections::BTreeMap<String, toml::Value>> =
+        std::sync::OnceLock::new();
+    ROWS.get_or_init(|| {
+        let mut rows: std::collections::BTreeMap<String, toml::Value> =
+            toml::from_str::<toml::Value>(CAPABILITY_TOML)
+                .ok()
+                .and_then(|v| {
+                    v.get("harness")?
+                        .as_table()
+                        .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                })
+                .unwrap_or_default();
+        apply_row_overrides(&mut rows);
+        rows
+    })
+}
+
+/// Fail-open report of every override the reader declined, naming the file
+/// and the reason (AC1-ERR). A warning never un-configures a working
+/// harness: the bundled row stays and the mistake is on the record.
+pub fn override_warnings() -> Vec<String> {
+    warnings_slot().lock().map(|w| w.clone()).unwrap_or_default()
+}
+
+fn warnings_slot() -> &'static std::sync::Mutex<Vec<String>> {
+    static WARNINGS: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> =
+        std::sync::OnceLock::new();
+    WARNINGS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+fn apply_row_overrides(rows: &mut std::collections::BTreeMap<String, toml::Value>) {
     let mut overridden: std::collections::HashSet<String> = Default::default();
     for path in config_toml_candidates() {
         let Ok(body) = std::fs::read_to_string(&path) else {
             continue;
         };
         let Ok(doc) = toml::from_str::<toml::Value>(&body) else {
+            if let Ok(mut w) = warnings_slot().lock() {
+                w.push(format!("{}: invalid TOML", path.display()));
+            }
             continue;
         };
         let Some(harnesses) = doc.get("harness").and_then(|h| h.as_table()) else {
             continue;
         };
-        for (name, caps) in harnesses {
+        for (name, over) in harnesses {
             // First candidate wins per name (project-local over global),
             // matching the loader's record precedence.
             if overridden.contains(name) {
                 continue;
             }
-            let Some(block) = caps.get(lane.config_key()) else {
+            let Some(over) = over.as_table() else {
                 continue;
             };
-            // A block that does not parse as a form is skipped, so
-            // the bundled form (or the safe "cannot attach" for an unknown
-            // name) stays; an explicit kind = "unsupported" override still
-            // lands, because that is a parsable statement.
-            if parse_form(lane, block).is_some() || is_unsupported_block(block) {
-                forms.insert(name.clone(), block.clone());
-                overridden.insert(name.clone());
+            // An override may correct a bundled row or ADD one for a name
+            // the Rust roster already carries; anything else is refused by
+            // name, never advertised.
+            if !rows.contains_key(name)
+                && !fno_agents::provider::KNOWN_PROVIDERS.contains(&name.as_str())
+            {
+                if let Ok(mut w) = warnings_slot().lock() {
+                    w.push(format!(
+                        "{}: harness {name:?} override rejected: absent from KNOWN_PROVIDERS",
+                        path.display()
+                    ));
+                }
+                continue;
             }
+            let mut candidate =
+                rows.get(name).cloned().unwrap_or(toml::Value::Table(Default::default()));
+            let normalized = lane_alias_normalized(over);
+            merge_field(&mut candidate, &toml::Value::Table(normalized));
+            // The merged candidate passes the SAME per-row validation the
+            // bundled table ships under, or it does not land: a rejected
+            // override keeps the bundled row and names itself, never
+            // silently drops (AC1-ERR).
+            if let Err(error) =
+                fno_agents::harness_capabilities::HarnessContract::validate_merged_row(
+                    name, &candidate,
+                )
+            {
+                if let Ok(mut w) = warnings_slot().lock() {
+                    w.push(format!(
+                        "{}: harness {name:?} override rejected: {error}",
+                        path.display()
+                    ));
+                }
+                continue;
+            }
+            rows.insert(name.clone(), candidate);
+            overridden.insert(name.clone());
         }
     }
-    forms
 }
 
-/// Whether a block is an explicit `kind = "unsupported"` statement - the one
-/// parsable way to say "this harness cannot attach", which an override may use
-/// to retire a bundled form.
-fn is_unsupported_block(block: &toml::Value) -> bool {
-    block.get("kind").and_then(|k| k.as_str()) == Some("unsupported")
+/// The x-6678 shallow lane keys, translated into the nested paths the bundled
+/// row carries them under, so one override shape feeds both readers.
+fn lane_alias_normalized(over: &toml::Table) -> toml::Table {
+    let mut out = over.clone();
+    for (alias, lane) in [("attach", "interactive_attach"), ("resume", "interactive_resume")] {
+        let Some(block) = out.remove(alias) else {
+            continue;
+        };
+        let Some(strategy) = out
+            .entry("resume_strategy".to_string())
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
+        else {
+            continue;
+        };
+        let Some(forms) = strategy
+            .entry("forms".to_string())
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
+        else {
+            continue;
+        };
+        forms.insert(lane.to_string(), block);
+    }
+    out
+}
+
+/// Recursive per-field merge, config winning: the `_DEFAULT_PROVIDERS`
+/// precedent, one level deeper so a dotted table header
+/// (`[harness.x.resume_strategy.forms.interactive_attach]`) can correct one
+/// lane without rewriting the other four. A non-table value replaces whole.
+fn merge_field(base: &mut toml::Value, over: &toml::Value) {
+    match (base, over) {
+        (toml::Value::Table(base_t), toml::Value::Table(over_t)) => {
+            for (key, value) in over_t {
+                match base_t.get_mut(key) {
+                    Some(slot) => merge_field(slot, value),
+                    None => {
+                        base_t.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        (base, over) => *base = over.clone(),
+    }
 }
 
 /// The pure half of [`declared_form`]: one form block (contract row or config
@@ -3175,8 +3258,6 @@ tokens = []"#,
         )
         .unwrap();
         assert!(parse_form(FormLane::Attach, &unsupported).is_none());
-        assert!(is_unsupported_block(&unsupported));
-        assert!(!is_unsupported_block(&idless));
     }
 
     /// The resume lane is stricter than the attach lane: it fills exactly
@@ -3249,6 +3330,200 @@ tokens = []"#,
         );
         assert!(candidates[0].ends_with(".fno/config.toml"));
         assert!(candidates[0] != candidates[1]);
+    }
+
+    /// AC2-ERR (x-244c): the merged row the PYTHON reader resolves must equal
+    /// the merged row this reader resolves, under the same staged config.
+    /// Driven by cli/tests/agents/test_harness_capability_parity.py, which
+    /// stages the config chain, writes the Python answer to
+    /// FNO_CAPABILITY_PARITY_JSON, and runs this test with
+    /// FNO_CAPABILITY_PARITY_DIR pointing at the stage. Ignored by default:
+    /// it needs that harness and a built dependency tree. The merge logic is
+    /// the one dual the x-244c ruling kept (both readers stand), so this is
+    /// the guard that pins them together.
+    #[test]
+    #[ignore = "driven by test_harness_capability_parity.py, which stages the config"]
+    fn capability_parity_with_python() {
+        let stage = std::env::var("FNO_CAPABILITY_PARITY_DIR").expect("parity stage dir");
+        let expected_path =
+            std::env::var("FNO_CAPABILITY_PARITY_JSON").expect("parity expected json");
+        std::env::set_var("PWD", &stage);
+        std::env::set_var("HOME", &stage);
+        std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH");
+        let expected: std::collections::BTreeMap<String, serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(&expected_path).unwrap())
+                .expect("the Python answer parses as JSON");
+
+        let rows = resolved_rows();
+        let mut diffs: Vec<String> = Vec::new();
+        let names: std::collections::BTreeSet<&String> =
+            rows.keys().chain(expected.keys()).collect();
+        for name in names {
+            let actual = match rows.get(name.as_str()) {
+                Some(row) => serde_json::to_value(row).expect("a row serializes"),
+                None => {
+                    diffs.push(format!("{name}: Rust reader has no row"));
+                    continue;
+                }
+            };
+            let Some(expected_row) = expected.get(name.as_str()) else {
+                diffs.push(format!("{name}: Python reader has no row"));
+                continue;
+            };
+            let (serde_json::Value::Object(actual), serde_json::Value::Object(expected_row)) =
+                (&actual, expected_row)
+            else {
+                diffs.push(format!("{name}: rows are not objects"));
+                continue;
+            };
+            let fields: std::collections::BTreeSet<&String> =
+                actual.keys().chain(expected_row.keys()).collect();
+            for field in fields {
+                let a = actual.get(field);
+                let e = expected_row.get(field);
+                if a != e {
+                    diffs.push(format!(
+                        "{name}.{field}: Python has {e:?}, Rust resolved {a:?}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            diffs.is_empty(),
+            "the two readers resolved the staged config differently:\n  {}",
+            diffs.join("\n  ")
+        );
+    }
+
+    /// AC1/AC2 (x-244c), Rust half: the config chain merges WHOLE rows - a
+    /// nested table corrects one strategy, a scalar flips, a lane alias lands
+    /// on its nested form, a malformed block is refused with the bundled row
+    /// kept and named, and a name outside the roster is refused by name. The
+    /// Python reader must answer the SAME stage identically; the cross-check
+    /// lives in cli/tests/agents/test_harness_capability_parity.py.
+    #[test]
+    fn the_config_chain_merges_whole_rows_by_the_shared_rules() {
+        let stage = std::env::temp_dir().join(format!("fno-x244c-{}", std::process::id()));
+        let project = stage.join(".fno");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("config.toml"),
+            r#"
+[harness.agy.model_switch_strategy]
+kind = "direct"
+tokens = ["--model {model}", "--effort {effort}"]
+effort_labels = {}
+status_command = "/status"
+status_pattern = 'Model:\s+(?P<model>\S+).*?effort\s+(?P<effort>low|medium|high)'
+
+[harness.agy]
+send_keys_enter_delay_ms = 400
+permission_bypass = ["--yolo"]
+
+[harness.pi.attach]
+kind = "session_flag"
+tokens = ["pi", "--session", "{session_id}"]
+
+[harness.codex.model_switch_strategy]
+kind = "direct"
+tokens = ["--model {model}", "--effort {effort}"]
+"#,
+        )
+        .unwrap();
+        // The env var names a settings path whose SIBLING config.toml is the
+        // global candidate - stage/config.toml here.
+        std::fs::write(
+            stage.join("config.toml"),
+            r#"
+[harness.codex]
+route_on_pane = true
+
+[harness.brandnewharness]
+thread = true
+"#,
+        )
+        .unwrap();
+
+        // Env is process-global; save and restore around the single read.
+        let (pwd, home, global) = (
+            std::env::var("PWD").ok(),
+            std::env::var("HOME").ok(),
+            std::env::var("FNO_GLOBAL_SETTINGS_PATH").ok(),
+        );
+        std::env::set_var("PWD", &stage);
+        std::env::set_var("HOME", &stage);
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", stage.join("global-settings.yaml"));
+        let mut rows: std::collections::BTreeMap<String, toml::Value> =
+            toml::from_str::<toml::Value>(CAPABILITY_TOML)
+                .unwrap()
+                .get("harness")
+                .unwrap()
+                .as_table()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+        apply_row_overrides(&mut rows);
+        match pwd {
+            Some(v) => std::env::set_var("PWD", v),
+            None => std::env::remove_var("PWD"),
+        }
+        match home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match global {
+            Some(v) => std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", v),
+            None => std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH"),
+        }
+        let _ = std::fs::remove_dir_all(&stage);
+
+        // The nested strategy lands whole, and the scalars ride the same row.
+        let agy = &rows["agy"];
+        let strategy = &agy["model_switch_strategy"];
+        assert_eq!(strategy["kind"].as_str(), Some("direct"));
+        assert_eq!(
+            strategy["status_command"].as_str(),
+            Some("/status"),
+            "the nested table deep-merged over the bundled row"
+        );
+        assert_eq!(agy["send_keys_enter_delay_ms"].as_integer(), Some(400));
+        assert_eq!(agy["permission_bypass"][0].as_str(), Some("--yolo"));
+        assert_eq!(
+            agy["resume_strategy"]["forms"]["interactive_resume"]["kind"].as_str(),
+            Some("session_flag"),
+            "untouched bundled fields survive the merge"
+        );
+
+        // The lane alias lands on its nested form.
+        assert_eq!(
+            rows["pi"]["resume_strategy"]["forms"]["interactive_attach"]["tokens"][0].as_str(),
+            Some("pi")
+        );
+
+        // The global candidate's scalar lands (per-name first-win only stops
+        // CONFLICTING candidates; codex was not overridden project-locally).
+        assert_eq!(rows["codex"]["route_on_pane"].as_bool(), Some(true));
+
+        // The unknown roster name is refused, never advertised.
+        assert!(!rows.contains_key("brandnewharness"));
+
+        // One bundled strategy codex kept: its override named no status pair,
+        // so the row validator refused it and the bundled row stayed.
+        assert_eq!(
+            rows["codex"]["model_switch_strategy"]["status_command"].as_str(),
+            Some("/status"),
+            "a rejected nested table keeps the bundled row"
+        );
+        let warnings = override_warnings();
+        assert!(
+            warnings.iter().any(|w| w.contains("codex")),
+            "the rejection is named: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("brandnewharness")),
+            "the roster refusal is named: {warnings:?}"
+        );
     }
 
     #[test]
@@ -4909,11 +5184,11 @@ config_dir = "~/.claude-alt"
     /// harness added next passes it without touching this file.
     #[test]
     fn every_attach_capable_harness_reaches_drive() {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/harness_capabilities.toml");
-        let raw = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let caps: toml::Value = toml::from_str(&raw).expect("parse harness_capabilities.toml");
+        // The embedded table (the build-generated copy of the Python-tree
+        // canonical) parsed straight from the const, not from a crate-local
+        // file: x-244c deleted this crate's own copy.
+        let caps: toml::Value =
+            toml::from_str(CAPABILITY_TOML).expect("parse harness_capabilities.toml");
         let harness = caps.get("harness").expect("harness table");
         let declared: Vec<String> = harness
             .as_table()
