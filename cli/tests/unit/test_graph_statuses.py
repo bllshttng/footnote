@@ -1,10 +1,13 @@
 """Unit tests for fno.graph.statuses - recompute_statuses and is_stale_lock."""
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone, timedelta
 
 import pytest
 
+from fno.claims.core import acquire_claim, claim_status, release_claim
+from fno.claims.io import global_claims_root
 from fno.graph.statuses import (
     is_stale_lock,
     live_claimed_node_ids,
@@ -67,6 +70,45 @@ def test_live_claim_read_can_fail_open_for_display_or_raise_for_mutation(monkeyp
     assert live_claimed_node_ids() == set()
     with pytest.raises(OSError, match="claims unavailable"):
         live_claimed_node_ids(strict=True)
+
+
+def test_baseline_recompute_clears_live_in_review_graph_mirror(
+    tmp_path, monkeypatch
+):
+    """Baseline pin for the pre-Task-2.2 live-owner loss defect.
+
+    A real live ``node:<id>`` claim does not stop today's clock-only
+    recompute path from clearing the graph mirror. Task 2.2 should invert the
+    mirror assertions while preserving the positive live-claim assertion.
+    """
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    node_id = "ab-live-review-owner"
+    holder = "target-session:live-review-owner"
+    old = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+    claim = acquire_claim(f"node:{node_id}", holder, pid=os.getpid())
+
+    try:
+        assert claim_status(claim.key)["state"] == "live"
+        assert node_id in live_claimed_node_ids()
+
+        entry = _entry(
+            node_id,
+            pr_number=1125,
+            status="in_review",
+            locked_by=holder,
+            session_id=holder,
+            claimed_at=old,
+        )
+        result = recompute_statuses([entry])
+
+        assert result[0]["status"] == "in_review"
+        assert result[0]["locked_by"] is None
+        assert result[0]["session_id"] is None
+        assert result[0]["claimed_at"] is None
+        assert claim_status(claim.key)["state"] == "live"
+    finally:
+        assert release_claim(claim.key, holder) is not None
+        assert claim_status(claim.key)["state"] == "free"
 
 
 # -- recompute_statuses --
