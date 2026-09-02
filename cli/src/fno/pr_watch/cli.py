@@ -443,64 +443,6 @@ def tick() -> None:
                 except Exception as exc:  # noqa: BLE001 - never fatal to the PR legs
                     log.warning("pr-watch: fleet heartbeat write failed: %s", exc)
 
-        set_tick_phase("sweep")
-        # A dead tick must not kill the legs below. The receipt contract makes
-        # _tick raise on a failed emission even though state is already persisted,
-        # so a broken events path would otherwise crash-loop recovery and sync
-        # catch-up, which ride this same launchd cadence. Fail the exit code at
-        # the end instead, mirroring how those legs wrap their own failures.
-        try:
-            result = _tick(
-                claim=ClaimAdapter(),
-                emit=_emit_event,
-                reviewers_for=_reviewers_for,
-                notify=lambda message, **_kw: _notify_parked(message),
-                post_merge_readiness_fn=post_merge_readiness,
-                now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                max_age_days=cfg.max_age_days,
-                max_retries=cfg.retries,
-                graphql_min_remaining=cfg.graphql_min_remaining,
-                enabled=tick_enabled,
-                dispatch_deadline=started + deadline,
-                dispatch_budget_seconds=deadline,
-            )
-        except TickDeadlineExceeded:
-            raise
-        except Exception as exc:  # noqa: BLE001 - a dead events path must not stop recovery
-            tick_failed = str(exc)
-            log.warning("pr-watch: tick failed: %s", exc)
-            typer.echo(f"pr-watch tick: failed: {exc}", err=True)
-            result = None
-
-        if result is not None:
-            if result.disabled:
-                reason = "config.autonomy.enabled" if not settings.autonomy.enabled else "config.pr_watch.enabled"
-                typer.echo(f"pr-watch tick: {reason} is false - skipped")
-            elif result.lock_held:
-                typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
-            elif result.quota_skip:
-                reset = f", resets {result.quota_reset}" if result.quota_reset else ""
-                # The skip can follow a sweep with failed repos, and this stdout
-                # line is what an operator tails during an outage: the failure
-                # count rides the skip line too, matching the end record.
-                degraded = (
-                    f" (degraded: {result.sweep_failures} sweep failure(s))"
-                    if result.sweep_failures
-                    else ""
-                )
-                typer.echo(
-                    f"pr-watch tick: graphql remaining {result.quota_remaining} below floor"
-                    f" - dispatch pass skipped{reset}{degraded}"
-                )
-            elif result.sweep_failures:
-                typer.echo(
-                    f"pr-watch tick: degraded: {result.sweep_failures} sweep failure(s)"
-                )
-            else:
-                typer.echo(
-                    f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
-                )
-
         set_tick_phase("watchdog")
         # Imported here, not at module scope: the watchdog package pulls the
         # harness layer and this module is on the launchd hot path.
@@ -818,6 +760,64 @@ def tick() -> None:
                 log.info("pr-watch: watchdog leg skipped: %s", exc)
             except Exception as exc:  # noqa: BLE001 - never let the watchdog break pr-watch
                 log.warning("pr-watch: watchdog sweep failed: %s", exc)
+
+        set_tick_phase("sweep")
+        # A dead tick must not kill the legs below. The receipt contract makes
+        # _tick raise on a failed emission even though state is already persisted,
+        # so a broken events path would otherwise crash-loop recovery and sync
+        # catch-up, which ride this same launchd cadence. Fail the exit code at
+        # the end instead, mirroring how those legs wrap their own failures.
+        try:
+            result = _tick(
+                claim=ClaimAdapter(),
+                emit=_emit_event,
+                reviewers_for=_reviewers_for,
+                notify=lambda message, **_kw: _notify_parked(message),
+                post_merge_readiness_fn=post_merge_readiness,
+                now_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                max_age_days=cfg.max_age_days,
+                max_retries=cfg.retries,
+                graphql_min_remaining=cfg.graphql_min_remaining,
+                enabled=tick_enabled,
+                dispatch_deadline=started + deadline,
+                dispatch_budget_seconds=deadline,
+            )
+        except TickDeadlineExceeded:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a dead events path must not stop recovery
+            tick_failed = str(exc)
+            log.warning("pr-watch: tick failed: %s", exc)
+            typer.echo(f"pr-watch tick: failed: {exc}", err=True)
+            result = None
+
+        if result is not None:
+            if result.disabled:
+                reason = "config.autonomy.enabled" if not settings.autonomy.enabled else "config.pr_watch.enabled"
+                typer.echo(f"pr-watch tick: {reason} is false - skipped")
+            elif result.lock_held:
+                typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
+            elif result.quota_skip:
+                reset = f", resets {result.quota_reset}" if result.quota_reset else ""
+                # The skip can follow a sweep with failed repos, and this stdout
+                # line is what an operator tails during an outage: the failure
+                # count rides the skip line too, matching the end record.
+                degraded = (
+                    f" (degraded: {result.sweep_failures} sweep failure(s))"
+                    if result.sweep_failures
+                    else ""
+                )
+                typer.echo(
+                    f"pr-watch tick: graphql remaining {result.quota_remaining} below floor"
+                    f" - dispatch pass skipped{reset}{degraded}"
+                )
+            elif result.sweep_failures:
+                typer.echo(
+                    f"pr-watch tick: degraded: {result.sweep_failures} sweep failure(s)"
+                )
+            else:
+                typer.echo(
+                    f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
+                )
 
         # Stranded-worktree recovery, same arming gate as the fleet
         # watchdog above: this is a second read of the same "is recovery
