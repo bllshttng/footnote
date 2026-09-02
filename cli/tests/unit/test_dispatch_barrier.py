@@ -31,8 +31,13 @@ def _last_json(out: str) -> dict:
 
 def _route_to(monkeypatch, root):
     # Route every claim key (node:/dispatch:) to an isolated tmp root so the real
-    # acquire/claim_status machinery runs hermetically.
+    # acquire/claim_status machinery runs hermetically. Two doors, deliberately:
+    # the monkeypatch covers callers that import claims_root_for directly, and
+    # FNO_CLAIMS_ROOT (the documented global-root override) covers anything that
+    # resolves through the env at call time, so a module-identity or import-order
+    # pathology can never route a CLI acquire to the real shared root.
     monkeypatch.setattr("fno.claims.io.claims_root_for", lambda key: root)
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(root))
 
 
 def test_spawn_guard_serializes_two_callers(monkeypatch, tmp_path):
@@ -479,8 +484,30 @@ def test_a_wrong_handover_holder_cannot_take_a_live_claim(monkeypatch, tmp_path)
             "--handover-from", "spawn-handover:t-guessed",
         ],
     )
-    assert r.exit_code == 1, r.output
-    assert claim_status("node:N", root=tmp_path)["holder"] == "target-session:incumbent"
+    assert r.exit_code == 1, f"{r.output}\n{_barrier_diag(tmp_path)}"
+    status = claim_status("node:N", root=tmp_path)
+    assert status.get("holder") == "target-session:incumbent", (
+        f"{status}\n{_barrier_diag(tmp_path)}"
+    )
+
+
+def _barrier_diag(tmp_path) -> str:
+    """What the failure needs to name: where the CLI's root actually pointed.
+
+    x-c319: under the CI changed-packet the acquire has been observed to win
+    where the seeded incumbent should refuse it, and the root the test seeded
+    is the first suspect. Resolve the SAME doors the test set up, read the
+    value NOW, and put the answer in the assertion message.
+    """
+    import os
+
+    from fno.claims.io import claims_root_for as current_resolver
+    from fno.claims.io import global_claims_dir
+
+    return (
+        f"[diag] resolver={current_resolver('node:N')} global={global_claims_dir()} "
+        f"env={os.environ.get('FNO_CLAIMS_ROOT')!r} tmp={tmp_path}"
+    )
 
 
 def test_handover_from_with_no_claim_on_disk_acquires_normally(monkeypatch, tmp_path):
@@ -505,8 +532,11 @@ def test_handover_from_with_no_claim_on_disk_acquires_normally(monkeypatch, tmp_
             "--handover-from", "spawn-handover:t-never-was",
         ],
     )
-    assert r.exit_code == 0, r.output
-    assert claim_status("node:N", root=tmp_path)["holder"] == "target-session:sid-2"
+    assert r.exit_code == 0, f"{r.output}\n{_barrier_diag(tmp_path)}"
+    status = claim_status("node:N", root=tmp_path)
+    assert status.get("holder") == "target-session:sid-2", (
+        f"{status}\n{_barrier_diag(tmp_path)}"
+    )
 
 
 def test_a_launch_window_claim_is_never_probed_as_abandoned(monkeypatch, tmp_path):

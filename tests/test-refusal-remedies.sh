@@ -107,13 +107,13 @@ require "$CV" "gone for good" "resume(rust): rm framed as the gone-for-good case
 require "$CV" "recoverable first" "resume(rust): path-recovery check precedes the remedy"
 require "$CV" "nothing resumable" "resume(rust): idless row told the truth, no id claim"
 
-# --- 4. rm-naming refusals: dispatch.py + the Rust ask twins -------------------
-# The ask twins are the guard-on-one-of-N-paths trap: dispatch.py was rewritten
-# while claude_ask/codex_ask/gemini_ask kept the rm-first text.
+# --- 4. rm-naming refusals: the Rust ask twins ---------------------------------
+# The Python rm-fallback refusals retired with the ask legs (the ask-adapter
+# port): their remedy text now lives only in the Rust twins, and these checks
+# are the live contract. The guard-on-one-of-N-paths trap this section once
+# guarded (dispatch.py rewritten while the twins kept the rm-first text) ends
+# when the Python emitter does.
 DIS="$REPO_ROOT/cli/src/fno/agents/dispatch.py"
-require "$DIS" "from the harness if it can still name" "rm-fallback(py): names the recovery remedy"
-require "$DIS" "Recover the short id from the harness" "rm-fallback(py): short-id variant named too"
-require "$DIS" "drops the row and its route" "rm-fallback(py): names what rm drops"
 # The needle matches the single literal line that closes both refusals.
 require "$DIS" "fno agents rm --help\`, not here." \
     "rm-fallback(py): override lives in --help, never in the refusal"

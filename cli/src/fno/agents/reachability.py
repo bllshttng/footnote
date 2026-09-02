@@ -411,3 +411,222 @@ def reachability(
         age_s=truth.get("last_activity_age_s"),
         falsifier=pid_falsifier(pid, pid_start_time),
     )
+
+
+# ---------------------------------------------------------------------------
+# (x-b029) The pane-identity cross-check
+#
+# One verb, two mismatch directions, counts always printed. Direction 1 finds
+# a registry row whose mux ref points at a pane the listing cannot resolve to
+# that row's identity (the stale pane a resume re-homed). Direction 2 finds
+# the pane carrying fno's spawn signature in its argv with no registry row at
+# all - the population this node is named for. Direction 2 reads ARGV only to
+# RAISE A MISMATCH for an operator to judge; it never mints an identity from
+# argv, which is the trap AGENTS.md records (argv can outlive the process it
+# describes).
+
+#: The argv flags fno's own spawn posture renders. Source of truth is the
+#: harness builders (codex sandbox_flag's yolo arm, claude's permission_mode
+#: else-arm); the literals are restated here because those builders are inline
+#: in larger argv assemblies and a cross-check must not spawn argv to learn it.
+FNO_SPAWN_SIGNATURE_FLAGS: tuple[str, ...] = (
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-skip-permissions",
+)
+
+
+def _process_tree() -> dict[int, str]:
+    """One `ps -axo` snapshot: pid -> that process's argv joined with every
+    DESCENDANT's argv, or an empty dict when ps cannot answer. Never raises.
+
+    Two reasons for the shape. The tree read, not just the child: a pane's
+    child_pid is usually the pane SHELL and the harness runs under it, so a
+    child-only probe reads `/bin/zsh` for a pane holding a live fno worker
+    and direction 2 never fires. And transitive, not one level: a launcher
+    script between the shell and the harness must not hide the signature
+    either. One snapshot serves every pane in a listing, so the cost is one
+    process-table read per verb run, not per pane.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["ps", "-axo", "ppid=,pid=,args="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if out.returncode != 0:
+        return {}
+    args_by_pid: dict[int, str] = {}
+    children_of: dict[int, list[int]] = {}
+    for line in out.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        ppid_s, pid_s, args = parts
+        try:
+            ppid, child = int(ppid_s), int(pid_s)
+        except ValueError:
+            continue
+        args_by_pid[child] = args
+        children_of.setdefault(ppid, []).append(child)
+    trees: dict[int, str] = {}
+    for pid, own in args_by_pid.items():
+        lines = [own]
+        stack = list(children_of.get(pid, ()))
+        seen: set[int] = set()
+        while stack:
+            descendant = stack.pop()
+            if descendant in seen:
+                continue
+            seen.add(descendant)
+            if descendant in args_by_pid:
+                lines.append(args_by_pid[descendant])
+            stack.extend(children_of.get(descendant, ()))
+        trees[pid] = "\n".join(lines).strip()
+    return trees
+
+
+def pane_identity_crosscheck(
+    panes: list[dict],
+    rows: list[Any],
+    session: str,
+    argv_of=None,
+) -> dict:
+    """Compare one mux session's pane listing against the registry, both ways.
+
+    ``panes`` is the parsed ``pane ls --json`` rows (each carrying ``fno_id``
+    and, since x-b029, ``fno_id_state``); ``rows`` is the loaded registry.
+    Pure aside from the injectable ``argv_of`` probe, so both directions and
+    the counts-compared contract are unit-testable on constructed rows; the
+    live-mux reading is the operator's run of the verb.
+
+    A mismatch is a READING, never a repair: nothing here mutates the
+    registry or the mux.
+    """
+    if argv_of is None:
+        # One process-table read for the whole listing, not one per pane.
+        tree = _process_tree()
+        argv_of = tree.get
+
+    pane_by_id = {p.get("pane_id"): p for p in panes}
+    rows_with_mux = [r for r in rows if getattr(r, "mux", None)]
+    rows_this_session = [
+        r for r in rows_with_mux if (r.mux or {}).get("session") == session
+    ]
+    rows_other_session = len(rows_with_mux) - len(rows_this_session)
+
+    # Direction 1: every row with a mux ref in THIS session resolves to a pane
+    # whose fno_id matches the row's identity.
+    row_mismatches: list[dict] = []
+    for r in rows_this_session:
+        mux = r.mux or {}
+        pane_id = mux.get("pane_id")
+        pane = pane_by_id.get(pane_id)
+        expected = (getattr(r, "harness_session_id", None) or "").strip()
+        if pane is None:
+            row_mismatches.append(
+                {
+                    "row": r.name,
+                    "pane": pane_id,
+                    "reason": "pane missing from session listing",
+                }
+            )
+            continue
+        if not expected:
+            row_mismatches.append(
+                {
+                    "row": r.name,
+                    "pane": pane_id,
+                    "reason": "row carries a mux ref but no session id",
+                }
+            )
+            continue
+        actual = pane.get("fno_id")
+        state = pane.get("fno_id_state") or (
+            "resolved" if actual else "unresolved:spawned-name"
+        )
+        if state != "resolved" or actual != expected:
+            row_mismatches.append(
+                {
+                    "row": r.name,
+                    "pane": pane_id,
+                    "reason": f"pane id is {actual or state!r}, row expects {expected}",
+                }
+            )
+
+    # Direction 2: every pane whose process tree carries fno's spawn
+    # signature is referenced by a row of THIS session. Pane ids are
+    # session-local, so a row of ANOTHER session naming the same numeric id
+    # must not spare the pane. A resolved pane needs no signature check. The
+    # probe reads argv ONLY to raise a mismatch; it never mints an identity
+    # from argv.
+    pane_mismatches: list[dict] = []
+    referenced = {(r.mux or {}).get("pane_id") for r in rows_this_session}
+    for p in panes:
+        pane_id = p.get("pane_id")
+        # A listing from an older daemon carries no fno_id_state; derive it
+        # from the raw value so the check stays honest against both.
+        state = p.get("fno_id_state") or (
+            "resolved" if p.get("fno_id") else "unresolved:spawned-name"
+        )
+        if state == "resolved":
+            continue
+        if p.get("pristine_idle_shell"):
+            # Positive shell-integrated evidence of an empty pane: a shell is
+            # not a worker, and probing it would report every idle pane.
+            continue
+        pid = p.get("child_pid")
+        if pid is None:
+            continue
+        argv = argv_of(pid)
+        if not argv:
+            continue
+        if pane_id in referenced:
+            continue
+        if any(flag in argv for flag in FNO_SPAWN_SIGNATURE_FLAGS):
+            pane_mismatches.append(
+                {
+                    "pane": pane_id,
+                    "pid": pid,
+                    "reason": "fno spawn signature in argv, no registry row",
+                }
+            )
+
+    return {
+        "session": session,
+        "panes_compared": len(panes),
+        "rows_with_mux_compared": len(rows_this_session),
+        "rows_other_session": rows_other_session,
+        "row_mismatches": row_mismatches,
+        "pane_mismatches": pane_mismatches,
+    }
+
+
+def render_pane_identity_crosscheck(result: dict) -> str:
+    """The human reading. The counts line prints on EVERY run, clean or not:
+    a zero-mismatch result must be distinguishable from a check that never
+    enumerated anything (AC5-EDGE)."""
+    lines = [
+        f"panes compared: {result['panes_compared']}; "
+        f"rows with mux ref compared: {result['rows_with_mux_compared']}"
+        + (
+            f"; rows in other sessions skipped: {result['rows_other_session']}"
+            if result["rows_other_session"]
+            else ""
+        )
+    ]
+    row_mismatches = result["row_mismatches"]
+    pane_mismatches = result["pane_mismatches"]
+    lines.append(f"row -> pane mismatches: {len(row_mismatches)}")
+    for m in row_mismatches:
+        lines.append(f"  row {m['row']} pane {m['pane']}: {m['reason']}")
+    lines.append(f"pane -> row mismatches: {len(pane_mismatches)}")
+    for m in pane_mismatches:
+        lines.append(f"  pane {m['pane']} pid {m['pid']}: {m['reason']}")
+    if not row_mismatches and not pane_mismatches:
+        lines.append("clean: no mismatch in either direction")
+    return "\n".join(lines)

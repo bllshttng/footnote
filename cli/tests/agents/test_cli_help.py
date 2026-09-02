@@ -73,6 +73,24 @@ def test_agents_resume_help_shows_print_command(runner: CliRunner) -> None:
     assert "--cross-project" in out
 
 
+def test_watchdog_help_advertises_the_live_verdict_set(runner: CliRunner) -> None:
+    from fno.agents import watchdog
+    from fno.agents.cli import _watchdog_only_help
+
+    code, out = _run(runner, "watchdog", "--help")
+    assert code == 0
+    flat = " ".join(out.split())
+    assert "--only" in flat
+    expected = "|".join(sorted(watchdog.VERDICTS))
+    assert f"({expected})" in _watchdog_only_help()
+
+
+def test_retire_is_an_addressable_watchdog_verdict() -> None:
+    from fno.agents import watchdog
+
+    assert watchdog.RETIRE in watchdog.VERDICTS
+
+
 def test_spawn_harness_help_no_longer_presents_a_closed_accepted_set(
     runner: CliRunner,
 ) -> None:

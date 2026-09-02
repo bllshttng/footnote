@@ -1027,6 +1027,19 @@ def test_the_retirable_set_accounts_for_every_live_state_claude_has():
     assert excluded <= folded, "an exclusion naming a state claude no longer emits"
 
 
+def test_failed_roster_state_folds_to_done_without_an_advisory():
+    state, warning = watchdog._row_state({"state": "failed"})
+
+    assert state == "done"
+    assert warning == ""
+
+    row = Row("dddd4444-0000", "failed-worker", state, None, "/tmp/bp", "spawn")
+    [verdict] = _retire_run(
+        [row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)}
+    )
+    assert verdict.verdict == watchdog.RETIRE
+
+
 def test_a_live_pane_painting_done_still_retires():
     """The counterweight to the test above, and the reason retire keys on
     the stopped words rather than `_TERMINAL_STATES`. `Done` is a member of

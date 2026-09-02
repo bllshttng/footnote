@@ -340,8 +340,8 @@ def read_timeline_tail(jobs_dir: Path, offset: int) -> str:
     """Read ``<jobs_dir>/timeline.jsonl`` from ``offset`` and concatenate
     ``text`` fields from terminal-or-needs-input rows.
 
-    The byte offset is the baseline captured before ``send_to_session``;
-    everything appended since contributes to the tail. Lines whose
+    The byte offset is the baseline captured before the send whose reply
+    is being awaited; everything appended since contributes to the tail. Lines whose
     ``state`` is outside :data:`_TERMINAL_STATES` are dropped (running
     rows describe in-flight tool calls, not the reply). Lines that
     fail to parse as JSON are skipped so a partial write at the tail

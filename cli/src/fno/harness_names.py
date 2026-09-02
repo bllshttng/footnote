@@ -34,17 +34,26 @@ KNOWN_HARNESSES: tuple[str, ...] = (
     "pi",
     "hermes",
     "openclaw",
+    "cursor-agent",
 )
 
-# Thread/headless accepts opencode through its launch seam. agy and gemini are
-# pane-only and stay out of this tuple.
+# Thread/headless accepts opencode through its launch seam, and the
+# keeper-hosted lanes: cursor-agent through `create-chat`'s callee-minted
+# chat id, pi through the caller-assigned id the restart journey proved.
+# agy and gemini are pane-only and stay out of this tuple.
 #
-# pi is pane-only TODAY and stays out for the same reason opencode's thread bit
-# reads false: the lane has to exist before the roster advertises it. pi's rpc
-# transport is built and tested (`fno.agents.harnesses.pi.PiRpcSession`), but
-# `dispatch_spawn` has no pi arm, so listing pi here sent a
-# `--substrate thread` spawn past this gate and into the terminal else-branch,
-# which refuses by naming gemini's retirement - a harness the operator never
-# mentioned. A wrong refusal is worse than an honest one, and the honest one is
-# this tuple.
-SPAWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode")
+# pi joins on journey evidence, not roster growth: its keeper-hosted thread
+# lane survived a double SIGKILL (journey wk-x61bc,
+# cli/tests/agents/test_thread_keeper_journey.py, first green 2026-09-01 on pi
+# 0.84.2), and the spawn arm shipped behind that evidence
+# (`dispatch_spawn`'s pi branch drives `_lane_b_thread_spawn`). pi's HEADLESS
+# lane is a different story: nothing has run it, its state_root_grant row
+# reads `unmeasured`, and `_check_spawn_harness` refuses that lane by stance
+# rather than by absence from this tuple. The membership answers "is there a
+# seam arm"; the row answers "is the lane measured".
+#
+# cursor-agent joins the same way (x-61bc's generic thread lane): the
+# dispatch_spawn arm mints the chat id through `create-chat`, hosts the TUI
+# under `fno-agents-worker --keeper`, and the journey backs it. Its `thread`
+# row reads true behind that same journey.
+SPAWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode", "cursor-agent", "pi")

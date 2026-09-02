@@ -5,11 +5,21 @@
 # that declaration against the filesystem in BOTH directions.
 #
 #   //! parity-stage: differential | characterization
-#   //! parity-oracle: <repo-relative path> | <python.dotted.module>
+#   //! parity-oracle: <repo-relative path> | <python.dotted.leg>
 #
 # A `differential` file pins a LIVE second implementation, so its oracle must
-# exist. A `characterization` file is a finished port frozen against goldens,
+# resolve. A `characterization` file is a finished port frozen against goldens,
 # so its oracle must be GONE.
+#
+# What an oracle names: the LEG, not a file that happens to hold it. A
+# repo-relative path names a whole-file leg (the bash case). A dotted name
+# resolves to cli/src/<a/b/c>.py when that file exists; otherwise its last
+# segment is a SYMBOL and the leg is that symbol inside the parent module
+# (cli/src/<a/b>.py defining `def c`/`class c`/`c =`/`c:` at top level). The
+# symbol form is how a leg inside a SURVIVING module is named: a port that
+# deletes the ask functions flips the oracle to gone even though the module
+# file remains, which is the case for every Python dual implementation. The
+# file wins when it exists, so a module-level oracle keeps meaning the module.
 #
 # Why two-sided. A one-sided check ("the oracle exists") passes a finished port
 # that still advertises a live second implementation, and a filename ending
@@ -23,8 +33,8 @@
 # -refs.sh fails on them. The oracle is the identity.
 #
 # The pass is NOT silent. It prints one line per file naming the stage and the
-# RESOLVED oracle path, because a green with no positive marker is exactly the
-# absence this gate exists to replace, and a dotted module resolved to the
+# RESOLVED oracle, because a green with no positive marker is exactly the
+# absence this gate exists to replace, and a dotted oracle resolved to the
 # wrong path would otherwise pass unseen.
 #
 # Usage: check-parity-test-provenance.sh [--root <dir>]
@@ -64,7 +74,7 @@ required_form() {
     echo "  see docs/architecture/dual-implementation-inventory.md"
     echo "  required header form, above the existing prose:"
     echo "    //! parity-stage: differential | characterization"
-    echo "    //! parity-oracle: <repo-relative path> | <python.dotted.module>"
+    echo "    //! parity-oracle: <repo-relative path> | <python.dotted.module> | <python.dotted.module>.<symbol>"
   } >&2
 }
 
@@ -73,13 +83,38 @@ read_field() { # <file> <field>
   sed -n "s|^//! *$2: *||p" "$1" | head -1 | sed 's/[[:space:]]*$//'
 }
 
-# An oracle with a slash is a repo-relative path. Anything else is a Python
-# dotted module, resolved under cli/src/ for the existence test.
-resolve_oracle() { # <oracle>
+# Map a dotted oracle to its repo-relative MODULE path (the whole dotted name
+# read as a module). A slash-bearing oracle is already a path.
+oracle_module() { # <oracle>
   case "$1" in
     */*) printf '%s' "$1" ;;
     *) printf 'cli/src/%s.py' "$(printf '%s' "$1" | tr '.' '/')" ;;
   esac
+}
+
+# Map a dotted oracle to its PARENT module path (dotted name minus the last
+# segment): the module a symbol-form leg is defined in.
+oracle_parent() { # <oracle>
+  printf 'cli/src/%s.py' "$(printf '%s' "${1%.*}" | tr '.' '/')"
+}
+
+# Whether the oracle identifies a leg still on disk. The module path itself
+# resolves when it exists; otherwise (dotted names only) the last segment is
+# a symbol, and it resolves when the parent module defines it at top level.
+oracle_resolves() { # <oracle>
+  local module
+  module="$(oracle_module "$1")"
+  if [[ -e "$ROOT/$module" ]]; then
+    return 0
+  fi
+  case "$1" in
+    */*) return 1 ;;
+  esac
+  local parent sym
+  parent="$(oracle_parent "$1")"
+  sym="${1##*.}"
+  [[ -f "$ROOT/$parent" ]] || return 1
+  grep -qE "^(async def|def|class)[[:space:]]+${sym}([(]|$)|^${sym}[[:space:]]*[:=]" "$ROOT/$parent" 2>/dev/null
 }
 
 shopt -s nullglob
@@ -111,10 +146,13 @@ for file in "${files[@]}"; do
     continue
   fi
 
-  resolved="$(resolve_oracle "$oracle")"
+  resolved="$(oracle_module "$oracle")"
+  if [[ "$oracle" != */* && ! -e "$ROOT/$resolved" ]]; then
+    resolved="$(oracle_parent "$oracle"):${oracle##*.}"
+  fi
 
   if [[ "$stage" == "differential" ]]; then
-    if [[ -e "$ROOT/$resolved" ]]; then
+    if oracle_resolves "$oracle"; then
       echo "ok   $rel  stage=differential      oracle=$resolved (present)"
     else
       refuse "$rel is differential but its oracle is gone: $resolved"
@@ -123,7 +161,7 @@ for file in "${files[@]}"; do
       echo "  See docs/architecture/dual-implementation-inventory.md." >&2
     fi
   else
-    if [[ -e "$ROOT/$resolved" ]]; then
+    if oracle_resolves "$oracle"; then
       refuse "$rel is characterization but its oracle is LIVE: $resolved"
       echo "  a characterization test stands in for a DELETED leg. This oracle" >&2
       echo "  still exists, so either the stage is wrong or the port is not done." >&2

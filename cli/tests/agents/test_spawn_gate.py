@@ -970,10 +970,12 @@ class TestRunGate:
             codex_rust, "fn dispatch_create(\n", "fn dispatch_resume(\n"
         )
         python_codex_create = section(
-            dispatch_python, "def _codex_create_path(\n", "def _codex_followup_path(\n"
+            dispatch_python, "def _codex_create_path(\n",
+            "def _capture_parent_edge() ->",
         )
         python_claude_spawn = section(
-            dispatch_python, "def _claude_create_path(\n", "def dispatch_ask(\n"
+            dispatch_python, "def _claude_create_path(\n",
+            "# Task 1.2: spawn verb (US2 Python fallback runtime)\n",
         )
         assert "def dispatch_spawn_pane(\n" in mux_python
         python_pane_spawn = mux_python.split("def dispatch_spawn_pane(\n", 1)[1]

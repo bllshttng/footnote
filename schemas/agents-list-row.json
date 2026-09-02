@@ -85,5 +85,33 @@
     "keys": [
       "dnd"
     ]
-  }
+  },
+  "storage_only": {
+    "$comment": "AgentEntry fields intentionally omitted from the list-row projection. The field's registry.py docstring owns the reason; do not duplicate those rationales here.",
+    "keys": [
+      "aliases",
+      "cc_session_id",
+      "exited_at",
+      "fno_id",
+      "host_mode",
+      "inside_leg",
+      "keeper_child_pid",
+      "launch_account",
+      "mcp_channel_id",
+      "messaging_socket_path",
+      "pid_start_time",
+      "related_session_id",
+      "requested_effort",
+      "requested_provider",
+      "route_settings_path",
+      "sandbox_posture",
+      "screen_state",
+      "spawn_trigger",
+      "spawned_by_cwd",
+      "spawned_by_harness",
+      "spawned_by_session",
+      "substrate"
+    ]
+  },
+  "known_gaps": {}
 }

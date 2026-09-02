@@ -90,19 +90,19 @@ footnote/
 
 Five advertised verbs (table below): `target`, `think`, `review`, `pr`, `fix`. Full set in `skills/using-fno/SKILL.md`. Always write verbs plugin-qualified per harness (bare `/execute` resolves elsewhere). Claude and opencode use `/fno:verb`. Codex uses `$fno:verb` because `/` is reserved for harness commands. See [docs/harness-command-matrix.md](docs/harness-command-matrix.md).
 
-| Command | Purpose |
-|---------|---------|
-| `/fno:target "feature"` | End-to-end: think -> blueprint -> do -> review -> ship |
-| `/fno:target path/to/plan` \| `<node-id>` | Execute an existing plan or backlog node |
-| `/fno:target L "feature"` | Large size: full ceremony including adversarial |
-| `/fno:target auto-merge "..."` | Auto-merge once external review passes (opt-in). [auto-merge](skills/target/references/auto-merge.md) |
-| `/fno:blueprint <doc-path>` | Mutate a design doc in place; `quick "..."` for a flat single-file plan |
-| `/fno:execute` | Execute a plan: `flat` (default) or `waves` |
-| `/fno:think` \| `/fno:review` \| `/fno:fix` \| `/fno:tdd` \| `/fno:triage` \| `/fno:setup` | Research / review / fix-loop / TDD / spec-ordering / config wizard |
-| `/fno:pr create` \| `check` \| `merged` | Open PR (pr-create role worker) / poll+implement external review / post-merge ritual |
-| `/fno:growth-launch "<objective>"` | Growth-studio pack: four-role campaign bundle held at a founder approval gate |
+| Command (claude/opencode `/fno:`, codex `$fno:`) | Purpose |
+|---|---|
+| `target "feature"` | End-to-end: think -> blueprint -> do -> review -> ship |
+| `target path/to/plan` \| `<node-id>` | Execute an existing plan or backlog node |
+| `target L "feature"` | Large size: full ceremony including adversarial |
+| `target auto-merge "..."` | Auto-merge once external review passes (opt-in). [auto-merge](skills/target/references/auto-merge.md) |
+| `blueprint <doc-path>` | Mutate a design doc in place; `quick "..."` for a flat single-file plan |
+| `execute` | Execute a plan: `flat` (default) or `waves` |
+| `think` \| `review` \| `fix` \| `tdd` \| `triage` \| `setup` | Research / review / fix-loop / TDD / spec-ordering / config wizard |
+| `pr create` \| `check` \| `merged` | Open PR (pr-create role worker) / poll+implement external review / post-merge ritual |
+| `growth-launch "<objective>"` | Growth-studio pack: four-role campaign bundle held at a founder approval gate |
 
-Surface evolution: `/fno:blueprint` mutates the design doc in place ([lean-blueprint](docs/architecture/lean-blueprint.md)); an approved native Plan-Mode plan is picked up by the next bare `/fno:target` ([target-plan-mode-integration](docs/architecture/target-plan-mode-integration.md)).
+Surface evolution: `blueprint` mutates the design doc in place ([lean-blueprint](docs/architecture/lean-blueprint.md)). An approved native Plan-Mode plan is picked up by the next bare `target` ([target-plan-mode-integration](docs/architecture/target-plan-mode-integration.md)).
 
 ## Backlog (`fno backlog`)
 
@@ -180,7 +180,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **`fno mux workspace restore`** - one verb resumes every worker member of a mux session through its own harness's declared resume form after a reboot or server kill; every member it cannot bring back is named with the reason. [workspace-restore](docs/architecture/workspace-restore.md).
 - **Pane keeper** - a worker pane's pty master lives in a keeper, not the server. A fresh server re-adopts the SAME pid. Plain panes still die with the server. `fno mux pane keeper list` reads survivors, and the page answers why not the daemon. [pane-keeper](docs/architecture/pane-keeper.md).
 - **watchdog** - transcript-truth wake/reroute/reap; dry run, `--apply`/`--apply-all`. [fleet-watchdog](docs/architecture/fleet-watchdog.md)
-- **`fno doctor`** - detects stale deployed `fno` vs merged source only. `--fix` delegates to `fno doctor update`. [installed-fno-staleness](docs/architecture/installed-fno-staleness.md).
+- **`fno doctor`** - compares deployed `fno` with local source. Reports lag. `--fix` runs `fno doctor update`. [installed-fno-staleness](docs/architecture/installed-fno-staleness.md).
 - **`fno doctor footprint`** - measures sustained fleet CPU and process count without load average; see [machine footprint](docs/architecture/machine-footprint.md).
 - **Accounts + rotation** - `fno config accounts`: records, failover, lockout, routing, combos. Five axes, never confuse them: harness (`-H`), provider (vendor, `-P`), model (`-m`), effort (`--effort`), account (`--account`). `opencode` is legally both harness and provider. Never infer the axis from a value. Definitions live in [axis-vocabulary](docs/architecture/axis-vocabulary.md).
 - **[Stage table](docs/architecture/role-based-model-routing.md)** (per-stage axis) - `config.agents.profiles.<verb>` overlays `agents.defaults`, reaches autonomous dispatch. `dispatch.harness` is deprecated. `route`=vendor/model (`--route`) beside `provider`=harness.

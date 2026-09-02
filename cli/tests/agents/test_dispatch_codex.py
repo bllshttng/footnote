@@ -75,18 +75,6 @@ def fake_codex_create(monkeypatch):
     return mock
 
 
-@pytest.fixture
-def fake_codex_resume(monkeypatch):
-    mock = MagicMock(return_value=CodexResult(
-        exit_code=0,
-        session_id="codex-sid-abc",
-        last_msg="follow-up reply",
-        duration_ms=22,
-    ))
-    monkeypatch.setattr(codex_mod, "resume", mock)
-    return mock
-
-
 def _read_events() -> list[dict]:
     """Return parsed events.jsonl entries for assertions."""
     from fno import paths
@@ -249,29 +237,6 @@ def test_create_codex_propagates_provider_specific_exit_code(workdir, fake_codex
     assert exc.value.exit_code == 127
 
 
-def test_followup_codex_propagates_provider_specific_exit_code(workdir, fake_codex_resume):
-    """Same propagation on the follow-up path."""
-    write_registry([
-        AgentEntry(
-            name="worker-X",
-            harness="codex",
-            cwd=str(workdir),
-            log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            harness_session_id="sid",
-        )
-    ])
-    fake_codex_resume.side_effect = CodexInvocationError(12)
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
-    with pytest.raises(DispatchAskError) as exc:
-        dispatch_ask(
-            name="worker-X",
-            message="msg",
-            harness=None,
-            cwd=workdir,
-            timeout=5,
-        )
-    assert exc.value.exit_code == 12
-
 
 def test_create_codex_timeout_maps_to_exit_15(workdir, fake_codex_create):
     """Repointed at _codex_create_path."""
@@ -329,49 +294,6 @@ def test_create_codex_passes_yolo_to_provider(workdir, fake_codex_create):
 # AC2 — follow-up (resume)
 # ---------------------------------------------------------------------------
 
-
-def test_followup_codex_routes_to_resume_and_bumps_last_message_at(
-    workdir, fake_codex_resume
-):
-    # Seed registry with a codex agent.
-    write_registry([
-        AgentEntry(
-            name="worker-X",
-            harness="codex",
-            cwd="/Users/foo/proj",
-            log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            harness_session_id="real-uuid",
-            created_at="2026-05-21T00:00:00Z",
-            status="live",
-            effort="low",
-            last_message_at=None,
-        )
-    ])
-
-    from fno.agents.dispatch import dispatch_ask
-    result = dispatch_ask(
-        name="worker-X",
-        message="follow up",
-        harness=None,
-        cwd=workdir,
-        timeout=10,
-    )
-    assert result.kind == "followup"
-    assert result.reply == "follow-up reply"
-
-    fake_codex_resume.assert_called_once()
-    call = fake_codex_resume.call_args
-    # AC2-EDGE: cwd comes from registry, not workdir.
-    assert call.kwargs["cwd"] == Path("/Users/foo/proj")
-    assert call.kwargs["session_id"] == "real-uuid"
-    assert call.kwargs["reasoning_effort"] == "low"
-
-    # last_message_at bumped.
-    entries = load_registry()
-    assert len(entries) == 1
-    assert entries[0].last_message_at is not None
-    # codex_session_id preserved (never re-minted).
-    assert entries[0].harness_session_id == "real-uuid"
 
 
 def _adopt_usable_codex_orphan(workdir, session_id):
@@ -434,237 +356,13 @@ def _adopt_usable_codex_orphan(workdir, session_id):
     return entries[0]
 
 
-def test_recovered_full_id_resumes_marker_and_stamps_exact_row(
-    workdir, fake_codex_resume
-):
-    from fno.agents.dispatch import dispatch_ask
-
-    session_id = "01a039cc-0000-7000-8000-000000000001"
-    marker = "RECOVERY-RESUME-OK-test-full-id"
-    entry = _adopt_usable_codex_orphan(workdir, session_id)
-    fake_codex_resume.return_value = CodexResult(
-        exit_code=0,
-        session_id=session_id,
-        last_msg=marker,
-        duration_ms=22,
-    )
-
-    result = dispatch_ask(
-        name=session_id,
-        message=f"Reply exactly {marker}",
-        harness=None,
-        cwd=workdir,
-        timeout=10,
-    )
-
-    assert result.reply == marker
-    assert fake_codex_resume.call_args.kwargs["session_id"] == session_id
-    assert fake_codex_resume.call_args.kwargs["session_id"] != session_id[:8]
-    recovered = load_registry()[0]
-    assert recovered.harness_session_id == session_id
-    assert recovered.last_message_at is not None
 
 
-def test_recovered_full_id_resume_failure_leaves_activity_unstamped(
-    workdir, fake_codex_resume
-):
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
-
-    session_id = "01a039cc-0000-7000-8000-000000000002"
-    entry = _adopt_usable_codex_orphan(workdir, session_id)
-    fake_codex_resume.side_effect = CodexInvocationError(1)
-
-    with pytest.raises(DispatchAskError) as exc:
-        dispatch_ask(
-            name=session_id,
-            message="Reply exactly RECOVERY-RESUME-OK-never",
-            harness=None,
-            cwd=workdir,
-            timeout=10,
-        )
-
-    assert exc.value.exit_code == 1
-    assert fake_codex_resume.call_args.kwargs["session_id"] == session_id
-    assert load_registry()[0].last_message_at is None
-    failures = [
-        event for event in _read_events()
-        if event.get("kind") == "agent_followup_failed"
-    ]
-    assert failures and failures[-1]["stage"] == "codex-subprocess"
 
 
-def test_followup_codex_provider_mismatch_rejected(workdir, fake_codex_resume):
-    """AC2-UI: ask with --provider claude against codex registry row -> exit 2."""
-    write_registry([
-        AgentEntry(
-            name="worker-X",
-            harness="codex",
-            cwd=str(workdir),
-            log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            harness_session_id="sid",
-        )
-    ])
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
-    with pytest.raises(DispatchAskError) as exc:
-        dispatch_ask(
-            name="worker-X",
-            message="msg",
-            harness="claude",
-            cwd=workdir,
-            timeout=5,
-        )
-    assert exc.value.exit_code == 2
-    fake_codex_resume.assert_not_called()
 
 
-def test_followup_codex_empty_log_path_rejected_at_dispatch(workdir, fake_codex_resume):
-    """Gemini PR #305 finding: registry log_path is contract-guarded; an
-    empty string is registry corruption, not a recoverable case."""
-    write_registry([
-        AgentEntry(
-            name="worker-X",
-            harness="codex",
-            cwd=str(workdir),
-            log_path="",  # corrupted
-            harness_session_id="sid",
-        )
-    ])
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
-    with pytest.raises(DispatchAskError) as exc:
-        dispatch_ask(
-            name="worker-X",
-            message="msg",
-            harness=None,
-            cwd=workdir,
-            timeout=5,
-        )
-    assert exc.value.exit_code == 11
-    assert "log_path" in str(exc.value)
-    fake_codex_resume.assert_not_called()
 
-
-def test_followup_codex_empty_cwd_rejected_at_dispatch(workdir, fake_codex_resume):
-    """Gemini PR #305 finding: registry cwd is contract-guarded; codex
-    sessions are cwd-pinned and a follow-up cannot proceed without it."""
-    write_registry([
-        AgentEntry(
-            name="worker-X",
-            harness="codex",
-            cwd="",  # corrupted
-            log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            harness_session_id="sid",
-        )
-    ])
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
-    with pytest.raises(DispatchAskError) as exc:
-        dispatch_ask(
-            name="worker-X",
-            message="msg",
-            harness=None,
-            cwd=workdir,
-            timeout=5,
-        )
-    assert exc.value.exit_code == 11
-    assert "cwd" in str(exc.value)
-    fake_codex_resume.assert_not_called()
-
-
-def test_followup_codex_no_session_id_in_registry_rejected(workdir, fake_codex_resume):
-    write_registry([
-        AgentEntry(
-            name="worker-X",
-            harness="codex",
-            cwd=str(workdir),
-            log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            harness_session_id=None,  # corrupted state
-        )
-    ])
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
-    with pytest.raises(DispatchAskError) as exc:
-        dispatch_ask(
-            name="worker-X",
-            message="msg",
-            harness=None,
-            cwd=workdir,
-            timeout=5,
-        )
-    assert exc.value.exit_code == 11
-    fake_codex_resume.assert_not_called()
-
-
-def test_followup_codex_timeout_maps_to_exit_15(workdir, fake_codex_resume):
-    write_registry([
-        AgentEntry(
-            name="worker-X",
-            harness="codex",
-            cwd=str(workdir),
-            log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            harness_session_id="sid",
-        )
-    ])
-    fake_codex_resume.side_effect = CodexTimeoutError(2.0)
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
-    with pytest.raises(DispatchAskError) as exc:
-        dispatch_ask(
-            name="worker-X",
-            message="msg",
-            harness=None,
-            cwd=workdir,
-            timeout=2,
-        )
-    assert exc.value.exit_code == 15
-    # last_message_at NOT advanced on failure.
-    assert load_registry()[0].last_message_at is None
-
-
-def test_followup_codex_invocation_error_maps_to_exit_1(workdir, fake_codex_resume):
-    write_registry([
-        AgentEntry(
-            name="worker-X",
-            harness="codex",
-            cwd=str(workdir),
-            log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            harness_session_id="invalid",
-        )
-    ])
-    fake_codex_resume.side_effect = CodexInvocationError(1)
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
-    with pytest.raises(DispatchAskError) as exc:
-        dispatch_ask(
-            name="worker-X",
-            message="msg",
-            harness=None,
-            cwd=workdir,
-            timeout=5,
-        )
-    assert exc.value.exit_code == 1
-    # last_message_at NOT advanced on failure.
-    assert load_registry()[0].last_message_at is None
-
-
-def test_followup_codex_emits_yolo_flag_in_events(workdir, fake_codex_resume):
-    write_registry([
-        AgentEntry(
-            name="worker-X",
-            harness="codex",
-            cwd=str(workdir),
-            log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            harness_session_id="sid",
-        )
-    ])
-    from fno.agents.dispatch import dispatch_ask
-    dispatch_ask(
-        name="worker-X",
-        message="msg",
-        harness="codex",
-        cwd=workdir,
-        timeout=5,
-        yolo=True,
-    )
-    started = [e for e in _read_events() if e.get("kind") == "agent_followup_started"]
-    done = [e for e in _read_events() if e.get("kind") == "agent_followup_done"]
-    assert started and started[-1].get("yolo") is True
-    assert done and done[-1].get("yolo") is True
 
 
 # ---------------------------------------------------------------------------
@@ -707,38 +405,6 @@ def test_yolo_on_claude_create_maps_to_bypass_permissions(workdir, capsys, monke
     assert seen.get("permission_mode") == "bypassPermissions"
 
 
-def test_yolo_on_claude_followup_emits_stderr_note(workdir, capsys, monkeypatch):
-    """AC3-ERR variant: claude follow-up with --yolo also emits the note."""
-    from fno.agents.harnesses import claude as claude_mod
-
-    write_registry([
-        AgentEntry(
-            name="worker-Y",
-            harness="claude",
-            cwd=str(workdir),
-            log_path=str(workdir / "agents" / "worker-X" / "output.jsonl"),
-            short_id="7c5dcf5d",
-            status="live",
-        )
-    ])
-    monkeypatch.setattr(
-        claude_mod,
-        "ask_followup",
-        lambda **kw: "reply",
-    )
-
-    from fno.agents.dispatch import dispatch_ask
-    dispatch_ask(
-        name="worker-Y",
-        message="msg",
-        harness="claude",
-        cwd=workdir,
-        timeout=5,
-        yolo=True,
-    )
-    err = capsys.readouterr().err
-    assert "--yolo has no effect for harness 'claude'" in err
-
 
 # ---------------------------------------------------------------------------
 # AC4 — from-name
@@ -770,17 +436,10 @@ def test_invalid_from_name_rejected_before_subprocess(workdir, fake_codex_create
     Reuses the US2 validator (no fresh regex per AC1.3 invariant); the rule
     set is: non-empty AND <=128 chars AND no XML-unsafe characters (", <, >, &).
     """
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
+    from fno.agents.dispatch import DispatchAskError, _validate_inputs
     for bad in ('', '"bad"', '<inject>', 'amp&persand', 'right>angle'):
         with pytest.raises(DispatchAskError) as exc:
-            dispatch_ask(
-                name="worker-X",
-                message="msg",
-                harness="codex",
-                cwd=workdir,
-                timeout=5,
-                from_name=bad,
-            )
+            _validate_inputs(name="worker-X", message="msg", from_name=bad)
         assert exc.value.exit_code == 2, f"input {bad!r}"
     # Provider MUST NOT have been called for any of the rejected inputs.
     fake_codex_create.assert_not_called()
@@ -788,17 +447,9 @@ def test_invalid_from_name_rejected_before_subprocess(workdir, fake_codex_create
 
 def test_yolo_does_not_bypass_from_name_validator(workdir, fake_codex_create):
     """AC3-FR: --yolo MUST NOT bypass the from-name validator."""
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
+    from fno.agents.dispatch import DispatchAskError, _validate_inputs
     with pytest.raises(DispatchAskError) as exc:
-        dispatch_ask(
-            name="worker-X",
-            message="msg",
-            harness="codex",
-            cwd=workdir,
-            yolo=True,
-            from_name='evil"',
-            timeout=5,
-        )
+        _validate_inputs(name="worker-X", message="msg", from_name='evil"')
     assert exc.value.exit_code == 2
     fake_codex_create.assert_not_called()
 

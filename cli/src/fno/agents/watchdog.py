@@ -116,7 +116,7 @@ KEEPER = "keeper"
 #: verdict was added, and `--only unclaimed` exited 2 on a verdict the sweep
 #: had been producing all along.
 VERDICTS = frozenset({
-    GHOST, REAP, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED, RECOVERABLE, KEEPER,
+    GHOST, REAP, RETIRE, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED, RECOVERABLE, KEEPER,
 })
 
 _RECOVERY_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhd])$", re.IGNORECASE)

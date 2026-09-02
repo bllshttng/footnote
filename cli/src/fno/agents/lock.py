@@ -191,7 +191,7 @@ def hold_agent_lock(
             :class:`AgentLockTimeout` if not acquired within this window.
         on_wait: Optional zero-arg callback. Called exactly once at or
             after `_ON_WAIT_THRESHOLD_SECONDS` (1.0s) of blocked-acquire
-            time. Used by `dispatch_ask` to print
+            time. Used by the dispatch paths to print
             `Waiting for agent '<name>' lock...` (AC1-UI threshold).
 
     Yields:

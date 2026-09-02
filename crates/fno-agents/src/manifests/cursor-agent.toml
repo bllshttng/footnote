@@ -1,0 +1,23 @@
+# cursor-agent readiness manifest, pinned against a live pane.
+#
+# fno drives cursor-agent through a hosted pty: a mux pane attended, or the
+# keeper-hosted thread lane dispatched. The --print stream-json mode is
+# output-only and has no input-format, rpc, acp, serve, or stdio transport.
+#
+# PINNED against cursor-agent v2026.08.31-4057e58 (the binary self-updates;
+# the v2026.08.25 idle marker `Add a follow-up` rotted under it). The idle
+# composer renders `-> Plan, search, build anything` inside the boxed
+# prompt. The v2026.08.25 working rule (a braille spinner beside
+# `Working`/`Running`) is DELETED rather than kept: it was never re-fired on
+# the new build, and an unfiring rule is a declaration standing in for a
+# capability. A working pane matches no rule and stays `live`, which is the
+# pane lane's safe default.
+
+min_engine_version = 1
+
+[[rule]]
+id = "idle_plan_build"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(8)"
+gate = { contains = "→ Plan, search, build anything" }

@@ -1030,7 +1030,7 @@ def _build_backlog_node(
         "domain": domain,
         "blocked_by": list(blocked_by or []),
         "session_id": None,
-        "claimed_at": None,
+        "locked_at": None,
         "completed_at": None,
         "has_brief": False,
         "roadmap_id": roadmap_id,
@@ -4110,7 +4110,7 @@ def cmd_update(
             # by _normalize_lock_fields. Clearing the lock also clears the US6
             # harness stamp so an unclaim never leaves a stale holder identity.
             node["locked_by"] = session
-            node["claimed_at"] = datetime.now(timezone.utc).isoformat() if session else None
+            node["locked_at"] = datetime.now(timezone.utc).isoformat() if session else None
             if session is None:
                 node["locked_by_harness"] = None
                 node["locked_by_harness_session"] = None
@@ -4627,7 +4627,7 @@ def _unclaim_node(task_id: str) -> None:
         # Same field clear as `update --locked-by null`; recompute_statuses
         # derives status back to ready from the now-empty locked_by.
         node["locked_by"] = None
-        node["claimed_at"] = None
+        node["locked_at"] = None
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
@@ -5185,7 +5185,7 @@ def cmd_next(
                 if candidates:
                     winner = candidates[0]
                     winner["locked_by"] = claim
-                    winner["claimed_at"] = datetime.now(timezone.utc).isoformat()
+                    winner["locked_at"] = datetime.now(timezone.utc).isoformat()
                     result[0] = _node_summary(winner)
                 return entries
 
@@ -5960,6 +5960,11 @@ def cmd_get(
         help="Node ab-id, slug, or bare 8-hex (e.g. ab-ff6f96e0 | dashless-spawn | ff6f96e0)",
     ),
     field: Optional[str] = typer.Option(None, help="Print only this field"),
+    grouped: bool = typer.Option(
+        False,
+        "--grouped",
+        help="Render populated fields in human-readable concept groups.",
+    ),
     strict: bool = typer.Option(
         False,
         "--strict",
@@ -6007,6 +6012,10 @@ def cmd_get(
                 typer.echo(json.dumps(value))
             else:
                 typer.echo(value)
+        elif grouped:
+            from fno.graph.grouped import render_grouped
+
+            typer.echo(render_grouped(e))
         else:
             typer.echo(json.dumps(e, indent=2))
         return
@@ -6043,6 +6052,10 @@ def cmd_get(
                     typer.echo(json.dumps(value))
                 else:
                     typer.echo(value)
+            elif grouped:
+                from fno.graph.grouped import render_grouped
+
+                typer.echo(render_grouped(e))
             else:
                 typer.echo(json.dumps(e, indent=2))
             return
@@ -8189,7 +8202,7 @@ def cmd_defer(
                     err=True,
                 )
             node["locked_by"] = None
-            node["claimed_at"] = None
+            node["locked_at"] = None
             # Clear completed_at PER NODE, inside the loop. The precedence
             # ladder is `done > deferred`, so hoisting this clear out of the
             # loop (or skipping it for the batch) makes deferring a done node
@@ -9122,7 +9135,7 @@ def _apply_completion_fields(node: dict, *, merge_status: Optional[str] = None) 
     a PR-less epic cascade leave it unset rather than assert a merge.
     """
     node["locked_by"] = None
-    node["claimed_at"] = None
+    node["locked_at"] = None
     # Done dominates deferred per the cascade. Clear any deferred/queued state
     # so the row presents as cleanly done with no ghost fields.
     node["deferred_at"] = None
@@ -9161,7 +9174,7 @@ def _clear_completion_fields(node: dict, *, reason: str) -> None:
       still true after a reopen; clearing it would erase a fact to express an
       opinion.
     - ``cost_usd`` / ``cost_sessions`` stay. The spend happened.
-    - ``locked_by`` / ``claimed_at`` stay null. ``done`` cleared them, and
+    - ``locked_by`` / ``locked_at`` stay null. ``done`` cleared them, and
       inventing a holder here would give the node a claim no lockfile backs;
       claims are acquired by ``fno do target init``.
     - ``deferred_at`` / ``queued_at`` stay null. ``done`` cleared those too, and
@@ -13045,7 +13058,7 @@ def cmd_maintain(
                     # Mirror cmd_defer: clear claim/completion so the cascade
                     # derives status: deferred, then set the deferred fields.
                     n["locked_by"] = None
-                    n["claimed_at"] = None
+                    n["locked_at"] = None
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
                     n["deferred_reason"] = reason
@@ -13083,7 +13096,7 @@ def cmd_maintain(
                     ):
                         continue
                     n["locked_by"] = None
-                    n["claimed_at"] = None
+                    n["locked_at"] = None
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
                     n["deferred_reason"] = _maintain.STALE_QUARANTINE_REASON
@@ -13528,6 +13541,32 @@ def cmd_migrate_difficulty(
         receipt = holder[0]
     else:
         receipt = _run(read_graph(_graph_path()))
+    typer.echo(json.dumps(receipt, sort_keys=True))
+
+
+@cli.command("migrate-updated-at", hidden=True)
+def cmd_migrate_updated_at(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Remove the proven-unread __updated_at field from candidate rows.",
+    ),
+) -> None:
+    """Dry-run or apply the one-shot __updated_at residue migration."""
+    from fno.graph.migrations import migrate_updated_at
+    from fno.graph.store import locked_mutate_graph, read_graph
+
+    if apply:
+        holder: list[dict] = []
+
+        def mutator(entries: list[dict]) -> list[dict]:
+            holder.append(migrate_updated_at(entries, apply=True))
+            return entries
+
+        locked_mutate_graph(_graph_path(), mutator)
+        receipt = holder[0]
+    else:
+        receipt = migrate_updated_at(read_graph(_graph_path()), apply=False)
     typer.echo(json.dumps(receipt, sort_keys=True))
 
 
@@ -14375,9 +14414,9 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
                 entry["project"] = resolved_project
             if entry.get("cwd") is None and resolved_cwd:
                 entry["cwd"] = resolved_cwd
-        # Promote idea -> ready by clearing any stale claimed_at.
+        # Promote idea -> ready by clearing any stale locked_at.
         # status is recomputed by recompute_statuses on the next read.
-        entry["claimed_at"] = None
+        entry["locked_at"] = None
         break
     return es
 
@@ -14952,7 +14991,7 @@ def cmd_new(
             "domain": domain,
             "blocked_by": [],
             "session_id": None,
-            "claimed_at": None,
+            "locked_at": None,
             "completed_at": None,
             "has_brief": False,
             "roadmap_id": None,
@@ -15311,7 +15350,7 @@ def cmd_supersede(
         canonical_new = new_node["id"]
         old_node["superseded_by"] = canonical_new
         old_node["locked_by"] = None
-        old_node["claimed_at"] = None
+        old_node["locked_at"] = None
         old_node["supersession"] = {
             "successor": canonical_new,
             "cause": cleaned_cause,
@@ -15561,6 +15600,7 @@ _TRACKER_OWNED_VERBS = frozenset(
         "remove",
         "migrate-priorities",
         "migrate-difficulty",
+        "migrate-updated-at",
         "reopen",
         "supersede",
         "unsupersede",

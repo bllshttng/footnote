@@ -167,6 +167,15 @@ def law_authority(subject: str) -> Tuple[str, str]:
     decision is missing or unreadable is malformed authority, not a clean no:
     that is ``unknown`` with the field named, the same rule that folds a
     damaged row.
+
+    Only rows with ``authority_source == "operator"`` are counted at all. A
+    waiver asserts a person at a terminal reviewed the diff, and
+    ``chat_attested`` rows cannot carry that fact: any harness-identified
+    agent session records the same value through the law door (a check that
+    also sits on the write path as
+    ``fno.decide.WaiverAuthorityRefusedError``). Filtering before the count
+    means such a row is a clean no, never a waiver, and never a conflict that
+    muddies a real operator ruling into unknown.
     """
     try:
         from fno.decide import list_decisions
@@ -177,6 +186,11 @@ def law_authority(subject: str) -> Tuple[str, str]:
             "unknown",
             f"decision probe failed for {subject}: {type(exc).__name__}: {exc}",
         )
+    rows = [
+        row
+        for row in rows
+        if str(row.get("authority_source") or "") == "operator"
+    ]
     if damaged:
         noun = "row" if damaged == 1 else "rows"
         return "unknown", f"decision probe: {damaged} damaged {noun} for {subject}"

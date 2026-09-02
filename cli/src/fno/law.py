@@ -23,6 +23,12 @@ What survives is the honest attribution: a chat recording lands as
 `chat_attested`, never as `operator`, so a reader can always tell it from a
 person at a terminal. Note the asymmetry that buys: a session can mint a law
 row and cannot retract one, because `retract_decision` requires `operator`.
+
+One family is closed to this door entirely: subjects under
+`review-coverage-waiver` (the merge gate's waiver evidence) refuse every
+non-operator authority at the write chokepoint, because a waiver asserts a
+person read the diff and no chat row can carry that fact. The attended
+`fno do pr coverage-waive` command is the only path.
 """
 
 from __future__ import annotations
@@ -107,6 +113,7 @@ def record_command(
         IndexWriteError,
         RefusedAuthorityError,
         UnattributedAuthorityError,
+        WaiverAuthorityRefusedError,
         record_decision,
         require_marked_caller,
     )
@@ -141,6 +148,9 @@ def record_command(
         # code reserved for "recorded, index write failed, do NOT re-run", so
         # letting it escape told a caller the opposite of what happened.
         typer.echo(f"fno law: refused: {exc}. Nothing was recorded.", err=True)
+        raise typer.Exit(3) from exc
+    except WaiverAuthorityRefusedError as exc:
+        typer.echo(f"fno law: refused: {exc}", err=True)
         raise typer.Exit(3) from exc
     except (RefusedAuthorityError, UnattributedAuthorityError) as exc:
         typer.echo(

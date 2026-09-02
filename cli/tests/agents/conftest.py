@@ -119,7 +119,7 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
 
     ``_force_python_runtime`` only keeps dispatch in-process; it does nothing
     about the provider subprocess underneath. The agents suite has repeatedly
-    leaked live ``claude --bg`` sessions when a test drove ``dispatch_ask``
+    leaked live ``claude --bg`` sessions when a test drove a dispatch path
     without isolating PATH - the ambient real ``claude`` got exec'd and left a
     resident bg session that piles up and can be resumed later (ab-c1bf3552,
     generalizing PR #415, which fixed two such tests one at a time).

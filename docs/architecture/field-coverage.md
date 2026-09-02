@@ -1,0 +1,9 @@
+# Agent field coverage
+
+`fno doctor lint field-coverage` checks that every field declared on `AgentEntry` has an explicit projection disposition. A field must be projected through `required`, intentionally excluded through `storage_only`, covered by another declared schema block, or recorded under `known_gaps` with an owning node. CI runs this source-only lane because it needs no registry or built Rust binary.
+
+`fno doctor lint field-coverage --live` adds two operator-run population readings. The persisted reading counts declared `AgentEntry` fields on real registry rows. The projected reading serializes those same rows through `fno.agents.format.serialize_entry` and counts emitted keys. The readings stay separate because a missing writer and a missing projection have different fixes. Empty registries and incomplete anchor fields are `UNMEASURED`, never clean.
+
+The 2026-09-01 acceptance baseline is a positive control. The persisted or projected findings must rediscover `crown`, `crown_grantor`, `crown_level`, `crown_scope`, `delivery_policy`, `forked_from_session_id`, `predecessor_session_ids`, `live_status`, and `live_status_basis`. A regression fixture removes `node` from the projection contract. The source lane must rediscover that historical omission by name. The live contract now projects `node` in both serializers. The decisive-field lane must prove that the consolidation receipt exposes a candidate's `superseded_by`. Previously, the gate read `graph.closure` only for the resolved node. It then presented a superseded candidate as live.
+
+Resolve a finding with one of four actions: fix its writer, project it through `required`, record it in `storage_only`, or add it to `known_gaps`. Do not populate an authority field such as crown until the operator decides whether that data must exist.

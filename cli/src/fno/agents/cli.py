@@ -1,8 +1,9 @@
 """`fno agents` Typer subapp.
 
-US1 wires ``ask`` to ``dispatch_ask``. US3 (this revision) replaces the
-``list`` stub with a real implementation and adds the new ``logs``
-verb. ``ping`` remains a Phase 1 stub until its own user story lands.
+``ask`` resolves its recipient and execs the Rust client binary; the Python
+ask adapters it once dispatched are gone (ported, parity frozen). ``list``
+and ``logs`` are live; ``ping`` remains a Phase 1 stub until its own user
+story lands.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from fno.agents.rust_runtime import make_agents_group_cls
 agents_app = typer.Typer(
     name="agents",
     help=(
-        "Cross-CLI agent lifecycle (claude / codex / gemini): "
+        "Cross-CLI agent lifecycle (claude / codex / gemini / cursor-agent): "
         "spawn / watch / list / logs / stop. "
         "To message a peer, use `fno agents mail send <name>` (or the `/mail` skill)."
     ),
@@ -1153,11 +1154,11 @@ def cmd_spawn(
         "-H",
         help=(
             "The CLI binary to launch. The declared harnesses - claude, codex, "
-            "gemini, opencode, agy, pi - get the full lane. Any other binary on "
-            "PATH also spawns, into a pane with fno as the viewport; pass its "
-            "init flags after '--'. Defaults to the invoking harness, then "
-            "claude. NOTE: -H no longer means headless; for a one-shot use "
-            "--substrate headless / --headless / --once."
+            "gemini, opencode, agy, pi, cursor-agent - get the full lane. Any "
+            "other binary on PATH also spawns, into a pane with fno as the "
+            "viewport; pass its init flags after '--'. Defaults to the "
+            "invoking harness, then claude. NOTE: -H no longer means headless; "
+            "for a one-shot use --substrate headless / --headless / --once."
         ),
     ),
     vendor: str | None = typer.Option(
@@ -1335,7 +1336,7 @@ def cmd_spawn(
             "Model for the worker, forwarded as --model <m> to the provider's "
             "own CLI (exact passthrough, no fuzzy resolution). On the default "
             "pane substrate every provider honors it (claude/codex/gemini/agy/"
-            "opencode); on --substrate thread/headless it reaches claude, codex, and agy. "
+            "opencode/cursor-agent); on --substrate thread/headless it reaches claude, codex, and agy. "
             "Unset = provider default; opencode defaults to zai-coding-plan/glm-5.3."
         ),
     ),
@@ -1348,7 +1349,8 @@ def cmd_spawn(
             "plan|bypassPermissions (exact passthrough); gemini --approval-mode "
             "(or 'yolo'); codex a shortcut (full-auto|yolo) or <sandbox>:"
             "<approval> (e.g. workspace-write:on-request); opencode 'auto'; agy "
-            "'skip'. An unmappable value errors before spawn. Mutually exclusive "
+            "'skip'; cursor-agent 'force' or 'yolo'. An unmappable value errors "
+            "before spawn. Mutually exclusive "
             "with --yolo. Honored on claude thread/headless (Rust or Python "
             "fallback); codex/gemini thread/headless one-shots reject it (use "
             "--substrate pane)."
@@ -1381,8 +1383,8 @@ def cmd_spawn(
         "--add-dir",
         help=(
             "Grant the worker extra write access to a directory (x-b6e2). Maps to "
-            "the harness's own --add-dir on claude/codex/agy (additive to the "
-            "worker's own workspace); opencode/gemini reject it (fail-closed)."
+            "the harness's own --add-dir on claude/codex/agy/cursor-agent (additive "
+            "to the worker's own workspace); opencode/gemini reject it (fail-closed)."
         ),
     ),
     agent: str | None = typer.Option(
@@ -2528,6 +2530,11 @@ def cmd_spawn(
                 # what it signals.
                 receipt_obj["pane_alive"] = pane_result.pane_alive
                 receipt_obj["unbound_reason"] = pane_result.unbound_reason
+            if getattr(pane_result, "stamp_failure", None) is not None:
+                # (x-b029, AC4-ERR) The stamp step reported its own failure: the
+                # row is id-less and no retry is coming, so the receipt says so
+                # instead of returning zero with a silent None.
+                receipt_obj["stamp_failure"] = pane_result.stamp_failure
             # Three orthogonal axes: harness always; provider (the model vendor)
             # and model only when an explicit route was applied (-P/--route) or a
             # model was named, absent otherwise. No key may hold another axis's
@@ -3134,18 +3141,25 @@ def cmd_ask(
     registry; because ask blocks for a reply it requires exactly one live
     peer (none/ambiguous exit nonzero).
 
-    Prints the recipient's reply verbatim on stdout (US2 AC2-HP: no
-    banner, no trailing newline added by fno). Failures surface on
-    stderr with deterministic exit codes (see ``DispatchAskError``).
+    Prints the recipient's reply verbatim on stdout (no banner, no
+    trailing newline added by fno).
+
+    The follow-up itself runs on the Rust runtime (the ask adapters were
+    ported; the parity harnesses freeze its behavior). This body keeps
+    only the work the binary cannot do: the ``--to-project`` anycast
+    resolution, which routes here first and then execs the binary with a
+    resolved name.
     """
+    from fno import rust_binary
+    from fno._flag_aliases import refuse_retired_provider
+    from fno.agents import rust_runtime
     from fno.agents.dispatch import (
         AMBIGUOUS_PROJECT_EXIT_CODE,
         UNKNOWN_AGENT_EXIT_CODE,
         DispatchAskError,
-        dispatch_ask,
         resolve_to_project,
     )
-    from fno._flag_aliases import refuse_retired_provider
+    from fno.agents.rust_runtime import BIN_NOT_FOUND_EXIT, route_to_rust, runtime_mode
 
     refuse_retired_provider(_provider_tombstone)
 
@@ -3194,33 +3208,53 @@ def cmd_ask(
         )
         raise typer.Exit(code=2)
 
-    try:
-        result = dispatch_ask(
-            name=name,
-            message=message,
-            harness=harness,
-            cwd=workdir,
-            timeout=timeout,
-            from_name=from_name,
-            yolo=yolo,
+    binary = rust_binary.resolve_installed_binary()
+    if runtime_mode() == "python" or binary is None:
+        # There is no Python ask implementation to fall back to: the legs
+        # were ported and deleted in the same change that moved this caller.
+        forced = (
+            f"{rust_runtime.RUNTIME_ENV}=python is set, and there is no Python "
+            "ask left to force; unset it with the binary installed. "
+            if runtime_mode() == "python"
+            else ""
         )
-    except DispatchAskError as exc:
-        # AC1-UI / AC2-UI: stderr surfaces the error, no extra wrapping.
-        print(str(exc), file=sys.stderr)
-        raise typer.Exit(code=exc.exit_code) from exc
+        print(
+            "fno agents ask: the Python ask runtime was ported to the Rust "
+            f"runtime, so ask requires the '{rust_binary.BINARY_NAME}' binary, "
+            f"which was not found. {forced}"
+            "Get it via `pip install fno` (bundled wheel), `cargo install "
+            "fno-agents`, or `cargo build --release -p fno-agents` plus "
+            f"`export {rust_binary.BINARY_ENV}=<path>`.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=BIN_NOT_FOUND_EXIT)
 
-    # AC2-HP / AC2-UI: stdout is the reply verbatim, no added newline.
-    # dispatch_ask only returns kind="followup" after this change;
-    # kind="create" is returned by the spawn verb's helper, not here.
-    sys.stdout.write(result.reply or "")
-    sys.stdout.flush()
+    args = ["ask"]
+    if harness:
+        args += ["--harness", harness]
+    args += ["--cwd", str(workdir)]
+    if timeout is not None:
+        args += ["--timeout", str(timeout)]
+    args += ["--from-name", from_name]
+    if yolo:
+        args += ["--yolo"]
+    # Equal-form keeps the message seed bound to its flag: a leading-dash
+    # message is data, not flags (the argv-fence gate enforces this shape).
+    args += [f"--message={message}"]
+    # The name rides behind a `--` fence as the one positional.
+    args += ["--", name]
+    # os.execv never returns; the binary prints the reply verbatim itself.
+    route_to_rust(args, binary=binary)
 
 
 @agents_app.command("list")
 def cmd_list(
     cwd: str = typer.Option(None, "--cwd", help="Filter by working directory."),
     harness: str = typer.Option(
-        None, "--harness", "-H", help="Filter by harness (claude | codex | gemini)."
+        None,
+        "--harness",
+        "-H",
+        help="Filter by harness (claude | codex | gemini | cursor-agent).",
     ),
     _provider_tombstone: str = typer.Option(
         None,
@@ -4044,6 +4078,84 @@ def cmd_orphans(
         raise typer.Exit(2)
 
 
+@agents_app.command("pane-identity", hidden=True)
+def cmd_pane_identity(
+    session_id: Optional[str] = typer.Option(
+        None,
+        "--session-id",
+        help="Mux session to check. Default: the resolved session.",
+    ),
+    session_legacy: Optional[str] = typer.Option(
+        None,
+        "--session",
+        hidden=True,
+        help="Deprecated alias for --session-id.",
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", "-J", help="Emit the same content as JSON."
+    ),
+) -> None:
+    """Cross-check mux panes against registry rows, in both directions.
+
+    Every registry row with a mux ref must resolve to a pane whose fno_id
+    matches the row (a stale ref means the pane was re-homed, e.g. by a
+    resume); every pane whose argv carries fno's spawn signature must be
+    referenced by a row (a miss is an fno worker no fno surface can address).
+    The counts compared print on every run, so a zero-mismatch result is a
+    reading and not a silence. A mismatch is a READING, never a repair: this
+    verb mutates nothing, and it never mints an identity from argv.
+
+    Exit codes: 0 clean, 1 mismatch found, 2 an instrument (mux listing or
+    registry) could not be read.
+    """
+    import json as _json
+    import subprocess as _subprocess
+
+    from fno._flag_aliases import merge_deprecated_alias
+    from fno.agents.mux_spawn import _run_mux, resolve_mux_session
+    from fno.agents.reachability import (
+        pane_identity_crosscheck,
+        render_pane_identity_crosscheck,
+    )
+    from fno.agents.registry import load_registry
+
+    session_name = resolve_mux_session(
+        merge_deprecated_alias(
+            session_id,
+            session_legacy,
+            canonical_flag="--session-id",
+            legacy_flag="--session",
+        )
+    )
+    listing = _run_mux(
+        ["mux", "pane", "ls", "--session", session_name, "--json"], _subprocess.run
+    )
+    if listing.returncode != 0 or not (listing.stdout or "").strip():
+        detail = (listing.stderr or "").strip() or "pane ls returned non-zero"
+        print(f"pane-identity: mux listing unavailable: {detail}", file=sys.stderr)
+        raise typer.Exit(2)
+    try:
+        panes = _json.loads(listing.stdout)
+    except _json.JSONDecodeError as exc:
+        print(f"pane-identity: unparseable pane ls JSON: {exc}", file=sys.stderr)
+        raise typer.Exit(2)
+    if not isinstance(panes, list):
+        print("pane-identity: pane ls JSON was not a list", file=sys.stderr)
+        raise typer.Exit(2)
+    try:
+        rows = load_registry()
+    except Exception as exc:  # noqa: BLE001 - an unreadable registry is a broken instrument
+        print(f"pane-identity: registry unavailable: {exc}", file=sys.stderr)
+        raise typer.Exit(2)
+    result = pane_identity_crosscheck(panes, rows, session_name)
+    if as_json:
+        print(_json.dumps(result, indent=2))
+    else:
+        print(render_pane_identity_crosscheck(result))
+    if result["row_mismatches"] or result["pane_mismatches"]:
+        raise typer.Exit(1)
+
+
 def _registry_falsifiers(handles: list[str]) -> dict[str, str | None]:
     """One registry read for N handles. Same three-key match as the single form.
 
@@ -4349,6 +4461,16 @@ def _run_unfinished_report(
         print(f"warning: {warning}", file=sys.stderr)
 
 
+def _watchdog_only_help() -> str:
+    from fno.agents import watchdog as wd
+
+    return (
+        "DIAGNOSTIC: filter the internal session-verdict table to one verdict "
+        f"({'|'.join(sorted(wd.VERDICTS))}). Recovery internals, not the "
+        "operator report."
+    )
+
+
 @agents_app.command("watchdog")
 def cmd_watchdog(
     json_out: bool = typer.Option(
@@ -4375,11 +4497,7 @@ def cmd_watchdog(
     ),
     only: Optional[str] = typer.Option(
         None, "--only",
-        help=(
-            "DIAGNOSTIC: filter the internal session-verdict table to one "
-            "verdict (wake|reroute|reap|retire|ghost|stale|leave|recoverable|"
-            "keeper). Recovery internals, not the operator report."
-        ),
+        help=_watchdog_only_help(),
     ),
     since: str = typer.Option(
         "24h",

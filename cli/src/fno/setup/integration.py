@@ -243,6 +243,55 @@ def _opencode_install() -> IntegrationResult:
     return IntegrationResult("opencode", label, "installed", note=f"plugin -> {dest}")
 
 
+# --- pi ---------------------------------------------------------------------
+# pi is an extension harness (like opencode, not a plugin-marketplace CLI),
+# measured 2026-08-28 as shipping no shell hook surface at all: its lifecycle
+# boundary is the in-process `pi.on("agent_settled")` extension event. The
+# integration is a local-file TypeScript extension copied into pi's global
+# extension dir (~/.pi/agent/extensions/ - pi auto-discovers *.ts there, one
+# install covers every project). Unlike codex, the installed state is
+# verifiable (the file exists and matches the shipped source), so we can
+# claim "installed" honestly.
+
+def _pi_extension_src() -> Path:
+    return Path(__file__).parent / "assets" / "pi" / "footnote.ts"
+
+
+def _pi_extensions_dir() -> Path:
+    return Path.home() / ".pi" / "agent" / "extensions"
+
+
+def _pi_extension_dest() -> Path:
+    return _pi_extensions_dir() / "footnote.ts"
+
+
+def _pi_is_installed() -> bool:
+    # Installed == the dest file exists AND matches the shipped source, so a
+    # stale copy (older footnote) reports not-installed and gets refreshed.
+    dest = _pi_extension_dest()
+    if not dest.exists():
+        return False
+    try:
+        return dest.read_text(encoding="utf-8") == _pi_extension_src().read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        return False
+
+
+def _pi_install() -> IntegrationResult:
+    label = "pi"
+    src = _pi_extension_src()
+    dest = _pi_extension_dest()
+    try:
+        src_text = src.read_text(encoding="utf-8")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(src_text, encoding="utf-8")
+    except OSError as exc:
+        return IntegrationResult("pi", label, "failed", note=str(exc))
+    return IntegrationResult("pi", label, "installed", note=f"extension -> {dest}")
+
+
 # --- agy (Antigravity CLI) --------------------------------------------------
 # agy is a native Stop-hook harness (like opencode, not a plugin-marketplace CLI).
 # Its hooks are Claude-shaped event names with a Gemini-family wire format, so the
@@ -397,6 +446,13 @@ def build_adapters(run: Runner = _run) -> "list[IntegrationAdapter]":
             is_available=lambda: shutil.which("opencode") is not None,
             is_installed=_opencode_is_installed,
             install=_opencode_install,
+        ),
+        IntegrationAdapter(
+            "pi",
+            "pi",
+            is_available=lambda: shutil.which("pi") is not None,
+            is_installed=_pi_is_installed,
+            install=_pi_install,
         ),
         IntegrationAdapter(
             "agy",

@@ -424,6 +424,7 @@ impl HarnessContract {
                 // no session here and, on pi, CREATES a second one under the
                 // same id rather than failing.
                 "caller-assigned-cwd-scoped",
+                "callee-minted-read-back",
                 "store-lookup",
                 "unsupported",
             ]
@@ -788,7 +789,15 @@ mod tests {
         let contract = HarnessContract::packaged().unwrap();
         assert_eq!(
             contract.harness.keys().cloned().collect::<Vec<_>>(),
-            ["agy", "claude", "codex", "gemini", "opencode", "pi"]
+            [
+                "agy",
+                "claude",
+                "codex",
+                "cursor-agent",
+                "gemini",
+                "opencode",
+                "pi"
+            ]
         );
         for (name, caps) in &contract.harness {
             assert_eq!(caps.permission_response.len(), 3, "{name}");
@@ -879,14 +888,15 @@ mod tests {
             distinct.len() > 1,
             "one value across every row is an inherited declaration, not a measurement"
         );
-        // Only the shipped extension names an artifact; pi's is empty because
-        // fno has not written it, which is what refuses a looping dispatch there.
+        // Both shipped extensions name an artifact; a native harness names
+        // none, which is what keeps the extension lanes honest about what
+        // actually closes a loop there.
         assert!(!contract
             .capabilities("opencode")
             .unwrap()
             .loop_extension
             .is_empty());
-        assert!(contract
+        assert!(!contract
             .capabilities("pi")
             .unwrap()
             .loop_extension

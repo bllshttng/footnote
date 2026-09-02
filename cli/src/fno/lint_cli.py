@@ -7,7 +7,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Optional, cast
+from typing import Any, Optional, cast
 
 import click
 import typer
@@ -43,6 +43,7 @@ CHECKS: dict[str, str] = {
     "state-roots": "state_roots",
     "hook-tombstones": "hook_tombstones",
     "seam-crossings": "seam_crossings",
+    "field-coverage": "field_coverage",
 }
 
 
@@ -1480,6 +1481,231 @@ def retired_commands() -> None:
     raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
+def _field_names(block: Any) -> set[str]:
+    if isinstance(block, list):
+        return {value for value in block if isinstance(value, str)}
+    if not isinstance(block, dict):
+        return set()
+    keys = block.get("keys")
+    if isinstance(keys, list):
+        return {value for value in keys if isinstance(value, str)}
+    return {
+        key
+        for key in block
+        if isinstance(key, str) and not key.startswith("$")
+    }
+
+
+_KNOWN_GAP_OWNER_RE = re.compile(r"\b[a-z][a-z0-9]*-[0-9a-f]+\b")
+
+
+def _valid_known_gaps(block: Any) -> dict[str, str]:
+    if not isinstance(block, dict):
+        return {}
+    valid: dict[str, str] = {}
+    for field, detail in block.items():
+        if not isinstance(field, str) or field.startswith("$") or not isinstance(detail, str):
+            continue
+        owner = _KNOWN_GAP_OWNER_RE.search(detail)
+        if owner is None or "\n" in detail:
+            continue
+        defect = (detail[: owner.start()] + detail[owner.end() :]).strip(" :-")
+        if defect:
+            valid[field] = detail
+    return valid
+
+
+def _source_field_coverage(repo_root: Path) -> dict[str, Any]:
+    registry_path = repo_root / "cli" / "src" / "fno" / "agents" / "registry.py"
+    schema_path = repo_root / "schemas" / "agents-list-row.json"
+    try:
+        tree = ast.parse(registry_path.read_text(encoding="utf-8"))
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, json.JSONDecodeError) as exc:
+        return {"status": "unmeasured", "detail": str(exc)}
+    if not isinstance(schema, dict):
+        return {
+            "status": "unmeasured",
+            "detail": "agents-list-row schema root is not an object",
+        }
+
+    agent_entry = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "AgentEntry"
+        ),
+        None,
+    )
+    declared = {
+        statement.target.id
+        for statement in (agent_entry.body if agent_entry else [])
+        if isinstance(statement, ast.AnnAssign)
+        and isinstance(statement.target, ast.Name)
+    }
+    required = _field_names(schema.get("required"))
+    accounted: set[str] = set()
+    for key in (
+        "required",
+        "projection_omissions",
+        "removed",
+        "rust_only",
+        "python_only",
+        "storage_only",
+    ):
+        accounted.update(_field_names(schema.get(key)))
+    known_gaps = _valid_known_gaps(schema.get("known_gaps"))
+    accounted.update(known_gaps)
+
+    if len(required) < 40 or len(declared) < 40:
+        return {
+            "status": "unmeasured",
+            "detail": (
+                "positive-control floor failed: "
+                f"{len(required)} required keys and {len(declared)} declared fields"
+            ),
+            "required_count": len(required),
+            "declared_count": len(declared),
+        }
+
+    uncovered = sorted(declared - accounted)
+    return {
+        "status": "uncovered" if uncovered else "ok",
+        "declared_count": len(declared),
+        "required_count": len(required),
+        "accounted_count": len(declared & accounted),
+        "uncovered_fields": uncovered,
+        "known_gaps": known_gaps,
+    }
+
+
+def _is_populated(value: Any) -> bool:
+    return value is not None and value != "" and value != [] and value != {}
+
+
+def _live_field_coverage(entries: list[Any]) -> dict[str, Any]:
+    from dataclasses import asdict, fields
+
+    from fno.agents.format import serialize_entry
+    from fno.agents.registry import AgentEntry
+
+    if not entries:
+        return {"status": "unmeasured", "detail": "zero persisted rows"}
+
+    persisted_rows = [asdict(entry) for entry in entries]
+    declared = [field.name for field in fields(AgentEntry)]
+    persisted_counts = {
+        name: sum(_is_populated(row.get(name)) for row in persisted_rows)
+        for name in declared
+    }
+    anchors = {
+        name: {"set": persisted_counts.get(name, 0), "total": len(entries)}
+        for name in ("name", "created_at", "harness", "status")
+    }
+    failed_anchors = [
+        name for name, reading in anchors.items() if reading["set"] != len(entries)
+    ]
+    if failed_anchors:
+        return {
+            "status": "unmeasured",
+            "detail": "anchor fields unset: " + ", ".join(failed_anchors),
+            "anchors": anchors,
+        }
+
+    projected_rows = [serialize_entry(entry, live_status=None) for entry in entries]
+    projected_fields = sorted({key for row in projected_rows for key in row})
+    projected_counts = {
+        name: sum(_is_populated(row.get(name)) for row in projected_rows)
+        for name in projected_fields
+    }
+    persisted_dead = sorted(
+        name for name, count in persisted_counts.items() if count == 0
+    )
+    projected_dead = sorted(
+        name for name, count in projected_counts.items() if count == 0
+    )
+    return {
+        "status": "findings" if persisted_dead or projected_dead else "ok",
+        "anchors": anchors,
+        "persisted": {
+            "total": len(persisted_rows),
+            "counts": persisted_counts,
+            "dead_fields": persisted_dead,
+        },
+        "projected": {
+            "total": len(projected_rows),
+            "counts": projected_counts,
+            "dead_fields": projected_dead,
+        },
+    }
+
+
+def field_coverage(live: bool = False, as_json: bool = False) -> None:
+    """Measure declared-field accounting and live population coverage.
+
+    See ``docs/architecture/field-coverage.md`` for the lane boundaries and
+    the choices each finding requires.
+    """
+    from fno.paths import resolve_repo_root
+
+    source = _source_field_coverage(Path(resolve_repo_root()))
+    payload: dict[str, Any] = {"status": source["status"], "source": source}
+    if source["status"] == "unmeasured":
+        payload["detail"] = source["detail"]
+    exit_code = 0
+    if source["status"] == "unmeasured":
+        exit_code = 2
+    elif source["status"] == "uncovered":
+        exit_code = 1
+
+    if live and exit_code != 2:
+        from fno.agents.registry import RegistryVersionError, load_registry
+
+        try:
+            live_result = _live_field_coverage(load_registry())
+        except (OSError, ValueError, RegistryVersionError) as exc:
+            live_result = {"status": "unmeasured", "detail": str(exc)}
+        payload.update(live_result)
+        payload["source"] = source
+        if live_result["status"] == "unmeasured":
+            exit_code = 2
+        elif live_result["status"] == "findings":
+            exit_code = 1
+
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        if source["status"] == "unmeasured":
+            typer.echo(f"fno doctor lint field-coverage: UNMEASURED: {source['detail']}")
+        else:
+            typer.echo(
+                "fno doctor lint field-coverage: "
+                f"{source['accounted_count']} declared fields accounted for"
+            )
+            for name, detail in source["known_gaps"].items():
+                typer.echo(f"known gap: {name}: {detail}")
+            for name in source["uncovered_fields"]:
+                typer.echo(
+                    f"unaccounted field: {name}; add it to required and project it, "
+                    "add it to storage_only, or add it to known_gaps with an owning node"
+                )
+        if live:
+            if payload["status"] == "unmeasured":
+                typer.echo(f"live field coverage: UNMEASURED: {payload['detail']}")
+            elif "persisted" in payload:
+                typer.echo(
+                    "persisted dead fields: "
+                    + ", ".join(payload["persisted"]["dead_fields"])
+                )
+                typer.echo(
+                    "projected dead fields: "
+                    + ", ".join(payload["projected"]["dead_fields"])
+                )
+
+    if exit_code:
+        raise typer.Exit(code=exit_code)
+
+
 def registry(as_json: bool = False) -> None:
     """Check every registry row against the resolvable-handle invariant (x-7bcd).
 
@@ -1606,7 +1832,10 @@ def lint(
         help="style: check ADDED lines only since this ref (e.g. origin/main).",
     ),
     as_json: bool = typer.Option(
-        False, "--json", "-J", help="registry: machine-readable output."
+        False, "--json", "-J", help="registry/field-coverage: machine-readable output."
+    ),
+    live: bool = typer.Option(
+        False, "--live", help="field-coverage: inspect real persisted registry rows."
     ),
     base: Optional[str] = typer.Option(
         None, "--base",
@@ -1639,6 +1868,7 @@ def lint(
         "files": files,
         "diff_base": diff_base,
         "as_json": as_json,
+        "live": live,
         "base": base,
     }
     accepted = set(inspect.signature(fn).parameters)

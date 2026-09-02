@@ -57,6 +57,7 @@ agents name	T1	agents name	5
 agents needs	KEEP	agents needs	11	ruled KEEP: fno-agents needs is coupled to needs_overlay
 agents nudge-peek	T1	agents nudge-peek	6
 agents orphans	T1	agents orphans	10
+agents pane-identity	T1	agents pane-identity	0
 agents peek	T1	agents peek	29
 agents ping	T1	agents ping	3
 agents probe-run	T1	agents probe-run	3
@@ -168,6 +169,7 @@ backlog lanes	T1	backlog lanes	2
 backlog maintain	T1	backlog maintain	7
 backlog migrate-difficulty	T1	backlog migrate-difficulty	0
 backlog migrate-priorities	T1	backlog migrate-priorities	0
+backlog migrate-updated-at	T1	backlog migrate-updated-at	0
 backlog new	T1	backlog new	38
 backlog next	KEEP	backlog next	54	deliberate readability slack for a high-traffic distinct operation
 backlog note	T1	backlog note	1

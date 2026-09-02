@@ -23,6 +23,12 @@ changing the field that drives its placement:
 
 `_kanban_column` is the sole column authority, `make_kanban_column(entries)` binds its whole-graph overlays, and `rank` never changes a card's column.
 
+## Reading one node
+
+`fno backlog get <id>` emits the flat, indented JSON record used by Footnote's dispatchers, hooks, and loop runtime. Treat the default output as a machine contract. Do not parse the grouped view from a script.
+
+Use `fno backlog get <id> --grouped` for a human scan. It renders populated fields under concept headings and places fields without a group under `Residual`, so new or legacy data stays visible. When combined with `--grouped`, `--field <name>` remains the precise machine-friendly read and takes precedence.
+
 ## Creating nodes
 
 There are three plan-less creation verbs. They overlap; pick by how much

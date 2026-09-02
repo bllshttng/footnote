@@ -1860,13 +1860,12 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
         // a pi PANE row already has a place for its process and keeps
         // navigating to its tab.
         //
-        // INERT TODAY, deliberately. pi's capability row declares
-        // `thread = false` and pi is out of `SPAWN_HARNESSES`, so every pi row
-        // fno can register is pane-hosted and carries a `mux` key - which means
-        // this predicate is false for every row that exists and the pi arm of
-        // `attach_id` never runs. It is written now so the thread lane inherits
-        // a viewport door rather than a gap, and it starts firing on its own
-        // the day that spawn arm ships. Do not read it as a shipped path.
+        // LIVE as of x-43bd. The spawn arm shipped (pi is in
+        // `SPAWN_HARNESSES`, `dispatch_spawn` has a pi branch), so a pi
+        // thread row now exists: keeper-hosted, no `mux` key, and this
+        // predicate starts firing for it. Before x-43bd every pi row fno
+        // could register was pane-hosted and carried a `mux` key, which kept
+        // this arm false for every row that existed.
         // The RAW `mux` key, not the parsed one, matching the codex clause
         // above for the reason its comment gives: a PRESENT key means
         // pane-hosted whether or not it parses into a (session, pane_id) pair,
@@ -3130,6 +3129,29 @@ mod tests {
         assert_eq!(reach("agy-row"), Reach::Locate);
         assert_eq!(reach("oc-row"), Reach::Locate);
         assert_eq!(reach("gm-row"), Reach::Locate);
+    }
+
+    #[test]
+    fn cursor_agent_rows_never_derive_an_attach_id() {
+        use crate::proto::Reach;
+
+        // The capability row declares interactive_attach unsupported: a
+        // second --resume process is a rival TUI on the same remote chat,
+        // not a join. No pane row may claim the Drive reach that resolve of
+        // an attach id would grant; the row is driven by pane or by mail.
+        let chat_id = "fadad56b-8008-45f5-b809-f9fab7074534";
+        let raw = reg(&format!(
+            r#"{{"name":"cursor","cwd":"/w","status":"live","harness":"cursor-agent",
+                "host_mode":"interactive","short_id":"","harness_session_id":"{chat_id}",
+                "mux":{{"session":"s","pane_id":7}}}}"#
+        ));
+        let row = derive_rows(&raw, NOW).unwrap().remove(0);
+
+        assert_eq!(row.attach_id.as_deref(), None);
+        assert_ne!(
+            thread_reach(row.harness.as_deref(), row.attach_id.as_deref()),
+            Reach::Drive
+        );
     }
 
     /// AC14-HP, AC16-EDGE (x-6678, x-296f): the viewport renders codex's

@@ -83,210 +83,6 @@ def _seed_agent_entry(tmp_path: Path, name: str, provider: str = "claude") -> No
     ])
 
 
-def test_started_and_done_share_request_id(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC4-HP: agent_followup_started and agent_followup_done share the same request_id.
-    Repointed at the followup path (create contract moved from dispatch_ask to spawn verb)."""
-    use_tmpdir(monkeypatch, tmp_path)
-    _install_fake_path(tmp_path, monkeypatch)
-    _clear_agent_env(monkeypatch)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    (tmp_path / "home").mkdir()
-    _seed_agent_entry(tmp_path, "alpha")
-    captured = _patch_emit_capture(monkeypatch)
-
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
-
-    # Follow-up fails at orphan stage - that's fine, context is set before routing
-    with pytest.raises(DispatchAskError):
-        dispatch_ask(
-            name="alpha",
-            message="hello",
-            harness="claude",
-            cwd=tmp_path,
-            from_name="orchestrator",
-        )
-
-    started = [e for e in captured if e[0] == "agent_followup_started"]
-    failed = [e for e in captured if e[0] == "agent_followup_failed"]
-    assert started, f"missing agent_followup_started; got: {[e[0] for e in captured]}"
-    assert "request_id" in started[0][1], "started event lacks request_id"
-    assert REQUEST_ID_RE.match(started[0][1]["request_id"]), (
-        f"request_id format invariant violated: {started[0][1]['request_id']!r}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# from_name asymmetry close — create path now carries from_name
-# ---------------------------------------------------------------------------
-
-
-def test_create_done_carries_from_name(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Locked spec: followup-path events carry from_name.
-    Repointed at followup path (create contract moved from dispatch_ask to spawn verb)."""
-    use_tmpdir(monkeypatch, tmp_path)
-    _install_fake_path(tmp_path, monkeypatch)
-    _clear_agent_env(monkeypatch)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    (tmp_path / "home").mkdir()
-    _seed_agent_entry(tmp_path, "beta")
-    captured = _patch_emit_capture(monkeypatch)
-
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
-
-    with pytest.raises(DispatchAskError):
-        dispatch_ask(
-            name="beta",
-            message="hi",
-            harness="claude",
-            cwd=tmp_path,
-            from_name="orchestrator",
-        )
-
-    started = [e for e in captured if e[0] == "agent_followup_started"]
-    assert started, "no agent_followup_started event captured"
-    assert started[0][1].get("from_name") == "orchestrator"
-
-
-def test_create_started_carries_from_name_and_caller_kind(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """agent_followup_started gets the full context envelope (caller_kind, from_*).
-    Repointed at followup path (create contract moved from dispatch_ask to spawn verb)."""
-    use_tmpdir(monkeypatch, tmp_path)
-    _install_fake_path(tmp_path, monkeypatch)
-    _clear_agent_env(monkeypatch)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    (tmp_path / "home").mkdir()
-    _seed_agent_entry(tmp_path, "gamma")
-    captured = _patch_emit_capture(monkeypatch)
-
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
-
-    with pytest.raises(DispatchAskError):
-        dispatch_ask(
-            name="gamma",
-            message="hi",
-            harness="claude",
-            cwd=tmp_path,
-            from_name="orchestrator",
-        )
-
-    started = [e for e in captured if e[0] == "agent_followup_started"]
-    assert started
-    payload = started[0][1]
-    assert payload.get("from_name") == "orchestrator"
-    assert payload.get("caller_kind") == "human_cli"
-    assert payload.get("to_name") == "gamma"
-    assert payload.get("to_provider") == "claude"
-
-
-# ---------------------------------------------------------------------------
-# AC3-HP — nested-agent attribution
-# ---------------------------------------------------------------------------
-
-
-def test_nested_agent_attribution_propagates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC3-HP: FNO_AGENT_* env stamps from_* on dispatch events.
-    Repointed at followup path (create contract moved from dispatch_ask to spawn verb)."""
-    use_tmpdir(monkeypatch, tmp_path)
-    _install_fake_path(tmp_path, monkeypatch)
-    _clear_agent_env(monkeypatch)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    (tmp_path / "home").mkdir()
-    _seed_agent_entry(tmp_path, "child")
-    monkeypatch.setenv("FNO_AGENT_SELF", "parent-worker")
-    monkeypatch.setenv("FNO_AGENT_HARNESS", "codex")
-    monkeypatch.setenv("FNO_AGENT_SESSION", "parent-sess-1234")
-    captured = _patch_emit_capture(monkeypatch)
-
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
-
-    with pytest.raises(DispatchAskError):
-        dispatch_ask(
-            name="child",
-            message="hi",
-            harness="claude",
-            cwd=tmp_path,
-            # from_name omitted — env attribution should outrank it anyway
-        )
-
-    started = [e for e in captured if e[0] == "agent_followup_started"]
-    assert started, f"missing agent_followup_started; got: {[e[0] for e in captured]}"
-
-    for label, payload in (("started", started[0][1]),):
-        assert payload.get("caller_kind") == "nested_agent", (
-            f"{label} caller_kind not nested_agent: {payload.get('caller_kind')}"
-        )
-        assert payload.get("from_name") == "parent-worker", label
-        assert payload.get("from_provider") == "codex", label
-        assert payload.get("from_session_id") == "parent-sess-1234", label
-
-
-# ---------------------------------------------------------------------------
-# ContextVar isolation — no leakage between dispatches
-# ---------------------------------------------------------------------------
-
-
-def test_context_var_resets_between_dispatches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Two sequential follow-up dispatches produce two distinct request_ids.
-    Repointed at followup path (create contract moved from dispatch_ask to spawn verb)."""
-    use_tmpdir(monkeypatch, tmp_path)
-    _install_fake_path(tmp_path, monkeypatch)
-    _clear_agent_env(monkeypatch)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    (tmp_path / "home").mkdir()
-    _seed_agent_entry(tmp_path, "d1")
-
-    from fno.agents.registry import AgentEntry, load_registry, write_registry
-    existing = load_registry()
-    write_registry(existing + [
-        AgentEntry(
-            name="d2",
-            harness="claude",
-            cwd=str(tmp_path),
-            log_path=str(tmp_path / "d2.log"),
-            short_id="abc12345",
-        )
-    ])
-
-    captured = _patch_emit_capture(monkeypatch)
-
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
-
-    with pytest.raises(DispatchAskError):
-        dispatch_ask(name="d1", message="hi", harness="claude", cwd=tmp_path)
-    with pytest.raises(DispatchAskError):
-        dispatch_ask(name="d2", message="hi", harness="claude", cwd=tmp_path)
-
-    started = [e for e in captured if e[0] == "agent_followup_started"]
-    assert len(started) == 2, f"expected 2 followup_started events, got: {[e[0] for e in captured]}"
-    rid1, rid2 = started[0][1]["request_id"], started[1][1]["request_id"]
-    assert rid1 != rid2, "sibling dispatches should not share request_id"
-
-
-def test_context_var_clear_outside_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_emit_ev outside an active dispatch falls back to legacy emit unmodified."""
-    captured = _patch_emit_capture(monkeypatch)
-
-    from fno.agents.dispatch import _emit_ev
-
-    _emit_ev("some_event", custom="value")
-    assert captured == [("some_event", {"custom": "value"})]
-    # No EventContext fields are present because no dispatch was active.
-    assert "request_id" not in captured[0][1]
-    assert "from_name" not in captured[0][1]
-
-
-# ---------------------------------------------------------------------------
-# Sigma-review H4 — agent name validation against env-corruption characters
 # ---------------------------------------------------------------------------
 
 
@@ -303,24 +99,19 @@ def test_dispatch_rejects_name_with_env_corrupting_char(
     """
     use_tmpdir(monkeypatch, tmp_path)
     _clear_agent_env(monkeypatch)
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
+    from fno.agents.dispatch import DispatchAskError, _validate_inputs
 
     name = f"agent{bad_char}name"
     with pytest.raises(DispatchAskError) as excinfo:
-        dispatch_ask(
-            name=name,
-            message="hi",
-            harness="claude",
-            cwd=tmp_path,
-        )
+        _validate_inputs(name=name, message="hi", from_name="fno")
     assert excinfo.value.exit_code == 2
     assert "forbidden character" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
 # Spawn-path context (codex P2, PR #457): dispatch_spawn wraps the create
-# helpers in the same _DISPATCH_CTX envelope dispatch_ask uses, so the
-# helpers' agent_ask_started/agent_ask_done emits keep request_id /
+# helpers in the same _DISPATCH_CTX envelope the old ask dispatcher used, so
+# the helpers' agent_ask_started/agent_ask_done emits keep request_id /
 # from_name / caller attribution after the create moved off ask.
 # ---------------------------------------------------------------------------
 

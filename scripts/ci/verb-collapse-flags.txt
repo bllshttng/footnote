@@ -61,6 +61,7 @@ resume receipt validate !--session
 resume receipt write !--session
 retro run !--pr
 retro run !--session
+agents pane-identity !--session
 state init !--allow-stub
 target init !--provider
 target resolve-model !--provider

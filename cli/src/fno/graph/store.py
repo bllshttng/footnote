@@ -92,9 +92,9 @@ CANONICAL_FIELD_ORDER: list[str] = [
     "locked_by_harness",
     "locked_by_harness_session",
     "session_id",
-    "claimed_at",
+    "locked_at",
     # Structured, recomputed uncertainty on a persisted active owner whose
-    # claimed_at age exceeded the graph TTL. It never asserts the worker died.
+    # locked_at age exceeded the graph TTL. It never asserts the worker died.
     "ownership_defect",
     "completed_at",
     "deferred_at",
@@ -381,6 +381,9 @@ def canonicalize_entries(entries: list[dict]) -> list[dict]:
     _normalize_lock_fields(entries)
     out: list[dict] = []
     for e in entries:
+        # One-write migration: remove only the legacy top-level lock key.
+        # Nested session provenance is intentionally left untouched.
+        e.pop("claimed_at", None)
         ordered: dict = {}
         for k in CANONICAL_FIELD_ORDER:
             if k in e:
@@ -577,7 +580,17 @@ def _apply_graph_defaults(entries: list[dict], *, keep_malformed: bool = False) 
         # holder's provider + harness-session UUID. session_id stays mirrored.
         e.setdefault("locked_by_harness", None)
         e.setdefault("locked_by_harness_session", None)
-        e.setdefault("claimed_at", None)
+        if "locked_at" not in e:
+            legacy_locked_at = e.get("claimed_at")
+            if isinstance(legacy_locked_at, str) and legacy_locked_at.strip():
+                try:
+                    datetime.fromisoformat(legacy_locked_at.replace("Z", "+00:00"))
+                except (TypeError, ValueError):
+                    e["locked_at"] = None
+                else:
+                    e["locked_at"] = legacy_locked_at
+            else:
+                e["locked_at"] = None
         e.setdefault("completed_at", None)
         e.setdefault("status", "ready")
         # Title-derived handle (ab-f82e8083). Default null on the read path;
@@ -1018,7 +1031,7 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
             # on a done node it is work/cost provenance, not a lock
             # (_normalize_lock_fields keeps it for exactly that reason).
             entry["locked_by"] = None
-            entry["claimed_at"] = None
+            entry["locked_at"] = None
             # Only the process's CONFIGURED graph owns the global node-id
             # space its claims coordinate on. A scratch or explicitly-passed
             # graph (tests, capture flows) closing a node must not release a

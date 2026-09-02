@@ -790,9 +790,9 @@ fn registry_repo_roots(home: &AgentsHome) -> Vec<String> {
     seen.into_iter().collect()
 }
 
-/// How long between worktree report sweeps. Long on purpose: this is the
-/// backstop for what the merge-triggered ritual missed, not a control loop.
-const WORKTREE_SWEEP_INTERVAL_SECS: u64 = 86_400;
+/// How long between worktree report sweeps. A 24-hour reap order spans at
+/// least three complete windows even when its mint cannot clear the stamp.
+const WORKTREE_SWEEP_INTERVAL_SECS: u64 = 21_600;
 
 /// How long between stale-question reconciles. Stale rows are measured in
 /// hundreds of hours, so the interval bounds discovery lag, not freshness:
@@ -891,6 +891,30 @@ pub struct WorktreeSweepReport {
     pub dirty: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeSweepOutput {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeSweepOrderRead {
+    pub standing: Option<bool>,
+    pub exit_code: Option<i32>,
+    pub stderr: String,
+}
+
+impl From<bool> for WorktreeSweepOrderRead {
+    fn from(standing: bool) -> Self {
+        Self {
+            standing: Some(standing),
+            exit_code: Some(0),
+            stderr: String::new(),
+        }
+    }
+}
+
 /// Parse `fno agents workspace worktree cleanup --merged`'s summary line.
 ///
 /// Returns `None` rather than a zeroed report when the line is absent. A sweep
@@ -916,18 +940,18 @@ pub fn parse_worktree_sweep(stdout: &str) -> Option<WorktreeSweepReport> {
     })
 }
 
-/// Worktree sweep, one line per repo, on a 24h floor: report-only until a
+/// Worktree sweep, one line per repo, on a 6h floor: report-only until a
 /// merge-minted reap order stands, then applying.
 ///
 /// A timer tick proves nothing on its own, so an unearned tick still only
 /// REPORTS. Removal stays on the merge-triggered path: the post-merge ritual
-/// mints a `reap:pr-<n>` claim (TTL-bounded) whenever its archive leg defers
-/// or is guard-refused, and while any such order stands (`orders` injects that
-/// read) the pass runs with `--apply` and the sweep's own guards - reapable,
-/// live claim, rooted processes - decide tree by tree. A tree that stays
-/// protected expires its order rather than being forced. There is no config
-/// knob, because two off-switches for one decision strand whoever flips the
-/// wrong one.
+/// mints a `reap:pr-<n>` claim (TTL-bounded) before archive lookup, and while
+/// any such order stands in a repository (`orders` injects that scoped read)
+/// that repository's pass runs with `--apply`. The sweep's own guards -
+/// reapable, live claim, rooted processes - decide tree by tree. A tree that
+/// stays protected expires its order rather than being forced. There is no
+/// config knob, because two off-switches for one decision strand whoever
+/// flips the wrong one.
 ///
 /// `orders` and `run` are injected so the policy is testable without shelling
 /// out.
@@ -936,8 +960,8 @@ pub fn worktree_sweep(
     emitter: &EventEmitter,
     now: i64,
     roots: &[String],
-    orders: &dyn Fn() -> bool,
-    run: &dyn Fn(&str, bool) -> Option<String>,
+    orders: &dyn Fn(&str) -> WorktreeSweepOrderRead,
+    run: &dyn Fn(&str, bool) -> WorktreeSweepOutput,
 ) -> usize {
     let stamp = home.root().join("worktree-sweep.stamp");
     let last = std::fs::read_to_string(&stamp)
@@ -947,15 +971,32 @@ pub fn worktree_sweep(
     if now.saturating_sub(last) < WORKTREE_SWEEP_INTERVAL_SECS as i64 {
         return 0;
     }
-    let apply = orders();
-    let mode = if apply { "apply-orders" } else { "report-only" };
     let mut swept = 0;
     for root in roots {
+        let order_read = orders(root);
+        let Some(apply) = order_read.standing else {
+            let stderr = order_read.stderr.lines().next().unwrap_or("");
+            let _ = emitter.emit(
+                "worktree_sweep",
+                &json!({
+                    "repo": root,
+                    "error": "unreadable-orders",
+                    "exit_code": order_read.exit_code,
+                    "stderr": stderr,
+                }),
+            );
+            continue;
+        };
+        let mode = if apply { "apply-orders" } else { "report-only" };
         // Emit for EVERY repo, including the ones that read zero. A tick that
         // stays silent when it finds nothing cannot be told from a tick that
         // never ran, and this sweep exists precisely to surface what the
         // ritual missed.
-        match run(root, apply).as_deref().and_then(parse_worktree_sweep) {
+        let output = run(root, apply);
+        let report = (output.exit_code == Some(0))
+            .then(|| parse_worktree_sweep(&output.stdout))
+            .flatten();
+        match report {
             Some(r) => {
                 let _ = emitter.emit(
                     "worktree_sweep",
@@ -970,9 +1011,16 @@ pub fn worktree_sweep(
                 swept += 1;
             }
             None => {
+                let stderr = output.stderr.lines().next().unwrap_or("");
                 let _ = emitter.emit(
                     "worktree_sweep",
-                    &json!({"repo": root, "mode": mode, "error": "unreadable-summary"}),
+                    &json!({
+                        "repo": root,
+                        "mode": mode,
+                        "error": "unreadable-summary",
+                        "exit_code": output.exit_code,
+                        "stderr": stderr,
+                    }),
                 );
             }
         }
@@ -1332,6 +1380,31 @@ fn cascade_harness_session_result_with(
                 Err((_, reason)) => CascadeOutcome::Failed(reason),
             }
         }
+        "cursor-agent" => {
+            // rm runs after the liveness gate, so the owner pid is normally
+            // already gone and the census's ownership proof is unprovable by
+            // construction. Failed would brick every post-stop rm; the row
+            // goes and the leak, if any, is named. A reap that fails with
+            // handles in hand is different - servers are provably alive and
+            // surviving - and still fails the removal.
+            let handles =
+                match crate::cursor_agent::capture_detached_worker_servers(e.pid, e.pid_start_time)
+                {
+                    Ok(handles) => handles,
+                    Err(reason) => {
+                        return CascadeOutcome::Unverified(format!(
+                            "worker-server cleanup unverified: {reason}"
+                        ))
+                    }
+                };
+            match crate::cursor_agent::reap_detached_worker_servers(&handles) {
+                Ok(0) => CascadeOutcome::AlreadyAbsent(
+                    "cursor-agent worker-server was already absent".into(),
+                ),
+                Ok(_count) => CascadeOutcome::Removed,
+                Err(reason) => CascadeOutcome::Failed(reason),
+            }
+        }
         _ => CascadeOutcome::NotApplicable,
     }
 }
@@ -1484,6 +1557,234 @@ fn worktree_clean_probe(cwd: &str) -> Option<bool> {
         return Some(false);
     }
     None
+}
+
+/// (x-d545) The reapable gate's answer for a removed row's worktree: the
+/// verdict, plus the reason a kept tree names in its receipt.
+enum WorktreeGate {
+    Reapable,
+    Blocked(String),
+    Unanswerable(String),
+}
+
+/// Per-subprocess budget for the rm worktree path, matching the Python
+/// runtime's remove bound (`subprocess.run(..., timeout=60.0)`).
+const RM_SUBPROCESS_TIMEOUT_SECS: u64 = 60;
+
+/// One subprocess read under a wall-clock budget: `std` has no
+/// `Command::output` timeout, and a git stalled on a wedged filesystem must
+/// not park the daemon's rm handler forever. Past the deadline the child is
+/// killed and the killed status returned, so a "kept" receipt can never be
+/// contradicted by a removal finishing in the background.
+fn output_with_timeout(mut cmd: std::process::Command, secs: u64) -> Option<std::process::Output> {
+    use std::io::Read;
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        if let Some(mut s) = stdout {
+            let _ = s.read_to_end(&mut out);
+        }
+        if let Some(mut s) = stderr {
+            let _ = s.read_to_end(&mut err);
+        }
+        (out, err)
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                break child.wait().ok()?;
+            }
+            Err(_) => return None,
+        }
+    };
+    let (stdout, stderr) = reader.join().ok()?;
+    Some(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Is the worktree's branch merged into the repo's main line? The rm door's
+/// half of the third bucket: the `--merged` sweep merge-filters BEFORE its
+/// gate, and this caller has no such pre-filter, so it asks here. `None`:
+/// nothing names the work or the main line (detached HEAD, no main ref, git
+/// error) - the caller keeps the tree. Mirrors
+/// `fno.worktree_reapable.branch_merged`, the Python door's same question.
+fn branch_merged(cwd: &str) -> Option<bool> {
+    let mut bases = vec!["origin/main".to_string(), "main".to_string()];
+    if let Some(out) = output_with_timeout(
+        {
+            let mut cmd = std::process::Command::new("git");
+            cmd.current_dir(cwd)
+                .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+            cmd
+        },
+        RM_SUBPROCESS_TIMEOUT_SECS,
+    ) {
+        let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if out.status.success() && !head.is_empty() {
+            bases.insert(0, head);
+        }
+    }
+    let mut base: Option<String> = None;
+    for candidate in &bases {
+        let known = output_with_timeout(
+            {
+                let mut cmd = std::process::Command::new("git");
+                cmd.current_dir(cwd)
+                    .args(["rev-parse", "--verify", "--quiet", candidate]);
+                cmd
+            },
+            RM_SUBPROCESS_TIMEOUT_SECS,
+        );
+        if known.is_some_and(|out| out.status.success()) {
+            base = Some(candidate.clone());
+            break;
+        }
+    }
+    let base = base?;
+    let branch = output_with_timeout(
+        {
+            let mut cmd = std::process::Command::new("git");
+            cmd.current_dir(cwd).args(["branch", "--show-current"]);
+            cmd
+        },
+        RM_SUBPROCESS_TIMEOUT_SECS,
+    )?;
+    if !branch.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
+    if branch.is_empty() {
+        return None;
+    }
+    let merged = output_with_timeout(
+        {
+            let mut cmd = std::process::Command::new("git");
+            cmd.current_dir(cwd)
+                .args(["merge-base", "--is-ancestor", &branch, &base]);
+            cmd
+        },
+        RM_SUBPROCESS_TIMEOUT_SECS,
+    )?;
+    match merged.status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
+/// Ask `fno agents workspace worktree reapable` - the same verb the `--merged`
+/// sweep, `archive-worktree.sh` and the GC probe ask - and read BOTH the
+/// literal marker and the reason, so a kept tree's receipt can name why. A
+/// `yes` then meets the merge check, because this door has no sweep-style
+/// pre-filter: a clean-but-unmerged branch is exactly where abandoned-but-real
+/// work lives, and the contract keeps it for a human.
+fn worktree_gate(cwd: &str) -> WorktreeGate {
+    let out = match output_with_timeout(
+        {
+            let mut cmd = std::process::Command::new("fno");
+            cmd.args(["agents", "workspace", "worktree", "reapable", cwd]);
+            cmd
+        },
+        RM_SUBPROCESS_TIMEOUT_SECS,
+    ) {
+        Some(out) => out,
+        None => {
+            return WorktreeGate::Unanswerable("the reapable probe could not run".into());
+        }
+    };
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let reason = |fallback: &str| -> String {
+        text.split("reason=")
+            .nth(1)
+            .and_then(|r| r.split_whitespace().next())
+            .unwrap_or(fallback)
+            .to_string()
+    };
+    // The literal marker, never a bare exit code a shim could swallow - the
+    // same double permission `worktree_clean_probe` needs.
+    if out.status.success() && text.contains("reapable=yes") {
+        return match branch_merged(cwd) {
+            Some(true) => WorktreeGate::Reapable,
+            Some(false) => WorktreeGate::Blocked("clean but the branch is not merged".into()),
+            None => WorktreeGate::Unanswerable("the merged-branch probe could not answer".into()),
+        };
+    }
+    if text.contains("reapable=no") {
+        return WorktreeGate::Blocked(reason("blocked"));
+    }
+    WorktreeGate::Unanswerable("the reapable probe could not answer".into())
+}
+
+/// (x-d545) A human removed ONE named row: its worktree goes with it, but
+/// only through the reapable gate plus the merge check - the same three
+/// buckets the `--merged` sweep and the watchdog honor (DIRTY untouched,
+/// clean-and-unmerged never auto-pruned, clean-and-MERGED loses the TREE and
+/// keeps the BRANCH: `git worktree remove` never deletes branches). A gate
+/// that cannot answer keeps the tree - removal never guesses. The row is
+/// removed either way; a protected worktree must not wedge the row on the
+/// sideline. `None`: the row owned no linked worktree, a clean no-op.
+fn rm_take_worktree_with(
+    entry: &state::RegistryEntry,
+    gate: &dyn Fn(&str) -> WorktreeGate,
+    remove: &dyn Fn(&str) -> Result<(), String>,
+) -> Option<String> {
+    let cwd = entry.cwd.as_str();
+    if !is_linked_worktree(cwd) {
+        return None;
+    }
+    match gate(cwd) {
+        WorktreeGate::Reapable => match remove(cwd) {
+            Ok(()) => Some(format!("worktree removed: {cwd}")),
+            Err(e) => Some(format!(
+                "worktree kept: {cwd} (git worktree remove failed: {e})"
+            )),
+        },
+        WorktreeGate::Blocked(reason) => {
+            Some(format!("worktree kept: {cwd} (the gate said no: {reason})"))
+        }
+        WorktreeGate::Unanswerable(why) => Some(format!("worktree kept: {cwd} ({why})")),
+    }
+}
+
+fn rm_take_worktree(entry: &state::RegistryEntry) -> Option<String> {
+    rm_take_worktree_with(entry, &worktree_gate, &|cwd| {
+        // Run git FROM the worktree: the daemon's own cwd is usually not a
+        // repository, and `git worktree remove` needs one to resolve against.
+        // A forced self-removal from inside the leaf is allowed by git.
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(cwd)
+            .args(["worktree", "remove", "--force", cwd]);
+        output_with_timeout(cmd, RM_SUBPROCESS_TIMEOUT_SECS)
+            .ok_or_else(|| "the removal timed out".to_string())
+            .and_then(|out| {
+                if out.status.success() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "exited {}: {}",
+                        out.status.code().unwrap_or(-1),
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ))
+                }
+            })
+    })
 }
 
 /// Wall-clock epoch seconds, for GC grace math. Degrades to 0 (a pre-1970 clock
@@ -3469,19 +3770,47 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         let _gate = SweepGate(flag);
                         let roots = registry_repo_roots(&home);
                         let now = now_epoch_secs();
-                        worktree_sweep(&home, &emitter, now, &roots, &|| {
+                        worktree_sweep(&home, &emitter, now, &roots, &|root| {
                             // Live reap orders anywhere (both claim roots are
                             // read by `list`): each is minted only by a ritual
                             // that gh-confirmed MERGED, so its standing is the
                             // merge-trigger for this tick's apply pass.
                             std::process::Command::new("fno")
+                                .current_dir(root)
                                 .args(["agents", "claim", "list", "--prefix", "reap:", "-J"])
                                 .output()
-                                .ok()
-                                .filter(|o| o.status.success())
-                                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                                .map(|out| out.trim() != "[]" && !out.trim().is_empty())
-                                .unwrap_or(false)
+                                .map_or_else(
+                                    |error| WorktreeSweepOrderRead {
+                                        standing: None,
+                                        exit_code: None,
+                                        stderr: error.to_string(),
+                                    },
+                                    |output| {
+                                        if !output.status.success() {
+                                            return WorktreeSweepOrderRead {
+                                                standing: None,
+                                                exit_code: output.status.code(),
+                                                stderr: String::from_utf8_lossy(&output.stderr)
+                                                    .into_owned(),
+                                            };
+                                        }
+                                        match serde_json::from_slice::<Value>(&output.stdout) {
+                                            Ok(Value::Array(rows)) => (!rows.is_empty()).into(),
+                                            Ok(_) => WorktreeSweepOrderRead {
+                                                standing: None,
+                                                exit_code: output.status.code(),
+                                                stderr: "claim list returned non-array JSON".into(),
+                                            },
+                                            Err(error) => WorktreeSweepOrderRead {
+                                                standing: None,
+                                                exit_code: output.status.code(),
+                                                stderr: format!(
+                                                    "claim list returned invalid JSON: {error}"
+                                                ),
+                                            },
+                                        }
+                                    },
+                                )
                         }, &|root, apply| {
                             let mut cmd = std::process::Command::new("fno");
                             cmd.current_dir(root).args([
@@ -3490,10 +3819,18 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                             if apply {
                                 cmd.arg("--apply");
                             }
-                            cmd.output()
-                                .ok()
-                                .filter(|o| o.status.success())
-                                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                            match cmd.output() {
+                                Ok(output) => WorktreeSweepOutput {
+                                    exit_code: output.status.code(),
+                                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                                },
+                                Err(error) => WorktreeSweepOutput {
+                                    exit_code: None,
+                                    stdout: String::new(),
+                                    stderr: error.to_string(),
+                                },
+                            }
                         });
                     });
                 }
@@ -8131,12 +8468,18 @@ async fn handle_rm_with(
     // its own fail-closed posture. A claude row absent from the `claude agents
     // --json --all` roster is provably gone, whoever removed it (claude-only;
     // `claude_row_provably_absent` is unconditionally false elsewhere). A pane
-    // row whose pane the probe cannot find is provably gone, because the pane
-    // is that row's ONE live ref. Anything less than proof keeps refusing, and
-    // `--force` remains the only escape for a row that cannot prove either.
-    let provably_gone =
-        claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref())
-            || pane_provably_absent(entry.mux.as_ref(), mux_pane_probe);
+    // row whose terminal state is explicit is finished even though Claude
+    // keeps it in the roster, and a pane row whose pane the probe cannot find
+    // is provably gone because the pane is that row's ONE live ref. Anything
+    // less than proof keeps refusing, and `--force` remains the only escape.
+    let row_state_terminal = claude_agents
+        .as_ref()
+        .and_then(|snapshot| harness_row_id.as_deref().and_then(|id| snapshot.find(id)))
+        .and_then(|row| row.state.as_deref())
+        .is_some_and(|state| matches!(state, "done" | "stopped" | "failed"));
+    let provably_gone = row_state_terminal
+        || claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref())
+        || pane_provably_absent(entry.mux.as_ref(), mux_pane_probe);
     if entry.status == AgentStatus::Live && !force && !provably_gone {
         let row = harness_row_id
             .clone()
@@ -8327,6 +8670,13 @@ async fn handle_rm_with(
         );
     }
     cleanup_king_manifest(&entry);
+    // (x-d545) The row is gone from the registry: take its worktree, but only
+    // as far as the reapable gate allows. The receipt rides the RESULT (the
+    // operator's notice), deliberately NOT the event: agent_removed sits
+    // near the 500-byte event cap already, so the receipt would push every
+    // rm event over it and the writer would replace the whole record. The
+    // auditable event field is x-90ee's to land with a shape that fits.
+    let worktree_receipt = rm_take_worktree(&entry);
     let pane_session = entry.mux.as_ref().map(|mux| mux.session.clone());
     let pane_id = entry.mux.as_ref().map(|mux| mux.pane_id);
     let event = json!({
@@ -8370,6 +8720,7 @@ async fn handle_rm_with(
         "pane_id": pane_id,
         "pane_removed": pane_outcome.removed_json(),
         "pane_reason": pane_outcome.reason(),
+        "worktree_receipt": worktree_receipt,
         "event_written": event_error.is_none(),
         "event_reason": event_error,
         "was_orphaned": was_orphaned,
@@ -10979,6 +11330,180 @@ mod tests {
         std::fs::remove_dir_all(home.root()).ok();
     }
 
+    /// A temp dir whose `.git` is a FILE: linked-worktree shape, no real repo
+    /// behind it (the gate and the removal are injected, so none is needed).
+    fn fake_worktree(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fno-rm-wt-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".git"), "gitdir: /elsewhere/worktrees/x.git\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn output_with_timeout_bounds_a_stalled_subprocess() {
+        // The rm path's budget: a fast child answers, a stalled one is
+        // bounded instead of parking the daemon's rm handler.
+        let fast = output_with_timeout(
+            {
+                let mut c = std::process::Command::new("echo");
+                c.arg("ok");
+                c
+            },
+            10,
+        );
+        assert!(fast.is_some(), "a fast child answers");
+        let stalled = output_with_timeout(
+            {
+                let mut c = std::process::Command::new("sleep");
+                c.arg("30");
+                c
+            },
+            1,
+        );
+        let stalled = stalled.expect("a stalled child is killed, not left running");
+        assert!(
+            !stalled.status.success(),
+            "the killed child reads as a failed call"
+        );
+    }
+
+    #[test]
+    fn branch_merged_answers_real_repos() {
+        // The rm door's half of the third bucket: a fresh branch is
+        // unmerged; a fast-forward into the main line flips it.
+        let root = std::env::temp_dir().join(format!("fno-rm-mg-{}", std::process::id()));
+        let repo = root.join("repo");
+        let wt = root.join("leaf");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str], cwd: &std::path::Path| {
+            std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let commit_args = [
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "seed",
+        ];
+        assert!(git(&["init", "-q", "-b", "main"], &repo).status.success());
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        assert!(git(&["add", "-A"], &repo).status.success());
+        assert!(git(&commit_args, &repo).status.success());
+        let worktree_add = [
+            "worktree",
+            "add",
+            "-q",
+            wt.to_str().unwrap(),
+            "-b",
+            "feature",
+        ];
+        assert!(git(&worktree_add, &repo).status.success());
+        std::fs::write(wt.join("b.txt"), "b\n").unwrap();
+        assert!(git(&["add", "-A"], &wt).status.success());
+        assert!(git(&commit_args, &wt).status.success());
+
+        assert_eq!(
+            branch_merged(wt.to_str().unwrap()),
+            Some(false),
+            "an unmerged branch blocks the rm door"
+        );
+
+        assert!(git(&["merge", "-q", "feature"], &repo).status.success());
+        assert_eq!(
+            branch_merged(wt.to_str().unwrap()),
+            Some(true),
+            "a merged branch passes"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn rm_take_worktree_removes_when_the_gate_answers_yes() {
+        // AC5-HP: a clean tree goes. The branch survives by git's own
+        // contract (`worktree remove` never deletes branches) - the command
+        // choice is the sweep's, not a second policy.
+        let wt = fake_worktree("clean");
+        let mut row = ask_row("wt1", Some("2020-01-01T00:00:00Z"));
+        row.cwd = wt.to_string_lossy().into_owned();
+        let receipt = rm_take_worktree_with(&row, &|_| WorktreeGate::Reapable, &|_| Ok(()));
+        assert_eq!(
+            receipt.as_deref().map(|s| s.to_string()),
+            Some(format!("worktree removed: {}", wt.to_string_lossy()))
+        );
+        std::fs::remove_dir_all(&wt).ok();
+    }
+
+    #[test]
+    fn rm_take_worktree_keeps_a_blocked_tree_and_names_the_reason() {
+        // AC6-EDGE: DIRTY or clean-and-unmerged keeps the tree; the receipt
+        // names the path and the gate's reason. The ROW was already removed
+        // by the caller - the receipt never blocks that.
+        let wt = fake_worktree("dirty");
+        let mut row = ask_row("wt2", Some("2020-01-01T00:00:00Z"));
+        row.cwd = wt.to_string_lossy().into_owned();
+        let receipt = rm_take_worktree_with(
+            &row,
+            &|_| WorktreeGate::Blocked("modified-tracked".into()),
+            &|_| Ok(()),
+        );
+        assert_eq!(
+            receipt.as_deref().map(|s| s.to_string()),
+            Some(format!(
+                "worktree kept: {} (the gate said no: modified-tracked)",
+                wt.to_string_lossy()
+            ))
+        );
+        std::fs::remove_dir_all(&wt).ok();
+    }
+
+    #[test]
+    fn rm_take_worktree_keeps_the_tree_when_the_probe_cannot_answer() {
+        // AC7-ERR: an unanswerable probe keeps the tree. Removal never guesses.
+        let wt = fake_worktree("mute");
+        let mut row = ask_row("wt3", Some("2020-01-01T00:00:00Z"));
+        row.cwd = wt.to_string_lossy().into_owned();
+        let receipt = rm_take_worktree_with(
+            &row,
+            &|_| WorktreeGate::Unanswerable("the reapable probe could not answer".into()),
+            &|_| Ok(()),
+        );
+        assert_eq!(
+            receipt.as_deref().map(|s| s.to_string()),
+            Some(format!(
+                "worktree kept: {} (the reapable probe could not answer)",
+                wt.to_string_lossy()
+            ))
+        );
+        std::fs::remove_dir_all(&wt).ok();
+    }
+
+    #[test]
+    fn rm_take_worktree_is_a_noop_for_a_row_without_a_linked_worktree() {
+        // A row that ran in a plain directory owns nothing removable: the
+        // gate is never consulted, the receipt is None, nothing fails.
+        let mut row = ask_row("wt4", Some("2020-01-01T00:00:00Z"));
+        row.cwd = "/tmp/plain-cwd".into();
+        let asked = std::cell::Cell::new(0);
+        let receipt = rm_take_worktree_with(
+            &row,
+            &|_| {
+                asked.set(asked.get() + 1);
+                WorktreeGate::Reapable
+            },
+            &|_| Ok(()),
+        );
+        assert_eq!(receipt, None);
+        assert_eq!(asked.get(), 0, "the gate was never consulted");
+    }
+
     #[tokio::test]
     async fn rm_refuses_to_report_removed_when_the_row_is_already_gone() {
         // AC1-NEG (silent-no-op mode): the row entry_for_lifecycle resolved is no
@@ -11128,6 +11653,86 @@ mod tests {
         let message = &response.error().unwrap().message;
         assert!(message.contains("rotate"));
         assert!(!message.contains("--force"));
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_accepts_terminal_claude_rows_that_remain_in_the_roster() {
+        for (index, state) in ["done", "stopped", "failed"].into_iter().enumerate() {
+            let home = short_home(&format!("rmterminal{state}"));
+            let short_id = format!("dead{index:04}");
+            let session_id = format!("{short_id}-1111-2222-3333-444444444444");
+            let mut row = claude_rm_row("finished-worker", &short_id, &session_id);
+            row.status = AgentStatus::Live;
+            state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+                .unwrap();
+            let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+            let request = Request::new(1, "agent.rm", json!({"name": "finished-worker"}));
+            let first = std::sync::atomic::AtomicBool::new(true);
+
+            let response = handle_rm_with(
+                &ctx,
+                &request,
+                &|| {
+                    if first.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                            crate::claude_roster::ClaudeAgentRow::new(&short_id, Some(state)),
+                        ])
+                    } else {
+                        crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new())
+                    }
+                },
+                &|_| Ok(()),
+                &|_, _| Ok(true),
+                &|_, _| PaneProbe::Unknown,
+            )
+            .await;
+
+            assert_eq!(response.result().unwrap()["removed"], true, "state={state}");
+            assert!(state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .is_empty());
+            std::fs::remove_dir_all(home.root()).ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn rm_still_refuses_an_idle_claude_row() {
+        let home = short_home("rmidle");
+        let mut row = claude_rm_row(
+            "idle-worker",
+            "1d1e0001",
+            "1d1e0001-1111-2222-3333-444444444444",
+        );
+        row.status = AgentStatus::Live;
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "idle-worker"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new("1d1e0001", Some("idle")),
+                ])
+            },
+            &|_| panic!("an idle row must not reach claude rm"),
+            &|_, _| panic!("an idle row must not reach mux kill"),
+            &|_, _| PaneProbe::Unknown,
+        )
+        .await;
+
+        assert!(response.error().unwrap().message.contains("still live"));
         assert_eq!(
             state::load_registry(&home.registry_json())
                 .unwrap()
@@ -11795,8 +12400,12 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &emitter,
             1_000_000,
             &["/repo/a".into(), "/repo/b".into()],
-            &|| false,
-            &|_, _| Some(quiet.to_string()),
+            &|_| false.into(),
+            &|_, _| WorktreeSweepOutput {
+                exit_code: Some(0),
+                stdout: quiet.into(),
+                stderr: String::new(),
+            },
         );
 
         assert_eq!(swept, 2, "a tick that finds nothing must still report");
@@ -11820,10 +12429,14 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &emitter,
             1_000_000,
             &["/repo/a".into()],
-            &|| true,
+            &|_| true.into(),
             &|_, apply| {
                 assert!(apply, "a standing order must reach the verb as --apply");
-                Some(quiet.to_string())
+                WorktreeSweepOutput {
+                    exit_code: Some(0),
+                    stdout: quiet.into(),
+                    stderr: String::new(),
+                }
             },
         );
 
@@ -11834,36 +12447,110 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     }
 
     #[test]
-    fn sweep_honours_its_own_24h_floor() {
+    fn sweep_reads_reap_orders_in_each_repository_scope() {
+        let home = tmp_home("wt-sweep-repo-orders");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let seen = std::sync::Mutex::new(Vec::new());
+        let quiet =
+            "Summary: 0 would archive, 0 kept (0 unmerged, 0 unpushed, 0 dirty), 0 failed\n";
+
+        let swept = worktree_sweep(
+            &home,
+            &emitter,
+            1_000_000,
+            &["/repo/a".into(), "/repo/b".into()],
+            &|root| (root == "/repo/b").into(),
+            &|root, apply| {
+                seen.lock().unwrap().push((root.to_string(), apply));
+                WorktreeSweepOutput {
+                    exit_code: Some(0),
+                    stdout: quiet.into(),
+                    stderr: String::new(),
+                }
+            },
+        );
+
+        assert_eq!(swept, 2);
+        assert_eq!(
+            seen.into_inner().unwrap(),
+            vec![("/repo/a".into(), false), ("/repo/b".into(), true)]
+        );
+    }
+
+    #[test]
+    fn sweep_skips_a_repo_when_its_order_probe_is_unreadable() {
+        let home = tmp_home("wt-sweep-order-unreadable");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let ran_cleanup = std::sync::atomic::AtomicBool::new(false);
+
+        let swept = worktree_sweep(
+            &home,
+            &emitter,
+            1_000_000,
+            &["/repo/a".into()],
+            &|_| WorktreeSweepOrderRead {
+                standing: None,
+                exit_code: Some(7),
+                stderr: "claim store unreadable\nextra detail\n".into(),
+            },
+            &|_, _| {
+                ran_cleanup.store(true, std::sync::atomic::Ordering::Relaxed);
+                unreachable!("an unreadable order probe must skip cleanup")
+            },
+        );
+
+        assert_eq!(swept, 0);
+        assert!(!ran_cleanup.load(std::sync::atomic::Ordering::Relaxed));
+        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(log.contains("\"error\":\"unreadable-orders\""));
+        assert!(log.contains("\"exit_code\":7"));
+        assert!(log.contains("\"stderr\":\"claim store unreadable\""));
+        assert!(!log.contains("extra detail"));
+        assert!(!log.contains("report-only"));
+    }
+
+    #[test]
+    fn sweep_honours_its_own_6h_floor() {
         let home = tmp_home("wt-sweep-floor");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let out = |_: &str, _: bool| Some(REAL_SUMMARY.to_string());
+        let out = |_: &str, _: bool| WorktreeSweepOutput {
+            exit_code: Some(0),
+            stdout: REAL_SUMMARY.into(),
+            stderr: String::new(),
+        };
         let now = 1_000_000;
 
         assert_eq!(
-            worktree_sweep(&home, &emitter, now, &["/repo/a".into()], &|| false, &out),
+            worktree_sweep(
+                &home,
+                &emitter,
+                now,
+                &["/repo/a".into()],
+                &|_| false.into(),
+                &out,
+            ),
             1
         );
-        // Same day: skipped entirely, no second reading.
+        // Same window: skipped entirely, no second reading.
         assert_eq!(
             worktree_sweep(
                 &home,
                 &emitter,
                 now + 60,
                 &["/repo/a".into()],
-                &|| false,
+                &|_| false.into(),
                 &out
             ),
             0
         );
-        // A day later: fires again.
+        // A little over six hours later: fires again.
         assert_eq!(
             worktree_sweep(
                 &home,
                 &emitter,
-                now + 86_401,
+                now + 21_601,
                 &["/repo/a".into()],
-                &|| false,
+                &|_| false.into(),
                 &out
             ),
             1
@@ -11893,14 +12580,68 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &emitter,
             1_000_000,
             &["/repo/a".into()],
-            &|| false,
-            &|_, _| None,
+            &|_| false.into(),
+            &|_, _| WorktreeSweepOutput {
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
         );
 
         assert_eq!(swept, 0);
         let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
         assert!(log.contains("unreadable-summary"));
         assert!(!log.contains("\"eligible\""));
+    }
+
+    #[test]
+    fn sweep_records_a_nonzero_exit_and_first_stderr_line() {
+        let home = tmp_home("wt-sweep-nonzero");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let output = WorktreeSweepOutput {
+            exit_code: Some(7),
+            stdout: String::new(),
+            stderr: "permission denied\nextra detail\n".into(),
+        };
+
+        let swept = worktree_sweep(
+            &home,
+            &emitter,
+            1_000_000,
+            &["/repo/a".into()],
+            &|_| false.into(),
+            &|_, _| output.clone(),
+        );
+
+        assert_eq!(swept, 0);
+        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(log.contains("\"exit_code\":7"));
+        assert!(log.contains("\"stderr\":\"permission denied\""));
+        assert!(!log.contains("extra detail"));
+    }
+
+    #[test]
+    fn sweep_distinguishes_a_zero_exit_with_no_summary() {
+        let home = tmp_home("wt-sweep-zero-no-summary");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+
+        let swept = worktree_sweep(
+            &home,
+            &emitter,
+            1_000_000,
+            &["/repo/a".into()],
+            &|_| false.into(),
+            &|_, _| WorktreeSweepOutput {
+                exit_code: Some(0),
+                stdout: "no summary here\n".into(),
+                stderr: String::new(),
+            },
+        );
+
+        assert_eq!(swept, 0);
+        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(log.contains("\"exit_code\":0"));
+        assert!(log.contains("\"stderr\":\"\""));
     }
 
     #[test]

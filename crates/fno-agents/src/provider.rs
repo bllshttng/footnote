@@ -1601,7 +1601,15 @@ pub fn gemini_session_id_from_blob(blob: &str) -> Option<String> {
 /// now shape-checks identity, so an alien harness reads without bricking; this
 /// list gates only spawn/`for_name`. Every name here MUST have a [`for_name`]
 /// arm (test-enforced).
-pub const KNOWN_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "agy", "opencode", "pi"];
+pub const KNOWN_PROVIDERS: &[&str] = &[
+    "claude",
+    "codex",
+    "gemini",
+    "agy",
+    "opencode",
+    "pi",
+    "cursor-agent",
+];
 
 /// The roster joined for error messages ("claude, codex, gemini, agy, opencode, pi").
 pub fn known_providers_csv() -> String {
@@ -1621,6 +1629,7 @@ pub fn for_name(name: &str) -> Option<Box<dyn Provider>> {
         "agy" => Some(Box::new(AgyProvider)),
         "opencode" => Some(Box::new(OpencodeProvider)),
         "pi" => Some(Box::new(PiProvider)),
+        "cursor-agent" => Some(Box::new(crate::cursor_agent::CursorAgentProvider)),
         _ => None,
     }
 }

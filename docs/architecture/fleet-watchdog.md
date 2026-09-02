@@ -45,6 +45,8 @@ These were measured by hand on 2026-08-15. Both are pinned by tests in `cli/test
 
 `fno agents watchdog` is a dry run by default and prints every row with its verdict and basis. `--apply` executes the wake lane only, because a wake is the one action that cannot destroy work. `--apply-all` adds reap, reroute and retire, which all stop a session. A ghost never auto-acts at any level: the remedy is a respawn under a new id, and that is the operator's call.
 
+`--only <verdict>` validates and renders its help from `VERDICTS`, the same live set the classifier returns. `retire` is a first-class filter for the reversible stop-only lane; `unclaimed` is advertised from the same source, so adding a verdict cannot require a second hand-maintained list.
+
 Actions delegate. The watchdog owns the decision, never the mechanism.
 
 | Verdict | Action |
@@ -80,6 +82,8 @@ The trigger is a predicate over transcript truth, not a signal the worker emits.
 The lane answers two markers for one fact, the work being over. The declared-done marker is the worker's own closed promise. It does not require the node to be done, and does not require the worktree to be this row's alone. The shipped-work marker is the opposite. It is external proof from the graph: node `done` AND PR `merged`. A think or blueprint worker can never emit the promise marker. A `<promise>` is a ship-phase artifact, and its recap reads like a session that died mid-stream. Both halves of the graph marker are required. 460 nodes read `done` and 42 of those carry no `merge_status`, so done alone stops rows whose work never shipped. Silence arms neither marker. A crowned row is excluded from the graph marker, because a king spans many nodes and resolving its row to one node's status mis-buckets it. Both are reap preconditions because reap deletes a worktree. Retire runs a stop, so the transcript, the worktree and the registry row all survive and `fno agents resume` brings the session back. That reversibility is why it ships armed at a 900 second grace while reap ships off. It is also why a blueprint worker whose node is still `ready` is in scope here and out of scope for reap.
 
 The grace is the follow-up window. A worker that just delivered can still be asked one more thing. `config.recovery.retire_grace_s` tunes it. Set it to `0` to turn the lane off.
+
+Claude's roster spelling `failed` folds to canonical `done`. It therefore contributes to the terminal-row count, emits no unmapped-state advisory, and can reach retire only through the same transcript, origin, age, liveness and question guards as every other done row. `stopped` remains outside retire because its process is already gone; `blocked` remains outside because it needs model rotation or operator input.
 
 `classify_tail` returns on its first match, checking watching, then `<promise>`, then question-or-`<help>`. So a turn that both promises and asks classifies `done` and never `your-move`. That is the modal shape here: a blueprint worker mails its plan and asks the operator one thing in the same turn. Retiring it strands the question, so the retire predicate asks the question half again itself. Reordering `classify_tail` instead is the wrong fix. `reap_decision`, the loop runtime's parked reading and the progress axis all share that classifier, and reap deletes worktrees. One caller needs the finer reading, so the finer reading lives in that caller.
 
