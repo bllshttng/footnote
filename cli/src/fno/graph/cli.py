@@ -1257,7 +1257,10 @@ def _create_node_impl(
             value_proc=_prompt_difficulty_value,
         )
     try:
-        difficulty = normalize_difficulty(difficulty)
+        normalized_difficulty = normalize_difficulty(difficulty)
+        if normalized_difficulty is None:
+            raise ValueError("difficulty must not be empty")
+        difficulty = normalized_difficulty
     except ValueError as exc:
         typer.echo(f"Error: {exc}. {DIFFICULTY_HELP}", err=True)
         raise typer.Exit(code=2)
@@ -14947,7 +14950,10 @@ def cmd_new(
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2)
     try:
-        difficulty = normalize_difficulty(difficulty)
+        normalized_difficulty = normalize_difficulty(difficulty)
+        if normalized_difficulty is None:
+            raise ValueError("difficulty must not be empty")
+        difficulty = normalized_difficulty
     except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=2)

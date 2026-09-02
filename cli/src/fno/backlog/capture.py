@@ -640,7 +640,7 @@ def _create_graph_node(
     *,
     title: str,
     priority: str,
-    difficulty: str,
+    difficulty: Optional[str],
     domain: str = "code",
     graph_path: Optional[Path] = None,
     blocks_everything: bool = False,
@@ -691,7 +691,7 @@ def promote_item(
     fu_id: str,
     *,
     priority: Optional[str] = None,
-    difficulty: str,
+    difficulty: Optional[str],
     blocks_everything: bool = False,
     graph_path: Optional[Path] = None,
 ) -> dict:
@@ -718,7 +718,10 @@ def promote_item(
             f"(low, medium, high). {DIFFICULTY_HELP}"
         )
     try:
-        difficulty = normalize_difficulty(difficulty)
+        normalized_difficulty = normalize_difficulty(difficulty)
+        if normalized_difficulty is None:
+            raise ValueError("difficulty must not be empty")
+        difficulty = normalized_difficulty
     except ValueError as exc:
         raise InboxValidationError(f"{exc}. {DIFFICULTY_HELP}") from exc
     path = Path(path)

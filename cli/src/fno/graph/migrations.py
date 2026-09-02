@@ -239,7 +239,7 @@ def _backfill_band(row: dict) -> str | None:
         band = _BACKFILL_TYPE_BANDS.get(node_type.strip().lower())
         if band:
             signals.append(band)
-    return max(signals, key=_BAND_RANK.get) if signals else None
+    return max(signals, key=lambda candidate: _BAND_RANK[candidate]) if signals else None
 
 
 def backfill_difficulty(entries: list[dict], *, apply: bool = False) -> dict:
