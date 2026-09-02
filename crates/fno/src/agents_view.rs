@@ -1900,9 +1900,8 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
                     .filter(|s| !s.is_empty())
                     .map(str::to_string),
                 // A full session id addresses a durable thread, and only a
-                // thread-shaped row may take one. Cursor Agent is the pane-row
-                // exception: its remote chat UUID is the attach target.
-                IdKind::Session if is_thread_shape || harness_name == Some("cursor-agent") => row
+                // thread-shaped row may take one.
+                IdKind::Session if is_thread_shape => row
                     .get("harness_session_id")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
@@ -3134,9 +3133,13 @@ mod tests {
     }
 
     #[test]
-    fn cursor_agent_pane_row_derives_remote_chat_attach_id() {
+    fn cursor_agent_rows_never_derive_an_attach_id() {
         use crate::proto::Reach;
 
+        // The capability row declares interactive_attach unsupported: a
+        // second --resume process is a rival TUI on the same remote chat,
+        // not a join. No pane row may claim the Drive reach that resolve of
+        // an attach id would grant; the row is driven by pane or by mail.
         let chat_id = "fadad56b-8008-45f5-b809-f9fab7074534";
         let raw = reg(&format!(
             r#"{{"name":"cursor","cwd":"/w","status":"live","harness":"cursor-agent",
@@ -3145,8 +3148,8 @@ mod tests {
         ));
         let row = derive_rows(&raw, NOW).unwrap().remove(0);
 
-        assert_eq!(row.attach_id.as_deref(), Some(chat_id));
-        assert_eq!(
+        assert_eq!(row.attach_id.as_deref(), None);
+        assert_ne!(
             thread_reach(row.harness.as_deref(), row.attach_id.as_deref()),
             Reach::Drive
         );

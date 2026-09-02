@@ -776,6 +776,9 @@ fn deliver_via_keeper_socket_in(
     // starts empty at inject time: only paint that happened after OUR submit
     // can confirm, which is exactly the claim.
     let pty_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // Decoded payloads land in pty_seen; a partial frame's raw bytes wait
+    // here for the next poll, exactly as the wire delivered them.
+    let pty_pending = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut transport = KeeperTransport { stream };
     let marker = text.lines().next().unwrap_or(text);
     inject_with_submit(&mut transport, text, Duration::from_millis(enter_delay_ms)).map_err(
@@ -815,16 +818,34 @@ fn deliver_via_keeper_socket_in(
                 // composer-wide prefix: the TUI wraps long lines in the
                 // composer, and a newline mid-marker would break a full-line
                 // match even after the escape strip.
-                if let (Some(stream), Ok(mut acc)) = (confirm_stream.as_ref(), pty_seen.lock()) {
+                if let (Some(stream), Ok(mut raw), Ok(mut acc)) =
+                    (confirm_stream.as_ref(), pty_pending.lock(), pty_seen.lock())
+                {
                     let mut buf = [0u8; 8192];
                     let mut reader = stream;
                     loop {
                         match std::io::Read::read(&mut reader, &mut buf) {
                             Ok(0) => break,
-                            Ok(n) => acc.extend_from_slice(&buf[..n]),
+                            Ok(n) => raw.extend_from_slice(&buf[..n]),
                             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
                             Err(_) => break,
                         }
+                    }
+                    // The socket carries FRAMES (tag u8 | len u32 LE |
+                    // payload), not a byte stream: matching over raw bytes
+                    // would embed a 5-byte header inside any marker that
+                    // straddles two Output frames. Decode payloads only; a
+                    // partial tail frame stays buffered for the next poll.
+                    loop {
+                        if raw.len() < 5 {
+                            break;
+                        }
+                        let len = u32::from_le_bytes([raw[1], raw[2], raw[3], raw[4]]) as usize;
+                        if len > 1_048_576 || raw.len() < 5 + len {
+                            break;
+                        }
+                        acc.extend_from_slice(&raw[5..5 + len]);
+                        raw.drain(..5 + len);
                     }
                 }
                 let prefix: String = marker.chars().take(48).collect();

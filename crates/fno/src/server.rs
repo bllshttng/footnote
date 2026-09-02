@@ -1021,8 +1021,10 @@ fn attach_argv(
 ///   control socket via `CODEX_HOME`), and the wrapper is claude's routing.
 /// - pi, whose argv carries env-dependent `--provider`/`--model` no static
 ///   form can name: its own builder (x-c198).
-/// - cursor-agent, whose pane attach uses the full callee-minted chat UUID and
-///   always carries `--trust`; its chat state is remote, not a local file.
+///
+/// cursor-agent declares no attach form at all (a second `--resume` is a
+/// rival TUI on the same remote chat, not a join), so its rows never reach
+/// here: no attach id resolves for them in the viewport.
 ///
 /// Any other harness falls through to the claude shape, which is what every
 /// caller did before a harness was passed at all; only rows that resolved an
@@ -16559,18 +16561,14 @@ mod tests {
         );
         assert_eq!(form.render(uuid)[..2], ["sh".to_string(), "-c".to_string()]);
 
-        // Cursor Agent attaches to the same remote chat by full UUID and
-        // carries the trust flag declared by its capability form.
-        let cursor_id = "fadad56b-8008-45f5-b809-f9fab7074534";
-        let cursor_form =
-            agents_view::attach_form("cursor-agent").expect("cursor-agent declares an attach form");
-        assert_eq!(
-            attach_argv_for(Some("cursor-agent"), cursor_id, Some("ignored"), Some(dir)),
-            cursor_form.render(cursor_id)
-        );
-        assert_eq!(
-            cursor_form.render(cursor_id),
-            ["cursor-agent", "--resume", cursor_id, "--trust",]
+        // Cursor Agent declares NO attach form: a second --resume process is
+        // a rival TUI on the same remote chat, not a join. Its rows are
+        // driven by pane or by mail, and the re-entry form (--resume with
+        // --trust) belongs to resume, not to the attach door.
+        assert!(agents_view::attach_form("cursor-agent").is_none());
+        assert!(
+            agents_view::resume_form("cursor-agent").is_some(),
+            "the resume lane stays the honest re-entry"
         );
     }
 

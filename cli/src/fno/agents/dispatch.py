@@ -1726,6 +1726,21 @@ def _mint_thread_session_id(
     return str(uuid.uuid4())
 
 
+def _keeper_pid_start_time(pid: int) -> Optional[int]:
+    """The keeper's process-start token, read while the spawner owns it.
+
+    A row pid alone is not an identity (the pitfalls corpus: argv-derived
+    fields outlive their process); the token is what lets a later stop prove
+    the pid was never recycled before capturing Cursor's worker-server
+    census."""
+    try:
+        from fno.agents.spawn_gate import _process_start_time
+
+        return _process_start_time(pid)
+    except Exception:  # noqa: BLE001 - a census failure must not kill the spawn
+        return None
+
+
 def _lane_b_thread_spawn(
     *,
     name: str,
@@ -1934,6 +1949,10 @@ def _lane_b_thread_spawn(
             # keeper: the daemon's restart sweep asserts it unchanged, so a
             # respawn wearing this row's name fails instead of recovering.
             keeper_child_pid=reply.get("child_pid"),
+            # The keeper's start token, captured while this process owns it:
+            # the cursor thread-stop arm proves ownership with the pair before
+            # it captures the worker-server census.
+            pid_start_time=_keeper_pid_start_time(proc.pid),
             messaging_socket_path=str(sock),
             spawned_by_session=_cx_session,
             spawned_by_harness=_cx_harness,
@@ -2009,7 +2028,10 @@ def _keeper_seed_submit(
     as soon as the spawn returns: a Resize frame forces the TUI to repaint
     whatever already painted, the idle marker read off the stream proves the
     composer is up, and only then is the payload pasted and submitted. The
-    repaint of the submitted turn is the landing proof; a miss is a raised
+    repaint of the submitted line is the landing proof, and its limit is
+    stated exactly: the echo shows the paste and the submit reached the
+    composer, not that the model answered - the journey carries that
+    stronger proof by waiting out the reply. A miss is a raised
     error, never a silent drop - the caller refuses the spawn rather than
     report a worker that will never start.
     """
@@ -2023,6 +2045,21 @@ def _keeper_seed_submit(
 
     def frame(tag: int, payload: bytes) -> bytes:
         return bytes([tag]) + len(payload).to_bytes(4, "little") + payload
+
+    raw_pending = bytearray()
+
+    def _decode_frames(out: bytearray) -> None:
+        # The socket carries FRAMES (tag u8 | len u32 LE | payload), not a
+        # byte stream: matching over raw bytes would embed a 5-byte header
+        # inside any marker that straddles two Output frames. Decode
+        # payloads only; a partial tail frame stays buffered for the next
+        # recv.
+        while len(raw_pending) >= 5:
+            length = int.from_bytes(raw_pending[1:5], "little")
+            if length > 1_048_576 or len(raw_pending) < 5 + length:
+                break
+            out.extend(raw_pending[5 : 5 + length])
+            del raw_pending[: 5 + length]
 
     conn = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
     conn.settimeout(2.0)
@@ -2059,7 +2096,10 @@ def _keeper_seed_submit(
             if not chunk:
                 _time.sleep(0.2)
                 continue
-            text.extend(_strip_ansi(chunk))
+            raw_pending.extend(chunk)
+            decoded = bytearray()
+            _decode_frames(decoded)
+            text.extend(_strip_ansi(bytes(decoded)))
         else:
             raise DispatchAskError(
                 f"keeper thread for {name!r} never painted its idle composer "
@@ -2091,7 +2131,10 @@ def _keeper_seed_submit(
             if not chunk:
                 _time.sleep(0.2)
                 continue
-            text.extend(_strip_ansi(chunk))
+            raw_pending.extend(chunk)
+            decoded = bytearray()
+            _decode_frames(decoded)
+            text.extend(_strip_ansi(bytes(decoded)))
         raise DispatchAskError(
             f"the seed for keeper thread {name!r} never repainted after "
             "submit; the worker may be idle. Send it by mail: "
@@ -5016,10 +5059,24 @@ def _teardown_harness_session(
             reap_detached_worker_servers,
         )
 
+        # rm runs after the owner is already gone, and the census's ownership
+        # proof needs a live owner pid: unprovable here is the normal shape,
+        # not a fault. Refusing would brick every post-stop rm; the row goes
+        # and the leak, if any, is named. A reap that FAILS with handles in
+        # hand is different - servers are provably alive and surviving - and
+        # still refuses.
         try:
             worker_servers = capture_detached_worker_servers(
                 existing.pid, existing.pid_start_time
             )
+        except RuntimeError as exc:
+            print(
+                "cursor-agent worker-server cleanup unverified: "
+                f"{exc}; if a worker-server survives, kill it by pid",
+                flush=True,
+            )
+            return None
+        try:
             reaped = reap_detached_worker_servers(worker_servers)
         except RuntimeError as exc:
             return _fail(str(exc), exit_code=1)
