@@ -528,6 +528,14 @@ def build_report(
     ``config.auto_continue.enabled`` - see this section's header for why the
     armed state is context here and not the answer.
     """
+    # Classification + backstop: `advance` is a tracker-owned verb, so its
+    # callback already refuses on an external tracker backend before this
+    # runs. The consumer census attributes the graph read to THIS function,
+    # so the one refusal call lives here too - never a second ruling.
+    from fno.graph.cli import _refuse_tracker_owned_on_external_backend
+
+    _refuse_tracker_owned_on_external_backend("advance")
+
     from fno.backlog import advance as adv
     from fno.graph._intake import make_selection_sort_key
     from fno.graph.cli import _container_ids, _require_live_claimed_node_ids
@@ -761,6 +769,12 @@ def build_lane_fill_report(
 
     Never dispatches, never claims a slot (``claim=False``), never emits.
     """
+    # Same guard as build_report: the census attributes the fill's graph-side
+    # reads to this function, so the tracker-owned refusal lives here too.
+    from fno.graph.cli import _refuse_tracker_owned_on_external_backend
+
+    _refuse_tracker_owned_on_external_backend("advance")
+
     from fno.backlog import advance as adv
     from fno.claims.lanes import active_lane_count
 
