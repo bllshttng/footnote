@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 import posixpath
 import re
 import shlex
@@ -14,7 +14,7 @@ from fno.plan.brief import (
     validate_task_edges,
 )
 from fno.plan.criteria import CriteriaParseError, compile_criteria
-from fno.plan.schema import created_after_gate
+from fno.plan.schema import created_after_gate, waves_gate_error
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,21 @@ class ExecutionViolation:
 
 @dataclass(frozen=True)
 class ExecutionValidationResult:
+    """Violations refuse the plan; warnings name a smell and let it through.
+
+    ``warnings`` defaults to empty, so every existing construction site and
+    every caller reading only ``.violations`` is unchanged. The channel exists
+    because a signal worth emitting is not always worth refusing on: the
+    total-chain check below fires on 4 plans in a fortnight, where a refusal
+    on any multi-file plan without waves would fire on 172 and teach authors
+    to route around the validator.
+    """
+
     violations: list[ExecutionViolation]
+    # Imported under an alias: `_violation` below takes a parameter named
+    # `field`, so the bare dataclasses name would read as two different things
+    # in one module.
+    warnings: list[ExecutionViolation] = dataclass_field(default_factory=list)
 
 
 _QUICK_REQUIRED_SECTIONS = ("Context", "Changes", "Files to Modify", "Verification")
@@ -300,7 +314,24 @@ def validate_execution(
     strategy_text = doc.get_section("Execution Strategy")
     if strategy_text is None:
         if doc.frontmatter.get("kind") == "quick-plan":
-            return _validate_quick(doc)
+            # The one escape hatch, now date-keyed. `quick` was told to skip
+            # the section on the assertion that a quick plan is single-task,
+            # and nothing checked it: 200 of 232 flat quick-plans in a
+            # fortnight carried more than one numbered change, so every one of
+            # them measured width 0 and `fno backlog join` could not tell a
+            # genuinely single-task plan from one that never declared its
+            # parallelism. Pre-gate plans keep the hatch; backfilling their
+            # topology would fabricate waves nobody authored.
+            quick = _validate_quick(doc)
+            gate_error = waves_gate_error(
+                doc.frontmatter, has_execution_strategy=False
+            )
+            if gate_error:
+                return ExecutionValidationResult(
+                    [*quick.violations, _violation("Execution Strategy", gate_error)],
+                    warnings=list(quick.warnings),
+                )
+            return quick
         return ExecutionValidationResult(
             [_violation("Execution Strategy", "missing ## Execution Strategy section")]
         )
