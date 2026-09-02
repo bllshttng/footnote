@@ -2227,6 +2227,11 @@ class AgentsBlock(BaseModel):
     max_fleet_cpu_share: float = 0.5
     hard_max_load_per_cpu: float = 40.0
     worker_qos: str = "utility"
+    # Absolute override for footprint's sustained-CPU threshold, in cores. Set
+    # it to pin a small box; unset, the threshold derives from measured CPU
+    # capacity (a fraction per core) instead of the old hardcoded 1.0, which
+    # asked a 12-core machine's fleet to idle at 8% utilisation.
+    footprint_sustained_cpu_cores: Optional[float] = None
     # Default permission/approval mode for AUTONOMOUS dispatchers only
     # (dispatch-node.sh / `fno backlog advance` / `/think dispatch`). Defaults to
     # bypass so a fire-and-forget worker enters its worktree without a prompt
