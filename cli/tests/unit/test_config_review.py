@@ -139,41 +139,31 @@ def test_review_agent_providers_scalar_fails_safe(
     assert settings.review.agent_providers == {}
 
 
-def test_review_agent_routes_parse_full_tuple(
+def test_review_agent_routes_empty_stays_legal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The key retired with the sigma panel it routed: absent or empty loads
+    clean, so a config that never used it is untouched."""
     settings = _load(
         tmp_path,
         monkeypatch,
-        "schema_version: 1\nconfig:\n  review:\n    agent_routes:\n"
-        "      code_reviewer:\n        harness: claude\n        provider: zai\n"
-        "        model: glm-5.2\n",
+        "schema_version: 1\nconfig:\n  review:\n    agent_routes: {}\n",
     )
-    route = settings.review.agent_routes["code_reviewer"]
-    assert route.harness == "claude"
-    assert route.provider == "zai"
-    assert route.model == "glm-5.2"
+    assert settings.review.agent_routes == {}
 
 
-@pytest.mark.parametrize(
-    "route_yaml",
-    [
-        "harness: codex\n        provider: zai\n        model: glm-5.2",
-        "harness: claude\n        provider: zai",
-        "harness: claude\n        provider: zai\n        model: ''",
-    ],
-)
-def test_review_agent_routes_reject_invalid_tuple_before_spawn(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    route_yaml: str,
+def test_review_agent_routes_configured_refuses_with_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    with pytest.raises(ValueError):
+    """AC8-ERR: a stale sigma routing config fails loud and names the rung
+    vocabulary as the replacement, never silently routing nothing."""
+    with pytest.raises(ValueError, match="review-posture"):
         _load(
             tmp_path,
             monkeypatch,
             "schema_version: 1\nconfig:\n  review:\n    agent_routes:\n"
-            f"      code_reviewer:\n        {route_yaml}\n",
+            "      code_reviewer:\n        harness: claude\n        provider: zai\n"
+            "        model: glm-5.2\n",
         )
 
 

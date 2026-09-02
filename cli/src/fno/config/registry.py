@@ -247,7 +247,7 @@ FIELD_META: dict[str, Meta] = {
     "review.agent_providers": Meta(
         "never", "Legacy alias for config.review.agent_harnesses (a straight rename); agent_harnesses wins if both are set.",
     ),
-    "review.agent_routes": Meta("never", "Opt-in per-agent harness/provider/model routes for named sigma sessions."),
+    "review.agent_routes": Meta("never", "RETIRED with the sigma panel: the review-posture ladder (config.review.posture) replaced per-agent review routing. An empty value is accepted; any configured route refuses with the replacement named, so remove the key."),
     "review.cross_model.enabled": Meta("advanced", "Enable cross-model (codex/gemini) second-opinion review."),
     # --- config.style.* ---
     "style.word_cap.mail": Meta(

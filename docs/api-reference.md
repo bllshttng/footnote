@@ -56,7 +56,7 @@ Input ("feature" or path/to/plan)
   -> think (design exploration)
   -> plan (wave strategy)
   -> do (execute waves, spawn subagents)
-  -> sigma-review (6 parallel review agents)
+  -> review (the owned lane: one inline reviewer, head-pinned attestation)
   -> goal-verification (3-level check)
   -> create-pr (fork to Haiku)
   -> <promise> tag signals completion
@@ -120,13 +120,13 @@ Code quality, testing, and PR management.
 
 | Skill | Command | Purpose |
 |-------|---------|---------|
-| `sigma-review` | `/fno:sigma-review` | Orchestrates 6 parallel review agents on changes |
+| `review` | `/fno:review` | The owned lane: one inline reviewer works every angle, verifies findings, and emits a head-pinned attestation; `peer` adds a cross-model second opinion |
 | `check-pr` | `/fno:check-pr` | Polls for external reviewer feedback and implements changes |
 | `create-pr` | `/fno:create-pr` | Creates PR with description. Runs in fork context on Haiku |
 
-#### sigma-review Agent Suite
+#### The review specialist agents
 
-When `/fno:sigma-review` runs, it dispatches 6 specialized review agents in parallel:
+The six specialist review agents remain individually invocable; the six-at-once panel that dispatched them is retired.
 
 | Agent | Focus Area |
 |-------|------------|

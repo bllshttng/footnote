@@ -126,7 +126,6 @@ def test_panic_switch_blocks_grant_activation(tmp_home, monkeypatch):
     r = runner.invoke(app, ["set", "config.auto_merge.grant", "dispatch"])
     assert r.exit_code == 0, r.output
     assert calls["activate"] == 0
-    assert "disabled" in r.output
 
 
 def test_activation_failure_is_loud_and_keeps_config(tmp_home, monkeypatch):

@@ -204,14 +204,14 @@ event_types:
 
   - name: review_attestation
     retention: gate
-    description: "A local reviewer (sigma | code-review | declare) completed a head-pinned review pass. loop-check reads this as gate evidence for a config.review.reviewers entry (x-e703, Phase 2): the entry is satisfied when reviewer matches, verdict == pass, and `review_freshness(head_sha, current HEAD)` is not Stale (x-5b99/x-62a1). That last clause used to be a bare `head_sha == current HEAD`, which made addressing a review destroy the proof the review happened - a mandatory pre-merge rebase cost a full re-review even though it changed no code. Freshness is now decided from the PR's own code-diff identity, so a pass carries across a rebase or a documentation-only advance and dies on any real code change. Head-pinning is still mandatory and the fail-closed direction is unchanged: an absent head_sha, an unresolvable commit, or any git failure is Stale. An unused-import removal is a `.py` change and still costs a re-review; no classifier here parses Python. NOTE what this event does and does not prove: the review verb emits nothing itself, and this event is written by a script that records the reviewer name and verdict it was PASSED. It proves a commit was pinned, never that a review happened."
+    description: "A local reviewer (code-review | peer | declare) completed a head-pinned review pass. loop-check reads this as gate evidence for a config.review.reviewers entry (x-e703, Phase 2): the entry is satisfied when reviewer matches, verdict == pass, and `review_freshness(head_sha, current HEAD)` is not Stale (x-5b99/x-62a1). That last clause used to be a bare `head_sha == current HEAD`, which made addressing a review destroy the proof the review happened - a mandatory pre-merge rebase cost a full re-review even though it changed no code. Freshness is now decided from the PR's own code-diff identity, so a pass carries across a rebase or a documentation-only advance and dies on any real code change. Head-pinning is still mandatory and the fail-closed direction is unchanged: an absent head_sha, an unresolvable commit, or any git failure is Stale. An unused-import removal is a `.py` change and still costs a re-review; no classifier here parses Python. NOTE what this event does and does not prove: the review verb emits nothing itself, and this event is written by a script that records the reviewer name and verdict it was PASSED. It proves a commit was pinned, never that a review happened."
     sources: [target, subagent, hook, test]
     data:
       required: [reviewer, head_sha, verdict, session_id]
       properties:
         reviewer:
           type: string
-          description: "The reviewer name matching a config.review.reviewers entry (sigma | code-review | declare; a leading '/' is stripped by both parsers)."
+          description: "The reviewer name matching a config.review.reviewers entry (code-review | peer | declare; a leading '/' is stripped by both parsers)."
         head_sha:
           type: string
           description: "The git HEAD sha the reviewer reviewed. loop-check head-pins on this: it satisfies the gate only while `review_freshness` rates it Fresh or Carried against the current HEAD (x-5b99). Emit it AFTER the reviewed commit is the tip - an attestation emitted before committing pins a commit the reviewer's findings are not about."
@@ -483,6 +483,10 @@ event_types:
                 type: string
                 enum: [self_attested, other_session, unknown]
                 description: "Authorship of a local_attestation review, computed from attester_session_id vs the authoring session's harness_session_id. self_attested = emitted by the authoring session; other_session = emitted by a different session (NOT 'independent' - a self-handoff successor or a second agent in a shared worktree is a different session and still not independent); unknown = attester empty/absent or the author session is unknown (the entire pre-landed backlog). Meaningful only on local_attestation verdicts; github_app/human approvals omit it. Recorded, never gating: reviewed_count does not read this field, so a self_attested verdict counts toward coverage exactly like any other and a green PR whose only attestation is self_attested is covered and may merge. Whether that should stay true is a later gate decision, not this field."
+              reviewer_context:
+                type: string
+                enum: [fresh, shared, unknown]
+                description: "Positive evidence about the reviewing context, mirrored verbatim from the review_attestation event that produced the verdict (x-f324). fresh = a harness-recorded forked review context; shared = a same-context review tool result; unknown = no positive marker. Read ONLY by the review_posture verdict's independent component (AC4-ERR: other_session or unknown never satisfies rung 4); the coverage count never reads it, and invoker identity is not an input to it. Omitted when the event predates the field."
         head_sha:
           type: string
           description: "The HEAD the coverage was computed against (coverage is a snapshot). This is the EVAL head, not the head any reviewer read - that is per-verdict `reviewed_sha`. Conflating the two is x-5b99: the merge gate compared this field against the current head and correctly refused a stale eval, but a FRESH eval carrying a stale bot verdict walked straight through it."
@@ -520,6 +524,38 @@ event_types:
         impossible:
           type: boolean
           description: "events_rounds_exhausted AND a hard non-terminal finding remains: a CONFIRMED correctness or security finding, or a truncated remainder. Only this shape keeps the IMPOSSIBLE verdict (exit 5) at the cap; every other non-terminal finding is filed by the merge gate and the PR merges. Advisory on the row - every gate surface re-derives before answering (the merge gate through coverage_verdict, fno do pr status through cap_verdict) - so this flag is an audit trail, never a gate input."
+        review_posture:
+          type: object
+          description: "The authoritative resolved review-posture verdict (x-f324), computed by the Rust producer against the same verdicts coverage used and carried verbatim by every Python reader (AC6-HP: Python never reclassifies). Resolved from config.review.posture - explicit, or inferred from the legacy settings with the source naming which - and satisfied only when every component the rung names is evidenced at the evaluated head. OPTIONAL: absent on rows produced before this field existed and on unknown/failure rows, where absence reads 'no posture resolved here', never 'unsatisfied'."
+          properties:
+            posture:
+              type: string
+              enum: [no_review, tests_pass, self_review, independent_review, github_review, peer_review, self_and_github, self_and_peer, self_github_and_peer]
+              description: "The resolved rung."
+            rank:
+              type: integer
+              description: "Ladder position, 1 (no_review) to 9 (self_github_and_peer). Auto-merge refuses below 3."
+            source:
+              type: string
+              enum: [explicit, legacy, default]
+              description: "How the rung was resolved: the config leaf, inferred from legacy settings, or the shipped floor."
+            cost:
+              type: string
+              description: "What the rung costs (zero reviews | one review | one fresh reviewer | one App review | one peer review | two reviews | three reviews)."
+            freshness:
+              type: string
+              description: "The reviewer-context requirement the rung carries."
+            diversity:
+              type: string
+              description: "The model-diversity requirement the rung carries."
+            posture_satisfied:
+              type: boolean
+              description: "Whether every component the rung names is evidenced at the evaluated head."
+            posture_gaps:
+              type: array
+              items:
+                type: string
+              description: "One exact gap per unsatisfied component, in the component order the rung declares. Empty iff posture_satisfied."
         repo:
           type: string
           description: "Full repository identity `host/owner/repo`, lowercased, from the git remote (x-f43c). This event is written to BOTH the project log and the cross-project global log, and `pr` is a bare integer, so a reader scanning ~/.fno/events.jsonl needs this to tell repo A's PR 781 from repo B's. It is the FULL identity, never the last path segment: `org-a/widget` and `org-b/widget` would otherwise share a key, and since this gates auto-merge one repo's coverage could clear the other's guard (a fork shares head SHAs, so the staleness check would not catch it). Omitted (never null) when no remote resolves or it has fewer than two path segments; a reader must then decline to match the event in the global log rather than guess. Stable across a repo's worktrees, which is the property that lets a merge run from canonical see coverage attested inside a worktree. Producer: crates/fno-agents/src/finalize.rs `repo_identity_from_remote_url`; reader: fno/paths.py `repo_identity_from_remote_url`. The two must agree."
@@ -3748,6 +3784,39 @@ event_types:
           type: string
           description: "Bounded diagnostic: the warm miss reason or the ritual receipt tail."
 
+  - name: merge_grant_execution
+    description: "One attributable attempt by the PR watcher to execute a durable dispatch grant on an OPEN PR: reserved under the per-PR lock before the canonical merge core runs, then executed, held, or failed from the core's verdict. Attribution only - the merge core's own receipts carry the reasons."
+    sources: [daemon]
+    data:
+      required: [phase, actor, pr]
+      properties:
+        phase:
+          type: string
+          enum: [reserved, executed, held, failed]
+          description: "'reserved' precedes the merge call; 'executed' = merged (exit 0); 'held' = a canonical guard refused, retryable and consuming no failure budget; 'failed' = the attempt errored."
+        actor:
+          type: string
+          enum: [pr-watch]
+          description: "The only component permitted to execute a durable grant."
+        pr:
+          type: integer
+          description: "GitHub PR number."
+        node_id:
+          type: string
+          description: "Backlog node the PR delivers, when the graph resolved one."
+        source:
+          type: string
+          description: "The winning durable receipt's source (config, no-merge-flag, none)."
+        recorded_by:
+          type: string
+          description: "The session that recorded the winning receipt - the dispatching spawner, i.e. the grant session."
+        recorded_at:
+          type: string
+          description: "When the winning receipt was recorded."
+        exit_code:
+          type: integer
+          description: "The merge core's exit code on a failed attempt."
+
   - name: pr_watch_skipped
     description: "PR-state watcher skipped a candidate PR this tick without firing (no local checkout, or a live node/walker claim owns it)."
     sources: [daemon]
@@ -3836,6 +3905,9 @@ event_types:
         receipt_chunks:
           type: integer
           description: "Number of bounded exact-detail events emitted before this summary; omitted when the full receipt is inline."
+        merge_scan:
+          type: object
+          description: "The durable-grant scan's positive receipt: completed=true (always, on this completed sweep), plus integer eligible (OPEN candidates whose durable verdict granted) and attempted (executions reserved) counts. Zero counts are valid and prove the scan ran; a quota-skipped tick emits no receipt at all, so no scan receipt either."
 
   - name: pr_watch_sweep_chunk
     description: "Bounded exact identities for an oversized pr_watch_tick receipt. All chunks precede the summary carrying the same receipt_id."

@@ -16,7 +16,7 @@ The repo root [`README.md`](../README.md) is the quickstart. This index maps the
 - [guides/how-done-is-decided.md](guides/how-done-is-decided.md) - how the stop gate decides a run is done
 - [guides/think-and-plan.md](guides/think-and-plan.md) - design exploration, plan creation, wave execution
 - [guides/pr-lifecycle.md](guides/pr-lifecycle.md) - review, create, check, merged: the PR arc by hand
-- [guides/review.md](guides/review.md) - sigma panel versus a cross-model second opinion
+- [guides/review.md](guides/review.md) - the owned review lane versus a cross-model second opinion
 - [guides/fix.md](guides/fix.md) - fast repair versus methodical diagnosis
 - [guides/agents-quickstart.md](guides/agents-quickstart.md) - spawn and message peer agents (claude/codex/gemini)
 - [guides/execution-modes.md](guides/execution-modes.md) - when to use target vs do vs operator
