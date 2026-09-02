@@ -53,7 +53,7 @@ Differences:
 All three accept `--details`/`--description`. A node with no `plan_path`
 derives to `status: idea` until a plan is associated.
 
-Every node-birth path states its difficulty: `add`, `idea`, `new`, `intake`, `decompose`, `capture promote`, and the retro lander either carry a band or refuse; decompose inherits its epic's band, intake reads the plan, retro maps severity, and inbox-created nodes use the named medium default. `fno backlog migrate-difficulty --backfill` fills only legacy nulls with an attributable `backfill` history entry and reports rows with no signal as skipped.
+Every node-birth path states its difficulty. `add`, `idea`, `new`, `intake`, `decompose`, `capture promote`, and retro either carry a band or refuse. Decompose inherits its epic's band. Intake reads the plan. Retro maps severity. Inbox-created nodes use the named medium default. `fno backlog migrate-difficulty --backfill` fills legacy nulls with an attributable `backfill` history entry. It reports rows with no signal as skipped.
 
 `fno backlog intake` is the one creation verb that reads a plan file. The plan's file table is load-bearing downstream: parallel lane fill collision-checks dispatches against it. Intake therefore refuses a plan whose `## Files to Modify` parses empty (exit 2) unless you pass `--allow-no-surface`. Such a node cannot be collision-checked and dispatches fail-open. A multi-path intake refuses the whole batch before any write. The plan-less creation verbs above are unaffected.
 
