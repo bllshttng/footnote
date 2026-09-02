@@ -16,10 +16,13 @@
 //! - Non-zero exit with no JSONL (exit 11 from NoSessionIdError)
 //! - Soft error item promotion (exit 0, reply = error message)
 
+use common::{capture_mode, assert_golden as assert_golden_common, Golden};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+mod common;
 
 /// Module-level PATH mutex: every test that mutates the process-global PATH
 /// must hold this lock for the duration of its mutation. Cargo runs tests in
@@ -438,6 +441,24 @@ fn parity_resume_happy_path() {
         &bin_dir,
         &extra,
     );
+
+    // Capture mode freezes the Python resume outcome as the golden (protocol
+    // step 2): resume is the codex ASK leg, the one case here whose Python
+    // implementation is deleted by the port. The create-based cases keep
+    // their live differential below, because `create` survives as the codex
+    // one-shot spawn implementation.
+    if capture_mode() {
+        let rust = Golden {
+            exit: Some(rs_exit),
+            streams: vec![rs_reply],
+        };
+        let oracle = Golden {
+            exit: Some(py_exit),
+            streams: vec![py_reply],
+        };
+        assert_golden_common("codex_ask", "resume happy path", &rust, Some(oracle));
+        return;
+    }
 
     assert_eq!(py_exit, 0, "Python resume exit: {}\n{}", py_exit, py_reply);
     assert_eq!(rs_exit, 0, "Rust resume exit: {}", rs_exit);

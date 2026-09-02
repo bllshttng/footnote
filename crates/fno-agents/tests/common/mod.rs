@@ -191,6 +191,7 @@ pub fn capture_mode() -> bool {
 /// `<key>.out` then `<key>.err` by position. This is the on-disk format the
 /// first two ports froze, so the kill_criteria and verify_evidence goldens
 /// stay byte-compatible through the hoist.
+#[derive(Clone)]
 pub struct Golden {
     pub exit: Option<i32>,
     pub streams: Vec<String>,

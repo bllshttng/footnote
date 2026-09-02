@@ -1,0 +1,1 @@
+{"type":"user","message":{"role":"user","content":"<cross-session-message from-name=\"bob\">\nhello\n</cross-session-message>"},"priority":"next"}
