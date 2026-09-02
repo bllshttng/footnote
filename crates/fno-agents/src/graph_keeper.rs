@@ -27,7 +27,7 @@
 //! `--store-keeper` lane flag, and its socket lives beside the graph file it
 //! owns, so both the process-table walk and the socket-dir walk find it.
 
-use crate::graph_store::{self, FieldUpdate, MutateInput, StoreError, TextField};
+use crate::graph_store::{self, FieldUpdate, MutateInput, StoreError};
 use serde_json::{json, Map, Value};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -638,8 +638,17 @@ fn apply_op_impl(entries: &mut Vec<Value>, name: &str, p: &Value) -> Result<Valu
             let started_at = opt_str(p, "started_at");
             let ended_at = opt_str(p, "ended_at");
             let observed = p.get("observed").cloned();
-            let row =
-                session_row(phase, harness, session_id, effort, started_at, ended_at, observed)?;
+            let merge_grant = p.get("merge_grant").filter(|v| !v.is_null());
+            let row = session_row(
+                phase,
+                harness,
+                session_id,
+                effort,
+                started_at,
+                ended_at,
+                observed,
+                merge_grant,
+            )?;
             let (found, added) = session_append(entries, node_id, row)?;
             Ok(json!({"found": found, "added": added}))
         }
@@ -852,6 +861,7 @@ fn session_row(
     started_at: Option<&str>,
     ended_at: Option<&str>,
     observed: Option<Value>,
+    merge_grant: Option<&Value>,
 ) -> Result<Value, StoreError> {
     const SESSION_PHASES: &[&str] = &["think", "blueprint", "do", "review", "ship"];
     const STR_MAX: usize = 200;
@@ -903,6 +913,60 @@ fn session_row(
     };
     let started_at = started_at.map(|s| stamp("started_at", s)).transpose()?;
     let ended_at = ended_at.map(|s| stamp("ended_at", s)).transpose()?;
+    // The spawner-resolved merge posture on a do row. The client validates the
+    // shape for its ValueError contract; the keeper re-validates before the
+    // row can carry it, so no raw caller can store a guessed grant.
+    let grant = match merge_grant {
+        None => None,
+        Some(g) => {
+            const GRANT_KEYS: &[&str] = &["approved", "source", "recorded_by", "recorded_at"];
+            let obj = g.as_object().ok_or_else(|| {
+                StoreError::Invalid("merge_grant must be a mapping when provided".into())
+            })?;
+            let unknown: Vec<String> = obj
+                .keys()
+                .filter(|k| !GRANT_KEYS.contains(&k.as_str()))
+                .cloned()
+                .collect();
+            if !unknown.is_empty() {
+                return Err(StoreError::Invalid(format!(
+                    "merge_grant carries unknown keys: {unknown:?}"
+                )));
+            }
+            let approved = obj.get("approved").and_then(Value::as_bool).ok_or_else(
+                || StoreError::Invalid("merge_grant.approved must be a boolean".into()),
+            )?;
+            let text = |key: &str| -> Result<String, StoreError> {
+                let v = obj.get(key).and_then(Value::as_str).unwrap_or("").trim();
+                if v.is_empty() {
+                    return Err(StoreError::Invalid(format!(
+                        "merge_grant.{key} must be a non-empty string"
+                    )));
+                }
+                if v.len() > STR_MAX {
+                    return Err(StoreError::Invalid(format!(
+                        "merge_grant.{key} exceeds {STR_MAX} chars"
+                    )));
+                }
+                Ok(v.to_string())
+            };
+            let source = text("source")?;
+            let recorded_by = text("recorded_by")?;
+            let raw_at = obj.get("recorded_at").and_then(Value::as_str).unwrap_or("");
+            if raw_at.trim().is_empty() {
+                return Err(StoreError::Invalid(
+                    "merge_grant.recorded_at must be a non-empty string".into(),
+                ));
+            }
+            let recorded_at = stamp("merge_grant.recorded_at", raw_at)?;
+            let mut grant = Map::new();
+            grant.insert("approved".into(), Value::Bool(approved));
+            grant.insert("source".into(), Value::String(source));
+            grant.insert("recorded_by".into(), Value::String(recorded_by));
+            grant.insert("recorded_at".into(), Value::String(recorded_at));
+            Some(Value::Object(grant))
+        }
+    };
     let mut row = Map::new();
     row.insert("phase".into(), Value::String(phase.to_string()));
     row.insert("harness".into(), Value::String(harness.to_string()));
@@ -919,6 +983,9 @@ fn session_row(
     // Written unconditionally, including the unknown kinds: an ABSENT key
     // means the writer never looked; a present one is what the writer saw.
     row.insert("observed_model".into(), observed.unwrap_or(Value::Null));
+    if let Some(g) = grant {
+        row.insert("merge_grant".into(), g);
+    }
     Ok(Value::Object(row))
 }
 
@@ -954,7 +1021,10 @@ fn session_append(
             && r.get("session_id").and_then(Value::as_str) == Some(session_id.as_str())
     });
     if let Some(prior) = prior {
-        for key in ["ended_at", "started_at", "effort"] {
+        // merge_grant joins the fill-if-absent set: the first resolved posture
+        // owns the row, and a re-stamp cannot rewrite a recorded refusal into
+        // a grant in place.
+        for key in ["ended_at", "started_at", "effort", "merge_grant"] {
             if let Some(v) = row.get(key) {
                 if !v.is_null() && !prior.as_object().unwrap().contains_key(key) {
                     prior
@@ -1323,4 +1393,68 @@ pub fn store_socket_for(graph: &std::path::Path) -> PathBuf {
     let uid = unsafe { libc::getuid() };
     let root = std::env::temp_dir().join(format!("fno-store-{uid}"));
     root.join(format!("{}.sock", &digest[..16]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn session_append_records_a_merge_grant_and_fills_absent_on_duplicate() {
+        let mut entries = vec![json!({"id": "x-grnt", "title": "t", "status": "in_progress"})];
+        let grant = json!({
+            "approved": true, "source": "config",
+            "recorded_by": "spawner", "recorded_at": "2026-09-02T10:00:00Z"
+        });
+        let req = json!({
+            "name": "session_append",
+            "params": {
+                "node_id": "x-grnt", "phase": "do", "harness": "claude",
+                "session_id": "s-1", "merge_grant": grant,
+            }
+        });
+        let out = apply_op_for_tests(&mut entries, &req).unwrap();
+        assert_eq!(out["added"], json!(true));
+        let row = entries[0]["sessions"][0].as_object().unwrap();
+        assert_eq!(row["merge_grant"]["approved"], json!(true));
+        assert_eq!(row["merge_grant"]["recorded_at"], json!("2026-09-02T10:00:00Z"));
+
+        // A re-stamp carrying a DIFFERENT posture must not rewrite the
+        // recorded one: the first resolved posture owns the row.
+        let req2 = json!({
+            "name": "session_append",
+            "params": {
+                "node_id": "x-grnt", "phase": "do", "harness": "claude",
+                "session_id": "s-1",
+                "merge_grant": {"approved": false, "source": "none",
+                                "recorded_by": "spawner",
+                                "recorded_at": "2026-09-02T11:00:00Z"},
+            }
+        });
+        let out = apply_op_for_tests(&mut entries, &req2).unwrap();
+        assert_eq!(out["added"], json!(false));
+        assert_eq!(entries[0]["sessions"][0]["merge_grant"]["approved"], json!(true));
+
+        // An ABSENT grant on a fresh row writes no key.
+        let req3 = json!({
+            "name": "session_append",
+            "params": {
+                "node_id": "x-grnt", "phase": "review", "harness": "claude",
+                "session_id": "s-2",
+            }
+        });
+        apply_op_for_tests(&mut entries, &req3).unwrap();
+        assert!(entries[0]["sessions"][1].get("merge_grant").is_none());
+
+        // A malformed grant is refused at the store boundary.
+        let req4 = json!({
+            "name": "session_append",
+            "params": {
+                "node_id": "x-grnt", "phase": "do", "harness": "claude",
+                "session_id": "s-3", "merge_grant": {"approved": "yes"},
+            }
+        });
+        assert!(apply_op_for_tests(&mut entries, &req4).is_err());
+    }
 }

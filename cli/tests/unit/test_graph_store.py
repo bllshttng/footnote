@@ -382,9 +382,13 @@ def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch):
     custom_dir = tmp_path / "custom"
     custom_dir.mkdir()
     graph_json = custom_dir / "graph.json"  # graph_json outside state_dir
-    monkeypatch.setattr(gc, "GRAPH_JSON", graph_json)
-    monkeypatch.setattr(gc, "GRAPH_HTML", state_dir / "graph.html")
-    monkeypatch.setattr(gc, "GRAPH_MD", state_dir / "graph.md")
+    # Pin the RESOLVER, not the facade: canonicality reads paths.graph_json(),
+    # and a facade setattr's undo bakes the path into the module (see
+    # test_archive_sweep). The render targets are read through the facade, so
+    # they patch by setitem to keep the undo unbaking.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph_json)
+    monkeypatch.setitem(vars(gc), "GRAPH_HTML", state_dir / "graph.html")
+    monkeypatch.setitem(vars(gc), "GRAPH_MD", state_dir / "graph.md")
 
     def mutator(entries):
         entries.append({"id": "ab-canon01", "title": "Canon"})
@@ -462,6 +466,67 @@ def _ready_plan_entry(tmp_path: Path, node_id: str = "ab-open0001") -> tuple[Pat
         "plan_path": plan.name,
         "sessions": [],
     }
+
+
+def test_a_malformed_merge_grant_is_refused_before_any_store_work(tmp_path):
+    """The spawner's merge posture rides the do row, but a grant that cannot
+    name approved/source/recorded_by/recorded_at is a ValueError at the call
+    boundary: nothing reaches the keeper, and no row is written."""
+    _plan, entry = _ready_plan_entry(tmp_path)
+    path = _make_graph(tmp_path, [entry])
+
+    with pytest.raises(ValueError, match="merge_grant.approved must be a boolean"):
+        append_session_record(
+            path,
+            entry["id"],
+            phase="do",
+            harness="codex",
+            session_id="session-open",
+            merge_grant={"approved": "yes", "source": "config",
+                         "recorded_by": "spawner", "recorded_at": "2026-08-20T00:00:00Z"},
+        )
+    assert json.loads(path.read_text())["entries"][0]["sessions"] == []
+
+    with pytest.raises(ValueError, match="unknown keys"):
+        append_session_record(
+            path,
+            entry["id"],
+            phase="do",
+            harness="codex",
+            session_id="session-open",
+            merge_grant={"approved": True, "source": "config",
+                         "recorded_by": "spawner", "recorded_at": "2026-08-20T00:00:00Z",
+                         "extra": 1},
+        )
+
+    grant = {"approved": True, "source": "config",
+             "recorded_by": "spawner", "recorded_at": "2026-08-20T00:00:00Z"}
+    found, added = append_session_record(
+        path,
+        entry["id"],
+        phase="do",
+        harness="codex",
+        session_id="session-open",
+        started_at="2026-08-20T00:00:00Z",
+        merge_grant=grant,
+    )
+    assert (found, added) == (True, True)
+    row = json.loads(path.read_text())["entries"][0]["sessions"][0]
+    assert row["merge_grant"] == grant
+
+    # A re-stamp with a DIFFERENT posture must not rewrite the recorded one.
+    found, added = append_session_record(
+        path,
+        entry["id"],
+        phase="do",
+        harness="codex",
+        session_id="session-open",
+        merge_grant={"approved": False, "source": "none",
+                     "recorded_by": "spawner", "recorded_at": "2026-08-20T01:00:00Z"},
+    )
+    assert (found, added) == (True, False)
+    row = json.loads(path.read_text())["entries"][0]["sessions"][0]
+    assert row["merge_grant"]["approved"] is True
 
 
 def test_open_do_row_persists_in_progress_and_closed_row_demotes(tmp_path):

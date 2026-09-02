@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// Keep at most this many timestamped backups on disk (store.py
 /// GRAPH_BACKUP_KEEP).
@@ -530,23 +530,11 @@ pub fn now_isoformat() -> String {
     }
 }
 
-/// Python `strftime("%Y-%m-%dT%H:%M:%SZ")` in UTC.
-fn now_utc_stamp() -> String {
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
-}
-
 /// Python `strftime("%Y%m%dT%H%M%S%f")` in UTC, the backup filename stamp.
 fn backup_stamp() -> String {
     chrono::Utc::now()
         .format("%Y%m%dT%H%M%S%f")
         .to_string()
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
