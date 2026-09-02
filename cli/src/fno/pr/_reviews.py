@@ -463,7 +463,18 @@ def review_coverage_for_gate(
     )
     ev_head = (raw or {}).get("head_sha")
     mismatch = bool(head and raw and ev_head and head != ev_head)
-    unusable = data is not None and data.get("coverage") == "unknown"
+    # A covered row with NO posture verdict is also stale in the sense that
+    # matters: the producer that wrote it resolved no rung (an fno-agents
+    # binary from before review.posture), so the merge gate would refuse on an
+    # unknown posture a fresh recompute might satisfy. The recompute is paid
+    # only on this covered arm, where it can change the answer.
+    unusable = data is not None and (
+        data.get("coverage") == "unknown"
+        or (
+            data.get("coverage") == "covered"
+            and "review_posture" not in data
+        )
+    )
     overtaken = _uncovered_row_overtaken(data, raw_ts, cwd, head)
     pinned = _pinned_note(data, raw_ts)
     if raw is None or mismatch or unusable or overtaken:

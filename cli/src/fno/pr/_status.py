@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any, Collection, Optional, Sequence, TYPE_CHECKING
 
 from fno.pr._proc import ToolMissing
@@ -572,6 +573,22 @@ def _ready_blockers(
                 blockers.append("review_coverage_corroboration")
             elif not ok:
                 blockers.append(f"review_coverage_{failed}")
+            # The Rust posture verdict, read the same way the merge gate reads
+            # it (one producer, never a reclassification): a satisfied-conjunct
+            # row whose rung is explicitly unsatisfied is its own blocker,
+            # because `ready` must not promise a merge the verb refuses. A row
+            # naming NO posture stays a receipt fact (`review_posture: null`)
+            # rather than a blocker here: this surface never recomputes, so a
+            # pre-posture row would read as blocked on a machine the merge
+            # gate would send to upgrade first - the verb, not the read,
+            # owns that refusal.
+            posture = coverage.get("review_posture") if ok else None
+            if (
+                ok
+                and isinstance(posture, dict)
+                and posture.get("posture_satisfied") is not True
+            ):
+                blockers.append("review_posture_unsatisfied")
     return blockers
 
 
@@ -622,6 +639,35 @@ def _review_owner_guidance(coverage: dict, worktree: dict) -> Optional[dict]:
         "manifest_path": worktree.get("manifest_path"),
         "authority_note": authority_note,
     }
+
+
+def _merge_authority(repo: str) -> dict:
+    """The resolved merge-authority axes for this repo (x-f324 AC7-HP).
+
+    Three keys, all fail-open to None on an unreadable settings load: a
+    status receipt that cannot read config says so rather than asserting
+    "disabled" - a guessed NO here is the direction a wedged fleet reads as
+    a disarm, and a guessed YES is the dangerous one. The autonomous shape
+    is `enabled AND grant=dispatch`; every other enabled grant routes the
+    actual merge through a human or the operator.
+    """
+    try:
+        from fno.config import load_settings_for_repo
+
+        am = load_settings_for_repo(Path(repo)).auto_merge
+        enabled = bool(am.enabled)
+        grant = str(am.grant or "none")
+        return {
+            "auto_merge_enabled": enabled,
+            "grant": grant,
+            "mergeable_autonomously": enabled and grant == "dispatch",
+        }
+    except Exception:  # noqa: BLE001 - an unreadable config is not a verdict
+        return {
+            "auto_merge_enabled": None,
+            "grant": None,
+            "mergeable_autonomously": None,
+        }
 
 
 def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int:
@@ -942,6 +988,20 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         "optional_reviews_unresolved": unresolved,
         "optional_reviews_resolved_unchanged": resolved_unchanged,
         "review_coverage": coverage,
+        # The Rust posture verdict verbatim (never reclassified), so the
+        # receipt answers "what review does this repo demand and is it met"
+        # without reading config in the same turn. None when the row resolved
+        # no rung - the same fact the merge gate refuses on.
+        "review_posture": (
+            coverage.get("review_posture")
+            if isinstance(coverage.get("review_posture"), dict)
+            else None
+        ),
+        # The merge-authority axes (AC7-HP): may the fleet merge, and via
+        # which grant. Read from the same settings object the merge verb and
+        # the config validator use, so a king asking "can this merge" gets the
+        # authority from the receipt rather than from memory.
+        "merge_authority": _merge_authority(cwd or os.getcwd()),
         # The round budget, from the same cap helper the blocker read, so a
         # worker sees the budget BEFORE spending the round that trips it.
         # reviews=None buys a zero-gh read, so the count is the events axis

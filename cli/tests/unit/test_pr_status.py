@@ -839,6 +839,14 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         "optional_reviews_unresolved": 0,
         "optional_reviews_resolved_unchanged": 0,
         "review_coverage": {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
+        # The posture projection mirrors the row (the stub row resolves no
+        # rung, so the receipt carries null rather than a verdict).
+        "review_posture": None,
+        "merge_authority": {
+            "auto_merge_enabled": False,
+            "grant": "none",
+            "mergeable_autonomously": False,
+        },
         "review_activity": {
             "blocker": "",
             "detail": "",

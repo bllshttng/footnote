@@ -431,8 +431,13 @@ FIELD_META: dict[str, Meta] = {
     ),
     # --- config.auto_merge.* ---
     "auto_merge.enabled": Meta(
-        "always", "Auto-merge a PR once external review passes.",
-        question="Auto-merge PRs after external review passes?",
+        "always",
+        "Auto-merge a PR once CI is green AND the review posture is satisfied. "
+        "There is no 'external review' step unless the review posture demands "
+        "one: with review.posture below self_review (the floor) the merge "
+        "refuses and names the rung to set. Read review.posture for what the "
+        "rung requires before enabling this.",
+        question="Auto-merge PRs once checks pass and the review posture is satisfied?",
     ),
     "auto_merge.grant": Meta(
         "advanced",

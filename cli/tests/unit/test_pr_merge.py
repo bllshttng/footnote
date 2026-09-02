@@ -3287,3 +3287,77 @@ def test_a_waiver_does_not_bypass_red_ci(
     assert failed["outcome"] == "failed"
     assert "require_checks_pass" in failed["reason"]
     assert len(fake.merge_cmds) == 0
+
+
+# --- review posture verdict (x-f324): the gate reads the Rust verdict ---
+
+
+def _covered_row(posture):
+    row = {
+        "coverage": "covered",
+        "reviewed_count": 1,
+        "head_sha": "a" * 40,
+        "verdicts": [
+            {
+                "producer": "local_attestation",
+                "name": "code-review",
+                "verdict": "reviewed",
+                "reviewed_sha": "a" * 40,
+                "freshness": "fresh",
+            }
+        ],
+    }
+    if posture is not None:
+        row["review_posture"] = posture
+    return row
+
+
+def test_posture_refusal_none_when_satisfied_or_not_covered():
+    from fno.pr._coverage_gate import posture_refusal
+
+    satisfied = {
+        "posture": "self_review",
+        "rank": 3,
+        "source": "default",
+        "cost": "one review",
+        "freshness": "same context sufficient",
+        "diversity": "same model allowed",
+        "posture_satisfied": True,
+        "posture_gaps": [],
+    }
+    assert posture_refusal(_covered_row(satisfied)) is None
+    # Not-covered rows answer through their own conjuncts, never posture.
+    assert posture_refusal({"coverage": "unknown"}) is None
+    assert posture_refusal(None) is None
+    # A STORED pre-posture row (no recompute this read) passes through: the
+    # pre-posture corpus merges under its own evidence.
+    assert posture_refusal(_covered_row(None), recomputed=False) is None
+
+
+def test_posture_refusal_names_the_rung_and_gaps_when_unsatisfied():
+    from fno.pr._coverage_gate import posture_refusal
+
+    unsatisfied = {
+        "posture": "peer_review",
+        "rank": 6,
+        "source": "explicit",
+        "cost": "one peer review",
+        "posture_satisfied": False,
+        "posture_gaps": ["peer: no cross-model peer verdict at this head"],
+    }
+    refusal = posture_refusal(_covered_row(unsatisfied))
+    assert refusal is not None
+    assert "peer_review" in refusal
+    assert "rank 6" in refusal
+    assert "no cross-model peer verdict" in refusal
+
+
+def test_posture_refusal_refuses_a_fresh_row_that_names_no_rung():
+    """A fresh recompute with no posture proves the producer binary predates
+    the field; the refusal names the upgrade."""
+    from fno.pr._coverage_gate import posture_refusal
+
+    refusal = posture_refusal(_covered_row(None), recomputed=True)
+    assert refusal is not None
+    assert "unknown" in refusal
+    assert "fno doctor update" in refusal
