@@ -670,18 +670,53 @@ def _merge_authority(repo: str) -> dict:
         }
 
 
+def _observer_health() -> dict:
+    """The watcher's liveness, for an execution receipt that needs an executor.
+
+    A durable grant is only worth anything while something ticks: with no
+    live watcher a granted PR waits forever, and the receipt must say so
+    (`observer_unavailable`) instead of reading as a working merge lane.
+    Reads the same liveness report the doctor and the SessionStart hook use -
+    one probe, never a second verdict implementation.
+    """
+    try:
+        from fno.pr_watch._install import liveness_report_live
+
+        report = liveness_report_live()
+        verdict = str(report.get("verdict") or "unknown")
+        available = verdict in ("healthy", "healthy-pending")
+        return {
+            "state": "observer_available" if available else "observer_unavailable",
+            "detail": str(report.get("detail") or verdict),
+            "repair": "" if available else str(
+                report.get("fix") or "fno config set pr_watch.enabled true; "
+                "then verify with fno do pr watch status"
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001 - liveness never crashes a receipt
+        return {
+            "state": "unknown",
+            "detail": f"liveness probe failed: {type(exc).__name__}: {exc}",
+            "repair": "verify with fno do pr watch status",
+        }
+
+
 def _merge_execution_projection(repo: str, pr: str) -> dict:
     """The durable-grant execution state, through the ONE resolver.
 
     Answers "if the worker parked, would the watcher merge this now": the
     newest recorded receipt, the node claim's liveness, and the standing
     config, fail-closed in the resolver's every arm. A projection only - it
-    never widens the merge verb's own gates.
+    never widens the merge verb's own gates. When a recorded receipt exists
+    the projection also names the observer's health, because a grant without
+    a live watcher is the AC12-ERR shape: loud, with a repair, and merging
+    nothing.
     """
     try:
         from fno.pr._merge_grant import resolve_durable_grant
 
-        return resolve_durable_grant(int(pr), repo).as_projection()
+        verdict = resolve_durable_grant(int(pr), repo)
+        projection = verdict.as_projection()
     except Exception as exc:  # noqa: BLE001 - a receipt never lies by crashing
         return {
             "state": "unknown",
@@ -689,6 +724,9 @@ def _merge_execution_projection(repo: str, pr: str) -> dict:
             "node_id": None,
             "claim_state": None,
         }
+    if verdict.state != "absent":
+        projection["observer"] = _observer_health()
+    return projection
 
 
 def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int:

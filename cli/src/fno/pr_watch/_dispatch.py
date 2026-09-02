@@ -707,6 +707,13 @@ def _run_tick(
 
     acted = 0
     skipped = 0
+    # The merge-scan receipt (the completed tick's positive proof the grant
+    # scan RAN): eligible = OPEN candidates whose durable verdict granted,
+    # attempted = executions actually reserved. Integers, zero fine - a scan
+    # that saw nothing is still a scan that ran, which is the fact AC12-HP
+    # needs and a bare absence cannot prove.
+    merge_scan_eligible = 0
+    merge_scan_attempted = 0
 
     # GraphQL budget preflight. The dispatch pass below spends gh pr view,
     # which bills the shared per-user GraphQL pool by point cost; with the
@@ -863,6 +870,8 @@ def _run_tick(
                 from fno.pr._merge_grant import resolve_durable_grant
 
                 grant_verdict = resolve_durable_grant(pr, str(cand.repo_dir))
+                if grant_verdict.merge_eligible:
+                    merge_scan_eligible += 1
 
             decision = decide(
                 obs,
@@ -1010,6 +1019,7 @@ def _run_tick(
                     {"phase": "reserved", "actor": "pr-watch", "pr": pr,
                      "node_id": cand.node_id, **grant_fields},
                 )
+                merge_scan_attempted += 1
                 from fno.pr._merge import run_merge_for_durable_grant
 
                 try:
@@ -1098,6 +1108,16 @@ def _run_tick(
         "failed": sorted(failed),
         "sweep_failures": sweep_failures,
         "listing_api": "rest",
+        # The grant scan's positive receipt: this tick LOOKED, and here is
+        # what it saw. completed=true always - it rides a completed sweep,
+        # and the quota-skip arm above returns before here precisely so a
+        # skipped tick mints no scan receipt (AC12-HP: counts are coherent,
+        # integer, and include zero).
+        "merge_scan": {
+            "completed": True,
+            "eligible": merge_scan_eligible,
+            "attempted": merge_scan_attempted,
+        },
     }
     _emit_tick_receipt(emit, receipt)
     return TickResult(

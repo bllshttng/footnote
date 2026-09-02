@@ -49,6 +49,65 @@ def _patch_silent(
 
 
 # ---------------------------------------------------------------------------
+# The durable-grant observer coupling (observer_unavailable)
+# ---------------------------------------------------------------------------
+
+
+def _emit_minimal(monkeypatch: pytest.MonkeyPatch, *, pw: dict) -> str:
+    """Run doctor's human printer down to the pr-watch advisories with a
+    minimal result and the expensive probes stubbed out."""
+    monkeypatch.setattr(doctor, "_review_invocation_report", lambda: [])
+    result = {
+        "status": "fresh",
+        "missing_verbs": [],
+        "pr_watch": pw,
+    }
+    import io
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        doctor._emit_human(result, None, {"binary": None, "source_rev": None}, err=False)
+    return buf.getvalue()
+
+
+def test_standing_grant_with_dead_observer_is_loud(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A standing dispatch grant with a disabled watcher reads
+    observer_unavailable with a repair: the grant is UNREAD, not quiet."""
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: types.SimpleNamespace(
+            auto_merge=types.SimpleNamespace(enabled=True, grant="dispatch"),
+        ),
+    )
+    out = _emit_minimal(
+        monkeypatch,
+        pw={"verdict": "disabled", "detail": "pr_watch.enabled=false", "fix": ""},
+    )
+    assert "observer_unavailable" in out
+    assert "fno do pr watch install" in out or "pr_watch.enabled" in out
+
+
+def test_no_standing_grant_stays_silent_about_the_observer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without grant=dispatch the watcher question is not an observer finding."""
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: types.SimpleNamespace(
+            auto_merge=types.SimpleNamespace(enabled=False, grant="none"),
+        ),
+    )
+    out = _emit_minimal(
+        monkeypatch,
+        pw={"verdict": "disabled", "detail": "pr_watch.enabled=false", "fix": ""},
+    )
+    assert "observer_unavailable" not in out
+
+
+# ---------------------------------------------------------------------------
 # Collector: both directions
 # ---------------------------------------------------------------------------
 

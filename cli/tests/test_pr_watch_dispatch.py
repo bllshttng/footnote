@@ -3043,6 +3043,8 @@ class TestDurableGrantExecution:
         entry = WatermarkStore(path=tmp_path / "state.json").get("owner/repo#1")
         assert entry["merge_dispatched"] is True
         assert entry["retries"] == 0
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["merge_scan"] == {"completed": True, "eligible": 1, "attempted": 1}
 
     def test_held_consumes_no_failure_budget(self, tmp_path, monkeypatch):
         deps = _make_tick_deps(
@@ -3114,3 +3116,31 @@ class TestDurableGrantExecution:
         assert all(
             e["type"] != "merge_grant_execution" for e in deps["events"]
         )
+
+    def test_quiet_tick_still_proves_the_scan_ran(self, tmp_path, monkeypatch):
+        """AC12-HP: a completed tick with zero eligible PRs carries the scan
+        receipt with integer zeros - a scan that saw nothing is still a scan
+        that ran, which an absence can never prove."""
+        from fno.pr_watch._dispatch import tick
+
+        deps = _make_tick_deps(tmp_path, candidates=[])
+        monkeypatch.setattr("fno.pr._merge.run_merge_for_durable_grant", lambda pr, cwd: 0)
+        tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=tmp_path / "state.json",
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({}, 0),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            graphql_remaining_fn=lambda: (4800, None),
+        )
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["merge_scan"]["completed"] is True
+        assert receipt["merge_scan"]["eligible"] == 0
+        assert receipt["merge_scan"]["attempted"] == 0
