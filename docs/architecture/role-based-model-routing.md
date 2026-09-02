@@ -124,6 +124,8 @@ The stage table reaches **every** spawn that carries a slash-verb seed, includin
 `skills/target/scripts/dispatch-node.sh` passes the verb as the spawn's positional message, so an autonomous `/target` or `/blueprint` worker inherits any field it did not itself pin from the matching profile.
 An explicit flag always wins, and a `--role` whose lane resolves owns the model, so the role and stage layers do not collide on the model: a stage table `model` is not injected alongside a resolving role, and a stage table `route` owns the model the same way an explicit `--route` does.
 
+The harness axis has one home: `config.agents.profiles.<verb>.provider`. The autonomous dispatch resolver reads it, so one node dispatched through `dispatch-node.sh` and through `fno agents spawn` lands on one harness. The old `config.dispatch.harness` key is deprecated. It reads as the fallback rung beneath the stage table for one release, so an installation setting only that key is unchanged. When both keys are set and disagree, the stage table wins and the resolve receipt names the losing spelling. `fno config doctor` prints the migration for every config file still carrying the old key.
+
 ```toml
 [agents]
 pane_group_max = 4
