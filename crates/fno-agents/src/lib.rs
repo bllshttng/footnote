@@ -858,6 +858,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "keeper_row_rebound",
     "keeper_row_superseded",
     "keeper_row_terminal_socket_live",
+    // Store-keeper socket hygiene (daemon-start sweep): dead store sockets in
+    // the state root and the hashed temp root are unlinked; live listeners are
+    // left as found.
+    "store_socket_unlinked",
     // Deliver (daemon-emitted, Task 2.2 US4)
     "agent_deliver_injected",
     "agent_deliver_demoted",

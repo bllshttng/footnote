@@ -4990,6 +4990,15 @@ event_types:
         path:
           type: string
 
+  - name: store_socket_unlinked
+    description: "A store-keeper socket that positively proved dead (refused, vanished, or not a socket) was unlinked from the state root or the hashed temp root at daemon start; a live listener is left as found."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        path:
+          type: string
+
   - name: keeper_socket_silent_no_row
     description: "A keeper socket accepted the Identify probe but never answered, and no registry row is bound to it."
     sources: [daemon]
