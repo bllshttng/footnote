@@ -35,4 +35,5 @@ READABLE_PROVIDERS: tuple[str, ...] = (
     "agy",
     "opencode",
     "pi",
+    "cursor-agent",
 )

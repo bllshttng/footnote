@@ -419,7 +419,7 @@ def _validate_row(harness: str, caps: dict) -> None:
         # harness scopes its lookup by cwd, so the identity is the PAIR and
         # the id alone addresses nothing. Distinct from "preassigned",
         # where the id is the whole handle.
-        "preassigned", "caller-assigned-cwd-scoped",
+        "preassigned", "caller-assigned-cwd-scoped", "callee-minted-read-back",
         "store-lookup", "unsupported",
     }:
         raise _contract_error(harness, "session_binding", "unknown strategy")
@@ -576,6 +576,36 @@ def normalize_command(command: str, harness: str) -> str:
     return cmd
 
 
+def _loop_extension_installed(harness: str) -> bool:
+    """Whether this harness's shipped loop artifact is actually installed at
+    the harness's own load surface - not merely shipped in the repo.
+
+    A ``loop_extension`` row names a repo path, but the harness only loads
+    the copy fno's installer placed at its own extension dir. Advertising a
+    closable loop while that copy is absent or stale would dispatch a worker
+    with nothing to stop it - the hang the field exists to prevent. A row
+    whose harness declares no installer is treated as not installed: an
+    extension row ships together with its install arm (opencode and pi both
+    did), so the missing arm is a gap to refuse, never a claim to wave
+    through.
+    """
+    try:
+        from fno.setup import integration
+    except ImportError:
+        return False
+    checkers = {
+        "opencode": integration._opencode_is_installed,
+        "pi": integration._pi_is_installed,
+    }
+    checker = checkers.get(harness)
+    if checker is None:
+        return False
+    try:
+        return bool(checker())
+    except OSError:
+        return False
+
+
 def check_loop_participation(harness: str, command: str) -> None:
     """Refuse a LOOPING dispatch at a harness that cannot close a loop.
 
@@ -596,6 +626,14 @@ def check_loop_participation(harness: str, command: str) -> None:
     if participation == "native":
         return
     if participation == "extension" and caps.get("loop_extension"):
+        if not _loop_extension_installed(harness):
+            raise DispatchResolveError(
+                f"refused: harness {harness!r} closes its loop through a "
+                f"fno-installed extension that is absent or stale on this "
+                f"machine. Run 'fno config setup' to install it, then "
+                f"dispatch again - a loop whose stop gate is not installed "
+                f"would take {command!r} and never stop."
+            )
         return
     if participation == "none":
         why = "no lifecycle boundary invokes loop-check"

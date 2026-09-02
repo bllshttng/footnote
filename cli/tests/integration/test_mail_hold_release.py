@@ -249,7 +249,13 @@ def test_an_idle_timer_never_runs_past_its_two_window_ceiling(state):
             time.sleep(0.6)
             now = float(int(time.time()))
             until = min(now + 2, ceiling)
-            clock.write_text(
+            # Atomic replace, matching the production write discipline: the
+            # polled reader runs concurrently, and a torn in-place rewrite can
+            # parse as garbage, which the holder treats as no live hold and
+            # releases seconds early (observed: the CI runner fired the final
+            # assertion 0.34s short of the ceiling).
+            tmp = clock.with_suffix(".json.tmp")
+            tmp.write_text(
                 json.dumps(
                     {
                         "until": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(until)),
@@ -260,6 +266,7 @@ def test_an_idle_timer_never_runs_past_its_two_window_ceiling(state):
                 ),
                 encoding="utf-8",
             )
+            os.replace(tmp, clock)
         stdout, stderr = proc.communicate(timeout=10)
     finally:
         if proc.poll() is None:

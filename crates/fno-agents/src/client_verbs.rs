@@ -1043,7 +1043,7 @@ pub fn run_trace(rest: &[String], home: &AgentsHome) -> i32 {
 fn session_id_field(harness: &str) -> Option<&'static str> {
     match harness {
         "claude" => Some("short_id"),
-        "codex" | "gemini" | "agy" | "opencode" => Some("harness_session_id"),
+        "codex" | "gemini" | "agy" | "opencode" | "cursor-agent" => Some("harness_session_id"),
         _ => None,
     }
 }
@@ -1786,6 +1786,10 @@ fn adopt_from_manifest(session_id: &str, home: &AgentsHome) -> Result<Option<Val
 /// "resume contract is invalid" message is a contract that LOADS and declares
 /// the form, then fails to render it: a malformed token template.
 fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Option<Vec<String>> {
+    // The declared form is the whole identity: cursor-agent's interactive_resume
+    // tokens already end in --trust, and a second one is a duplicated flag,
+    // never a stronger one. Python's builder renders the same form with no
+    // cursor arm, so runtimes stay byte-identical by rendering and nothing else.
     let mut argv = crate::harness_capabilities::render_session_argv(
         provider,
         "interactive_resume",
@@ -3735,9 +3739,11 @@ fn is_codex_thread_row(entry: &Value) -> bool {
 /// mux viewport renders from the declaration - one declaration, two doors,
 /// pinned byte-identical by `attach_argv_matches_the_mux_renderer`.
 ///
-/// The row-shape predicate (`is_codex_thread_row`) is load-bearing and kept:
-/// a declared form widens WHICH harnesses can attach, never which row shapes.
-/// A codex PANE row and a one-shot ask row refuse exactly as before.
+/// The row-shape predicate (`is_codex_thread_row`) is load-bearing: a declared
+/// form widens WHICH harnesses can attach, never which row shapes. Cursor
+/// Agent is not exempted - its row declares interactive_attach unsupported
+/// (a second --resume is a rival TUI, not a join), so the probe below reads
+/// "declares none" and the row keeps the generic arms.
 fn attach_via_declared_form(
     harness: &str,
     entry: &Value,
@@ -3837,7 +3843,16 @@ fn attach_via_declared_form(
     // produces the more specific of the two errors in the terminal the
     // operator is already looking at.
     use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    if let Some(cwd) = entry
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        command.current_dir(cwd);
+    }
+    let err = command.exec();
     eprintln!("fno agents attach: failed to exec {}: {err}", argv[0]);
     Some(1)
 }
@@ -5737,6 +5752,7 @@ mod tests {
         assert_eq!(session_id_field("gemini"), Some("harness_session_id"));
         assert_eq!(session_id_field("agy"), Some("harness_session_id"));
         assert_eq!(session_id_field("opencode"), Some("harness_session_id"));
+        assert_eq!(session_id_field("cursor-agent"), Some("harness_session_id"));
         assert_eq!(session_id_field("unknown"), None);
 
         // --cd lands the resume in the row's own tree instead of the session

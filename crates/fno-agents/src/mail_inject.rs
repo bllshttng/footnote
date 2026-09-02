@@ -37,6 +37,7 @@ use std::time::Duration;
 use crate::claude_attach::{perform_attach, AttachRequest, UnixControlTransport};
 use crate::claude_drive::{contains_detach_sentinel, find_transcript, transcript_len, DriveError};
 use crate::claude_roster::{read_control_key, ClaudeRoster};
+use std::sync::Arc;
 
 /// Default transcript-growth poll budget: 40 * 250ms = 10s. A live blocked
 /// session echoes the injected turn well within this; a miss demotes to durable.
@@ -649,9 +650,9 @@ fn resolve_keeper_target_in(
 /// session file at the first turn attempt, so a not-yet-filed session returns
 /// a pending target that materializes once the injected turn lands; a
 /// DUPLICATE refuses (the same no-picking discipline as pi resume). Any other
-/// hosted harness has no resolver here yet, and the lane refuses before
-/// typing rather than paste an envelope it can never confirm - an honest
-/// durable demotion beats an unverifiable `delivered`.
+/// hosted harness without a local store resolves to the pty stream if its TUI
+/// paints what it receives, and refuses otherwise - an honest durable
+/// demotion beats an unverifiable `delivered`.
 enum KeeperConfirm {
     /// Poll this file from `baseline` bytes onward.
     Transcript {
@@ -660,11 +661,24 @@ enum KeeperConfirm {
     },
     /// The file does not exist yet; every line it ever has is new signal.
     PendingStore,
+    /// The hosted harness keeps its transcript REMOTELY (cursor-agent: the
+    /// chat store lives server-side; nothing lands under its state root), so
+    /// no local file can ever confirm. The pty stream is the only local
+    /// evidence: the TUI repaints the submitted turn into its scrollback, so
+    /// the SUBSCRIBER connection (this inject's own - first come, first
+    /// seated, and the only seat whose Input the keeper honors) sees the
+    /// marker in `Output` frames after the submit.
+    Pty,
     Refused(&'static str),
 }
 
 fn resolve_keeper_confirm(target: &KeeperTarget, session: &str, pi_root: &Path) -> KeeperConfirm {
     match target.hosted_harness.as_str() {
+        // cursor-agent's chat store is remote (measured: the id appears in no
+        // file under its state root after two live turns), so there is no
+        // transcript to grep. Its TUI repaints the submitted turn, which the
+        // pty variant confirms against.
+        "cursor-agent" => KeeperConfirm::Pty,
         "pi" => match crate::pi::lookup_sessions_under(pi_root, &target.cwd, session) {
             crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
                 baseline: transcript_len(&file),
@@ -707,6 +721,33 @@ pub fn deliver_via_keeper_socket(
     )
 }
 
+/// Strip ANSI escape sequences from pty output so a marker match cannot be
+/// broken by an escape interleaved into painted text: CSI sequences
+/// (`ESC [ ... final`) and two-byte `ESC x` forms are dropped, every other
+/// byte (UTF-8 continuation bytes included) passes through. Lossy on purpose:
+/// this is a matcher input, never a transcript.
+fn strip_ansi(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == 0x1B {
+            if i + 1 < raw.len() && raw[i + 1] == b'[' {
+                i += 2;
+                while i < raw.len() && !(0x40..=0x7E).contains(&raw[i]) {
+                    i += 1;
+                }
+                i += 1; // the final byte
+            } else {
+                i += 2; // ESC plus one byte
+            }
+        } else {
+            out.push(raw[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 fn deliver_via_keeper_socket_in(
     home: &crate::paths::AgentsHome,
     pi_root: &Path,
@@ -729,6 +770,15 @@ fn deliver_via_keeper_socket_in(
         // honest outcome, and the reason names why nothing was pasted.
         return Err(reason);
     }
+    // The pty variant confirms on THIS connection: it is the subscriber
+    // (first come, first seated - and the only seat whose Input the keeper
+    // honors), so the keeper relays the TUI's repaints to it. The accumulator
+    // starts empty at inject time: only paint that happened after OUR submit
+    // can confirm, which is exactly the claim.
+    let pty_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // Decoded payloads land in pty_seen; a partial frame's raw bytes wait
+    // here for the next poll, exactly as the wire delivered them.
+    let pty_pending = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut transport = KeeperTransport { stream };
     let marker = text.lines().next().unwrap_or(text);
     inject_with_submit(&mut transport, text, Duration::from_millis(enter_delay_ms)).map_err(
@@ -741,7 +791,14 @@ fn deliver_via_keeper_socket_in(
     // first turn attempt, and THIS inject is that attempt, so the file (and
     // then the marker) appears within the budget; every line a fresh file has
     // is new signal, hence the zero baseline.
-    let confirmed = || -> bool {
+    let confirm_stream = transport.stream.try_clone().ok();
+    // The drain reads must time out, never block the confirm loop past its
+    // cadence. SO_RCVTIMEO shapes reads only, so the inject writes above are
+    // unaffected.
+    if let Some(cs) = confirm_stream.as_ref() {
+        let _ = cs.set_read_timeout(Some(Duration::from_millis(50)));
+    }
+    let confirmed = move || -> bool {
         match &confirm {
             KeeperConfirm::Transcript { path, baseline } => {
                 confirm_content_after(path, marker, *baseline).unwrap_or(false)
@@ -753,6 +810,51 @@ fn deliver_via_keeper_socket_in(
                     }
                     _ => false,
                 }
+            }
+            KeeperConfirm::Pty => {
+                // Drain whatever the keeper has relayed since the last poll,
+                // then match the marker in the ANSI-stripped text. The
+                // needle is the payload's first line TRUNCATED to a
+                // composer-wide prefix: the TUI wraps long lines in the
+                // composer, and a newline mid-marker would break a full-line
+                // match even after the escape strip.
+                if let (Some(stream), Ok(mut raw), Ok(mut acc)) =
+                    (confirm_stream.as_ref(), pty_pending.lock(), pty_seen.lock())
+                {
+                    let mut buf = [0u8; 8192];
+                    let mut reader = stream;
+                    loop {
+                        match std::io::Read::read(&mut reader, &mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => raw.extend_from_slice(&buf[..n]),
+                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                            Err(_) => break,
+                        }
+                    }
+                    // The socket carries FRAMES (tag u8 | len u32 LE |
+                    // payload), not a byte stream: matching over raw bytes
+                    // would embed a 5-byte header inside any marker that
+                    // straddles two Output frames. Decode payloads only; a
+                    // partial tail frame stays buffered for the next poll.
+                    loop {
+                        if raw.len() < 5 {
+                            break;
+                        }
+                        let len = u32::from_le_bytes([raw[1], raw[2], raw[3], raw[4]]) as usize;
+                        if len > 1_048_576 || raw.len() < 5 + len {
+                            break;
+                        }
+                        acc.extend_from_slice(&raw[5..5 + len]);
+                        raw.drain(..5 + len);
+                    }
+                }
+                let prefix: String = marker.chars().take(48).collect();
+                if prefix.is_empty() {
+                    return false;
+                }
+                let snapshot = pty_seen.lock().map(|m| strip_ansi(&m)).unwrap_or_default();
+                let hay = String::from_utf8_lossy(&snapshot);
+                hay.contains(&prefix)
             }
             KeeperConfirm::Refused(_) => false,
         }

@@ -104,9 +104,10 @@ if ! grep -q 'pub fn ambient_parent_edge(' "$CLAIMS_RUST"; then
   failed=1
 fi
 
-section "$CODEX_PY" 'def _codex_create_path(' 'def _codex_followup_path(' \
+section "$CODEX_PY" 'def _codex_create_path(' 'def _capture_parent_edge(' \
   'Python codex create' '_capture_parent_edge()' 'spawned_by_session=_cx_session'
-section "$CODEX_PY" 'def _claude_create_path(' 'def dispatch_ask(' \
+section "$CODEX_PY" 'def _claude_create_path(' \
+  '# Task 1.2: spawn verb (US2 Python fallback runtime)' \
   'Python claude create' 'spawned_by_session=spawned_by_session'
 section "$MUX_PY" 'def dispatch_spawn_pane(' '__END_OF_FILE__' \
   'Python pane spawn' 'spawned_by_session=spawned_by_session'

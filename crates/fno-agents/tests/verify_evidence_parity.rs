@@ -25,36 +25,12 @@
 //!     settings-absent (rc2), dangling-provider-ref (warn + skip), malformed
 //!     YAML (rc1 + warn).
 
+use common::{assert_golden as assert_golden_common, capture_mode, Golden};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Slug a case label into a filename-safe golden key (lowercase, every run of
-/// non-alphanumeric chars collapses to a single `_`, trimmed).
-fn slug(label: &str) -> String {
-    let mut out = String::with_capacity(label.len());
-    let mut prev_us = false;
-    for ch in label.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            prev_us = false;
-        } else if !prev_us {
-            out.push('_');
-            prev_us = true;
-        }
-    }
-    out.trim_matches('_').to_string()
-}
-
-/// Directory holding the frozen verify_evidence goldens.
-fn golden_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/verify_evidence")
-}
-
-/// Whether to (re)capture goldens from the live bash oracle this run.
-fn capture_mode() -> bool {
-    std::env::var("FNO_CAPTURE_GOLDEN").is_ok()
-}
+mod common;
 
 /// Absolute path to the bash oracle (only used in capture mode).
 fn bash_script() -> PathBuf {
@@ -120,62 +96,26 @@ fn normalize_paths(s: &str, args: &[&str]) -> String {
 /// args, writes the golden files, and additionally asserts Rust==bash so a
 /// broken capture is caught at freeze time. In normal mode (the deleted-bash
 /// world), reads the golden and asserts Rust matches it — bash is never run.
+/// The capture/freeze IO itself lives in `common::assert_golden`.
 ///
 /// Volatile fixture paths are normalized to `<FIXTURE>` on both sides (see
 /// `normalize_paths`) so the frozen goldens survive the per-run tempdir churn.
 fn assert_golden(sub: &str, bash_func: &str, args: &[&str], label: &str) {
-    let key = slug(label);
-    let dir = golden_dir();
-    let exit_path = dir.join(format!("{key}.exit"));
-    let out_path = dir.join(format!("{key}.out"));
-    let err_path = dir.join(format!("{key}.err"));
-
     let (rc, ro, re) = run_rust(sub, args);
     let ro = normalize_paths(&ro, args);
     let re = normalize_paths(&re, args);
-
-    if capture_mode() {
+    let rust = Golden {
+        exit: Some(rc),
+        streams: vec![ro, re],
+    };
+    let oracle = capture_mode().then(|| {
         let (bc, bo, be) = run_bash(bash_func, args);
-        let bo = normalize_paths(&bo, args);
-        let be = normalize_paths(&be, args);
-        assert_eq!(bc, rc, "[{label}] capture: exit bash={bc} rust={rc}");
-        assert_eq!(
-            bo, ro,
-            "[{label}] capture: stdout\nbash={bo:?}\nrust={ro:?}"
-        );
-        assert_eq!(
-            be, re,
-            "[{label}] capture: stderr\nbash={be:?}\nrust={re:?}"
-        );
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(&exit_path, format!("{bc}\n")).unwrap();
-        fs::write(&out_path, &bo).unwrap();
-        fs::write(&err_path, &be).unwrap();
-        return;
-    }
-
-    let golden_exit: i32 = fs::read_to_string(&exit_path)
-        .unwrap_or_else(|e| panic!("[{label}] missing golden {exit_path:?}: {e}"))
-        .trim()
-        .parse()
-        .unwrap_or_else(|e| panic!("[{label}] bad golden exit in {exit_path:?}: {e}"));
-    let golden_out = fs::read_to_string(&out_path)
-        .unwrap_or_else(|e| panic!("[{label}] missing golden {out_path:?}: {e}"));
-    let golden_err = fs::read_to_string(&err_path)
-        .unwrap_or_else(|e| panic!("[{label}] missing golden {err_path:?}: {e}"));
-
-    assert_eq!(
-        golden_exit, rc,
-        "[{label}] exit differs from golden: golden={golden_exit} rust={rc}"
-    );
-    assert_eq!(
-        golden_out, ro,
-        "[{label}] stdout differs from golden:\ngolden={golden_out:?}\nrust={ro:?}"
-    );
-    assert_eq!(
-        golden_err, re,
-        "[{label}] stderr differs from golden:\ngolden={golden_err:?}\nrust={re:?}"
-    );
+        Golden {
+            exit: Some(bc),
+            streams: vec![normalize_paths(&bo, args), normalize_paths(&be, args)],
+        }
+    });
+    assert_golden_common("verify_evidence", label, &rust, oracle);
 }
 
 /// Assert the child-promise sub-verb matches the frozen `verify_child_promise`

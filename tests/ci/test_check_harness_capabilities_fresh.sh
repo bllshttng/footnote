@@ -4,8 +4,9 @@
 # Test harness for scripts/ci/check-harness-capabilities-fresh.sh.
 #
 # The x-244c collapse (operator ruling 2026-09-02) left ONE canonical table
-# (the Python tree's) and ONE generated copy (crates/fno-agents), so the
-# scenarios cover a single pair.
+# (crates/fno-agents, which build.rs reads) and ONE generated copy (the
+# Python tree's, which the package loads as a resource), so the scenarios
+# cover a single pair.
 #
 # Scenarios:
 #   T01 - identical canonical and generated files -> PASS, rc=0
@@ -33,8 +34,8 @@ TMP=$(mktemp -d -t harness-caps-test-XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
 REPO="$TMP/repo"
-CANONICAL_DIR="$REPO/cli/src/fno/agents"
-COPY_DIR="$REPO/crates/fno-agents/src"
+CANONICAL_DIR="$REPO/crates/fno-agents/src"
+COPY_DIR="$REPO/cli/src/fno/agents"
 
 mkdir -p "$CANONICAL_DIR" "$COPY_DIR"
 (cd "$REPO" && git init -q)
@@ -52,8 +53,8 @@ pass "T01 matching files exit 0"
 printf '\n# extra line\n' >> "$COPY_DIR/harness_capabilities.toml"
 out="$(cd "$REPO" && bash "${GATE}" 2>&1)" && rc=0 || rc=$?
 [[ "$rc" -eq 1 ]] || fail "T02: expected rc=1, got $rc: $out"
-echo "$out" | grep -q "crates/fno-agents/src/harness_capabilities.toml" || fail "T02: generated path not named: $out"
-echo "$out" | grep -q "cli/src/fno/agents/harness_capabilities.toml" || fail "T02: canonical path not named: $out"
+echo "$out" | grep -q "cli/src/fno/agents/harness_capabilities.toml" || fail "T02: generated path not named: $out"
+echo "$out" | grep -q "crates/fno-agents/src/harness_capabilities.toml" || fail "T02: canonical path not named: $out"
 echo "$out" | grep -q "cargo build -p fno-agents" || fail "T02: resync hint not suggested: $out"
 pass "T02 divergent files fail (rc=1), naming paths and resync hint"
 
@@ -82,8 +83,8 @@ pass "T04 missing canonical exits 2"
 # that is still committed. The default committed-bytes comparison must still
 # fail. Needs real commits, so this scenario builds its own repo.
 REPO2="$TMP/repo2"
-CANONICAL_DIR2="$REPO2/cli/src/fno/agents"
-COPY_A_DIR2="$REPO2/crates/fno-agents/src"
+CANONICAL_DIR2="$REPO2/crates/fno-agents/src"
+COPY_A_DIR2="$REPO2/cli/src/fno/agents"
 mkdir -p "$CANONICAL_DIR2" "$COPY_A_DIR2"
 (
   cd "$REPO2"

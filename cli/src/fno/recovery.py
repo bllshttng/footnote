@@ -19,7 +19,8 @@ The listener's ``fromMode`` attestation field would lift the hold, but reading
 it is gated behind an internal, default-off GrowthBook flag footnote cannot
 enable, so attestation is not a supported contract; and the only documented
 escape (``crossSessionInbound: "accept"``) accepts every un-attested peer, which
-is not footnote's setting to make. See ``harnesses.claude._build_envelope``.
+is not footnote's setting to make. See the BG8 envelope contract in
+``crates/fno-agents/src/claude_ask.rs`` (``build_cross_session_container``).
 
 So this module is NOT an auto-resume watchdog anymore: it cannot inject a resume
 into a stuck bypass session, and pretending otherwise would ship a daemon that
@@ -45,9 +46,9 @@ so "has-been-quiet" is NOT the discriminator: bg-ness is. Under-coverage (a
 footnote bg session missing from the registry) stays the safe failure.
 
 Transcript truth owns liveness (``session_truth``; frozen ``state.json`` is
-phase metadata only). The socket write is the shipped
-``harnesses.claude.send_to_session`` (same transport as ``fno agents mail`` /
-dispatch); the state read is ``_claude_session_registry``.
+phase metadata only). The state read is ``_claude_session_registry``; the
+socket-inject send that once rode ``harnesses.claude.send_to_session`` was
+ported to the Rust runtime with the rest of the ask adapters.
 
 The held-socket resume is intentionally NOT replaced here by a speculative
 respawn-for-every-stuck-session. ``_redispatch`` / ``_respawn_bg_resume``

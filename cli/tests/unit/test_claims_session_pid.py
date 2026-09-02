@@ -179,7 +179,7 @@ def _resolve_from(child, from_pid):
             return resolve_session_pid(from_pid=from_pid)
 
 
-@pytest.mark.parametrize("token", ["codex", "opencode", "agy"])
+@pytest.mark.parametrize("token", ["codex", "opencode", "agy", "cursor-agent"])
 def test_native_binary_harness_resolves_by_basename(token):
     """Native-binary harnesses have their name as the exe basename."""
     child = _chain(

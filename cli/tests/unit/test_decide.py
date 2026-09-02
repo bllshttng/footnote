@@ -3453,3 +3453,36 @@ def test_review_list_breakdown_survives_a_key_sorting_serializer(monkeypatch):
         {"value": "crown-l1", "count": 40},
         {"value": "banana", "count": 1},
     ]
+
+
+def test_waiver_subject_refusal_names_the_attended_command_not_the_law_door(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The generic agent refusal's advice is the law door - the exact door the
+    waiver-subject guard closes. The subclass catch must render first, or a
+    refused writer is pointed straight back at the refused path. `backlog
+    decide` cannot mint chat_attested (its --authority set excludes it), so
+    the reachable shape here is an attended terminal claiming agent
+    authority, which provenance resolves below operator and the guard
+    refuses."""
+    from fno.graph.cli import cli as backlog_app
+
+    result = runner.invoke(
+        backlog_app,
+        [
+            "decide",
+            "review-coverage-waiver:acme/widgets#42@" + ("c" * 40),
+            "review coverage waived for this head",
+            "--rationale",
+            "why",
+            "--authority",
+            "agent",
+        ],
+    )
+
+    assert result.exit_code == 3, result.output
+    assert "coverage-waive" in result.stderr, result.stderr
+    assert "The law door is open to it" not in result.stderr, result.stderr

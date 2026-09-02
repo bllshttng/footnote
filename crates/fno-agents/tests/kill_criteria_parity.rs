@@ -29,36 +29,12 @@
 //!   - no kill_criteria block -> exit 0
 //!   - quick-mode fenced `## Kill Criteria`
 
+use common::{assert_golden as assert_golden_common, capture_mode, Golden};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Slug a case label into a filename-safe golden key (lowercase, every run of
-/// non-alphanumeric chars collapses to a single `_`, trimmed).
-fn slug(label: &str) -> String {
-    let mut out = String::with_capacity(label.len());
-    let mut prev_us = false;
-    for ch in label.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            prev_us = false;
-        } else if !prev_us {
-            out.push('_');
-            prev_us = true;
-        }
-    }
-    out.trim_matches('_').to_string()
-}
-
-/// Directory holding the frozen kill_criteria goldens.
-fn golden_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/kill_criteria")
-}
-
-/// Whether to (re)capture goldens from the live bash oracle this run.
-fn capture_mode() -> bool {
-    std::env::var("FNO_CAPTURE_GOLDEN").is_ok()
-}
+mod common;
 
 /// Absolute path to the bash oracle (only used in capture mode).
 fn bash_script() -> PathBuf {
@@ -151,47 +127,22 @@ fn write_state(repo: &Path, body: &str) {
 /// In capture mode (`FNO_CAPTURE_GOLDEN=1`), runs bash on the SAME fixture,
 /// writes the golden files, and additionally asserts Rust==bash so a broken
 /// capture is caught at freeze time. In normal mode (the deleted-bash world),
-/// reads the golden and asserts Rust matches it — bash is never run.
+/// reads the golden and asserts Rust matches it — bash is never run. The
+/// capture/freeze IO itself lives in `common::assert_golden`.
 fn assert_golden(repo: &Path, plan_path: &str, label: &str) {
-    let key = slug(label);
-    let dir = golden_dir();
-    let exit_path = dir.join(format!("{key}.exit"));
-    let out_path = dir.join(format!("{key}.out"));
-
-    let (rust_code, rust_out) = run_rust(repo, plan_path);
-
-    if capture_mode() {
+    let (code, stdout) = run_rust(repo, plan_path);
+    let rust = Golden {
+        exit: Some(code),
+        streams: vec![stdout],
+    };
+    let oracle = capture_mode().then(|| {
         let (bash_code, bash_out) = run_bash(repo, plan_path);
-        assert_eq!(
-            bash_code, rust_code,
-            "[{label}] capture: exit differs bash={bash_code} rust={rust_code}\nbash_out={bash_out:?}\nrust_out={rust_out:?}"
-        );
-        assert_eq!(
-            bash_out, rust_out,
-            "[{label}] capture: stdout differs\nbash={bash_out:?}\nrust={rust_out:?}"
-        );
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(&exit_path, format!("{bash_code}\n")).unwrap();
-        fs::write(&out_path, &bash_out).unwrap();
-        return;
-    }
-
-    let golden_exit: i32 = fs::read_to_string(&exit_path)
-        .unwrap_or_else(|e| panic!("[{label}] missing golden {exit_path:?}: {e}"))
-        .trim()
-        .parse()
-        .unwrap_or_else(|e| panic!("[{label}] bad golden exit in {exit_path:?}: {e}"));
-    let golden_out = fs::read_to_string(&out_path)
-        .unwrap_or_else(|e| panic!("[{label}] missing golden {out_path:?}: {e}"));
-
-    assert_eq!(
-        golden_exit, rust_code,
-        "[{label}] exit differs from golden: golden={golden_exit} rust={rust_code}\nrust_out={rust_out:?}"
-    );
-    assert_eq!(
-        golden_out, rust_out,
-        "[{label}] stdout differs from golden:\ngolden={golden_out:?}\nrust={rust_out:?}"
-    );
+        Golden {
+            exit: Some(bash_code),
+            streams: vec![bash_out],
+        }
+    });
+    assert_golden_common("kill_criteria", label, &rust, oracle);
 }
 
 // ── iteration predicate ───────────────────────────────────────────────────────

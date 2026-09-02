@@ -1339,7 +1339,7 @@ def test_node_has_movement_field_signals():
     assert m.node_has_movement({"sessions": [{"phase": "do"}]}, now, 21)
     assert m.node_has_movement({"pr_number": 5}, now, 21)
     assert m.node_has_movement({"locked_by": "sess"}, now, 21)
-    assert m.node_has_movement({"claimed_at": "2026-07-18T00:00:00+00:00"}, now, 21)
+    assert m.node_has_movement({"locked_at": "2026-07-18T00:00:00+00:00"}, now, 21)
     assert not m.node_has_movement({}, now, 21)
 
 

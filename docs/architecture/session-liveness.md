@@ -10,6 +10,12 @@ It reads claim liveness and loop-check recency to answer whether a session owns 
 
 Neither family substitutes for the other: a session can be alive without a current claim, and a claim can remain visible while its worker is not producing transcript activity.
 
+## Wait and graph-lock decisions
+
+`fno-agents wait --state done` treats a live Claude hook report of `done` as a candidate, not completion. Before wait returns success, the existing family-1 transcript probe must also report `done`. Working, watching, your-move, stalled, unknown, malformed, and failed probes keep waiting until timeout. Pane exit remains authoritative. Non-Claude rows do not pay for the Claude probe.
+
+Graph entries use top-level `locked_at` for the graph lock mirror. At the read seam, legacy top-level `claimed_at` copies to `locked_at`. The next locked mutation removes legacy `claimed_at`. Nested claim records and `sessions[*].claimed_at` retain their meaning. Timestamp age and unreadable values are diagnostics only. They never clear `locked_by` or `session_id`. The claim lifecycle clears those fields after it confirms release or reap. It then rechecks the exact node claim path, so a new owner wins the race.
+
 ## Worktree-local activity advisory
 
 The SessionStart peer note uses a worktree-local observation cache, not a third truth family.

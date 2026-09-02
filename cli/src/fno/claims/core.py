@@ -987,6 +987,7 @@ def release_claim(
     *,
     strict: bool = False,
     root: Optional[Path] = None,
+    sync_graph_mirror: bool = True,
 ) -> Optional["Claim"]:
     """Release a claim we hold.
 
@@ -997,6 +998,10 @@ def release_claim(
         (then raise HolderMismatch). Releases are idempotent in the common
         case; strict mode is for explicit "this MUST be ours" callers.
       - File present but corrupted: silent success (treat as released).
+
+    ``sync_graph_mirror`` defaults to true for confirmed ``node:`` releases.
+    It runs the shared post-release mirror cleanup after the claim is gone;
+    callers releasing test or repo-local claims can disable it explicitly.
 
     The duration_held_ms field in the audit event is best-effort: read from
     acquired_at minus now. If the file disappears between read and unlink,
@@ -1036,6 +1041,11 @@ def release_claim(
     except FileNotFoundError:
         return None
     emit_claim_released(existing, duration_ms=duration_ms)
+    if sync_graph_mirror and key.startswith("node:"):
+        _clear_lock_mirror_for_reaped(
+            [key[len("node:") :]],
+            claim_roots=[root] if root is not None else None,
+        )
     return existing
 
 
@@ -1956,8 +1966,10 @@ def reap_dead_claims(
     return summary
 
 
-def _clear_lock_mirror_for_reaped(node_ids: list[str]) -> int:
-    """Clear ``locked_by``/``claimed_at`` on nodes whose claims were reaped.
+def _clear_lock_mirror_for_reaped(
+    node_ids: list[str], *, claim_roots: Optional[list[Optional[Path]]] = None
+) -> int:
+    """Clear ``locked_by``/``locked_at`` on nodes after claim transitions.
 
     Best-effort: a graph failure is a named stderr line and never fails the
     sweep - the claim file is already gone, which is the load-bearing half.
@@ -2007,13 +2019,14 @@ def _clear_lock_mirror_for_reaped(node_ids: list[str]) -> int:
             if not (isinstance(e, dict) and e.get("id") in wanted):
                 continue
             key = f"node:{e['id']}"
-            if any(
-                claim_path(key, root=r).exists()
-                for r, _d in dedup_claims_roots([claims_root_for(key), None])
-            ):
+            roots = claim_roots
+            if roots is None:
+                roots = [claims_root_for(key), None]
+            if any(claim_path(key, root=r).exists() for r, _d in dedup_claims_roots(roots)):
                 continue  # re-acquired between archive and this clear
             e["locked_by"] = None
-            e["claimed_at"] = None
+            e["locked_at"] = None
+            e.pop("claimed_at", None)
             cleared.append(str(e.get("id")))
         return entries
 

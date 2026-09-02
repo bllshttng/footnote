@@ -77,7 +77,9 @@ def test_map_covers_current_surface_once():
     # session-history reader: 549 lines minus the header = 548 + 1 = 549.
     # The resource-meter branch adds `doctor lanes`, the whole-machine lane
     # advisor (hidden, per the new-verb convention): 549 -> 550.
-    assert len(mapped) == 551, (
+    # This branch adds `agents harness probe`, the capability-probe verb:
+    # 551 (main, with `agents pane-identity`) -> 552.
+    assert len(mapped) == 552, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

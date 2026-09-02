@@ -212,6 +212,7 @@ def _record(
         RefusedAuthorityError,
         UnknownOriginError,
         UnattributedAuthorityError,
+        WaiverAuthorityRefusedError,
         record_decision,
     )
     from fno.decide.graduation import InvalidGraduationError, graduation_or_guidance
@@ -254,6 +255,9 @@ def _record(
     except InvalidGraduationError as exc:
         typer.echo(f"backlog decide: refused. {exc}. Nothing was recorded.", err=True)
         raise typer.Exit(2)
+    except WaiverAuthorityRefusedError as exc:
+        typer.echo(f"decide: refused. {exc}", err=True)
+        raise typer.Exit(3)
     except RefusedAuthorityError as exc:
         typer.echo(
             f"backlog decide: refused. This session is agent {exc.agent_handle}, so it "

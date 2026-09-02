@@ -543,10 +543,6 @@ fn operator_waiver_law_surface_is_pinned_across_both_gates() {
     assert!(rust.contains("\"backlog\"") && rust.contains("\"decisions\""));
     assert!(rust.contains("\"--lane\"") && rust.contains("\"law\""));
     assert!(rust.contains("\"--state\"") && rust.contains("\"live\""));
-    assert!(
-        rust.contains("/current_law/status"),
-        "the Rust reader must decide on current_law.status only"
-    );
     // One affirmative decision value on both sides: a single row counts only
     // when its decision equals it, so a denial recorded at a waiver subject
     // reads as no waiver on BOTH gates.
@@ -555,7 +551,7 @@ fn operator_waiver_law_surface_is_pinned_across_both_gates() {
         "the Rust affirmative waiver value moved"
     );
     assert!(
-        rust.contains("/decisions/0/decision"),
+        rust.contains("== WAIVER_DECISION => LawStatus::Single"),
         "the Rust reader stopped checking the row's decision value"
     );
     assert!(
@@ -565,5 +561,22 @@ fn operator_waiver_law_surface_is_pinned_across_both_gates() {
     assert!(
         python.contains("list_decisions(subject, lane=\"law\", state=\"live\")"),
         "the Python gate grew a second law reader"
+    );
+    // Only operator authority counts as waiver evidence: a chat_attested row
+    // cannot carry the person-at-a-terminal fact a waiver asserts, and the
+    // law door is open to any harness-descended process. Both gates filter
+    // rows to operator BEFORE the count - Rust derives from the CLI's row
+    // list rather than trusting current_law.status, which counts
+    // chat_attested rows too and would read a forged row beside a real
+    // operator waiver as a conflict. The write path refuses non-operator rows
+    // at these subjects outright (WaiverAuthorityRefusedError), so this pin
+    // is the reader half.
+    assert!(
+        rust.contains("r.get(\"authority_source\").and_then(|a| a.as_str()) == Some(\"operator\")"),
+        "the Rust reader stopped filtering waiver rows to operator authority"
+    );
+    assert!(
+        python.contains("row.get(\"authority_source\") or \"\") == \"operator\""),
+        "the Python gate stopped filtering waiver rows to operator authority"
     );
 }

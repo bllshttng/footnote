@@ -172,6 +172,15 @@ pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
     )
 }
 
+/// Probe family-1 truth within a caller-supplied total budget.
+///
+/// The retrying reader may make two attempts when the first process crashes.
+/// Split the budget across those attempts so a waiter's outer deadline remains
+/// authoritative even when the truth command is unavailable.
+pub fn family1_truth_probe_with_timeout(handle: &str, timeout: Duration) -> Option<TruthProbe> {
+    family1_truth_probe_retrying(|| family1_truth_command(handle), timeout / 2, handle)
+}
+
 /// [`family1_truth_probe`] with the command built per attempt, so a test can
 /// count the attempts a given failure shape actually costs. A `Command` cannot
 /// be reused after a spawn, which is why this takes a factory.

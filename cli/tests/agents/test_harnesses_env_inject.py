@@ -138,40 +138,6 @@ def test_codex_create_without_agent_self_skips_injection(
     assert "FNO_AGENT_SELF" not in captured["env"]
 
 
-def test_codex_resume_replaces_inherited_agent_self(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A resumed worker receives its row name, never its caller's name."""
-    from fno.agents.harnesses import codex as codex_mod
-
-    captured: Dict[str, Any] = {}
-    monkeypatch.setenv("FNO_AGENT_SELF", "parent")
-
-    def fake_popen(argv: list[str], **kw: Any) -> Any:
-        captured["env"] = kw.get("env")
-        raise codex_mod.CodexInvocationError(1)
-
-    monkeypatch.setattr(codex_mod, "_subprocess_popen", fake_popen)
-
-    output_path = tmp_path / "out.jsonl"
-    output_path.touch()
-    with pytest.raises(codex_mod.CodexInvocationError):
-        codex_mod.resume(
-            session_id="session-child",
-            cwd=tmp_path,
-            prompt="continue",
-            from_name="orchestrator",
-            yolo=False,
-            output_path=output_path,
-            agent_self="child",
-        )
-
-    env = captured["env"]
-    assert env["FNO_AGENT_SELF"] == "child"
-    assert env["FNO_AGENT_HARNESS"] == "codex"
-    assert env["FNO_HARNESS_NAME"] == "codex"
-    assert env["FNO_HARNESS_SESSION_ID"] == "session-child"
-
 
 # ---------------------------------------------------------------------------
 # Failure-recovery / degradation contract

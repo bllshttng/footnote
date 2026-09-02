@@ -44,6 +44,16 @@ AUTHORITY_SOURCES: tuple[str, ...] = (
 )
 READ_AUTHORITY_SOURCES = frozenset((*AUTHORITY_SOURCES, "chat_attested"))
 
+# The review-coverage waiver family. A row at one of these subjects is waiver
+# EVIDENCE: it asserts a person at a terminal read the diff and chose to waive.
+# Only `operator` authority carries that fact, so the write path refuses every
+# other authority at these subjects (WaiverAuthorityRefusedError) and the
+# readers count operator rows only. Mirrored by `STANDING_WAIVER_SUBJECT` in
+# `fno.pr._coverage_gate` and `STANDING_WAIVER_SUBJECT` in
+# crates/fno-agents/src/loopcheck.rs; the equality is pinned by tests, not by
+# trust.
+WAIVER_SUBJECT_PREFIX = "review-coverage-waiver"
+
 # Origin is evidence about the channel, not an authority claim. Keep the two
 # axes separate: only operator-origin evidence can carry operator intent into
 # a machine-readable gate.
@@ -136,6 +146,31 @@ class RefusedAuthorityError(RuntimeError):
         )
         self.agent_handle = agent_handle
         self.origin = origin
+
+
+class WaiverAuthorityRefusedError(RefusedAuthorityError):
+    """A non-operator authority tried to mint review-coverage waiver evidence.
+
+    Distinct from :class:`RefusedAuthorityError` because the remedy differs and
+    the generic refusal's advice points at the law door - the exact door this
+    refusal closes at waiver subjects. A waiver asserts a person at a terminal
+    read the diff; a ``chat_attested`` row cannot carry that fact, because a
+    harness-identified agent session records the same value. The only path is
+    the attended ``fno do pr coverage-waive`` command.
+    """
+
+    def __init__(self, subject: str, authority: str | None) -> None:
+        RuntimeError.__init__(
+            self,
+            f"'{subject}' is a review-coverage waiver subject: waiver evidence "
+            "needs operator authority, and a chat-attested row proves only "
+            "that a session was addressed, not that a person reviewed "
+            "anything. Waivers are recorded by the attended command "
+            "`fno do pr coverage-waive <pr> --reason \"...\"` at an operator "
+            "terminal; a session a harness identifies records nothing there.",
+        )
+        self.agent_handle = authority or "unattributed"
+        self.origin = None
 
 
 class UnknownOriginError(RuntimeError):
@@ -382,6 +417,25 @@ def record_decision(
     # close.
     origin = enforce_origin_floor(origin)
     provenance = _resolve_decider(decided_by, authority_source, origin=origin)
+
+    # A waiver subject is operator-evidence-only (see WAIVER_SUBJECT_PREFIX).
+    # The family is the exact standing subject and the colon-delimited scoped
+    # form, the two shapes the gate reads: a free-form law subject that merely
+    # begins with the text (review-coverage-waiver-policy) is ordinary law and
+    # stays open to every authority. The check reads the RESOLVED authority,
+    # never the caller's claim, so the one thing it keys on is the thing the
+    # identity walk proved.
+    subject_text = str(subject or "")
+    if (
+        (
+            subject_text == WAIVER_SUBJECT_PREFIX
+            or subject_text.startswith(WAIVER_SUBJECT_PREFIX + ":")
+        )
+        and provenance.authority_source != "operator"
+    ):
+        raise WaiverAuthorityRefusedError(
+            subject_text, provenance.authority_source
+        )
 
     if supersedes:
         superseded_row = _decision_row_by_id(supersedes)

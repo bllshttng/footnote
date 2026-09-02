@@ -68,7 +68,7 @@ def test_session_harness_stamp_ignored_when_pid_dead(monkeypatch):
     monkeypatch.setattr(_session_pid.psutil, "pid_exists", lambda pid: False)
     monkeypatch.setenv("FNO_SESSION_HARNESS", "codex")
     monkeypatch.setenv("FNO_SESSION_PID", "1234")
-    assert _session_pid.resolve_session_harness() != "codex"
+    assert _session_pid.resolve_session_harness(from_pid=-1) is None
 
 
 def test_session_harness_stamp_ignored_for_unknown_harness(monkeypatch):

@@ -1,25 +1,33 @@
-//! parity-stage: differential
-//! parity-oracle: fno.agents.harnesses.codex
+//! parity-stage: characterization
+//! parity-oracle: fno.agents.harnesses.codex.resume
 //!
-//! Wave B3: codex ask cross-language parity harness (ab-0429c6e1).
+//! Wave B3: codex ask cross-language parity harness (ab-0429c6e1), now a
+//! characterization suite for the `resume` ask leg (the ask-adapter port).
 //!
-//! Drives the SAME fake `codex` binary through BOTH Python (`harnesses/codex.py`
-//! `create`/`resume`) and the Rust `codex_ask` path, and asserts identical
-//! behavior: reply text, exit code, and key events.jsonl field presence.
+//! The resume happy path was frozen against the Python leg
+//! (`harnesses/codex.py` `resume`) before that leg was deleted: under
+//! `FNO_CAPTURE_GOLDEN=1` the test runs Python, asserts Rust==Python, and
+//! freezes the golden under `tests/golden/codex_ask/`; normally it asserts
+//! the Rust outcome against that frozen golden and Python never runs.
 //!
-//! Skips (not fails) when `python3` or the `fno` package is unavailable,
-//! following the `claude_ask_parity.rs` skip-when-unavailable policy.
+//! Four cases stay LIVE differential on purpose, because their Python
+//! counterparts SURVIVE the port as the codex one-shot spawn substrate:
+//! `create`, the no-JSONL exit-11 path, soft-error promotion, and
+//! `inject_from_name`. Those keep the skip-when-Python-unavailable policy.
 //!
 //! Cases covered:
-//! - Create happy path (reply text + session_id capture)
-//! - Resume happy path (reply text, no session_id re-capture)
-//! - Non-zero exit with no JSONL (exit 11 from NoSessionIdError)
-//! - Soft error item promotion (exit 0, reply = error message)
+//! - Create happy path (reply text + session_id capture) [live differential]
+//! - Resume happy path (reply text, no session_id re-capture) [golden]
+//! - Non-zero exit with no JSONL (exit 11 from NoSessionIdError) [live]
+//! - Soft error item promotion (exit 0, reply = error message) [live]
 
+use common::{assert_golden as assert_golden_common, capture_mode, Golden};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+mod common;
 
 /// Module-level PATH mutex: every test that mutates the process-global PATH
 /// must hold this lock for the duration of its mutation. Cargo runs tests in
@@ -399,9 +407,13 @@ fn parity_create_happy_path() {
 
 #[test]
 fn parity_resume_happy_path() {
-    if let Some(why) = python_skip_reason() {
-        eprintln!("SKIP: the test interpreter cannot run this flow: {why}");
-        return;
+    // Capture mode needs the Python leg to freeze against; the golden-read
+    // path needs nothing but the fake codex binary.
+    if capture_mode() {
+        if let Some(why) = python_skip_reason() {
+            eprintln!("SKIP: the test interpreter cannot run this flow: {why}");
+            return;
+        }
     }
 
     let bin_dir = tmpdir("par-r1-bin");
@@ -412,21 +424,8 @@ fn parity_resume_happy_path() {
     let reply = "parity resume reply";
     let extra = [("FAKE_CODEX_REPLY", reply)]; // No FAKE_CODEX_SESSION_ID on resume
 
-    let py_out = tmpdir("par-r1-py-out").join("out.jsonl");
     let rs_out = tmpdir("par-r1-rs-out").join("out.jsonl");
 
-    let (py_exit, py_reply) = py_codex(
-        "resume",
-        Some(session_id),
-        &cwd,
-        "follow up",
-        "fno",
-        false,
-        &py_out,
-        10,
-        &bin_dir,
-        &extra,
-    );
     let (rs_exit, rs_reply) = rust_codex_resume(
         session_id,
         &cwd,
@@ -438,15 +437,35 @@ fn parity_resume_happy_path() {
         &bin_dir,
         &extra,
     );
+    let rust = Golden {
+        exit: Some(rs_exit),
+        streams: vec![rs_reply],
+    };
 
-    assert_eq!(py_exit, 0, "Python resume exit: {}\n{}", py_exit, py_reply);
-    assert_eq!(rs_exit, 0, "Rust resume exit: {}", rs_exit);
-    assert_eq!(
-        py_reply, rs_reply,
-        "Reply mismatch: python={:?} rust={:?}",
-        py_reply, rs_reply
-    );
-    assert_eq!(py_reply, reply);
+    // Capture mode freezes the Python resume outcome as the golden (protocol
+    // step 2): resume is the codex ASK leg, the one case here whose Python
+    // implementation is deleted by the port. Normal mode (the deleted-Python
+    // world) reads the frozen golden and asserts Rust matches it.
+    let oracle = capture_mode().then(|| {
+        let py_out = tmpdir("par-r1-py-out").join("out.jsonl");
+        let (py_exit, py_reply) = py_codex(
+            "resume",
+            Some(session_id),
+            &cwd,
+            "follow up",
+            "fno",
+            false,
+            &py_out,
+            10,
+            &bin_dir,
+            &extra,
+        );
+        Golden {
+            exit: Some(py_exit),
+            streams: vec![py_reply],
+        }
+    });
+    assert_golden_common("codex_ask", "resume happy path", &rust, oracle);
 }
 
 // ---------------------------------------------------------------------------

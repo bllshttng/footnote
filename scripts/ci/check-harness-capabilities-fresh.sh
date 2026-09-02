@@ -2,13 +2,13 @@
 # scripts/ci/check-harness-capabilities-fresh.sh
 #
 # Tripwire, not a sync step. ONE canonical table is edited by humans:
-# `cli/src/fno/agents/harness_capabilities.toml` (x-244c, operator ruling
-# 2026-09-02, which collapsed the old three-copy arrangement). Every build of
-# `crates/fno-agents` PRODUCES its in-crate byte copy from the canonical
-# (`build.rs`), and `crates/fno` reads the table through the fno-agents dep
-# instead of carrying a third copy. The copy stays tracked because the
-# crates.io tarball must compile standalone, where no `cli/` exists - the
-# events_limits.toml precedent.
+# `crates/fno-agents/src/harness_capabilities.toml`. Every build of
+# `crates/fno-agents` PRODUCES the Python-tree byte copy
+# (`cli/src/fno/agents/harness_capabilities.toml`) from it (`build.rs`), and
+# `crates/fno` reads the table through the fno-agents dep instead of carrying
+# its own copy (x-244c, operator ruling 2026-09-02, which collapsed the old
+# three-copy arrangement). The cli copy stays tracked because the Python
+# package loads it as a package resource.
 #
 # The only way the copy diverges now is a hand edit of the generated file that
 # was committed without a rebuild. This gate catches that.
@@ -31,9 +31,9 @@ gate_parse_mode "$@"
 gate_resolve_repo_root
 MODE="$GATE_MODE"
 
-CANONICAL_REL="cli/src/fno/agents/harness_capabilities.toml"
+CANONICAL_REL="crates/fno-agents/src/harness_capabilities.toml"
 COPY_RELS=(
-  "crates/fno-agents/src/harness_capabilities.toml"
+  "cli/src/fno/agents/harness_capabilities.toml"
 )
 
 CANONICAL="$REPO_ROOT/$CANONICAL_REL"

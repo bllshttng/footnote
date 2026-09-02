@@ -769,7 +769,11 @@ pub fn bundled_manifest(agent: &str) -> Option<&'static str> {
         // agy harness (id "agy"), already covered by agy.toml above.
         "amp" => Some(include_str!("manifests/amp.toml")),
         "cline" => Some(include_str!("manifests/cline.toml")),
+        // "cursor" is the x-83e7 dormant Cursor-IDE roster manifest; the
+        // cursor-agent CLI harness below is a distinct identity with its own
+        // pinned markers. Neither entry subsumes the other.
         "cursor" => Some(include_str!("manifests/cursor.toml")),
+        "cursor-agent" => Some(include_str!("manifests/cursor-agent.toml")),
         "devin" => Some(include_str!("manifests/devin.toml")),
         "droid" => Some(include_str!("manifests/droid.toml")),
         "copilot" => Some(include_str!("manifests/github-copilot.toml")),
@@ -1413,9 +1417,25 @@ mod tests {
         // x-8f7f added agy + opencode; x-83e7 grew the roster to full-roster parity.
         let synthetic = view("some scrollback\nesc to interrupt\n\u{276f} ");
         for agent in [
-            "claude", "codex", "gemini", "agy", "opencode", // pre-x-83e7
-            "amp", "cline", "cursor", "devin", "droid", "copilot", "grok", "hermes", "kilo",
-            "kimi", "kiro", "pi", "qodercli", // x-83e7
+            "claude",
+            "codex",
+            "gemini",
+            "agy",
+            "opencode", // pre-x-83e7
+            "amp",
+            "cline",
+            "cursor",
+            "devin",
+            "droid",
+            "copilot",
+            "grok",
+            "hermes",
+            "kilo",
+            "kimi",
+            "kiro",
+            "pi",
+            "qodercli",     // x-83e7
+            "cursor-agent", // the pinned CLI harness manifest
         ] {
             let src = bundled_manifest(agent).unwrap_or_else(|| panic!("{agent} is bundled"));
             let m = Manifest::parse(src)
