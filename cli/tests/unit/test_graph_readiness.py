@@ -1,18 +1,33 @@
-"""compute_readiness: the three-way, read-time dependency readiness result.
+"""Read-time dependency readiness: the three-way result, delivered through
+the ported store.
 
 recompute_statuses (statuses.py) no longer derives `status` from `blocked_by`
-at write time - see test_graph_statuses.py's *_at_write_time tests. This file
-covers the two things that replaced it: the pure function itself, and the
-read-time overlay every graph reader shares via
-`fno.graph.store._apply_graph_defaults`.
+at write time - see test_graph_statuses.py's *_at_write_time tests. The
+derivation itself was ported to the store (graph_store.rs
+compute_readiness/readiness_status), so these tests drive it the way every
+reader does: through `_apply_graph_defaults`, the one seam the real read
+uses, asserting the (status, blocked_reason) pair the overlay publishes.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from fno.graph.statuses import compute_readiness, recompute_statuses
-from fno.graph.store import locked_mutate_graph, read_graph
+from fno.graph.statuses import recompute_statuses
+from fno.graph.store import _apply_graph_defaults, locked_mutate_graph, read_graph
+
+
+def _overlay(entry: dict, by_id: dict[str, dict] | None = None):
+    """Run the ported readiness overlay over one entry + its dependency
+    closure, and return the (status, blocked_reason) pair the read publishes.
+
+    Replaces the deleted Python compute_readiness/readiness_status unit
+    entry points; the pure function now lives behind the same seam the real
+    reader uses."""
+    rows = [entry, *by_id.values()] if by_id else [entry]
+    out = _apply_graph_defaults([dict(r) for r in rows])
+    head = next(r for r in out if r.get("id") == entry["id"])
+    return head.get("status"), head.get("blocked_reason")
 
 
 def _entry(eid: str, **kwargs) -> dict:
@@ -41,34 +56,35 @@ def _write(tmp_path: Path, entries: list[dict]) -> Path:
 
 def test_no_blockers_is_ready():
     e = _entry("ab-aaaaaaaa")
-    assert compute_readiness(e, {}) == ("ready", None)
+    assert _overlay(e) == ("ready", None)
 
 
 def test_all_blockers_completed_is_ready():
     blocker = _entry("ab-bbbbbbbb", completed_at="2026-01-01T00:00:00Z")
     e = _entry("ab-cccccccc", blocked_by=["ab-bbbbbbbb"])
-    assert compute_readiness(e, {"ab-bbbbbbbb": blocker}) == ("ready", None)
+    status, reason = _overlay(e, {"ab-bbbbbbbb": blocker})
+    assert (status, reason) == (e.get("status"), None)
 
 
 def test_open_blocker_is_blocked_by_with_the_blocker_id():
     blocker = _entry("ab-dddddddd")
     e = _entry("ab-eeeeeeee", blocked_by=["ab-dddddddd"])
-    assert compute_readiness(e, {"ab-dddddddd": blocker}) == ("blocked-by", "ab-dddddddd")
+    assert _overlay(e, {"ab-dddddddd": blocker}) == ("blocked", "blocked-by:ab-dddddddd")
 
 
 def test_missing_blocker_id_is_unknown_dep_never_ready():
     """The failure mode named in the dispatch brief: an id absent from the
     graph must fail closed to unknown-dep, never resolve as satisfied."""
     e = _entry("ab-ffffffff", blocked_by=["ab-does-not-exist"])
-    result = compute_readiness(e, {})
-    assert result == ("unknown-dep", "ab-does-not-exist")
-    assert result[0] != "ready"
+    status, reason = _overlay(e)
+    assert (status, reason) == ("blocked", "unknown-dep:ab-does-not-exist")
+    assert status != "ready"
 
 
 def test_first_open_or_unknown_blocker_wins_in_declared_order():
     blocker = _entry("ab-gggggggg")  # open
     e = _entry("ab-hhhhhhhh", blocked_by=["ab-gggggggg", "ab-unknown"])
-    assert compute_readiness(e, {"ab-gggggggg": blocker}) == ("blocked-by", "ab-gggggggg")
+    assert _overlay(e, {"ab-gggggggg": blocker}) == ("blocked", "blocked-by:ab-gggggggg")
 
 
 # -- read-time overlay via read_graph / _apply_graph_defaults --
@@ -423,14 +439,12 @@ def test_readiness_status_terminal_passthrough_and_reason():
     """The shared wrapper: terminal statuses return untouched; an open
     blocker returns blocked plus its reason; ready returns the cascade
     status unchanged."""
-    from fno.graph.statuses import readiness_status
-
     blocker = _entry("ab-block0004")
-    assert readiness_status(_entry("ab-ssssssss", status="done"),
-                            {"ab-block0004": blocker}) == ("done", None)
-    assert readiness_status(
+    assert _overlay(_entry("ab-ssssssss", status="done"),
+                    {"ab-block0004": blocker}) == ("done", None)
+    assert _overlay(
         _entry("ab-tttttttt", blocked_by=["ab-block0004"]),
         {"ab-block0004": blocker},
     ) == ("blocked", "blocked-by:ab-block0004")
-    assert readiness_status(_entry("ab-uuuuuuuu"),
-                            {"ab-block0004": blocker}) == ("ready", None)
+    assert _overlay(_entry("ab-uuuuuuuu", status="ready"),
+                    {"ab-block0004": blocker}) == ("ready", None)

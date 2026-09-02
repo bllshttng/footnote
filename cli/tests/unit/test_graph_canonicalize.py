@@ -13,11 +13,15 @@ import json
 from pathlib import Path
 
 from fno.graph.store import (
-    CANONICAL_FIELD_ORDER,
+    canonical_field_order,
     canonicalize_entries,
     locked_mutate_graph,
     _read_json,
 )
+
+# The canonical key order, read from the ported store: one source of truth,
+# never a re-typed copy that drifts from the on-disk shape.
+CANONICAL_FIELD_ORDER = canonical_field_order()
 
 
 def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:

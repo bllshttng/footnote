@@ -206,26 +206,20 @@ def test_filing_time_dangling_peer_refuses_the_whole_filing(tmp_graph):
 # ---------------------------------------------------------------------------
 
 
-def test_ac1_fr_peer_write_failure_leaves_neither_side(tmp_graph, monkeypatch):
-    """AC1-FR: fault the mirror step; the declaring write must not survive alone.
+def test_ac1_fr_peer_write_failure_leaves_neither_side(tmp_graph):
+    """AC1-FR: a refused mirror leaves neither side; the half-edge is unreachable.
 
-    Faulted at the peer-normalization function rather than by killing the
-    process, so the assertion runs against a deterministic point. Both halves
-    are in one locked_mutate_graph call, so the abort is structural.
+    With the ported store the two halves are ONE atomic op (the keeper's
+    set_related mirrors both endpoints or refuses), so there is no client
+    seam left to fault. The deterministic trigger for the same refusal is a
+    peer absent from the graph: the op refuses the declaring write rather
+    than persist a dangling half-edge.
     """
-    import fno.graph.store as gs
-
-    def boom(*a, **k):
-        raise RuntimeError("peer write failed")
-
-    monkeypatch.setattr(gs, "_mirror_related", boom)
-
     result = runner.invoke(
-        app, ["backlog", "update", "x-aaaa", "--related", "x-bbbb"]
+        app, ["backlog", "update", "x-aaaa", "--related", "x-ghost"]
     )
     assert result.exit_code != 0
     assert _related(tmp_graph, "x-aaaa") == []
-    assert _related(tmp_graph, "x-bbbb") == []
 
 
 def test_ac2_fr_opposite_endpoint_declarations_both_survive(tmp_graph):

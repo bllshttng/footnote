@@ -19,10 +19,8 @@ from fno.graph._constants import (  # noqa: F401
 )
 from fno.graph.store import (  # noqa: F401
     GraphCorruptError,
-    _acquire_flock,
     _apply_graph_defaults,
     _read_json,
-    _release_flock,
     _write_json,
     locked_mutate_graph,
     read_graph,

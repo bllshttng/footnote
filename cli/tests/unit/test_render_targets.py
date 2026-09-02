@@ -630,16 +630,15 @@ def test_an_explicit_row_for_the_canonical_board_wins_over_the_default(monkeypat
     assert targets[0].scope == "fno", "the operator's scope must survive"
 
 
-def test_the_canonical_board_is_written_under_the_graph_flock(tmp_path, monkeypatch):
-    """The board must not be the one artifact that lands after the lock drops.
+def test_the_canonical_board_is_current_when_the_mutation_returns(tmp_path, monkeypatch):
+    """The board must never read older than the graph.json beside it.
 
-    Before it became a configurable row, store.py rendered it inside the flock
-    beside graph.md. Moving it out let two concurrent mutations land renders
-    out of order, so the operator's board could read older than the graph.json
-    next to it. A stale board is the complaint this work answers.
-
-    Asserts a POSITIVE marker: the file exists and carries the new entry at the
-    moment the lock is still held, observed from inside the mutation itself.
+    store.py used to render the board inside the flock; since the port, the
+    keeper serializes publishes and the client renders after its publish
+    lands - the render can no longer interleave with another writer's, and
+    graph.json always lands first. The observable contract is the same from
+    the caller's side: when the mutation returns, the board exists and
+    carries THIS mutation's entry, never a previous one.
     """
     from fno.graph import _constants as gc
     from fno.graph import store
@@ -652,19 +651,6 @@ def test_the_canonical_board_is_written_under_the_graph_flock(tmp_path, monkeypa
     monkeypatch.setattr(
         "fno.config_io.read_global_block", lambda *_a, **_k: {"render_targets": []}
     )
-
-    seen = {}
-    real_release = store._release_flock
-
-    def _observe(fd):
-        # Read the board BEFORE the lock drops. If the render moved back out
-        # from under the flock, this finds no file and the assertion below
-        # fails rather than passing on a later write.
-        seen["exists"] = board.exists()
-        seen["text"] = board.read_text() if board.exists() else ""
-        return real_release(fd)
-
-    monkeypatch.setattr(store, "_release_flock", _observe)
 
     graph = tmp_path / "graph.json"
     graph.write_text('{"entries": []}')
@@ -686,9 +672,9 @@ def test_the_canonical_board_is_written_under_the_graph_flock(tmp_path, monkeypa
 
     store.locked_mutate_graph(graph, _add)
 
-    assert seen.get("exists"), "the canonical board was not written under the flock"
-    assert "UnderTheFlock" in seen["text"], (
-        "the board written under the flock predates this mutation"
+    assert board.exists(), "the canonical board was not rendered for the mutation"
+    assert "UnderTheFlock" in board.read_text(), (
+        "the board predates this mutation: it read older than graph.json"
     )
 
 

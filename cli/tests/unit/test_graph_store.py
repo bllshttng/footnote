@@ -1,4 +1,4 @@
-"""Unit tests for fno.graph.store - flock helpers, load/write, locked_mutate.
+"""Unit tests for fno.graph.store - the keeper-backed client.
 
 These tests are ported from tests/test_graph.py and target the extracted module.
 They run the module functions directly (no subprocess) for speed.
@@ -14,11 +14,9 @@ import pytest
 
 from fno.graph.store import (
     GraphCorruptError,
-    _acquire_flock,
     _apply_graph_defaults,
     append_session_record,
     _read_json,
-    _release_flock,
     _write_json,
     locked_mutate_graph,
     read_graph,
@@ -90,12 +88,14 @@ def test_ac7_edge_mixed_version_round_trip(tmp_path):
     assert saved["status"] == "in_progress"
 
 
-def test_ac1_hp_acquire_release_flock(tmp_path):
-    """AC1-HP: acquire and release flock without error."""
-    lock = tmp_path / "test.lock"
-    fd = _acquire_flock(lock)
-    assert fd >= 0
-    _release_flock(fd)  # should not raise
+def test_the_raw_flock_helpers_are_retired():
+    """The unbounded flock was the port's first named defect: acquisition
+    now happens only inside the keeper's bounded lock, so the client exposes
+    no raw acquire/release pair to call."""
+    import fno.graph.store as store_mod
+
+    assert not hasattr(store_mod, "_acquire_flock")
+    assert not hasattr(store_mod, "_release_flock")
 
 
 def test_ac1_hp_read_json_missing_file(tmp_path):
