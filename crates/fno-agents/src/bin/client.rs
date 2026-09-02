@@ -767,12 +767,12 @@ async fn run(args: Vec<String>) -> i32 {
                         serde_json::to_string_pretty(&result).unwrap_or_default()
                     );
                 }
-                // Drift warning on `list` (ab-1891cdff), stderr-only so a
-                // `list --json` stdout consumer stays clean (US4). `list` already
+                // Drift warning on read/removal verbs, stderr-only so a
+                // `--json` stdout consumer stays clean. These verbs already
                 // ensured a daemon is up via `call`; a freshly lazy-started one
                 // reads Fresh, so no false warning. A separate status probe keeps
                 // this off every other verb's hot path.
-                if verb_owned == "list" {
+                if warns_on_daemon_drift(&verb_owned) {
                     let state = check_daemon_drift(&home).await;
                     if let Some(w) = drift_warning(&state, None) {
                         eprintln!("{w}");
@@ -3255,7 +3255,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "restart [--force]  # --force: break-glass SIGKILL of the lockfile holder; plain restart is graceful",
     "reap [--json] [--dry-run]",
     "stop <name> [--force]",
-    "rm <name> [--force]   --force drops the registry row even when the row is LIVE or harness teardown fails; a live pane worker that cannot be stopped is still refused; the process survives for bg and headless rows, a mux-hosted pane is killed with it",
+    "rm <name> [--force]   --force drops the registry row even when the row is LIVE or harness teardown fails; a live pane worker that cannot be stopped is still refused; a claude row's harness session is removed too (claude rm <short_id>), and claude removes that session's WORKTREE under its own guards - it keeps a worktree with uncommitted changes and refuses one holding commits it cannot confirm are saved elsewhere; a non-claude bg or headless process survives, a mux-hosted pane is killed with it",
     "loop-check --state <target-state.md> --transcript <transcript.jsonl> --cwd <project-root> [--events <events.jsonl>] [--global-events <global.jsonl>] [--settings <config.toml>] [--ledger <ledger.json>] [--now <rfc3339>] [--gh-bin <path>] [--git-bin <path>]",
     "finalize --state <target-state.md> --cwd <project-root> --reason <TerminationReason> [--transcript <transcript.jsonl>]",
     "reconcile",
@@ -3285,6 +3285,10 @@ fn verb_usage(verb: &str) -> Option<&'static str> {
         .iter()
         .copied()
         .find(|usage| usage.split_whitespace().next() == Some(verb))
+}
+
+fn warns_on_daemon_drift(verb: &str) -> bool {
+    matches!(verb, "list" | "rm")
 }
 
 /// True when `--help`/`-h` appears in the verb's OWN options, i.e. before an
@@ -3391,6 +3395,24 @@ mod tests {
         assert!(verb_usage("loop").unwrap().starts_with("loop run"));
         assert!(verb_usage("loop-check").unwrap().starts_with("loop-check"));
         assert!(verb_usage("definitely-not-a-verb").is_none());
+    }
+
+    #[test]
+    fn rm_usage_names_the_claude_cascade_and_worktree() {
+        let usage = verb_usage("rm").expect("rm usage line");
+        assert!(usage.contains("claude rm"), "rm help must name the cascade verb");
+        assert!(usage.contains("short_id"), "rm help must name the join key");
+        assert!(
+            usage.to_ascii_lowercase().contains("worktree"),
+            "rm help must say a removal can remove a worktree"
+        );
+    }
+
+    #[test]
+    fn rm_runs_the_same_daemon_drift_probe_as_list() {
+        assert!(warns_on_daemon_drift("list"));
+        assert!(warns_on_daemon_drift("rm"));
+        assert!(!warns_on_daemon_drift("spawn"));
     }
 
     // -----------------------------------------------------------------------
