@@ -3322,9 +3322,17 @@ mod tests {
         );
         let rows = derive_rows(&raw, NOW).unwrap();
         let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
-        assert_eq!(get("z").route.as_deref(), Some("zai"), "null route falls to provider");
+        assert_eq!(
+            get("z").route.as_deref(),
+            Some("zai"),
+            "null route falls to provider"
+        );
         assert_eq!(get("z").model.as_deref(), Some("glm-5.3-flash[1m]"));
-        assert_eq!(get("r").route.as_deref(), Some("openrouter"), "declared route wins");
+        assert_eq!(
+            get("r").route.as_deref(),
+            Some("openrouter"),
+            "declared route wins"
+        );
         assert_eq!(get("bare").route, None);
         assert_eq!(get("bare").model, None);
         assert_eq!(

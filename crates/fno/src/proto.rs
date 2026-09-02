@@ -4117,7 +4117,10 @@ mod tests {
         assert_eq!(row.route, None);
         let encoded = serde_json::to_string(&row).unwrap();
         assert!(!encoded.contains("harness"), "None axes stay off the wire");
-        assert!(!encoded.contains("\"model\""), "None model stays off the wire");
+        assert!(
+            !encoded.contains("\"model\""),
+            "None model stays off the wire"
+        );
         let filled_json = r#"{"squad":null,"name":"z","pane_id":null,
                       "badge":null,"reason":null,"exited":false,
                       "harness":"claude","model":"glm-5.3-flash[1m]","route":"zai"}"#;
@@ -4450,9 +4453,9 @@ mod tests {
                 area: (24, 80),
                 agents: vec![
                     AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                        harness: None,
+                        model: None,
+                        route: None,
                         reach: Reach::Locate,
                         spawned_by_session: None,
                         harness_session_id: None,
@@ -4501,9 +4504,9 @@ mod tests {
                         pane_activity: None,
                     },
                     AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                        harness: None,
+                        model: None,
+                        route: None,
                         reach: Reach::Locate,
                         spawned_by_session: None,
                         harness_session_id: None,

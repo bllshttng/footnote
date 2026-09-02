@@ -17226,9 +17226,9 @@ mod tests {
             (AgentNoPaneReason::UnsupportedHarness, "unsupported harness"),
         ] {
             let dead = AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                harness: None,
+                model: None,
+                route: None,
                 name: "t-dead-paneless".into(),
                 exited: true,
                 no_pane_reason: Some(reason),
@@ -18392,9 +18392,9 @@ mod tests {
         let mut view = two_pane_view();
         for p in 100..140u64 {
             view.layout.agents.push(AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                harness: None,
+                model: None,
+                route: None,
                 name: format!("w{p}"),
                 // (x-c5ee) Working, not idle, so the top-K cap never folds them:
                 // this test needs a long, fully-rendered scrollable list.
@@ -21632,9 +21632,9 @@ mod tests {
         // top-K cap, so all 40 render and the list still reaches the bottom.
         let agents: Vec<AgentRow> = (0..40)
             .map(|i| AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                harness: None,
+                model: None,
+                route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
@@ -26402,9 +26402,9 @@ mod tests {
             area: (29, 72),
             agents: vec![
                 AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                    harness: None,
+                    model: None,
+                    route: None,
                     reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
@@ -26437,9 +26437,9 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                    harness: None,
+                    model: None,
+                    route: None,
                     reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
@@ -26472,9 +26472,9 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                    harness: None,
+                    model: None,
+                    route: None,
                     reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
@@ -26583,9 +26583,9 @@ mod tests {
         // all-exited squad keeps its ✗ count so dead agents stay discoverable.
         fn ar(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
             AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                harness: None,
+                model: None,
+                route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
@@ -26850,9 +26850,9 @@ mod tests {
         let panes = view.layout.panes.clone();
         let agents: Vec<AgentRow> = (0..8)
             .map(|i| AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                harness: None,
+                model: None,
+                route: None,
                 name: format!("a{i}"),
                 pane_id: Some(100 + i),
                 ..focus_agent(0)
@@ -26903,9 +26903,9 @@ mod tests {
         let panes = view.layout.panes.clone();
         let agents: Vec<AgentRow> = (0..8)
             .map(|i| AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                harness: None,
+                model: None,
+                route: None,
                 name: format!("a{i}"),
                 pane_id: Some(100 + i),
                 ..focus_agent(0)
@@ -27013,9 +27013,9 @@ mod tests {
             area: (29, 72),
             agents: vec![
                 AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                    harness: None,
+                    model: None,
+                    route: None,
                     reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
@@ -27048,9 +27048,9 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                    harness: None,
+                    model: None,
+                    route: None,
                     reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
@@ -27083,9 +27083,9 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                    harness: None,
+                    model: None,
+                    route: None,
                     reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
@@ -27121,9 +27121,9 @@ mod tests {
                 // load-bearing "attention is never dimmed" branch. The accent
                 // must win over the external DIM modifier.
                 AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                    harness: None,
+                    model: None,
+                    route: None,
                     reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
@@ -29918,9 +29918,9 @@ mod tests {
         let mut v = two_pane_view();
         v.layout.agents = vec![
             AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                harness: None,
+                model: None,
+                route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
@@ -29953,9 +29953,9 @@ mod tests {
                 pane_activity: None,
             },
             AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                harness: None,
+                model: None,
+                route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
@@ -30237,9 +30237,9 @@ mod tests {
         let mut v = two_pane_view();
         v.layout.agents = vec![
             AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                harness: None,
+                model: None,
+                route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
@@ -30272,9 +30272,9 @@ mod tests {
                 pane_activity: None,
             },
             AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                harness: None,
+                model: None,
+                route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
@@ -31538,9 +31538,9 @@ mod tests {
             .iter()
             .map(|r| {
                 let row = AgentRow {
-            harness: None,
-            model: None,
-            route: None,
+                    harness: None,
+                    model: None,
+                    route: None,
                     basis: r["basis"].as_str().map(str::to_string),
                     last_activity_age_s: r["last_activity_age_s"].as_u64(),
                     exited: r["exited"].as_bool().unwrap_or(false),

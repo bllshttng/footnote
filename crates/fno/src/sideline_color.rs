@@ -136,8 +136,7 @@ fn read_palette() -> SidelinePalette {
         .filter(|v| !v.is_empty())
         .map(|v| PathBuf::from(v).with_file_name("config.toml"))
         .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".fno").join("config.toml"))
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno").join("config.toml"))
         });
     if let Some(g) = global {
         candidates.push(g);
@@ -156,9 +155,7 @@ fn read_palette() -> SidelinePalette {
                     .and_then(|t| t.as_table())
                     .map(|t| {
                         t.iter()
-                            .filter_map(|(k, v)| {
-                                v.as_str().map(|s| (k.to_string(), s.to_string()))
-                            })
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string())))
                             .collect()
                     })
                     .unwrap_or_default()
@@ -178,10 +175,18 @@ fn read_palette() -> SidelinePalette {
                 .filter_map(|r| r.as_table())
                 .map(|t| RoutingRow {
                     name: t.get("name").and_then(|v| v.as_str()).unwrap_or("").into(),
-                    harness: t.get("harness").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    harness: t
+                        .get("harness")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .into(),
                     model: t.get("model").and_then(|v| v.as_str()).unwrap_or("").into(),
                     route: t.get("route").and_then(|v| v.as_str()).unwrap_or("").into(),
-                    account: t.get("account").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    account: t
+                        .get("account")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .into(),
                     color: t.get("color").and_then(|v| v.as_str()).unwrap_or("").into(),
                 })
                 .collect();
@@ -204,10 +209,10 @@ fn builtin_color(axis: Axis, value: &str) -> Option<Color> {
     let named = |idx: u8| Some(Color::Indexed(idx));
     match axis {
         Axis::Route => match value {
-            "zai" => named(2),         // green: the GLM-via-zai bill
-            "openrouter" => named(5),  // magenta: the open catalog bill
-            "openai" => named(4),      // blue: codex / GPT lanes
-            "anthropic" => named(6),   // cyan: subscription claude
+            "zai" => named(2),        // green: the GLM-via-zai bill
+            "openrouter" => named(5), // magenta: the open catalog bill
+            "openai" => named(4),     // blue: codex / GPT lanes
+            "anthropic" => named(6),  // cyan: subscription claude
             _ => None,
         },
         Axis::Harness => match value {
@@ -251,7 +256,8 @@ pub fn resolve_lane_color(
     // 1. The routing row: every declared (non-empty) field must match the
     // agent's axes (an empty declared field is a wildcard); the first
     // matching row carrying a color wins (first declaration wins).
-    let matches = |declared: &str, actual: Option<&str>| declared.is_empty() || actual == Some(declared);
+    let matches =
+        |declared: &str, actual: Option<&str>| declared.is_empty() || actual == Some(declared);
     let matched_row = pal.routing_rows.iter().find(|r| {
         (r.harness.is_empty() && r.model.is_empty() && r.route.is_empty() && r.account.is_empty())
             == false
@@ -276,8 +282,8 @@ pub fn resolve_lane_color(
         }
     }
     if let Some(rt) = route {
-        if let Some(c) = SidelinePalette::table_color(&pal.route, rt)
-            .or_else(|| builtin_color(Axis::Route, rt))
+        if let Some(c) =
+            SidelinePalette::table_color(&pal.route, rt).or_else(|| builtin_color(Axis::Route, rt))
         {
             return Some(c);
         }
@@ -360,10 +366,7 @@ mod tests {
         assert_eq!(parse_color("chartreuse"), None);
         assert_eq!(parse_color("cyan"), Some(Color::Indexed(6)));
         assert_eq!(parse_color("indexed(200)"), Some(Color::Indexed(200)));
-        assert_eq!(
-            parse_color("#12abF0"),
-            Some(Color::Rgb(0x12, 0xab, 0xf0))
-        );
+        assert_eq!(parse_color("#12abF0"), Some(Color::Rgb(0x12, 0xab, 0xf0)));
         // An unknown color inside a cascade position falls THROUGH to the
         // built-in rather than blanking the row.
         assert_eq!(
@@ -395,6 +398,10 @@ mod tests {
         assert_eq!(parse_color("#12a"), None);
         assert_eq!(parse_color("#zzzzzz"), None);
         assert_eq!(parse_color("indexed("), None);
-        assert_eq!(parse_color("indexed(999)"), None, "u8 range is the contract");
+        assert_eq!(
+            parse_color("indexed(999)"),
+            None,
+            "u8 range is the contract"
+        );
     }
 }

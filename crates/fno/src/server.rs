@@ -17338,8 +17338,8 @@ mod tests {
             // A pane hosted by ANOTHER session -> that session's server renders
             // it; correctly skipped here.
             RegistryAgent {
-            model: None,
-            route: None,
+                model: None,
+                route: None,
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
@@ -17366,8 +17366,8 @@ mod tests {
             // A bg worker: paneless, no squad match -> watch-only orphan, and
             // it carries a claude jobId so the sideline can attach it.
             RegistryAgent {
-            model: None,
-            route: None,
+                model: None,
+                route: None,
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
@@ -17394,8 +17394,8 @@ mod tests {
             // A live codex worker with a session identity but no pane or attach
             // target must project the typed branch-four recovery reason.
             RegistryAgent {
-            model: None,
-            route: None,
+                model: None,
+                route: None,
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: Some("codex-live-id".into()),
@@ -17533,8 +17533,8 @@ mod tests {
             // but its registry cwd "/w" matches no origin - membership must win.
             agent_in("main", 42, None, false),
             RegistryAgent {
-            model: None,
-            route: None,
+                model: None,
+                route: None,
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
@@ -17669,8 +17669,8 @@ mod tests {
         let mut core = empty_core();
         core.agents = vec![
             RegistryAgent {
-            model: None,
-            route: None,
+                model: None,
+                route: None,
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
@@ -17696,8 +17696,8 @@ mod tests {
             },
             // An exited external row (dead pane beat the upgrade): not attachable.
             RegistryAgent {
-            model: None,
-            route: None,
+                model: None,
+                route: None,
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
