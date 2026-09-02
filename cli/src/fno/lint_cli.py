@@ -21,7 +21,8 @@ import typer
 #
 # The per-check options survive as options on the one verb, dispatched by
 # signature rather than by name: a check is called with only the parameters it
-# declares, so `--update` reaches `verb-ratchet` and nothing else.
+# declares, so `--update` reaches `verb-ratchet` and `seam-crossings` and
+# nothing else.
 #
 # A check's option must still be DECLARED on `lint` below, and forgetting one is
 # silent here and loud four jobs later in CI - `--surface` was missed on the
@@ -41,6 +42,7 @@ CHECKS: dict[str, str] = {
     "registry": "registry",
     "state-roots": "state_roots",
     "hook-tombstones": "hook_tombstones",
+    "seam-crossings": "seam_crossings",
 }
 
 
@@ -922,6 +924,21 @@ def verb_ratchet(update: bool = False) -> None:
     raise typer.Exit(0 if report.ok else 1)
 
 
+def seam_crossings(update: bool = False) -> None:
+    """Ratchet the Rust/Python seam's crossing surface.
+
+    Thin wrapper: the three-assertion check (crossing sites, resolver
+    functions, the Python door) lives in ``fno.lint_seam_crossings`` so the
+    injected-drift selftest can drive the module API against a fixture tree
+    without going through the CLI dispatcher.
+    """
+    from fno.lint_seam_crossings import run
+
+    code = run(_repo_root(), update=update)
+    if code:
+        raise typer.Exit(code)
+
+
 # `comment` has no chokepoint. A PR comment goes out through `gh pr comment`,
 # which this repo never wraps, so the author runs the check by hand. It is named
 # here so a comment body is checkable at all, and docs/style-rules.md says
@@ -1558,7 +1575,13 @@ def lint(
         help="Which check to run: " + " | ".join(CHECKS),
     ),
     update: bool = typer.Option(
-        False, "--update", help="verb-ratchet: regenerate scripts/ci/verb-baseline.txt."
+        False,
+        "--update",
+        help=(
+            "Regenerate a baseline after an intentional change. "
+            "verb-ratchet: scripts/ci/verb-baseline.txt. "
+            "seam-crossings: scripts/ci/seam-crossings-baseline.txt."
+        ),
     ),
     no_degrade: bool = typer.Option(
         False, "--no-degrade", help="shellout-drift: fail instead of degrading."
