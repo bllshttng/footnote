@@ -1047,8 +1047,8 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_config_env();
         let cwd = write_project_settings("floor-explicit", "[review]\nposture = \"tests_pass\"\n");
-        let reason = automerge_posture_floor_block_reason(&cwd)
-            .expect("tests_pass is below the floor");
+        let reason =
+            automerge_posture_floor_block_reason(&cwd).expect("tests_pass is below the floor");
         assert!(reason.contains("tests_pass"), "{reason}");
         assert!(reason.contains("self_review"), "{reason}");
     }
