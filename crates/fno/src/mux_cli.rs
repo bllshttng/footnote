@@ -2991,6 +2991,15 @@ worker pane outlives the server outright and a fresh server re-adopts it in plac
 keeper list` reads them); startup restore holds (default) or idles it by policy; `fno mux \
 workspace restore` respawns it on demand. A run without --worker records no member.";
 
+/// (x-b029) What the `fno_id` column answers, stated where the listing is
+/// read: identity, never idleness or reusability. The dash is reserved for
+/// panes with no fno evidence at all; `unresolved:<reason>` marks an fno pane
+/// whose session id never resolved, so it can never share the dash.
+pub const PANE_LS_IDENTITY_HELP: &str = "pane ls fno_id answers identity, not idleness: `-` means \
+no fno evidence at all; `unresolved:spawned-name` / `unresolved:name-as-id` mean an fno pane whose \
+session id never resolved. Whether a pane is idle or reusable is `fno mux pane wait --quiet-ms <n>` \
+(or the `pristine_idle_shell` field in --json), never this column.";
+
 pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let verb = args
         .first()
@@ -2998,7 +3007,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         .ok_or_else(|| format!("pane needs a verb: {PANE_VERBS}"))?;
     if matches!(verb, "-h" | "--help") {
         return Err(format!(
-            "{PANE_REFERENCE_USAGE}; verbs: {PANE_VERBS}\n{PANE_SEND_RAW_HELP}\n{PANE_RUN_WORKER_HELP}"
+            "{PANE_REFERENCE_USAGE}; verbs: {PANE_VERBS}\n{PANE_SEND_RAW_HELP}\n{PANE_RUN_WORKER_HELP}\n{PANE_LS_IDENTITY_HELP}"
         ));
     }
 
@@ -3059,7 +3068,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             match tok {
                 "-h" | "--help" => {
                     return Err(format!(
-                        "{PANE_REFERENCE_USAGE}; verbs: {PANE_VERBS}\n{PANE_SEND_RAW_HELP}\n{PANE_RUN_WORKER_HELP}"
+                        "{PANE_REFERENCE_USAGE}; verbs: {PANE_VERBS}\n{PANE_SEND_RAW_HELP}\n{PANE_RUN_WORKER_HELP}\n{PANE_LS_IDENTITY_HELP}"
                     ))
                 }
                 "--" => {
@@ -5541,6 +5550,51 @@ fn tab_location_lines(
     out
 }
 
+/// (x-b029) True for the session-id shapes harnesses mint: the hyphenated
+/// 36-char hex form (claude UUIDv4, codex UUIDv7) and opencode's
+/// `ses_` + alphanumerics (`harnesses/opencode.py:is_session_id` is the
+/// Python twin). A populated `fno_id` of any other shape is a worker NAME
+/// the registry's identity slot holds, never an id.
+pub fn session_id_shaped(value: &str) -> bool {
+    if let Some(tail) = value.strip_prefix("ses_") {
+        return !tail.is_empty() && tail.bytes().all(|c| c.is_ascii_alphanumeric());
+    }
+    let b = value.as_bytes();
+    if b.len() != 36 {
+        return false;
+    }
+    for (i, c) in b.iter().enumerate() {
+        let ok = match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+/// (x-b029) The `fno_id` column for one pane: `(state, cell)`. Three states
+/// where two lived before. A RESOLVED session id. UNRESOLVED with the reason
+/// named, for a pane carrying fno evidence but no resolvable id:
+/// `spawned-name` (the spawn captured a worker `name`, so the pane is fno's
+/// even though the registry join found no session id) or `name-as-id` (the
+/// registry identity slot holds a worker name). And the `-` sentinel, now
+/// reserved for panes with NO fno evidence at all. Pure so the
+/// self-contradicting row (a worker name beside `-`) is unit-testable without
+/// a socket.
+pub fn pane_identity_cell(p: &proto::PaneInfo) -> (&'static str, String) {
+    match p.fno_id.as_deref() {
+        Some(id) if session_id_shaped(id) => ("resolved", id.to_string()),
+        Some(_) => ("unresolved:name-as-id", "unresolved:name-as-id".into()),
+        None => match p.name.as_deref() {
+            Some(_) => ("unresolved:spawned-name", "unresolved:spawned-name".into()),
+            None => ("untracked", "-".into()),
+        },
+    }
+}
+
 fn render_reply(
     reply: ServerMsg,
     json: bool,
@@ -5554,9 +5608,27 @@ fn render_reply(
                 panes.retain(|p| p.fno_id.as_deref() == Some(want));
             }
             if json {
+                // (x-b029) Each row carries `fno_id_state` beside the raw
+                // `fno_id`, so a JSON consumer can tell a resolved session id
+                // from a name-shaped registry identity from an untracked pane
+                // without re-deriving the shape rule. The raw value stays for
+                // callers that match it against a registry identity.
+                let rows: Vec<serde_json::Value> = panes
+                    .iter()
+                    .map(|p| {
+                        let mut obj = serde_json::to_value(p).unwrap_or(serde_json::Value::Null);
+                        if let Some(o) = obj.as_object_mut() {
+                            o.insert(
+                                "fno_id_state".into(),
+                                serde_json::json!(pane_identity_cell(p).0),
+                            );
+                        }
+                        obj
+                    })
+                    .collect();
                 println!(
                     "{}",
-                    serde_json::to_string(&panes).unwrap_or_else(|_| "[]".into())
+                    serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
                 );
             } else {
                 for p in &panes {
@@ -5564,7 +5636,9 @@ fn render_reply(
                         .child_pid
                         .map(|n| n.to_string())
                         .unwrap_or_else(|| "-".into());
-                    let fno = p.fno_id.as_deref().unwrap_or("-");
+                    // (x-b029) The column names why an id is absent instead of
+                    // printing one dash for two opposite states.
+                    let fno = pane_identity_cell(p).1;
                     let name = p.name.as_deref().unwrap_or("-");
                     let tab = tab_label(p.tab_name.as_deref(), p.tab_ordinal);
                     // (x-dfe7) The current harness session prints BESIDE the

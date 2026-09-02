@@ -344,6 +344,11 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # hook calls it synchronously. Routing it to the daemon would make a sweep
     # for stray processes lazy-start a process. No Rust client port.
     "orphans",
+    # x-b029: the pane/registry identity cross-check. Pure Python (one pane ls
+    # subprocess + load_registry + a ps probe); a mismatch is a READING, never
+    # a repair, and the daemon holds no such verb, so it must never auto-route
+    # to the daemon.
+    "pane-identity",
     # x-9de7: the codex late-bind helper `late_bind_codex_sessions` (Rust,
     # fno-agents daemon) shells out to for one pane's rollout session id.
     # Pure Python (fno.agents.mux_spawn._codex_session_id_for_pid, reads the
