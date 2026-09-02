@@ -173,7 +173,7 @@ fn rung_to_graph_status(rung: &str) -> &'static str {
 /// Store-level failure taxonomy, mirroring the Python exceptions by name.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    #[error("graph at {0} is corrupt (unparseable JSON or a non-object root)")]
+    #[error("{0}")]
     Corrupt(String),
     #[error("graph at {0} could not be read: {1}")]
     Unreadable(String, String),
@@ -230,6 +230,10 @@ pub enum FieldUpdate {
     /// Remove the key explicitly. Deliberate; never reachable by passing an
     /// empty value to [`FieldUpdate::parse`].
     Clear,
+    /// Write a non-text JSON value verbatim (a rank number, a flag bool).
+    /// Only reachable for fields OUTSIDE [`PRESENCE_TEXT_FIELDS`]: the
+    /// presence invariant governs text, not structured values.
+    Raw(Value),
 }
 
 impl FieldUpdate {
@@ -240,6 +244,25 @@ impl FieldUpdate {
         match raw {
             None => Ok(FieldUpdate::Keep),
             Some(v) => Ok(FieldUpdate::Set(TextField::parse(field, v)?)),
+        }
+    }
+
+    /// Build the update a JSON request value means. Strings on a presence
+    /// field go through [`TextField::parse`]; non-text values on other
+    /// fields (the board rank's float, most notably) set verbatim.
+    pub fn from_value(field: &str, value: &Value) -> Result<Self, StoreError> {
+        match value {
+            Value::Null => Ok(FieldUpdate::Keep),
+            Value::Object(o) if o.get("clear") == Some(&Value::Bool(true)) => Ok(FieldUpdate::Clear),
+            Value::String(s) => Ok(FieldUpdate::Set(TextField::parse(field, s)?)),
+            other => {
+                if PRESENCE_TEXT_FIELDS.contains(&field) {
+                    let s = other.as_str().unwrap_or_default();
+                    Ok(FieldUpdate::Set(TextField::parse(field, s)?))
+                } else {
+                    Ok(FieldUpdate::Raw(other.clone()))
+                }
+            }
         }
     }
 }
@@ -255,6 +278,9 @@ pub fn apply_field_update(entry: &mut Map<String, Value>, field: &str, update: &
         }
         FieldUpdate::Clear => {
             entry.shift_remove(field);
+        }
+        FieldUpdate::Raw(value) => {
+            entry.insert(field.to_string(), value.clone());
         }
     }
 }
@@ -391,6 +417,60 @@ pub enum RawRead {
     MalformedRoot,
 }
 
+/// Defuse the non-finite float literals Python's `json.dumps` writes bare
+/// (`Infinity`, `-Infinity`, `NaN`) into JSON-null, string-aware. The old
+/// Python store read such a file happily and its rank math treated a
+/// non-finite rank as unranked; the ported store cannot carry a non-finite
+/// f64 at all, so the honest equivalent is to read them as null (unranked)
+/// and let the next write publish a finite file. Tokens OUTSIDE strings
+/// only: a string value spelling "Infinity" is data, not a float.
+fn defuse_nonfinite(text: &str) -> String {
+    const TOKENS: [&str; 3] = ["Infinity", "-Infinity", "NaN"];
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut rest = text;
+    while !rest.is_empty() {
+        let c = rest.chars().next().unwrap();
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            rest = &rest[c.len_utf8()..];
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+            continue;
+        }
+        let hit = TOKENS.iter().find(|t| rest.starts_with(**t));
+        if let Some(tok) = hit {
+            let after = &rest[tok.len()..];
+            let next = after.chars().next();
+            let delimited = next.is_none()
+                || matches!(
+                    next,
+                    Some(',') | Some('}') | Some(']') | Some(' ') | Some('\n') | Some('\r') | Some('\t')
+                );
+            if delimited {
+                out.push_str("null");
+                rest = after;
+                continue;
+            }
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
 /// Raw read of the entries file. Raises nothing; callers map [`RawRead`] onto
 /// their own strictness (read_graph swallows Corrupt to empty; the strict
 /// read surfaces it).
@@ -410,16 +490,26 @@ pub fn read_raw(path: &Path) -> Result<RawRead, StoreError> {
             "empty (zero bytes)".to_string(),
         ));
     }
-    let data: Value =
-        serde_json::from_str(&text).map_err(|_| StoreError::Corrupt(path.display().to_string()))?;
+    let text = if text.contains("Infinity") || text.contains("NaN") {
+        defuse_nonfinite(&text)
+    } else {
+        text
+    };
+    // The three parse shapes answer as RawRead::Corrupt (not Err) so the
+    // caller decides strictness: the soft read backs the bytes up before
+    // surfacing them; the strict read just diagnoses.
+    let data: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return Ok(RawRead::Corrupt(format!("{} is not valid JSON", path.display()))),
+    };
     let Some(obj) = data.as_object() else {
-        return Err(StoreError::Corrupt(path.display().to_string()));
+        return Ok(RawRead::Corrupt(format!("{} root is not a JSON object", path.display())));
     };
     let Some(entries) = obj.get("entries") else {
         return Ok(RawRead::MalformedRoot);
     };
     let Some(list) = entries.as_array() else {
-        return Err(StoreError::Corrupt(path.display().to_string()));
+        return Ok(RawRead::Corrupt(format!("{} 'entries' is not a list", path.display())));
     };
     Ok(RawRead::Entries(list.clone()))
 }
@@ -1743,6 +1833,31 @@ pub fn locked_mutate(path: &Path, input: MutateInput, timeout: Duration) -> Resu
     );
     let mut entries = input.entries;
 
+    // The presence invariant holds at the STORE boundary, not only at the
+    // typed update path: the Python mutator runs client-side against plain
+    // dicts, so `FieldUpdate` alone cannot see everything a commit carries.
+    // An entry that arrives with an empty/whitespace-only presence field is
+    // refused outright -- the measured `--details ""` wipe (3,036 characters,
+    // 2026-09-02) is unrepresentable even from a hand-built payload. Clearing
+    // a populated field stays expressible the explicit way: remove the key
+    // ([`FieldUpdate::Clear`]), never write an empty string.
+    for e in entries.iter() {
+        let Some(obj) = e.as_object() else {
+            continue;
+        };
+        let id = entry_id(e).unwrap_or("<no id>");
+        for field in PRESENCE_TEXT_FIELDS {
+            if let Some(Value::String(s)) = obj.get(*field) {
+                if s.trim().is_empty() {
+                    return Err(StoreError::EmptyFieldUpdate(format!(
+                        "refusing to persist an empty '{field}' on entry '{id}': \
+                         pass real content, or remove the key to clear it"
+                    )));
+                }
+            }
+        }
+    }
+
     // Slug assignment on EVERY persisted mutation (ab-f82e8083).
     ensure_slugs(&mut entries);
     recompute_statuses(&mut entries);
@@ -1831,17 +1946,38 @@ fn same_file(a: &Path, b: &Path) -> bool {
 /// bytes are copied to a `.json.bak` sibling before the error surfaces, so
 /// the recovery the store's messages promise actually exists on disk.
 pub fn read_defaulted(path: &Path, keep_malformed: bool) -> Result<Vec<Value>, StoreError> {
+    read_defaulted_opts(path, keep_malformed, true)
+}
+
+/// The strict variant takes `backup_on_corrupt = false`: read_graph_strict's
+/// contract is that diagnosis is read-only and never writes a .bak.
+pub fn read_defaulted_opts(
+    path: &Path,
+    keep_malformed: bool,
+    backup_on_corrupt: bool,
+) -> Result<Vec<Value>, StoreError> {
     match read_raw(path) {
         Ok(RawRead::Empty) => Ok(vec![]),
-        Ok(RawRead::MalformedRoot) => Err(StoreError::MalformedRoot(path.display().to_string())),
+        Ok(RawRead::MalformedRoot) => {
+            if backup_on_corrupt {
+                // Soft read: a root with no entries key reads EMPTY, never an
+                // error -- the malformed-root signal is reachable only through
+                // the strict path, exactly as the Python soft reader answered.
+                Ok(vec![])
+            } else {
+                Err(StoreError::MalformedRoot(path.display().to_string()))
+            }
+        }
         Ok(RawRead::Corrupt(reason)) => {
-            let backup = path.with_file_name(format!(
-                "{}.bak",
-                path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
-            ));
-            // path.with_suffix(".json.bak") in Python; the file-name form
-            // keeps "graph.json" -> "graph.json.bak" for the same effect.
-            let _ = std::fs::copy(path, &backup);
+            if backup_on_corrupt {
+                let backup = path.with_file_name(format!(
+                    "{}.bak",
+                    path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+                ));
+                // path.with_suffix(".json.bak") in Python; the file-name form
+                // keeps "graph.json" -> "graph.json.bak" for the same effect.
+                let _ = std::fs::copy(path, &backup);
+            }
             Err(StoreError::Corrupt(reason))
         }
         Ok(RawRead::Entries(mut v)) => {
@@ -1980,6 +2116,49 @@ mod tests {
     }
 
     #[test]
+    fn commit_refuses_an_empty_presence_field_even_from_a_raw_mutator() {
+        // The Python mutator runs client-side against plain dicts, so the
+        // store boundary enforces what the typed update path cannot see: a
+        // hand-built payload carrying details:"" never persists.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        let err = locked_mutate(
+            &graph,
+            MutateInput {
+                entries: vec![json!({"id": "ab-1", "title": "t", "details": ""})],
+                canonical_path: None,
+                base_version: None,
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+        assert!(matches!(err, StoreError::EmptyFieldUpdate(_)), "{err}");
+        // Whitespace-only is the same wipe shape.
+        let err = locked_mutate(
+            &graph,
+            MutateInput {
+                entries: vec![json!({"id": "ab-1", "completion_note": "   "})],
+                canonical_path: None,
+                base_version: None,
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+        assert!(matches!(err, StoreError::EmptyFieldUpdate(_)), "{err}");
+        // Removing the key stays legal (the explicit clear).
+        locked_mutate(
+            &graph,
+            MutateInput {
+                entries: vec![json!({"id": "ab-1", "title": "t"})],
+                canonical_path: None,
+                base_version: None,
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn lock_timeout_surfaces_inside_its_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
@@ -2084,5 +2263,27 @@ mod tests {
         // round trip.
         let v: Value = serde_json::from_str(r#"{"b": 1, "a": 2}"#).unwrap();
         assert_eq!(to_python_json(&v), "{\n  \"b\": 1,\n  \"a\": 2\n}");
+    }
+
+    #[test]
+    fn python_nonfinite_floats_defuse_to_null_and_strings_survive() {
+        // json.dumps(float("inf")) writes the bare token; the old Python
+        // store read it and its rank math treated non-finite as unranked.
+        // The port reads it as null (unranked) instead of refusing the file.
+        let raw = "{\"entries\": [{\"rank\": Infinity, \"neg\": -Infinity, \"nan\": NaN, \
+                   \"keep\": \"Infinity and NaN stay\", \"esc\": \"escaped \\\"Infinity\\\"\"}]}";
+        let defused = defuse_nonfinite(raw);
+        let v: Value = serde_json::from_str(&defused).expect("defused output parses");
+        let e = &v["entries"][0];
+        assert!(e["rank"].is_null());
+        assert!(e["neg"].is_null());
+        assert!(e["nan"].is_null());
+        assert_eq!(e["keep"], "Infinity and NaN stay");
+        assert_eq!(e["esc"], "escaped \"Infinity\"");
+        // A full file with a poisoned rank reads Entries, never Corrupt.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, raw).unwrap();
+        assert!(matches!(read_raw(&graph), Ok(RawRead::Entries(_))));
     }
 }

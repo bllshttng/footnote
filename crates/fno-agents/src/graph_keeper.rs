@@ -46,9 +46,10 @@ pub(crate) const TAG_IDENTIFY: u8 = 3;
 pub(crate) const TAG_RESPONSE: u8 = 4;
 pub(crate) const TAG_IDENTIFY_REPLY: u8 = 5;
 
-/// One request/response frame exchange bound: no frame larger than the
-/// daemon protocol's own cap (protocol.rs MAX_FRAME_BYTES).
-const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+/// One request/response frame exchange bound. Sized for a large operator
+/// graph's entries array, not the daemon protocol's cap: a canonical
+/// graph.json of 11 MB answers a `read` with a same-order JSON array.
+const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 /// Parsed `--store-keeper` lane argv:
 /// `--store-keeper --sock <path> --graph <path> [--session <id>]
@@ -258,13 +259,6 @@ fn serve_client(state: Arc<StoreState>, mut stream: UnixStream, identify: Vec<u8
                 ));
                 let _ = stream.flush();
                 shutdown.store(1, Ordering::SeqCst);
-                let _ = std::fs::remove_file(&state.graph.parent().map(|p| p.to_path_buf()).unwrap_or_default().join(
-                    state
-                        .graph
-                        .file_name()
-                        .map(|n| format!("{}.store.sock", n.to_string_lossy()))
-                        .unwrap_or_default(),
-                ));
                 let _ = std::fs::remove_file(store_socket_for(&state.graph));
                 std::process::exit(0);
             }
@@ -319,6 +313,40 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "op" => handle_op(state, &params),
         "read_archive" => handle_read_archive(state, &params),
         "read_file" => handle_read_file(state),
+        "defaults" => handle_pure(&params, |mut entries, p| {
+            graph_store::apply_defaults(
+                &mut entries,
+                p.get("keep_malformed").and_then(Value::as_bool).unwrap_or(false),
+            );
+            entries
+        }),
+        "recompute" => handle_pure(&params, |mut entries, _p| {
+            graph_store::recompute_statuses(&mut entries);
+            entries
+        }),
+        // The read-time readiness overlay (statuses.compute_readiness), for
+        // the client's pre-render pass: the write path's recompute does not
+        // derive `blocked` -- it is a read overlay -- so a mutation that
+        // newly blocks a sibling must overlay before rendering graph.md.
+        "overlay" => handle_pure(&params, |mut entries, _p| {
+            graph_store::apply_readiness_overlay(&mut entries);
+            entries
+        }),
+        "normalize_plan_path" => {
+            let normalized = graph_store::normalize_plan_path(opt_str(&params, "path"));
+            Ok(json!({ "path": normalized }))
+        }
+        // The canonical key order, for the ordering tests and any caller
+        // that documents the on-disk shape: one source of truth (the
+        // ported store's constant), never a re-typed copy.
+        "canonical_field_order" => {
+            Ok(json!({ "fields": graph_store::CANONICAL_FIELD_ORDER }))
+        }
+        // One named op applied over client-shipped rows, no file I/O and no
+        // publish: `set_related`, `plan_path_owner_conflict`, and friends
+        // run INSIDE a client mutator on an in-hand snapshot, where a full
+        // locked cycle would be a write the caller never asked for.
+        "pure_op" => handle_pure_op(&params),
         other => Err(StoreError::Invalid(format!("unknown store method {other:?}"))),
     };
     match result {
@@ -329,15 +357,37 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
 
 /// The default-entries read, returned with the byte-exact serialization the
 /// file leg produced, so the parity contract ("byte-for-byte on the
-/// serialized result") is checkable on the wire.
-fn handle_read(state: &StoreState, _params: &Value) -> Result<Value, StoreError> {
+/// serialized result") is checkable on the wire. `read` is the soft path
+/// (a corrupt read leaves a .bak behind, as read_graph did); `read_strict`
+/// diagnoses without writing.
+fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let _gate = state.write_gate.lock().unwrap_or_else(|e| e.into_inner());
-    let entries = graph_store::read_defaulted(&state.graph, false)?;
-    Ok(json!({
-        "entries": entries,
-        "serialized": graph_store::serialize_graph_file(&entries),
-        "entries_serialized": graph_store::serialize_entries(&entries),
-    }))
+    let strict = params.get("strict").and_then(Value::as_bool).unwrap_or(false);
+    let keep_malformed = params
+        .get("keep_malformed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // Entries only: the parity-era byte-serialization echoes rode every
+    // reply and tripled its size on a large graph; the differential stage
+    // that needed them is over (graph_store_parity.rs is characterization).
+    let entries = graph_store::read_defaulted_opts(&state.graph, keep_malformed, !strict)?;
+    Ok(json!({ "entries": entries }))
+}
+
+/// Pure transforms over client-shipped rows: the migration seam and the
+/// status cascade, for callers holding entries in memory (scoreboard fold,
+/// drift checks). No file I/O, no publish.
+fn handle_pure(
+    params: &Value,
+    f: impl FnOnce(Vec<Value>, &Value) -> Vec<Value>,
+) -> Result<Value, StoreError> {
+    let entries: Vec<Value> = params
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| StoreError::Invalid("pure methods need entries".into()))?
+        .clone();
+    let out = f(entries, params);
+    Ok(json!({ "entries": out }))
 }
 
 /// The raw file bytes + their digest, for the hash-validated read
@@ -364,7 +414,6 @@ fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
     Ok(json!({
         "version": version,
         "entries": entries,
-        "serialized": graph_store::serialize_graph_file(&entries),
     }))
 }
 
@@ -398,7 +447,6 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
 fn outcome_json(outcome: &graph_store::MutateOutcome) -> Value {
     json!({
         "entries": outcome.entries,
-        "serialized": graph_store::serialize_graph_file(&outcome.entries),
         "dropped": outcome.dropped,
         "backup": outcome.backup,
         "closure_releases": outcome
@@ -422,7 +470,7 @@ fn handle_read_archive(state: &StoreState, params: &Value) -> Result<Value, Stor
             "serialized": graph_store::serialize_graph_file(&entries),
         })),
         // The archive is advisory: any read failure degrades to empty.
-        Err(_) => Ok(json!({"entries": [], "serialized": "{\n  \"entries\": []\n}\n"})),
+        Err(_) => Ok(json!({"entries": []})),
     }
 }
 
@@ -467,17 +515,7 @@ fn apply_op_impl(entries: &mut Vec<Value>, name: &str, p: &Value) -> Result<Valu
                 .ok_or_else(|| StoreError::Invalid(format!("no node resolves to '{node_id}'")))?;
             let mut applied = 0usize;
             for (field, spec) in fields {
-                let update = match spec {
-                    Value::Null => FieldUpdate::Keep,
-                    Value::String(s) => FieldUpdate::Set(TextField::parse(field, s)?),
-                    Value::Object(o) if o.get("clear") == Some(&Value::Bool(true)) => {
-                        FieldUpdate::Clear
-                    }
-                    other => FieldUpdate::Set(TextField::parse(
-                        field,
-                        other.as_str().unwrap_or_default(),
-                    )?),
-                };
+                let update = FieldUpdate::from_value(field, spec)?;
                 if matches!(update, FieldUpdate::Keep) {
                     continue;
                 }
@@ -702,6 +740,31 @@ fn apply_op_impl(entries: &mut Vec<Value>, name: &str, p: &Value) -> Result<Valu
         }
         other => Err(StoreError::Invalid(format!("unknown op {other:?}"))),
     }
+}
+
+/// One named op applied over client-shipped rows, no file I/O and no
+/// publish: `set_related`, `plan_path_owner_conflict`, and friends run
+/// INSIDE a client mutator on an in-hand snapshot, where a full locked
+/// cycle would be a write the caller never asked for.
+fn handle_pure_op(params: &Value) -> Result<Value, StoreError> {
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| StoreError::Invalid("pure_op needs a name".into()))?;
+    let p = params.get("params").cloned().unwrap_or(Value::Null);
+    let mut entries: Vec<Value> = params
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| StoreError::Invalid("pure_op needs entries".into()))?
+        .clone();
+    let op_result = match name {
+        "canonicalize" => {
+            graph_store::canonicalize_entries(&mut entries);
+            json!({"ok": true})
+        }
+        other => apply_op(&mut entries, other, &p)?,
+    };
+    Ok(json!({ "entries": entries, "op": op_result }))
 }
 
 fn param_str<'a>(p: &'a Value, key: &str) -> Result<&'a str, StoreError> {
@@ -1221,11 +1284,43 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
 
 /// The socket path for a graph file: a sibling `<graph>.store.sock`, so the
 /// keeper's discovery needs no config and a tmp test graph never touches the
-/// operator's state root.
+/// operator's state root. When the sibling would overrun the unix-socket
+/// address limit (macOS binds 104 sun_path bytes, directory included), the
+/// socket moves to a uid-keyed root under the platform temp dir, named by
+/// the graph path's hash; mirrors the Python client's `store_socket_for`,
+/// which is the path authority (it passes --sock).
 pub fn store_socket_for(graph: &std::path::Path) -> PathBuf {
+    const SOCK_PATH_LIMIT: usize = 96;
+    let dir = graph.parent().unwrap_or(std::path::Path::new("."));
     let name = graph
         .file_name()
         .map(|n| format!("{}.store.sock", n.to_string_lossy()))
         .unwrap_or_else(|| "graph.store.sock".to_string());
-    graph.parent().unwrap_or(std::path::Path::new(".")).join(name)
+    let sibling = dir.join(&name);
+    if sibling.to_string_lossy().len() <= SOCK_PATH_LIMIT {
+        return sibling;
+    }
+    use sha2::Digest as _;
+    // Hash the ABSOLUTE spelling: the client resolves the graph before
+    // hashing, so a nonexistent graph absolute-izes lexically here too.
+    let absolute = match graph.canonicalize() {
+        Ok(p) => p,
+        Err(_) if graph.is_absolute() => graph.to_path_buf(),
+        Err(_) => std::env::current_dir()
+            .unwrap_or_default()
+            .join(graph),
+    };
+    let mut h = sha2::Sha256::new();
+    h.update(absolute.to_string_lossy().as_bytes());
+    let digest: String = h
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join("");
+    // SAFETY: getuid reads a per-process kernel value; it cannot fail or
+    // race, and this thread is not mid-syscall elsewhere.
+    let uid = unsafe { libc::getuid() };
+    let root = std::env::temp_dir().join(format!("fno-store-{uid}"));
+    root.join(format!("{}.sock", &digest[..16]))
 }

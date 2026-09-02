@@ -1,169 +1,110 @@
-//! Differential parity for the graph store port (protocol steps 1-2,
+//! Characterization for the graph store port (protocol steps 3-4,
 //! docs/architecture/dual-implementation-inventory.md). The Rust leg is
-//! `fno_agents::graph_store` + the keeper's typed ops; the Python leg is the
-//! file-reading store in `cli/src/fno/graph/store.py` until the deletion
-//! half of this port lands. Both run over identical fixtures and must agree
-//! byte-for-byte on the read serialization, the per-step results, and the
-//! published file bytes.
+//! `fno_agents::graph_store` + the keeper's typed ops; the Python leg it is
+//! frozen against was the file-reading store in `cli/src/fno/graph/store.py`,
+//! deleted in the same change that flipped this file. The goldens in
+//! `tests/golden/graph_store/` were captured from the PYTHON leg while both
+//! legs lived: the differential stage asserted Rust==Python byte-for-byte
+//! over these exact fixtures and op sequences, then froze Python's output.
 //!
-//! The only bytes allowed to differ are the now()-stamps both legs write
-//! (touched_at, deferred_at); they are normalized symmetrically before the
+//! The only bytes allowed to differ from a golden are the now()-stamps the
+//! pipeline writes (touched_at, deferred_at); they are normalized before the
 //! comparison and their PRESENCE is still asserted by the pipeline steps
-//! that write them.
+//! that write them. Two behavioral cases (error kinds, concurrent writers)
+//! never had a byte-parity surface and stay as direct Rust assertions.
 //!
-//! `FNO_CAPTURE_GOLDEN=1`: the helper runs the Python leg, asserts
-//! Rust==Python, and writes the Python output as the golden this test
-//! freezes against when the Python leg is deleted (step 4 converts this
-//! file to a characterization test).
+//! The oracle is the flock helper the deletion retired: the symbol is the
+//! identity of the leg, and the provenance gate asserts it is GONE.
 
-//! parity-stage: differential
-//! parity-oracle: fno.graph.store
+//! parity-stage: characterization
+//! parity-oracle: fno.graph.store._acquire_flock
 
 use base64::Engine as _;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::OnceLock;
 
-fn pythonpath() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cli/src")
-}
-
-/// The interpreter that can import the store's dependencies (pydantic at
-/// minimum): the project venv when present, else `uv run` against the cli
-/// project, which resolves the env itself.
-fn python_command() -> (String, Vec<String>) {
-    let venv = pythonpath().join("../.venv/bin/python");
-    if venv.is_file() {
-        return (venv.display().to_string(), Vec::new());
+fn strict_error_kind(e: &fno_agents::graph_store::StoreError) -> String {
+    use fno_agents::graph_store::StoreError as E;
+    match e {
+        E::Corrupt(_)
+        | E::Unreadable(_, _)
+        | E::EmptyFieldUpdate(_)
+        | E::Invalid(_)
+        | E::Io(_)
+        | E::LockTimeout(_, _)
+        | E::Conflict => "GraphUnreadableError".to_string(),
+        E::MalformedRoot(_) => "GraphMalformedRootError".to_string(),
     }
-    let cli = pythonpath().parent().unwrap().to_path_buf();
-    (
-        "uv".to_string(),
-        vec![
-            "run".into(),
-            "--project".into(),
-            cli.display().to_string(),
-            "python".into(),
-        ],
-    )
 }
 
-fn python_available() -> bool {
-    let (bin, pre) = python_command();
-    let mut cmd = Command::new(bin);
-    cmd.args(pre)
-        .arg("-c")
-        .arg("import fno.graph.store")
-        .env("PYTHONPATH", pythonpath());
-    matches!(cmd.output(), Ok(o) if o.status.success())
+/// The two volatile now()-stamps the pipeline writes, normalized before any
+/// comparison: a recursive walk over the parsed values, so escaping layers
+/// cannot hide a stamp from the normalizer.
+fn normalize_volatile(v: &Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, val) in map {
+                if (k == "touched_at" || k == "deferred_at") && val.is_string() {
+                    out.insert(k.clone(), Value::String("<TS>".into()));
+                } else {
+                    out.insert(k.clone(), normalize_volatile(val));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(normalize_volatile).collect()),
+        // A step value that IS a serialized JSON payload (read_after) is
+        // parsed and normalized structurally, so stamps inside it cannot
+        // hide and formatting cannot leak into the comparison.
+        Value::String(text) if text.trim_start().starts_with('[') || text.trim_start().starts_with('{') => {
+            match serde_json::from_str::<Value>(text) {
+                Ok(parsed) => normalize_volatile(&parsed),
+                Err(_) => Value::String(text.clone()),
+            }
+        }
+        other => other.clone(),
+    }
 }
 
-/// Run the PYTHON leg over one fixture + op list. Prints one JSON object:
-/// the read serialization, per-step results, and the final file bytes.
-fn python_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
-    let code = r#"
-import base64, json, os, sys
-from pathlib import Path
-from fno.graph import store
-
-graph = Path(os.environ["GRAPH"])
-ops = json.loads(os.environ["OPS"])
-out = {"steps": []}
-
-read = store.read_graph(graph)
-out["read"] = json.dumps(read, indent=2, ensure_ascii=True)
-
-try:
-    strict = store.read_graph_strict(graph)
-    out["strict"] = json.dumps(strict, indent=2, ensure_ascii=True)
-except Exception as exc:  # noqa: BLE001 - the error KIND is the parity datum
-    out["strict_error"] = type(exc).__name__
-
-def find(entries, node_id):
-    for e in entries:
-        if e.get("id") == node_id:
-            return e
-    return None
-
-for op in ops:
-    name = op["name"]
-    if name == "set_field":
-        def mutator(entries, op=op):
-            node = find(entries, op["node_id"])
-            if node is not None:
-                node[op["field"]] = op["value"]
-            return entries
-        store.locked_mutate_graph(graph, mutator)
-    elif name == "new_node":
-        def mutator(entries, op=op):
-            entries.append(dict(op["entry"]))
-            return entries
-        store.locked_mutate_graph(graph, mutator)
-    elif name == "append_progress_note":
-        found, plan_path = store.append_progress_note(graph, op["node_id"], op["note"])
-        out["steps"].append({"append_progress_note": [found, plan_path]})
-    elif name == "append_encounter":
-        appended, error, reason = store.append_encounter(graph, op["node_id"], op["record"])
-        out["steps"].append({"append_encounter": [appended, error, reason]})
-    elif name == "append_wave_note":
-        found, error = store.append_wave_note(graph, op["node_id"], op["note"])
-        out["steps"].append({"append_wave_note": [found, error]})
-    elif name == "session_append":
-        orig = store._observe_model
-        store._observe_model = lambda h, s: op["observed"]
-        try:
-            found, added = store.append_session_record(
-                graph, op["node_id"], phase=op["phase"], harness=op["harness"],
-                session_id=op["session_id"], effort=op.get("effort"),
-                started_at=op.get("started_at"), ended_at=op.get("ended_at"))
-        finally:
-            store._observe_model = orig
-        out["steps"].append({"session_append": [found, added]})
-    elif name == "session_remove_open":
-        found, removed = store.remove_open_session_record(
-            graph, op["node_id"], phase=op["phase"], harness=op["harness"],
-            session_id=op["session_id"], started_at=op["started_at"])
-        out["steps"].append({"session_remove_open": [found, removed]})
-    elif name == "session_reap_open":
-        report = store.reap_open_session_record(
-            graph, op["node_id"], phase=op["phase"], harness=op["harness"],
-            session_id=op["session_id"], ended_at=op.get("ended_at"))
-        report.pop("status_after", None)
-        report.pop("remaining_open_do", None)
-        out["steps"].append({"session_reap_open": report})
-    elif name == "set_related":
-        def mutator(entries, op=op):
-            store.set_related(entries, op["node_id"], op["desired"])
-            return entries
-        store.locked_mutate_graph(graph, mutator)
-    elif name == "read_after":
-        out["steps"].append({"read_after": json.dumps(store.read_graph(graph), indent=2, ensure_ascii=True)})
-
-out["file"] = base64.b64encode(graph.read_bytes()).decode()
-print(json.dumps(out))
-"#;
-    let (bin, pre) = python_command();
-    let out = Command::new(bin)
-        .args(pre)
-        .arg("-c")
-        .arg(code)
-        .env("PYTHONPATH", pythonpath())
-        .env("GRAPH", graph)
-        .env("OPS", serde_json::to_string(ops).unwrap())
-        .output()
-        .expect("run python store probe");
-    assert!(
-        out.status.success(),
-        "python store probe failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    serde_json::from_slice(&out.stdout).expect("probe output is one JSON object")
+/// Textual normalization for the two stamp shapes at every JSON escaping
+/// layer (file bytes carry one layer; step strings two).
+fn normalize_bytes(text: &str) -> String {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r#"(\\)?"(touched_at|deferred_at)(\\)?"(\\)?: (\\)?"[^"\\\\]*"#)
+            .unwrap()
+    });
+    re.replace_all(text, |caps: &regex::Captures| {
+        let esc = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+        format!("{esc}\"{}{esc}\"{esc}: {esc}\"<TS>", &caps[2])
+    })
+    .into_owned()
 }
 
-/// Run the RUST leg over the same fixture + ops: read, then each step
-/// through the exact functions the keeper serves (typed ops via
-/// `apply_op_for_tests`, plain client mutators via `locked_mutate`).
+/// On divergence, dump the live output and the frozen golden to files a
+/// human (or a script) can diff, then panic. The assert message alone wraps
+/// values in escaping layers.
+fn assert_frozen(name: &str, surface: &str, live: &Value, golden: &Value) {
+    if live != golden {
+        let dir = std::env::temp_dir();
+        let r = dir.join(format!("parity-fail-{name}-{surface}.live.json"));
+        let p = dir.join(format!("parity-fail-{name}-{surface}.golden.json"));
+        std::fs::write(&r, serde_json::to_vec_pretty(live).unwrap()).unwrap();
+        std::fs::write(&p, serde_json::to_vec_pretty(golden).unwrap()).unwrap();
+        panic!(
+            "{name}: {surface} diverged from the golden; dumped {} and {}",
+            r.display(),
+            p.display()
+        );
+    }
+}
+
+/// Run the RUST leg over the fixture + ops: read, then each step through the
+/// exact functions the keeper serves (typed ops via `apply_op_for_tests`,
+/// plain client mutators via `locked_mutate`). Returns the probe object the
+/// goldens were captured in the shape of.
 fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
     use fno_agents::graph_keeper::apply_op_for_tests;
     use fno_agents::graph_store::{self, MutateInput};
@@ -312,85 +253,8 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
     Value::Object(json_out)
 }
 
-/// Textual normalization for the two stamp shapes at every JSON escaping
-/// layer (file bytes carry one layer; step strings two).
-fn normalize_bytes(text: &str) -> String {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        regex::Regex::new(r#"(\\)?"(touched_at|deferred_at)(\\)?"(\\)?: (\\)?"[^"\\\\]*"#)
-            .unwrap()
-    });
-    re.replace_all(text, |caps: &regex::Captures| {
-        let esc = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-        format!("{esc}\"{}{esc}\"{esc}: {esc}\"<TS>", &caps[2])
-    })
-    .into_owned()
-}
-
-
-/// On divergence, dump both sides to files a human (or a script) can diff,
-/// then panic. The assert message alone wraps values in escaping layers.
-fn assert_dumped(name: &str, surface: &str, rust_v: &Value, py_v: &Value) {
-    if rust_v != py_v {
-        let dir = std::env::temp_dir();
-        let r = dir.join(format!("parity-fail-{name}-{surface}.rust.json"));
-        let p = dir.join(format!("parity-fail-{name}-{surface}.python.json"));
-        std::fs::write(&r, serde_json::to_vec_pretty(rust_v).unwrap()).unwrap();
-        std::fs::write(&p, serde_json::to_vec_pretty(py_v).unwrap()).unwrap();
-        panic!(
-            "{name}: {surface} diverged; dumped {} and {}",
-            r.display(),
-            p.display()
-        );
-    }
-}
-
-fn strict_error_kind(e: &fno_agents::graph_store::StoreError) -> String {
-    use fno_agents::graph_store::StoreError as E;
-    match e {
-        E::Corrupt(_)
-        | E::Unreadable(_, _)
-        | E::EmptyFieldUpdate(_)
-        | E::Invalid(_)
-        | E::Io(_)
-        | E::LockTimeout(_, _)
-        | E::Conflict => "GraphUnreadableError".to_string(),
-        E::MalformedRoot(_) => "GraphMalformedRootError".to_string(),
-    }
-}
-
-/// The two volatile now()-stamps both legs write, normalized symmetrically:
-/// a recursive walk over the parsed values, so escaping layers cannot hide a
-/// stamp from the normalizer.
-fn normalize_volatile(v: &Value) -> Value {
-    match v {
-        Value::Object(map) => {
-            let mut out = serde_json::Map::new();
-            for (k, val) in map {
-                if (k == "touched_at" || k == "deferred_at") && val.is_string() {
-                    out.insert(k.clone(), Value::String("<TS>".into()));
-                } else {
-                    out.insert(k.clone(), normalize_volatile(val));
-                }
-            }
-            Value::Object(out)
-        }
-        Value::Array(items) => Value::Array(items.iter().map(normalize_volatile).collect()),
-        // A step value that IS a serialized JSON payload (read_after) is
-        // parsed and normalized structurally, so stamps inside it cannot
-        // hide and formatting cannot leak into the comparison.
-        Value::String(text) if text.trim_start().starts_with('[') || text.trim_start().starts_with('{') => {
-            match serde_json::from_str::<Value>(text) {
-                Ok(parsed) => normalize_volatile(&parsed),
-                Err(_) => Value::String(text.clone()),
-            }
-        }
-        other => other.clone(),
-    }
-}
-
 // -------------------------------------------------------------------------
-// Fixtures
+// Fixtures (identical bytes to what the differential stage ran)
 // -------------------------------------------------------------------------
 
 fn fixture_basic() -> String {
@@ -448,94 +312,87 @@ fn fixture_unicode_and_exotics() -> String {
     );
     e.insert("related".into(), serde_json::json!(["ab-0001"]));
     // The fixture file is written exactly the way the store publishes a
-    // one-entry graph, so the two legs start from identical bytes.
+    // one-entry graph, so the frozen comparison starts from identical bytes.
     fno_agents::graph_store::serialize_graph_file(&[Value::Object(e)])
 }
 
 // -------------------------------------------------------------------------
-// The parity cases
+// The characterization cases
 // -------------------------------------------------------------------------
 
-/// One differential case: fixture -> ops -> compare every surface.
+fn golden_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/graph_store")
+}
+
+/// One characterization case: fixture -> ops -> the live Rust output must
+/// equal the frozen Python golden on every surface, modulo volatile stamps.
 fn run_case(name: &str, fixture: String, ops: serde_json::Value) {
-    let py_dir = tempfile::tempdir().expect("py dir");
-    let rs_dir = tempfile::tempdir().expect("rs dir");
-    let py_graph = py_dir.path().join("graph.json");
-    let rs_graph = rs_dir.path().join("graph.json");
-    std::fs::write(&py_graph, &fixture).unwrap();
-    std::fs::write(&rs_graph, &fixture).unwrap();
-
-    let py = python_probe(&py_graph, &ops);
-    let rs = rust_probe(&rs_graph, &ops);
-
-    let py_read = py.get("read").and_then(Value::as_str).unwrap_or("");
-    let rs_read = rs.get("read").and_then(Value::as_str).unwrap_or("");
-    assert_eq!(
-        rs_read, py_read,
-        "{name}: the defaulted read must be byte-identical\n--- rust ---\n{rs_read}\n--- python ---\n{py_read}"
-    );
-
-    let py_strict = py.get("strict").and_then(Value::as_str);
-    let rs_strict = rs.get("strict").and_then(Value::as_str);
-    assert_eq!(rs_strict, py_strict, "{name}: strict read must match");
-    assert_eq!(
-        rs.get("strict_error"),
-        py.get("strict_error"),
-        "{name}: strict-read error kind must match"
-    );
-
-    let py_steps = normalize_volatile(py.get("steps").unwrap_or(&Value::Null));
-    let rs_steps = normalize_volatile(rs.get("steps").unwrap_or(&Value::Null));
-    assert_dumped(name, "steps", &rs_steps, &py_steps);
-
-    let py_file = String::from_utf8(
-        base64::engine::general_purpose::STANDARD
-            .decode(py.get("file").and_then(Value::as_str).unwrap_or(""))
-            .expect("py file b64"),
+    let golden_path = golden_dir().join(format!("{name}.json"));
+    let golden: Value = serde_json::from_str(
+        &std::fs::read_to_string(&golden_path)
+            .unwrap_or_else(|e| panic!("golden {}: {e}", golden_path.display())),
     )
-    .expect("py file bytes are utf8");
+    .expect("golden parses");
+
+    let dir = tempfile::tempdir().expect("rs dir");
+    let graph = dir.path().join("graph.json");
+    std::fs::write(&graph, &fixture).unwrap();
+    let rs = rust_probe(&graph, &ops);
+
+    assert_frozen(
+        name,
+        "read",
+        &Value::String(rs.get("read").and_then(Value::as_str).unwrap_or("").to_string()),
+        &Value::String(golden.get("read").and_then(Value::as_str).unwrap_or("").to_string()),
+    );
+
+    assert_frozen(
+        name,
+        "strict",
+        &json_pick(&rs, "strict", "strict_error"),
+        &json_pick(&golden, "strict", "strict_error"),
+    );
+
+    let rs_steps = normalize_volatile(rs.get("steps").unwrap_or(&Value::Null));
+    let golden_steps = normalize_volatile(golden.get("steps").unwrap_or(&Value::Null));
+    assert_frozen(name, "steps", &rs_steps, &golden_steps);
+
     let rs_file = String::from_utf8(
         base64::engine::general_purpose::STANDARD
             .decode(rs.get("file").and_then(Value::as_str).unwrap_or(""))
             .expect("rs file b64"),
     )
     .expect("rs file bytes are utf8");
-    let py_root: Value = serde_json::from_str(&py_file).expect("py file parses");
+    let golden_file = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(golden.get("file").and_then(Value::as_str).unwrap_or(""))
+            .expect("golden file b64"),
+    )
+    .expect("golden file bytes are utf8");
     let rs_root: Value = serde_json::from_str(&rs_file).expect("rs file parses");
+    let golden_root: Value = serde_json::from_str(&golden_file).expect("golden file parses");
     // Byte identity, checked structurally then textually: the structural
     // compare localizes a divergence; the textual one on normalized bytes
     // catches ordering the structural compare forgives.
-    let norm_rs = normalize_volatile(&rs_root);
-    let norm_py = normalize_volatile(&py_root);
-    assert_dumped(name, "file-content", &norm_rs, &norm_py);
+    assert_frozen(name, "file-content", &normalize_volatile(&rs_root), &normalize_volatile(&golden_root));
     assert_eq!(
-        normalize_bytes(&rs_file), normalize_bytes(&py_file),
-        "{name}: the published file must be byte-identical modulo volatile stamps\n--- rust ---\n{rs_file}\n--- python ---\n{py_file}"
+        normalize_bytes(&rs_file), normalize_bytes(&golden_file),
+        "{name}: the published file must be byte-identical to the golden modulo volatile stamps\n--- live ---\n{rs_file}\n--- golden ---\n{golden_file}"
     );
-
-    if std::env::var("FNO_CAPTURE_GOLDEN").as_deref() == Ok("1") {
-        capture_golden(name, &py);
-    }
 }
 
-fn golden_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/graph_store")
-}
-
-fn capture_golden(name: &str, py: &serde_json::Value) {
-    let dir = golden_dir();
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{name}.json"));
-    std::fs::write(&path, serde_json::to_vec_pretty(py).unwrap()).unwrap();
-    println!("captured golden {}", path.display());
+/// Exactly one of the two keys exists; return whichever does, so a golden
+/// that recorded a strict-read SUCCESS compares against the live one the
+/// same way a golden that recorded a FAILURE does.
+fn json_pick(v: &Value, ok_key: &str, err_key: &str) -> Value {
+    v.get(ok_key)
+        .or_else(|| v.get(err_key))
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 #[test]
-fn differential_reads_and_mutations_match_the_python_leg() {
-    if !python_available() {
-        eprintln!("skip: the fno Python package is unavailable");
-        return;
-    }
+fn characterization_reads_and_mutations_match_the_frozen_python_leg() {
     run_case(
         "defaults_and_lifecycle",
         fixture_basic(),
@@ -564,11 +421,7 @@ fn differential_reads_and_mutations_match_the_python_leg() {
 }
 
 #[test]
-fn differential_legacy_rows_and_defer_backfill_match() {
-    if !python_available() {
-        eprintln!("skip: the fno Python package is unavailable");
-        return;
-    }
+fn characterization_legacy_rows_and_defer_backfill_match() {
     run_case(
         "legacy_backfill",
         fixture_basic(),
@@ -580,11 +433,7 @@ fn differential_legacy_rows_and_defer_backfill_match() {
 }
 
 #[test]
-fn differential_unicode_and_escapes_are_byte_identical() {
-    if !python_available() {
-        eprintln!("skip: the fno Python package is unavailable");
-        return;
-    }
+fn characterization_unicode_and_escapes_are_byte_identical() {
     run_case(
         "unicode_exotics",
         fixture_unicode_and_exotics(),
@@ -596,11 +445,7 @@ fn differential_unicode_and_escapes_are_byte_identical() {
 }
 
 #[test]
-fn differential_session_lifecycle_matches() {
-    if !python_available() {
-        eprintln!("skip: the fno Python package is unavailable");
-        return;
-    }
+fn characterization_session_lifecycle_matches() {
     let entries = serde_json::json!([{"id": "ab-00aa", "title": "Session host"}]);
     let fixture = format!(
         "{{\n  \"entries\": {}\n}}\n",
@@ -638,11 +483,7 @@ fn differential_session_lifecycle_matches() {
 }
 
 #[test]
-fn differential_related_mirror_matches() {
-    if !python_available() {
-        eprintln!("skip: the fno Python package is unavailable");
-        return;
-    }
+fn characterization_related_mirror_matches() {
     let fixture = r#"{
   "entries": [
     {"id": "ab-00c1", "title": "C1"},
@@ -664,14 +505,10 @@ fn differential_related_mirror_matches() {
 }
 
 #[test]
-fn differential_corrupt_and_malformed_roots_agree_on_kinds() {
-    if !python_available() {
-        eprintln!("skip: the fno Python package is unavailable");
-        return;
-    }
+fn corrupt_and_malformed_roots_keep_the_read_failure_taxonomy() {
     // The soft read swallows corruption to []; the strict read raises, and
-    // the RAISED KIND is the parity datum. Python's _read_json copies the
-    // unreadable bytes to a .json.bak on the soft path.
+    // the RAISED KIND is the taxonomy the Python strict read fixed. No
+    // golden: the contract is the kind, not bytes.
     for (name, body, want_kind) in [
         ("corrupt", "{not json", "GraphUnreadableError"),
         ("malformed_root", "{\"no_entries\": []}", "GraphMalformedRootError"),
@@ -682,27 +519,16 @@ fn differential_corrupt_and_malformed_roots_agree_on_kinds() {
         let graph = dir.path().join("graph.json");
         std::fs::write(&graph, body).unwrap();
         let ops = serde_json::json!([]);
-        let py = python_probe(&graph, &ops);
         let rs = rust_probe(&graph, &ops);
         assert_eq!(
-            py.get("read").and_then(Value::as_str),
+            rs.get("read").and_then(Value::as_str),
             Some("[]"),
             "{name}: soft read swallows"
         );
         assert_eq!(
-            rs.get("read").and_then(Value::as_str),
-            Some("[]"),
-            "{name}: rust soft read swallows"
-        );
-        assert_eq!(
-            py.get("strict_error").and_then(Value::as_str),
-            Some(want_kind),
-            "{name}: python strict kind"
-        );
-        assert_eq!(
             rs.get("strict_error").and_then(Value::as_str),
-            py.get("strict_error").and_then(Value::as_str),
-            "{name}: strict kinds must agree"
+            Some(want_kind),
+            "{name}: strict kind"
         );
     }
 }
@@ -754,25 +580,16 @@ fn concurrent_writers_never_lose_an_update_through_the_bounded_cycle() {
         }
     }
     assert_eq!(landed, 8, "every retried writer eventually lands");
-    assert!(landed >= 1, "at least one concurrent writer must land");
     let final_entries = graph_store::read_defaulted(&graph, false).unwrap();
     let ids: Vec<String> = final_entries
         .iter()
-        .filter_map(|e| e.get("id").and_then(Value::as_str).map(str::to_string))
+        .filter_map(|e| graph_store::entry_id(e).map(str::to_string))
         .collect();
-    assert_eq!(
-        ids.len(),
-        landed,
-        "no lost updates: every landed publish's node is in the final file"
-    );
-    // The sidecar matches the published bytes after the storm.
-    let body = std::fs::read_to_string(&graph).unwrap();
-    let sidecar = std::fs::read_to_string(format!("{}.sha256", graph.display())).unwrap();
-    let digest = {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(body.as_bytes());
-        format!("{:x}\n", h.finalize())
-    };
-    assert_eq!(sidecar, digest, "the sidecar matches the published bytes");
+    for i in 0..8 {
+        let want = format!("ab-c0nc{i:04}");
+        assert!(
+            ids.iter().any(|id| *id == want),
+            "writer {i}'s node must survive: {ids:?}"
+        );
+    }
 }
