@@ -268,8 +268,11 @@ def test_self_review_invocation_is_the_lane_on_every_harness():
         assert rc.harness_can_self_review(harness) is True, harness
     # One recommendation for every harness: the fno lane with a level. WHICH
     # reviewer is harness-independent; only the SPELLING differs per surface.
-    for harness in ("claude", "opencode", "agy", "gemini", None, "unknown"):
+    # agy has no plugin namespace, so its slash palette takes the verb bare -
+    # the same lane, its own spelling.
+    for harness in ("claude", "opencode", "gemini", None, "unknown"):
         assert rc.self_review_invocation(harness) == "/fno:review medium --comment", harness
+    assert rc.self_review_invocation("agy") == "/review medium --comment"
     assert rc.self_review_invocation("codex") == "$fno:review medium --comment"
     # No native verb leaks into the recommendation from any harness.
     assert "/code-review" not in rc.self_review_invocation("claude")
@@ -385,7 +388,7 @@ def test_self_review_invocation_takes_the_level():
     assert rc.self_review_invocation("claude", level=None) == "/fno:review <level> --comment"
     # The level travels on every harness alike.
     assert rc.self_review_invocation("codex", level="high") == "$fno:review high --comment"
-    assert rc.self_review_invocation("agy", level="low") == "/fno:review low --comment"
+    assert rc.self_review_invocation("agy", level="low") == "/review low --comment"
 
 
 def test_satisfiable_verdict_names_the_lane():
@@ -450,4 +453,4 @@ def test_review_invocation_verb_prints_the_render(monkeypatch, tmp_path):
 
     portable = CliRunner().invoke(target_app, ["review-invocation", "--harness", "agy"])
     assert portable.exit_code == 0, portable.output
-    assert portable.output.strip() == f"/fno:review {sized} --comment"
+    assert portable.output.strip() == f"/review {sized} --comment"
