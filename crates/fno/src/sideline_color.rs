@@ -252,7 +252,20 @@ pub fn resolve_lane_color(
     route: Option<&str>,
     account: Option<&str>,
 ) -> Option<Color> {
-    let pal = palette();
+    resolve_with(palette(), harness, model, route, account)
+}
+
+/// The cascade over an EXPLICIT palette - the testable seam behind
+/// [`resolve_lane_color`] (the process palette is a `OnceLock` over real
+/// config files, so the config-driven cascade levels need this injection
+/// point for unit coverage).
+pub fn resolve_with(
+    pal: &SidelinePalette,
+    harness: Option<&str>,
+    model: Option<&str>,
+    route: Option<&str>,
+    account: Option<&str>,
+) -> Option<Color> {
     // 1. The routing row: every declared (non-empty) field must match the
     // agent's axes (an empty declared field is a wildcard); the first
     // matching row carrying a color wins (first declaration wins).
@@ -402,6 +415,214 @@ mod tests {
             parse_color("indexed(999)"),
             None,
             "u8 range is the contract"
+        );
+    }
+
+    fn pal(
+        rows: Vec<RoutingRow>,
+        model: &str,
+        route: &str,
+        harness: &str,
+        row: &str,
+    ) -> SidelinePalette {
+        let pairs = |s: &str| -> Vec<(String, String)> {
+            s.split(',')
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    let (k, v) = p.split_once('=').unwrap();
+                    (k.to_string(), v.to_string())
+                })
+                .collect()
+        };
+        SidelinePalette {
+            routing_rows: rows,
+            model: pairs(model),
+            route: pairs(route),
+            harness: pairs(harness),
+            row: pairs(row),
+        }
+    }
+
+    #[test]
+    fn the_config_cascade_levels_fire_in_specificity_order() {
+        // Level 1: a routing row matching on harness+model wins over every
+        // coarser table.
+        let p = pal(
+            vec![RoutingRow {
+                name: "zai-glm".into(),
+                harness: "claude".into(),
+                model: "glm-5.3-flash[1m]".into(),
+                color: "green".into(),
+                ..Default::default()
+            }],
+            "glm-5.3-flash[1m]=yellow",
+            "zai=blue",
+            "claude=cyan",
+            "",
+        );
+        assert_eq!(
+            resolve_with(
+                &p,
+                Some("claude"),
+                Some("glm-5.3-flash[1m]"),
+                Some("zai"),
+                None
+            ),
+            Some(Color::Indexed(2)),
+            "routing row outranks model/route/harness tables"
+        );
+        // Level 2: with no routing row, the model table wins.
+        let p2 = pal(
+            vec![],
+            "glm-5.3-flash[1m]=yellow",
+            "zai=blue",
+            "claude=cyan",
+            "",
+        );
+        assert_eq!(
+            resolve_with(
+                &p2,
+                Some("claude"),
+                Some("glm-5.3-flash[1m]"),
+                Some("zai"),
+                None
+            ),
+            Some(Color::Indexed(3)),
+            "model table beats route and harness"
+        );
+        // Level 3: route table; level 4: harness table.
+        let p3 = pal(vec![], "", "zai=blue", "claude=cyan", "");
+        assert_eq!(
+            resolve_with(
+                &p3,
+                Some("claude"),
+                Some("glm-5.3-flash[1m]"),
+                Some("zai"),
+                None
+            ),
+            Some(Color::Indexed(4))
+        );
+        assert_eq!(
+            resolve_with(&p3, Some("claude"), None, None, None),
+            Some(Color::Indexed(6))
+        );
+    }
+
+    #[test]
+    fn routing_row_wildcards_match_and_account_participates_only_when_carried() {
+        // A row declaring only route matches any harness/model on that route.
+        let p = pal(
+            vec![RoutingRow {
+                name: "or".into(),
+                route: "openrouter".into(),
+                color: "magenta".into(),
+                ..Default::default()
+            }],
+            "",
+            "",
+            "",
+            "",
+        );
+        assert_eq!(
+            resolve_with(
+                &p,
+                Some("codex"),
+                Some("deepseek-r1"),
+                Some("openrouter"),
+                None
+            ),
+            Some(Color::Indexed(5))
+        );
+        // An account-declaring row does NOT match a row carrying no account.
+        let pa = pal(
+            vec![RoutingRow {
+                name: "mk".into(),
+                account: "makers".into(),
+                color: "red".into(),
+                ..Default::default()
+            }],
+            "",
+            "",
+            "",
+            "",
+        );
+        assert_eq!(
+            resolve_with(&pa, Some("claude"), None, None, None),
+            None,
+            "declared account vs no account: no match"
+        );
+        assert_eq!(
+            resolve_with(&pa, Some("claude"), None, None, Some("makers")),
+            Some(Color::Indexed(1))
+        );
+    }
+
+    #[test]
+    fn first_declaration_wins_and_unknown_colors_fall_through() {
+        // Two matching rows: the FIRST declared wins even when the second is
+        // more specific.
+        let p = pal(
+            vec![
+                RoutingRow {
+                    name: "broad".into(),
+                    route: "zai".into(),
+                    color: "red".into(),
+                    ..Default::default()
+                },
+                RoutingRow {
+                    name: "narrow".into(),
+                    harness: "claude".into(),
+                    route: "zai".into(),
+                    color: "blue".into(),
+                    ..Default::default()
+                },
+            ],
+            "",
+            "",
+            "",
+            "",
+        );
+        assert_eq!(
+            resolve_with(&p, Some("claude"), None, Some("zai"), None),
+            Some(Color::Indexed(1)),
+            "first declaration wins"
+        );
+        // An unknown color on the winning row falls through to the NEXT
+        // cascade level, never blanks the row.
+        let p2 = pal(
+            vec![RoutingRow {
+                name: "typo".into(),
+                route: "zai".into(),
+                color: "chartreuse".into(),
+                ..Default::default()
+            }],
+            "",
+            "zai=green",
+            "",
+            "",
+        );
+        assert_eq!(
+            resolve_with(&p2, Some("claude"), None, Some("zai"), None),
+            Some(Color::Indexed(2)),
+            "unknown color falls through to the route table"
+        );
+        // A row whose row-table entry names it also resolves (the row.color
+        // field empty path).
+        let p3 = pal(
+            vec![RoutingRow {
+                name: "named".into(),
+                route: "zai".into(),
+                ..Default::default()
+            }],
+            "",
+            "",
+            "",
+            "named=yellow",
+        );
+        assert_eq!(
+            resolve_with(&p3, None, None, Some("zai"), None),
+            Some(Color::Indexed(3)),
+            "the row table names the matched row"
         );
     }
 }

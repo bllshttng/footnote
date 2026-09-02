@@ -2277,13 +2277,19 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
         // the live fallback (live rows carry the vendor there; `route` exists
         // on disk but is null everywhere today, so a NULL route must still
         // reach the fallback - hence the or_else after the string read, not
-        // after the key read).
+        // after the key read). The fallback is SHAPE-gated on the row also
+        // naming `harness`: a pre-v10 row carries the HARNESS under `provider`
+        // (the review finding), and reading it as a vendor lane would mount
+        // the harness name on the route axis.
         let route = row
             .get("route")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .or_else(|| {
+                if row.get("harness").is_none() {
+                    return None; // pre-v10 shape: provider WAS the harness axis
+                }
                 row.get("provider")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
@@ -3340,6 +3346,31 @@ mod tests {
             Some("gpt-5.6-luna"),
             "null model falls to observed_model.model"
         );
+    }
+
+    #[test]
+    fn pre_v10_provider_rows_do_not_mount_the_harness_as_the_route() {
+        // (x-1b35 review finding) A pre-v10 row carried the HARNESS under
+        // `provider` and no `harness` key at all; the route fallback is
+        // shape-gated on the row naming `harness`, so such a row derives
+        // route=None instead of route=Some("claude").
+        let raw = reg(
+            r#"{"name":"old","cwd":"/w","status":"live","provider":"claude"},
+               {"name":"new","cwd":"/w","status":"live","harness":"claude","provider":"zai"}"#,
+        );
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        assert_eq!(
+            get("old").harness.as_deref(),
+            Some("claude"),
+            "provider still feeds the harness read"
+        );
+        assert_eq!(
+            get("old").route,
+            None,
+            "pre-v10 provider is not a vendor lane"
+        );
+        assert_eq!(get("new").route.as_deref(), Some("zai"));
     }
 
     /// AC11-HP, AC12-EDGE, AC13-EDGE (x-6678): `attach_id` is derived PER

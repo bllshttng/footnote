@@ -8229,18 +8229,11 @@ impl View {
                     }
                     // (x-1b35) Same lane-color cascade as the compact arm; the
                     // Blocked accent wins there and here.
-                    let lane_fg = if st == LatticeState::Blocked {
-                        style.fg
-                    } else {
-                        sideline_color::resolve_lane_color(
-                            a.harness.as_deref(),
-                            a.model.as_deref(),
-                            a.route.as_deref(),
-                            a.account.as_deref(),
-                        )
-                        .unwrap_or(style.fg)
-                    };
-                    (table_row_text(a, layout, depth, now), flags, lane_fg)
+                    (
+                        table_row_text(a, layout, depth, now),
+                        flags,
+                        agent_lane_fg(a, st, style.fg),
+                    )
                 }
                 DisplayRow::Agent(a) => {
                     // The unified icon lattice (x-df4c): exit beats badge beats
@@ -8343,18 +8336,7 @@ impl View {
                     // through the fixed cascade (routing row > model > route >
                     // harness > built-in). A Blocked row keeps the lattice
                     // accent - attention is never re-colored.
-                    let lane_fg = if st == LatticeState::Blocked {
-                        style.fg
-                    } else {
-                        sideline_color::resolve_lane_color(
-                            a.harness.as_deref(),
-                            a.model.as_deref(),
-                            a.route.as_deref(),
-                            a.account.as_deref(),
-                        )
-                        .unwrap_or(style.fg)
-                    };
-                    (text, flags, lane_fg)
+                    (text, flags, agent_lane_fg(a, st, style.fg))
                 }
                 DisplayRow::Card(c) => {
                     // The same icon lattice as the agent rows (x-df4c US3): a
@@ -10323,6 +10305,23 @@ struct LatticeStyle {
 /// emulator's own amber, preserved exactly), under a named theme it is the
 /// palette's pick. Only the one caller that reads `.fg` supplies it; callers
 /// that want only the glyph/flags use [`lattice_glyph`] and stay out of color.
+/// (x-1b35) The lane fg for one agent row, shared by both sideline arms:
+/// the fixed cascade over the row's axes, with the lattice accent standing
+/// on Blocked (attention is never re-colored) and the lattice fg as the
+/// fallback when nothing declares the lane.
+fn agent_lane_fg(a: &AgentRow, st: LatticeState, fallback: Color) -> Color {
+    if st == LatticeState::Blocked {
+        return fallback;
+    }
+    sideline_color::resolve_lane_color(
+        a.harness.as_deref(),
+        a.model.as_deref(),
+        a.route.as_deref(),
+        a.account.as_deref(),
+    )
+    .unwrap_or(fallback)
+}
+
 fn lattice_style(s: LatticeState, accent: Color) -> LatticeStyle {
     match s {
         LatticeState::Working => LatticeStyle {
