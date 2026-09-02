@@ -3033,18 +3033,25 @@ def cmd_ask(
     registry; because ask blocks for a reply it requires exactly one live
     peer (none/ambiguous exit nonzero).
 
-    Prints the recipient's reply verbatim on stdout (US2 AC2-HP: no
-    banner, no trailing newline added by fno). Failures surface on
-    stderr with deterministic exit codes (see ``DispatchAskError``).
+    Prints the recipient's reply verbatim on stdout (no banner, no
+    trailing newline added by fno).
+
+    The follow-up itself runs on the Rust runtime (the ask adapters were
+    ported; the parity harnesses freeze its behavior). This body keeps
+    only the work the binary cannot do: the ``--to-project`` anycast
+    resolution, which routes here first and then execs the binary with a
+    resolved name.
     """
+    from fno import rust_binary
+    from fno._flag_aliases import refuse_retired_provider
+    from fno.agents import rust_runtime
     from fno.agents.dispatch import (
         AMBIGUOUS_PROJECT_EXIT_CODE,
         UNKNOWN_AGENT_EXIT_CODE,
         DispatchAskError,
-        dispatch_ask,
         resolve_to_project,
     )
-    from fno._flag_aliases import refuse_retired_provider
+    from fno.agents.rust_runtime import BIN_NOT_FOUND_EXIT, route_to_rust, runtime_mode
 
     refuse_retired_provider(_provider_tombstone)
 
@@ -3093,26 +3100,43 @@ def cmd_ask(
         )
         raise typer.Exit(code=2)
 
-    try:
-        result = dispatch_ask(
-            name=name,
-            message=message,
-            harness=harness,
-            cwd=workdir,
-            timeout=timeout,
-            from_name=from_name,
-            yolo=yolo,
+    binary = rust_binary.resolve_installed_binary()
+    if runtime_mode() == "python" or binary is None:
+        # There is no Python ask implementation to fall back to: the legs
+        # were ported and deleted in the same change that moved this caller.
+        forced = (
+            f"{rust_runtime.RUNTIME_ENV}=python is set, and there is no Python "
+            "ask left to force; unset it with the binary installed. "
+            if runtime_mode() == "python"
+            else ""
         )
-    except DispatchAskError as exc:
-        # AC1-UI / AC2-UI: stderr surfaces the error, no extra wrapping.
-        print(str(exc), file=sys.stderr)
-        raise typer.Exit(code=exc.exit_code) from exc
+        print(
+            "fno agents ask: the Python ask runtime was ported to the Rust "
+            f"runtime, so ask requires the '{rust_binary.BINARY_NAME}' binary, "
+            f"which was not found. {forced}"
+            "Get it via `pip install fno` (bundled wheel), `cargo install "
+            "fno-agents`, or `cargo build --release -p fno-agents` plus "
+            f"`export {rust_binary.BINARY_ENV}=<path>`.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=BIN_NOT_FOUND_EXIT)
 
-    # AC2-HP / AC2-UI: stdout is the reply verbatim, no added newline.
-    # dispatch_ask only returns kind="followup" after this change;
-    # kind="create" is returned by the spawn verb's helper, not here.
-    sys.stdout.write(result.reply or "")
-    sys.stdout.flush()
+    args = ["ask"]
+    if harness:
+        args += ["--harness", harness]
+    args += ["--cwd", str(workdir)]
+    if timeout is not None:
+        args += ["--timeout", str(timeout)]
+    args += ["--from-name", from_name]
+    if yolo:
+        args += ["--yolo"]
+    # Equal-form keeps the message seed bound to its flag: a leading-dash
+    # message is data, not flags (the argv-fence gate enforces this shape).
+    args += [f"--message={message}"]
+    # The name rides behind a `--` fence as the one positional.
+    args += ["--", name]
+    # os.execv never returns; the binary prints the reply verbatim itself.
+    route_to_rust(args, binary=binary)
 
 
 @agents_app.command("list")

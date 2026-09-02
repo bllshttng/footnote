@@ -1,5 +1,7 @@
 # Architecture: agent.deliver RPC and the injection gate
 
+> **Status note.** The Python claude follow-up legs named below (`_build_envelope`, `send_to_session`, `ask_followup_via_mcp`) were ported to the Rust runtime and deleted (the ask-adapter port, 2026-09-02). The container-escaping contract they pinned now lives in `crates/fno-agents/src/claude_ask.rs` and is byte-locked by `claude_ask_parity.rs` goldens; the `agent.deliver` RPC and gate material is unchanged.
+
 This document covers the internals of live PTY delivery for codex and gemini hosted peers: the `agent.deliver` daemon RPC, the `inject_into_pty` primitive, the provenance container format, and the per-provider injection gate that guards them. For the user-facing send verb, see [docs/guides/fno-agents-send.md](../guides/fno-agents-send.md).
 
 ## agent.deliver RPC

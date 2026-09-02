@@ -587,60 +587,66 @@ def test_ask_routes_to_rust_without_provider_flag(monkeypatch, tmp_path) -> None
     assert captured == [(["ask", "ghost", "hi"], binary)]
 
 
-def test_ask_falls_back_to_python_without_installed_binary(monkeypatch) -> None:
-    """With no installed binary, `ask` falls through to the mature Python
-    dispatch (the no-binary fallback is intact for every provider)."""
+def test_ask_without_installed_binary_refuses(monkeypatch) -> None:
+    """With no installed binary, `ask` refuses legibly: the Python ask
+    runtime was ported to Rust, so there is no dispatch to fall back to."""
     from fno.cli import app
-    from fno.agents import dispatch as dispatch_mod
 
     called: list = []
-    dispatched: list = []
-
-    def fake_dispatch_ask(**kwargs):
-        # Stub the Python dispatch so the test verifies the fallback is
-        # SELECTED without EXECUTING a real provider call. Letting the real
-        # dispatch_ask run shells `claude --bg`/codex/gemini and spawns a
-        # live "newagent" session on every test run (the leak this guards).
-        dispatched.append(kwargs)
-        return SimpleNamespace(kind="create", short_id="stub", reply=None)
 
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
     monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
-    monkeypatch.setattr(dispatch_mod, "dispatch_ask", fake_dispatch_ask)
-    CliRunner().invoke(app, ["agents", "ask", "newagent", "hi", "--harness", "gemini"])
+    result = CliRunner().invoke(app, ["agents", "ask", "newagent", "hi", "--harness", "codex"])
     assert called == []
-    assert [d["name"] for d in dispatched] == ["newagent"]
+    assert result.exit_code == rr.BIN_NOT_FOUND_EXIT
+    assert "ported" in result.stderr
 
 
-@pytest.mark.parametrize("provider", ["claude", "codex", "gemini"])
-def test_python_mode_forces_python_for_ask(monkeypatch, tmp_path, provider) -> None:
-    """`FNO_AGENTS_RUNTIME=python` keeps `ask` on the Python dispatch for every
-    provider even with a binary present (the fallback must stay intact)."""
+@pytest.mark.parametrize("binary_present", [True, False])
+def test_python_mode_refuses_ask(monkeypatch, tmp_path, binary_present) -> None:
+    """`FNO_AGENTS_RUNTIME=python` cannot force ask onto Python anymore: the
+    legs were ported and deleted. The refusal names the flag so the operator
+    learns the contract changed rather than staring at a missing command."""
     from fno.cli import app
-    from fno.agents import dispatch as dispatch_mod
+
+    called: list = []
+
+    monkeypatch.setenv(rr.RUNTIME_ENV, "python")
+    if binary_present:
+        monkeypatch.setattr(
+            rust_binary, "resolve_installed_binary", lambda: tmp_path / "bin"
+        )
+    else:
+        monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
+    result = CliRunner().invoke(app, ["agents", "ask", "any", "hi", "--harness", "codex"])
+    assert called == []
+    assert result.exit_code == rr.BIN_NOT_FOUND_EXIT
+    assert rr.RUNTIME_ENV in result.stderr
+
+
+def test_anycast_ask_resolves_in_python_before_routing(monkeypatch, tmp_path) -> None:
+    """`ask --to-project` falls through to cmd_ask even with a binary (the
+    client has no --to-project flag), resolves the recipient from the
+    registry, and THEN routes the plain ask to the binary. With no live
+    peer the resolution is the refusal: exit 16, never a binary exec."""
+    from fno.cli import app
 
     binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     called: list = []
-    dispatched: list = []
 
-    def fake_dispatch_ask(**kwargs):
-        # Stub the Python dispatch so the test verifies python-mode is
-        # SELECTED without EXECUTING a real provider call. Letting the real
-        # dispatch_ask run shells `claude --bg`/codex/gemini and spawns a
-        # live "any" session on every test run (the leak this guards).
-        dispatched.append(kwargs)
-        return SimpleNamespace(kind="create", short_id="stub", reply=None)
-
-    monkeypatch.setenv(rr.RUNTIME_ENV, "python")
+    monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
-    monkeypatch.setattr(dispatch_mod, "dispatch_ask", fake_dispatch_ask)
-    CliRunner().invoke(app, ["agents", "ask", "any", "hi", "--harness", provider])
-    assert called == [], f"=python must keep ask on Python for {provider}; got: {called}"
-    assert [d["name"] for d in dispatched] == ["any"], (
-        f"=python must reach the Python dispatch for {provider}; got: {dispatched}"
+    result = CliRunner().invoke(
+        app, ["agents", "ask", "--to-project", "no-such-project", "hi"]
     )
+    assert called == [], "anycast with no live peer must refuse before any exec"
+    from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
+
+    assert result.exit_code == UNKNOWN_AGENT_EXIT_CODE
+    assert "no live peer" in result.stderr
 
 
 # --------------------------------------------------------------------------- #

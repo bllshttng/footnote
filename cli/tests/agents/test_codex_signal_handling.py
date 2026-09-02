@@ -111,26 +111,6 @@ def test_create_timeout_sigterms_codex_and_raises_timeout_error(
     sys.platform == "win32",
     reason="SIGINT signal-delivery on Windows is process-group-specific.",
 )
-def test_resume_timeout_sigterms_codex(tmp_path, fake_codex_on_path):
-    """AC2-FR end-to-end: resume timeout SIGTERMs codex, raises CodexTimeoutError."""
-    from fno.agents.harnesses import codex as codex_mod
-    from fno.agents.harnesses.codex import CodexTimeoutError
-
-    start = time.monotonic()
-    with pytest.raises(CodexTimeoutError) as exc_info:
-        codex_mod.resume(
-            session_id="any-uuid",
-            cwd=Path("/tmp"),
-            prompt="hang resume",
-            from_name="fno",
-            yolo=False,
-            output_path=tmp_path / "output.jsonl",
-            timeout=1.0,
-        )
-    elapsed = time.monotonic() - start
-    assert exc_info.value.timeout_sec == 1.0
-    assert elapsed < 15.0
-
 
 @pytest.mark.skipif(
     sys.platform == "win32",

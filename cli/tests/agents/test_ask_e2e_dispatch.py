@@ -287,25 +287,11 @@ def test_spawn_once_python_vs_rust_parity(
 
 
 @requires_rust
-def test_ask_unknown_agent_python_vs_rust_parity(tmp_path: Path, monkeypatch) -> None:
-    """`ask` for an unregistered name errors identically on both runtimes
-    (US1 / AC1-ERR, Task 1.3): same stderr bytes, same exit 16, no create."""
-    py_home = tmp_path / "py-home"
-    py_home.mkdir()
-    use_tmpdir(monkeypatch, py_home)
-
-    from fno.agents.dispatch import (
-        UNKNOWN_AGENT_EXIT_CODE,
-        DispatchAskError,
-        dispatch_ask,
-    )
-
-    cwd = tmp_path / "workdir"
-    cwd.mkdir()
-    with pytest.raises(DispatchAskError) as excinfo:
-        dispatch_ask(name="ghost-agent", message="hi", harness="codex", cwd=cwd, timeout=10)
-    assert excinfo.value.exit_code == UNKNOWN_AGENT_EXIT_CODE
-
+def test_ask_unknown_agent_exits_16(tmp_path: Path, monkeypatch) -> None:
+    """`ask` for an unregistered name exits 16 with a stderr hint and no
+    create (US1 / AC1-ERR, Task 1.3). The Python dispatch half of the old
+    parity test died with the ported ask legs; the Rust client is the sole
+    implementation, so this pins its observable contract."""
     rs_home = tmp_path / "rs-home"
     rs_home.mkdir()
     completed = subprocess.run(
@@ -315,16 +301,13 @@ def test_ask_unknown_agent_python_vs_rust_parity(tmp_path: Path, monkeypatch) ->
         text=True,
         timeout=30,
     )
+    from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
+
     assert completed.returncode == UNKNOWN_AGENT_EXIT_CODE, (
-        f"rust unknown-agent ask must exit {UNKNOWN_AGENT_EXIT_CODE}: "
+        f"unknown-agent ask must exit {UNKNOWN_AGENT_EXIT_CODE}: "
         f"{completed.returncode} (stderr: {completed.stderr!r})"
     )
-    # cmd_ask prints str(exc) + newline; the Rust client uses eprintln.
-    assert completed.stderr == f"{excinfo.value}\n", (
-        f"unknown-agent stderr drift:\n"
-        f"  python: {str(excinfo.value)!r}\n"
-        f"  rust:   {completed.stderr!r}"
-    )
+    assert completed.stderr.strip(), "unknown-agent ask must explain itself on stderr"
     assert completed.stdout == ""
 
 
@@ -468,13 +451,13 @@ def test_codex_spawn_once_fake_provider_exit_propagates(tmp_path: Path, monkeypa
 
 @requires_rust
 @pytest.mark.parametrize("provider", ["codex"])
-def test_ask_followup_python_vs_rust_parity(provider, tmp_path: Path, monkeypatch) -> None:
-    """A follow-up ask produces the same stdout + exit on the Python dispatch and
-    the Rust client for codex. The agent is seeded via the retained
-    create machinery (Task 1.3: ask never creates), and the Rust side reads the
-    Python-written registry row - exactly the production shape, where both
-    runtimes share one registry. Follow-ups pass no `--harness` so the
-    provider is resolved from the registry row."""
+def test_ask_followup_e2e_registry_seeded(provider, tmp_path: Path, monkeypatch) -> None:
+    """A follow-up ask through the Rust client returns the provider's reply
+    verbatim and exit 0, reading a registry row the Python create machinery
+    wrote (exactly the production shape: both runtimes share one registry).
+    Follow-ups pass no `--harness` so the provider resolves from the row.
+    The Python dispatch half of the old parity test died with the ported
+    ask legs; the retained `_codex_create_path` still writes the row."""
     import shutil
 
     install_fake, env_for = _PROVIDER_FAKES[provider]
@@ -487,24 +470,22 @@ def test_ask_followup_python_vs_rust_parity(provider, tmp_path: Path, monkeypatc
     cwd = tmp_path / "workdir"
     cwd.mkdir()
 
-    # --- Python path: seed via the retained create helper (writes the
-    # registry row), then followup (resolve via registry).
+    # Seed via the retained create helper (writes the registry row).
     py_home = tmp_path / "py-home"
     py_home.mkdir()
     use_tmpdir(monkeypatch, py_home)
     monkeypatch.setenv("PATH", fake_path)
 
     from fno import paths
-    from fno.agents.dispatch import _codex_create_path, dispatch_ask
+    from fno.agents.dispatch import _codex_create_path
 
     class _Lock:
         def detach(self) -> None:
             pass
 
-    create_helper = _codex_create_path
     for k, v in env_for(_SESSION_ID, create_reply).items():
         monkeypatch.setenv(k, v)
-    create_helper(
+    _codex_create_path(
         name="fu-agent",
         message="hi",
         cwd=cwd,
@@ -514,30 +495,27 @@ def test_ask_followup_python_vs_rust_parity(provider, tmp_path: Path, monkeypatc
         lock_handle=_Lock(),
     )
 
-    for k, v in env_for(_SESSION_ID, followup_reply).items():
-        monkeypatch.setenv(k, v)
-    py_fu = dispatch_ask(name="fu-agent", message="again", harness=None, cwd=cwd, timeout=10)
-    py_stdout = py_fu.reply or ""  # followup -> reply verbatim, no trailing newline
-
-    # --- Rust path: separate home seeded by COPYING the Python-written
-    # registry (cross-language read is the production contract; both runtimes
-    # share ~/.fno/agents/registry.json). Run from the same cwd so the
-    # followup honors the registry-pinned cwd.
+    # Followup through the binary, from the same cwd so the registry-pinned
+    # cwd is honored.
     rs_home = tmp_path / "rs-home"
     rs_home.mkdir()
     shutil.copy(paths.agents_registry_path(), rs_home / "registry.json")
-    base_env = {**os.environ, "FNO_AGENTS_HOME": str(rs_home), "PATH": fake_path}
+    env = {
+        **os.environ,
+        "FNO_AGENTS_HOME": str(rs_home),
+        "PATH": fake_path,
+        **env_for(_SESSION_ID, followup_reply),
+    }
 
     rs = subprocess.run(
         [str(RUST_BIN), "ask", "fu-agent", "again"],
-        env={**base_env, **env_for(_SESSION_ID, followup_reply)},
+        env=env,
         cwd=cwd, capture_output=True, text=True, timeout=30, check=False,
     )
 
     assert rs.returncode == 0, f"rust {provider} followup failed: {rs.stderr}"
-    assert py_stdout == rs.stdout, (
-        f"{provider} followup stdout drift:\n"
-        f"  python: {py_stdout!r}\n"
-        f"  rust:   {rs.stdout!r}\n"
+    assert rs.stdout == followup_reply, (
+        f"{provider} followup stdout must be the reply verbatim:\n"
+        f"  stdout: {rs.stdout!r}\n"
         f"  rust stderr: {rs.stderr}"
     )
