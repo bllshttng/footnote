@@ -95,6 +95,10 @@ def _run_rust(args: list[str], home: Path) -> subprocess.CompletedProcess:
         "FNO_AGENTS_HOME": str(home),
         "PYTHONPATH": pythonpath,
     }
+    # The smoke setup exports the fresh Rust front through FNO_RUST_FRONT. The
+    # front's verification notice is setup noise, not part of the client verb
+    # contract, and would make Rust stderr differ from the Python oracle.
+    env.pop("FNO_RUST_FRONT", None)
     # Only when the real binary is absent, so a machine that HAS fno keeps
     # exercising the genuine article rather than a shim.
     shim_dir = _fno_shim_dir()
