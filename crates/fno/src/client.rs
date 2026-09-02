@@ -1980,7 +1980,10 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         add(entry_acc("◉", "Peek", "peek-row"), &[MenuAction::Peek]);
         // Resume above the rule (AC7): the menu twin of peek `r`, on the row
         // state `r` accepts - an exited row.
-        add(entry_acc("↻", "Resume", "resume-row"), &[MenuAction::Resume]);
+        add(
+            entry_acc("↻", "Resume", "resume-row"),
+            &[MenuAction::Resume],
+        );
     } else if agent.pane_id.is_some() {
         // Live pane row: already placed, so re-placement is a MOVE of the live
         // pane, never an attach. Same 2x2 grid geometry the paneless branch uses
@@ -23551,9 +23554,7 @@ mod tests {
     fn entry_hint(v: &View, label: &str) -> Option<String> {
         let m = v.row_menu.as_ref()?;
         m.popup.rows.iter().find_map(|row| match row {
-            PopupRow::Entry {
-                label: l, hint, ..
-            } if l == label => Some(hint.clone()),
+            PopupRow::Entry { label: l, hint, .. } if l == label => Some(hint.clone()),
             _ => None,
         })
     }
