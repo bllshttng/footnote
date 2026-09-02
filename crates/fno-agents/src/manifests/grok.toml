@@ -10,9 +10,11 @@
 # is idle-only. The reference port's permission-scope and ctrl+c-keyed
 # working rules never matched the live TUI and were deleted with the rot
 # rather than kept unfired (the cursor-agent row's precedent). grok has
-# approval prompts only in its default permission mode; the lanes the
-# capability row opens always launch --always-approve, so no blocked rule is
-# pinned. State vocab + arbitration: see codex.toml.
+# approval prompts in its default permission mode: the bypass rides only
+# when the spawn passes --yolo/--permission-mode, so a default spawn can
+# sit on a prompt and no blocked rule is pinned - the posture matches
+# cursor-agent's optional-bypass shape. State vocab + arbitration: see
+# codex.toml.
 #
 # Priority (highest wins): 120 waiting (working) > 10 idle.
 

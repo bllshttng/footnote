@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import socket
 import struct
 import subprocess
@@ -102,16 +101,6 @@ def _strip_ansi(raw: bytes) -> str:
             out.append(b)
             i += 1
     return bytes(out).decode("utf-8", "replace")
-
-
-def _wait_marker(text: str, pattern: str, timeout_s: float) -> bool:
-    rx = re.compile(pattern)
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if rx.search(_strip_ansi(text.encode())):
-            return True
-        time.sleep(2.0)
-    return rx.search(_strip_ansi(text.encode())) is not None
 
 
 def _alive(pid: int) -> bool:
@@ -254,9 +243,11 @@ def test_grok_spawn_journey_public_surface_reaches_a_live_row(
                 # No marker yet: force a repaint (alternate sizes every
                 # pass, the same nudge the seed submit uses) and read again.
                 flip = not flip
-                rows, cols = (25, 81) if flip else (24, 80)
+                flip_rows, flip_cols = (25, 81) if flip else (24, 80)
                 conn.sendall(
-                    bytes([2]) + struct.pack("<I", 4) + struct.pack("<HH", rows, cols)
+                    bytes([2])
+                    + struct.pack("<I", 4)
+                    + struct.pack("<HH", flip_rows, flip_cols)
                 )
             finally:
                 conn.close()

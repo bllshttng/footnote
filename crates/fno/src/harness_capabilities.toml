@@ -910,9 +910,12 @@ pane = "unsandboxed"
 thread = "unsandboxed"
 headless = "unmeasured"
 
-# grok HAS approval prompts in its default permission mode, but the lanes
-# this row opens always launch --always-approve (the argv bypass), so no
-# keystroke answer is ever composed. Measured answer vocabulary: none.
+# grok HAS approval prompts in its default permission mode. The bypass rides
+# only when the spawn passes --yolo or --permission-mode (pane and keeper
+# arms alike); a default spawn launches bare grok and can sit on a prompt,
+# so no blocked rule is pinned and the posture matches cursor-agent's
+# optional-bypass shape. No keystroke answer is measured: when a prompt
+# appears, compose no keys.
 [harness.grok.permission_response.allow_once]
 supported = false
 rule_ids = []
