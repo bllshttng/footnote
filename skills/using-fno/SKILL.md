@@ -26,13 +26,13 @@ Invoke plugin-qualified per harness: `/fno:<verb>` on claude/opencode, `$fno:<ve
 
 | Verb | Purpose |
 |------|---------|
-| `/fno:target` | End-to-end pipeline: think -> plan -> do -> review -> ship. |
-| `/fno:think` | Research cited findings to one file. Briefs: what-if, panel, class. Prefix `bg`/`subagent` to run off-thread. |
-| `/fno:review` | Review a diff. Routes: `sigma` (six-agent panel, default), `peer` (cross-model). |
-| `/fno:pr` | PR lifecycle. Routes: `create` (Haiku worker), `check`, `merged`. |
-| `/fno:fix` | Repair. Routes: `fix` (default), `investigate`. |
+| `target` | End-to-end pipeline: think -> plan -> do -> review -> ship. |
+| `think` | Research cited findings to one file. Briefs: what-if, panel, class. Prefix `bg`/`subagent` to run off-thread. |
+| `review` | Review a diff. Routes: `default` (inline lane), `peer` (cross-model), `prove-it`, `cleanup`. |
+| `pr` | PR lifecycle. Routes: `create` (Haiku worker), `check`, `merged`. |
+| `fix` | Repair. Routes: `fix` (default), `investigate`. |
 
-Everything else stays invocable by full name: `/fno:blueprint`, `/fno:execute` (`execute waves` for orchestration), `/fno:ship` (`ship pr` = `/fno:pr`, `ship doc`), `/fno:setup`, `/fno:triage`, `/fno:agent`, `/fno:mail`, `/fno:law`, `/fno:ship-docs`, `/fno:audit`, `/fno:speculate`. The session skill list enumerates them; this set is the entry point, not an access boundary.
+Everything else stays invocable by full name: `blueprint`, `execute` (`execute waves` for orchestration), `ship` (`ship pr` = `pr`, `ship doc`), `setup`, `triage`, `agent`, `mail`, `law`, `ship-docs`, `audit`, `speculate`. The session skill list enumerates them; this set is the entry point, not an access boundary.
 
 ## 2. CLI primitives (`fno <verb>`, mechanical, fast)
 
@@ -69,7 +69,7 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 
 **Observing = `fno agents peek <handle>`** (`--lines`, `--follow`): tails a transcript peer or pane worker via its mux ref; `fno agents logs <name>` is registry-scoped.
 
-**You are one of many agents (the mesh).** The loop is backlog -> spawn -> target -> mail: pull work with `fno backlog next`, spawn a peer into any project via `fno agents spawn --cwd <repo-root> "/fno:target <node>"` (the `--cwd` is load-bearing - never do another project's work inline), coordinate over `fno agents mail send <handle>`. Spawned workers are roster citizens; a hand-started session joins via `/fno-me`. `fno mux` hosts all of it as watchable, drivable panes.
+**You are one of many agents (the mesh).** The loop is backlog -> spawn -> target -> mail: pull work with `fno backlog next`, spawn a peer into any project via `fno agents spawn --cwd <repo-root> "/target <node>"` (the `--cwd` is load-bearing - never do another project's work inline), coordinate over `fno agents mail send <handle>`. Spawned workers are roster citizens; a hand-started session joins via `/fno-me`. `fno mux` hosts all of it as watchable, drivable panes.
 
 **Citizens vs limbs.** `fno agents spawn` makes an addressable, durable roster citizen. A native subagent is a one-shot, observable-only limb. Spawn work that must outlive you, hold a claim, or receive mail. Use a limb for a result consumed next turn. [Details](docs/architecture/coordination.md).
 

@@ -90,19 +90,19 @@ footnote/
 
 Five advertised verbs (table below): `target`, `think`, `review`, `pr`, `fix`. Full set in `skills/using-fno/SKILL.md`. Always write verbs plugin-qualified per harness (bare `/execute` resolves elsewhere). Claude and opencode use `/fno:verb`. Codex uses `$fno:verb` because `/` is reserved for harness commands. See [docs/harness-command-matrix.md](docs/harness-command-matrix.md).
 
-| Command | Purpose |
-|---------|---------|
-| `/fno:target "feature"` | End-to-end: think -> blueprint -> do -> review -> ship |
-| `/fno:target path/to/plan` \| `<node-id>` | Execute an existing plan or backlog node |
-| `/fno:target L "feature"` | Large size: full ceremony including adversarial |
-| `/fno:target auto-merge "..."` | Auto-merge once external review passes (opt-in). [auto-merge](skills/target/references/auto-merge.md) |
-| `/fno:blueprint <doc-path>` | Mutate a design doc in place; `quick "..."` for a flat single-file plan |
-| `/fno:execute` | Execute a plan: `flat` (default) or `waves` |
-| `/fno:think` \| `/fno:review` \| `/fno:fix` \| `/fno:tdd` \| `/fno:triage` \| `/fno:setup` | Research / review / fix-loop / TDD / spec-ordering / config wizard |
-| `/fno:pr create` \| `check` \| `merged` | Open PR (pr-create role worker) / poll+implement external review / post-merge ritual |
-| `/fno:growth-launch "<objective>"` | Growth-studio pack: four-role campaign bundle held at a founder approval gate |
+| Command (claude/opencode `/fno:`, codex `$fno:`) | Purpose |
+|---|---|
+| `target "feature"` | End-to-end: think -> blueprint -> do -> review -> ship |
+| `target path/to/plan` \| `<node-id>` | Execute an existing plan or backlog node |
+| `target L "feature"` | Large size: full ceremony including adversarial |
+| `target auto-merge "..."` | Auto-merge once external review passes (opt-in). [auto-merge](skills/target/references/auto-merge.md) |
+| `blueprint <doc-path>` | Mutate a design doc in place; `quick "..."` for a flat single-file plan |
+| `execute` | Execute a plan: `flat` (default) or `waves` |
+| `think` \| `review` \| `fix` \| `tdd` \| `triage` \| `setup` | Research / review / fix-loop / TDD / spec-ordering / config wizard |
+| `pr create` \| `check` \| `merged` | Open PR (pr-create role worker) / poll+implement external review / post-merge ritual |
+| `growth-launch "<objective>"` | Growth-studio pack: four-role campaign bundle held at a founder approval gate |
 
-Surface evolution: `/fno:blueprint` mutates the design doc in place ([lean-blueprint](docs/architecture/lean-blueprint.md)); an approved native Plan-Mode plan is picked up by the next bare `/fno:target` ([target-plan-mode-integration](docs/architecture/target-plan-mode-integration.md)).
+Surface evolution: `blueprint` mutates the design doc in place ([lean-blueprint](docs/architecture/lean-blueprint.md)). An approved native Plan-Mode plan is picked up by the next bare `target` ([target-plan-mode-integration](docs/architecture/target-plan-mode-integration.md)).
 
 ## Backlog (`fno backlog`)
 
