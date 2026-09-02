@@ -213,3 +213,72 @@ def migrate_updated_at(entries: list[dict], *, apply: bool = False) -> dict:
         row.pop("__updated_at", None)
     receipt["removed"] = len(pending)
     return receipt
+
+
+_BACKFILL_SIZE_BANDS = {"S": "low", "M": "medium", "L": "high"}
+_BACKFILL_PRIORITY_BANDS = {"p0": "high", "p1": "high", "p2": "medium", "p3": "low"}
+_BACKFILL_TYPE_BANDS = {"bug": "high", "epic": "medium", "feature": "medium", "roadmap": "medium"}
+_BAND_RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+def _backfill_band(row: dict) -> str | None:
+    """Choose the strongest named signal on a legacy row, or no band."""
+    signals: list[str] = []
+    size = row.get("size")
+    if isinstance(size, str):
+        band = _BACKFILL_SIZE_BANDS.get(size.strip().upper())
+        if band:
+            signals.append(band)
+    priority = row.get("priority")
+    if isinstance(priority, str):
+        band = _BACKFILL_PRIORITY_BANDS.get(priority.strip().lower())
+        if band:
+            signals.append(band)
+    node_type = row.get("type")
+    if isinstance(node_type, str):
+        band = _BACKFILL_TYPE_BANDS.get(node_type.strip().lower())
+        if band:
+            signals.append(band)
+    return max(signals, key=_BAND_RANK.get) if signals else None
+
+
+def backfill_difficulty(entries: list[dict], *, apply: bool = False) -> dict:
+    """Backfill missing difficulty from explicit legacy row signals.
+
+    Size, priority, and type are signals already stored on the row. The
+    strongest available signal wins; a row with none stays unbanded rather
+    than receiving an invented default. Existing difficulty and history are
+    untouched.
+    """
+    pending = [
+        row for row in entries
+        if isinstance(row, dict) and row.get("difficulty") is None
+    ]
+    planned: list[tuple[dict, str]] = []
+    skipped: list[str] = []
+    for row in pending:
+        band = _backfill_band(row)
+        if band is None:
+            skipped.append(str(row.get("id", "?")))
+        else:
+            planned.append((row, band))
+
+    receipt = {
+        "apply": apply,
+        "candidates": [str(row.get("id", "?")) for row, _band in planned],
+        "written": [str(row.get("id", "?")) for row, _band in planned] if apply else [],
+        "skipped": skipped,
+        "already_band": sum(
+            1 for row in entries if isinstance(row, dict) and row.get("difficulty") is not None
+        ),
+    }
+    if not apply:
+        return receipt
+
+    now = datetime.now(timezone.utc).isoformat()
+    from fno.graph._constants import append_difficulty_history
+
+    for row, band in planned:
+        row["difficulty"] = band
+        append_difficulty_history(row, band, "backfill", now)
+    return receipt

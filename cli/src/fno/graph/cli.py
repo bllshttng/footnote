@@ -13524,13 +13524,18 @@ def cmd_migrate_difficulty(
     apply: bool = typer.Option(
         False, "--apply", help="Move each model_tier band onto difficulty and drop the retired key."
     ),
+    backfill: bool = typer.Option(
+        False, "--backfill", help="Backfill missing bands from size, priority, or type."
+    ),
 ) -> None:
-    """Dry-run or apply the one-shot model_tier -> difficulty migration."""
-    from fno.graph.migrations import migrate_model_tier
+    """Dry-run or apply the difficulty migrations."""
+    from fno.graph.migrations import backfill_difficulty, migrate_model_tier
     from fno.graph.store import locked_mutate_graph, read_graph
 
     def _run(entries: list[dict]) -> dict:
         try:
+            if backfill:
+                return backfill_difficulty(entries, apply=apply)
             return migrate_model_tier(entries, apply=apply)
         except ValueError as exc:
             typer.echo(f"fno backlog migrate-difficulty: {exc}", err=True)
