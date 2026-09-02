@@ -88,7 +88,7 @@ footnote/
 
 ## Commands
 
-Five advertised verbs: `/fno:target`, `/fno:think`, `/fno:review`, `/fno:pr`, `/fno:fix`, each fanning out to modes (table below). Everything else stays invocable by full name. The advertised set lives in `skills/using-fno/SKILL.md`. Always write verbs plugin-qualified (`/fno:...`) - a bare `/execute` can resolve to another plugin.
+Five advertised verbs (table below): `target`, `think`, `review`, `pr`, `fix`. Full set in `skills/using-fno/SKILL.md`. Always write verbs plugin-qualified per harness (bare `/execute` resolves elsewhere). Claude and opencode use `/fno:verb`. Codex uses `$fno:verb` because `/` is reserved for harness commands. See [docs/harness-command-matrix.md](docs/harness-command-matrix.md).
 
 | Command | Purpose |
 |---------|---------|
@@ -213,6 +213,6 @@ Loop & target: [control-plane loop](docs/architecture/control-plane-loop.md) · 
 
 Planning & ship: [lean blueprint](docs/architecture/lean-blueprint.md) · [plan completion stamp](docs/architecture/plan-completion-stamp.md) · [post-merge ritual](docs/architecture/auto-post-merge-ritual.md)
 
-Coordination & providers: [coordination](docs/architecture/coordination.md) · [mux selector resolution](docs/architecture/mux-selector-resolution.md) · [provider rotation](docs/provider-rotation.md) · [harness command matrix](docs/harness-command-matrix.md) · [cross-model review](docs/architecture/cross-model-review.md)
+Coordination & providers: [coordination](docs/architecture/coordination.md) · [mux selector resolution](docs/architecture/mux-selector-resolution.md) · [provider rotation](docs/provider-rotation.md) · [cross-model review](docs/architecture/cross-model-review.md)
 
 Platform & ops: [harnesses](docs/HARNESSES.md) · [multi-CLI hooks](docs/architecture/multi-cli-hooks.md) · [path config](docs/path-config.md) · [workspace restore](docs/architecture/workspace-restore.md) · [disposable deletes](docs/architecture/disposable-deletes.md) · [thread lanes](docs/architecture/thread-lanes.md)
