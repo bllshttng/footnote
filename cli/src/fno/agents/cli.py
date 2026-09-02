@@ -12,7 +12,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 
@@ -1171,6 +1171,15 @@ def cmd_spawn(
             "the CLI binary -- that is --harness/-H. Capital -P: -p is headless."
         ),
     ),
+    recorded_provider: str | None = typer.Option(
+        None,
+        "--recorded-provider",
+        hidden=True,
+        help=(
+            "Machine-recorded model-vendor identity for a recovery spawn. "
+            "Unlike --provider, this does not configure a Claude route."
+        ),
+    ),
     once: bool = typer.Option(
         False,
         "--once",
@@ -1451,6 +1460,16 @@ def cmd_spawn(
             "with room, or create the next. --substrate pane only."
         ),
     ),
+    bounded_placement: bool = typer.Option(
+        False,
+        "--bounded-placement",
+        hidden=True,
+        help=(
+            "Spawn-side lane for automated placement (the outage handoff's "
+            "successor spawn): serialize placement under the mux lease, select "
+            "a stable tab with room, and enforce at most four panes per tab."
+        ),
+    ),
     crown: list[str] = typer.Option(
         [],
         "--crown",
@@ -1619,6 +1638,20 @@ def cmd_spawn(
     except DispatchFlagError as exc:
         print(str(exc), file=sys.stderr)
         raise typer.Exit(code=2) from exc
+    if recorded_provider is not None:
+        recorded_provider = recorded_provider.strip()
+        if not recorded_provider or model is None:
+            print(
+                "--recorded-provider requires a non-empty --model",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if vendor is not None and recorded_provider != vendor:
+            print(
+                "--recorded-provider must match --provider when both are supplied",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
     # Provenance rides the pane receipt's harness_source field below (the
     # default substrate) - it is the HARNESS axis's provenance, so it is not
     # named provider_*, which now holds the vendor. The bg/once stdout
@@ -1767,7 +1800,11 @@ def cmd_spawn(
     # pane substrate has. bg/headless have no pane tree, so the controls are
     # refused fail-closed before any spawn (mirrors the tier-3 guard shape above).
     placement_requested = (
-        squad is not None or split is not None or at is not None or tab is not None
+        bounded_placement
+        or squad is not None
+        or split is not None
+        or at is not None
+        or tab is not None
     )
     if squad is not None and not squad.strip():
         print("--workspace/-s needs a nonblank workspace name", file=sys.stderr)
@@ -1787,6 +1824,13 @@ def cmd_spawn(
         raise typer.Exit(code=2)
     if tab is not None and not tab.strip():
         print("--tab needs a nonblank selector or pane-group name", file=sys.stderr)
+        raise typer.Exit(code=2)
+    if bounded_placement and any(value is not None for value in (split, at, tab)):
+        print(
+            "--bounded-placement selects its own stable tab and cannot be combined "
+            "with --split, --at, or --tab",
+            file=sys.stderr,
+        )
         raise typer.Exit(code=2)
     if at is not None:
         # `--at current` is the exact-anchor spelling: the mux CLI resolves the
@@ -2349,10 +2393,11 @@ def cmd_spawn(
     spawn_succeeded = False
     try:
         if substrate == "pane" and not once:
-            from fno.agents.mux_spawn import dispatch_spawn_pane
+            from fno.agents.mux_spawn import dispatch_spawn_bounded_pane
 
             try:
-                pane_result = dispatch_spawn_pane(
+                pane_dispatch = dispatch_spawn_bounded_pane
+                pane_kwargs: dict[str, Any] = dict(
                     name=name,
                     message=message,
                     provider=harness,
@@ -2366,10 +2411,10 @@ def cmd_spawn(
                     agent=agent,
                     tools=tools,
                     deny_tools=deny_tools,
-                    squad=squad,
                     split=split,
                     at=at,
                     tab=tab,
+                    bounded_placement=bounded_placement,
                     crown_level=crown_level,
                     crown_scope=crown_scope,
                     succession=succeed,
@@ -2379,10 +2424,15 @@ def cmd_spawn(
                     monitor=monitor,
                     route_provider=route_provider,
                     provider_gate=gate,
+                    route_provider_id=route_provider or recorded_provider,
+                    model_name=model or route_model,
+                    account_record_id=dispatch_account or account,
                     passthrough=passthrough,
                     launch_account=account or dispatch_account,
                     route_model=route_model,
                 )
+                pane_kwargs["workspace"] = squad
+                pane_result = pane_dispatch(**pane_kwargs)
             except DispatchAskError as exc:
                 print(str(exc), file=sys.stderr)
                 raise typer.Exit(code=exc.exit_code) from exc
@@ -2448,8 +2498,8 @@ def cmd_spawn(
             # Reporting only route_model here would re-introduce the
             # receipt-can-lie defect: a `--route zai,glm-5.3 --model opus` spawn
             # would name glm-5.3 in the receipt while the worker runs opus.
-            if route_provider is not None:
-                receipt_obj["provider"] = route_provider
+            if route_provider is not None or recorded_provider is not None:
+                receipt_obj["provider"] = route_provider or recorded_provider
             receipt_model = model or route_model
             if receipt_model is not None:
                 # v23 (x-2019): the label is the point. At receipt time this
@@ -2601,6 +2651,9 @@ def cmd_spawn(
                 resume_session_id=resume,
                 account_env=account_env,
                 launch_account=account or dispatch_account,
+                route_provider_id=route_provider or recorded_provider,
+                model_name=model or route_model,
+                account_record_id=dispatch_account or account,
                 crown_level=crown_level,
                 crown_scope=crown_scope,
                 succession=succeed,
@@ -2709,8 +2762,9 @@ def cmd_spawn(
         # `model` is the EFFECTIVE model: an explicit --model reaches claude as
         # its own `--model` flag and beats the route's ANTHROPIC_MODEL, so it
         # wins the receipt too (see the pane branch above).
+        receipt_provider = route_provider or recorded_provider
         provider_field = (
-            f", \"provider\": {json.dumps(route_provider)}" if route_provider else ""
+            f", \"provider\": {json.dumps(receipt_provider)}" if receipt_provider else ""
         )
         receipt_model = model or route_model
         # v23 (x-2019): a receipt that prints `model` labels it - the request
@@ -4579,6 +4633,9 @@ def cmd_watchdog(
         "manual", payload["counts"], now, signature,
         events_signature=signature_to_stamp,
         terminal_harness_rows=payload.get("terminal_harness_rows", 0),
+        provider_outages=payload.get("provider_outages") or wd._unknown_provider_report(
+            "provider_outage_payload_missing"
+        ),
     )
 
     # Classification events ride every mode: a verdict emitted only under a
@@ -4616,6 +4673,22 @@ def cmd_watchdog(
         typer.echo(
             f"terminal harness rows: {payload.get('terminal_harness_rows', 0)}"
         )
+        outage_counts = (payload.get("provider_outages") or {}).get("counts") or {}
+        blind_spots = {
+            reason: outage_counts[reason]
+            for reason in ("unknown_route_identity", "transcript_shape_unsupported")
+            if outage_counts.get(reason)
+        }
+        if blind_spots:
+            # Loud, not silent: these rows are outside what the provider-outage
+            # instrument can measure at all, not rows it measured and cleared.
+            named = " ".join(f"{k}={v}" for k, v in sorted(blind_spots.items()))
+            typer.echo(
+                f"provider-outage coverage gap ({named}): route identity "
+                f"missing on daemon-managed rows, or a transcript shape this "
+                f"instrument does not parse - filed as follow-up work, not "
+                f"measured this sweep"
+            )
         return
 
     lanes = "all" if apply_all else "wake"

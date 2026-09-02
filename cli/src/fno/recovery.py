@@ -1023,7 +1023,13 @@ def _redispatch(
     pre_spawn: Optional[Callable[[], bool]] = None,
     flags: Optional[Sequence[str]] = None,
 ) -> "bool | str | _Failed":
-    """Stop the rate-limited session and respawn ``/target`` on the now-active
+    """Legacy non-outage stop and respawn on an already selected route.
+
+    Quorum-backed provider outages must enter through
+    :func:`recover_provider_outage`; this helper has neither exact source-death
+    proof nor a durable attempt journal and is not an outage migration seam.
+
+    Stop the rate-limited session and respawn ``/target`` on the now-active
     (swapped) provider, continuing in the SAME worktree (work-so-far lives in the
     branch's atomic commits there). Returns True iff a replacement worker was
     actually launched and its graph ownership was stamped. Returns
@@ -1172,6 +1178,15 @@ def _redispatch(
         if old_worker_stopped:
             _clear_dead_owner(node, cwd)
         return False
+
+
+def recover_provider_outage(request, *, deps, journal_root: Path):
+    """Run the durable path only for a positively quorum-backed outage."""
+    if getattr(request, "quorum_evidence_count", 0) < 2:
+        raise ValueError("provider outage handoff requires quorum evidence")
+    from fno.agents.outage_handoff import run_outage_handoff
+
+    return run_outage_handoff(request, deps=deps, journal_root=journal_root)
 
 
 def _auto_switch_enabled(repo_root: Optional[str] = None) -> bool:
@@ -1616,6 +1631,7 @@ def run_recovery_sweep(
     load_counts_fn: Optional[Callable] = None,
     save_counts_fn: Optional[Callable] = None,
     failover_fn: Optional[Callable] = None,
+    provider_failover: bool = True,
     mission_complete_fn: Optional[Callable] = None,
     notify_close_fn: Optional[Callable[["Candidate"], bool]] = None,
 ) -> int:
@@ -1651,11 +1667,13 @@ def run_recovery_sweep(
             )
     load_counts_fn = load_counts_fn or load_counts
     save_counts_fn = save_counts_fn or save_counts
-    # Default-on in production: the failover branch activates whenever a stale
-    # session's last error is swap-class. With a single configured provider the
-    # controller returns QUEUE_EXHAUSTED (a bounded stop), so wiring it on by
-    # default is safe (x-7abe).
-    failover_fn = failover_fn or _default_failover
+    # The legacy single-row failover is exclusive with provider supervision.
+    # Report/wake/handoff modes still run this sweep for unrelated close
+    # surfacing, but only the quorum supervisor may move provider ownership.
+    if provider_failover:
+        failover_fn = failover_fn or _default_failover
+    else:
+        failover_fn = None
     mission_complete_fn = mission_complete_fn or mission_complete
     notify_close_fn = notify_close_fn or _notify_close
 

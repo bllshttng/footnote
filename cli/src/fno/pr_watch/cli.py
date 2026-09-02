@@ -392,7 +392,14 @@ def tick() -> None:
                     _emit_event(event_type, data)
 
                 _fleet_candidates = run_recovery_sweep(
-                    settings.recovery, emit=emit_recovery
+                    settings.recovery,
+                    emit=emit_recovery,
+                    # Legacy failover stands down only for "handoff", where the
+                    # provider-outage supervisor owns the transaction instead.
+                    # "report" and "wake" still need it: neither mode arms the
+                    # supervisor, so gating this on "off" alone would silently
+                    # drop the old safety net the moment either is turned on.
+                    provider_failover=(settings.recovery.watchdog != "handoff"),
                 )
                 _fleet_swept = True
                 typer.echo(f"recovery sweep: candidates={_fleet_candidates}")
@@ -542,6 +549,72 @@ def tick() -> None:
                     log=lambda line: log.warning("pr-watch: %s", line),
                 )
 
+                # Provider-outage supervision, both modes, measured ONCE per
+                # tick: a breaker must be visible from a plain report tick -
+                # waiting for someone to arm wake mode is how the fleet stays
+                # blind through an outage. The wake sweep below reuses this
+                # measurement through run_sweep's provider_outage_fn seam, so
+                # no transcript is read twice on one tick. Refused the same
+                # way the wake lane is: a budget under the probe's measured
+                # cost buys a guaranteed timeout, not a smaller answer.
+                left = deadline - (time.monotonic() - started)
+                if left < _ROSTER_FLOOR_S:
+                    raise _WatchdogBudgetSpent(
+                        f"{left:.1f}s left, under the {_ROSTER_FLOOR_S:.0f}s "
+                        f"a roster probe costs"
+                    )
+                provider_rows, _provider_warnings = _wd.fleet_rows(timeout=left)
+                provider_outages = _wd.measure_provider_outages(
+                    provider_rows, now_s=now
+                )
+                # Read BEFORE any write, defaulted here: the sweep file is the
+                # only memory of what the event lane already said, so a first
+                # tick after a wipe re-announces the open breaker - correct.
+                prev_events_sig = _wd._last_events_signature()
+                previous_parts = set(filter(None, prev_events_sig.split(";")))
+                emitted_breaker_parts = []
+                for breaker in provider_outages.get("breakers") or []:
+                    breaker_part = (
+                        "provider-breaker:"
+                        f"{breaker.get('provider')}:{breaker.get('account')}:"
+                        f"{breaker.get('outage_epoch')}"
+                    )
+                    if breaker_part not in previous_parts:
+                        _wd.emit_event("provider_breaker_transition", {
+                            "outage_epoch": str(breaker.get("outage_epoch") or ""),
+                            "provider": str(breaker.get("provider") or ""),
+                            "account": str(breaker.get("account") or ""),
+                            "phase": "open",
+                            "count": len(breaker.get("row_ids") or []),
+                        })
+                    emitted_breaker_parts.append(breaker_part)
+                _wd.write_sweep_file(
+                    "tick", None, now, None,
+                    events_signature=";".join(
+                        sorted(previous_parts | set(emitted_breaker_parts))
+                    ),
+                    provider_outages=provider_outages,
+                )
+                try:
+                    handoffs = _wd.supervise_provider_handoffs(
+                        provider_outages, provider_rows,
+                        settings=settings, now_s=now,
+                    )
+                except Exception as exc:  # noqa: BLE001 - PR polling stays live
+                    handoffs = [{
+                        "phase": "refused",
+                        "reason": "provider_supervisor_exception",
+                        "detail": repr(exc)[:400],
+                        "count": 1,
+                    }]
+                for handoff in handoffs:
+                    event = (
+                        "provider_handoff_refused"
+                        if handoff.get("phase") == "refused"
+                        else "provider_handoff_transition"
+                    )
+                    _wd.emit_event(event, handoff)
+
                 # Internal recovery, wake mode only. Session verdicts drive
                 # nothing here in report mode, and their receipts stay
                 # separate from the report's event stream.
@@ -563,7 +636,8 @@ def tick() -> None:
                         )
                     else:
                         payload, rows = _wd.run_sweep(
-                            now_s=now, roster_timeout=wake_budget
+                            now_s=now, roster_timeout=wake_budget,
+                            provider_outage_fn=lambda: provider_outages,
                         )
                         if payload.get("refused"):
                             # x-4c87: zero rows read is an instrument failure.
@@ -722,6 +796,7 @@ def tick() -> None:
                             now,
                             None,
                             recovery_events_signature=recovery_sig,
+                            provider_outages=provider_outages,
                         )
                 counts = " ".join(
                     f"{k}={v}"

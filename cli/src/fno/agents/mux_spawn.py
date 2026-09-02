@@ -3366,6 +3366,120 @@ def _submit_spawn_seed(
     return "submitted", "", trust_source or _send_source(payload), observation
 
 
+def _strict_json_list(
+    args: list[str],
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+    *,
+    noun: str,
+) -> list[dict]:
+    proc = _run_mux(args, runner)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise DispatchAskError(f"{noun} failed: {detail or 'no output'}", exit_code=1)
+    try:
+        value = json.loads(proc.stdout or "")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise DispatchAskError(f"{noun} was unreadable", exit_code=1) from exc
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise DispatchAskError(f"{noun} was unreadable", exit_code=1)
+    return value
+
+
+def _select_or_create_bounded_tab(
+    session: str,
+    workspace: str | None,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> int:
+    args = ["mux", "tab", "ls", "--session", session, "--json"]
+    if workspace:
+        args += ["--workspace", workspace]
+    tabs = _strict_json_list(args, runner, noun="tab listing")
+    for tab in tabs:
+        tab_id = tab.get("tab_id")
+        pane_ids = tab.get("pane_ids")
+        if isinstance(tab_id, int) and isinstance(pane_ids, list) and len(pane_ids) < 4:
+            return tab_id
+    create_args = ["mux", "tab", "create", "--session", session, "--json"]
+    if workspace:
+        create_args += ["--workspace", workspace]
+    proc = _run_mux(create_args, runner)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise DispatchAskError(
+            f"tab creation failed: {detail or 'no output'}", exit_code=1
+        )
+    try:
+        created = json.loads(proc.stdout or "")
+        tab_id = created["tab_id"]
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise DispatchAskError("tab creation receipt was unreadable", exit_code=1) from exc
+    if not isinstance(tab_id, int):
+        raise DispatchAskError("tab creation receipt had no stable tab id", exit_code=1)
+    return tab_id
+
+
+def dispatch_spawn_bounded_pane(
+    *,
+    workspace: str | None = None,
+    placement_holder: str | None = None,
+    claims_root: Path | None = None,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
+    **spawn_kwargs,
+) -> MuxSpawnResult:
+    """Place one canonical pane spawn while holding the mux placement lease."""
+    from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim, release_claim
+    from fno.claims.io import global_claims_root
+
+    provider = spawn_kwargs.get("provider")
+    if provider not in PANE_HOSTABLE_PROVIDERS:
+        raise DispatchAskError(
+            f"unknown provider {provider!r}; pane-hostable providers: "
+            f"{', '.join(PANE_HOSTABLE_PROVIDERS)}",
+            exit_code=2,
+        )
+    session = resolve_mux_session(spawn_kwargs.pop("session", None))
+    holder = placement_holder or f"mux-placement:{os.getpid()}:{_uuid.uuid4()}"
+    key = f"placement:{session}:global"
+    root = claims_root or global_claims_root()
+    try:
+        acquire_claim(
+            key, holder, ttl_ms=60_000, root=root,
+            reason="bounded mux pane placement",
+        )
+    except CLAIM_UNAVAILABLE as exc:
+        live_holder = getattr(exc, "holder", "unknown")
+        raise DispatchAskError(
+            f"placement lease held by {live_holder}; no pane spawned", exit_code=2
+        ) from exc
+    try:
+        explicit_geometry = any(
+            spawn_kwargs.get(key) is not None for key in ("split", "at", "tab_id")
+        )
+        if explicit_geometry:
+            return dispatch_spawn_pane(
+                session=session,
+                squad=workspace,
+                runner=runner,
+                enforce_tab_capacity=True,
+                **spawn_kwargs,
+            )
+        for geometry_key in ("split", "at", "tab_id"):
+            spawn_kwargs.pop(geometry_key, None)
+        tab_id = _select_or_create_bounded_tab(session, workspace, runner)
+        return dispatch_spawn_pane(
+            session=session,
+            squad=workspace,
+            tab_id=f"id:{tab_id}",
+            runner=runner,
+            **spawn_kwargs,
+        )
+    finally:
+        try:
+            release_claim(key, holder, strict=True, root=root)
+        except Exception:  # noqa: BLE001 - a stale lease release must not mask the spawn result
+            pass
+
+
 def dispatch_spawn_pane(
     name: str,
     message: str,
@@ -3386,6 +3500,10 @@ def dispatch_spawn_pane(
     split: Optional[str] = None,
     at: Optional[str] = None,
     tab: Optional[str] = None,
+    # Internal stable-id lane: bounded placement passes id:<n> after it has
+    # selected the tab itself. Not a user flag - the user surface is --tab.
+    tab_id: Optional[str] = None,
+    enforce_tab_capacity: bool = False,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     succession: bool = False,
@@ -3395,6 +3513,9 @@ def dispatch_spawn_pane(
     monitor: Optional[str] = None,
     route_provider: Optional[str] = None,
     provider_gate: object | None = None,
+    route_provider_id: Optional[str] = None,
+    model_name: Optional[str] = None,
+    account_record_id: Optional[str] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
     codex_sessions_dir: Optional[Path] = None,
     passthrough: Optional[Sequence[str]] = None,
@@ -3582,6 +3703,16 @@ def dispatch_spawn_pane(
                     "flag after '--' instead.",
                     exit_code=2,
                 )
+    if tab_id is not None:
+        # The internal bounded-placement lane must hand the transport a stable
+        # id, never an ordinal: an ordinal resolves against live tab order and
+        # two concurrent placements can resolve the same ordinal differently.
+        stable_tab = tab_id.strip()
+        if not stable_tab.startswith("id:") or not stable_tab[3:].isdigit():
+            raise DispatchAskError(
+                "tab_id requires id:<stable-id>, not an ordinal or tab name",
+                exit_code=2,
+            )
 
     codex_route = None
     if provider == "codex" and role is not None:
@@ -3784,6 +3915,10 @@ def dispatch_spawn_pane(
             # parser owns env identity for every reachable caller (no Python
             # env drift, AC1-ERR).
             placement_args += ["at", at]
+        if tab_id:
+            # The bounded-placement lane's stable id rides the same transport
+            # flag as a caller tab; the id: shape is enforced at the gate.
+            placement_args += ["--tab", tab_id.strip()]
         # Same reasoning as the spawn-clock stamp below, snapshotted first: a
         # sibling pane starting during the lock-wait or argv-build above would
         # otherwise widen the daemon oracle's candidate set. Gated to codex
@@ -3821,8 +3956,8 @@ def dispatch_spawn_pane(
         # Exact placement answers --json so the server authors the receipt
         # (anchor/direction/fallback); Python never synthesizes those from the
         # requested flags (AC1-UI). Legacy spawns keep the plain pane-id stdout.
-        exact = bool(at)
-        if exact:
+        json_receipt = bool(at or tab_id)
+        if json_receipt:
             run_args.append("--json")
         run_args += ["--", *wrapped]
         # x-42c5: pop FNO_SPAWN_TRIGGER BEFORE this env snapshot, mirroring the
@@ -3933,7 +4068,7 @@ def dispatch_spawn_pane(
                 "there is no daemon-PTY fallback)",
                 exit_code=1,
             )
-        elif exact:
+        elif json_receipt:
             try:
                 payload = json.loads((proc.stdout or "").strip().splitlines()[-1])
                 pane_id = int(payload["pane_id"])
@@ -3982,6 +4117,43 @@ def dispatch_spawn_pane(
                 )
 
         child_pid = _lookup_child_pid(session, pane_id, runner)
+        if tab_id or enforce_tab_capacity:
+            expected_tab_id = int(tab_id[3:]) if tab_id else None
+            try:
+                listed = _strict_json_list(
+                    ["mux", "pane", "ls", "--session", session, "--json"],
+                    runner,
+                    noun="pane listing",
+                )
+                if expected_tab_id is None:
+                    spawned_row = next(
+                        (item for item in listed if item.get("pane_id") == pane_id), None
+                    )
+                    expected_tab_id = (
+                        spawned_row.get("tab_id") if isinstance(spawned_row, dict) else None
+                    )
+                in_tab = [
+                    item for item in listed
+                    if isinstance(item, dict) and item.get("tab_id") == expected_tab_id
+                ]
+                placed = expected_tab_id is not None and any(
+                    item.get("pane_id") == pane_id for item in in_tab
+                )
+                if not placed or len(in_tab) > 4:
+                    reason = "wrong tab" if not placed else "fifth pane"
+                    raise DispatchAskError(
+                        f"bounded placement verification failed: {reason}", exit_code=1
+                    )
+            except DispatchAskError as exc:
+                reaped, detail = _reap_spawned_pane(session, pane_id, runner)
+                if reaped:
+                    raise DispatchAskError(
+                        f"{exc}; pane {pane_id} reaped, no registry row written",
+                        exit_code=1,
+                    ) from exc
+                raise DispatchAskError(
+                    f"{exc}; exact cleanup failed: {detail}", exit_code=1
+                ) from exc
         from fno.agents.spawn_gate import _process_start_time
 
         pid_start_time = _process_start_time(child_pid) if child_pid is not None else None
@@ -4578,6 +4750,9 @@ def dispatch_spawn_pane(
                     # session's ambient value.
                     node=(provenance or {}).get("FNO_NODE") or None,
                     fno_id=stored_session_uuid or name,
+                    route_provider_id=route_provider_id,
+                    model_name=model_name,
+                    account_record_id=account_record_id,
                 )
             if entry.crown_level is not None and entry.crown_scope:
                 from fno.king.state import arm_king_manifest

@@ -597,47 +597,45 @@ fi
 # From this point, unwind must release the dispatch reservation on failure.
 
 # ---------------------------------------------------------------------------
-# Step 4: Archive target-state.md to {plan_path}.artifacts/
+# Steps 4-5: Python-owned manifest archive + exact-holder claim release
 # ---------------------------------------------------------------------------
 PLAN_ARTIFACTS_DIR="${PLAN_PATH}.artifacts"
-mkdir -p "$PLAN_ARTIFACTS_DIR"
 ARCHIVED_STATE="$PLAN_ARTIFACTS_DIR/target-state-${SESSION_ID}.md"
 
-_ARCHIVE_RC=0
-mv "$STATE_FILE" "$ARCHIVED_STATE" 2>/dev/null || _ARCHIVE_RC=$?
-
-if [ "$_ARCHIVE_RC" -ne 0 ]; then
-  # Unwind: release dispatch reservation
-  FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$DISPATCH_KEY" \
-    --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
-  echo "parked $NODE_ID reason=\"failed to archive manifest (rc=$_ARCHIVE_RC)\""
-  exit "$_EXIT_PARKED"
+_PREPARE_RC=0
+# Bootstrap the interpreter the way every other Python-delegating script does
+# (scripts/lib/fno-python.sh): FNO_SRC-style PYTHONPATH pins are set only by
+# test harnesses, so a production run must never depend on one.
+_HANDOFF_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+_HANDOFF_PYTHON="python3"
+_HANDOFF_PKG_SRC=""
+if [ -n "$_HANDOFF_REPO_ROOT" ] && [ -f "$_HANDOFF_REPO_ROOT/scripts/lib/fno-python.sh" ]; then
+  # shellcheck source=scripts/lib/fno-python.sh
+  . "$_HANDOFF_REPO_ROOT/scripts/lib/fno-python.sh"
+  fno_python_init "$_HANDOFF_REPO_ROOT"
+  _HANDOFF_PYTHON="${FNO_PYTHON:-python3}"
+  _HANDOFF_PKG_SRC="${_HANDOFF_REPO_ROOT}/cli/src"
 fi
+FNO_CLAIMS_ROOT="$HOME" PYTHONPATH="${_HANDOFF_PKG_SRC}${PYTHONPATH:+:${PYTHONPATH}}" \
+  "$_HANDOFF_PYTHON" -m fno.state.outage_handoff prepare \
+  --state "$STATE_FILE" \
+  --archive "$ARCHIVED_STATE" \
+  --claim-key "node:$NODE_ID" \
+  --holder "$CLAIM_HOLDER" >/dev/null 2>&1 || _PREPARE_RC=$?
 
-# ---------------------------------------------------------------------------
-# Step 5: Release node claim
-# ---------------------------------------------------------------------------
-_RELEASE_RC=0
-FNO_CLAIMS_ROOT="$HOME" fno agents claim release "node:$NODE_ID" \
-  --holder "$CLAIM_HOLDER" >/dev/null 2>&1 || _RELEASE_RC=$?
-
-if [ "$_RELEASE_RC" -ne 0 ]; then
-  # Unwind: restore manifest, release dispatch reservation
-  _RESTORE_RC=0
-  mv "$ARCHIVED_STATE" "$STATE_FILE" 2>/dev/null || _RESTORE_RC=$?
+if [ "$_PREPARE_RC" -ne 0 ]; then
   FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$DISPATCH_KEY" \
     --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
 
   _emit_event "handoff_failed" \
-    "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"release_failed\",\"detail\":\"claim release exited $_RELEASE_RC\"}"
+    "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"prepare_failed\",\"detail\":\"python prepare exited $_PREPARE_RC\"}"
 
-  if [ "$_RESTORE_RC" -ne 0 ]; then
-    # Archive is gone AND restore failed: unrecoverable
-    echo "handoff-restore-failed $NODE_ID reason=\"release_failed + restore_failed\""
+  if [ "$_PREPARE_RC" -eq 12 ]; then
+    echo "handoff-restore-failed $NODE_ID reason=\"prepare failed + restore failed\""
     exit "$_EXIT_RESTORE_FAILED"
   fi
 
-  echo "parked $NODE_ID reason=\"claim release failed (rc=$_RELEASE_RC)\""
+  echo "parked $NODE_ID reason=\"handoff prepare failed (rc=$_PREPARE_RC)\""
   exit "$_EXIT_PARKED"
 fi
 

@@ -12,6 +12,8 @@ agents mail pane-prepare !--session
 agents mail send !--origin
 agents mail send !--provider
 agents spawn !--output-format
+agents spawn !--bounded-placement
+agents spawn !--recorded-provider
 agents spawn !--squad
 agents worker external !--pr
 agents worker review !--session

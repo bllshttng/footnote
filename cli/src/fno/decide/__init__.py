@@ -342,6 +342,7 @@ def record_decision(
     asked_at: str | None = None,
     expiry_ref: dict[str, Any] | None = None,
     events_root: Any = None,
+    source: str = "target",
 ) -> dict[str, Any]:
     """Append the event, then project it onto the subject node.
 
@@ -438,6 +439,7 @@ def record_decision(
         graduation=graduation,
         rationale=rationale,
         supersedes=supersedes,
+        source=source,
     )
     append_event(event, events_path=events_path(events_root))
     # Order is the contract: the project journal is durability, the index is

@@ -3631,6 +3631,9 @@ fn create(
         // three-valued env read is the honest account fact for the row.
         launch_account: crate::state::launch_account_from_env(),
         related_session_id: None,
+        route_provider_id: None,
+        model_name: None,
+        account_record_id: None,
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,
