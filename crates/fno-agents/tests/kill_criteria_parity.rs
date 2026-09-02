@@ -29,7 +29,7 @@
 //!   - no kill_criteria block -> exit 0
 //!   - quick-mode fenced `## Kill Criteria`
 
-use common::{capture_mode, assert_golden as assert_golden_common, Golden};
+use common::{assert_golden as assert_golden_common, capture_mode, Golden};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

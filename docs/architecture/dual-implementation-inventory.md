@@ -43,22 +43,22 @@ Measured by reading each file's header, then testing whether its oracle still ex
 
 | Parity file | Oracle | On disk | Verdict |
 |---|---|---|---|
-| `crates/fno-agents/tests/claude_ask_parity.rs` | `fno.agents.harnesses.claude` | present | dual-logic |
-| `crates/fno-agents/tests/codex_ask_parity.rs` | `fno.agents.harnesses.codex` | present | dual-logic |
+| `crates/fno-agents/tests/claude_ask_parity.rs` | `fno.agents.harnesses.claude._build_envelope` | absent (symbol) | characterization, port complete |
+| `crates/fno-agents/tests/codex_ask_parity.rs` | `fno.agents.harnesses.codex.resume` | absent (symbol) | characterization, port complete |
 | `crates/fno-agents/tests/kill_criteria_parity.rs` | `scripts/lib/kill-criteria.sh` | absent | characterization, port complete |
 | `crates/fno-agents/tests/verify_evidence_parity.rs` | `scripts/lib/verify-event-evidence.sh` | absent | characterization, port complete |
 
-Two of the four are finished ports. Their bash oracles were deleted. Each case now asserts against a golden captured before that deletion. They sit at step 4 of the protocol below. They do not await one.
+All four are finished ports. Their oracle legs are gone. Each converted case now asserts against a golden captured before that deletion, and each file sits at step 4 of the protocol below. None awaits anything. The ask files carry the first two SYMBOL oracles, and their Python modules survive the port. The spawn surface keeps `parse_short_id`, the session registry keeps the reply readers, and `codex.create` keeps the one-shot lane. Only a symbol says which leg is gone.
 
 `kill_criteria` is not a dual implementation. State the reason, because the mistake is easy to repeat. The Python files under `cli/src/fno/plan/` validate the kill-criteria DECLARATION against a schema. The Rust `kill-check` verb EVALUATES the predicates at a wave boundary. Two functions share a vocabulary. The parity test never pointed at that Python. It points at a bash oracle that is gone.
 
 ## The real dual set
 
-There are four, in retirement order.
+There were four, in retirement order. Three are retired.
 
-**The claim classifier.** Dual and UNGUARDED. It goes first for that reason. Nothing pins it, so it can drift silently. The other three cannot.
+**The claim classifier.** Dual and UNGUARDED. It went first for that reason. Nothing pinned it. It drifted or died only by luck.
 
-**The ask adapters.** `fno.agents.harnesses.claude` and `fno.agents.harnesses.codex`, pinned by the two differential harnesses above. `claude_ask_parity.rs` runs the genuine Python `_build_envelope` and `parse_short_id` and asserts byte-identity. `codex_ask_parity.rs` drives one fake `codex` binary through both legs. It asserts reply text, exit code, and event fields. This is one port with one production caller. That caller is `cli/src/fno/agents/cli.py`, the body of `fno agents ask`.
+**The ask adapters.** `fno.agents.harnesses.claude` and `fno.agents.harnesses.codex`, pinned by the two differential harnesses until their port completed (2026-09-02). The Rust runtime already owned production `ask` end to end. The port deleted the Python ask functions and moved the last Python-only caller duty, `--to-project` anycast resolution, into `cmd_ask` ahead of the binary exec. The surviving Python surface is spawn substrate, not ask: `parse_short_id` for bg receipts, the registry reply readers, and `codex.create` for one-shot spawns.
 
 **The native graph reader.** `crates/fno/src/backlog_view.rs`, 2140 lines of Rust parsing `graph.json` with no subprocess. Its own docstrings name the Python oracles it mirrors: `KANBAN_COLUMNS` (`cli/src/fno/graph/render.py:26`, mirrored at `backlog_view.rs:380`), `_kanban_column` (`render.py:71`, mirrored near `backlog_view.rs:390`), and `compute_readiness` (`cli/src/fno/graph/statuses.py:133`, mirrored near `backlog_view.rs:441`). Dual and UNGUARDED. The parity is a comment asking a human to remember, and the tests beside it run one side only. The earlier guard enumeration did not find this file. That is the limit the duplicate-discovery sweep exists to close. A mirror that declares itself in a docstring is invisible to a guard census keyed on parity-test files. It holds exactly one seam crossing, so a crossing count alone scores writing more of it as an improvement. The two-axis budget in [the seam doc](rust-python-seam.md) exists for exactly this shape.
 
@@ -101,7 +101,7 @@ Use this. Do not invent another. The repo proved it on two migrations. The prope
 
 Never delete a leg before proving it unreachable. The ask adapters are live in production. A port is a migration with callers to move, never a cleanup. `verify_evidence` was free only because its counterpart was already gone.
 
-When the other language is unavailable, a test skips. It never fails. `claude_ask_parity.rs` shows the shape.
+When the other language is unavailable, a test skips. It never fails. The live-differential residue in `claude_ask_parity.rs` and `codex_ask_parity.rs` shows the shape. It covers the spawn substrate whose Python counterparts survive. The golden-driven cases need no other language at all.
 
 ## The provenance declaration
 
@@ -112,19 +112,25 @@ Every `*_parity.rs` declares its stage and its oracle in its header. `scripts/ci
 //! parity-oracle: fno.agents.harnesses.claude
 ```
 
-`parity-stage` is exactly one of `differential` or `characterization`. `parity-oracle` names the LEG, and it takes one of three forms: a repo-relative path for a leg that occupied a whole file, a dotted module for a leg that occupies a whole Python module, or a dotted module with one final symbol for a leg that lives inside a surviving module, naming a `def`, a `class`, or an assignment at that module's top level. The symbol form is the ordinary Python case: the module file survives the port, the ask functions inside it do not, and only a symbol can say which leg is gone. A file-existence rule read the two finished bash ports as proof that "the file is gone" and "the leg is gone" were the same sentence; they share that property by accident, and no Python oracle shares it at all.
+`parity-stage` is exactly one of `differential` or `characterization`. `parity-oracle` names the LEG, in one of three forms.
+
+- A repo-relative path, for a leg that occupied a whole file.
+- A dotted module, for a leg that occupies a whole Python module.
+- A dotted module with one final symbol, for a leg inside a surviving module. The symbol names a `def`, a `class`, or an assignment at that module's top level.
+
+The symbol form is the ordinary Python case. The module file survives the port, the ask functions inside it do not, and only a symbol can say which leg is gone. The two finished bash ports made "the file is gone" and "the leg is gone" read as one sentence. They shared that property by accident, and no Python oracle shares it at all.
 
 The check is two-sided on purpose. A `characterization` file must name an oracle that NO LONGER RESOLVES. The leg was deleted, and the golden stands in for it. A `differential` file must name one that DOES resolve. A live second implementation is the only reason to run both legs. Either way the assertion has a positive marker rather than an absence. Either way it fails loudly the moment a port finishes or a new dual implementation appears.
 
-The header carries no node id and no PR number. `scripts/ci/check-no-internal-refs.sh` fails on them. The oracle is the identity: a path names a whole-file leg, a symbol names a leg inside a surviving module, and resolution is what both arms of the check test.
+The header carries no node id and no PR number. `scripts/ci/check-no-internal-refs.sh` fails on them. The oracle is the identity. A path names a whole-file leg, a symbol names a leg inside a surviving module, and resolution is what both arms of the check test.
 
 ## Sequence
 
-The claim classifier goes first. It is the only dual implementation with no parity guard pinning it. A guarded leg cannot drift silently. An unguarded one can.
+The claim classifier went first. It was the only dual implementation with no parity guard pinning it. A guarded leg cannot drift silently. An unguarded one can.
 
 Retirement order is subordinate to the crossing dependency order in [the seam doc](rust-python-seam.md). A leg with no guard still waits for the legs it feeds. Risk argues for a port. Dependency decides the safe order.
 
-The ask adapters go second. They already sit at step 1, with both harnesses passing. The work is steps 2 through 4, plus moving one caller.
+The ask adapters went second, and the sequence is complete. They sat at step 1. The work was steps 2 through 4, plus moving one caller and fixing the guard the first symbol-oracle port exposed.
 
 There is no third. Do not open a `kill_criteria` port under this sequence. The table above removed it from the dual set. Filing one re-imports the error this page corrects.
 

@@ -50,18 +50,31 @@ def _parity(root: Path, name: str, body: str) -> Path:
 
 def test_shipped_tree_passes_and_reports_every_file() -> None:
     """AC4-HP: exit 0, and one report line per parity file. A silent pass is
-    what let the original miscount stand, so the pass is not silent."""
+    what let the original miscount stand, so the pass is not silent. Each
+    finished port's stage is pinned individually: a file the fleet expects at
+    characterization that drifts to differential (or the reverse) must fail
+    here even though the two-sided check alone would still pass."""
     result = _run(ROOT)
     assert result.returncode == 0, result.stdout + result.stderr
-    for name in (
-        "claude_ask_parity.rs",
-        "codex_ask_parity.rs",
-        "kill_criteria_parity.rs",
-        "verify_evidence_parity.rs",
-    ):
-        assert name in result.stdout, f"{name} not reported:\n{result.stdout}"
-    assert "differential" in result.stdout
-    assert "characterization" in result.stdout
+    expected = {
+        "claude_ask_parity.rs": "characterization",
+        "codex_ask_parity.rs": "characterization",
+        "kill_criteria_parity.rs": "characterization",
+        "verify_evidence_parity.rs": "characterization",
+    }
+    reported = set()
+    for line in result.stdout.splitlines():
+        if not (line.startswith("ok") and "parity.rs" in line):
+            continue
+        name = line.split()[1].rsplit("/", 1)[-1]
+        reported.add(name)
+        if name in expected:
+            assert f"stage={expected[name]}" in line, line
+        else:
+            # A live dual (e.g. the claim classifier) may pin any stage; its
+            # line must still carry a stage the gate actually asserted.
+            assert "stage=" in line, line
+    assert set(expected) <= reported, f"unreported files: {set(expected) - reported}"
 
 
 # --- the two-sided refusal --------------------------------------------------

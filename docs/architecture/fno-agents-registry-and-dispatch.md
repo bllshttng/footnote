@@ -1,6 +1,6 @@
 # fno agents — registry and dispatch substrate
 
-> **Partly retired.** The `dispatch_ask` orchestrator and the Python ask legs this page describe were ported to the Rust runtime and deleted (the ask-adapter port, 2026-09-02); `ask` now auto-routes to the `fno-agents` binary and `--to-project` resolves in Python before that exec. The registry, locking, spawn and send material below is current.
+> **Partly retired.** The `dispatch_ask` orchestrator and the Python ask legs are gone: the ask-adapter port moved them to the Rust runtime (2026-09-02). `ask` now auto-routes to the `fno-agents` binary, and `--to-project` resolves in Python before that exec. The registry, locking, spawn and send material below is current.
 
 Storage and dispatch primitives for the `fno agents` subsystem. The registry remembers which named agent belongs to which provider; the dispatch layer routes `fno agents ask` to the right provider adapter under a per-agent lock. Everything else in the subsystem (follow-up, list/logs, lifecycle verbs, the codex and gemini providers, the MCP channel) builds on this layer.
 

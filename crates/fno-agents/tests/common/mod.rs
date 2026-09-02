@@ -228,7 +228,10 @@ pub fn assert_golden(subject: &str, label: &str, rust: &Golden, oracle: Option<G
             "[{label}] capture: stream count differs"
         );
         for (i, (o, r)) in golden.streams.iter().zip(rust.streams.iter()).enumerate() {
-            assert_eq!(o, r, "[{label}] capture: stream {i} differs\noracle={o:?}\nrust={r:?}");
+            assert_eq!(
+                o, r,
+                "[{label}] capture: stream {i} differs\noracle={o:?}\nrust={r:?}"
+            );
         }
         fs::create_dir_all(&dir).unwrap();
         if let Some(code) = golden.exit {
@@ -253,10 +256,8 @@ pub fn assert_golden(subject: &str, label: &str, rust: &Golden, oracle: Option<G
     } else {
         None
     };
-    let mut golden_streams = vec![
-        fs::read_to_string(dir.join(format!("{key}.out")))
-            .unwrap_or_else(|e| panic!("[{label}] missing golden {}.out: {e}", key)),
-    ];
+    let mut golden_streams = vec![fs::read_to_string(dir.join(format!("{key}.out")))
+        .unwrap_or_else(|e| panic!("[{label}] missing golden {}.out: {e}", key))];
     let err_path = dir.join(format!("{key}.err"));
     if err_path.exists() {
         golden_streams.push(

@@ -1,6 +1,6 @@
 # fno agents — follow-up via messaging socket
 
-> **Retired implementation.** The Python follow-up flow this page describes was ported to the Rust runtime and deleted (the ask-adapter port, 2026-09-02). The page stays as the design record; the live contract is the Rust ask path plus the frozen goldens in `crates/fno-agents/tests/claude_ask_parity.rs`.
+> **Retired implementation.** The Python follow-up flow this page describes was ported to the Rust runtime and deleted (the ask-adapter port, 2026-09-02). The page stays as the design record. The live contract is the Rust ask path plus the frozen goldens in `crates/fno-agents/tests/claude_ask_parity.rs`.
 
 Calling `fno agents ask <existing-name> "<message>"` against a running Claude agent delivers the message to its `claude --bg` supervisor over the supervisor's messaging socket and prints the agent's reply on stdout. Re-using a name routes to this follow-up flow instead of failing as a duplicate.
 
