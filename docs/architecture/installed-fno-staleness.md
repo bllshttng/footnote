@@ -8,7 +8,7 @@ That group was reachable as both `fno backlog capture` and `fno backlog inbox` a
 
 ## `fno doctor` (detection)
 
-`fno doctor` reports skew between the installed `fno` and a resolvable source checkout. It is **network-free**. When staleness is *proven*, it exits non-zero. Two independent signals, each degrading to `unknown` rather than crying wolf:
+`fno doctor` reports skew between the installed `fno` and a resolvable source checkout. It is **network-free**. When staleness or source-checkout lag is proven, it exits non-zero. Two independent signals, each degrading to `unknown` rather than crying wolf:
 
 The resolved local source checkout is the comparison boundary. Doctor does not fetch or compare against remote state. A local checkout can therefore trail `origin/main`. Doctor reports that measured distance as a blocker so a binary fresh against stale source cannot authorize downstream verification. The `origin/main` value is the local remote-tracking ref, so it can itself need a fetch before the operator treats the distance as current.
 
@@ -28,7 +28,7 @@ Plus an advisory **mux front-door** check: now that the Rust mux binary (`crates
 Flags: `--json` emits one stdout object and sends human text to stderr. The object carries status, revision, binary, and mux-front-door fields. For Python staleness, `--fix` delegates to `fno doctor update`, whose Rust leg also refreshes the bins. For Rust-only staleness, it runs the cargo refresh helper without reinstalling Python. Under `--json`, `--fix` performs no repair and prints a skip message. `--source` overrides the source checkout.
 
 ```bash
-fno doctor            # human verdict, exit non-zero iff proven stale
+fno doctor            # human verdict; exit non-zero on proven staleness or source lag
 fno doctor --json     # machine verdict for an LLM caller
 fno doctor --fix      # run `fno doctor update` if the Python install is stale
 ```
@@ -92,7 +92,7 @@ fno doctor update --check --json   # the one resolver, the mux TUI's only consum
 1. `fno doctor` is the primary mechanism, not reinstall-on-ship. Detection plus explicit repair beats implicit mutation that races a running pipeline.
 2. Detection is network-free: local git refs + local command trees, no PyPI / crates.io calls. No source checkout or unreadable `origin/main` yields `unknown`. It never invents a distance or false `stale`.
 3. The gate path instructs, it never executes the fix.
-4. When all four facts are present, the `installed-rust-rev` marker proves Rust staleness. Anything less degrades to `unknown`. `doctor` still reports the resolved binary. A binary-embedded commit cross-check remains planned for environments without the marker.
+4. Rust freshness requires a cargo binary, embedded `crates_rev`, source `crates/` tip, and a clean build. When these are known, `doctor` compares the embedded revision with the source tip. A mismatch proves Rust staleness. Missing evidence yields `unknown`. `doctor` still reports the resolved binary.
 5. The `installed-rev` marker is written only after a successful install. Absence means "rev unknown", never "fresh".
 6. `fno doctor update --check --json` is the single resolver for mux update readiness. The TUI renders it and computes nothing. Guidance routes restart recovery through `fno agents restart --mux` only, never `fno mux kill-server` (that routing fix is tracked separately). A verb guaranteed to fail in the case it is offered for is worse than no guidance.
 
