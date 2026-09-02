@@ -20,6 +20,8 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         harness_session_id: Some(session_id.into()),
     };
     let registry = RegistryAgent {
+        model: None,
+        route: None,
         spawned_by_session: None,
         session_id: None,
         harness_session_id: Some(session_id.into()),
@@ -52,6 +54,9 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
     evidence.add_live_pair(harness, session_id);
     assert_eq!(evidence.verdict(&member), MemberLiveness::Live);
     let sideline = AgentRow {
+        harness: None,
+        model: None,
+        route: None,
         squad: Some(7),
         name: registry.name.clone(),
         pane_id: None,
