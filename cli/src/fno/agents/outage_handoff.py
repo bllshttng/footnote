@@ -263,14 +263,32 @@ def stop_source_exact(
     return StopProof(False, "process", evidence, f"process death probe is {reason}")
 
 
+class UnprovenCredentialsRefused(RuntimeError):
+    """The successor request carries no account env the canary proved."""
+
+
 def spawn_successor_exact(
     snapshot: HandoffSnapshot,
     request: HandoffRequest,
     *,
     runner: Callable[..., object] = subprocess.run,
 ) -> SpawnReceipt:
-    """Spawn one pane successor with explicit destination axes."""
+    """Spawn one pane successor with explicit destination axes.
+
+    The canary's exact proven credentials ride to the spawn through the
+    FNO_DISPATCH_ACCOUNT_ENV environment carrier - never argv, whose values
+    every process listing on the machine can read. A request without a
+    proved account env is REFUSED here: spawning against credentials nothing
+    proved is the failure the canary exists to prevent."""
     from fno import _subprocess_util
+
+    if not request.destination_account_env:
+        raise UnprovenCredentialsRefused(
+            "successor request carries no canary-proven account env; "
+            f"refusing to spawn {request.destination_harness} against "
+            f"unproven credentials for account "
+            f"{request.destination_account!r}"
+        )
 
     command = [
         *_subprocess_util.fno_py_cmd(),
@@ -299,7 +317,13 @@ def spawn_successor_exact(
         text=True,
         timeout=60,
         check=False,
-        env={**os.environ, "TARGET_NO_MERGE": "1"},
+        env={
+            **os.environ,
+            "TARGET_NO_MERGE": "1",
+            "FNO_DISPATCH_ACCOUNT_ENV": json.dumps(
+                request.destination_account_env, sort_keys=True
+            ),
+        },
     )
     if getattr(proc, "returncode", 1) != 0:
         detail = str(getattr(proc, "stderr", "") or "spawn failed").strip()

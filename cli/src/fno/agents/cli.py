@@ -2027,6 +2027,36 @@ def cmd_spawn(
         from fno.adapters.providers.dispatch import dispatch_env
         from fno.adapters.providers.loader import load_providers
 
+        # The proven-credential carrier (outage handoff): the supervisor's
+        # health canary proved a SPECIFIC env for this account and passed it
+        # through the FNO_DISPATCH_ACCOUNT_ENV environment carrier (never
+        # argv). When present, it IS the dispatch overlay - re-deriving from
+        # the record here could stage different credentials than the ones
+        # proved, which is the exact disconnect that made the canary's proof
+        # decorative. The record still must exist and match the harness: the
+        # env proves the values, this check proves the target.
+        proven_env_raw = os.environ.pop("FNO_DISPATCH_ACCOUNT_ENV", None)
+        proven_env: dict[str, str] | None = None
+        if proven_env_raw:
+            try:
+                parsed = json.loads(proven_env_raw)
+                if not isinstance(parsed, dict) or not all(
+                    isinstance(k, str) and isinstance(v, str)
+                    for k, v in parsed.items()
+                ):
+                    raise ValueError("carrier payload must be a flat string map")
+                if not parsed:
+                    raise ValueError("carrier payload is empty")
+                proven_env = parsed
+            except (TypeError, ValueError) as exc:
+                print(
+                    f"refusing --dispatch-account {dispatch_account!r}: the "
+                    f"proven-credential carrier is unreadable ({exc}); "
+                    "no worker launched",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=2) from exc
+
         try:
             # Resolve against the WORKER's root, not the dispatcher's cwd: the
             # record was selected out of the node's project registry, and reading
@@ -2050,10 +2080,20 @@ def cmd_spawn(
                     f"record is a {rec_harness or '<no harness>'} account but "
                     f"the spawn resolves {harness}"
                 )
+            overlay = (
+                proven_env if proven_env is not None
+                else dispatch_env(dispatch_account, repo_root=workdir)
+            )
             account_env = {
                 **(account_env or {}),
-                **dispatch_env(dispatch_account, repo_root=workdir),
+                **overlay,
             }
+            if proven_env is not None:
+                credential_source = "canary-proven carrier"
+                credential_env_keys = sorted(proven_env)
+            else:
+                credential_source = "record-derived"
+                credential_env_keys = sorted(overlay)
         except Exception as exc:  # noqa: BLE001 - never spawn onto an unresolved record
             print(
                 f"refusing --dispatch-account {dispatch_account!r}: {exc}; "
@@ -2542,6 +2582,13 @@ def cmd_spawn(
                 receipt_obj["account"] = account
             if dispatch_account is not None:
                 receipt_obj["dispatch_account"] = dispatch_account
+                # Name the credential provenance and the env keys actually
+                # staged (never their values): a reader can tell a
+                # canary-proven overlay from a record re-derivation, which is
+                # the difference the outage handoff's proof rests on.
+                if account_env is not None:
+                    receipt_obj["credential_source"] = credential_source
+                    receipt_obj["credential_env_keys"] = credential_env_keys
             # x-8552: for the composed spawn, which credential fno made live and
             # who is billed - derived from the composed env, never the flags.
             if credential is not None:

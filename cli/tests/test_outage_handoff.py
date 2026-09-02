@@ -20,6 +20,7 @@ from fno.agents.outage_handoff import (
     SpawnReceipt,
     StopProof,
     SuccessorProof,
+    UnprovenCredentialsRefused,
     run_outage_handoff,
     production_handoff_dependencies,
     spawn_successor_exact,
@@ -690,7 +691,30 @@ def test_ac9_hp_successor_spawn_uses_canonical_axes_and_no_merge(tmp_path: Path)
     assert cmd[cmd.index("--model") + 1] == "gpt-5.6-sol"
     assert cmd[cmd.index("--dispatch-account") + 1] == "work"
     assert kwargs["env"]["TARGET_NO_MERGE"] == "1"
+    # AC4-HP: the canary's exact proven env rides the environment carrier -
+    # never argv, whose values every process listing can read.
+    assert "--account-env" not in " ".join(cmd)
+    assert kwargs["env"]["FNO_DISPATCH_ACCOUNT_ENV"] == json.dumps(
+        {"CODEX_HOME": "/private/account"}, sort_keys=True
+    )
     assert receipt == SpawnReceipt(row_id="child-row", name="successor")
+
+
+def test_ac4_err_successor_without_proven_env_is_refused_before_spawn(tmp_path: Path):
+    """An empty destination_account_env means nothing was proved. Spawning
+    anyway would stage whatever the record happens to re-derive - the exact
+    disconnect that made the canary's proof decorative."""
+    commands: list[object] = []
+
+    with pytest.raises(UnprovenCredentialsRefused, match="unproven credentials"):
+        spawn_successor_exact(
+            _snapshot(tmp_path),
+            replace(_request(), destination_account_env={}),
+            runner=lambda cmd, **kwargs: commands.append(cmd)
+            or type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+        )
+
+    assert commands == []  # nothing spawned
 
 
 def test_ac11_ui_live_registry_status_is_not_executability_proof():
