@@ -36,6 +36,7 @@ use std::time::Duration;
 
 use crate::claude_attach::{perform_attach, AttachRequest, UnixControlTransport};
 use crate::claude_drive::{contains_detach_sentinel, find_transcript, transcript_len, DriveError};
+use std::sync::Arc;
 use crate::claude_roster::{read_control_key, ClaudeRoster};
 
 /// Default transcript-growth poll budget: 40 * 250ms = 10s. A live blocked
@@ -649,9 +650,9 @@ fn resolve_keeper_target_in(
 /// session file at the first turn attempt, so a not-yet-filed session returns
 /// a pending target that materializes once the injected turn lands; a
 /// DUPLICATE refuses (the same no-picking discipline as pi resume). Any other
-/// hosted harness has no resolver here yet, and the lane refuses before
-/// typing rather than paste an envelope it can never confirm - an honest
-/// durable demotion beats an unverifiable `delivered`.
+/// hosted harness without a local store resolves to the pty stream if its TUI
+/// paints what it receives, and refuses otherwise - an honest durable
+/// demotion beats an unverifiable `delivered`.
 enum KeeperConfirm {
     /// Poll this file from `baseline` bytes onward.
     Transcript {
@@ -660,11 +661,28 @@ enum KeeperConfirm {
     },
     /// The file does not exist yet; every line it ever has is new signal.
     PendingStore,
+    /// The hosted harness keeps its transcript REMOTELY (cursor-agent: the
+    /// chat store lives server-side; nothing lands under its state root), so
+    /// no local file can ever confirm. The pty stream is the only local
+    /// evidence: the TUI paints the pasted payload into its composer, so a
+    /// reader connected BEFORE the first keystroke sees the marker in the
+    /// keeper's `Output` frames. The accumulator only grows, so a composer
+    /// that redraws after submit never un-confirms a landed turn.
+    Pty {
+        received: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    },
     Refused(&'static str),
 }
 
 fn resolve_keeper_confirm(target: &KeeperTarget, session: &str, pi_root: &Path) -> KeeperConfirm {
     match target.hosted_harness.as_str() {
+        // cursor-agent's chat store is remote (measured: the id appears in no
+        // file under its state root after two live turns), so there is no
+        // transcript to grep. Its TUI paints what it receives, which the pty
+        // variant confirms against.
+        "cursor-agent" => KeeperConfirm::Pty {
+            received: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        },
         "pi" => match crate::pi::lookup_sessions_under(pi_root, &target.cwd, session) {
             crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
                 baseline: transcript_len(&file),
@@ -707,6 +725,68 @@ pub fn deliver_via_keeper_socket(
     )
 }
 
+/// Strip ANSI escape sequences from pty output so a marker match cannot be
+/// broken by an escape interleaved into painted text: CSI sequences
+/// (`ESC [ ... final`) and two-byte `ESC x` forms are dropped, every other
+/// byte (UTF-8 continuation bytes included) passes through. Lossy on purpose:
+/// this is a matcher input, never a transcript.
+fn strip_ansi(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == 0x1B {
+            if i + 1 < raw.len() && raw[i + 1] == b'[' {
+                i += 2;
+                while i < raw.len() && !(0x40..=0x7E).contains(&raw[i]) {
+                    i += 1;
+                }
+                i += 1; // the final byte
+            } else {
+                i += 2; // ESC plus one byte
+            }
+        } else {
+            out.push(raw[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Open a second keeper connection and drain its `Output` frames into
+/// `received` forever. Detached on purpose: a one-shot CLI exits, the stream
+/// closes, the thread's read returns, and the accumulator is the only shared
+/// state. The frame tags and lengths interleaved in the raw bytes are harmless
+/// to a substring confirm.
+fn spawn_pty_reader(sock: &Path, received: std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+    let Ok(mut stream) = std::os::unix::net::UnixStream::connect(sock) else {
+        return;
+    };
+    let _ = stream.set_nonblocking(true);
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if let Ok(mut acc) = received.lock() {
+                        acc.extend_from_slice(&buf[..n]);
+                        if acc.len() > 4 * 1024 * 1024 {
+                            // The composer redraw can loop; the marker only
+                            // ever needs the most recent window.
+                            let excess = acc.len() - 1024 * 1024;
+                            acc.drain(..excess);
+                        }
+                    }
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
 fn deliver_via_keeper_socket_in(
     home: &crate::paths::AgentsHome,
     pi_root: &Path,
@@ -728,6 +808,14 @@ fn deliver_via_keeper_socket_in(
         // Connected but never typed into: closing without a keystroke is the
         // honest outcome, and the reason names why nothing was pasted.
         return Err(reason);
+    }
+    // The pty reader must exist BEFORE the first keystroke, so the Pty variant
+    // opens its second connection now: a thread drains the keeper's Output
+    // frames into a growing accumulator the confirm closure greps. The thread
+    // is detached on purpose - this is a one-shot CLI, the accumulator is the
+    // only shared state, and the stream dies with the process.
+    if let KeeperConfirm::Pty { received } = &confirm {
+        spawn_pty_reader(&target.sock, Arc::clone(received));
     }
     let mut transport = KeeperTransport { stream };
     let marker = text.lines().next().unwrap_or(text);
@@ -753,6 +841,18 @@ fn deliver_via_keeper_socket_in(
                     }
                     _ => false,
                 }
+            }
+            KeeperConfirm::Pty { received } => {
+                let escaped = escaped_marker(marker);
+                if escaped.is_empty() {
+                    return false;
+                }
+                let acc = received
+                    .lock()
+                    .map(|m| strip_ansi(&m))
+                    .unwrap_or_default();
+                let hay = String::from_utf8_lossy(&acc);
+                hay.contains(&escaped)
             }
             KeeperConfirm::Refused(_) => false,
         }
