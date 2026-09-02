@@ -10,6 +10,7 @@ from fno.claims.core import acquire_claim, claim_status, release_claim
 from fno.claims.io import global_claims_root
 from fno.graph.statuses import (
     is_stale_lock,
+    lock_timestamp_quality,
     live_claimed_node_ids,
     recompute_statuses,
 )
@@ -21,7 +22,7 @@ def _entry(eid: str, **kwargs) -> dict:
         "title": eid,
         "completed_at": None,
         "session_id": None,
-        "claimed_at": None,
+        "locked_at": None,
         "blocked_by": [],
         # A stub plan_path so the default fixture exercises the ready/blocked/
         # claimed/done branches; tests for the idea derivation explicitly omit
@@ -44,21 +45,36 @@ def test_ac1_hp_is_stale_lock_no_session():
 def test_ac1_hp_is_stale_lock_fresh_claim():
     """AC1-HP: recently claimed entry is not stale."""
     now = datetime.now(timezone.utc).isoformat()
-    e = _entry("ab-22222222", session_id="sess-001", claimed_at=now)
+    e = _entry("ab-22222222", session_id="sess-001", locked_at=now)
     assert is_stale_lock(e) is False
 
 
 def test_ac1_hp_is_stale_lock_old_claim():
     """AC1-HP: claim older than TTL is stale."""
     old = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
-    e = _entry("ab-33333333", session_id="sess-001", claimed_at=old)
+    e = _entry("ab-33333333", session_id="sess-001", locked_at=old)
     assert is_stale_lock(e) is True
 
 
 def test_ac2_err_is_stale_lock_bad_timestamp():
     """AC2-ERR: unparseable timestamp is treated as stale."""
-    e = _entry("ab-44444444", session_id="sess-001", claimed_at="not-a-date")
+    e = _entry("ab-44444444", session_id="sess-001", locked_at="not-a-date")
     assert is_stale_lock(e) is True
+
+
+@pytest.mark.parametrize(
+    ("locked_at", "expected"),
+    [
+        (datetime.now(timezone.utc).isoformat(), "fresh"),
+        ((datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(), "old"),
+        (None, "unreadable"),
+        ("not-a-date", "unreadable"),
+    ],
+)
+def test_lock_timestamp_quality_is_diagnostic(locked_at, expected):
+    """Timestamp age/quality is metadata, never an owner-death verdict."""
+    entry = _entry("ab-lock-quality", locked_by="worker", locked_at=locked_at)
+    assert lock_timestamp_quality(entry) == expected
 
 
 def test_live_claim_read_can_fail_open_for_display_or_raise_for_mutation(monkeypatch):
@@ -96,14 +112,14 @@ def test_live_in_review_old_lock_preserves_mirror_until_claim_transition(
             status="in_review",
             locked_by=holder,
             session_id=holder,
-            claimed_at=old,
+            locked_at=old,
         )
         result = recompute_statuses([entry])
 
         assert result[0]["status"] == "in_review"
         assert result[0]["locked_by"] == holder
         assert result[0]["session_id"] == holder
-        assert result[0]["claimed_at"] == old
+        assert result[0]["locked_at"] == old
         assert result[0]["ownership_defect"]["liveness"] == "unverified"
         assert claim_status(claim.key)["state"] == "live"
     finally:
@@ -251,7 +267,7 @@ def test_container_rollup_uses_child_derived_status_not_read_overlay():
             parent="ab-parent007",
             blocked_by=["ab-blocker001"],
             session_id="session-012",
-            claimed_at=now,
+            locked_at=now,
         ),
     ]
 
@@ -300,7 +316,7 @@ def test_ac1_hp_recompute_unblock_on_completion():
 def test_ac1_hp_recompute_claimed():
     """AC1-HP: entry with active session_id is claimed."""
     now = datetime.now(timezone.utc).isoformat()
-    entries = [_entry("ab-gggggggg", session_id="sess-active", claimed_at=now)]
+    entries = [_entry("ab-gggggggg", session_id="sess-active", locked_at=now)]
     result = recompute_statuses(entries)
     assert result[0]["status"] == "in_progress"
 
@@ -312,7 +328,7 @@ def test_ac3_err_recompute_stale_lock_preserved_until_claim_transition():
         _entry(
             "ab-hhhhhhhh",
             session_id="old-sess",
-            claimed_at=old,
+            locked_at=old,
             ownership_defect={
                 "kind": "stale-active-owner-unverified",
                 "node_id": "ab-hhhhhhhh",
@@ -326,7 +342,7 @@ def test_ac3_err_recompute_stale_lock_preserved_until_claim_transition():
     assert e["status"] == "in_progress"
     assert e["session_id"] == "old-sess"
     assert e["locked_by"] == "old-sess"
-    assert e["claimed_at"] == old
+    assert e["locked_at"] == old
     assert e["ownership_defect"]["liveness"] == "unverified"
 
 
@@ -338,7 +354,7 @@ def test_old_lock_on_in_progress_node_is_unknown_and_preserved():
         status="in_progress",
         locked_by="worker-unverified",
         session_id="worker-unverified",
-        claimed_at=old,
+        locked_at=old,
     )
 
     result = recompute_statuses([entry])
@@ -352,17 +368,17 @@ def test_old_lock_on_in_progress_node_is_unknown_and_preserved():
     }
     assert entry["locked_by"] == "worker-unverified"
     assert entry["session_id"] == "worker-unverified"
-    assert entry["claimed_at"] == old
+    assert entry["locked_at"] == old
 
 
-@pytest.mark.parametrize("claimed_at", [None, "not-a-date"])
-def test_unreadable_lock_timestamp_preserves_owner_with_defect(claimed_at):
+@pytest.mark.parametrize("locked_at", [None, "not-a-date"])
+def test_unreadable_lock_timestamp_preserves_owner_with_defect(locked_at):
     """Missing and malformed lock times are unknown, never clear signals."""
     entry = _entry(
         "ab-unreadable-lock",
         locked_by="worker-unverified",
         session_id="worker-unverified",
-        claimed_at=claimed_at,
+        locked_at=locked_at,
     )
 
     result = recompute_statuses([entry])[0]
@@ -380,7 +396,7 @@ def test_old_lock_on_legacy_claimed_node_is_migrated_and_preserved():
         status="claimed",
         locked_by="legacy-worker-unverified",
         session_id="legacy-worker-unverified",
-        claimed_at=old,
+        locked_at=old,
     )
 
     result = recompute_statuses([entry])
@@ -394,7 +410,7 @@ def test_old_lock_on_legacy_claimed_node_is_migrated_and_preserved():
     }
     assert entry["locked_by"] == "legacy-worker-unverified"
     assert entry["session_id"] == "legacy-worker-unverified"
-    assert entry["claimed_at"] == old
+    assert entry["locked_at"] == old
 
 
 def test_active_owner_defect_clears_when_age_is_no_longer_stale():
@@ -404,7 +420,7 @@ def test_active_owner_defect_clears_when_age_is_no_longer_stale():
         status="in_progress",
         locked_by="worker-live",
         session_id="worker-live",
-        claimed_at=now,
+        locked_at=now,
         ownership_defect={
             "kind": "stale-active-owner-unverified",
             "node_id": "ab-livework3",
@@ -467,7 +483,7 @@ def test_ac4_edge_idea_overridden_by_claimed():
         "ab-ideaa003",
         plan_path=None,
         session_id="sess-active",
-        claimed_at=now,
+        locked_at=now,
     )
     result = recompute_statuses([e])
     assert result[0]["status"] == "in_progress"
@@ -523,11 +539,11 @@ def test_in_review_survives_stale_claim():
     open. Status must stay in_review, NOT revert to ready and re-enter the
     dispatch pool."""
     old = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
-    e = _entry("ab-prreview2", pr_number=358, session_id="dead-sess", claimed_at=old)
+    e = _entry("ab-prreview2", pr_number=358, session_id="dead-sess", locked_at=old)
     result = recompute_statuses([e])
     assert result[0]["status"] == "in_review"
     assert result[0]["session_id"] == "dead-sess"
-    assert result[0]["claimed_at"] == old
+    assert result[0]["locked_at"] == old
     assert result[0]["locked_by"] == "dead-sess"
     assert result[0]["ownership_defect"]["liveness"] == "unverified"
 

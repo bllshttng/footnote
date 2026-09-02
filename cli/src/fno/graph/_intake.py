@@ -1588,7 +1588,7 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         "domain": "code",
         "blocked_by": spec["deps"],
         "session_id": None,
-        "claimed_at": None,
+        "locked_at": None,
         "completed_at": None,
         "has_brief": False,
         "roadmap_id": spec["roadmap_id"],

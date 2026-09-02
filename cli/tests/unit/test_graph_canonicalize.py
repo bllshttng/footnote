@@ -177,7 +177,7 @@ def test_rank_in_canonical_field_order():
 
 def test_ownership_defect_has_canonical_lifecycle_position():
     assert "ownership_defect" in CANONICAL_FIELD_ORDER
-    assert CANONICAL_FIELD_ORDER.index("claimed_at") < CANONICAL_FIELD_ORDER.index(
+    assert CANONICAL_FIELD_ORDER.index("locked_at") < CANONICAL_FIELD_ORDER.index(
         "ownership_defect"
     )
     assert CANONICAL_FIELD_ORDER.index("ownership_defect") < CANONICAL_FIELD_ORDER.index(
@@ -201,6 +201,32 @@ def test_ownership_defect_round_trips_through_entry_schema():
         ownership_defect=marker,
     ).model_dump()
     assert dumped["ownership_defect"] == marker
+
+
+def test_legacy_graph_lock_timestamp_migrates_once_without_nested_rename(tmp_path):
+    """AC6-HP/AC6-ERR: migrate only the top-level graph lock timestamp."""
+    timestamp = "2026-08-23T12:34:56+00:00"
+    path = _make_graph(
+        tmp_path,
+        [
+            {
+                "id": "ab-legacy-lock",
+                "title": "Legacy lock",
+                "status": "in_progress",
+                "locked_by": "worker-1",
+                "session_id": "worker-1",
+                "claimed_at": timestamp,
+                "sessions": [{"claimed_at": timestamp}],
+            }
+        ],
+    )
+
+    locked_mutate_graph(path, _noop)
+
+    raw = _read_json(path)[0]
+    assert raw["locked_at"] == timestamp
+    assert "claimed_at" not in raw
+    assert raw["sessions"] == [{"claimed_at": timestamp}]
 
 
 def test_rank_backfilled_null_on_next_mutation(tmp_path):

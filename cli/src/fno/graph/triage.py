@@ -630,7 +630,7 @@ def _candidate_record(entry: dict, deep: bool) -> dict:
         "claim_history": {
             "session_count": len(valid_sessions),
             "total_cost_usd": round(cost_total, 2),
-            "last_claimed_at": entry.get("claimed_at"),
+            "last_locked_at": entry.get("locked_at", entry.get("claimed_at")),
         },
         "ship_state": {
             "pr_number": entry.get("pr_number"),
@@ -1318,7 +1318,7 @@ def cmd_apply(
             # Clear the canonical lock field; _normalize_lock_fields re-syncs the
             # session_id mirror and clears the harness stamp at serialize.
             node["locked_by"] = None
-            node["claimed_at"] = None
+            node["locked_at"] = None
             applied["deferred"] += 1
         applied["duplicates_flagged"] = len(cleaned_locked["duplicates"])
         return entries

@@ -191,9 +191,13 @@ def readiness_status(entry: dict, id_to_entry: dict[str, dict]) -> tuple[str | N
     return "blocked", f"{kind}:{blocker_id}"
 
 
-def _lock_timestamp_quality(task: dict) -> str:
+def lock_timestamp_quality(task: dict) -> str:
     """Classify the graph lock timestamp without deciding owner death."""
-    lock_time_str = task.get("claimed_at")
+    lock_time_str = task.get("locked_at")
+    if lock_time_str is None:
+        # Direct callers may still hand us a legacy row before the graph read
+        # seam has applied its one-write migration.
+        lock_time_str = task.get("claimed_at")
     # locked_by-first; tolerate a raw legacy (session_id-only) task not yet
     # normalized (read-only staleness check, so no resurrection risk).
     if not (task.get("locked_by") or task.get("session_id")):
@@ -211,11 +215,12 @@ def _lock_timestamp_quality(task: dict) -> str:
 
 def is_stale_lock(task: dict) -> bool:
     """Compatibility bool for callers that only need an old/bad timestamp."""
-    quality = _lock_timestamp_quality(task)
+    quality = lock_timestamp_quality(task)
     # Preserve the historical malformed-value result for this compatibility
     # helper. Missing data remains false here; recompute_statuses uses the
     # diagnostic quality directly so both unreadable shapes preserve owners.
-    return quality == "old" or (quality == "unreadable" and bool(task.get("claimed_at")))
+    legacy_or_canonical = task.get("locked_at", task.get("claimed_at"))
+    return quality == "old" or (quality == "unreadable" and bool(legacy_or_canonical))
 
 
 def is_open_phase_row(row: object, phase: str) -> bool:
@@ -355,7 +360,7 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
         # an owner that may still be working. Preserve the mirror and record
         # the uncertainty until that lifecycle emits a confirmed transition.
         if e.get("locked_by"):
-            timestamp_quality = _lock_timestamp_quality(e)
+            timestamp_quality = lock_timestamp_quality(e)
             if timestamp_quality in {"old", "unreadable"}:
                 e["ownership_defect"] = {
                     "kind": (
