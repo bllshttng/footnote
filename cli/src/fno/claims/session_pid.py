@@ -166,9 +166,30 @@ def resolve_session_harness(from_pid: Optional[int] = None) -> Optional[str]:
     resolving a claude session correctly and laundering a foreign
     CODEX_THREAD_ID into its identity.
 
+    Honors the launcher-stamped proof pair before walking: ``FNO_SESSION_PID``
+    (the same override :func:`resolve_session_pid` honors) beside
+    ``FNO_SESSION_HARNESS``. The pair is stamped by a caller one fork SHALLOWER
+    - the `fno do target init` CLI - whose own ppid read was still permitted;
+    under the codex sandbox every deeper fork reads PermissionError on its
+    parent's ppid, so the script and the verb it spawns cannot walk at all
+    (x-a0cd, measured: only self's ppid is readable). The pid must be alive,
+    and the name must be a known harness, or the stamp is ignored and the walk
+    decides - a stale or forged pair fails closed to the walk's own answer.
+
     Degrades to None when no harness ancestor is found (a plain shell), so a
     caller treats "unproven" and "no ancestor" identically.
     """
+    stamp = (os.environ.get("FNO_SESSION_HARNESS") or "").strip().lower()
+    if stamp and stamp in _HARNESS_TOKENS:
+        env_pid = (os.environ.get("FNO_SESSION_PID") or "").strip()
+        if env_pid:
+            try:
+                stamp_pid = int(env_pid)
+            except ValueError:
+                stamp_pid = 0
+            if stamp_pid > 0 and psutil.pid_exists(stamp_pid):
+                return stamp
+
     start = from_pid if from_pid is not None else os.getppid()
     try:
         proc: Optional[psutil.Process] = psutil.Process(start)
