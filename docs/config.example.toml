@@ -387,7 +387,7 @@ max_concurrent = 1
 # mission = <unset>   # optional; no default
 
 [parallel]
-# Max concurrent parallel-mode lanes (0/1 = sequential, >=2 opts in).
+# Deprecated and ignored: the epic advance's width derives from spawn-gate headroom (agents.max_live, provider lanes). The key stays parseable for one release; delete it from config.
 max_lanes = 1
 
 [auto_merge]
