@@ -28,11 +28,20 @@ The implementation is a Python package (`cli/src/fno/pr_watch/`) split along a p
 4. **Decide** (at most one action per PR per tick), in precedence order:
    - merged and not yet dispatched, and the post-merge readiness oracle passes -> run `fno do pr ritual <n> --autonomous`. The route is warm-inject into a live origin, else the cold subprocess. The verb owns its own conditional headless judgment leg. The watcher adds no model layer of its own and creates no background thread.
    - closed-without-merge, or open past the max-age window -> park (poll it no further).
+   - open, and the durable-grant resolver says the newest recorded dispatch receipt is a positive grant on a positively not-live worker -> execute the merge through the canonical core (see [Durable-grant execution](#durable-grant-execution)).
    - a configured reviewer posted activity newer than the watermark -> fire `/fno:pr check`.
    - otherwise no-op.
-5. Advance the watermark **only after a clean dispatch**. A headless `claude --print` that exits 0 but reports `is_error: true` is a failure. The watermark is left unadvanced and retried next tick. Retries are bounded to three before the PR is parked with a notification.
+5. Advance the watermark **only after a clean dispatch**. A headless `claude --print` that exits 0 but reports `is_error: true` is a failure. The watermark is left unadvanced and retried next tick. Retries are bounded to three before the PR is parked with a notification. A grant execution that a canonical guard holds consumes no retry budget - the guard is a state to wait out, not a watcher defect.
 
-The daemon never merges, closes, comments on, or mutates a PR or a graph node - it only reads state and fires skills. Decisions emit canonical events (`pr_watch_dispatched`, `pr_watch_skipped`, `pr_watch_dispatch_failed`, `pr_watch_parked`) plus a per-tick heartbeat (`pr_watch_tick`) to the global event log under `~/.fno/`, so a quiet-but-alive watcher is distinguishable from a dead one.
+With that one exception below, the daemon never merges, closes, comments on, or mutates a PR or a graph node - it only reads state and fires skills. Decisions emit canonical events (`pr_watch_dispatched`, `pr_watch_skipped`, `pr_watch_dispatch_failed`, `pr_watch_parked`, `merge_grant_execution`) plus a per-tick heartbeat (`pr_watch_tick`) to the global event log under `~/.fno/`, so a quiet-but-alive watcher is distinguishable from a dead one. Every heartbeat carries a `merge_scan` receipt with integer `eligible` and `attempted` counts, including zero, so a completed scan that saw nothing still proves the scan ran.
+
+## Durable-grant execution
+
+A dispatch's merge decision is recorded on the worker's own append-only `phase: do` graph row as a `merge_grant` receipt (`approved`, `source`, `recorded_by`, `recorded_at`), written by the SPAWNER at spawn time - a worker can never mint or rewrite one. A `--no-merge` dispatch records an explicit `approved=false`. One typed resolver (`fno/pr/_merge_grant.py`) reads that record for status, merge, and the watcher, and it grants on nothing but a positive receipt: absence, malformed data, ambiguous PR-to-node links, a live or unreadable node claim, and a live config that no longer says `enabled=true, grant=dispatch` all refuse.
+
+When the resolver grants, the watcher executes the PR under its per-PR lock: it emits `merge_grant_execution` `reserved` (naming the actor, the PR, the node, and the grant session), calls the internal durable-grant entry point, and that entry is canonical `fno do pr merge` with the receipt as authority. Every ordinary guard - plan hold, in-flight review, incarnation fence, stub manifest, review coverage, review posture, CI green - runs identically, so the watcher can never merge a PR an interactive merge would refuse. The core's verdict lands as `executed`, `held` (retryable, no failure budget consumed), or `failed` (retry-bounded, then parked).
+
+The coupling is enforced on both ends: arming `auto_merge.grant = dispatch` through `fno config set` activates the watcher (one-way - revoking the grant never unloads it, and `autonomy.enabled = false` blocks the activation), and `fno doctor` reports `observer_unavailable` when a standing grant has no live watcher to execute it. `fno do pr status` carries the same answer in its `merge_execution` projection.
 
 ### Headless fire (review poll)
 
