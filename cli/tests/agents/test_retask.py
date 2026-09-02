@@ -46,6 +46,19 @@ def _screen_verdict(
     return {"matched": matched, "rule_id": rule_id, "state": state}
 
 
+def test_retask_node_resolution_canonicalizes_slug_and_bare_hex(monkeypatch):
+    import fno.agents.retask as retask
+
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{"id": "x-bdb9", "slug": "retask-destination"}],
+    )
+    monkeypatch.setattr("fno.graph._constants.node_id_prefix", lambda: "x-")
+
+    assert retask._resolve_retask_node("retask-destination") == "x-bdb9"
+    assert retask._resolve_retask_node("bdb9") == "x-bdb9"
+
+
 def test_same_tier_builds_target_payload_without_executable_switch_commands():
     from fno.agents.retask import detect_retask, resolve_target_coordinate
 
