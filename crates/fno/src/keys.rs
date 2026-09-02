@@ -1141,6 +1141,38 @@ pub const MENU_BINDINGS: &[MenuKeyBinding] = &[
         action: "move-tab-right",
         key: b'>',
     },
+    // (x-d545) The row-menu verbs, teachable by keyboard now. Letters reuse
+    // the sideline's own vocabulary so the two scopes teach one keyboard:
+    // `s` stop (the sideline spends `x` on stop-then-remove and `X` on bulk
+    // reap, so the menu's own free mnemonic takes Stop), `p` peek (the
+    // sideline's attach/peek neighbour), `m` mail (the peek overlay's reply
+    // key), `d` diff (the prefix-chord diff-pane letter, now a menu byte
+    // too), `o` open-here, and `r` resume (peek `r` resumes; the row menu
+    // never offers rename, so the byte cannot collide inside one open menu).
+    MenuKeyBinding {
+        action: "stop-row",
+        key: b's',
+    },
+    MenuKeyBinding {
+        action: "peek-row",
+        key: b'p',
+    },
+    MenuKeyBinding {
+        action: "mail-row",
+        key: b'm',
+    },
+    MenuKeyBinding {
+        action: "diff-row",
+        key: b'd',
+    },
+    MenuKeyBinding {
+        action: "open-here",
+        key: b'o',
+    },
+    MenuKeyBinding {
+        action: "resume-row",
+        key: b'r',
+    },
 ];
 
 /// The one resolver both menu-scope projections read: the binding registered
