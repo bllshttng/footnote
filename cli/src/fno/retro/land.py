@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+from fno.retro.classify import severity_to_difficulty
 from fno.retro.dedup import anchor_verdicts, trailer
 from fno.retro.types import TIER_INBOX, Candidate
 
@@ -29,7 +30,7 @@ MODE_INTERACTIVE = "interactive"
 
 # Injection points (real defaults below). Kept narrow so the routing logic is
 # unit-testable without a live graph.
-CreateFn = Callable[..., str]  # (title, details, priority, project, cwd, domain, queued) -> node_id
+CreateFn = Callable[..., str]  # (title, details, priority, difficulty, project, cwd, domain, queued) -> node_id
 InboxFn = Callable[[Candidate], None]
 
 
@@ -57,6 +58,7 @@ def _default_create(
     title: str,
     details: str,
     priority: str,
+    difficulty: str,
     project: Optional[str],
     cwd: Optional[str],
     domain: str = "code",
@@ -89,6 +91,8 @@ def _default_create(
             project=project,
             cwd=cwd,
             priority=priority,
+            difficulty=difficulty,
+            difficulty_source="retro",
             domain=domain,
             details=details,
             known_ids={e.get("id") for e in entries},
@@ -196,6 +200,7 @@ def land_candidates(
                 title=c.title,
                 details=details,
                 priority=c.priority,
+                difficulty=severity_to_difficulty(c.extra.get("severity")),
                 project=project,
                 cwd=node_cwd,
                 domain=domain,

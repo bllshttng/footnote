@@ -73,7 +73,7 @@ def test_ac1_hp_explicit_source_node_stamps_the_origin(tmp_graph):
 def test_explicit_source_node_accepts_a_slug(tmp_graph):
     """A slug is the likely mistake and the resolver already handles it."""
     result = runner.invoke(
-        app, ["backlog", "add", "follow-up", "--source-node", "the-origin-node"]
+        app, ["backlog", "add", "follow-up", "--source-node", "the-origin-node", "--difficulty", "medium"]
     )
     assert result.exit_code == 0, result.output
     new_id = json.loads(result.stdout)["id"]

@@ -153,7 +153,9 @@ def test_intake_non_node_type_falls_back_silently(tmp_path, monkeypatch, declare
 def test_create_paths_reject_an_invalid_type(tmp_path, monkeypatch):
     """`add`/`idea` validate --type against the same set `update` does."""
     _route_graph(tmp_path, monkeypatch)
-    result = runner.invoke(app, ["backlog", "add", "T", "--type", "task"])
+    result = runner.invoke(
+        app, ["backlog", "add", "T", "--type", "task", "--difficulty", "medium"]
+    )
     assert result.exit_code == 1
     assert "invalid type 'task'" in result.output
 

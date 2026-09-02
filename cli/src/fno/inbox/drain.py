@@ -363,6 +363,7 @@ def _create_graph_node_from_plan(repo_root: Path, h: ThreadHandle, plan) -> str:
         *_subprocess_util.fno_py_cmd(), "backlog", "new",
         plan.title,
         "--priority", plan.priority,
+        "--difficulty", "medium",
         "--source-kind", "from_inbox",
         "--source-project", h.from_project,
         "--source-inbox-msg", h.root_msg_id,

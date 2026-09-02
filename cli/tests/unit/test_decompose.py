@@ -173,6 +173,22 @@ def test_inherits_epic_project_cwd(graph_env, tmp_path):
         assert c["cwd"] == str(tmp_path)
 
 
+def test_inherits_epic_difficulty(graph_env):
+    g, read_entries = graph_env
+    entries = json.loads(g.read_text())["entries"]
+    entries[0]["difficulty"] = "high"
+    g.write_text(json.dumps({"entries": entries}) + "\n")
+
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)]
+    )
+
+    assert result.exit_code == 0, result.output
+    children = [e for e in read_entries() if e.get("parent") == "ab-epic0001"]
+    assert children
+    assert all(child["difficulty"] == "high" for child in children)
+
+
 # -- per-group repo routing (multi-repo decomposition) --
 
 

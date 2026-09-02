@@ -26,7 +26,12 @@ runner = CliRunner()
 
 
 def _invoke(*args, input=None):
-    return runner.invoke(app, list(args), input=input, catch_exceptions=False)
+    argv = list(args)
+    if "backlog" in argv:
+        index = argv.index("backlog")
+        if argv[index : index + 2] == ["backlog", "add"] and "--difficulty" not in argv:
+            argv.extend(["--difficulty", "medium"])
+    return runner.invoke(app, argv, input=input, catch_exceptions=False)
 
 
 def _route_graph(g: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

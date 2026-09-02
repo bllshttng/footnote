@@ -28,11 +28,18 @@ class _Recorder:
         self.inbox = []
         self._n = 0
 
-    def create(self, *, title, details, priority, project, cwd, domain="code", queued=False):
+    def create(self, *, title, details, priority, difficulty, project, cwd, domain="code", queued=False):
         self._n += 1
         nid = f"ab-{self._n:08d}"
         self.created.append(
-            {"id": nid, "title": title, "details": details, "cwd": cwd, "queued": queued}
+            {
+                "id": nid,
+                "title": title,
+                "details": details,
+                "cwd": cwd,
+                "difficulty": difficulty,
+                "queued": queued,
+            }
         )
         return nid
 
