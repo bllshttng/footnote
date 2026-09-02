@@ -6911,19 +6911,27 @@ impl Core {
         // token (x-6b0b): the pane's own argv then says what it is, so a
         // later server re-derives `refused_worker` on re-adoption and can
         // sweep a placeholder it did not mint. Stored state would go stale;
-        // argv cannot. The shell stays a plain shell - the title carries the
-        // human-readable half.
-        let shell = self
+        // argv cannot. Each shell candidate takes its turn, so a broken
+        // $SHELL falls through to /bin/sh the way the plain shell spawn
+        // always did; the title carries the human-readable half.
+        let candidates: Vec<String> = self
             .shells
-            .first()
+            .iter()
             .map(|s| s.to_string_lossy().into_owned())
-            .ok_or_else(|| "no shell candidate for refused placeholder".to_string())?;
-        let argv = vec![
-            "env".to_string(),
-            format!("FNO_REFUSED_WORKER={name}"),
-            shell,
-        ];
-        let pid = self.spawn_pane_cmd(&argv, rows, cols, cwd)?;
+            .collect();
+        let mut spawned = Err("no shell candidate for refused placeholder".to_string());
+        for shell in &candidates {
+            let argv = vec![
+                "env".to_string(),
+                format!("FNO_REFUSED_WORKER={name}"),
+                shell.clone(),
+            ];
+            spawned = self.spawn_pane_cmd(&argv, rows, cols, cwd);
+            if spawned.is_ok() {
+                break;
+            }
+        }
+        let pid = spawned?;
         if let Some(entry) = self.panes.get_mut(&pid) {
             entry.name = Some(format!("{name} ({reason})"));
             entry.refused_worker = Some(name.to_string());
@@ -21460,6 +21468,20 @@ mod tests {
             "/bin/sh".to_string(),
         ];
         assert_eq!(refused_worker_from_argv(&other), None);
+    }
+
+    #[test]
+    fn refused_placeholder_mints_through_the_real_spawn_path() {
+        // The mint goes through the argv path (not the bare shell spawn), so
+        // the registered pane derives its own refusal marker from the env
+        // wrapper token.
+        let mut core = empty_core();
+        core.shells = vec!["/bin/sh".into()];
+        let pid = core
+            .refused_worker_pane("w", "test reason", 24, 80, "/tmp")
+            .expect("placeholder spawns");
+        let entry = core.panes.get(&pid).expect("registered");
+        assert_eq!(entry.refused_worker.as_deref(), Some("w"));
     }
 
     #[test]
