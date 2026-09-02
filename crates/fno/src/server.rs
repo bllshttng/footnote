@@ -126,7 +126,7 @@ type PaneChildRoster = Arc<Mutex<HashSet<PaneChild>>>;
 
 /// Block termination signals and start the one waiter that can end a wedged
 /// core loop. Threads created later inherit this blocked mask.
-fn install_signal_reaper() -> Result<PaneChildRoster, String> {
+fn install_signal_reaper(socket: &Path) -> Result<PaneChildRoster, String> {
     let mut signal_set = unsafe { std::mem::zeroed::<libc::sigset_t>() };
     let empty = unsafe { libc::sigemptyset(&mut signal_set) };
     if empty != 0 {
@@ -154,14 +154,15 @@ fn install_signal_reaper() -> Result<PaneChildRoster, String> {
     }
     let roster = Arc::new(Mutex::new(HashSet::new()));
     let waiter_roster = Arc::clone(&roster);
+    let waiter_socket = socket.to_path_buf();
     std::thread::Builder::new()
         .name("fno-mux-sigwait".into())
-        .spawn(move || signal_waiter(signal_set, waiter_roster))
+        .spawn(move || signal_waiter(signal_set, waiter_roster, waiter_socket))
         .map_err(|e| format!("sigwait setup failed to spawn waiter: {e}"))?;
     Ok(roster)
 }
 
-fn signal_waiter(signal_set: libc::sigset_t, roster: PaneChildRoster) -> ! {
+fn signal_waiter(signal_set: libc::sigset_t, roster: PaneChildRoster, socket: PathBuf) -> ! {
     let mut received = 0;
     let result = unsafe { libc::sigwait(&signal_set, &mut received) };
     if result != 0 {
@@ -179,11 +180,18 @@ fn signal_waiter(signal_set: libc::sigset_t, roster: PaneChildRoster) -> ! {
         }
     };
     kill_plain_children(&snapshot);
+    let _ = crate::proto::remove_session_files(&socket);
+    crate::proto::remove_startup_guard(&socket);
     unsafe { libc::_exit(0) }
 }
 
 fn kill_plain_children(roster: &HashSet<PaneChild>) {
-    for child in roster.iter().filter(|child| !child.keeper_hosted) {
+    let plain = roster
+        .iter()
+        .filter(|child| !child.keeper_hosted)
+        .copied()
+        .collect::<Vec<_>>();
+    for child in &plain {
         let result = unsafe { libc::kill(child.pid as libc::pid_t, libc::SIGKILL) };
         if result != 0 {
             let error = std::io::Error::last_os_error();
@@ -194,6 +202,33 @@ fn kill_plain_children(roster: &HashSet<PaneChild>) {
                 );
             }
         }
+    }
+    for child in plain {
+        reap_plain_child(child.pid);
+    }
+}
+
+fn reap_plain_child(pid: u32) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut status = 0;
+    loop {
+        let result = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        if result == pid as libc::pid_t {
+            return;
+        }
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ECHILD | libc::ESRCH)) {
+                return;
+            }
+            eprintln!("fno mux: emergency waitpid failed for pane child {pid}: {error}");
+            return;
+        }
+        if Instant::now() >= deadline {
+            eprintln!("fno mux: emergency waitpid timed out for pane child {pid}");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -1949,7 +1984,7 @@ pub fn run(socket: PathBuf) -> i32 {
     // Install signal ownership before constructing the Tokio runtime. Every
     // runtime thread inherits the blocked mask; only the dedicated waiter can
     // consume SIGTERM/SIGINT.
-    let pane_children = match install_signal_reaper() {
+    let pane_children = match install_signal_reaper(&socket) {
         Ok(roster) => roster,
         Err(e) => {
             eprintln!("fno mux: cannot install emergency signal reaper: {e}");
@@ -4130,16 +4165,18 @@ impl Core {
     /// leave `panes`/`pane_watch`, so the two maps never drift. Idempotent.
     fn reap_pane(&mut self, pid: u64) {
         if let Some(entry) = self.panes.remove(&pid) {
-            if let Some(child_pid) = entry.pty.child_pid() {
-                let child = PaneChild {
-                    pid: child_pid,
-                    keeper_hosted: entry.pty.is_keeper_hosted(),
-                };
-                if let Ok(mut children) = self.pane_children.lock() {
+            if let Ok(mut children) = self.pane_children.lock() {
+                if let Some(child_pid) = entry.pty.child_pid() {
+                    let child = PaneChild {
+                        pid: child_pid,
+                        keeper_hosted: entry.pty.is_keeper_hosted(),
+                    };
                     children.remove(&child);
                 }
+                entry.pty.kill();
+            } else {
+                entry.pty.kill();
             }
-            entry.pty.kill();
         }
         // Pane exit releases the writer claim UNCONDITIONALLY (Locked 5): a
         // held claim never blocks the close cascade.
@@ -29896,7 +29933,7 @@ mod tests {
 
     #[test]
     fn emergency_roster_kills_plain_child_and_spares_keeper_child() {
-        let mut plain = std::process::Command::new("/bin/sh")
+        let plain = std::process::Command::new("/bin/sh")
             .args(["-c", "exec sleep 30"])
             .spawn()
             .unwrap();
@@ -29918,12 +29955,8 @@ mod tests {
         ]);
 
         kill_plain_children(&roster);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while plain.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
         assert!(
-            plain.try_wait().unwrap().is_some(),
+            unsafe { libc::kill(plain_pid as libc::pid_t, 0) } != 0,
             "plain roster child must be killed"
         );
         assert_eq!(

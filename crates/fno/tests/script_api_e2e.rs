@@ -51,6 +51,10 @@ fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+fn pid_live(pid: i32) -> bool {
+    (unsafe { libc::kill(pid, 0) == 0 }) && !fno::proto::pid_is_zombie(pid)
+}
+
 /// Shut the session's server down (best effort) so a detached server never
 /// outlives the test.
 fn kill_server(scratch: &Scratch) {
@@ -872,16 +876,8 @@ fn wedged_sigterm_reaps_plain_pane_children() {
     )
     .expect("server pid field");
 
-    assert_eq!(
-        unsafe { libc::kill(child_pid, 0) },
-        0,
-        "child live before SIGTERM"
-    );
-    assert_eq!(
-        unsafe { libc::kill(server_pid, 0) },
-        0,
-        "server live at wedge marker"
-    );
+    assert!(pid_live(child_pid), "child live before SIGTERM");
+    assert!(pid_live(server_pid), "server live at wedge marker");
 
     assert_eq!(
         unsafe { libc::kill(server_pid, libc::SIGTERM) },
@@ -889,13 +885,11 @@ fn wedged_sigterm_reaps_plain_pane_children() {
         "SIGTERM reaches wedged server"
     );
     let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline
-        && (unsafe { libc::kill(server_pid, 0) } == 0 || unsafe { libc::kill(child_pid, 0) } == 0)
-    {
+    while Instant::now() < deadline && (pid_live(server_pid) || pid_live(child_pid)) {
         std::thread::sleep(Duration::from_millis(50));
     }
-    let server_alive = unsafe { libc::kill(server_pid, 0) } == 0;
-    let child_alive = unsafe { libc::kill(child_pid, 0) } == 0;
+    let server_alive = pid_live(server_pid);
+    let child_alive = pid_live(child_pid);
     if server_alive || child_alive {
         unsafe {
             libc::kill(server_pid, libc::SIGKILL);
@@ -903,6 +897,18 @@ fn wedged_sigterm_reaps_plain_pane_children() {
         }
         panic!(
             "wedged SIGTERM left processes alive: server={server_alive} child={child_alive}; log: {log}"
+        );
+    }
+    for path in [
+        scratch.main_sock(),
+        fno::proto::version_sidecar_path(&scratch.main_sock()),
+        fno::proto::pid_sidecar_path(&scratch.main_sock()),
+        fno::proto::startup_sidecar_path(&scratch.main_sock()),
+    ] {
+        assert!(
+            !path.exists(),
+            "signal exit left session file {}",
+            path.display()
         );
     }
 }
