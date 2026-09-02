@@ -159,10 +159,11 @@ else
     *) printf '%s\n' "$out" >&2; fail "helper-discovery failure does not name the definition" ;;
   esac
 fi
-cp "$tmp/lib.rs.clean" "$tmp/crates/probe/src/lib.rs"
 
 # the call line is invisible to the crossing rule (no literal), proving the
 # previous failure came from the resolver SHAPE, not a crossing-count rise.
+# This probe runs BEFORE the restore below: on the clean fixture it would be
+# vacuous, passing even if a future scanner started counting helper calls.
 if ! (cd "$ROOT/cli" && uv run python - "$tmp" <<'PYEOF'
 import sys
 from pathlib import Path
@@ -182,6 +183,31 @@ PYEOF
 else
   note "PASS: helper case failed on shape with no crossing-count rise"
 fi
+cp "$tmp/lib.rs.clean" "$tmp/crates/probe/src/lib.rs"
+
+# case 3b: a resolver whose env-key argument rustfmt wrapped onto its own
+# line, with a helper call fed from it - the shape per-line regexes miss.
+cat >> "$tmp/crates/probe/src/lib.rs" <<'RS'
+
+fn wrapped_helper() -> String {
+    let key = std::env::var(
+        "FNO_BIN",
+    )
+    .unwrap_or_else(|_| "fno".to_string());
+    let mut cmd = Command::new(wrapped_other());
+    cmd.arg(&key);
+    key
+}
+RS
+if out=$(check_clean 2>&1); then
+  fail "multiline resolver expression accepted"
+else
+  case "$out" in
+    *wrapped_helper*) note "PASS: multiline resolver rejected, definition named" ;;
+    *) printf '%s\n' "$out" >&2; fail "multiline-resolver failure does not name the definition" ;;
+  esac
+fi
+cp "$tmp/lib.rs.clean" "$tmp/crates/probe/src/lib.rs"
 
 # case 4: a Python file outside the door execing literal fno-agents fails,
 # in BOTH shapes: the inline argv list, and an argv assembled into a
@@ -215,6 +241,26 @@ else
   case "$out" in
     *innocent.py*) note "PASS: variable-assembled argv rejected, file named" ;;
     *) printf '%s\n' "$out" >&2; fail "assembled-argv failure does not name the file" ;;
+  esac
+fi
+cp "$tmp/innocent.py.clean" "$tmp/cli/src/fno/innocent.py"
+
+# case 4b2: an imported callable drops the qualifier, so the direct
+# string-argument form must be caught without any subprocess. prefix.
+cat >> "$tmp/cli/src/fno/innocent.py" <<'PY'
+
+
+def imported_run() -> None:
+    from subprocess import run
+
+    run("fno-agents agents ping", check=False)
+PY
+if out=$(check_clean 2>&1); then
+  fail "imported-callable direct exec accepted"
+else
+  case "$out" in
+    *innocent.py*) note "PASS: imported-callable direct exec rejected, file named" ;;
+    *) printf '%s\n' "$out" >&2; fail "bare-direct failure does not name the file" ;;
   esac
 fi
 cp "$tmp/innocent.py.clean" "$tmp/cli/src/fno/innocent.py"

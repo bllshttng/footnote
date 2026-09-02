@@ -63,9 +63,9 @@ _HELPER_CALL_TEMPLATE = r"(?<![A-Za-z0-9_]){name}\s*\("
 # env-free, current_exe-relative construction; the closing quote keeps
 # `join("fno-agents-daemon")` (a Rust runtime binary, not porcelain) out.
 _PORCELAIN_ENV_RE = re.compile(
-    r'\b(?:var|var_os)\(\s*"(?:FNO_BIN|FNO_LOOPCHECK_FNO_BIN)"\s*\)'
+    r'\b(?:var|var_os)\(\s*"(?:FNO_BIN|FNO_LOOPCHECK_FNO_BIN)"\s*,?\s*\)'
 )
-_PORCELAIN_JOIN_RE = re.compile(r'join\(\s*"fno"\s*\)')
+_PORCELAIN_JOIN_RE = re.compile(r'join\(\s*"fno"\s*,?\s*\)')
 
 _FN_DEF_RE = re.compile(
     r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?"
@@ -87,7 +87,13 @@ _PY_DOOR_CALL_RE = re.compile(
 # a locator, not an exec) or a name tuple, and treating it as argv0 ratchets
 # the tree's locators as execs.
 _PY_DOOR_ARGV0_RE = re.compile(r"""\[\s*["']fno-agents["']""")
-_PY_DOOR_DIRECT_RE = re.compile(r"""\(\s*["']fno-agents["']""")
+# The direct string-argument forms accept a whole command string, so the
+# literal is followed by a space, a quote, or end of line - never required to
+# be the entire argument.
+_PY_DOOR_DIRECT_RE = re.compile(r"""\(\s*["']fno-agents(?:["'\s]|$)""")
+_PY_DOOR_BARE_DIRECT_RE = re.compile(
+    r"""\b(?:Popen|run|call|check_output|check_call|exec[lv]p?e?|spawn[lv]p?e?)\(\s*["']fno-agents(?:["'\s]|$)"""
+)
 
 SITE_RULE = "crossing"
 RESOLVER_RULE = "resolver"
@@ -172,9 +178,18 @@ def _find_resolvers(
             if match is not None:
                 fns.append((i, line.strip(), match.group(1)))
                 continue
+            # A three-line FORWARD window, because rustfmt wraps a long
+            # argument call across three lines (`var(\n    "FNO_BIN",\n)`);
+            # the match still anchors at line i, so attribution to the fn
+            # above is unchanged. The paren guard keeps a fn's bare closing
+            # brace from anchoring a window that reaches the next function's
+            # first wrapped call.
+            if "(" not in line:
+                continue
+            window = "\n".join(lines[i : i + 3])
             if (
-                _PORCELAIN_ENV_RE.search(line) is None
-                and _PORCELAIN_JOIN_RE.search(line) is None
+                _PORCELAIN_ENV_RE.search(window) is None
+                and _PORCELAIN_JOIN_RE.search(window) is None
             ):
                 continue
             if fns:
@@ -234,9 +249,13 @@ def _find_pydoor(repo_root: Path) -> list[tuple[str, int, str]]:
         for i, line in enumerate(lines):
             if _is_comment(line):
                 continue
-            if _PY_DOOR_ARGV0_RE.search(line) is not None or (
-                _PY_DOOR_CALL_RE.search(line) is not None
-                and _PY_DOOR_DIRECT_RE.search(line) is not None
+            if (
+                _PY_DOOR_ARGV0_RE.search(line) is not None
+                or _PY_DOOR_BARE_DIRECT_RE.search(line) is not None
+                or (
+                    _PY_DOOR_CALL_RE.search(line) is not None
+                    and _PY_DOOR_DIRECT_RE.search(line) is not None
+                )
             ):
                 hits.append((rel, i + 1, line.strip()))
     return hits
