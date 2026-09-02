@@ -202,6 +202,8 @@ is known):
    Leave it off (the default) for a group whose scope is already clear from the
    epic; that child takes the inline-fill path.
 
+   `needs_think` is a field of the GROUP SPEC you pass to `fno backlog decompose`, never a plan frontmatter key. It is validated on the group (`_decompose.py` `NormalizedGroup`) and read as the sole consent for the fan-out spawn (`graph/cli.py`). A census of plan frontmatter therefore finds zero uses of it by construction, and that zero says nothing about whether the flag is used. This step above is its step.
+
 7. **Inline-fill every child you own BEFORE linking (MANDATORY).** Decompose
    births each child UNLINKED (`status: idea`, no `plan_path`), so nothing
    dispatches against an empty scaffold. You hold the epic in context right now -

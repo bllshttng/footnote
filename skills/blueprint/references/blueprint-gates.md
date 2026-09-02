@@ -4,6 +4,8 @@ Read a gate only when its trigger fires. The dispatch table in SKILL.md ("## Gat
 
 ## Plan-level dispatch hold
 
+Trigger: named evidence must exist before this plan dispatches or merges. The Gates table in SKILL.md routes here. This gate carried a body and no table row until 2026-09-02. Nothing routed to it and no plan ever set the key. Meanwhile `finalize.rs`, `ladder.py`, `target_cli.py`, `git-protection.py` and `validate-plan.sh` all read it. A gate body with no trigger row is unreachable, whatever it says.
+
 When named evidence must exist before work starts or merges, author one `dispatch_hold` mapping in frontmatter. Add non-blank `reason`, `release_when`, and `set_by` strings. Add an ISO `review_on` date. The mapping's presence is the hold. The review date prompts review and never releases work. Every dispatcher and merger reads the same declaration. If the declaration is malformed or unreadable, the action fails closed. After an authorized operator confirms `release_when`, remove the mapping to lift the hold. Never copy the hold into graph status or a private dispatcher file.
 
 ## Plan Claims Ingestion (MANDATORY when input is a node id)
@@ -490,7 +492,7 @@ That is the same canonical probe `init-target-state.sh` shells out to. When the 
 
 **An absent answer is never a width of one.** The probe exits 1 rather than printing a number. That is precisely so a caller can tell an unmeasured plan from a narrow one. A gate that collapsed the two records `manual` while reporting a measurement it never made. Name the unmeasured width in the receipt.
 
-**Do NOT add a config key for a global default.** Adoption follows the step. A plan key that no `/blueprint` step asks for stays unadopted. `consolidation` reached 428 plans and `executor` reached 421, both with a step. The posture key reached 1 and `needs_think` reached 0, neither with one. The step is the mechanism. A config default only moves the same decision to a file no plan author reads.
+**Do NOT add a config key for a global default.** Adoption follows the step. A plan key that no `/blueprint` step asks for stays unadopted. `consolidation` reached 428 plans and `executor` reached 421, both with a step. The posture key reached 1 with no step. The step is the mechanism. A config default only moves the same decision to a file no plan author reads.
 
 ## Collision check (step 3a; skip with `no-collision-check`)
 

@@ -25,6 +25,7 @@ Each gate loads only when its trigger fires. The bodies (with verbatim scripts) 
 | Gate | Read its section when |
 |------|-----------------------|
 | Plan Claims Ingestion | the argument is an existing node id (`x-8af8` / `ab-<hex>`) - runs FIRST, before any classifier |
+| Plan-level dispatch hold | named evidence must exist before this plan dispatches or merges |
 | Consolidation Gate | always, between discovery grounding (2b) and the write (3) - step 2d |
 | Schema Citation Gate | the codemap has a `## Database Schema` section AND the plan touches the DB |
 | Executor Lock Transcription | a design doc supplies a Locked Decision (executor) |
