@@ -523,35 +523,62 @@ fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
     // (x-6b0b) Repair rows carrying both a name and a key - a rename of an
     // unnamed squad used to mint exactly that and leave the old key row alive
     // beside it. Clearing the key is reversible without loss (clearing a name
-    // re-derives it from origins). Two collapse shapes: the row's key twins an
-    // unnamed row (the minted duplicate - fold the twin in, the named row is
-    // the one the operator chose), or its name twins another row once the key
-    // is gone (merge members, keep the earlier stamp). Every repair lands in
-    // the notice; never folded silently.
+    // re-derives it from origins). Two passes: strip every both-fields key
+    // first (remembering it), then fold, so a twin is found whichever row the
+    // store lists first. A stripped row folds into its unnamed key twin
+    // anywhere in the list - the named row is the one the operator chose -
+    // else onto an emitted row of the same name. Every repair lands in the
+    // notice; never folded silently.
     let mut repaired = 0usize;
     let mut folded = 0usize;
-    let mut squads: Vec<StoredSquad> = Vec::with_capacity(loaded.len());
-    for mut sq in loaded {
-        if !sq.name.is_empty() && !sq.key.is_empty() {
-            repaired += 1;
-            let key = std::mem::take(&mut sq.key);
-            if let Some(pos) = squads
-                .iter()
-                .position(|s| s.name.is_empty() && s.key == key)
+    let mut rows: Vec<(StoredSquad, Option<String>)> = loaded
+        .into_iter()
+        .map(|mut sq| {
+            let key =
+                (!sq.name.is_empty() && !sq.key.is_empty()).then(|| std::mem::take(&mut sq.key));
+            if key.is_some() {
+                repaired += 1;
+            }
+            (sq, key)
+        })
+        .collect();
+    let mut drop_row = vec![false; rows.len()];
+    for i in 0..rows.len() {
+        let Some(key) = rows[i].1.clone() else {
+            continue;
+        };
+        let Some(j) = (0..rows.len())
+            .find(|&j| j != i && !drop_row[j] && rows[j].0.name.is_empty() && rows[j].0.key == key)
+        else {
+            continue;
+        };
+        folded += 1;
+        let mut members = std::mem::take(&mut rows[j].0.members);
+        members.retain(|m| !rows[i].0.members.contains(m));
+        rows[i].0.members.extend(members);
+        if rows[i].0.created_at.is_empty()
+            || (!rows[j].0.created_at.is_empty() && rows[j].0.created_at < rows[i].0.created_at)
+        {
+            rows[i].0.created_at = rows[j].0.created_at.clone();
+        }
+        drop_row[j] = true;
+    }
+    let mut squads: Vec<StoredSquad> = Vec::with_capacity(rows.len());
+    for ((sq, stripped), drop) in rows.into_iter().zip(drop_row) {
+        if drop {
+            continue;
+        }
+        // A repaired row whose cleared name collides with an emitted row of
+        // the same name folds into it. A row that never carried both fields
+        // passes through untouched: a pre-existing duplicate-name pair is not
+        // this repair's defect, and the next write collapses it.
+        if stripped.is_some() {
+            if let Some(existing) = squads
+                .iter_mut()
+                .find(|s| !s.name.is_empty() && s.name == sq.name)
             {
                 folded += 1;
-                let twin = squads.remove(pos);
-                let mut members = twin.members;
-                members.retain(|m| !sq.members.contains(m));
-                sq.members.extend(members);
-                if sq.created_at.is_empty()
-                    || (!twin.created_at.is_empty() && twin.created_at < sq.created_at)
-                {
-                    sq.created_at = twin.created_at;
-                }
-            } else if let Some(existing) = squads.iter_mut().find(|s| s.name == sq.name) {
-                folded += 1;
-                let mut members = sq.members.drain(..).collect::<Vec<_>>();
+                let mut members = sq.members;
                 members.retain(|m| !existing.members.contains(m));
                 existing.members.extend(members);
                 if existing.created_at.is_empty()
@@ -2519,6 +2546,49 @@ mod tests {
             row.created_at, "2026-09-01T10:00:00Z",
             "the earlier stamp wins"
         );
+    }
+
+    #[test]
+    fn load_repair_finds_the_key_twin_whichever_row_comes_first() {
+        // The same pair as the fold test, listed in reverse order: the repair
+        // strips every key before matching, so the twin is found regardless
+        // of store row order and the result is identical.
+        let s = Scratch::new("x6b0b-fold-twin-reversed");
+        let file = StoreFile {
+            version: STORE_VERSION,
+            squads: vec![
+                StoredSquad {
+                    name: "oss".into(),
+                    key: "c5bf8f5419a350e8".into(),
+                    origins: vec!["/repo".into()],
+                    members: vec![m("deadbeef")],
+                    created_at: "2026-09-01T10:01:21Z".into(),
+                    tab_specs: vec![],
+                    tab_trees: Vec::new(),
+                    active_tab: None,
+                },
+                StoredSquad {
+                    name: String::new(),
+                    key: "c5bf8f5419a350e8".into(),
+                    origins: vec!["/repo".into()],
+                    members: vec![m("c19cd2c3")],
+                    created_at: "2026-09-01T10:00:00Z".into(),
+                    tab_specs: vec![],
+                    tab_trees: Vec::new(),
+                    active_tab: None,
+                },
+            ],
+            ..StoreFile::default()
+        };
+        std::fs::write(s.file(), serde_json::to_string(&file).unwrap()).unwrap();
+        let loaded = load();
+        assert!(loaded.notice.as_deref().unwrap().contains("repaired 1"));
+        assert_eq!(loaded.squads.len(), 1);
+        let row = &loaded.squads[0];
+        assert_eq!(row.name, "oss");
+        assert!(row.key.is_empty());
+        assert_eq!(row.members.len(), 2);
+        assert_eq!(row.created_at, "2026-09-01T10:00:00Z");
     }
 
     #[test]

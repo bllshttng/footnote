@@ -2149,9 +2149,30 @@ enum BatchReplay {
     Recruit { squad: String, ids: Vec<String> },
 }
 
+/// The still-held spawn receipts from journal text: a thin view over
+/// [`parse_journal_events`], which walks receipts and never-bound markers in
+/// one pass.
 fn parse_spawn_receipts(raw: &str) -> HashMap<(String, String), HeldWorker> {
+    parse_journal_events(raw).receipts
+}
+
+/// One walk over journal text yielding both restore inputs: the still-held
+/// spawn receipts (build and revoke in file order) and the never-bound
+/// removal markers. One pass, because restore reads this journal twice
+/// otherwise; the split accessors below keep the two halves independently
+/// testable.
+struct JournalEvents {
+    receipts: HashMap<(String, String), HeldWorker>,
+    never_bound: HashMap<String, String>,
+}
+
+fn parse_journal_events(raw: &str) -> JournalEvents {
     let mut receipts: HashMap<(String, String), HeldWorker> = HashMap::new();
-    for line in raw.lines() {
+    // Recency, not presence: a removal older than the name's latest spawn is
+    // a dead name that came back to life.
+    let mut last_spawn: HashMap<String, usize> = HashMap::new();
+    let mut removals: HashMap<String, (usize, String)> = HashMap::new();
+    for (idx, line) in raw.lines().enumerate() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
@@ -2181,7 +2202,44 @@ fn parse_spawn_receipts(raw: &str) -> HashMap<(String, String), HeldWorker> {
                 });
                 continue;
             }
-            Some("agent_spawned") => {}
+            // A spawn both anchors marker recency and, when it carries a full
+            // session identity, mint a receipt - the fall-through below.
+            Some("agent_spawned") => {
+                if let Some(name) = data.get("name").and_then(|v| v.as_str()) {
+                    last_spawn.insert(name.to_string(), idx);
+                }
+            }
+            Some("registry_row_removed") => {
+                // (x-6b0b) A worker name the journal positively records as
+                // never bound: the row's own session field is absent or empty
+                // and the reason names the missing identity. An
+                // `agent_removed` row with a null session is deliberately NOT
+                // a marker - that shape also fires for probe workers
+                // (py3probe) that must stay `Unknown`. The set is keyed on
+                // the worker NAME because a never-bound member has no other
+                // identity; reused names are not lifecycle identity, so the
+                // recency filter below re-checks every marker against the
+                // name's last spawn.
+                let sessionless = data
+                    .get("harness_session_id")
+                    .map(|v| v.as_str().unwrap_or_default().is_empty())
+                    .unwrap_or(true);
+                let names_identity = data
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|reason| reason.contains("identity"));
+                if sessionless && names_identity {
+                    let reason = data
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    if let Some(name) = data.get("name").and_then(|v| v.as_str()) {
+                        removals.insert(name.to_string(), (idx, reason));
+                    }
+                }
+                continue;
+            }
             _ => continue,
         }
         if !matches!(
@@ -2225,65 +2283,24 @@ fn parse_spawn_receipts(raw: &str) -> HashMap<(String, String), HeldWorker> {
             },
         );
     }
-    receipts
-}
-
-/// (x-6b0b) Worker names the journal positively records as never bound, with
-/// the removal reason each carries: a `registry_row_removed` row whose own
-/// `harness_session_id` is absent or empty and whose reason names the missing
-/// identity. An `agent_removed` row with a null session is deliberately NOT a
-/// marker - that shape also fires for probe workers (py3probe) that must stay
-/// `Unknown`. The set is keyed on the worker NAME because a never-bound member
-/// has no other identity; `parse_spawn_receipts`'s reuse warning applies, so
-/// every consumer re-checks recency against `agent_spawned` rows for the name.
-fn parse_never_bound_removals(raw: &str) -> HashMap<String, String> {
-    // Recency, not presence: a removal older than the name's latest spawn is a
-    // dead name that came back to life.
-    let mut last_spawn: HashMap<String, usize> = HashMap::new();
-    let mut removals: HashMap<String, (usize, String)> = HashMap::new();
-    for (idx, line) in raw.lines().enumerate() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let Some(data) = value.get("data").and_then(|v| v.as_object()) else {
-            continue;
-        };
-        let Some(name) = data.get("name").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        match value.get("type").and_then(|v| v.as_str()) {
-            Some("agent_spawned") => {
-                last_spawn.insert(name.to_string(), idx);
-            }
-            Some("registry_row_removed") => {
-                let sessionless = data
-                    .get("harness_session_id")
-                    .map(|v| v.as_str().unwrap_or_default().is_empty())
-                    .unwrap_or(true);
-                let names_identity = data
-                    .get("reason")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|reason| reason.contains("identity"));
-                if sessionless && names_identity {
-                    let reason = data
-                        .get("reason")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    removals.insert(name.to_string(), (idx, reason));
-                }
-            }
-            _ => {}
-        }
-    }
-    removals
+    let never_bound = removals
         .into_iter()
         // No spawn on record: the name was never spawned in this journal, so
         // the removal is trivially the newest fact about it (a journal whose
         // FIRST line is the removal must still mark).
         .filter(|(name, (idx, _))| last_spawn.get(name).is_none_or(|spawn| idx > spawn))
         .map(|(name, (_, reason))| (name, reason))
-        .collect()
+        .collect();
+    JournalEvents {
+        receipts,
+        never_bound,
+    }
+}
+
+/// (x-6b0b) Worker names the journal positively records as never bound, with
+/// the removal reason each carries.
+pub(crate) fn parse_never_bound_removals(raw: &str) -> HashMap<String, String> {
+    parse_journal_events(raw).never_bound
 }
 
 /// The journal's retained segment paths, OLDEST first: `<stem>.<N>` with `N`
@@ -2328,6 +2345,21 @@ fn scan_spawn_journal() -> SpawnJournal {
 /// The path-injected core of [`scan_spawn_journal`], so the segment walk is
 /// unit-testable without touching the operator's registry location.
 fn scan_journal_at(live: &std::path::Path) -> SpawnJournal {
+    let (combined, error) = read_journal_text_at(live);
+    let events = parse_journal_events(&combined);
+    SpawnJournal {
+        receipts: events.receipts,
+        never_bound: events.never_bound,
+        error,
+    }
+}
+
+/// (x-6b0b) The journal's retained segments plus the live file, concatenated
+/// OLDEST FIRST and newline-terminated per segment, with the first read
+/// error. Shared with the mux CLI's prune evidence (`member_evidence`), so
+/// the sweep modal and the CLI apply read the same durable rows the server
+/// sweep reads - one reader shape, never two.
+pub(crate) fn read_journal_text_at(live: &std::path::Path) -> (String, Option<String>) {
     let dir = live.parent().map(std::path::Path::to_path_buf);
     let mut paths = dir
         .map(|dir| spawn_receipt_segments(&dir, "events.jsonl"))
@@ -2357,11 +2389,7 @@ fn scan_journal_at(live: &std::path::Path) -> SpawnJournal {
             }
         }
     }
-    SpawnJournal {
-        receipts: parse_spawn_receipts(&combined),
-        never_bound: parse_never_bound_removals(&combined),
-        error,
-    }
+    (combined, error)
 }
 
 fn receipt_for_member<'a>(
