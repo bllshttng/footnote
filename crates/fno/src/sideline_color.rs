@@ -38,7 +38,6 @@
 //! reader simply never sees bare keys.
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
 use crate::proto::Color;
 
@@ -196,9 +195,30 @@ fn read_palette() -> SidelinePalette {
     SidelinePalette::default()
 }
 
-fn palette() -> &'static SidelinePalette {
-    static PAL: OnceLock<SidelinePalette> = OnceLock::new();
-    PAL.get_or_init(read_palette)
+static PAL: std::sync::RwLock<Option<&'static SidelinePalette>> = std::sync::RwLock::new(None);
+
+/// The currently cached palette, re-reading config on first call. The read
+/// accessor the settings UI uses to list configured colors without
+/// re-parsing config itself.
+///
+/// The cache holds a `&'static` into a leaked `Box`, so outstanding
+/// references stay valid across a reload - `reload_palette` drops the CACHE
+/// entry, never the memory a reader may still hold. A reload race can leak
+/// one orphaned palette (small, bounded by reload count).
+pub fn palette() -> &'static SidelinePalette {
+    if let Some(p) = *PAL.read().unwrap() {
+        return p;
+    }
+    let fresh: &'static SidelinePalette = Box::leak(Box::new(read_palette()));
+    *PAL.write().unwrap() = Some(fresh);
+    fresh
+}
+
+/// Invalidate the cached palette so the next [`palette`] re-reads config from
+/// disk. Call after a successful `fno config set` so a saved color goes live
+/// in the running mux without a restart. The cascade itself is untouched.
+pub fn reload_palette() {
+    *PAL.write().unwrap() = None;
 }
 
 /// The built-in fallback table, consulted only when nothing in config
@@ -256,7 +276,7 @@ pub fn resolve_lane_color(
 }
 
 /// The cascade over an EXPLICIT palette - the testable seam behind
-/// [`resolve_lane_color`] (the process palette is a `OnceLock` over real
+/// [`resolve_lane_color`] (the process palette is cached over real
 /// config files, so the config-driven cascade levels need this injection
 /// point for unit coverage).
 pub fn resolve_with(
@@ -623,6 +643,50 @@ mod tests {
             resolve_with(&p3, None, None, Some("zai"), None),
             Some(Color::Indexed(3)),
             "the row table names the matched row"
+        );
+    }
+
+    // (x-e4f1) The settings UI reads the cached palette through the pub
+    // accessor and invalidates it through reload_palette; both behave on the
+    // module-scope cache.
+    #[test]
+    fn palette_accessor_exposes_all_four_axes() {
+        let p = pal(
+            vec![],
+            "glm-5.3-flash[1m]=yellow",
+            "zai=green",
+            "codex=cyan",
+            "named=red",
+        );
+        assert_eq!(p.harness, vec![("codex".into(), "cyan".into())]);
+        assert_eq!(p.route, vec![("zai".into(), "green".into())]);
+        assert_eq!(p.model, vec![("glm-5.3-flash[1m]".into(), "yellow".into())]);
+        assert_eq!(p.row, vec![("named".into(), "red".into())]);
+        // The accessor hands out one stable cached instance between reloads.
+        assert!(
+            std::ptr::eq(palette(), palette()),
+            "palette() returns the same cached instance between reloads"
+        );
+    }
+
+    #[test]
+    fn reload_palette_invalidates_so_the_next_read_reinitializes() {
+        // prime, invalidate, re-prime: the observable contract the settings
+        // save path depends on (write config, reload, resolve sees it).
+        let _ = palette();
+        assert!(
+            PAL.read().unwrap().is_some(),
+            "palette() primes the cache"
+        );
+        reload_palette();
+        assert!(
+            PAL.read().unwrap().is_none(),
+            "reload_palette clears the cache"
+        );
+        let _ = palette();
+        assert!(
+            PAL.read().unwrap().is_some(),
+            "the next palette() re-primes"
         );
     }
 }
