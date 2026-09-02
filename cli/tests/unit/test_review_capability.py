@@ -246,6 +246,19 @@ def test_a_login_with_no_account_stays_unverifiable_not_absent(
     assert not any("users/" in c for c in calls)
 
 
+def test_self_review_invocation_docstring_answers_two_questions_not_one():
+    """The old docstring claimed the harness parameter was deliberately unused;
+    the spelling change makes that false, and the stale claim would send the
+    next reader re-deriving which reviewer owns the transport."""
+    import inspect
+
+    import fno.review_capability as rc
+
+    doc = inspect.getdoc(rc.self_review_invocation) or ""
+    assert "deliberately unused" not in doc
+    assert "normalize_command" in doc
+
+
 def test_self_review_invocation_is_the_lane_on_every_harness():
     import fno.review_capability as rc
 
@@ -253,12 +266,13 @@ def test_self_review_invocation_is_the_lane_on_every_harness():
     # off the pre-ship review anymore.
     for harness in ("claude", "codex", "opencode", "agy", "gemini", None, "unknown"):
         assert rc.harness_can_self_review(harness) is True, harness
-    # One recommendation for every harness: the fno lane with a level.
-    for harness in ("claude", "codex", "opencode", "agy", "gemini", None, "unknown"):
+    # One recommendation for every harness: the fno lane with a level. WHICH
+    # reviewer is harness-independent; only the SPELLING differs per surface.
+    for harness in ("claude", "opencode", "agy", "gemini", None, "unknown"):
         assert rc.self_review_invocation(harness) == "/fno:review medium --comment", harness
+    assert rc.self_review_invocation("codex") == "$fno:review medium --comment"
     # No native verb leaks into the recommendation from any harness.
     assert "/code-review" not in rc.self_review_invocation("claude")
-    assert rc.self_review_invocation("codex") == "/fno:review medium --comment"
 
 
 def test_self_review_invocation_asks_for_comments_but_never_fixes():
@@ -317,7 +331,7 @@ def test_render_self_review_invocation_names_the_final_pr_head_and_base():
         head_sha="abc1234",
         base_branch="main",
     )
-    assert codex == "/fno:review <level> --comment HEAD abc1234 of PR 123 against origin/main"
+    assert codex == "$fno:review <level> --comment HEAD abc1234 of PR 123 against origin/main"
 
     claude = rc.render_self_review_invocation(
         "claude",
@@ -370,7 +384,7 @@ def test_self_review_invocation_takes_the_level():
     # No diff in hand yet: the placeholder survives for a pre-diff surface.
     assert rc.self_review_invocation("claude", level=None) == "/fno:review <level> --comment"
     # The level travels on every harness alike.
-    assert rc.self_review_invocation("codex", level="high") == "/fno:review high --comment"
+    assert rc.self_review_invocation("codex", level="high") == "$fno:review high --comment"
     assert rc.self_review_invocation("agy", level="low") == "/fno:review low --comment"
 
 
@@ -432,7 +446,7 @@ def test_review_invocation_verb_prints_the_render(monkeypatch, tmp_path):
 
     bare = CliRunner().invoke(target_app, ["review-invocation", "--harness", "codex"])
     assert bare.exit_code == 0, bare.output
-    assert bare.output.strip() == f"/fno:review {sized} --comment"
+    assert bare.output.strip() == f"$fno:review {sized} --comment"
 
     portable = CliRunner().invoke(target_app, ["review-invocation", "--harness", "agy"])
     assert portable.exit_code == 0, portable.output

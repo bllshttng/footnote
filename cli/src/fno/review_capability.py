@@ -543,24 +543,41 @@ def self_review_invocation(harness: Optional[str], level: Optional[str] = "mediu
     outright, so in practice the findings land on it. Narrowing that gap is a
     target-resolution change, not this one.
 
+    Two questions live in this string, and they answer differently. WHICH
+    reviewer to recommend is harness-independent: the fno lane on every
+    harness, and that decision stays here unchanged. HOW TO SPELL that verb
+    on the chosen harness is NOT harness-independent: the lane is
+    `/fno:review` on a slash surface and `$fno:review` on codex, so the base
+    renders through the same `normalize_command` every dispatch surface uses
+    - its discriminator rewrites a namespaced footnote verb and leaves
+    native verbs alone. A harness whose surface refuses the rewrite (a
+    deprecated or unknown name) gets the claude spelling: this is advisory
+    text, never a gate, so the failure mode is the generic spelling rather
+    than a crash on the way to the text.
+
     `level` is validated against `ALLOWED_REVIEW_LEVELS` - anything outside it
     (`ultra` included) raises. `None` leaves the `<level>` placeholder in
-    place for a pre-diff surface that has no diff to size from yet. `harness`
-    is accepted and deliberately unused: the answer is harness-independent
-    now, and the parameter stays so callers do not have to know that."""
+    place for a pre-diff surface that has no diff to size from yet.
+    `harness=None` resolves to the claude spelling; callers that know their
+    harness thread it (the renderer resolves the ambient session first)."""
     if level is not None and level not in ALLOWED_REVIEW_LEVELS:
         raise ValueError(
             f"review level {level!r} is not one of {ALLOWED_REVIEW_LEVELS}; "
             "ultra is billed separately and no autonomous surface may issue it"
         )
+    from fno.agents.harness_map import DispatchResolveError, normalize_command
     from fno.config import _RESOLVABLE_REVIEWERS
 
     desc = _RESOLVABLE_REVIEWERS.get("code-review")
     base = desc.invocation if desc else "/fno:review"
+    try:
+        spelled = normalize_command(base, harness or "claude")
+    except DispatchResolveError:
+        spelled = base
     # Flag order follows the router grammar: [level] [--comment] [--fix]
     # [target]. `render_self_review_invocation` appends the target after this,
     # so the flag must sit here rather than at the end.
-    return f"{base} <level> --comment" if level is None else f"{base} {level} --comment"
+    return f"{spelled} <level> --comment" if level is None else f"{spelled} {level} --comment"
 
 
 def _git_out(cwd: Path, *args: str) -> Optional[str]:
