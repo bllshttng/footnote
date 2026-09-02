@@ -100,10 +100,29 @@ For every kept finding, open the cited `file:line` and check the finding's verba
 
 ### Carry-forward (prior rounds)
 
-An incremental round narrows scope only to the increment since the last reviewed head, and the narrowing is earned, never assumed. Resolve the prior head through the existing accessor and verify it before trusting it:
+An incremental round narrows scope only to the increment since the last reviewed head, and the narrowing is earned, never assumed. Resolve the prior head from the attestation journal: the newest `review_attestation` row with `verdict: pass` on this branch whose `head_sha` differs from the current HEAD is the prior round.
 
 ```bash
-PRIOR_HEAD=$(fno do review --sigma-last-head --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" 2>/dev/null || true)
+EVENTS="${FNO_EVENTS_PATH:-.fno/events.jsonl}"
+PRIOR_HEAD=$(python3 -c '
+import json, sys
+path, branch, head = sys.argv[1], sys.argv[2], sys.argv[3]
+best = ""
+for line in open(path, encoding="utf-8"):
+    if "review_attestation" not in line:
+        continue
+    try:
+        row = json.loads(line)
+    except ValueError:
+        continue
+    data = row.get("data") or {}
+    if data.get("verdict") != "pass" or data.get("branch") != branch:
+        continue
+    sha = data.get("head_sha") or ""
+    if sha and sha != head:
+        best = sha
+print(best)
+' "$EVENTS" "$BRANCH" "$HEAD_SHA")
 SCOPE="first-round"
 if [ -n "$PRIOR_HEAD" ] && git merge-base --is-ancestor "$PRIOR_HEAD" HEAD 2>/dev/null; then
   if git diff --name-only "$PRIOR_HEAD..HEAD" | grep -qE '(^|/)(CLAUDE\.md|AGENTS\.md)$|^\.claude/rules/'; then
@@ -116,19 +135,9 @@ fi
 
 A prior head that is not an ancestor of HEAD (rebase, squash, force-push) reads as `first-round`: full scope. An empty increment resets to full scope the same way, so a zero-file round can never pass vacuously. The single changed-files producer is this block; no other diff read in the pass names its own base.
 
-On an incremental round, read the prior round's report through the existing inspect surface and keep its exit status:
+On an incremental round, read the prior round's findings from the SAME journal row: the bounded `findings` primitives it carries (category, verdict, finding_key, summary) are the prior report body. A prior row without findings primitives is unreadable evidence, not an empty prior report: re-run this round at full scope before any verdict, and emit no attestation from the incomplete round - a live blocking finding can sit in an unread prior round.
 
-```bash
-if PRIOR_REPORT=$(fno do review --inspect-sigma --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" --sigma-head "$PRIOR_HEAD" --json 2>/dev/null); then
-  INSPECT=ok
-else
-  INSPECT=failed
-fi
-```
-
-With `INSPECT=ok` and no critical or high findings in the prior body, there is nothing to carry. With `INSPECT=failed`, the prior report was not readable and the narrowed scope is unproven: re-run this round at full scope before any verdict, and emit no attestation from the incomplete round. Never read a failed inspection as an empty prior report - a live blocking finding can sit in the unread report.
-
-For each critical or high finding in a readable prior body, re-validate its cited quote at the CURRENT head, the same cite-or-drop check as above:
+For each critical or high finding in a readable prior round, re-validate its cited quote at the CURRENT head, the same cite-or-drop check as above:
 
 - quote still matches at the cited `file:line` -> the finding is unresolved. Carry it verbatim into this round's report tagged `carried from round <id>`. It counts as a blocking finding of THIS round.
 - quote is gone or no longer supports the claim -> it lands in the 0-25 abstain band, drops below the 80 threshold, and is named `dropped-unverifiable`.
@@ -143,7 +152,7 @@ Surface up to 8 additional candidates, each naming a defect not already on the l
 
 ## Report and emit
 
-The report opens with one scope line and ends with one verdict line. The scope line is `Scope: first-round` on a full review, `Scope: incremental` on a narrowed round, or `Scope: full-scope (prior report unreadable; inspect failed)` after a failed inspection forced the wider scope. The verdict line is `Verdict: pass` or `Verdict: fail`, and it mirrors the classifier: pass only when the blocking count is zero and no carried finding is unresolved.
+The report opens with one scope line and ends with one verdict line. The scope line is `Scope: first-round` on a full review, `Scope: incremental` on a narrowed round, or `Scope: full-scope (prior round unreadable)` after an unreadable prior round forced the wider scope. The verdict line is `Verdict: pass` or `Verdict: fail`, and it mirrors the classifier: pass only when the blocking count is zero and no carried finding is unresolved.
 
 The resolved route line comes from the one seam: `fno do review resolve-level <level>` prints the full record (level, level_source, band, effort, model, provider, degraded_max). Its `model`/`effort`/`provider` name the POLICY pick for this level - never what ran, because this lane never dispatches. Since the lane always executes inline in the invoking session (Phase 0 above), report the resolved route's `model`/`effort`/`provider` as a `resolved (not dispatched):` line, and separately state `executed inline as: <this session's own harness and model>` so a reader never mistakes the policy target for an attribution of the finished work. A session unable to name its own model states so rather than guessing.
 

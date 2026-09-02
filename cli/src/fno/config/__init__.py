@@ -653,14 +653,15 @@ class ResearchBlock(BaseModel):
 class CrossModelBlock(BaseModel):
     """Cross-model review opt-in (nested under 'config.review.cross_model').
 
-    Gates the provider-rotated sigma-review panel (ab-6c8f4c61): when
-    `enabled` is true the internal review panel may route correctness agents
-    to a different provider (codex/gemini) than wrote the code, catching
-    model-specific blind spots. Default False: existing all-claude review is
-    byte-for-byte unchanged until the operator turns it on (Locked Decision 7).
-    An explicit `config.review.agent_providers` map ALSO engages cross-model
-    (the selector treats either signal as opt-in); this flag is the
-    no-map-needed switch.
+    Gates the diversity axis of review (ab-6c8f4c61; the sigma panel it once
+    routed is removed by x-f324): when `enabled` is true, reviewer capacity
+    may include a different provider (codex/gemini) than wrote the code,
+    catching model-specific blind spots - the peer rung's substrate and the
+    assurance resolver's effective kinds. Default False: existing all-claude
+    review is byte-for-byte unchanged until the operator turns it on (Locked
+    Decision 7). An explicit `config.review.agent_providers` map ALSO engages
+    cross-model (the selector treats either signal as opt-in); this flag is
+    the no-map-needed switch.
     """
 
     model_config = ConfigDict(extra="ignore")
