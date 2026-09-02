@@ -298,10 +298,134 @@ def test_truth_json_carries_the_reachability_verdict_for_rust_callers() -> None:
 
 
 def _pane_row():
-    """A mux row whose recorded pid is confidently dead (pid 1 is never a worker)."""
+    """A mux row whose recorded pid is confidently dead (pid 1 is never a worker).
+
+    ``pane_id`` 7, not 0: ids are allocated from a floor of 1, so 0 is an
+    unset field rather than a pane, and a row carrying it is not a pane row.
+    """
     from types import SimpleNamespace
 
-    return SimpleNamespace(pid=1, pid_start_time=None, mux={"session": "s", "pane_id": 0})
+    return SimpleNamespace(pid=1, pid_start_time=None, mux={"session": "s", "pane_id": 7})
+
+
+# --------------------------------------------------------------------------
+# x-d914: a mux ref that names no pane must read like no ref at all.
+# --------------------------------------------------------------------------
+
+
+def _zero_ref_row(pid, status=None):
+    """The damaged shape measured live: ``mux: {"session": "main", "pane_id": 0}``."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        pid=pid, pid_start_time=None, mux={"session": "main", "pane_id": 0}, status=status
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_mux",
+    [
+        {"session": "main", "pane_id": 0},
+        {"session": "main", "pane_id": -3},
+        {"session": "main", "pane_id": "7"},
+        {"session": "main", "pane_id": 7.0},
+        {"session": "main", "pane_id": True},
+        {"session": "main"},
+        {"session": "", "pane_id": 7},
+        {},
+        "main",
+        ["main", 7],
+        None,
+    ],
+)
+def test_a_ref_that_names_no_pane_is_invalid(bad_mux) -> None:
+    """AC4-EDGE: every impossible shape fails validity and falls through.
+
+    ``pane_id`` 0 is the live specimen (server.rs allocates from a floor of
+    1), and the rest are the boundaries around it. ``True`` is excluded
+    explicitly: ``isinstance(True, int)`` is True, and a ``pane_id`` of
+    ``True`` is a leaked flag, not a pane.
+    """
+    from fno.agents.reachability import mux_ref_names_a_pane
+
+    assert mux_ref_names_a_pane(bad_mux) is False
+
+
+def test_pane_id_one_is_the_smallest_legal_value() -> None:
+    """The floor itself is valid; the guard must not overcorrect past it."""
+    from fno.agents.reachability import mux_ref_names_a_pane
+
+    assert mux_ref_names_a_pane({"session": "main", "pane_id": 1}) is True
+
+
+def test_a_zero_pane_ref_row_is_judged_by_its_pid(monkeypatch) -> None:
+    """AC1-HP: a live worker behind a broken ref stays reachable.
+
+    And AC9-INV at the row level: the mux is never asked, because validity is
+    structural. The booms prove it -- either one firing fails this test.
+    """
+    from fno.agents import mux_spawn, spawn_gate
+    from fno.agents.reachability import registry_falsifier
+
+    def _boom(*_a):
+        raise AssertionError("an invalid ref must never reach a probe")
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", _boom)
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, start: True)
+    assert registry_falsifier(_zero_ref_row(pid=4242, status="live")) is None
+
+
+def test_a_zero_pane_ref_row_with_a_dead_pid_still_condemns() -> None:
+    """AC5-HP: falling through must reach the falsifiers, not skip them.
+
+    The wrong fix silences the pane branch and leaves the row with NO
+    falsifier -- a new false-live hazard. pid 1 is a confident death
+    (spawn_gate refuses pid <= 1 outright), so this row must condemn.
+    """
+    from fno.agents.reachability import registry_falsifier
+
+    assert registry_falsifier(_zero_ref_row(pid=1)) == "process-gone"
+
+
+def test_a_zero_pane_ref_row_with_a_recorded_exit_condemns() -> None:
+    """The other fall-through leg: the exit tombstone still applies."""
+    from fno.agents.reachability import registry_falsifier
+
+    assert registry_falsifier(_zero_ref_row(pid=None, status="exited")) == "exit-recorded"
+
+
+def test_a_null_ref_row_still_skips_the_pane(monkeypatch) -> None:
+    """AC3-INV: the null-ref path is unchanged -- it never asks the mux."""
+    from types import SimpleNamespace
+
+    from fno.agents import mux_spawn
+    from fno.agents.reachability import registry_falsifier
+
+    def _boom(*_a):
+        raise AssertionError("a null ref must never reach a pane probe")
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", _boom)
+    row = SimpleNamespace(pid=None, pid_start_time=None, mux=None, status=None)
+    assert registry_falsifier(row) is None
+
+
+def test_a_ref_to_a_real_dead_pane_still_reads_pane_gone(monkeypatch) -> None:
+    """AC2-INV: the guard is corrected, not removed.
+
+    A ref naming a pane that EXISTS and is dead still condemns with basis
+    ``pane-gone``. Widening validity into leniency would strand dead panes
+    as unknowns -- the opposite failure on the same branch.
+    """
+    from types import SimpleNamespace
+
+    from fno.agents import mux_spawn
+    from fno.agents.reachability import registry_falsifier
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda mux: False)
+    row = SimpleNamespace(
+        pid=1, pid_start_time=None, mux={"session": "s", "pane_id": 7}, status="live"
+    )
+    assert registry_falsifier(row) == "pane-gone"
 
 
 def test_a_reconciled_exit_survives_the_pid_being_cleared(monkeypatch) -> None:
