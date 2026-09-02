@@ -2017,7 +2017,7 @@ def _keeper_seed_submit(
             f"'fno agents peek {name}' and send the prompt by mail.",
             exit_code=1,
         )
-    delivered = _mail_inject_keeper(name, message, harness=harness)
+    delivered = _mail_inject_keeper(session_id, message, harness=harness)
     if not delivered:
         raise DispatchAskError(
             f"the seed for keeper thread {name!r} did not land; the worker "

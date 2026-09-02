@@ -768,9 +768,16 @@ tokens = ["cursor-agent", "--resume", "{session_id}", "--trust"]
 kind = "flag"
 tokens = ["cursor-agent", "--resume", "{session_id}", "--trust"]
 
+# Attach is UNSUPPORTED, and that is what makes this a keeper-lane row. Lane
+# A's attach means a client JOINS the harness's live session (codex's
+# app-server, pi's rpc); cursor-agent has no such protocol - a second
+# `--resume` process is a RIVAL TUI on the same remote chat, not a join. fno
+# must hold the pty, so the lane answers keeper and the thread is the
+# keeper's child. The pane re-entry argv (the same --resume form) lives in
+# the harness module, never in this seam.
 [harness.cursor-agent.resume_strategy.forms.interactive_attach]
-kind = "flag"
-tokens = ["cursor-agent", "--resume", "{session_id}", "--trust"]
+kind = "unsupported"
+tokens = []
 
 [harness.cursor-agent.resume_strategy.forms.headless_create]
 kind = "unsupported"

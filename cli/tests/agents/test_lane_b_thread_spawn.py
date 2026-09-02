@@ -23,7 +23,11 @@ from pathlib import Path
 import pytest
 
 from fno.agents import dispatch as dispatch_mod
-from fno.agents.dispatch import DispatchAskError, _lane_b_thread_spawn
+from fno.agents.dispatch import (
+    DispatchAskError,
+    _lane_b_thread_spawn,
+    _mint_thread_session_id,
+)
 from fno.agents.harness_map import (
     DispatchResolveError,
     capabilities,
@@ -614,3 +618,65 @@ def test_stop_agent_stops_a_keeper_that_dies_between_probe_and_kill(lane_b_home)
     finally:
         thread.join(timeout=5)
         shutil.rmtree(short_state, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# cursor-agent: the callee-minted keeper harness
+# ---------------------------------------------------------------------------
+
+def test_lane_b_cursor_agent_mints_through_create_chat(
+    lane_b_home, monkeypatch
+) -> None:
+    """The row's id is CALLEE-minted: create-chat returns it before launch,
+    and it is never fno's uuid4."""
+    _fake_keeper(monkeypatch, lane_b_home)
+    minted = "fadad56b-8008-45f5-b809-f9fab7074534"
+
+    from fno.agents.harnesses import cursor_agent
+
+    monkeypatch.setattr(
+        cursor_agent, "create_chat", lambda cwd: minted
+    )
+    receipt = _lane_b_thread_spawn(
+        name="wk-cursor", harness="cursor-agent", cwd=lane_b_home
+    )
+    assert receipt["session_id"] == minted
+    row = next(e for e in load_registry() if e.name == "wk-cursor")
+    assert row.harness == "cursor-agent"
+    assert row.harness_session_id == minted
+
+
+def test_lane_b_cursor_agent_keeper_argv_carries_trust_and_grant(
+    lane_b_home, monkeypatch
+) -> None:
+    """The keeper tail is the declared form (--trust rides it) plus the
+    state-root grant the row's argv-add-dir cell declares - never a worktree
+    flag."""
+    recorded = _fake_keeper(monkeypatch, lane_b_home)
+    minted = "0f9e63ed-861d-4f9f-8efa-3e40c5e01266"
+
+    from fno.agents import dispatch as d
+
+    monkeypatch.setattr(
+        d, "_mint_thread_session_id", lambda harness, cwd, requested=None: minted
+    )
+    _lane_b_thread_spawn(
+        name="wk-cursor-argv", harness="cursor-agent", cwd=lane_b_home
+    )
+    argv = list(recorded["argv"])  # type: ignore[arg-type]
+    tail = argv[argv.index("--") + 1 :]
+    assert tail[:3] == ["cursor-agent", "--resume", minted]
+    assert "--trust" in tail
+    assert "--add-dir" in tail, "the computed state-root grant rides the keeper argv"
+    assert not any(t in {"-w", "--worktree", "--worktree-base"} for t in tail)
+
+
+def test_lane_b_cursor_agent_refuses_a_truncated_resume_id(lane_b_home) -> None:
+    """spawn --resume with a head-8 handle: the pinned refusal names the
+    condition, because the wrong value has an obvious source."""
+    with pytest.raises(DispatchAskError) as caught:
+        _mint_thread_session_id("cursor-agent", lane_b_home, requested="74db359a")
+    message = str(caught.value)
+    assert "74db359a" in message
+    assert "8 hex characters" in message
+    assert "an fno session handle, not a chat id" in message
