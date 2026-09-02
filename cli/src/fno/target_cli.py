@@ -1161,6 +1161,55 @@ def request_self_review_cmd(
         raise typer.Exit(code=2)
 
 
+def _registry_self_proof(
+    harness: str,
+    sid: str,
+    *,
+    true_harness: Optional[str],
+    own_binding: Optional[tuple[str, str]],
+    present_families: set,
+    owning_row_harness,
+) -> Optional[bool]:
+    """The verb's proof policy: True proves the marker is this process's, False
+    contradicts it, None cannot tell.
+
+    Process-tree proof first (``true_harness``). When the tree is silent - a
+    daemon-hosted thread whose psutil walk degrades inside a sandboxed
+    subshell, a CI runner - the registry is the remaining prover, in two
+    escalating forms:
+
+    * a spawn-minted canonical stamp backed by a same-harness live row
+      (``own_binding``), and now also
+    * a SINGLE-family env whose only family is this marker's harness and whose
+      id a same-harness live row holds. A spawned worker carries no canonical
+      stamp (daemon-hosted threads measure clean of FNO_HARNESS_*), so
+      without this branch its own spawn-minted row rejects it and init
+      refuses its own identity (x-a0cd, measured live). Two live sessions
+      cannot share a harness session id, so row agreement on the only present
+      family is self by that premise; a foreign marker arrives BESIDE this
+      session's own, making the env multi-family, which this branch never
+      fires on.
+    """
+    if true_harness is not None:
+        return harness == (true_harness or "").strip().lower()
+    from fno.harness_identity import session_identity_key
+
+    key = session_identity_key
+    if (
+        own_binding
+        and own_binding[0] == harness
+        and key(own_binding[1]) == key(sid)
+        and owning_row_harness(sid) == own_binding[0]
+    ):
+        return True
+    if (
+        present_families == {harness}
+        and owning_row_harness(sid) == harness
+    ):
+        return True
+    return None
+
+
 @target_app.command("resolve-owned-identity", hidden=True)
 def resolve_owned_identity_cmd() -> None:
     """Resolve the harness identity this process can PROVE it owns.
@@ -1189,6 +1238,7 @@ def resolve_owned_identity_cmd() -> None:
     from fno.claims.session_pid import resolve_session_harness
     from fno.harness_identity import (
         parse_canonical_identity,
+        present_harness_markers,
         resolve_owned_identity,
         session_identity_key,
     )
@@ -1238,20 +1288,17 @@ def resolve_owned_identity_cmd() -> None:
         # foreign), None (no harness ancestor found - CI / degraded - cannot
         # tell). Only True skips the collision check; None falls through to
         # collision-elimination so the verb still resolves in a headless runner.
-        if true_harness is None:
-            # No ancestor to walk: the spawn-minted registry binding is the
-            # remaining proof - the stamp and a live row of the same harness
-            # agree on this id. Without it (no stamp, or no backing row) the
-            # answer stays None so collision-elimination decides.
-            if (
-                own_binding
-                and own_binding[0] == (harness or "").strip().lower()
-                and session_identity_key(own_binding[1]) == session_identity_key(_sid)
-                and _owning_row_harness(_sid) == own_binding[0]
-            ):
-                return True
-            return None
-        return harness == true_harness
+        return _registry_self_proof(
+            (harness or "").strip().lower(),
+            _sid,
+            true_harness=true_harness,
+            own_binding=own_binding,
+            present_families={
+                fam.lower()
+                for _m, fam, _v in present_harness_markers(env)
+            },
+            owning_row_harness=_owning_row_harness,
+        )
 
     # The COLLIDER stays wired HERE and is deliberately not hoisted into the
     # shared resolver every stamp site uses. A live registry row holding an id
