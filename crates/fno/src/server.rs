@@ -25,7 +25,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -73,6 +73,11 @@ const RELIABLE_CAP: usize = 256;
 /// reports "session ended (server closed)"), so this is politeness, not
 /// correctness.
 const BYE_FLUSH: Duration = Duration::from_millis(250);
+
+/// Give a responsive core time to flush topology and run normal cleanup after
+/// the signal waiter submits its shutdown message before taking the emergency
+/// path for a wedged core.
+const SIGNAL_CORE_GRACE: Duration = Duration::from_secs(2);
 
 /// The droppable outbound path: newest unsent frame per pane, per client.
 type DirtyMap = Arc<Mutex<HashMap<u64, Frame>>>;
@@ -126,7 +131,11 @@ type PaneChildRoster = Arc<Mutex<HashSet<PaneChild>>>;
 
 /// Block termination signals and start the one waiter that can end a wedged
 /// core loop. Threads created later inherit this blocked mask.
-fn install_signal_reaper(socket: &Path) -> Result<PaneChildRoster, String> {
+fn install_signal_reaper(
+    socket: &Path,
+    core_tx: mpsc::Sender<CoreMsg>,
+    shutdown_complete: Arc<AtomicBool>,
+) -> Result<PaneChildRoster, String> {
     let mut signal_set = unsafe { std::mem::zeroed::<libc::sigset_t>() };
     let empty = unsafe { libc::sigemptyset(&mut signal_set) };
     if empty != 0 {
@@ -155,14 +164,29 @@ fn install_signal_reaper(socket: &Path) -> Result<PaneChildRoster, String> {
     let roster = Arc::new(Mutex::new(HashSet::new()));
     let waiter_roster = Arc::clone(&roster);
     let waiter_socket = socket.to_path_buf();
+    let waiter_complete = Arc::clone(&shutdown_complete);
     std::thread::Builder::new()
         .name("fno-mux-sigwait".into())
-        .spawn(move || signal_waiter(signal_set, waiter_roster, waiter_socket))
+        .spawn(move || {
+            signal_waiter(
+                signal_set,
+                waiter_roster,
+                waiter_socket,
+                core_tx,
+                waiter_complete,
+            )
+        })
         .map_err(|e| format!("sigwait setup failed to spawn waiter: {e}"))?;
     Ok(roster)
 }
 
-fn signal_waiter(signal_set: libc::sigset_t, roster: PaneChildRoster, socket: PathBuf) -> ! {
+fn signal_waiter(
+    signal_set: libc::sigset_t,
+    roster: PaneChildRoster,
+    socket: PathBuf,
+    core_tx: mpsc::Sender<CoreMsg>,
+    shutdown_complete: Arc<AtomicBool>,
+) {
     let mut received = 0;
     let result = unsafe { libc::sigwait(&signal_set, &mut received) };
     if result != 0 {
@@ -171,6 +195,15 @@ fn signal_waiter(signal_set: libc::sigset_t, roster: PaneChildRoster, socket: Pa
             std::io::Error::from_raw_os_error(result)
         );
         unsafe { libc::_exit(1) }
+    }
+    if core_tx.try_send(CoreMsg::Kill).is_ok() {
+        let deadline = Instant::now() + SIGNAL_CORE_GRACE;
+        while !shutdown_complete.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if shutdown_complete.load(Ordering::Acquire) {
+            return;
+        }
     }
     let snapshot = match roster.lock() {
         Ok(children) => children.iter().copied().collect::<HashSet<_>>(),
@@ -1984,13 +2017,16 @@ pub fn run(socket: PathBuf) -> i32 {
     // Install signal ownership before constructing the Tokio runtime. Every
     // runtime thread inherits the blocked mask; only the dedicated waiter can
     // consume SIGTERM/SIGINT.
-    let pane_children = match install_signal_reaper(&socket) {
-        Ok(roster) => roster,
-        Err(e) => {
-            eprintln!("fno mux: cannot install emergency signal reaper: {e}");
-            return 1;
-        }
-    };
+    let (signal_tx, signal_rx) = mpsc::channel(1);
+    let shutdown_complete = Arc::new(AtomicBool::new(false));
+    let pane_children =
+        match install_signal_reaper(&socket, signal_tx, Arc::clone(&shutdown_complete)) {
+            Ok(roster) => roster,
+            Err(e) => {
+                eprintln!("fno mux: cannot install emergency signal reaper: {e}");
+                return 1;
+            }
+        };
 
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
@@ -2003,7 +2039,14 @@ pub fn run(socket: PathBuf) -> i32 {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| crate::proto::DEFAULT_SESSION.to_string());
-    runtime.block_on(serve(listener, &socket, session_name, pane_children))
+    runtime.block_on(serve(
+        listener,
+        &socket,
+        session_name,
+        pane_children,
+        signal_rx,
+        shutdown_complete,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -15249,6 +15292,8 @@ async fn serve(
     socket: &Path,
     session_name: String,
     pane_children: PaneChildRoster,
+    mut signal_rx: mpsc::Receiver<CoreMsg>,
+    shutdown_complete: Arc<AtomicBool>,
 ) -> i32 {
     if let Err(e) = listener.set_nonblocking(true) {
         eprintln!("fno mux: listener setup failed: {e}");
@@ -15928,6 +15973,12 @@ async fn serve(
                     std::thread::park();
                 }
             }
+            signal = signal_rx.recv() => {
+                let Some(signal) = signal else { break Flow::Shutdown };
+                if core.handle(signal) == Flow::Shutdown {
+                    break Flow::Shutdown;
+                }
+            }
             // A client-count change is activity (covers the 0->1 attach edge):
             // re-arm the grace window. Disabled in prod (the reaper arm below
             // is off without the marker), so no watch-channel wakeups there
@@ -15978,6 +16029,7 @@ async fn serve(
         // "session ended (server closed)" client-side, so this is best-effort.
         tokio::time::sleep(BYE_FLUSH).await;
     }
+    shutdown_complete.store(true, Ordering::Release);
     0
 }
 
