@@ -17,6 +17,35 @@ from typing import Any
 REVIEW_VERBS = frozenset({"code-review", "review", "review-changes", "sigma-review"})
 REVIEW_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 
+# The review flags whose spelling this module is the authority for: the router
+# prose cites this vocabulary rather than restating it, so a spelling accepted
+# in one place is accepted in the other and the two cannot drift.
+KNOWN_REVIEW_FLAGS = frozenset({"comment", "fix"})
+_EM_DASH = "\u2014"
+
+
+def canonical_flag(token: str) -> "str | None":
+    """Return the canonical ``--`` spelling when ``token`` is a review flag.
+
+    Three spellings reach the router and this parser for the same flag: the
+    canonical double hyphen, the bare word an operator drops the hyphens
+    from, and the single em dash a phone autocorrect substitutes for the
+    double hyphen. The em-dash alias is deliberately narrow: exactly one
+    character, immediately followed by a KNOWN flag name - no other dash (en
+    dash, minus sign, horizontal bar) is a flag, because no legitimate target
+    begins with an em dash while those characters do occur in prose and
+    paths. Bare words count only for the known names, so a branch literally
+    named ``fix`` is the one casualty and stays reachable through its
+    double-hyphen spelling or a fuller ref form. Unknown ``--`` tokens return
+    None here; the parser still records them verbatim.
+    """
+    name = token
+    if name.startswith("--"):
+        name = name[2:]
+    elif name.startswith(_EM_DASH):
+        name = name[1:]
+    return f"--{name}" if name in KNOWN_REVIEW_FLAGS else None
+
 
 def mint_invocation_id() -> str:
     """Return a unique, human-identifiable review invocation id."""
@@ -198,10 +227,21 @@ def parse_review_invocation(raw: str) -> dict[str, Any] | None:
     elif args and args[0] in REVIEW_LEVELS:
         level = args[0]
         level_source = "explicit"
+    # One flag normalizer serves the telemetry and the router prose. A known
+    # flag records its canonical spelling whatever it arrived as; an unknown
+    # double-hyphen token still records verbatim, so a novel flag is visible
+    # in the record rather than silently dropped.
+    flags: "list[str]" = []
+    for arg in args:
+        canonical = canonical_flag(arg)
+        if canonical:
+            flags.append(canonical)
+        elif arg.startswith("--"):
+            flags.append(arg)
     return {
         "verb": f"/{name}",
         "args_raw": args_raw,
         "level": level,
         "level_source": level_source,
-        "flags": [arg for arg in args if arg.startswith("--")],
+        "flags": flags,
     }
