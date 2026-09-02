@@ -99,6 +99,62 @@ def test_all_autonomous_entry_points_reach_an_owned_routing_seam() -> None:
     )
 
 
+def _substrate_warning_block(dispatch_node: str) -> str:
+    """The `Loud, once` fallback block, extracted so its guard and payload
+    are asserted together rather than as loose source substrings."""
+    match = re.search(
+        r"# Loud, once:.*?\nif \[\[.*?\nfi\n", dispatch_node, re.DOTALL
+    )
+    assert match is not None, "substrate warning block not found in dispatch-node.sh"
+    return match.group(0)
+
+
+def test_substrate_warning_fires_only_on_the_one_shot_lane() -> None:
+    """A thread-resolving dispatch prints nothing and emits no
+    dispatch_substrate_fallback row (AC1/AC9); the guard reads the resolved
+    substrate's meaning, never a spelling that can drift a release."""
+    dispatch_node = _read_with_positive_control(
+        "skills/target/scripts/dispatch-node.sh",
+        "dispatch-node.sh",
+    )
+    block = _substrate_warning_block(dispatch_node)
+    assert '[[ "$DISPATCH_SUBSTRATE" == "headless" ]]' in block
+    assert '"bg"' not in block
+    assert "has no bg substrate" not in block
+
+
+def test_substrate_warning_and_event_name_the_resolved_value() -> None:
+    """The message names the resolved substrate instead of asserting one; the
+    event's `from` is the value actually resolved from, `to` the one-shot lane
+    (AC2)."""
+    dispatch_node = _read_with_positive_control(
+        "skills/target/scripts/dispatch-node.sh",
+        "dispatch-node.sh",
+    )
+    block = _substrate_warning_block(dispatch_node)
+    assert "$DISPATCH_SUBSTRATE" in block
+    assert '"from\\":\\"$DISPATCH_SUBSTRATE\\"' in block
+    assert '"to\\":\\"headless\\"' in block
+
+
+def test_resolver_failure_refusal_carries_no_substrate_assertions() -> None:
+    """The resolver-failure refusal names the config key and no dead substrate
+    spelling or per-harness mapping (AC3): the resolver itself reports what
+    each harness supports."""
+    dispatch_node = _read_with_positive_control(
+        "skills/target/scripts/dispatch-node.sh",
+        "dispatch-node.sh",
+    )
+    refusal = next(
+        line
+        for line in dispatch_node.splitlines()
+        if "no autonomous substrate resolved" in line
+    )
+    assert "config.dispatch.harness" in refusal
+    assert "bg" not in refusal
+    assert "=headless" not in refusal
+
+
 def test_context_think_legacy_substrate_is_compatibility_only() -> None:
     config = _read_with_positive_control(
         "cli/src/fno/config/__init__.py",
