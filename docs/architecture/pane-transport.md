@@ -112,6 +112,14 @@ So this helper never refuses a spawn. It owes the caller an honest sidecar or no
 
 Note what this does and does not cover. Because the seed usually rides in on argv, `_send_source` (`cli/src/fno/agents/mux_spawn.py`) returns `preloaded` for an empty payload, and the `pane send --text payload --submit` arm is the RECOVERY path. So enveloping `pane send` covers every pane drive and the seed's recovery arm. The sidecar is what covers the common seed path.
 
+## The `fno_id` column answers identity, not idleness
+
+`fno mux pane ls` carries one column that says whether a pane belongs to fno, and it spent months lying in the direction that hid fno's own work. It printed `fno_id=-` for both "not an fno pane" and "an fno pane whose id never registered". Those demand opposite responses: the first is a pane to ignore or reuse, the second is a worker doing real work that every fno surface overlooks. Measured on 2026-09-02: 24 of 27 panes printed the dash and 14 of those carried a populated fno worker `name` on the same line, which is how a live worker (pid 40859) came to read as untracked while a king was declaring workers dead.
+
+The column now carries three states. `fno_id=<uuid>` is a resolved session id. `fno_id=unresolved:spawned-name` and `fno_id=unresolved:name-as-id` name why an fno pane's id is absent: the spawn captured a worker `name` but the registry join found no session id, or the registry's identity slot holds a worker name rather than one. The dash is reserved for panes with no fno evidence at all, so an fno-spawned pane can never share it. The `--json` listing adds `fno_id_state` beside the raw `fno_id` for the same reason.
+
+What the column still does not answer is whether a pane is idle or safe to reuse. That is `fno mux pane wait --quiet-ms <n>` (quiet means no new output) or the `pristine_idle_shell` field in `--json`, which is positive shell-integrated evidence. Reading the identity column as a reuse decision is the exact mistake this node's operator report describes.
+
 ## Out of scope
 
 **Making `live-miss` say busy versus absent.** Measured: two sends to one codex worker both returned `live-miss`. `fno mux pane read` showed that same worker `Working`. The receipt conflates a busy peer with an unreachable one, and those demand opposite responses. It changes what the liveness PROBE MEASURES, upstream of every transport, so it belongs in its own node. What lands here against that finding is `--force`. A reader who misreads `live-miss` as dead now reaches for a verb that keeps the envelope, the id, the reply handle, and the outbox row.
