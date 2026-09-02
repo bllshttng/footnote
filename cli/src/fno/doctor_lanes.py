@@ -223,13 +223,8 @@ def _memory_arm(sample: Optional[dict], macmon_reason: Optional[str]) -> ArmRead
     usage = mem.get("ram_usage")
     swap_total = mem.get("swap_total")
     swap_usage = mem.get("swap_usage")
-    numeric = all(
-        isinstance(v, (int, float))
-        for v in (total, usage, swap_total, swap_usage)
-    )
     if (
-        numeric
-        and isinstance(total, (int, float))
+        isinstance(total, (int, float))
         and isinstance(usage, (int, float))
         and isinstance(swap_total, (int, float))
         and isinstance(swap_usage, (int, float))
@@ -267,7 +262,8 @@ def _memory_arm(sample: Optional[dict], macmon_reason: Optional[str]) -> ArmRead
         reason=(
             f"no swap file and memory_pressure unreadable: {reason}"
             if swap_total == 0
-            else f"macmon memory unreadable ({macmon_reason}) and memory_pressure unreadable: {reason}"
+            else f"macmon memory unreadable ({macmon_reason or 'memory block unreadable'})"
+                 f" and memory_pressure unreadable: {reason}"
         ),
     )
 

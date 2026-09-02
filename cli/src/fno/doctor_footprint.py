@@ -19,7 +19,6 @@ import typer
 from fno.footprint import Footprint, parse_footprint
 
 
-CPU_THRESHOLD_CORES = 1.0
 #: The sustained-CPU threshold derives from measured capacity at this fraction
 #: per core, not from the old absolute 1.0 - which on a 12-core M2 Max asked
 #: the fleet to idle at 8% utilisation. ``agents.footprint_sustained_cpu_cores``
