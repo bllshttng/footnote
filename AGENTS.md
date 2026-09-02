@@ -21,6 +21,7 @@ Lead responses with the next action, number multi-step work, give concrete time 
 6. **Comments earn their place.** Match the surrounding file's comment density and idiom; add one only for a non-obvious invariant, race, or why-not-the-obvious. Never ticket/PR/node IDs (`scripts/ci/check-no-internal-refs.sh` fails on them).
 7. **Reproduce before you fix.** Reproduce a bug end-to-end on the real user path before editing; the repro is also the proof the fix landed. When a UI is in the loop, exercise it and be picky (see #4).
 8. **Quality outweighs cost.** Weight quality, simplicity, robustness, and maintainability over effort-now. Never overrides #2.
+9. **Delete a leg, never the harness that forces two to agree.** Operator ruling: port it instead. Writing a parity guard is itself the trigger. The act proves the case for deleting a leg. A guard is scaffolding DURING a port, never an end state. Where the duplication is DATA, the removal is a file deletion. A port must carry a decision's whole fact set. A subprocess has no cheap call, so a split decision adds a spawn. Check `fno-py doctor lint seam-crossings` before and after. Resequence a port that raises the count. Triggers, protocol and exclusions: [dual-implementation-inventory](docs/architecture/dual-implementation-inventory.md), [rust-python-seam](docs/architecture/rust-python-seam.md).
 
 ## Pitfalls corpus (capped)
 
