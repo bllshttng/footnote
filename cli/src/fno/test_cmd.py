@@ -1540,11 +1540,12 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     actual rc (no pipe/tail masking), so preflight's attestation gate reads the
     truth.
 
-    Flags: --list [--verbose], --keep-going, --only <globs>, --skip <globs>, --retry-failed,
-    and --changed [--base REV --head REV] for the changed-surface packet (a
+    Flags: --list [--verbose], --keep-going, --only <globs>, --skip <globs>, --shard I/N,
+    --retry-failed, and --changed [--base REV --head REV] for the changed-surface packet (a
     CHANGED SUBSET; exits 20 when nothing mapped, 21 when the diff is not
     trustworthy - neither is a green verdict, and the full run still gates).
-    The four subset modes are mutually exclusive.
+    `--shard` can combine with `--only` or `--skip`, but not with `--changed` or
+    `--retry-failed`.
 
     --ambient clean|dirty|both (default clean) picks the ambient shape every
     step's child process runs under. `dirty` poisons this runner's own

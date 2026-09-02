@@ -169,8 +169,8 @@ jobs:
   # with every test passing. Raised to 30. On 2026-08-21 it hit 30 too, and the
   # comment then standing said that at 30 the suite is the thing to fix. It was
   # raised to 45 anyway, as an unblock for a stalled fleet, on the condition
-  # that the suite got fixed. This is that fix, and it is why the ceiling is
-  # back at 30 rather than climbing to a third number.
+  # that the suite got fixed. This is that fix. Four legs per lane bring each
+  # measured leg below the 15-minute cap instead of raising the ceiling again.
   #
   # What was measured, so the next reader can re-measure rather than guess. One
   # main-push job ran 2095 seconds: 64s of runner setup, 1036s in the single
@@ -192,7 +192,7 @@ jobs:
   # true. `Sync + build` deliberately runs in every leg: it costs about 3s and
   # removes any question of whether pytest can rely on `uv build`.
   #
-  # If a shard approaches 30, split again or cut work. Do not raise this.
+  # If a shard approaches 15, split again or cut work. Do not raise this.
   smoke-pytest:
     strategy:
       fail-fast: false

@@ -1,7 +1,7 @@
 """`--only` / `--skip` selector contract for `fno doctor test smoke`.
 
 The two flags are exact complements over the same glob list, which is what
-lets CI run the suite as two shards that cover the registry by construction
+lets CI run each lane as four shards that cover the registry by construction
 rather than by a hand-maintained list of step names.
 """
 from __future__ import annotations
