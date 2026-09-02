@@ -50,7 +50,14 @@ from .io import (
     read_claim_file,
     serialize_claim,
 )
-from .staleness import classify, classify_for_sweep, is_expired, is_live, now_ms
+from .staleness import (
+    classify,
+    classify_for_sweep,
+    classify_with_basis,
+    is_expired,
+    is_live,
+    now_ms,
+)
 from .self_identity import resolve_self_identity
 from ..mutex import acquire_dir_mutex, release_dir_mutex
 from .types import (
@@ -1213,6 +1220,8 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
     Keys in the returned dict:
         key:       echo of input
         state:     one of free | live | suspect | stale | corrupted
+        basis:     why the state (only when state in {live, suspect, stale});
+                   e.g. stale/offhost vs stale/pid-reuse vs suspect/pid-shared
         holder:    string (only when state in {live, suspect, stale})
         pid, host, acquired_at, expires_at, reason, metadata: when readable
         error:     string (only when state == corrupted)
@@ -1233,10 +1242,11 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
             "path": str(path),
         }
 
-    state = classify(claim)
+    state, basis = classify_with_basis(claim)
     out: dict[str, Any] = {
         "key": key,
         "state": state.value,
+        "basis": basis,
         "holder": claim.holder,
         "pid": claim.pid,
         "pid_unavailable": claim.pid_unavailable,

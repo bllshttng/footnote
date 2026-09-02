@@ -1,6 +1,7 @@
 """Unit tests for fno.claims.staleness: PID-liveness + TTL expiry."""
 from __future__ import annotations
 
+import inspect
 import os
 import socket
 import time
@@ -11,9 +12,20 @@ import pytest
 
 from fno.claims import hostid
 from fno.claims.staleness import (
+    CAUSE_ACCESS_DENIED,
+    CAUSE_LIVE,
+    CAUSE_OFFHOST,
+    CAUSE_PID_ABSENT,
+    CAUSE_PID_REUSE,
+    CAUSE_PID_SHARED,
+    CAUSE_PID_UNAVAILABLE,
+    CAUSE_TTL_EXPIRED,
+    _probe_create_time,
     classify,
+    classify_with_basis,
     is_expired,
     is_live,
+    is_provably_dead,
     now_ms,
 )
 from fno.claims.types import Claim, ClaimState
@@ -288,6 +300,158 @@ def test_classify_suspect_ttl_unexpired_remote_host():
         host="some-other-host-that-does-not-exist", expires_at=now_ms() + 60_000
     )
     assert classify(claim) == ClaimState.SUSPECT
+
+
+# ---------------------------------------------------------------------------
+# the probe names its cause
+# ---------------------------------------------------------------------------
+
+
+def _refuse_inspection(pid):
+    raise psutil.AccessDenied(pid=pid)
+
+
+def test_probe_names_pid_absent_for_unreported_pid():
+    dead_pid = 999_999
+    while psutil.pid_exists(dead_pid):
+        dead_pid += 1
+    assert _probe_create_time(dead_pid) == (None, CAUSE_PID_ABSENT)
+
+
+def test_probe_names_access_denied_when_inspection_refused():
+    with patch("psutil.Process", _refuse_inspection):
+        assert _probe_create_time(os.getpid()) == (None, CAUSE_ACCESS_DENIED)
+
+
+def test_unreadable_holder_is_not_read_as_dead():
+    """The positive marker: a gone holder and an unreadable holder must not
+    collapse. Gone is provably dead (STALE, recoverable); unreadable is not -
+    permission cannot be denied on a pid that is gone, so the holder EXISTS
+    and its claim must read SUSPECT, never stealable on pid evidence."""
+    claim = _live_claim()
+    with patch("psutil.Process", _refuse_inspection):
+        assert classify(claim) == ClaimState.SUSPECT
+    dead_pid = 999_999
+    while psutil.pid_exists(dead_pid):
+        dead_pid += 1
+    dead = _live_claim(pid=dead_pid)
+    assert classify(dead) == ClaimState.STALE
+
+
+def test_unreadable_holder_claim_is_never_stolen_on_pid_evidence():
+    claim = _live_claim()
+    with patch("psutil.Process", _refuse_inspection):
+        assert is_provably_dead(claim) is False
+        # The acquire gate: exactly the states acquire refuses to steal over.
+        assert classify(claim) in (ClaimState.LIVE, ClaimState.SUSPECT)
+
+
+def test_unreadable_ttl_holder_protected_until_ttl_actually_expires():
+    protected = _live_claim(expires_at=now_ms() + 60_000)
+    with patch("psutil.Process", _refuse_inspection):
+        assert classify(protected) == ClaimState.SUSPECT
+    expired = _live_claim(expires_at=now_ms() - 1)
+    with patch("psutil.Process", _refuse_inspection):
+        assert classify(expired) == ClaimState.STALE
+
+
+def test_is_live_docstring_lists_every_branch():
+    doc = inspect.getdoc(is_live) or ""
+    assert "pid_unavailable" in doc
+
+
+# ---------------------------------------------------------------------------
+# the verdict carries its basis
+# ---------------------------------------------------------------------------
+
+
+def test_basis_offhost_and_pid_reuse_differ():
+    """The positive marker: two causes that both read STALE must still be
+    tellable apart from the basis alone, without a source read."""
+    offhost = _live_claim(host="some-other-host-that-does-not-exist")
+    reused = _live_claim(acquired_at=0)
+    assert classify_with_basis(offhost) == (ClaimState.STALE, CAUSE_OFFHOST)
+    assert classify_with_basis(reused) == (ClaimState.STALE, CAUSE_PID_REUSE)
+
+
+def test_basis_names_the_cause_of_every_state():
+    dead_pid = 999_999
+    while psutil.pid_exists(dead_pid):
+        dead_pid += 1
+    cases = [
+        (_live_claim(), (ClaimState.LIVE, CAUSE_LIVE)),
+        (
+            _live_claim(pid=dead_pid),
+            (ClaimState.STALE, CAUSE_PID_ABSENT),
+        ),
+        (
+            _live_claim(pid=dead_pid, expires_at=now_ms() + 60_000),
+            (ClaimState.SUSPECT, CAUSE_PID_ABSENT),
+        ),
+        (
+            _live_claim(expires_at=now_ms() - 1),
+            (ClaimState.STALE, CAUSE_TTL_EXPIRED),
+        ),
+        (
+            _live_claim(expires_at=now_ms() - 1, pid_provenance="session-prover"),
+            (ClaimState.LIVE, CAUSE_LIVE),
+        ),
+        (
+            _live_claim(
+                pid=dead_pid,
+                expires_at=now_ms() - 1,
+                pid_provenance="session-prover",
+            ),
+            (ClaimState.STALE, CAUSE_TTL_EXPIRED),
+        ),
+        (
+            _live_claim(
+                pid=None,
+                pid_unavailable=True,
+                schema_version=2,
+                expires_at=now_ms() + 60_000,
+            ),
+            (ClaimState.SUSPECT, CAUSE_PID_UNAVAILABLE),
+        ),
+    ]
+    for claim, expected in cases:
+        assert classify_with_basis(claim) == expected, claim
+
+
+def test_basis_access_denied_reads_suspect_access_denied():
+    claim = _live_claim()
+    with patch("psutil.Process", _refuse_inspection):
+        assert classify_with_basis(claim) == (ClaimState.SUSPECT, CAUSE_ACCESS_DENIED)
+
+
+def test_basis_pid_shared_demotion_names_itself():
+    claim = _live_claim(expires_at=now_ms() - 1, pid_provenance="session-prover")
+    assert classify_with_basis(claim, pid_exclusive=False) == (
+        ClaimState.SUSPECT,
+        CAUSE_PID_SHARED,
+    )
+    assert classify_with_basis(claim, pid_exclusive=None) == (
+        ClaimState.LIVE,
+        CAUSE_LIVE,
+    )
+
+
+def test_classify_is_the_state_view_of_classify_with_basis():
+    claims = [
+        _live_claim(),
+        _live_claim(host="some-other-host-that-does-not-exist"),
+        _live_claim(acquired_at=0),
+        _live_claim(expires_at=now_ms() - 1),
+        _live_claim(expires_at=now_ms() + 60_000),
+        _live_claim(
+            pid=None,
+            pid_unavailable=True,
+            schema_version=2,
+            expires_at=now_ms() + 60_000,
+        ),
+    ]
+    for claim in claims:
+        assert classify(claim) == classify_with_basis(claim)[0], claim
 
 
 # ---------------------------------------------------------------------------
