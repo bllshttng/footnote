@@ -19,7 +19,7 @@ There are three kinds. Only the first is a port candidate.
 
 **shared-vocabulary.** One concept declared, spelled, or stamped at many sites. The guard checks that the sites agree. Porting one site does not retire the guard. The concept still has to be spelled the same way everywhere it appears. Several sites are not code at all. A workflow YAML, a ruleset data file, and a setup-doc filename are all such sites. When a guard's surfaces include a non-code artifact, no port can ever retire it.
 
-**generated-artifact.** One owner, a generated copy, and a freshness tripwire. This is correct and must not be "fixed". The exemplar is `harness_capabilities.toml`. The Rust tree owns the canonical file. `build.rs` generates the Python copy on every build. `scripts/ci/check-harness-capabilities-fresh.sh` catches a stale copy. One owner, one generated artifact, one guard. A generated data file is not a second implementation.
+**generated-artifact.** One owner, a generated copy, and a freshness tripwire. This is correct and must not be "fixed". The exemplar is `harness_capabilities.toml`. The Rust tree owns the canonical file. `build.rs` generates the Python copy and the mux-crate copy on every build. `scripts/ci/check-harness-capabilities-fresh.sh` catches a stale copy. One owner, one generated artifact, one guard. A generated data file is not a second implementation.
 
 This page exists to prevent one failure: reading a filename as evidence. A file called `*_parity.rs` looks like a live second implementation. Often it is not. The inventory below was filed wrong twice for that reason. The guard in the last section makes the distinction machine-readable.
 

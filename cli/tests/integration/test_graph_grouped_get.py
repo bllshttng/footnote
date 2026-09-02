@@ -100,7 +100,7 @@ def test_default_view_matches_recorded_flat_fixture(tmp_graph):
   "session_id": null,
   "locked_by_harness": null,
   "locked_by_harness_session": null,
-  "claimed_at": null,
+  "locked_at": null,
   "completed_at": null,
   "status": "ready",
   "slug": null,

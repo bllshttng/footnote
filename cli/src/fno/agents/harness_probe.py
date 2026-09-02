@@ -423,8 +423,8 @@ def line_row_matches(harness: str, *, repo_root: Path | None = None) -> LineVerd
     )
     required = _required_registrations(harness, root)
     if clean_sweep and fresh_copies and required.issubset(present):
-        return LineVerdict("ROW MATCHES", "pass", "honesty sweep and three-copy freshness", detail=detail)
-    return LineVerdict("ROW MATCHES", "fail", "honesty sweep and three-copy freshness", detail=detail)
+        return LineVerdict("ROW MATCHES", "pass", "honesty sweep and canonical-copy freshness", detail=detail)
+    return LineVerdict("ROW MATCHES", "fail", "honesty sweep and canonical-copy freshness", detail=detail)
 
 
 def line_manifest_pinned(
@@ -458,7 +458,7 @@ def _dry_run_lines(harness: str) -> list[LineVerdict]:
         "worker response to sent message",
         "harness-owned screen",
         "prior turn after process stop",
-        "honesty sweep and three-copy freshness",
+        "honesty sweep and canonical-copy freshness",
         "live readiness-grid capture",
     ]
     names = ["SPAWN", "IDENTITY", "CLAIM", "MAIL BOTH WAYS", "VIEW", "SURVIVE", "ROW MATCHES", "MANIFEST PINNED"]
@@ -503,7 +503,7 @@ def _missing_binary_lines(harness: str, detail: str) -> list[LineVerdict]:
         ("MAIL BOTH WAYS", "worker response to sent message"),
         ("VIEW", "harness-owned screen"),
         ("SURVIVE", "prior turn after process stop"),
-        ("ROW MATCHES", "honesty sweep and three-copy freshness"),
+        ("ROW MATCHES", "honesty sweep and canonical-copy freshness"),
         ("MANIFEST PINNED", "live readiness-grid capture"),
     ]
     return [

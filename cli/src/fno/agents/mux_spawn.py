@@ -598,20 +598,23 @@ def effort_tokens(harness: str, value: str) -> list[str]:
     """Translate effort without maintaining a provider/model value catalog.
 
     Keyed by HARNESS, not vendor: every branch below is a CLI binary, and the
-    flag spelling that has to be translated is the binary's. gemini and agy have
-    no reasoning-effort surface at all, which is a property of those binaries.
-    The sibling that reads the same axis, ``harness_map.effort_values``, was
-    already spelled this way. The provider/model at the far end still owns the
-    accepted VALUES; fno translates the spelling and keeps no catalog.
+    flag spelling that has to be translated is the binary's. gemini has no
+    reasoning-effort surface at all, which is a property of that binary. agy
+    was measured into this same deny set until its own ``--help`` said
+    otherwise (`--effort (low|medium|high)` on 1.1.24, quoted by
+    `fno agents harness probe agy` - x-4e62/x-244c); it now translates like
+    claude. The sibling that reads the same axis, ``harness_map.effort_values``,
+    was already spelled this way. The provider/model at the far end still owns
+    the accepted VALUES; fno translates the spelling and keeps no catalog.
     """
     if not value:
         raise DispatchAskError("--effort requires a value", exit_code=2)
-    if harness in {"gemini", "agy"}:
+    if harness == "gemini":
         raise DispatchAskError(
             f"harness {harness!r} has no reasoning-effort surface; omit --effort",
             exit_code=2,
         )
-    if harness == "claude":
+    if harness in {"claude", "agy"}:
         return ["--effort", value]
     if harness == "codex":
         return ["-c", f"model_reasoning_effort={value}"]

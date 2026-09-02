@@ -1,6 +1,6 @@
 # `fno agents`: every verb, per harness
 
-`fno agents` supports seven harness CLIs: `claude`, `codex`, `gemini`, `agy` (Antigravity), `opencode`, `pi`, and `cursor-agent`. Each harness has different substrates, session IDs, and re-entry paths. This page explains the contract. `cli/src/fno/agents/harness_capabilities.toml` is the authoring source. Cargo packages byte-identical Rust copies. If the copies differ, tests fail. The complete supported-harness roster is wider than this matrix: `KNOWN_HARNESSES` (`cli/src/fno/harness_names.py`) also carries `hermes` and `openclaw`, identity-only hosts with no dispatch row (`docs/SETUP-HERMES.md`, `docs/SETUP-OPENCLAW.md`). The roster-parity CI gate (`scripts/ci/check-harness-roster-parity.py`) holds that union against its evidence.
+`fno agents` supports seven harness CLIs: `claude`, `codex`, `gemini`, `agy` (Antigravity), `opencode`, `pi`, and `cursor-agent`. Each harness has different substrates, session IDs, and re-entry paths. This page explains the contract. The canonical table lives at `crates/fno-agents/src/harness_capabilities.toml`. Every build regenerates two byte copies from it: the Python tree's, which the package loads as a resource, and the mux crate's, which `include_str!`s it. The crates publish to crates.io independently, so neither copy is a dependency edge. When a generated copy diverges, `scripts/ci/check-harness-capabilities-fresh.sh` fails CI. The complete supported-harness roster is wider than this matrix: `KNOWN_HARNESSES` (`cli/src/fno/harness_names.py`) also carries `hermes` and `openclaw`, identity-only hosts with no dispatch row (`docs/SETUP-HERMES.md`, `docs/SETUP-OPENCLAW.md`). The roster-parity CI gate (`scripts/ci/check-harness-roster-parity.py`) holds that union against its evidence.
 
 Before calling a newly declared lane supported, run `fno doctor harness <name> --live`. The probe reads eight behaviors on the real lane: SPAWN, IDENTITY, CLAIM, MAIL BOTH WAYS, VIEW, SURVIVE, ROW MATCHES, and MANIFEST PINNED. The capability table is input only to ROW MATCHES. It is evidence for no other line. Without `--live`, the probe prints all eight markers and its no-spawn argv.
 
@@ -22,7 +22,6 @@ What each harness fundamentally is, from fno's point of view:
 | Revive a **dead** session | `fno agents resume <name>` (respawns the job, same id) or `spawn --resume <uuid>` (forks a new id) or `recover` | no | no | no | no | yes: a fresh process on the same `(cwd, session_id)` pair recalls prior context and prints no creation warning | yes: a fresh process with the same explicit chat id recalls prior context from the remote store; the journey proves the recall across a stop | no |
 | Read-only observation (`peek`, `logs`) | yes | yes | yes | yes | yes | yes | yes | yes (pane read) |
 | Loop participation (`loop_participation`) | `native`. `hooks.json` declares a `Stop` group that runs `target-stop-hook.sh`. | `native`. `codex-hooks.json` declares the same `Stop` adapter. | `none`. Nothing wires a gemini stop boundary. The only gemini hook fno installs is SessionStart. A looping dispatch is refused. | `native`. `agy-target-stop-hook.sh` translates agy's wire format over the same `loop-check`, registered as a `Stop` handler by `fno config setup`. | `extension`. opencode has no shell hook and no exit veto. The loop closes through the JS plugin fno installs, which subscribes to `session.idle` and shells the same `loop-check`. | `extension`. pi ships no shell hook surface at all; its extension points are in-process TypeScript extensions. The `footnote.ts` extension fno installs subscribes to `pi.on("agent_settled")` - which fires when no retry, compaction or follow-up is left - and shells the same `loop-check`, re-driving the session on a non-terminal decision. | `extension`, with no artifact yet. `~/.cursor/hooks.json` declares a `stop` command, but no positive firing marker was captured on the headless lane and the hook file sits unattributed in a mixed GUI-and-CLI state root, so the declaration is not the capability. A looping dispatch is refused. | `none`. No capability row, no stop boundary. A looping dispatch is refused. |
- (fix(ci): sync the third toml copy and drop the node id from docs)
 
 The pane substrate (the default) is the great equalizer: all seven declared harnesses can be spawned as a mux-hosted interactive PTY pane. Through the undeclared lane, so can any other binary on PATH. Everything asymmetric lives in the detached lanes. pi's detached lane is the keeper-hosted thread. Its pane and thread lanes share the same pi TUI underneath.
 
@@ -67,7 +66,7 @@ Two traps carry the rest. `rpc` exits on stdin EOF mid-turn with status 0. `--pr
 
 ## Machine-readable interactive capabilities
 
-The support probe is the onboarding gate for this table. Run `fno doctor harness <name> --live` before treating a row as supported. It must produce a positive marker for every non-skipped line. A missing credential is a named `skip`, not a pass or fail. Run `scripts/ci/check-harness-capabilities-fresh.sh` alongside the honesty sweep for the three committed table copies.
+The support probe is the onboarding gate for this table. Run `fno doctor harness <name> --live` before treating a row as supported. It must produce a positive marker for every non-skipped line. A missing credential is a named `skip`, not a pass or fail. Run `scripts/ci/check-harness-capabilities-fresh.sh` alongside the honesty sweep to catch a hand edit of a generated copy. The canonical table lives in `crates/fno-agents`, and every build regenerates the Python-tree and mux-crate copies from it.
 
 Run `fno agents dispatch capabilities <h> --json` to read one harness without dispatch configuration. The JSON includes versioned data for permissions, sessions, readiness, input, stop, and removal. Missing or malformed fields stop contract loading. A harness never inherits Claude defaults.
 
@@ -275,7 +274,7 @@ uv run --project cli fno-py agents list --json | jq -e --arg sid "$sid" '.agents
 
 ## Dispatch command surface
 
-This table shows how autonomous dispatch renders a footnote `/verb` for each harness. `cli/src/fno/agents/harness_capabilities.toml` is the authoring source. `fno.agents.harness_map` loads it. Cargo packages a byte-identical Rust copy. `skills/agent/scripts/normalize.sh` mirrors the command-surface subset as a tested fallback.
+This table shows how autonomous dispatch renders a footnote `/verb` for each harness. The canonical table lives at `crates/fno-agents/src/harness_capabilities.toml`. `fno.agents.harness_map` loads the generated cli copy. `skills/agent/scripts/normalize.sh` mirrors the command-surface subset as a tested fallback.
 
 | Harness | Rendered invocation | Notes |
 |---|---|---|

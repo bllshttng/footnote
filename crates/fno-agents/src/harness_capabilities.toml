@@ -810,3 +810,38 @@ tokens = []
 effort_labels = {}
 status_command = ""
 status_pattern = ""
+# HOW EACH FIELD CAN BE SETTLED (x-244c). A capability question is one of two
+# kinds. A DECLARED fact - does this flag exist, what values does it take - is
+# the vendor's own statement about its own interface, so its authority is a
+# help or version command and reading it is not inference. A BEHAVIORAL fact -
+# does this argv actually attach - is settled only by running the candidate in
+# a scratch PTY and checking a marker the vendor's own store produced, because
+# a form that looks right and opens a FRESH session is the failure this table
+# exists to prevent. A field with neither an authority nor a marker is
+# UNPROBEABLE and must say so: send_keys_enter_delay_ms was measured over five
+# delays at three trials each on a live pane, and a probe that emitted a
+# number for it would overwrite a measurement with a guess. {bin} is the
+# harness's own binary name. A field absent from this table is UNDECLARED:
+# the probe reports it as such instead of guessing an instrument.
+[probe.model_switch_strategy]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '--effort\s+.*\((?P<vocab>[a-z|]+)\)'
+# What a match means: the binary declares a reasoning-effort surface, so a
+# row whose kind is "unsupported" understates the CLI (the live agy case).
+
+[probe.thread]
+kind = "behavioral"
+marker = "the session id appears in the harness's own session store only after the run (the codex 2026-08-28 template: absent from `codex thread list` before, present after)"
+
+[probe."resume_strategy.forms.interactive_attach"]
+kind = "behavioral"
+marker = "the created session is readable by the harness's own attach/list surface, by id, after the run"
+
+[probe."resume_strategy.forms.interactive_resume"]
+kind = "behavioral"
+marker = "the resumed conversation's store record gains the token planted in the probe turn"
+
+[probe.send_keys_enter_delay_ms]
+kind = "unprobeable"
+reason = "measured over 5 delays x 3 trials on a live pane; no one-shot probe recovers it"
