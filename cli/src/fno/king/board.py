@@ -1,4 +1,4 @@
-"""Read the nine queues that decide whether a king still has work.
+"""Read the ten queues that decide whether a king still has work.
 
 Three properties are load-bearing and each has a test that fails loudly when it
 breaks.
@@ -63,6 +63,7 @@ _DEAD_CLAIM_STATES = frozenset({"stale", "corrupted"})
 #: The literal commands a reader can re-run. These strings ARE the checkability
 #: property, so they live beside the readers that run them.
 SRC_UNDISPATCHED = "fno backlog undispatched --json"
+SRC_READY = "fno backlog ready --json -A"
 SRC_CLAIMS = "fno agents claim list -J --include-stale --prefix node:"
 SRC_PRS = (
     "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url"
@@ -132,7 +133,7 @@ def _as_dict(value: Any) -> dict:
     through a PATH-resolved ``fno``, so a stale deployed CLI can answer with an
     older stream shape (a list where a dict belongs, string counts). A
     structural surprise in ONE stream must degrade that stream, never raise
-    out of ``build_board`` - an exception here kills all nine queues instead
+    out of ``build_board`` - an exception here kills all ten queues instead
     of the designed one-unreadable-queue exit.
     """
     return value if isinstance(value, dict) else {}
@@ -198,6 +199,7 @@ def _queue(
     actionable: bool,
     note: str = "",
     count: "int | None" = None,
+    verb: str = "",
 ) -> dict:
     if not read.ok:
         return {
@@ -209,6 +211,7 @@ def _queue(
             "rows": [],
             "actionable": actionable,
             "note": note,
+            "verb": verb,
         }
     # Every row, not the rendered slice. The consumer of this payload is the
     # loop, which derives each row's identity to tell progress from a stall. A
@@ -232,6 +235,7 @@ def _queue(
         "rows": rows,
         "actionable": actionable,
         "note": note,
+        "verb": verb,
     }
 
 
@@ -285,6 +289,31 @@ def build_board(
         if not in_scope("undispatched", node.get("id"), node):
             continue
         undispatched.append(
+            {
+                "id": node.get("id"),
+                "priority": node.get("priority"),
+                "title": node.get("title"),
+            }
+        )
+
+    # The complementary half of `undispatched`: its source requires a
+    # finalized plan, so a planless node is absent by construction. `ready` is
+    # the selection authority for cold-dispatchable ideas and already drops
+    # deferred, blocked, live-claimed, batched, containerized and PR-bearing
+    # rows. Its output has no status, so those guards stay upstream. A stale
+    # claim still belongs to `stale_claim`, not this queue.
+    unplanned: list[dict] = []
+    for node in inputs.ready.rows():
+        if node.get("priority") not in KING_PRIORITIES:
+            continue
+        if node.get("plan_path"):
+            continue
+        claim = claim_by_node.get(str(node.get("id")))
+        if claim is not None and claim.get("state") in _DEAD_CLAIM_STATES:
+            continue
+        if not in_scope("unplanned", node.get("id"), node):
+            continue
+        unplanned.append(
             {
                 "id": node.get("id"),
                 "priority": node.get("priority"),
@@ -433,7 +462,17 @@ def build_board(
             SourceRead(error=undispatched_read.error or inputs.claims.error),
             undispatched,
             actionable=True,
+            note="one worker per node; these already carry a plan",
+            verb="/fno:target",
+        ),
+        _queue(
+            "unplanned",
+            f"{SRC_READY} + {SRC_CLAIMS}",
+            SourceRead(error=inputs.ready.error or inputs.claims.error),
+            unplanned,
+            actionable=True,
             note="batch: up to 3 blueprints per session; merge same-shape nodes into one waved plan",
+            verb="/fno:blueprint",
         ),
         _queue(
             "stalled_holder",
@@ -790,7 +829,7 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
     warnings.extend(claimed_warnings)
 
     return BoardInputs(
-        ready=SourceRead(payload=[]),
+        ready=_run_json([*_fno(), "backlog", "ready", "--json", "-A"], timeout=timeout),
         claims=claims,
         claimed_nodes=claimed_nodes,
         holder_activity=_resolve_holder_activity(holders),
