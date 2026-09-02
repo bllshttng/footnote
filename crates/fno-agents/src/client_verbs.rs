@@ -4824,9 +4824,9 @@ pub fn run_claim(args: &[String]) -> i32 {
             let (state, rec) = crate::claims::status(&key, opts.root.as_deref());
             // Mirror the `fno agents claim status -J` dict shape so the compat
             // matrix can diff the two implementations field-by-field.
-            let output = rec.map(|record| claim_status_value(&record)).unwrap_or_else(|| {
-                serde_json::json!({"key": key, "state": state.as_str()})
-            });
+            let output = rec
+                .map(|record| claim_status_value(&record))
+                .unwrap_or_else(|| serde_json::json!({"key": key, "state": state.as_str()}));
             println!("{output}");
             0
         }
