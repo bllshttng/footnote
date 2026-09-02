@@ -2156,11 +2156,10 @@ _JOIN_WORKER_TABLE = {
 def _highest_wave_band(graph: _PlanTaskGraph) -> str:
     """The strongest band the plan carries, or the medium default when it
     carries none (an unbanded plan sizes like the default band everywhere
-    else in fno)."""
-    ranked = [b for b in graph.wave_bands if b in _BAND_RANK]
-    if not ranked:
-        return "medium"
-    return max(ranked, key=lambda b: _BAND_RANK[b])
+    else in fno). The first row of the distinct-bands ranking is that
+    highest band; no second implementation of the ranking."""
+    bands = _bands_from_graph(graph)
+    return bands[0] if bands else "medium"
 
 
 def _derive_join_workers(graph: _PlanTaskGraph, priority: str) -> tuple[int, str]:

@@ -1687,7 +1687,7 @@ PYEOF
           armed=true*) _jt_armed=1 ;;
           *) _jt_armed="" ;;
         esac
-        if [[ -z "$_jt_width" ]]; then
+        if [[ -z "$_jt_width" ]] || [[ ! "$_jt_width" =~ ^[1-9][0-9]*$ ]]; then
           echo "target: orchestration mechanical: plan width unreadable; join not fired" >&2
         elif [[ -z "$_jt_armed" ]]; then
           echo "target: orchestration mechanical: PARKED, auto_continue off (width $_jt_width)" >&2

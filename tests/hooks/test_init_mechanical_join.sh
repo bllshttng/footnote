@@ -203,6 +203,19 @@ grep -q "width unreadable; join not fired" "$TMP_BLIND/err.log" \
   || fail "blind: the unreadable line is missing"
 pass "blind: absent answer never read as width 1"
 
+# ── Garbage width: join NOT fired (the probe contract is int-or-nothing,
+#    and the shell holds that invariant even when the probe breaks it) ──
+log "mechanical garbage width: join not fired"
+make_repo TMP_GARBAGE "orchestration: mechanical" "banana" "armed=true rank=config" 0
+_ALL_TMPS+=("$TMP_GARBAGE")
+
+run_init "$TMP_GARBAGE"
+[[ "$?" -eq 0 ]] || fail "garbage: init must survive a garbage width"
+[[ "$(joins "$TMP_GARBAGE")" == "0" ]] || fail "garbage: join fired on a garbage width"
+grep -q "width unreadable; join not fired" "$TMP_GARBAGE/err.log" \
+  || fail "garbage: the unreadable line is missing"
+pass "garbage: non-numeric output never read as a width"
+
 # ── Join refused: init survives and names it ──
 log "mechanical join refused: non-fatal, named"
 make_repo TMP_REFUSED "orchestration: mechanical" 3 "armed=true rank=config" 5
