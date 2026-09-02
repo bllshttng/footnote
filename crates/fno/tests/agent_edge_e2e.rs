@@ -24,7 +24,35 @@ fn agents_home(scratch: &Scratch) -> PathBuf {
 }
 
 fn worker_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fno-agents/target/debug/fno-agents-worker")
+    static WORKER_BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    WORKER_BIN
+        .get_or_init(|| {
+            let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fno-agents/target")
+                });
+            let path = target_dir.join("debug/fno-agents-worker");
+            if !path.is_file() {
+                let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+                let manifest =
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fno-agents/Cargo.toml");
+                let status = Command::new(cargo)
+                    .args(["build", "--manifest-path"])
+                    .arg(manifest)
+                    .args(["--bin", "fno-agents-worker"])
+                    .status()
+                    .expect("cargo builds the keeper worker");
+                assert!(status.success(), "keeper worker build failed: {status}");
+            }
+            assert!(
+                path.is_file(),
+                "keeper worker binary missing: {}",
+                path.display()
+            );
+            path
+        })
+        .clone()
 }
 
 fn pane(scratch: &Scratch, args: &[&str]) -> Output {
