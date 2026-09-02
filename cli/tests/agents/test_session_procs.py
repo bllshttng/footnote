@@ -226,7 +226,7 @@ def test_top_prices_tree_rss_off_the_resolved_pid(tmp_path, monkeypatch):
 
     result = CliRunner().invoke(agents_app, ["top", "--json"])
     assert result.exit_code == 0, result.output
-    row = next(w for w in json.loads(result.output)["workers"] if w["name"] == "t-xb57a-glm")
+    row = next(w for w in json.loads(result.stdout)["workers"] if w["name"] == "t-xb57a-glm")
     assert row["pid"] == 37355  # the column shows the session, not its host
     assert row["rss_mb"] == 380  # and prices its tree
 

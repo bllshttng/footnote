@@ -46,7 +46,9 @@ from typing import Callable, Optional
 import typer
 
 from fno._subprocess_util import fno_py_cmd
+from fno.agents.events import _emit_daemon_envelope
 from fno.config import load_settings_for_repo
+from fno.paths import agents_home_dir
 from fno.pr._proc import Result, ToolMissing, run as _run
 
 # Cross-runner mutex (Step 0.5): a global TTL claim so an attended `/fno:pr
@@ -57,10 +59,10 @@ _CLAIM_TTL = "15m"
 # Reap order: minted only by this ritual against a gh-confirmed MERGED state,
 # consumed by the daemon's periodic worktree sweep (which runs its pass with
 # --apply while any order stands). 24h is the claim TTL ceiling AND the sweep
-# interval, so an order pairs the merge proof with at most one sweep window; a
-# tree still protected at that sweep waits for the next merge's order rather
-# than a timer's authority. "7d"-style day units are rejected TTL syntax
-# (verified: only m/h/s parse, and the ms range caps at one day).
+# interval ceiling. Minting clears the cadence stamp, and the six-hour fallback
+# leaves at least three complete payment windows inside the order's lifetime.
+# "7d"-style day units are rejected TTL syntax (verified: only m/h/s parse,
+# and the ms range caps at one day).
 _REAP_ORDER_TTL = "24h"
 # x-0d66: bound the advance leg. advance dispatches successors inline and can
 # spend minutes with no output; a bounded run with progress lines surfaces
@@ -332,6 +334,16 @@ class Ritual:
         rec = Receipt(step, status, detail)
         self.ctx.receipts.append(rec)
         typer.echo(rec.line())
+        if step == "archive":
+            _emit_daemon_envelope(
+                "post_merge_archive",
+                {
+                    "pr": self.ctx.pr,
+                    "project": self.ctx.project,
+                    "outcome": status,
+                    "detail": detail,
+                },
+            )
 
     def _leg(self, step: str, argv: list[str], *, cwd: Optional[Path] = None,
              timeout: float = _LEG_TIMEOUT_S) -> Result:
@@ -594,6 +606,14 @@ class Ritual:
             )
         except (ToolMissing, subprocess.SubprocessError) as exc:
             return f"reap-order-unwritten ({exc})"
+        if r.returncode in (0, 1):
+            # Minting makes the next idle tick the order's first payment
+            # window; the six-hour cadence remains the fallback if this
+            # best-effort reset cannot be written.
+            try:
+                (agents_home_dir() / "worktree-sweep.stamp").unlink(missing_ok=True)
+            except OSError:
+                pass
         if r.returncode == 0:
             return f"reap-order {key} standing ({why})"
         if r.returncode == 1:
@@ -613,9 +633,15 @@ class Ritual:
         if not branch:
             self._emit("archive", _SKIPPED, "no-branch")
             return
+        order = self._register_reap_order("merged-pr")
+        order_written = not order.startswith("reap-order-unwritten")
         wt = self._find_worktree(branch)
         if not wt:
-            self._emit("archive", _SKIPPED, f"no worktree for {branch}")
+            self._emit(
+                "archive",
+                _DEFERRED if order_written else _FAILED,
+                f"no worktree for {branch}; sweep-will-reap; {order}",
+            )
             return
         if Path(wt).resolve() == self.cwd.resolve():
             # Never self-remove. This is the DOMINANT path, because the worker
@@ -625,12 +651,19 @@ class Ritual:
             # in the detail line read as done and nobody ever ran it. The
             # order makes "later" a fact in the world: the daemon's sweep pays
             # this debt instead of a human remembering to.
-            self._emit("archive", _DEFERRED,
-                       f"sweep-will-reap; {self._register_reap_order('self-worktree')}")
+            self._emit(
+                "archive",
+                _DEFERRED if order_written else _FAILED,
+                f"sweep-will-reap; worktree={wt}; {order}",
+            )
             return
         script = self.canon / "scripts" / "setup" / "archive-worktree.sh"
         if not script.exists():
-            self._emit("archive", _SKIPPED, "archive-worktree.sh missing")
+            self._emit(
+                "archive",
+                _DEFERRED if order_written else _FAILED,
+                f"worktree={wt}; archive-worktree.sh missing; {order}",
+            )
             return
         try:
             # env(1) prefixes the caller into the removal event the script
@@ -639,20 +672,28 @@ class Ritual:
                              "bash", str(script), str(wt), "--yes"],
                             cwd=str(self.canon), timeout=120.0)
         except subprocess.TimeoutExpired:
-            self._emit("archive", _FAILED, "timeout")
+            self._emit("archive", _FAILED, f"worktree={wt}; timeout; {order}")
             return
         except (ToolMissing, subprocess.SubprocessError) as exc:
-            self._emit("archive", _FAILED, f"spawn-error: {exc}")
+            self._emit(
+                "archive", _FAILED, f"worktree={wt}; spawn-error: {exc}; {order}"
+            )
             return
         if r.ok:
-            self._emit("archive", _OK, "archived")
+            self._emit(
+                "archive",
+                _OK if order_written else _FAILED,
+                f"worktree={wt}; archived; {order}",
+            )
             return
         # A guarded refusal (live session in the tree, salvage, confirmation)
         # leaves the tree in place: the work is still owed, so the order
         # stands for the sweep to retry once the guard's cause is gone.
-        self._emit("archive", _FAILED,
-                   f"exit={r.returncode} (worktree left in place); "
-                   f"{self._register_reap_order('archive-refused')}")
+        self._emit(
+            "archive",
+            _FAILED,
+            f"worktree={wt}; exit={r.returncode} (worktree left in place); {order}",
+        )
 
     def _find_worktree(self, branch: str) -> Optional[str]:
         out = _git_text(["worktree", "list", "--porcelain"], self.canon)

@@ -4248,6 +4248,16 @@ def _run_unfinished_report(
         print(f"warning: {warning}", file=sys.stderr)
 
 
+def _watchdog_only_help() -> str:
+    from fno.agents import watchdog as wd
+
+    return (
+        "DIAGNOSTIC: filter the internal session-verdict table to one verdict "
+        f"({'|'.join(sorted(wd.VERDICTS))}). Recovery internals, not the "
+        "operator report."
+    )
+
+
 @agents_app.command("watchdog")
 def cmd_watchdog(
     json_out: bool = typer.Option(
@@ -4274,11 +4284,7 @@ def cmd_watchdog(
     ),
     only: Optional[str] = typer.Option(
         None, "--only",
-        help=(
-            "DIAGNOSTIC: filter the internal session-verdict table to one "
-            "verdict (wake|reroute|reap|retire|ghost|stale|leave|recoverable|"
-            "keeper). Recovery internals, not the operator report."
-        ),
+        help=_watchdog_only_help(),
     ),
     since: str = typer.Option(
         "24h",

@@ -1347,6 +1347,7 @@ _LIVE_STATUS_INPUT = {
     "needs input": "Needs input",
     "idle": "Idle",
     "done": "Done",
+    "failed": "Done",
 }
 
 # Field aliases for the row schema. claude's `agents --json` emits `id` and

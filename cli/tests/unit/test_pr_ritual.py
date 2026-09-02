@@ -10,6 +10,7 @@ from __future__ import annotations
 import subprocess
 from types import SimpleNamespace
 
+import pytest
 
 from fno.config import PostMergeBlock
 from fno.pr import _ritual
@@ -765,7 +766,7 @@ def test_archive_refusal_leaves_a_standing_order(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "step=archive status=failed" in out
     assert "exit=2" in out
-    assert "reap-order reap:pr-7 standing" in out
+    assert "reap-order reap:pr-7 standing" in r.ctx.receipts[-1].detail
 
 
 def test_reap_order_already_standing_is_not_a_failure(tmp_path, capsys, monkeypatch):
@@ -778,6 +779,37 @@ def test_reap_order_already_standing_is_not_a_failure(tmp_path, capsys, monkeypa
     out = capsys.readouterr().out
     assert "step=archive status=deferred" in out
     assert "already standing" in out
+
+
+@pytest.mark.parametrize("claim_rc", [0, 1])
+def test_standing_reap_order_clears_the_sweep_stamp(
+    tmp_path, monkeypatch, claim_rc
+):
+    agents_home = tmp_path / "agents"
+    agents_home.mkdir()
+    stamp = agents_home / "worktree-sweep.stamp"
+    stamp.write_text("123")
+    monkeypatch.setattr(_ritual, "agents_home_dir", lambda: agents_home, raising=False)
+    r = _bare(tmp_path, FakeRunner(claim_rc=claim_rc))
+
+    receipt = r._register_reap_order("test")
+
+    assert "standing" in receipt
+    assert not stamp.exists()
+
+
+def test_unwritten_reap_order_leaves_the_sweep_stamp(tmp_path, monkeypatch):
+    agents_home = tmp_path / "agents"
+    agents_home.mkdir()
+    stamp = agents_home / "worktree-sweep.stamp"
+    stamp.write_text("123")
+    monkeypatch.setattr(_ritual, "agents_home_dir", lambda: agents_home, raising=False)
+    r = _bare(tmp_path, FakeRunner(claim_rc=2))
+
+    receipt = r._register_reap_order("test")
+
+    assert "reap-order-unwritten" in receipt
+    assert stamp.read_text() == "123"
 
 
 def test_archive_runs_script_when_worktree_found(tmp_path, capsys, monkeypatch):
@@ -801,13 +833,78 @@ def test_archive_runs_script_when_worktree_found(tmp_path, capsys, monkeypatch):
     assert "FNO_WT_REMOVE_CALLER=post-merge ritual" in archive_calls[0]
 
 
-def test_archive_skips_when_no_worktree(tmp_path, capsys, monkeypatch):
+def test_archive_missing_script_receipt_keeps_worktree_and_order(
+    tmp_path, capsys, monkeypatch
+):
+    runner = FakeRunner(branch="feature/x")
+    r = _bare(tmp_path, runner)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(wt))
+
+    r.leg_archive()
+
+    out = capsys.readouterr().out
+    assert "step=archive status=deferred" in out
+    assert f"worktree={wt}" in out
+    assert "archive-worktree.sh missing" in out
+    assert "reap-order reap:pr-7 standing" in out
+
+
+def test_archive_without_a_worktree_still_mints_the_reap_order(tmp_path, capsys, monkeypatch):
     runner = FakeRunner(branch="feature/x")
     r = _bare(tmp_path, runner)
     monkeypatch.setattr(r, "_find_worktree", lambda branch: None)
     r.leg_archive()
     out = capsys.readouterr().out
-    assert "step=archive status=skipped" in out
+    assert "step=archive status=deferred" in out
+    assert "no worktree for feature/x" in out
+    assert "reap-order reap:pr-7 standing" in out
+    assert any("reap:pr-7" in " ".join(call) for call in runner.calls)
+
+
+def test_archive_without_a_written_order_fails_loudly(tmp_path, capsys, monkeypatch):
+    runner = FakeRunner(branch="feature/x", claim_rc=2)
+    r = _bare(tmp_path, runner)
+    monkeypatch.setattr(r, "_find_worktree", lambda branch: None)
+
+    r.leg_archive()
+
+    out = capsys.readouterr().out
+    assert "step=archive status=failed" in out
+    assert "reap-order-unwritten" in out
+
+
+def test_archive_receipt_is_written_to_the_daemon_journal(
+    tmp_path, monkeypatch
+):
+    runner = FakeRunner(branch="feature/x")
+    r = _bare(tmp_path, runner)
+    monkeypatch.setattr(r, "_find_worktree", lambda branch: None)
+    events = []
+    monkeypatch.setattr(
+        _ritual,
+        "_emit_daemon_envelope",
+        lambda kind, data: events.append((kind, data)),
+        raising=False,
+    )
+
+    r.leg_archive()
+
+    assert events == [
+        (
+            "post_merge_archive",
+            {
+                "pr": 7,
+                "project": "",
+                "outcome": "deferred",
+                "detail": (
+                    "no worktree for feature/x; sweep-will-reap; "
+                    "reap-order reap:pr-7 standing (merged-pr)"
+                ),
+            },
+        )
+    ]
 
 
 # --- AC4: idempotency / mutex -------------------------------------------
