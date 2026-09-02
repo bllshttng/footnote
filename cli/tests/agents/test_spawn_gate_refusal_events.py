@@ -63,6 +63,7 @@ def test_provider_cap_refusal_names_provider_cap_and_count(journal: Path) -> Non
     assert row["count"] == 7
     assert row["name"] == "t-probe"
     assert row["substrate"] == "thread"
+    assert row["gate"] == "python"
     assert row["exit_code"] == spawn_gate.EXIT_PROVIDER_CAP
 
 

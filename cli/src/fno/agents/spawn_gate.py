@@ -904,7 +904,12 @@ def _refuse(
     zero rows of any kind naming a gate refusal.
 
     ``receipt`` is the caller-facing shape ``fno agents spawn`` prints on
-    stdout and is passed through untouched. ``event`` is extra telemetry for
+    stdout and is passed through untouched. Every event carries
+    ``gate: "python"`` and the spawn's ``substrate``, so a reader can tell
+    this journal's population (the pane substrate, the sole leg this gate
+    covers) from the Rust gate's refusals, which x-ab75 owns.
+
+    ``event`` is extra telemetry for
     the refusals that deliberately carry no receipt (the load ceiling and the
     king share), so a refusal can name its measured value against its
     threshold in the log without changing what stdout has always printed.
@@ -918,6 +923,7 @@ def _refuse(
         exit_code=exit_code,
         name=spawn_name,
         substrate=substrate,
+        gate="python",
         **{**(receipt or {}), **event},
     )
     refusal = GateRefused(exit_code, receipt)

@@ -2007,6 +2007,20 @@ class JoinRefuse(Exception):
         self.message = message
 
 
+def _emit_join_event(kind: str, **data: Any) -> None:
+    """Best-effort join telemetry through the agents journal. Never raises.
+
+    Same posture as the spawn gate's ``_emit_gate_event``: telemetry can
+    never change a join outcome.
+    """
+    try:
+        from fno.agents import events
+
+        events.emit(kind, **data)
+    except Exception:  # noqa: BLE001 - telemetry never changes a join outcome
+        pass
+
+
 _BAND_RANK = {"low": 0, "medium": 1, "high": 2}
 
 
@@ -2416,6 +2430,37 @@ def _sandbox_block(worktree: Path, policy: JoinWritePolicy) -> dict:
 
 
 def join_node(
+    node_id: str, workers: Optional[int] = None, *, model: Optional[str] = None
+) -> dict:
+    """Join with a trace: emit ``join_dispatched`` / ``join_refused`` around it.
+
+    The event carries the brief inputs already in hand (node, width,
+    requested, spawned names, band map, lead) so an orchestration pass can
+    read what join did without archaeology; the refusal carries node, exit
+    code and reason. Emission is best-effort. See :func:`_join_node` for the
+    join contract itself. ``requested`` records the resolved ask: the
+    operator's ``--workers``, or the derived count when it was omitted.
+    """
+    try:
+        receipt = _join_node(node_id, workers, model=model)
+    except JoinRefuse as exc:
+        _emit_join_event(
+            "join_refused", node=node_id, code=exc.code, reason=exc.message
+        )
+        raise
+    _emit_join_event(
+        "join_dispatched",
+        node=node_id,
+        width=receipt["width"],
+        requested=workers if workers is not None else len(receipt["spawned"]),
+        spawned=receipt["spawned"],
+        bands={name: lane.get("band", "") for name, lane in receipt["lanes"].items()},
+        lead=receipt["lead"],
+    )
+    return receipt
+
+
+def _join_node(
     node_id: str, workers: Optional[int] = None, *, model: Optional[str] = None
 ) -> dict:
     """Spawn width-bounded joiners into a held node's worktree (x-8d1d).
