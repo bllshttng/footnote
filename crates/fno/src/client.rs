@@ -960,6 +960,21 @@ struct View {
     /// Manual status-row toggle (prefix+s). Client-local and deliberately
     /// unpersisted: a reattach resets to on (AC4-FR).
     status_on: bool,
+    /// The whole-machine resource meter, rendered in the status row. Off by
+    /// default: it needs `macmon` on PATH, which fno core does not depend on.
+    resource_meter_on: bool,
+    /// The meter's latest one-line reading, or None before the first sample
+    /// (and after a failed one - the row then says the sensor is unavailable
+    /// and shows no number).
+    resource_meter_text: Option<String>,
+    /// Sample cadence, latched from config at startup (default 5s).
+    resource_meter_refresh: u64,
+    /// The sampler task's stop flag: toggling the meter off (or dropping the
+    /// client) flips it and the task exits on its next wake.
+    resource_meter_gate: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// One-shot: set when the toggle turns the meter on, cleared by the run
+    /// loop after it spawns the sampler, so a toggle spawns exactly one task.
+    resource_meter_sampling: bool,
     /// The which-key hint line is painted over the bottom row (prefix held
     /// past [`HINT_DELAY`]); any chord resolution clears it (AC4-HP).
     hint: bool,
@@ -1354,6 +1369,71 @@ enum SweepMsg {
     Counts { tabs: usize, dead: usize },
     Applied { closed: usize, reaped: usize },
     Failed(String),
+}
+
+/// Spawn the meter sampler: one bounded `macmon pipe -s 1` sample per refresh
+/// interval, the one-line reading sent to the UI loop. Exits when the view's
+/// gate flips off, so a toggle-off never leaves a sampler running. Two
+/// overlapping tasks are harmless: the channel is last-send-wins.
+fn spawn_meter_sampler(
+    gate: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    refresh: u64,
+    meter_tx: tokio::sync::mpsc::UnboundedSender<String>,
+) {
+    tokio::spawn(async move {
+        while gate.load(std::sync::atomic::Ordering::Relaxed) {
+            let text = sample_macmon_line().await;
+            if meter_tx.send(text).is_err() {
+                // The UI loop is gone; nothing left to report to.
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(refresh)).await;
+        }
+    });
+}
+
+/// One bounded `macmon pipe -s 1` sample rendered as a status-row segment.
+/// macmon streams forever, so the timeout is the normal exit; anything that
+/// fails to arrive or parse renders as "sensor unavailable" - a dark sensor
+/// is named, never read as a zero.
+async fn sample_macmon_line() -> String {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        tokio::process::Command::new("macmon")
+            .arg("pipe")
+            .arg("-s")
+            .arg("1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    let parsed = match output {
+        Ok(Ok(out)) => parse_macmon_sample(&out.stdout),
+        _ => None,
+    };
+    parsed.unwrap_or_else(|| "meter: sensor unavailable".into())
+}
+
+fn parse_macmon_sample(raw: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(raw).ok()?;
+    let line = text.lines().find(|l| l.trim_start().starts_with('{'))?;
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let cpu = value.get("cpu_usage_pct")?.as_f64()?;
+    let mem = value.get("memory")?;
+    let total = mem.get("ram_total")?.as_f64()?;
+    let usage = mem.get("ram_usage")?.as_f64()?;
+    let cpu_pct = if cpu > 1.0 { cpu } else { cpu * 100.0 };
+    let mut line = format!(
+        "cpu {cpu_pct:.0}% mem {:.0}G/{:.0}G",
+        usage / 1e9,
+        total / 1e9
+    );
+    if let Some(w) = value.get("sys_power").and_then(|p| p.as_f64()) {
+        line.push_str(&format!(" {w:.0}W"));
+    }
+    Some(line)
 }
 
 /// A pending destructive/costly action awaiting the operator's one-keypress
@@ -2232,6 +2312,9 @@ enum AuxAction {
     Detach,
     ToggleHoverFocus,
     ToggleStatus,
+    /// The whole-machine resource meter: flip the status-row meter, persist
+    /// `resource_meter.enabled`, start or stop the sampler.
+    ToggleResourceMeter,
     /// (x-f75e) Apply the named mux theme now: swap the in-memory theme, then
     /// persist via `fno config set mux.theme`. The picker lists the shipped
     /// names, so this carries one of them.
@@ -2678,6 +2761,11 @@ impl View {
             sideline_width,
             agent_sort,
             status_on: true,
+            resource_meter_on: false,
+            resource_meter_text: None,
+            resource_meter_refresh: 5,
+            resource_meter_gate: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resource_meter_sampling: false,
             hint: false,
             keys_modal: None,
             pane_ids_until: None,
@@ -3897,8 +3985,13 @@ impl View {
                 };
                 rows.push(toggle(self.hover_focus, "focus follows mouse"));
                 rows.push(toggle(self.status_on, "status row"));
+                rows.push(toggle(
+                    self.resource_meter_on,
+                    "resource meter (needs macmon)",
+                ));
                 actions.push(AuxAction::ToggleHoverFocus);
                 actions.push(AuxAction::ToggleStatus);
+                actions.push(AuxAction::ToggleResourceMeter);
             }
             SettingsTab::Theme => {
                 // The four shipped palettes; the active one is marked. Enter on a
@@ -7022,6 +7115,20 @@ impl View {
                     put(cells, c, ch, cell_flags::INVERSE);
                     c += 1;
                 }
+            }
+        }
+        // The whole-machine meter, when toggled on: the latest one-line
+        // reading, or an explicit "sensor unavailable" until a sample lands.
+        // A dark sensor is named - the row never shows a zero or a blank as
+        // if it were a reading.
+        if self.resource_meter_on {
+            let text = self
+                .resource_meter_text
+                .clone()
+                .unwrap_or_else(|| "meter: sensor unavailable".into());
+            for ch in format!("│ {text} ").chars() {
+                put(cells, c, ch, cell_flags::DIM);
+                c += 1;
             }
         }
         let help = "? for keys ";
@@ -10755,6 +10862,16 @@ async fn attach_and_run(
     // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
     view.status_on = crate::digest_overlay::status_row_enabled(Path::new(&cwd));
+    // The meter's toggle and cadence latch here too; the READING does not -
+    // that is the sampler task's job once the toggle is on.
+    view.resource_meter_on = crate::digest_overlay::resource_meter_enabled(Path::new(&cwd));
+    view.resource_meter_refresh =
+        crate::digest_overlay::resource_meter_refresh_secs(Path::new(&cwd));
+    view.resource_meter_gate
+        .store(view.resource_meter_on, std::sync::atomic::Ordering::Relaxed);
+    // A fresh attach with the meter already enabled starts its sampler on the
+    // run loop's first iteration (the loop owns meter_tx, one-shot flag).
+    view.resource_meter_sampling = view.resource_meter_on;
     view.obsidian = crate::digest_overlay::ObsidianCfg::read(Path::new(&cwd));
     // Same idiom for the optional `~ missions` / `~ backlog` section toggles.
     view.show_missions = crate::digest_overlay::missions_section_enabled(Path::new(&cwd));
@@ -11026,6 +11143,12 @@ async fn attach_and_run(
     // invalidate, just a last-outcome-wins cache the menu/overlay read from.
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateOutcome>();
 
+    // The resource meter's sampler reports its one-line reading here, same
+    // last-wins shape. The task itself is spawned by the toggle (and once at
+    // startup when config enables the meter) and exits through the view's
+    // gate, so an off meter costs nothing.
+    let (meter_tx, mut meter_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
     // x-4e2d: after an absence, fold a "while you were gone" digest for the
     // focused pane's node and show it on the FIRST frame. Fully fail-open (a
     // disabled knob, a too-recent detach, or a slow/absent `fno-agents` all
@@ -11226,6 +11349,19 @@ async fn attach_and_run(
             let elapsed = yv.opened_at.elapsed().as_millis() as u64;
             yv.opened_at + Duration::from_millis((elapsed / step + 1) * step)
         });
+        // The meter's one-shot spawn: the settings toggle sets
+        // `resource_meter_sampling`, and the loop - which owns meter_tx -
+        // starts the sampler here, exactly once per toggle-on. A fresh
+        // attach with the meter already enabled takes the same path via the
+        // startup latch below.
+        if view.resource_meter_on && view.resource_meter_sampling {
+            view.resource_meter_sampling = false;
+            spawn_meter_sampler(
+                view.resource_meter_gate.clone(),
+                view.resource_meter_refresh,
+                meter_tx.clone(),
+            );
+        }
         tokio::select! {
             msg = srv_rx.recv() => match msg.unwrap_or(Err(ProtoError::Closed)) {
                 Ok(ServerMsg::Frame { pane_id, frame }) => {
@@ -11651,8 +11787,15 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
-            Some(msg) = sweep_rx.recv() => {
-                // The tap asked for this outcome: counts open the centered
+            Some(text) = meter_rx.recv() => {
+                // Last sample wins; the row renders "sensor unavailable" for
+                // a failed one, so nothing stale survives a sensor going dark.
+                view.resource_meter_text = Some(text);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            Some(msg) = sweep_rx.recv() => {                // The tap asked for this outcome: counts open the centered
                 // choice modal, an apply speaks in a notice. A popup opened
                 // after the tap is the operator's newer intent and is never
                 // stomped by a landing probe.
@@ -14189,6 +14332,27 @@ async fn execute_aux_action(
             let notice = match spawn_config_set("mux.status_row", enabled).await {
                 Ok(()) => format!("status row: {enabled}"),
                 Err(_) => "status row applied this session; save failed".into(),
+            };
+            view.set_notice(notice);
+            view.reopen_settings_keeping_sel();
+        }
+        AuxAction::ToggleResourceMeter => {
+            view.resource_meter_on = !view.resource_meter_on;
+            view.resource_meter_gate
+                .store(view.resource_meter_on, std::sync::atomic::Ordering::Relaxed);
+            // The run loop owns the spawn (one-shot via resource_meter_sampling);
+            // clearing the text here means the row reads "sensor unavailable"
+            // until the first sample lands - never a stale reading.
+            view.resource_meter_sampling = view.resource_meter_on;
+            view.resource_meter_text = None;
+            let enabled = if view.resource_meter_on {
+                "true"
+            } else {
+                "false"
+            };
+            let notice = match spawn_config_set("resource_meter.enabled", enabled).await {
+                Ok(()) => format!("resource meter: {enabled}"),
+                Err(_) => "resource meter applied this session; save failed".into(),
             };
             view.set_notice(notice);
             view.reopen_settings_keeping_sel();
@@ -25165,10 +25329,59 @@ mod tests {
         let modal = v.build_settings_modal();
         assert!(modal.actions.contains(&AuxAction::ToggleHoverFocus));
         assert!(modal.actions.contains(&AuxAction::ToggleStatus));
+        assert!(modal.actions.contains(&AuxAction::ToggleResourceMeter));
         assert!(modal.popup.rows.iter().all(|row| !matches!(
             row,
             PopupRow::Entry { hint, .. } if hint == "session only"
         )));
+    }
+
+    #[tokio::test]
+    async fn resource_meter_toggle_flips_persists_and_arms_the_sampler() {
+        let mut v = two_pane_view();
+        v.settings_tab = SettingsTab::General;
+        let mut buf: Vec<u8> = Vec::new();
+        execute_aux_action(&mut v, AuxAction::ToggleResourceMeter, &mut buf)
+            .await
+            .unwrap();
+        assert!(v.resource_meter_on);
+        assert!(
+            v.resource_meter_sampling,
+            "the run loop must be told to spawn the sampler"
+        );
+        assert!(v.resource_meter_text.is_none());
+        assert!(v.notice.as_ref().is_some_and(|(notice, _)| {
+            notice == "resource meter applied this session; save failed"
+                || notice.starts_with("resource meter: ")
+        }));
+        // Off again: the gate flips and the sampler exits on its next wake.
+        execute_aux_action(&mut v, AuxAction::ToggleResourceMeter, &mut buf)
+            .await
+            .unwrap();
+        assert!(!v.resource_meter_on);
+        assert!(!v.resource_meter_sampling);
+        assert!(!v
+            .resource_meter_gate
+            .load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_dark_macmon_sample_never_renders_a_number() {
+        // An empty or unparseable pipe parses to None; `sample_macmon_line`
+        // renders that as the unavailable line, never a zero.
+        assert_eq!(parse_macmon_sample(b""), None);
+        assert_eq!(parse_macmon_sample(b"not json\n"), None);
+        let good = parse_macmon_sample(
+            br#"{"cpu_usage_pct":0.45,"sys_power":53.5,"memory":{"ram_total":103079215104,"ram_usage":30702266368}}"#,
+        )
+        .expect("a healthy sample parses");
+        assert!(good.contains("cpu 45%"), "{good}");
+        // Decimal GB (bytes / 1e9), matching the Python arm's convention.
+        assert!(good.contains("mem 31G/103G"), "{good}");
+        assert!(good.contains("54W"), "{good}");
+        // A missing memory block parses to None, which renders as the
+        // unavailable line - never a zero.
+        assert_eq!(parse_macmon_sample(br#"{"cpu_usage_pct":0.45}"#), None);
     }
 
     #[tokio::test]
