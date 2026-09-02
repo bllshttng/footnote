@@ -11,8 +11,8 @@ import psutil
 
 from fno.claims.core import acquire_claim, claim_status, refresh_claim
 from fno.claims.io import claim_path, serialize_claim
-from fno.claims.staleness import classify, now_ms
-from fno.claims.types import Claim, ClaimState
+from fno.claims.staleness import classify
+from fno.claims.types import Claim, ClaimState, now_ms
 
 
 def _acquire_ttl(root, key="node:N", holder="target-session:me", ttl_ms=60_000):

@@ -56,7 +56,6 @@ from .staleness import (
     classify_with_basis,
     is_expired,
     is_live,
-    now_ms,
 )
 from .self_identity import resolve_self_identity
 from ..mutex import acquire_dir_mutex, release_dir_mutex
@@ -69,6 +68,7 @@ from .types import (
     SCHEMA_VERSION,
     Claim,
     ClaimState,
+    now_ms,
 )
 
 

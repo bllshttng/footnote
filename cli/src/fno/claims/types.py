@@ -9,6 +9,7 @@ ClaimState is the four-way classification used by status/list verbs.
 """
 from __future__ import annotations
 
+import time
 from enum import Enum
 from typing import Any, Optional
 
@@ -31,6 +32,11 @@ MAX_KEY_LENGTH = 256
 MAX_ENCODED_FILENAME_BYTES = 240  # 240 + ".lock" suffix = 245 bytes
 MIN_TTL_MS = 60_000        # 1 minute
 MAX_TTL_MS = 86_400_000    # 24 hours
+
+
+def now_ms() -> int:
+    """Return current UTC time as epoch milliseconds."""
+    return int(time.time() * 1000)
 
 
 class ClaimState(str, Enum):

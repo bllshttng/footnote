@@ -27,8 +27,7 @@ from fno.claims.core import (
     release_claim,
 )
 from fno.claims.io import claim_path, claims_dir, serialize_claim
-from fno.claims.staleness import now_ms
-from fno.claims.types import Claim
+from fno.claims.types import Claim, now_ms
 
 _PROCESS_START_TIMEOUT_SECONDS = 30.0
 

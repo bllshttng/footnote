@@ -36,8 +36,8 @@ from fno.claims.core import (
     _clear_lock_mirror_for_reaped,
 )
 from fno.claims.io import archive_claim, claim_path, claims_dir, read_claim_file, serialize_claim
-from fno.claims.staleness import classify_for_sweep, is_provably_dead, now_ms
-from fno.claims.types import Claim
+from fno.claims.staleness import classify_for_sweep, is_provably_dead
+from fno.claims.types import Claim, now_ms
 from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
 

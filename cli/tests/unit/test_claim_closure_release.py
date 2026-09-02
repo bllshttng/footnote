@@ -18,8 +18,7 @@ from pathlib import Path
 from fno.claims.cli import RosterReading, _node_settlement
 from fno.claims.core import reap_dead_claims, sweep_verdict
 from fno.claims.io import claim_path, claims_dir, serialize_claim
-from fno.claims.staleness import now_ms
-from fno.claims.types import Claim
+from fno.claims.types import Claim, now_ms
 from fno.graph.store import locked_mutate_graph, read_graph, release_node_claim_at_closure
 
 

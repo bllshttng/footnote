@@ -25,8 +25,7 @@ import pytest
 from fno import mutex
 from fno.claims.core import acquire_claim
 from fno.claims.io import claim_path, claims_dir, serialize_claim
-from fno.claims.staleness import now_ms
-from fno.claims.types import Claim
+from fno.claims.types import Claim, now_ms
 from fno.events import append_event, mission_started
 from fno.mutex import (
     STALE_MUTEX_STEAL_S,
