@@ -78,8 +78,10 @@ def test_map_covers_current_surface_once():
     # The resource-meter branch adds `doctor lanes`, the whole-machine lane
     # advisor (hidden, per the new-verb convention): 549 -> 550.
     # This branch adds `agents harness probe`, the capability-probe verb:
-    # 551 (main, with `agents pane-identity`) -> 552.
-    assert len(mapped) == 552, (
+    # 551 (main, with `agents pane-identity`) -> 552. Counted from the
+    # merged file at the third main fold-in: main's `backlog migration`
+    # allocation lands on the same merged tree -> 553.
+    assert len(mapped) == 553, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
