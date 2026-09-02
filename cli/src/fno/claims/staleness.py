@@ -223,7 +223,6 @@ def classify_with_basis(
     it hit; before the probe split, ``access-denied`` and ``pid-absent``
     were one None and a live-but-unreadable holder read as dead.
     """
-    live, cause = _liveness_reading(claim)
     if is_expired(claim, now=now):
         # HYBRID, corroborated: an expired clock does NOT imply a dead session,
         # but a live pid speaks for the holder only when it was prover-proven
@@ -233,11 +232,18 @@ def classify_with_basis(
         # corroboration. The shared shape reads SUSPECT, not STALE: the pid
         # proves the daemon lives, which is neither holder-live nor holder-dead,
         # so the sweep's secondary instruments settle it.
-        if claim.pid_provenance == "session-prover" and live:
-            if pid_exclusive is False:
-                return ClaimState.SUSPECT, CAUSE_PID_SHARED
-            return ClaimState.LIVE, cause
+        #
+        # The liveness reading is only load-bearing here for a prover-proven
+        # pid; every other expired claim is STALE on the clock alone, so the
+        # probe (a syscall per claim) is skipped on that path.
+        if claim.pid_provenance == "session-prover":
+            live, cause = _liveness_reading(claim)
+            if live:
+                if pid_exclusive is False:
+                    return ClaimState.SUSPECT, CAUSE_PID_SHARED
+                return ClaimState.LIVE, cause
         return ClaimState.STALE, CAUSE_TTL_EXPIRED
+    live, cause = _liveness_reading(claim)
     if claim.expires_at is None:
         if live:
             return ClaimState.LIVE, cause

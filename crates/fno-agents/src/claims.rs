@@ -620,19 +620,24 @@ pub fn classify_with_basis(
     probe: &dyn Fn(i32) -> PidProbe,
 ) -> (ClaimState, &'static str) {
     let now = now.unwrap_or_else(now_ms);
-    let (live, cause) = liveness_reading(rec, probe);
     if is_expired(rec, now) {
         // Corroborated hybrid: the pid keeps the claim Live only when it was
         // proven to be the holder session's own process. Any other provenance
         // (or a legacy record with no field) is Stale, as a pre-hybrid claim
         // was: the TTL is a lease.
-        let corroborated = rec.pid_provenance.as_deref() == Some("session-prover") && live;
-        return if corroborated {
-            (ClaimState::Live, cause)
-        } else {
-            (ClaimState::Stale, basis::TTL_EXPIRED)
-        };
+        //
+        // The liveness reading is only load-bearing here for a prover-proven
+        // pid; every other expired claim is Stale on the clock alone, so the
+        // probe (a syscall per claim) is skipped on that path.
+        if rec.pid_provenance.as_deref() == Some("session-prover") {
+            let (live, cause) = liveness_reading(rec, probe);
+            if live {
+                return (ClaimState::Live, cause);
+            }
+        }
+        return (ClaimState::Stale, basis::TTL_EXPIRED);
     }
+    let (live, cause) = liveness_reading(rec, probe);
     if rec.expires_at.is_none() {
         if live {
             return (ClaimState::Live, cause);
