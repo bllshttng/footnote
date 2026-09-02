@@ -1943,6 +1943,90 @@ struct HeldWorker {
     cwd: String,
 }
 
+/// A worker pane removed from every visible tree but still backed by a live
+/// PTY. Keeper-hosted panes can outlive this server, so the row identity is
+/// retained separately from the in-process pane map and persisted on its
+/// squad member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DetachedPane {
+    name: String,
+    harness: Option<String>,
+    harness_session_id: Option<String>,
+    cwd: String,
+    squad: u64,
+    squad_name: String,
+    squad_key: String,
+    origins: Vec<String>,
+    tab_name: Option<String>,
+}
+
+impl DetachedPane {
+    fn from_agent(
+        agent: &RegistryAgent,
+        squad: u64,
+        squad_name: String,
+        squad_key: String,
+        origins: Vec<String>,
+        tab_name: Option<String>,
+    ) -> Self {
+        Self {
+            name: agent.name.clone(),
+            harness: agent.harness.clone(),
+            harness_session_id: agent_harness_session_id(agent).map(str::to_string),
+            cwd: agent.cwd.clone(),
+            squad,
+            squad_name,
+            squad_key,
+            origins,
+            tab_name,
+        }
+    }
+
+    fn from_member(
+        member: &crate::squad_store::StoredMember,
+        squad: u64,
+        squad_name: String,
+        squad_key: String,
+        origins: Vec<String>,
+    ) -> Option<Self> {
+        Some(Self {
+            name: member.worker.as_deref()?.to_string(),
+            harness: member.harness.clone(),
+            harness_session_id: member.harness_session_id.clone(),
+            cwd: member.cwd.clone().unwrap_or_default(),
+            squad,
+            squad_name,
+            squad_key,
+            origins,
+            tab_name: member.tab_name.clone(),
+        })
+    }
+
+    fn matches_agent(&self, agent: &RegistryAgent) -> bool {
+        self.name == agent.name
+            && self
+                .harness
+                .as_deref()
+                .is_none_or(|h| agent.harness.as_deref() == Some(h))
+            && self
+                .harness_session_id
+                .as_deref()
+                .is_none_or(|id| agent_harness_session_id(agent) == Some(id))
+    }
+
+    fn matches_member(&self, member: &crate::squad_store::StoredMember) -> bool {
+        member.worker.as_deref() == Some(self.name.as_str())
+            && member
+                .harness
+                .as_deref()
+                .is_none_or(|h| self.harness.as_deref() == Some(h))
+            && member
+                .harness_session_id
+                .as_deref()
+                .is_none_or(|id| self.harness_session_id.as_deref() == Some(id))
+    }
+}
+
 /// (x-d285) The canonical re-entry verdict a mux gesture consumes, parsed from
 /// `fno-agents reentry-plan`'s JSON. `argv` is the provider invocation (ids
 /// and file PATHS only - never a settings value), `env` the `KEY=VALUE`
@@ -2312,6 +2396,10 @@ struct Core {
     /// Restart placeholders keyed by pane. Focusing one consumes the marker
     /// and resumes the persisted harness session into the same tree leaf.
     held_workers: HashMap<u64, HeldWorker>,
+    /// Live worker panes intentionally removed from every tab tree. The
+    /// keeper owns the PTY for worker panes, so this map is a placement marker,
+    /// not the child-lifetime owner.
+    detached_panes: HashMap<u64, DetachedPane>,
     /// The one live diff pane, as `(source cwd, pane id)`. One at a
     /// time by construction, so the "at most one pane per source" invariant
     /// needs no per-source map and no GC: a stale id (the pane was closed by
@@ -2372,6 +2460,9 @@ struct Core {
     /// it so a second client attach does not re-materialize the persisted
     /// squads.
     restored: bool,
+    /// Squads created before first attach. Their empty bootstrap persist must
+    /// not overwrite an older squad waiting for restore.
+    pre_restore_squads: HashSet<u64>,
     /// (x-caef) A topology mutation landed (`push_layout(true)`) whose tree
     /// capture has not been written yet. Set on every layout-changing pass,
     /// flushed by [`Core::flush_topology`] when the debounce window is past or
@@ -3762,6 +3853,7 @@ impl Core {
         });
         self.worker_session_pane.retain(|_, p| *p != pid);
         self.held_workers.remove(&pid);
+        self.detached_panes.remove(&pid);
         if let Some(tx) = self.pane_watch.remove(&pid) {
             // Last observable tick before the sender drops: a watcher that
             // reads it sees `exited`; one blocked in `changed()` sees the
@@ -3783,7 +3875,14 @@ impl Core {
     /// Defensive backstop for a lost PTY-reader exit notification.
     fn reap_dead_children(&mut self, dead: Vec<u64>) -> Flow {
         for pid in dead {
+            let worker = self.worker_member_context(pid);
+            let detached = self.detached_panes.get(&pid).cloned();
             let ctx = self.member_ctx(pid);
+            if let Some(detached) = detached {
+                self.reconcile_worker_member_close(&detached, true);
+            } else if let Some(worker) = worker {
+                self.reconcile_worker_member_close(&worker, true);
+            }
             self.reconcile_member_close(ctx, true);
             if self.close_pane(pid) == Flow::Shutdown {
                 return Flow::Shutdown;
@@ -3990,6 +4089,7 @@ impl Core {
                 // immediately, even before any member attaches, keyed by its
                 // durable key.
                 self.squad_members.entry(sid).or_default();
+                self.pre_restore_squads.insert(sid);
                 self.persist_squad(sid);
                 return Ok((sid, tid, false));
             }
@@ -4120,8 +4220,16 @@ impl Core {
             .map_err(|e| (err_code::SPAWN_FAILED, e.to_string()))?;
         // The worker path is the keeper path: a recorded member's pane
         // outlives this server. Everything else spawns inline.
+        let mut spawn_argv = argv.clone();
+        if let Some(worker) = worker.as_deref() {
+            if agent_self_from_argv(&spawn_argv).is_none() {
+                let mut wrapped = vec!["env".to_string(), format!("FNO_AGENT_SELF={worker}")];
+                wrapped.extend(spawn_argv);
+                spawn_argv = wrapped;
+            }
+        }
         let pid = self
-            .spawn_pane_shell_with_permit(&argv, rows, cols, &cwd, permit, worker.is_some())
+            .spawn_pane_shell_with_permit(&spawn_argv, rows, cols, &cwd, permit, worker.is_some())
             .map_err(|e| (err_code::SPAWN_FAILED, e))?;
         if claim {
             // Writer-claim ELIGIBILITY, set only at agent spawn (Locked 5).
@@ -4146,6 +4254,7 @@ impl Core {
                 },
             );
             self.squad_members.insert(sid, Vec::new());
+            self.pre_restore_squads.insert(sid);
             if let Some(worker) = &worker {
                 self.record_worker_member(sid, worker, pid, &cwd, None);
             }
@@ -5343,6 +5452,311 @@ impl Core {
         })
     }
 
+    fn detached_pane_for_agent(&self, agent: &RegistryAgent) -> Option<u64> {
+        let hits: Vec<u64> = self
+            .detached_panes
+            .iter()
+            .filter(|(pane, detached)| {
+                detached.matches_agent(agent)
+                    && self
+                        .panes
+                        .get(pane)
+                        .is_some_and(|entry| entry.pty.is_child_alive())
+            })
+            .map(|(pane, _)| *pane)
+            .collect();
+        match hits.as_slice() {
+            [pane] => Some(*pane),
+            _ => None,
+        }
+    }
+
+    fn detached_pane_for_member(&self, member: &crate::squad_store::StoredMember) -> Option<u64> {
+        let hits: Vec<u64> = self
+            .detached_panes
+            .iter()
+            .filter(|(pane, detached)| {
+                detached.matches_member(member)
+                    && self
+                        .panes
+                        .get(pane)
+                        .is_some_and(|entry| entry.pty.is_child_alive())
+            })
+            .map(|(pane, _)| *pane)
+            .collect();
+        match hits.as_slice() {
+            [pane] => Some(*pane),
+            _ => None,
+        }
+    }
+
+    fn detached_pane_for_resume(
+        &self,
+        name: &str,
+        member: Option<&crate::squad_store::StoredMember>,
+    ) -> Result<Option<(u64, DetachedPane)>, String> {
+        let hits: Vec<(u64, DetachedPane)> = self
+            .detached_panes
+            .iter()
+            .filter(|(_, detached)| {
+                detached.name == name && member.is_none_or(|member| detached.matches_member(member))
+            })
+            .map(|(pane, detached)| (*pane, detached.clone()))
+            .collect();
+        match hits.as_slice() {
+            [] => Ok(None),
+            [(pane, detached)] => Ok(Some((*pane, detached.clone()))),
+            _ => Err(format!("{name} is ambiguous - use the CLI")),
+        }
+    }
+
+    fn bind_worker_pane(&mut self, detached: &DetachedPane, pane: u64) {
+        let panes = self.worker_pane.entry(detached.name.clone()).or_default();
+        if !panes.contains(&pane) {
+            panes.push(pane);
+        }
+        if let (Some(harness), Some(session_id)) = (
+            detached.harness.as_deref(),
+            detached.harness_session_id.as_deref(),
+        ) {
+            self.worker_session_pane
+                .insert((harness.to_string(), session_id.to_string()), pane);
+        }
+    }
+
+    fn persist_detached_member(&mut self, detached: &DetachedPane, is_detached: bool) {
+        let members = self.squad_members.entry(detached.squad).or_default();
+        if let Some(member) = members
+            .iter_mut()
+            .find(|member| detached.matches_member(member))
+        {
+            member.detached = is_detached;
+            if is_detached {
+                member.tombstone = false;
+            }
+        } else if is_detached {
+            members.push(crate::squad_store::StoredMember {
+                attach_id: String::new(),
+                tombstone: false,
+                detached: true,
+                tab_name: detached.tab_name.clone(),
+                cwd: (!detached.cwd.is_empty()).then(|| detached.cwd.clone()),
+                worker: Some(detached.name.clone()),
+                harness: detached.harness.clone(),
+                harness_session_id: detached.harness_session_id.clone(),
+            });
+        }
+        self.persist_squad(detached.squad);
+    }
+
+    /// Capture a worker member before a visible pane is reaped. The detached
+    /// path cannot use `member_ctx`, whose attach-id shape belongs to claude
+    /// attach members.
+    fn worker_member_context(&self, pane: u64) -> Option<DetachedPane> {
+        let (squad, tab_index) = self.session.find_pane(pane)?;
+        let entry = self.panes.get(&pane)?;
+        let name = entry.name.as_deref()?.to_string();
+        let sq = self.session.squad(squad)?;
+        let tab_name = sq.tabs.get(tab_index).and_then(|tab| tab.name.clone());
+        if let Some(member) = self.squad_members.get(&squad).and_then(|members| {
+            members
+                .iter()
+                .find(|member| member.worker.as_deref() == Some(name.as_str()))
+        }) {
+            return DetachedPane::from_member(
+                member,
+                squad,
+                sq.name.clone().unwrap_or_default(),
+                sq.key.clone(),
+                sq.origins.clone(),
+            );
+        }
+        self.agents
+            .iter()
+            .find(|agent| {
+                agent.name == name
+                    && agent.mux.as_ref().is_some_and(|(session, candidate)| {
+                        session == &self.session_name && *candidate == pane
+                    })
+            })
+            .map(|agent| {
+                DetachedPane::from_agent(
+                    agent,
+                    squad,
+                    sq.name.clone().unwrap_or_default(),
+                    sq.key.clone(),
+                    sq.origins.clone(),
+                    tab_name,
+                )
+            })
+    }
+
+    fn reconcile_worker_member_close(&mut self, detached: &DetachedPane, churn: bool) {
+        let Some(members) = self.squad_members.get_mut(&detached.squad) else {
+            return;
+        };
+        if churn {
+            if let Some(member) = members
+                .iter_mut()
+                .find(|member| detached.matches_member(member))
+            {
+                member.tombstone = true;
+                member.detached = false;
+            }
+        } else {
+            members.retain(|member| !detached.matches_member(member));
+        }
+        if self.session.squad(detached.squad).is_some() {
+            self.persist_squad(detached.squad);
+        } else {
+            self.squad_members.remove(&detached.squad);
+            self.persist_remove(&detached.squad_name, &detached.squad_key);
+        }
+    }
+
+    /// Detach a live worker pane from the visible topology without reaping its
+    /// child. A one-leaf tab gets a replacement shell so the session never
+    /// renders an empty tab or loses its last anchor.
+    fn detach_worker_pane(&mut self, pane: u64) -> Result<(), String> {
+        let (squad, tab_index) = self
+            .session
+            .find_pane(pane)
+            .ok_or_else(|| format!("no such pane: {pane}"))?;
+        let (rows, cols, entry_cwd) = {
+            let entry = self
+                .panes
+                .get(&pane)
+                .ok_or_else(|| format!("no such pane: {pane}"))?;
+            if !entry.pty.is_child_alive() {
+                return Err(format!("pane {pane} is no longer live"));
+            }
+            let (rows, cols) = entry.vt.size();
+            (rows, cols, entry.cwd.clone())
+        };
+        let agent_matches = self
+            .agents
+            .iter()
+            .filter(|agent| {
+                !agent.exited
+                    && (agent.mux.as_ref().is_some_and(|(session, candidate)| {
+                        session == &self.session_name && *candidate == pane
+                    }) || self.worker_pane_for_agent(agent) == Some(pane))
+            })
+            .collect::<Vec<_>>();
+        let mapped_worker = self.worker_member_context(pane).filter(|worker| {
+            self.worker_pane
+                .get(&worker.name)
+                .is_some_and(|panes| panes.contains(&pane))
+        });
+        let agent = match agent_matches.as_slice() {
+            [agent] => Some((*agent).clone()),
+            [] => None,
+            matches => {
+                return Err(format!(
+                    "pane {pane} has no unique live worker row (matches: {}, session: {})",
+                    matches.len(),
+                    self.session_name
+                ))
+            }
+        };
+        if agent.is_none() && mapped_worker.is_none() {
+            return Err(format!("pane {pane} has no unique live worker row"));
+        }
+        let (only_leaf, tab_name, tid, squad_name, squad_key, origins) = {
+            let sq = self
+                .session
+                .squad(squad)
+                .expect("find_pane returned live squad");
+            let tab = &sq.tabs[tab_index];
+            (
+                tree::leaves(&tab.root).len() == 1,
+                tab.name.clone(),
+                tab.id,
+                sq.name.clone().unwrap_or_default(),
+                sq.key.clone(),
+                sq.origins.clone(),
+            )
+        };
+        let cwd = if entry_cwd.is_empty() {
+            agent
+                .as_ref()
+                .map(|agent| agent.cwd.clone())
+                .or_else(|| mapped_worker.as_ref().map(|worker| worker.cwd.clone()))
+                .unwrap_or_default()
+        } else {
+            entry_cwd
+        };
+        let replacement = if only_leaf {
+            Some(self.spawn_pane(rows, cols, &cwd)?)
+        } else {
+            None
+        };
+        let vp = self.tab_rect(tid);
+        let si = self
+            .session
+            .squads
+            .iter()
+            .position(|s| s.id == squad)
+            .expect("squad live");
+        let outcome = {
+            let tab = &mut self.session.squads[si].tabs[tab_index];
+            tree::detach_leaf(tab, vp, pane).map_err(|error| error.to_string())?
+        };
+        if let (tree::DetachOutcome::TabEmptied, Some(shell)) = (outcome, replacement) {
+            let tab = &mut self.session.squads[si].tabs[tab_index];
+            tab.root = Node::Leaf(shell);
+            tab.focus = shell;
+        }
+        let detached = if let Some(agent) = agent {
+            DetachedPane::from_agent(&agent, squad, squad_name, squad_key, origins, tab_name)
+        } else {
+            mapped_worker.ok_or_else(|| format!("pane {pane} has no worker mapping"))?
+        };
+        self.detached_panes.insert(pane, detached.clone());
+        self.persist_detached_member(&detached, true);
+        Ok(())
+    }
+
+    fn reattach_detached_pane(
+        &mut self,
+        pane: u64,
+        fallback_squad: u64,
+    ) -> Result<(u64, TabId), String> {
+        let detached = self
+            .detached_panes
+            .get(&pane)
+            .cloned()
+            .ok_or_else(|| format!("no detached pane: {pane}"))?;
+        if !self
+            .panes
+            .get(&pane)
+            .is_some_and(|entry| entry.pty.is_child_alive())
+        {
+            return Err(format!("detached pane {pane} is no longer live"));
+        }
+        let squad = self
+            .session
+            .squad(detached.squad)
+            .map(|_| detached.squad)
+            .or_else(|| self.session.squad(fallback_squad).map(|_| fallback_squad))
+            .ok_or_else(|| "target workspace no longer exists".to_string())?;
+        let tid = self.session.mint_tab_id();
+        self.session
+            .squad_mut(squad)
+            .expect("target squad checked")
+            .tabs
+            .push(Tab {
+                name: detached.tab_name.clone(),
+                id: tid,
+                root: Node::Leaf(pane),
+                focus: pane,
+            });
+        self.detached_panes.remove(&pane);
+        self.bind_worker_pane(&detached, pane);
+        self.persist_detached_member(&detached, false);
+        Ok((squad, tid))
+    }
+
     /// Detach `pane` from whatever tab currently holds it, keeping the PTY alive
     /// (the [`Self::pane_break`] cleanup, minus the new-tab step). A no-op if the
     /// pane is in no tab. Used to relocate a bound session's live pane into a
@@ -6138,6 +6552,9 @@ impl Core {
     /// (`Unmeasured`): the join then keeps protecting the rollout rather
     /// than guessing the backend dead.
     fn pane_resumes_session(&self, a: &RegistryAgent) -> bool {
+        if self.detached_pane_for_agent(a).is_some() {
+            return true;
+        }
         let sid = a
             .harness_session_id
             .as_deref()
@@ -6396,6 +6813,27 @@ impl Core {
             };
         }
         let stored_member = stored_members.into_iter().next();
+        match self.detached_pane_for_resume(name, stored_member.as_ref()) {
+            Err(reason) => return ResumeOutcome::Refused { reason },
+            Ok(Some((pane, detached))) => {
+                if dry_run {
+                    return ResumeOutcome::Planned;
+                }
+                let fallback_squad = self.session.find_by_cwd(&detached.cwd).unwrap_or(view.0);
+                return match self.reattach_detached_pane(pane, fallback_squad) {
+                    Ok((squad, tab)) => ResumeOutcome::Resumed {
+                        pane,
+                        squad,
+                        tab,
+                        notice: None,
+                    },
+                    Err(reason) => ResumeOutcome::Refused {
+                        reason: format!("reattach failed: {reason}"),
+                    },
+                };
+            }
+            Ok(None) => {}
+        }
         let (fresh_receipts, receipt_error) = match load_spawn_receipts() {
             Ok(receipts) => (receipts, None),
             Err(error) => (HashMap::new(), Some(error)),
@@ -6809,7 +7247,17 @@ impl Core {
             Some(verdict) => verdict.prefixed_argv(),
             None => resume_argv_for(&facts.harness, &facts.harness_session_id)?,
         };
+        // Unit fixtures replace the provider with short-lived `/bin/cat`; it
+        // can exit before a keeper answers Identify. Production resumes use
+        // the keeper so the worker has the same ownership contract as a
+        // `pane run --worker` launch.
+        #[cfg(test)]
         let pid = self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd)?;
+        #[cfg(not(test))]
+        let pid = {
+            let permit = crate::process_admission::admit_fleet().map_err(|e| e.to_string())?;
+            self.spawn_pane_shell_with_permit(&argv, rows, cols, &spawn_cwd, permit, true)?
+        };
         if let Some(entry) = self.panes.get_mut(&pid) {
             entry.name = Some(facts.name.clone());
         }
@@ -6906,6 +7354,19 @@ impl Core {
             if let Some(s) = self.session.squad_mut(sid) {
                 s.key = key.clone();
             }
+        }
+        // A fresh server may need one bootstrap shell before its first client
+        // attach triggers restore. Do not let that empty shell overwrite an
+        // existing same-origin squad that contains keeper-backed members.
+        if !self.restored
+            && self.pre_restore_squads.contains(&sid)
+            && self.squad_members.get(&sid).is_some_and(Vec::is_empty)
+            && crate::squad_store::load()
+                .squads
+                .iter()
+                .any(|stored| stored.name == name && stored.key == key && stored.origins == origins)
+        {
+            return;
         }
         // (x-0f9d US4) Re-derive each member's hosting tab name and write it back
         // into the AUTHORITATIVE in-memory list, not just the store copy. Other
@@ -7156,6 +7617,7 @@ impl Core {
             None => members.push(crate::squad_store::StoredMember {
                 attach_id: id.to_string(),
                 tombstone: false,
+                detached: false,
                 tab_name: None,
                 cwd: None,
                 worker: None,
@@ -7184,6 +7646,9 @@ impl Core {
         cwd: &str,
         persisted_session_id: Option<&str>,
     ) {
+        if let Some(entry) = self.panes.get_mut(&pid) {
+            entry.name = Some(name.to_string());
+        }
         // The pane's hosting tab name at record time, the pid-based twin of
         // `member_tab_name` (which joins through `attached`, a claude-id map a
         // worker pane never enters). persist_squad's re-derivation misses
@@ -7198,29 +7663,44 @@ impl Core {
                     .map(|t| t.name.clone())
             })
             .flatten();
-        let named_rows: Vec<&RegistryAgent> =
-            self.agents.iter().filter(|a| a.name == name).collect();
-        let facts = match persisted_session_id {
-            Some(session_id) => {
-                let pair_rows: Vec<&RegistryAgent> = named_rows
-                    .iter()
-                    .copied()
-                    .filter(|a| agent_harness_session_id(a) == Some(session_id))
-                    .collect();
-                match pair_rows.as_slice() {
+        let (named_rows_len, facts) = {
+            let named_rows: Vec<&RegistryAgent> =
+                self.agents.iter().filter(|a| a.name == name).collect();
+            let facts = match persisted_session_id {
+                Some(session_id) => {
+                    let pair_rows: Vec<&RegistryAgent> = named_rows
+                        .iter()
+                        .copied()
+                        .filter(|a| agent_harness_session_id(a) == Some(session_id))
+                        .collect();
+                    match pair_rows.as_slice() {
+                        [one] => Self::worker_facts(one),
+                        _ => None,
+                    }
+                }
+                None => match named_rows.as_slice() {
                     [one] => Self::worker_facts(one),
                     _ => None,
-                }
-            }
-            None => match named_rows.as_slice() {
-                [one] => Self::worker_facts(one),
-                _ => None,
-            },
+                },
+            };
+            (named_rows.len(), facts)
         };
         let harness = facts.as_ref().map(|facts| facts.harness.clone());
         let harness_session_id = persisted_session_id
             .map(str::to_string)
             .or_else(|| facts.as_ref().map(|facts| facts.harness_session_id.clone()));
+        let detached = DetachedPane {
+            name: name.to_string(),
+            harness: harness.clone(),
+            harness_session_id: harness_session_id.clone(),
+            cwd: cwd.to_string(),
+            squad: sid,
+            squad_name: String::new(),
+            squad_key: String::new(),
+            origins: Vec::new(),
+            tab_name: tab_name.clone(),
+        };
+        self.bind_worker_pane(&detached, pid);
         let members = self.squad_members.entry(sid).or_default();
         let exact_identity = facts
             .as_ref()
@@ -7234,7 +7714,7 @@ impl Core {
                 })
             })
             .or_else(|| {
-                if named_rows.len() > 1 {
+                if named_rows_len > 1 {
                     return None;
                 }
                 let candidates: Vec<usize> = members
@@ -7267,12 +7747,14 @@ impl Core {
         match existing.map(|index| &mut members[index]) {
             Some(m) if m.tombstone => {
                 m.tombstone = false;
+                m.detached = false;
                 m.tab_name = tab_name;
                 m.cwd = (!cwd.is_empty()).then(|| cwd.to_string());
                 m.harness = harness.clone().or(m.harness.clone());
                 m.harness_session_id = harness_session_id.or(m.harness_session_id.clone());
             }
             Some(m) => {
+                m.detached = false;
                 m.harness = harness.clone().or(m.harness.clone());
                 m.harness_session_id = harness_session_id.or(m.harness_session_id.clone());
             }
@@ -7281,6 +7763,7 @@ impl Core {
                 members.push(crate::squad_store::StoredMember {
                     attach_id: String::new(),
                     tombstone: false,
+                    detached: false,
                     tab_name,
                     cwd,
                     worker: Some(name.to_string()),
@@ -7305,6 +7788,9 @@ impl Core {
 
     fn member_pane(&self, member: &crate::squad_store::StoredMember) -> Option<u64> {
         if let Some(worker) = member.worker.as_deref() {
+            if let Some(detached) = self.detached_pane_for_member(member) {
+                return Some(detached);
+            }
             if let (Some(harness), Some(session_id)) = (
                 member.harness.as_deref(),
                 member.harness_session_id.as_deref(),
@@ -7864,9 +8350,7 @@ impl Core {
                 session_id.is_some() && resume_target_from_argv(&a.argv).as_deref() == session_id;
             by_name || by_session
         });
-        let Some(a) = hit else {
-            return None;
-        };
+        let a = hit?;
         a.placed = true;
         Some(a.pane)
     }
@@ -8037,6 +8521,7 @@ impl Core {
             // (attach_id, pane, stored tab name). The tree lane places them by
             // slot; the legacy lane gives each its own tab.
             let mut member_panes: Vec<(String, u64, Option<String>)> = Vec::new();
+            let mut detached_adoptions: Vec<(u64, crate::squad_store::StoredMember)> = Vec::new();
             let mut pane_aliases: HashMap<String, Option<u64>> = HashMap::new();
             // (x-c4d4) The zero-live-member fallback shell tab, if we create one;
             // a deferred template restore removes it once real template tabs land.
@@ -8059,17 +8544,37 @@ impl Core {
                     members.push(m.clone()); // already dead - stays a tombstone
                     continue;
                 }
-                // (x-5f7f) A worker member is a registry NAME, not a claude
-                // jobId: its pty died with the previous server (a codex/agy
-                // pane is a direct child of the mux pid), so after a restart
-                // it is ALWAYS dead and no liveness probe is needed - probing
-                // an already-known answer is the receipt-can-lie shape. Never
-                // respawn it silently: keep the member as-is so the row
-                // renders idle, and let the operator resume it through the
-                // harness's own form from the agent panel.
+                // A worker member is a registry NAME, not a
+                // claude jobId. A keeper-hosted pane may survive the previous
+                // server and arrive through `keeper_readopt`; a worker with no
+                // adopted pane remains idle and is never respawned silently.
+                // Resume uses the harness's own form, while a detached marker
+                // keeps an adopted live pane paneless until that gesture.
                 if m.worker.is_some() {
                     worker_members_total += 1;
                     let worker_name = m.worker.as_deref().expect("checked above");
+                    // A worker launched into this still-running server is
+                    // already represented by its worker mapping. Attaching a
+                    // client triggers restore, but must not import that same
+                    // member again or create a held placeholder beside it.
+                    let existing = self.member_pane(m).or_else(|| {
+                        self.panes.iter().find_map(|(pid, entry)| {
+                            (entry.name.as_deref() == Some(worker_name)
+                                && self.session.find_pane(*pid).is_some())
+                            .then_some(*pid)
+                        })
+                    });
+                    if let Some(pid) = existing.filter(|pid| {
+                        self.panes.contains_key(pid)
+                            && (self.session.find_pane(*pid).is_some()
+                                || self.detached_panes.contains_key(pid))
+                    }) {
+                        members.push(m.clone());
+                        if m.detached {
+                            debug_assert!(self.detached_panes.contains_key(&pid));
+                        }
+                        continue;
+                    }
                     // A keeper-hosted pane SURVIVED the server death and was
                     // already re-adopted: bind it into its stored tab and
                     // spawn nothing. Same pid before and after (the child
@@ -8077,6 +8582,11 @@ impl Core {
                     // later resume FOCUS it instead of opening a second
                     // writer.
                     if let Some(pid) = self.take_adopted_for_member(m) {
+                        members.push(m.clone());
+                        if m.detached {
+                            detached_adoptions.push((pid, m.clone()));
+                            continue;
+                        }
                         let binding =
                             worker_binding_key(m).unwrap_or_else(|| worker_name.to_string());
                         self.worker_pane
@@ -8185,6 +8695,7 @@ impl Core {
                     members.push(crate::squad_store::StoredMember {
                         attach_id: m.attach_id.clone(),
                         tombstone: true,
+                        detached: false,
                         tab_name: m.tab_name.clone(),
                         cwd: m.cwd.clone(),
                         worker: None,
@@ -8235,6 +8746,7 @@ impl Core {
                         members.push(crate::squad_store::StoredMember {
                             attach_id: m.attach_id.clone(),
                             tombstone: false,
+                            detached: false,
                             tab_name: m.tab_name.clone(),
                             cwd: m.cwd.clone(),
                             worker: None,
@@ -8249,6 +8761,7 @@ impl Core {
                         members.push(crate::squad_store::StoredMember {
                             attach_id: m.attach_id.clone(),
                             tombstone: false,
+                            detached: false,
                             tab_name: m.tab_name.clone(),
                             cwd: m.cwd.clone(),
                             worker: None,
@@ -8409,10 +8922,12 @@ impl Core {
                         .tabs
                         .push(tab);
                 }
-                self.squad_members
-                    .entry(home_sid)
-                    .or_default()
-                    .extend(members);
+                let home_members = self.squad_members.entry(home_sid).or_default();
+                for member in members {
+                    if !home_members.iter().any(|existing| existing == &member) {
+                        home_members.push(member);
+                    }
+                }
                 // Home adopts the lane's durable key so its next persist updates
                 // the SAME store entry instead of minting a second one.
                 if let Some(h) = self.session.squad_mut(home_sid) {
@@ -8448,6 +8963,17 @@ impl Core {
                 self.squad_members.insert(sid, members);
                 sid
             };
+            for (pane, member) in detached_adoptions {
+                if let Some(detached) = DetachedPane::from_member(
+                    &member,
+                    sid,
+                    ps.name.clone(),
+                    ps.key.clone(),
+                    ps.origins.clone(),
+                ) {
+                    self.detached_panes.insert(pane, detached);
+                }
+            }
             // Persist the reconciled membership (members dead at restore are now
             // tombstoned in the store) plus the just-restored tree capture, so a
             // second restart restores the same shape.
@@ -9915,7 +10441,13 @@ impl Core {
                     // carry `resumable`, so tapping it resumes the session
                     // through the harness's own form instead of dead-ending
                     // on a focus at a pane that no longer exists.
-                    let resumable = self.row_resumable_in_session(a);
+                    let detached = self.detached_pane_for_agent(a);
+                    let detached_live = detached.is_some_and(|pane| {
+                        self.panes
+                            .get(&pane)
+                            .is_some_and(|entry| entry.pty.is_child_alive())
+                    });
+                    let resumable = !detached_live && self.row_resumable_in_session(a);
                     // Attribute the row to the squad holding its recorded
                     // membership FIRST (cwd ownership only as a fallback), so
                     // the panel shows it where ResumeAgent will actually place
@@ -9929,9 +10461,13 @@ impl Core {
                         squad,
                         name: a.name.clone(),
                         pane_id: None,
-                        badge: None,
-                        reason: None,
-                        exited: true,
+                        badge: detached_live.then_some(a.badge).flatten(),
+                        reason: detached_live.then(|| a.reason.clone()).flatten(),
+                        exited: if detached.is_some() {
+                            !detached_live
+                        } else {
+                            true
+                        },
                         dnd: a.dnd,
                         unmeasured: false,
                         answerable: None,
@@ -9952,7 +10488,11 @@ impl Core {
                         basis: self.truth_basis(&a.name),
                         last_activity_age_s: self.truth_age(&a.name),
                         resumable,
-                        no_pane_reason: self.row_no_pane_reason_in_session(a),
+                        no_pane_reason: if detached_live {
+                            Some(AgentNoPaneReason::LivePaneless)
+                        } else {
+                            self.row_no_pane_reason_in_session(a)
+                        },
                         // Dangling dead: the pane is gone, so no vt reading.
                         pane_activity: None,
                         reach: Reach::Locate,
@@ -11622,9 +12162,20 @@ impl Core {
                 // the close settles (so squad-survival is known) - user close
                 // de-recruits (AC3-EDGE).
                 let ctx = self.member_ctx(pid);
+                let worker_ctx = self.worker_member_context(pid);
                 let flow = self.close_pane(pid);
                 self.reconcile_member_close(ctx, false);
+                if let Some(worker_ctx) = worker_ctx {
+                    self.reconcile_worker_member_close(&worker_ctx, false);
+                }
                 flow
+            }
+            Command::DetachPane { pane } => {
+                match self.detach_worker_pane(pane) {
+                    Ok(()) => self.push_layout(true),
+                    Err(error) => self.notice(client_id, error),
+                }
+                Flow::Continue
             }
             Command::FocusDir(dir) => {
                 let Some(tab) = self.viewed_tab_mut(view) else {
@@ -12802,6 +13353,7 @@ impl Core {
                         crate::squad_store::StoredMember {
                             attach_id: id.clone(),
                             tombstone: false,
+                            detached: false,
                             // persist_squad below re-derives the hosting tab name
                             // and the pane cwd.
                             tab_name: None,
@@ -14228,6 +14780,7 @@ async fn serve(
         worker_pane: HashMap::new(),
         worker_session_pane: HashMap::new(),
         held_workers: HashMap::new(),
+        detached_panes: HashMap::new(),
         diff_pane: None,
         thread_pane: None,
         thread_pane_noticed: false,
@@ -14237,6 +14790,7 @@ async fn serve(
         external_lifecycle: Vec::new(),
         persist_degraded_notified: false,
         restored: false,
+        pre_restore_squads: HashSet::new(),
         topology_dirty: false,
         last_topology_flush: None,
         reentry_verdict: None,
@@ -20011,6 +20565,7 @@ mod tests {
                     crate::squad_store::StoredMember {
                         attach_id: String::new(),
                         tombstone: false,
+                        detached: false,
                         tab_name: None,
                         cwd: None,
                         worker: Some("t-codex-one".into()),
@@ -20020,6 +20575,7 @@ mod tests {
                     crate::squad_store::StoredMember {
                         attach_id: String::new(),
                         tombstone: false,
+                        detached: false,
                         tab_name: None,
                         cwd: None,
                         worker: Some("t-codex-two".into()),
@@ -20108,6 +20664,7 @@ mod tests {
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
                     tombstone: false,
+                    detached: false,
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-one".into()),
@@ -20117,6 +20674,7 @@ mod tests {
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
                     tombstone: false,
+                    detached: false,
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-two".into()),
@@ -20301,6 +20859,7 @@ mod tests {
         let member = crate::squad_store::StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            detached: false,
             tab_name: None,
             cwd: None,
             worker: Some("worker".into()),
@@ -20329,6 +20888,7 @@ mod tests {
         let member = crate::squad_store::StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            detached: false,
             tab_name: None,
             cwd: None,
             worker: Some("reused-name".into()),
@@ -20349,6 +20909,7 @@ mod tests {
         let member = crate::squad_store::StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            detached: false,
             tab_name: None,
             cwd: Some("/Users/wt/worker".into()),
             worker: Some("t-worker".into()),
@@ -20420,6 +20981,7 @@ mod tests {
             vec![crate::squad_store::StoredMember {
                 attach_id: String::new(),
                 tombstone: false,
+                detached: false,
                 tab_name: None,
                 cwd: None,
                 worker: Some("worker".into()),
@@ -20499,6 +21061,7 @@ mod tests {
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
                     tombstone: false,
+                    detached: false,
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-live".into()),
@@ -20508,6 +21071,7 @@ mod tests {
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
                     tombstone: false,
+                    detached: false,
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-reaped".into()),
@@ -20577,6 +21141,7 @@ mod tests {
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
                     tombstone: false,
+                    detached: false,
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-one".into()),
@@ -20586,6 +21151,7 @@ mod tests {
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
                     tombstone: false,
+                    detached: false,
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-two".into()),
@@ -23284,6 +23850,113 @@ mod tests {
     }
 
     #[test]
+    fn detached_live_worker_row_is_paneless_but_not_exited() {
+        let (mut core, _client_id, p1, _p2, _rx) = seen_test_core();
+        let mut worker = agent_in("test", p1, Some(AgentBadge::Working), false);
+        worker.name = "detached-worker".into();
+        worker.harness = Some("codex".into());
+        worker.harness_session_id = Some("session-detached".into());
+        core.agents = vec![worker];
+
+        core.detach_worker_pane(p1).unwrap();
+
+        let row = core
+            .agent_rows()
+            .into_iter()
+            .find(|row| row.name == "detached-worker")
+            .expect("detached worker remains visible");
+        assert_eq!(row.pane_id, None, "detached worker is paneless");
+        assert!(!row.exited, "detached worker is still alive");
+        assert!(
+            core.panes.contains_key(&p1),
+            "detachment did not reap the PTY"
+        );
+        assert!(
+            core.session.find_pane(p1).is_none(),
+            "detachment removed the pane from every visible tree"
+        );
+
+        core.reap_pane(p1);
+    }
+
+    #[test]
+    fn resume_reattaches_the_same_detached_pane_without_spawning() {
+        let (mut core, client_id, p1, _p2, _rx) = seen_test_core();
+        let mut worker = agent_in("test", p1, Some(AgentBadge::Working), false);
+        worker.name = "detached-worker".into();
+        worker.harness = Some("codex".into());
+        worker.harness_session_id = Some("session-detached".into());
+        core.agents = vec![worker];
+        core.detach_worker_pane(p1).unwrap();
+
+        let result = core.resume_one("detached-worker", None, client_id, (1, 1), (24, 40), false);
+        match result {
+            ResumeOutcome::Resumed { pane, squad, .. } => {
+                assert_eq!(pane, p1, "resume grafted the original pane");
+                assert_eq!(squad, 1, "resume returned it to its owning squad");
+            }
+            other => panic!("expected same-pane reattach, got {other:?}"),
+        }
+        assert!(
+            core.session.find_pane(p1).is_some(),
+            "pane is back in a tree"
+        );
+        assert!(!core.detached_panes.contains_key(&p1));
+        assert_eq!(core.worker_pane.get("detached-worker"), Some(&vec![p1]));
+        let row = core
+            .agent_rows()
+            .into_iter()
+            .find(|row| row.name == "detached-worker")
+            .unwrap();
+        assert_eq!(row.pane_id, Some(p1), "reattached row is pane-hosted");
+
+        for pane in core.panes.keys().copied().collect::<Vec<_>>() {
+            core.reap_pane(pane);
+        }
+    }
+
+    #[test]
+    fn detached_child_exit_tombstones_member_and_clears_roster() {
+        let (mut core, _client_id, p1, _p2, _rx) = seen_test_core();
+        let mut worker = agent_in("test", p1, Some(AgentBadge::Working), false);
+        worker.name = "detached-worker".into();
+        worker.harness = Some("codex".into());
+        worker.harness_session_id = Some("session-detached".into());
+        core.agents = vec![worker];
+        core.detach_worker_pane(p1).unwrap();
+        let child = core.panes[&p1].pty.child_pid().unwrap();
+        assert_eq!(
+            unsafe { libc::kill(child as libc::pid_t, libc::SIGKILL) },
+            0
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !core.panes[&p1].pty.is_reap_ready() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            core.panes[&p1].pty.is_reap_ready(),
+            "child exit was observed"
+        );
+
+        assert!(matches!(core.reap_dead_children(vec![p1]), Flow::Continue));
+        assert!(!core.panes.contains_key(&p1));
+        assert!(!core.detached_panes.contains_key(&p1));
+        let member = core.squad_members[&1]
+            .iter()
+            .find(|member| member.worker.as_deref() == Some("detached-worker"))
+            .unwrap();
+        assert!(
+            member.tombstone,
+            "natural detached exit leaves a dead marker"
+        );
+        assert!(!member.detached, "dead member is no longer detached");
+
+        for pane in core.panes.keys().copied().collect::<Vec<_>>() {
+            core.reap_pane(pane);
+        }
+    }
+
+    #[test]
     fn reap_sweeps_attach_map_and_row_reverts_to_watch_only() {
         // x-0090 AC1-FR: killing the mapped pane sweeps the map (eager) AND the
         // lazy `panes` liveness check reverts the row to watch-only attachable,
@@ -24026,6 +24699,7 @@ mod tests {
             vec![crate::squad_store::StoredMember {
                 attach_id: attach.into(),
                 tombstone: false,
+                detached: false,
                 tab_name: None,
                 cwd: None,
                 worker: None,
@@ -24040,6 +24714,7 @@ mod tests {
         crate::squad_store::StoredMember {
             attach_id: id.into(),
             tombstone,
+            detached: false,
             tab_name: None,
             cwd: None,
             worker: None,
@@ -24496,6 +25171,7 @@ mod tests {
         crate::squad_store::StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            detached: false,
             tab_name: None,
             cwd: Some(cwd.into()),
             worker: Some(name.into()),
@@ -24661,6 +25337,7 @@ mod tests {
                 crate::squad_store::StoredMember {
                     attach_id: "deadbee1".into(),
                     tombstone: false,
+                    detached: false,
                     tab_name: None,
                     cwd: None,
                     worker: None,
@@ -25458,6 +26135,7 @@ mod tests {
             vec![crate::squad_store::StoredMember {
                 attach_id: String::new(),
                 tombstone: false,
+                detached: false,
                 tab_name: None,
                 cwd: None,
                 worker: Some("worker".into()),
@@ -25495,6 +26173,7 @@ mod tests {
             vec![crate::squad_store::StoredMember {
                 attach_id: String::new(),
                 tombstone: false,
+                detached: false,
                 tab_name: None,
                 cwd: None,
                 worker: Some("reused-name".into()),
@@ -25588,6 +26267,7 @@ mod tests {
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
                     tombstone: false,
+                    detached: false,
                     tab_name: None,
                     cwd: None,
                     worker: Some("reused-name".into()),
@@ -25597,6 +26277,7 @@ mod tests {
                 crate::squad_store::StoredMember {
                     attach_id: String::new(),
                     tombstone: false,
+                    detached: false,
                     tab_name: None,
                     cwd: None,
                     worker: Some("reused-name".into()),
@@ -25629,6 +26310,7 @@ mod tests {
         let member = |harness: &str, session_id: &str| crate::squad_store::StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            detached: false,
             tab_name: None,
             cwd: Some("/elsewhere".into()),
             worker: Some("reused-name".into()),
@@ -25668,6 +26350,7 @@ mod tests {
         let first = crate::squad_store::StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            detached: false,
             tab_name: None,
             cwd: None,
             worker: Some("reused-name".into()),
@@ -25911,6 +26594,7 @@ mod tests {
             vec![crate::squad_store::StoredMember {
                 attach_id: "c19cd2c3".into(),
                 tombstone: false,
+                detached: false,
                 tab_name: Some("old".into()),
                 cwd: None,
                 worker: None,
@@ -26038,6 +26722,7 @@ mod tests {
             vec![crate::squad_store::StoredMember {
                 attach_id: "c19cd2c3".into(),
                 tombstone: false,
+                detached: false,
                 tab_name: Some("home".into()),
                 cwd: None,
                 worker: None,
@@ -26099,6 +26784,7 @@ mod tests {
             vec![crate::squad_store::StoredMember {
                 attach_id: "c19cd2c3".into(),
                 tombstone: false,
+                detached: false,
                 tab_name: Some("src".into()),
                 cwd: None,
                 worker: None,
@@ -26498,6 +27184,7 @@ mod tests {
             worker_pane: HashMap::new(),
             worker_session_pane: HashMap::new(),
             held_workers: HashMap::new(),
+            detached_panes: HashMap::new(),
             diff_pane: None,
             thread_pane: None,
             thread_pane_noticed: false,
@@ -26507,6 +27194,7 @@ mod tests {
             external_lifecycle: Vec::new(),
             persist_degraded_notified: false,
             restored: false,
+            pre_restore_squads: HashSet::new(),
             topology_dirty: false,
             last_topology_flush: None,
             reentry_verdict: None,
@@ -28014,6 +28702,7 @@ mod tests {
         let member = crate::squad_store::StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            detached: false,
             tab_name: None,
             cwd: Some("/tmp".into()),
             worker: Some("t-keeper-worker".into()),

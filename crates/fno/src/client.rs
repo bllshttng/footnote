@@ -1729,6 +1729,8 @@ enum MenuAction {
     /// Break a pane-hosted row's live pane out into its own tab
     /// (`Command::BreakPane`) - the menu twin of dragging its grip to the strip.
     BreakOut,
+    /// Detach a pane-hosted worker while keeping its PTY live.
+    Detach,
     /// Relocate a pane-hosted row's live pane into ANOTHER workspace. Opens the
     /// move picker (the same numbered picker `m` uses for a tab); the chosen
     /// workspace's active-tab focus pane is the `MovePane` anchor, so the live
@@ -1779,6 +1781,8 @@ enum MenuAction {
     /// (x-92d3 6.2) Respawn an exited row - the menu twin of peek `r`, the
     /// same `Command::RespawnAgent`.
     Resume,
+    /// Reattach a live paneless row whose server-side session is still present.
+    Reattach,
     /// (x-92d3 6.2) Mail this agent - opens the SAME peek overlay and its
     /// free-text composer (`peek_input`) that peek `m` opens, never a second
     /// input surface.
@@ -1892,6 +1896,7 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
             PopupRow::FullWidth("▭ New Tab".into()),
             &[MenuAction::BreakOut],
         );
+        add(entry("⇱", "Detach pane"), &[MenuAction::Detach]);
         // Ungated by pane count. A row whose pane is on screen and has no
         // neighbour `dir`-ward gets the server's "no pane in that direction"
         // notice, the same fail-closed feedback the paneless branch relies on;
@@ -1944,6 +1949,9 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         // A live row that is neither pane-hosted nor attachable here.
         add(entry("◉", "Peek"), &[MenuAction::Peek]);
         add(entry("✉", "Mail"), &[MenuAction::Mail]);
+        if agent.no_pane_reason == Some(AgentNoPaneReason::LivePaneless) {
+            add(entry("↩", "Reattach"), &[MenuAction::Reattach]);
+        }
         add(entry("■", "Stop"), &[MenuAction::Stop]);
         add(inert("✕", "Remove", "stop first"), &[]);
     }
@@ -13745,6 +13753,15 @@ async fn execute_row_menu_action(
             .map_err(|e| format!("break send failed: {e}"))?,
             None => view.set_notice("agent has no pane here".into()),
         },
+        MenuAction::Detach => match (a.pane_id, a.exited) {
+            (Some(pid), false) => write_msg(
+                sock_w,
+                &ClientMsg::Command(Command::DetachPane { pane: pid }),
+            )
+            .await
+            .map_err(|e| format!("detach send failed: {e}"))?,
+            _ => view.set_notice("only a live pane-hosted worker can detach".into()),
+        },
         MenuAction::MoveToWorkspace => match a.pane_id {
             Some(pid) => {
                 // Recomputed at execute (a workspace added or removed between
@@ -13811,6 +13828,20 @@ async fn execute_row_menu_action(
                 .map_err(|e| format!("respawn send failed: {e}"))?;
             } else {
                 view.set_notice("only an exited row can resume".into());
+            }
+        }
+        MenuAction::Reattach => {
+            if !a.exited && a.pane_id.is_none() {
+                write_msg(
+                    sock_w,
+                    &ClientMsg::Command(Command::ResumeAgent {
+                        name: a.name.clone(),
+                    }),
+                )
+                .await
+                .map_err(|e| format!("reattach send failed: {e}"))?;
+            } else {
+                view.set_notice("only a live paneless row can reattach".into());
             }
         }
         // Unreachable: the crossed-pair guard above returns before an agent
@@ -14949,6 +14980,20 @@ async fn selector_keys(
                     // cursor gets an on-screen notice, never a silent close or a
                     // bare beep (x-f331 US3).
                     None => view.set_notice("no action for this row".into()),
+                }
+            }
+            b'd' => {
+                let pane = match view.display_rows().get(cur) {
+                    Some(DisplayRow::Agent(a)) if a.pane_id.is_some() && !a.exited => a.pane_id,
+                    _ => None,
+                };
+                match pane {
+                    Some(pane) => {
+                        write_msg(sock_w, &ClientMsg::Command(Command::DetachPane { pane }))
+                            .await
+                            .map_err(|e| format!("detach send failed: {e}"))?;
+                    }
+                    None => view.set_notice("only a live pane-hosted worker can detach".into()),
                 }
             }
             b'r' => {
@@ -21962,6 +22007,12 @@ mod tests {
                 "pane row offers Move {d:?}"
             );
         }
+        assert!(
+            menu_labels(&pane)
+                .iter()
+                .any(|label| label == "Detach pane"),
+            "a live pane row offers row-scoped detach"
+        );
         assert!(pane.actions.contains(&super::MenuAction::BreakOut));
         let dead = super::build_row_menu(&mk("d", None, None, true), Anchor::Center);
         assert!(dead.actions.contains(&super::MenuAction::Remove));
@@ -24943,6 +24994,30 @@ mod tests {
         assert_eq!(
             menu_command_for(&mut v, super::MenuAction::BreakOut).await,
             Command::BreakPane { pane: 7 }
+        );
+    }
+
+    #[tokio::test]
+    async fn row_menu_detach_sends_the_pane_id_without_global_detach() {
+        let row = pane_hosted_row("p", 7);
+        let mut v = view_with_agents(vec![row.clone()]);
+        v.row_menu = Some(build_row_menu(&row, Anchor::Center));
+        assert_eq!(
+            menu_command_for(&mut v, super::MenuAction::Detach).await,
+            Command::DetachPane { pane: 7 }
+        );
+    }
+
+    #[tokio::test]
+    async fn row_menu_reattach_sends_resume_for_a_live_paneless_row() {
+        let mut row = pane_hosted_row("p", 0);
+        row.pane_id = None;
+        row.no_pane_reason = Some(AgentNoPaneReason::LivePaneless);
+        let mut v = view_with_agents(vec![row.clone()]);
+        v.row_menu = Some(build_row_menu(&row, Anchor::Center));
+        assert_eq!(
+            menu_command_for(&mut v, super::MenuAction::Reattach).await,
+            Command::ResumeAgent { name: "p".into() }
         );
     }
 
@@ -29220,6 +29295,21 @@ mod tests {
         selector_keys(&mut v, b"k", &mut buf).await.unwrap();
         assert_eq!(v.selector, Some(5), "k skips it back");
         assert!(buf.is_empty(), "navigation sends nothing");
+    }
+
+    #[tokio::test]
+    async fn selector_d_on_live_pane_row_sends_row_detach_shape() {
+        let row = pane_hosted_row("worker", 10);
+        let mut v = view_with_agents(vec![row]);
+        let idx = agent_row_at(&v, |a| a.name == "worker");
+        v.selector = Some(idx);
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"d", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::DetachPane { pane: 10 }],
+            "sideline d sends the row-scoped detach command"
+        );
     }
 
     // ---- x-653d: session navigator (prefix+f) ----

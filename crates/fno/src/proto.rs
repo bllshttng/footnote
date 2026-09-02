@@ -306,7 +306,11 @@ fn default_true() -> bool {
 /// v61 (x-7d02, DND presence): `AgentRow.dnd` - additive do-not-disturb
 /// presence, separate from the liveness badge; the pane-send DND refusal
 /// rides the same generation.
-pub const PROTO_VERSION: u32 = 61;
+///
+/// v62 (row detach): `Command::DetachPane { pane }` removes a live
+/// worker pane from the visible tree without changing the frozen client-session
+/// `ClientMsg::Detach` behavior.
+pub const PROTO_VERSION: u32 = 62;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1487,6 +1491,13 @@ pub enum Command {
     /// background tab, and the focus repoint then pulls the viewer to it. A
     /// stale id is refused fail-closed by the server, like `MovePane`.
     BreakPane {
+        pane: u64,
+    },
+    /// (v62, row detach) Remove a live worker pane from the visible tree while
+    /// retaining its PTY/keeper for a later row attach or resume. This is
+    /// deliberately distinct from [`ClientMsg::Detach`], which leaves the
+    /// client session entirely.
+    DetachPane {
         pane: u64,
     },
     /// (v43, x-d6a8) Join the whole `src_tab` into `anchor_pane`'s tab as a split
@@ -3930,6 +3941,13 @@ mod tests {
     }
 
     #[test]
+    fn proto_accepts_row_detach_command_shape() {
+        let raw = serde_json::json!({"DetachPane": {"pane": 7}});
+        let decoded = serde_json::from_value::<Command>(raw).unwrap();
+        assert_eq!(decoded, Command::DetachPane { pane: 7 });
+    }
+
+    #[test]
     fn proto_client_msgs_roundtrip() {
         for msg in [
             ClientMsg::Attach {
@@ -3948,6 +3966,7 @@ mod tests {
             ClientMsg::Command(Command::SelectTab(3)),
             ClientMsg::Command(Command::SelectSquad(42)),
             ClientMsg::Command(Command::FocusPane(3)),
+            ClientMsg::Command(Command::DetachPane { pane: 7 }),
             ClientMsg::Command(Command::attach_agent("c19cd2c3")),
             ClientMsg::Command(Command::DispatchNode {
                 node: "x-a496".into(),
@@ -4095,7 +4114,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 61);
+        assert_eq!(PROTO_VERSION, 62);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,

@@ -70,7 +70,7 @@ fn ac2_err_refuses_at_fleet_ceiling_with_positive_marker() {
 
     assert_eq!(
         decision.refusal(),
-        Some(format!("process admission refused: count=2 ceiling=2 scope=fleet reason=over-limit{BYPASS_HINT}").into())
+        Some(format!("process admission refused: count=2 ceiling=2 scope=fleet reason=over-limit{BYPASS_HINT}"))
     );
 }
 
@@ -84,8 +84,7 @@ fn ac4_neg_refuses_incomplete_snapshot_without_substituting_zero() {
     assert_eq!(
         decision.refusal(),
         Some(
-            format!("process admission refused: count=unknown ceiling=2 scope=fleet reason=measurement-unavailable{BYPASS_HINT}")
-                .into(),
+            format!("process admission refused: count=unknown ceiling=2 scope=fleet reason=measurement-unavailable{BYPASS_HINT}"),
         )
     );
 }
@@ -135,7 +134,7 @@ fn ac2_err_creation_path_emits_positive_refusal_marker() {
 
     assert_eq!(
         refusal,
-        Some(format!("process admission refused: count=2 ceiling=2 scope=fleet reason=over-limit{BYPASS_HINT}").into())
+        Some(format!("process admission refused: count=2 ceiling=2 scope=fleet reason=over-limit{BYPASS_HINT}"))
     );
 }
 
