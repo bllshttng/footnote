@@ -377,7 +377,10 @@ fn resolved_rows() -> &'static std::collections::BTreeMap<String, toml::Value> {
 /// and the reason (AC1-ERR). A warning never un-configures a working
 /// harness: the bundled row stays and the mistake is on the record.
 pub fn override_warnings() -> Vec<String> {
-    warnings_slot().lock().map(|w| w.clone()).unwrap_or_default()
+    warnings_slot()
+        .lock()
+        .map(|w| w.clone())
+        .unwrap_or_default()
 }
 
 fn warnings_slot() -> &'static std::sync::Mutex<Vec<String>> {
@@ -424,8 +427,10 @@ fn apply_row_overrides(rows: &mut std::collections::BTreeMap<String, toml::Value
                 }
                 continue;
             }
-            let mut candidate =
-                rows.get(name).cloned().unwrap_or(toml::Value::Table(Default::default()));
+            let mut candidate = rows
+                .get(name)
+                .cloned()
+                .unwrap_or(toml::Value::Table(Default::default()));
             let normalized = lane_alias_normalized(over);
             merge_field(&mut candidate, &toml::Value::Table(normalized));
             // The merged candidate passes the SAME per-row validation the
@@ -455,7 +460,10 @@ fn apply_row_overrides(rows: &mut std::collections::BTreeMap<String, toml::Value
 /// row carries them under, so one override shape feeds both readers.
 fn lane_alias_normalized(over: &toml::Table) -> toml::Table {
     let mut out = over.clone();
-    for (alias, lane) in [("attach", "interactive_attach"), ("resume", "interactive_resume")] {
+    for (alias, lane) in [
+        ("attach", "interactive_attach"),
+        ("resume", "interactive_resume"),
+    ] {
         let Some(block) = out.remove(alias) else {
             continue;
         };
@@ -3452,7 +3460,10 @@ thread = true
         );
         std::env::set_var("PWD", &stage);
         std::env::set_var("HOME", &stage);
-        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", stage.join("global-settings.yaml"));
+        std::env::set_var(
+            "FNO_GLOBAL_SETTINGS_PATH",
+            stage.join("global-settings.yaml"),
+        );
         let mut rows: std::collections::BTreeMap<String, toml::Value> =
             toml::from_str::<toml::Value>(CAPABILITY_TOML)
                 .unwrap()

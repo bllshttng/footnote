@@ -156,8 +156,7 @@ fn sync_harness_capabilities() {
     let Ok(bytes) = std::fs::read(&canonical) else {
         return;
     };
-    let copy =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/harness_capabilities.toml");
+    let copy = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/harness_capabilities.toml");
     write_if_different(&copy, &bytes);
 }
 

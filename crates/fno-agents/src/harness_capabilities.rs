@@ -584,8 +584,26 @@ fn validate_probe_decl(field: &str, decl: &ProbeDecl) -> Result<(), ContractErro
 
 fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), ContractError> {
     let allowed_keys: BTreeSet<&str> = [
-        "1", "2", "3", "4", "5", "6", "7", "8", "9", "enter", "left", "right", "up", "down",
-        "tab", "esc", "y", "a", "d", "unsupported",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "enter",
+        "left",
+        "right",
+        "up",
+        "down",
+        "tab",
+        "esc",
+        "y",
+        "a",
+        "d",
+        "unsupported",
     ]
     .into_iter()
     .collect();
@@ -671,9 +689,7 @@ fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), Contrac
             }
         }
     }
-    if caps.ready_marker != "unsupported"
-        && !caps.ready_rule_ids.contains(&caps.ready_marker)
-    {
+    if caps.ready_marker != "unsupported" && !caps.ready_rule_ids.contains(&caps.ready_marker) {
         return Err(field_error(
             harness,
             "ready_marker",
