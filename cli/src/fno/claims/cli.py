@@ -495,11 +495,7 @@ def release(
         raise typer.Exit(code=2)
     try:
         released = release_claim(
-            key=key,
-            holder=holder,
-            strict=strict,
-            root=_node_aware_root(key),
-            sync_graph_mirror=key.startswith("node:"),
+            key=key, holder=holder, strict=strict, root=_node_aware_root(key)
         )
     except HolderMismatch as exc:
         typer.echo(f"holder mismatch: {exc}", err=True)

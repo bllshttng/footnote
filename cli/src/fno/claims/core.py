@@ -987,7 +987,7 @@ def release_claim(
     *,
     strict: bool = False,
     root: Optional[Path] = None,
-    sync_graph_mirror: bool = False,
+    sync_graph_mirror: bool = True,
 ) -> Optional["Claim"]:
     """Release a claim we hold.
 
@@ -999,10 +999,9 @@ def release_claim(
         case; strict mode is for explicit "this MUST be ours" callers.
       - File present but corrupted: silent success (treat as released).
 
-    ``sync_graph_mirror`` is an explicit opt-in for a confirmed global
-    ``node:`` release. It runs the shared post-release mirror cleanup after
-    the claim is gone; callers releasing test or repo-local claims leave the
-    configured graph untouched.
+    ``sync_graph_mirror`` defaults to true for confirmed ``node:`` releases.
+    It runs the shared post-release mirror cleanup after the claim is gone;
+    callers releasing test or repo-local claims can disable it explicitly.
 
     The duration_held_ms field in the audit event is best-effort: read from
     acquired_at minus now. If the file disappears between read and unlink,

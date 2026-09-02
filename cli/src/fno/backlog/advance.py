@@ -2923,12 +2923,7 @@ def _safe_release(key: str, holder: str, root) -> None:
     from fno.claims.core import release_claim
 
     try:
-        release_claim(
-            key,
-            holder,
-            root=root,
-            sync_graph_mirror=key.startswith("node:"),
-        )
+        release_claim(key, holder, root=root)
     except Exception as exc:  # noqa: BLE001
         _LOG.debug("advance: dispatch-reservation release failed for %s: %s", key, exc)
 
