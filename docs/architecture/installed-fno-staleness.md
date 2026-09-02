@@ -12,6 +12,8 @@ That group was reachable as both `fno backlog capture` and `fno backlog inbox` a
 
 The resolved local source checkout is the comparison boundary. Doctor does not fetch or compare against remote state. A local checkout can therefore trail `origin/main`. Doctor reports that measured distance as a blocker so a binary fresh against stale source cannot authorize downstream verification. The `origin/main` value is the local remote-tracking ref, so it can itself need a fetch before the operator treats the distance as current.
 
+`--fix` refuses while source-checkout sync is behind. Repairing from stale source cannot establish freshness.
+
 - **Revision compare (high-signal).** `fno doctor update` records source `git rev-parse HEAD` into `~/.fno/installed-rev` after a successful install. Source precedence is `--source`, `$FNO_SOURCE`, `~/.fno/source-path`, then well-known paths. `doctor` reads and compares source HEAD. A marker behind source means stale. An absent marker means "rev unknown" and falls back to the probe.
 - **Capability probe (always available).** Runs `fno backlog capture --help` (the capture-tier verb, formerly named `backlog inbox`) against the installed CLI. A `No such command` failure proves the verb is missing regardless of any marker. The probe outcome is a three-valued `present | missing | unknown` so a "could not probe" result can never be conflated with "proven missing".
 

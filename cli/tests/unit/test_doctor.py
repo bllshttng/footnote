@@ -235,6 +235,98 @@ def test_source_checkout_behind_makes_doctor_exit_nonzero(
     assert "source checkout" in result.stderr
 
 
+def test_build_report_checks_source_sync_after_post_merge_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    source = Path("/src")
+
+    monkeypatch.setattr(doctor, "_resolve_source", lambda _: source)
+    monkeypatch.setattr(doctor, "_source_rev", lambda _: "source")
+    monkeypatch.setattr(doctor, "_read_marker", lambda: "source")
+    monkeypatch.setattr(doctor, "_probe_installed_verb", lambda: "present")
+    monkeypatch.setattr(doctor, "_rust_report", lambda: {"binary": None, "revision": None})
+    monkeypatch.setattr(doctor, "_rust_source_rev", lambda _: None)
+    monkeypatch.setattr(doctor, "_cargo_bin_present", lambda: False)
+    monkeypatch.setattr(doctor, "_deployed_config_keys", lambda: frozenset())
+    monkeypatch.setattr(doctor, "_source_config_keys", lambda _: frozenset())
+    monkeypatch.setattr(doctor, "_python_content_drift", lambda _: 0)
+    monkeypatch.setattr(doctor, "_verdict", lambda **_: {"status": "fresh"})
+    monkeypatch.setattr(
+        doctor,
+        "_post_merge_sync_health",
+        lambda: events.append("post-merge") or {},
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_source_checkout_sync",
+        lambda _: events.append("source-sync") or {"status": "current", "behind": 0},
+    )
+    for name in (
+        "_mux_front_door_report",
+        "_daemon_drift_warning",
+        "_orphan_report",
+        "_pr_watch_liveness",
+        "_fd_limit_report",
+        "_dead_letter_report",
+        "_codex_app_server_report",
+        "_managed_block_report",
+        "_harness_surface_report",
+        "_plugin_hooks_launch_report",
+        "_pre_push_hook_report",
+        "_groom_health",
+        "_archive_id_collisions",
+        "_launch_agent_failures",
+        "_self_attested_coverage_report",
+        "_plugin_cache_report",
+        "_silent_switch_report",
+        "_auto_merge_review_gap",
+    ):
+        monkeypatch.setattr(doctor, name, lambda *args, **kwargs: {})
+    monkeypatch.setattr(doctor, "_auto_merge_armed_manifests", lambda: [])
+
+    from fno import update
+
+    monkeypatch.setattr(update, "stale_mux_servers", lambda: [])
+
+    doctor.build_report(source)
+
+    assert events == ["post-merge", "source-sync"]
+
+
+def test_source_checkout_behind_refuses_fix_before_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="source",
+        marker="installed",
+        capture_present="present",
+        source_checkout_sync={
+            "status": "behind",
+            "behind": 117,
+            "source_head": "source",
+            "remote_head": "remote",
+            "detail": "",
+        },
+    )
+    monkeypatch.setattr(doctor, "_post_merge_sync_health", lambda: {})
+
+    from fno import update
+
+    def tripwire(*args, **kwargs):
+        raise AssertionError("repair must not run from a stale source checkout")
+
+    monkeypatch.setattr(update, "update_command", tripwire)
+
+    result = runner.invoke(app, ["doctor", "--fix"])
+
+    assert result.exit_code == 1
+    assert "behind origin/main" in result.stdout
+    assert "refused" in result.stderr
+
+
 # ---------------------------------------------------------------------------
 # x-3248 Change 5: per-harness surface freshness / dedupe
 # ---------------------------------------------------------------------------

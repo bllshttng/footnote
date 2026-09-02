@@ -3898,7 +3898,6 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
         source_config_keys=source_config_keys,
         content_drift_count=content_drift,
     )
-    result["source_checkout_sync"] = _source_checkout_sync(src)
     # Advisory front-door fields (x-c267); never change status/exit.
     result.update(_mux_front_door_report())
     result["daemon_drift"] = _daemon_drift_warning()
@@ -3957,6 +3956,7 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     result["groom"] = _groom_health()
     result["archive_id_collisions"] = _archive_id_collisions()
     result["post_merge_sync"] = _post_merge_sync_health()
+    result["source_checkout_sync"] = _source_checkout_sync(src)
     result["launch_agents"] = _launch_agent_failures()
 
     # Advisory self-attestation share (x-7f7b): per merged PR in the recent
@@ -4171,6 +4171,9 @@ def doctor_command(
 
     result = build_report(source)
     blockers = _blockers(result)
+    source_checkout_blocked = (
+        (result.get("source_checkout_sync") or {}).get("status") == "behind"
+    )
 
     if blockers_only:
         _emit_blockers(blockers, err=False)
@@ -4200,6 +4203,18 @@ def doctor_command(
             preamble_line = _preamble_budget_line(src)
             if preamble_line is not None:
                 typer.echo(preamble_line)
+
+    # A repair from stale source can reinstall the same pre-merge snapshot and
+    # then exec away before the final blocker check. Refuse every repair path
+    # until the source checkout is synced, so --fix never reports success over
+    # a stale comparison boundary.
+    if fix and source_checkout_blocked:
+        typer.echo(
+            "fno doctor: --fix refused: resolved source checkout is behind "
+            "origin/main; sync the checkout before repairing.",
+            err=True,
+        )
+        raise typer.Exit(1)
 
     # Report BEFORE delegating: `fno doctor update` execs/replaces this process.
     if fix:
@@ -4314,9 +4329,6 @@ def doctor_command(
     id_collisions = bool(
         (result.get("archive_id_collisions") or {}).get("count")
         or (result.get("archive_id_collisions") or {}).get("unreadable")
-    )
-    source_checkout_blocked = (
-        (result.get("source_checkout_sync") or {}).get("status") == "behind"
     )
     raise typer.Exit(
         1
