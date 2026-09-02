@@ -5231,6 +5231,8 @@ def harness_probe(
     ),
     as_json: bool = typer.Option(False, "--json", "-J", help="Machine-readable report."),
 ) -> None:
+    import json as _json
+
     from fno.agents.capability_probe import probe_harness
 
     report = probe_harness(harness, live=live, write=write)
