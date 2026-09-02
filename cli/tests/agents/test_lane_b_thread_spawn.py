@@ -108,11 +108,14 @@ def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit() -> None:
         resolve_dispatch(harness="pi", substrate="thread")
 
 
-def test_lane_b_spawn_is_not_wired_into_dispatch_spawn() -> None:
-    """The explicit internal entry point is the ONLY caller surface: the
-    public dispatch_spawn body does not reference it."""
+def test_lane_b_spawn_wiring_names_only_the_wired_keeper_harness() -> None:
+    """The public dispatch_spawn body reaches the keeper entry point only
+    through the cursor-agent arm. pi's arm is still unbuilt, so pi must not
+    appear in the wiring: its spawn arm ships with its own journey."""
     source = inspect.getsource(dispatch_mod.dispatch_spawn)
-    assert "_lane_b_thread_spawn" not in source
+    assert 'harness="cursor-agent"' in source
+    assert "_lane_b_thread_spawn" in source
+    assert 'harness="pi"' not in source
 
 
 # ---------------------------------------------------------------------------

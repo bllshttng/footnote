@@ -1,6 +1,7 @@
 # cursor-agent readiness manifest, pinned against a live pane.
 #
-# The pane is the only fno driving lane. The --print stream-json mode is
+# fno drives cursor-agent through a hosted pty: a mux pane attended, or the
+# keeper-hosted thread lane dispatched. The --print stream-json mode is
 # output-only and has no input-format, rpc, acp, serve, or stdio transport.
 # The captured idle marker is `→ Add a follow-up`; working screens carry a
 # braille spinner followed by `Working` or `Running`.

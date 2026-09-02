@@ -41,11 +41,16 @@ KNOWN_HARNESSES: tuple[str, ...] = (
 # pane-only and stay out of this tuple.
 #
 # pi is pane-only TODAY and stays out for the same reason opencode's thread bit
-# reads false: the lane has to exist before the roster advertises it. pi's rpc
-# transport is built and tested (`fno.agents.harnesses.pi.PiRpcSession`), but
-# `dispatch_spawn` has no pi arm, so listing pi here sent a
-# `--substrate thread` spawn past this gate and into the terminal else-branch,
-# which refuses by naming gemini's retirement - a harness the operator never
-# mentioned. A wrong refusal is worse than an honest one, and the honest one is
-# this tuple.
-SPAWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode")
+# once read false: the lane has to exist before the roster advertises it. pi's
+# rpc transport is built and tested (`fno.agents.harnesses.pi.PiRpcSession`)
+# and its keeper lane has a passing journey, but `dispatch_spawn` still has no
+# pi arm, so listing pi here would send a `--substrate thread` spawn past this
+# gate and into the terminal else-branch, which refuses by naming gemini's
+# retirement - a harness the operator never mentioned. A wrong refusal is worse
+# than an honest one, and the honest one is this tuple.
+#
+# cursor-agent joins on the keeper lane (x-61bc's generic thread lane): the
+# dispatch_spawn arm mints the chat id through `create-chat`, hosts the TUI
+# under `fno-agents-worker --keeper`, and the journey backs it. Its `thread`
+# row reads true behind that same journey.
+SPAWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode", "cursor-agent")

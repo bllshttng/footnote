@@ -757,11 +757,16 @@ keys = []
 
 [harness.cursor-agent.resume_strategy.forms.interactive_create]
 kind = "flag"
-tokens = ["cursor-agent", "--resume", "{session_id}"]
+tokens = ["cursor-agent", "--resume", "{session_id}", "--trust"]
+# Create and resume are the SAME launch once the id exists: create-chat mints
+# it, every later process rejoins it. --trust is NOT the bypass axis (--force
+# is): an untrusted cwd refuses with Workspace Trust Required and does no
+# work, and fno always spawns into a worktree it just created. -w/--worktree
+# is never passed; the worktree is fno's.
 
 [harness.cursor-agent.resume_strategy.forms.interactive_resume]
 kind = "flag"
-tokens = ["cursor-agent", "--resume", "{session_id}"]
+tokens = ["cursor-agent", "--resume", "{session_id}", "--trust"]
 
 [harness.cursor-agent.resume_strategy.forms.interactive_attach]
 kind = "flag"

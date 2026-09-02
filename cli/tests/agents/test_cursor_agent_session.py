@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 
 
-def test_cursor_agent_capability_contract_is_pane_bound_and_callee_minted():
+def test_cursor_agent_capability_contract_is_pty_hosted_and_callee_minted():
     from fno.agents.harness_map import capabilities, render_session_argv
 
     caps = capabilities("cursor-agent")
 
-    assert caps["thread"] is False
+    assert caps["thread"] is False  # flips with the keeper journey; see below
     assert caps["ready_marker"] == "idle_follow_up"
     assert caps["ready_rule_ids"] == ["idle_follow_up"]
     assert caps["send_keys_enter_delay_ms"] == 0
@@ -22,9 +22,17 @@ def test_cursor_agent_capability_contract_is_pane_bound_and_callee_minted():
         "required": True,
         "timeout_ms": 60000,
     }
+    # The declared form IS the launch argv: --trust rides it because an
+    # untrusted cwd refuses with Workspace Trust Required, and fno always
+    # spawns into a worktree it just created.
     assert render_session_argv(
         "cursor-agent", "interactive_resume", "fadad56b-8008-45f5-b809-f9fab7074534"
-    ) == ["cursor-agent", "--resume", "fadad56b-8008-45f5-b809-f9fab7074534"]
+    ) == [
+        "cursor-agent",
+        "--resume",
+        "fadad56b-8008-45f5-b809-f9fab7074534",
+        "--trust",
+    ]
 
 
 def test_cursor_agent_resume_rejects_empty_and_truncated_ids():

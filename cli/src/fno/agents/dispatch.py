@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import uuid
 import os
 import re
 import select
@@ -1686,11 +1687,55 @@ def _keeper_identify(sock: Path, timeout_sec: float = 10.0) -> dict:
     raise TimeoutError(f"no keeper answered Identify on {sock}: {last_err}")
 
 
+def _mint_thread_session_id(
+    harness: str, cwd: Path, requested: Optional[str] = None
+) -> str:
+    """The harness session id a keeper thread launches on, fixed BEFORE launch.
+
+    Two shapes, declared by the row's ``session_binding.strategy``:
+    caller-assigned (pi, the default) - fno mints a UUIDv4 and the harness
+    adopts it. ``callee-minted-read-back`` (cursor-agent) - only the harness
+    mints, so fno runs ``create-chat``, reads the one id line, and kills the
+    helper (it never exits on its own). Either way the id exists before any
+    worker starts and rides the registry row from birth. A caller-requested id
+    (``spawn --resume``) skips the mint and validates instead, because a
+    truncated or bare id is a picker or a rival chat, never a resume.
+    """
+    if requested is not None:
+        if harness == "cursor-agent":
+            from fno.agents.harnesses.cursor_agent import (
+                CursorAgentSessionError,
+                _require_chat_id,
+            )
+
+            try:
+                return _require_chat_id(requested)
+            except CursorAgentSessionError as exc:
+                raise DispatchAskError(str(exc), exit_code=2) from exc
+        return requested
+    if harness == "cursor-agent":
+        from fno.agents.harnesses.cursor_agent import (
+            CursorAgentSessionError,
+            create_chat,
+        )
+
+        try:
+            return create_chat(cwd)
+        except CursorAgentSessionError as exc:
+            raise DispatchAskError(str(exc), exit_code=2) from exc
+    return str(uuid.uuid4())
+
+
 def _lane_b_thread_spawn(
     *,
     name: str,
     harness: str,
     cwd: Path,
+    model: Optional[str] = None,
+    yolo: bool = False,
+    permission_mode: Optional[str] = None,
+    add_dir: Optional[str] = None,
+    resume_session_id: Optional[str] = None,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
 ) -> dict:
     """Host a lane-B harness thread on a pane-less keeper (x-889a).
@@ -1716,8 +1761,6 @@ def _lane_b_thread_spawn(
     Returns the spawn receipt dict (session id, keeper socket, pids,
     rendered argv).
     """
-    import uuid
-
     from fno.agents.harness_map import render_session_argv, thread_lane
     from fno.harness_identity import scrub_ambient_identity
 
@@ -1756,7 +1799,9 @@ def _lane_b_thread_spawn(
                 exit_code=2,
             )
 
-        session_id = str(uuid.uuid4())
+        session_id = _mint_thread_session_id(
+            harness, cwd, requested=resume_session_id
+        )
         try:
             argv = render_session_argv(harness, "interactive_create", session_id)
         except DispatchResolveError as exc:
@@ -1765,7 +1810,38 @@ def _lane_b_thread_spawn(
                 f"argv: {exc}",
                 exit_code=2,
             ) from exc
-        if harness == "pi":
+        if harness == "cursor-agent":
+            # The pane lane's build_pane_argv appends the same completion. The
+            # declared form already carries --trust (an untrusted cwd refuses
+            # with Workspace Trust Required and fno always spawns into a fresh
+            # worktree); what rides here is the rest of the launch axes: the
+            # bypass, the one model axis, and the state-root grant the row's
+            # argv-add-dir cell declares.
+            from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
+            from fno.agents.mux_spawn import permission_pane_tokens
+
+            if permission_mode:
+                argv = [*argv, *permission_pane_tokens("cursor-agent", permission_mode)]
+            elif yolo:
+                argv = [*argv, "--force"]
+            if model:
+                argv = [*argv, "--model", model]
+            argv = [
+                *argv,
+                *add_dir_tokens(
+                    "cursor-agent",
+                    add_dir,
+                    worker_writable_dirs(cwd),
+                    unsupported=lambda flag: (_ for _ in ()).throw(
+                        DispatchAskError(
+                            f"{flag} is not supported on the cursor-agent "
+                            "thread lane",
+                            exit_code=2,
+                        )
+                    ),
+                ),
+            ]
+        elif harness == "pi":
             # Provider AND model, both, always: bare pi defaults to provider
             # google (credentials_not_configured here) and `--provider
             # openai-codex` without `--model` falls to a Bedrock model - the
@@ -1892,6 +1968,62 @@ def _lane_b_thread_spawn(
         "child_pid": reply.get("child_pid"),
         "argv": argv,
     }
+
+
+def _keeper_seed_submit(
+    *,
+    name: str,
+    harness: str,
+    session_id: str,
+    sock: Path,
+    message: str,
+) -> None:
+    """Deliver a thread spawn's seed to its keeper-hosted TUI.
+
+    A spawn that leaves the worker idle is the x-f22f shape: a row that did
+    nothing. The keeper child's composer is not painted the instant the
+    keeper answers Identify, so this waits for the harness's idle marker on
+    the keeper pty stream (the same read the journey proves; there is no
+    screen to scrape on a pane-less keeper) and only then hands the payload
+    to the mail lane's keeper injector, which types it with the row's own
+    settle delay. A marker that never paints is a raised error, not a silent
+    drop: the caller refuses the spawn rather than report a worker that will
+    never start.
+    """
+    import socket
+    import time
+
+    deadline = time.monotonic() + 60.0
+    buf = b""
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    conn.settimeout(2.0)
+    try:
+        conn.connect(str(sock))
+        while time.monotonic() < deadline and b"Add a follow-up" not in buf:
+            try:
+                chunk = conn.recv(4096)
+            except socket.timeout:
+                continue
+            if not chunk:
+                time.sleep(0.2)
+                continue
+            buf += chunk
+    finally:
+        conn.close()
+    if b"Add a follow-up" not in buf:
+        raise DispatchAskError(
+            f"keeper thread for {name!r} never painted its idle composer "
+            f"within 60s; the seed was not delivered. Inspect with "
+            f"'fno agents peek {name}' and send the prompt by mail.",
+            exit_code=1,
+        )
+    delivered = _mail_inject_keeper(name, message, harness=harness)
+    if not delivered:
+        raise DispatchAskError(
+            f"the seed for keeper thread {name!r} did not land; the worker "
+            f"is idle. Send it by mail: fno agents mail send {name}",
+            exit_code=1,
+        )
 
 
 def _claude_create_path(
@@ -3399,6 +3531,76 @@ def dispatch_spawn(
             kind="created",
             name=name,
             provider="codex",
+            short_id=session_id,
+            effective_message=effective_message,
+        )
+
+    # 3b-2. cursor-agent threads are keeper-hosted lane B (x-61bc's generic
+    # thread lane). The harness has no daemon and no bidirectional transport:
+    # the keeper holds the TUI's pty so the thread survives supervisor death,
+    # and the chat id is minted by `create-chat` (callee-minted-read-back)
+    # before the child launches. The pane stays the attended substrate; the
+    # thread lane is the dispatch one.
+    if harness == "cursor-agent":
+        if once or headless:
+            raise DispatchAskError(
+                "cursor-agent has no headless lane: --print is output-only "
+                "(no --input-format, no rpc), so there is no one-shot form. "
+                "Use the thread substrate for a persistent worker or "
+                "--substrate pane for an attended one.",
+                exit_code=2,
+            )
+        unsupported = next(
+            (
+                flag
+                for flag, value in (
+                    ("--role", launch_role),
+                    ("--agent", agent),
+                    ("--tools", tools),
+                    ("--deny-tools", deny_tools),
+                    ("--effort", effort),
+                )
+                if value
+            ),
+            None,
+        )
+        if unsupported is not None:
+            raise DispatchAskError(
+                f"{unsupported} is not supported on the cursor-agent thread "
+                "lane; drop it or use --substrate pane",
+                exit_code=2,
+            )
+        receipt = _lane_b_thread_spawn(
+            name=name,
+            harness="cursor-agent",
+            cwd=cwd,
+            model=model,
+            yolo=yolo,
+            permission_mode=permission_mode,
+            add_dir=add_dir,
+            resume_session_id=resume_session_id,
+            lock_timeout=lock_timeout,
+        )
+        session_id = receipt["session_id"]
+        if message.strip():
+            _keeper_seed_submit(
+                name=name,
+                harness="cursor-agent",
+                session_id=session_id,
+                sock=Path(receipt["keeper_socket"]),
+                message=message,
+            )
+        _emit_ev(
+            "agent_ask_done",
+            stage="dispatch",
+            name=name,
+            provider="cursor-agent",
+            substrate="thread",
+        )
+        return SpawnResult(
+            kind="created",
+            name=name,
+            provider="cursor-agent",
             short_id=session_id,
             effective_message=effective_message,
         )
