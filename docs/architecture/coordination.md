@@ -205,7 +205,7 @@ a session whose gates are all false (it just started).
 
 ## Dispatch width has one authority: the spawn gate
 
-Concurrency is bounded where the spawn is refused: `agents.max_live` over the live fleet census, and `agents.provider_limits.<provider>.lanes` per provider. The epic advance derives its dispatch width from those same counters (spawn-gate headroom) through the same functions `fno agents top` and `advance --explain` read, so no two surfaces can disagree about why a launch did not happen. The retired `config.parallel.max_lanes` knob was a second concurrency authority beside the real one; it stays parseable for one release, prints a deprecation line when set, and is otherwise ignored. Delete it from config.
+Concurrency is bounded where the spawn is refused. Two caps bind: `agents.max_live` over the live fleet census, and `agents.provider_limits.<provider>.lanes` per provider. The epic advance derives its width from those same counters. It reads them through the same functions that `fno agents top` and `advance --explain` use. No two surfaces can disagree about why a launch did not happen. The retired `config.parallel.max_lanes` knob was a second authority beside the real one. When the key is set, fno prints one deprecation line and ignores it. The key stays parseable for one release. Delete it from config.
 
 ## Selection-time enforcement (node claims)
 
