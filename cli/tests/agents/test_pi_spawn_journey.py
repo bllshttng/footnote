@@ -25,14 +25,14 @@ markers only:
      this synthetic manifest is its own business.
 
 RUN OF RECORD, 2026-09-02, pi 0.84.2 on a live openai-codex subscription,
-worktree debug builds: **GREEN, twice, 39.1s and 42.3s.** Evidence line:
-``child_pid=79111 keeper_pid=79102 session_id=ebdebdff-2965-414c-9f40-917f838f3f03``.
-The first two attempts were blocked before spawn (no fno-agents debug
-build; the spawn gate refusing at 1-min load 389 against a 96 trigger -
-not bypassed), and the next three fixed what they found: the injector
-keys on the harness session id, not the row name; it refuses to paste
-what it cannot confirm on a fresh cwd, which is why the seed rides the
-mail ladder and the spawn refuses to carry one at all.
+worktree debug builds: **GREEN, twice, 39.1s and 42.3s** on the pre-rebase
+arm (evidence ``child_pid=79111 keeper_pid=79102
+session_id=ebdebdff-2965-414c-9f40-917f838f3f03``); RE-RUN REQUIRED on the
+reconciled arm, which seeds through the keeper paste the cursor-agent lane
+landed while this branch was open. The first two attempts were blocked
+before spawn (no fno-agents debug build; the spawn gate refusing at 1-min
+load 389 against a 96 trigger - not bypassed). This line is updated with
+the reconciled run's own pid and session id when it lands.
 
 The live test is opt-in (``FNO_PI_LIVE=1``) because it spends real
 subscription tokens and needs this machine's pi credentials. It installs

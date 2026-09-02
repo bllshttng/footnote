@@ -576,10 +576,12 @@ def test_spawn_pi_thread_passes_the_seam_and_headless_refuses_unmeasured() -> No
 def test_spawn_pi_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) -> None:
     """`dispatch_spawn -H pi --substrate thread` reaches `_lane_b_thread_spawn`
     and returns its session id - the refusal text `unknown harness 'pi' on the
-    thread substrate` never renders (x-43bd AC)."""
+    thread substrate` never renders (x-43bd AC). The seed rides the keeper
+    paste, keyed to the MINTED id and pi's own composer-ready marker."""
     from fno.agents import dispatch
 
     calls: list[dict] = []
+    seeds: list[dict] = []
 
     def _fake_lane_b(*, name, harness, cwd, lock_timeout):
         calls.append({"name": name, "harness": harness, "cwd": cwd})
@@ -593,7 +595,19 @@ def test_spawn_pi_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) -> 
             "argv": ["pi"],
         }
 
+    def _fake_seed(*, name, session_id, sock, message, ready_marker):
+        seeds.append(
+            {
+                "name": name,
+                "session_id": session_id,
+                "sock": str(sock),
+                "message": message,
+                "ready_marker": ready_marker,
+            }
+        )
+
     monkeypatch.setattr(dispatch, "_lane_b_thread_spawn", _fake_lane_b)
+    monkeypatch.setattr(dispatch, "_keeper_seed_submit", _fake_seed)
 
     result = dispatch.dispatch_spawn(
         name="wkpi",
@@ -608,6 +622,16 @@ def test_spawn_pi_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) -> 
     assert calls == [
         {"name": "wkpi", "harness": "pi", "cwd": workdir}
     ], "the pi branch must drive the keeper lane exactly once"
+    # One seed, keyed to the minted id, pasted against pi's own ready marker.
+    # The message arrives with the ambient relay-compression envelope appended,
+    # so it is asserted by its start, never by equality.
+    assert len(seeds) == 1, f"exactly one seed paste, got {seeds!r}"
+    seed = seeds[0]
+    assert seed["name"] == "wkpi"
+    assert seed["session_id"] == "minted-pi-thread-id"
+    assert seed["sock"] == "/tmp/does-not-matter.sock"
+    assert seed["message"].startswith("hello")
+    assert seed["ready_marker"] == b"(sub)"
 
 
 def test_spawn_seam_refuses_an_absent_stance(monkeypatch) -> None:
