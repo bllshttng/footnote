@@ -203,8 +203,9 @@ pub fn shell_candidates(env_shell: Option<&OsStr>) -> Vec<OsString> {
     v
 }
 
-/// A live PTY-managed shell. The server owns this for the pane's lifetime -
-/// client attach/detach never touches it (AC4-HP).
+/// A live PTY-managed shell. Local panes keep their master in the mux server;
+/// worker panes use Keeper, where the server keeps only a socket. Client
+/// attach/detach never kills either form (AC4-HP).
 ///
 /// Two ownership forms. `Local` is today's inline master: the mux server
 /// process holds the pty master, and a server death hangs the child up
@@ -583,6 +584,8 @@ impl PtyShell {
             return Err(PtyError::Spawn("empty argv".into()));
         }
         let dir = keeper_dir();
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| PtyError::Spawn(format!("create keeper directory: {e}")))?;
         let sock_path = dir.join(format!("{session}-{pane_id}.sock"));
         let keeper_child = launch_keeper(
             keeper_bin, &sock_path, session, pane_id, rows, cols, cwd, argv,
@@ -959,6 +962,7 @@ fn keeper_handshake_quiet() -> std::time::Duration {
 /// Returns (stream, IdentifyReply json, ring bytes). The stream is returned
 /// with blocking reads restored. `None`-valued Ok means the socket never
 /// appeared (the keeper died at startup).
+#[allow(clippy::type_complexity)]
 fn keeper_handshake(
     sock_path: &std::path::Path,
     quiet: std::time::Duration,

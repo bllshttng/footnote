@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::time::Duration;
 
-use fno::proto::{AgentBadge, AgentRow};
+use fno::proto::{AgentBadge, AgentRow, Command as MuxCommand};
 
 /// A hermetic agents home next to the mux dir; the server's registry reader
 /// resolves it via `FNO_AGENTS_HOME` (inherited by the self-spawned server).
@@ -23,12 +23,50 @@ fn agents_home(scratch: &Scratch) -> PathBuf {
     scratch.0.join("agents-home")
 }
 
+fn worker_bin() -> PathBuf {
+    static WORKER_BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    WORKER_BIN
+        .get_or_init(|| {
+            let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fno-agents/target")
+                });
+            let path = target_dir.join("debug/fno-agents-worker");
+            if !path.is_file() {
+                let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+                let manifest =
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fno-agents/Cargo.toml");
+                let status = Command::new(cargo)
+                    .args(["build", "--manifest-path"])
+                    .arg(manifest)
+                    .args(["--bin", "fno-agents-worker"])
+                    .status()
+                    .expect("cargo builds the keeper worker");
+                assert!(status.success(), "keeper worker build failed: {status}");
+            }
+            assert!(
+                path.is_file(),
+                "keeper worker binary missing: {}",
+                path.display()
+            );
+            path
+        })
+        .clone()
+}
+
 fn pane(scratch: &Scratch, args: &[&str]) -> Output {
+    pane_at(scratch, &scratch.0, args)
+}
+
+fn pane_at(scratch: &Scratch, mux: &PathBuf, args: &[&str]) -> Output {
     scratch
         .command()
         .args(["mux", "pane"])
         .args(args)
+        .env("FNO_MUX_DIR", mux)
         .env("FNO_AGENTS_HOME", agents_home(scratch))
+        .env("FNO_AGENTS_WORKER_BIN", worker_bin())
         .env("SHELL", "/bin/sh")
         .output()
         .expect("fno binary runs")
@@ -40,6 +78,35 @@ fn stdout(out: &Output) -> String {
 
 fn kill_server(scratch: &Scratch) {
     let _ = scratch.command().args(["mux", "kill-server"]).output();
+}
+
+struct ChildGuard(u32);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        // SAFETY: this test owns the keeper-hosted child PID it recorded.
+        unsafe {
+            libc::kill(self.0 as libc::pid_t, libc::SIGKILL);
+        }
+    }
+}
+
+fn pane_list_at(scratch: &Scratch, mux: &PathBuf) -> Vec<serde_json::Value> {
+    let out = pane_at(scratch, mux, &["ls", "--json"]);
+    assert!(
+        out.status.success(),
+        "pane ls stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_str(&stdout(&out)).expect("pane ls JSON")
+}
+
+fn kill_server_at(scratch: &Scratch, mux: &PathBuf) {
+    let _ = scratch
+        .command()
+        .env("FNO_MUX_DIR", mux)
+        .args(["mux", "kill-server"])
+        .output();
 }
 
 /// Write the registry file the reader parses. Minimal rows: the reader is
@@ -208,6 +275,167 @@ fn agent_edge_spawn_to_badge_round_trip() {
 
     client.detach();
     kill_server(&scratch);
+}
+
+#[test]
+fn agent_edge_keeper_row_detach_restarts_and_reattaches_same_child() {
+    let scratch = Scratch::new("agent_edge_keeper_detach");
+    let mux = PathBuf::from(format!("/tmp/fno-k-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&mux);
+    let dir = scratch.0.to_str().unwrap().to_string();
+    let run = pane_at(
+        &scratch,
+        &mux,
+        &[
+            "run",
+            "--worker",
+            "keeper-worker",
+            "--cwd",
+            &dir,
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf 'keeper-positive-marker\\n'; sleep 300",
+        ],
+    );
+    assert!(
+        run.status.success(),
+        "worker run stderr: {:?}",
+        String::from_utf8_lossy(&run.stderr),
+    );
+    let original_pane: u64 = stdout(&run).parse().expect("worker pane id");
+    let keeper_list = pane_at(&scratch, &mux, &["keeper", "list", "--json"]);
+    assert!(keeper_list.status.success());
+    let keeper_list: serde_json::Value = serde_json::from_str(&stdout(&keeper_list)).unwrap();
+    assert!(
+        keeper_list.as_array().unwrap().iter().any(|keeper| {
+            keeper["argv"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|arg| arg == "FNO_AGENT_SELF=keeper-worker")
+        }),
+        "keeper Identify carries the worker identity: {keeper_list}"
+    );
+    let listed = pane_list_at(&scratch, &mux);
+    let child_pid = listed
+        .iter()
+        .find(|entry| entry["pane_id"] == original_pane)
+        .and_then(|entry| entry["child_pid"].as_u64())
+        .expect("pane ls positively reports the worker child pid") as u32;
+    let _child = ChildGuard(child_pid);
+    assert_eq!(
+        unsafe { libc::kill(child_pid as libc::pid_t, 0) },
+        0,
+        "the recorded child is live before detach"
+    );
+
+    write_registry(
+        &scratch,
+        &format!(
+            r#"{{"name":"keeper-worker","provider":"codex","harness":"codex",
+                 "harness_session_id":"keeper-session","cwd":"{dir}","status":"live",
+                 "mux":{{"session":"main","pane_id":{original_pane}}}}}"#
+        ),
+    );
+    let socket = mux.join("main.sock");
+    let mut client = FakeClient::attach(&socket, 30, 100, &dir);
+    wait_agents(&mut client, 10, "keeper pane row", |rows| {
+        rows.iter().any(|row| {
+            row.name == "keeper-worker" && row.pane_id == Some(original_pane) && !row.exited
+        })
+    });
+
+    client.cmd(MuxCommand::DetachPane {
+        pane: original_pane,
+    });
+    let detached = wait_agents(&mut client, 10, "live paneless detached row", |rows| {
+        rows.iter().any(|row| {
+            row.name == "keeper-worker"
+                && row.pane_id.is_none()
+                && !row.exited
+                && row.no_pane_reason.is_some()
+        })
+    });
+    let detached_row = detached
+        .iter()
+        .find(|row| row.name == "keeper-worker")
+        .unwrap();
+    assert_eq!(
+        detached_row.no_pane_reason,
+        Some(fno::proto::AgentNoPaneReason::LivePaneless),
+        "the paneless interval has a positive live-session marker"
+    );
+    assert_eq!(
+        unsafe { libc::kill(child_pid as libc::pid_t, 0) },
+        0,
+        "row detach leaves the keeper-owned child alive"
+    );
+    let stored = std::fs::read_to_string(agents_home(&scratch).join("squads.json"))
+        .expect("detach writes the squad store");
+    let stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
+    assert!(
+        stored["squads"][0]["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|member| { member["worker"] == "keeper-worker" && member["detached"] == true }),
+        "stored worker identity and detached marker: {stored}"
+    );
+
+    client.detach();
+    kill_server_at(&scratch, &mux);
+
+    // A new pane boots a fresh server. Its startup sweep must re-adopt the
+    // detached keeper before restore, without requiring the old pane id.
+    let bootstrap = pane_at(
+        &scratch,
+        &mux,
+        &["run", "--cwd", &dir, "--", "/bin/sh", "-c", "sleep 300"],
+    );
+    assert!(
+        bootstrap.status.success(),
+        "bootstrap run stderr: {:?}",
+        String::from_utf8_lossy(&bootstrap.stderr)
+    );
+    let mut restarted = FakeClient::attach(&socket, 30, 100, &dir);
+    wait_agents(&mut restarted, 15, "re-adopted live paneless row", |rows| {
+        rows.iter()
+            .any(|row| row.name == "keeper-worker" && row.pane_id.is_none() && !row.exited)
+    });
+    assert_eq!(
+        unsafe { libc::kill(child_pid as libc::pid_t, 0) },
+        0,
+        "fresh server re-adoption preserves the same child"
+    );
+
+    restarted.cmd(MuxCommand::ResumeAgent {
+        name: "keeper-worker".into(),
+    });
+    let reattached = wait_agents(&mut restarted, 10, "re-attached keeper row", |rows| {
+        rows.iter()
+            .any(|row| row.name == "keeper-worker" && row.pane_id.is_some() && !row.exited)
+    });
+    let reattached_pane = reattached
+        .iter()
+        .find(|row| row.name == "keeper-worker")
+        .and_then(|row| row.pane_id)
+        .expect("reattached row names its pane");
+    let final_list = pane_list_at(&scratch, &mux);
+    let final_pid = final_list
+        .iter()
+        .find(|entry| entry["pane_id"] == reattached_pane)
+        .and_then(|entry| entry["child_pid"].as_u64())
+        .expect("reattached pane reports a child pid");
+    assert_eq!(
+        final_pid, child_pid as u64,
+        "reattach did not respawn the worker"
+    );
+
+    let _ = pane_at(&scratch, &mux, &["kill", &reattached_pane.to_string()]);
+    restarted.detach();
+    kill_server_at(&scratch, &mux);
+    let _ = std::fs::remove_dir_all(&mux);
 }
 
 #[test]

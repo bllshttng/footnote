@@ -98,9 +98,8 @@ pub const STORE_VERSION: u32 = 1;
 const FLOCK_RETRIES: u32 = 5;
 const FLOCK_SLEEP: Duration = Duration::from_millis(20);
 
-/// One persisted member: the `claude attach <id>` jobId plus whether the
-/// worker has died (a tombstone survives restarts as a dimmed row until the
-/// operator dismisses it).
+/// One persisted member: the `claude attach <id>` jobId or worker identity,
+/// plus lifecycle markers for a dead or intentionally detached worker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredMember {
     /// (x-5f7f) `#[serde(default)]` so a worker member can omit it: a
@@ -111,6 +110,12 @@ pub struct StoredMember {
     pub attach_id: String,
     #[serde(default)]
     pub tombstone: bool,
+    /// True while the live worker pane is intentionally off every visible
+    /// tree. The keeper owns the PTY across mux-server restarts; restore uses
+    /// this marker to re-adopt it without placing it back until the operator
+    /// attaches/resumes the row. Omitted false keeps older stores compact.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
     /// (x-0f9d US4) The name of the tab hosting this member's pane at store
     /// time, so a chosen tab name survives a mux restart: restore names the
     /// re-derived tab from it. Re-derived fresh on every persist so a rename is
@@ -1846,12 +1851,31 @@ mod tests {
         StoredMember {
             attach_id: id.into(),
             tombstone: false,
+            detached: false,
             tab_name: None,
             cwd: None,
             worker: None,
             harness: None,
             harness_session_id: None,
         }
+    }
+
+    #[test]
+    fn stored_member_roundtrips_detached_marker() {
+        let raw = r#"{
+            "attach_id":"",
+            "worker":"worker-a",
+            "harness":"codex",
+            "harness_session_id":"session-a",
+            "detached":true
+        }"#;
+        let member: StoredMember = serde_json::from_str(raw).unwrap();
+        let encoded = serde_json::to_value(member).unwrap();
+        assert_eq!(
+            encoded.get("detached"),
+            Some(&serde_json::Value::Bool(true)),
+            "restore needs a positive persisted detached marker"
+        );
     }
 
     #[test]
@@ -2089,6 +2113,7 @@ mod tests {
         let worker = StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            detached: false,
             tab_name: Some("lane".into()),
             cwd: Some("/repo/wt".into()),
             worker: Some("probe-x5f7f".into()),
@@ -2140,6 +2165,7 @@ mod tests {
         let hostile = StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            detached: false,
             tab_name: None,
             cwd: None,
             worker: Some("a;rm -rf".into()),
@@ -3030,6 +3056,7 @@ mod tests {
             s.members = vec![StoredMember {
                 attach_id: "deadbeef".into(),
                 tombstone: true,
+                detached: false,
                 tab_name: None,
                 cwd: None,
                 worker: None,
@@ -3226,6 +3253,7 @@ mod tests {
         s.members = vec![StoredMember {
             attach_id: "deadbeef".into(),
             tombstone: true,
+            detached: false,
             tab_name: None,
             cwd: None,
             worker: None,
@@ -3383,6 +3411,7 @@ mod tests {
         StoredMember {
             attach_id: id.into(),
             tombstone: true,
+            detached: false,
             tab_name: None,
             cwd: None,
             worker: None,
@@ -3395,6 +3424,7 @@ mod tests {
         StoredMember {
             attach_id: String::new(),
             tombstone: false,
+            detached: false,
             tab_name: None,
             cwd: None,
             worker: Some(name.into()),
