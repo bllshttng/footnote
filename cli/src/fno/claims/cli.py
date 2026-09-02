@@ -1642,10 +1642,10 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
                 cache["reading"] = first
         return cache["reading"]
 
-    def _probe(claim) -> Optional[bool]:
-        from .verdict import claim_verdicts
-
-        native = claim_verdicts([claim.key]).get(claim.key)
+    def _probe(claim, native_verdict=None) -> Optional[bool]:
+        native = native_verdict
+        if native is None:
+            return None
 
         if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
             # The launch window, not an abandoned session - but the window is

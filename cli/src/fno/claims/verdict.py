@@ -10,6 +10,7 @@ from typing import Any, Sequence
 import psutil
 
 from fno.rust_binary import resolve_binary
+from .io import claim_path
 
 
 class ClaimVerdictUnavailable(RuntimeError):
@@ -65,7 +66,9 @@ def claim_verdicts(
         ) from exc
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
-        raise ClaimVerdictError(f"fno-agents claim sweep failed with exit {result.returncode}: {detail}")
+        raise ClaimVerdictError(
+            f"fno-agents claim sweep failed with exit {result.returncode}: {detail}"
+        )
 
     try:
         payload = json.loads(result.stdout)
@@ -79,4 +82,13 @@ def claim_verdicts(
         if not isinstance(row, dict) or not isinstance(row.get("key"), str):
             raise ClaimVerdictError("fno-agents claim sweep returned a malformed claim row")
         verdicts[row["key"]] = row
+    for key in requested:
+        if key in verdicts:
+            continue
+        path = claim_path(key, root=root)
+        if path.exists():
+            raise ClaimVerdictError(
+                f"native claim sweep omitted existing claim {key!r}; refusing to assume free"
+            )
+        verdicts[key] = {"key": key, "state": "free"}
     return verdicts

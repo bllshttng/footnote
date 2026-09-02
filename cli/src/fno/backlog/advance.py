@@ -3087,8 +3087,11 @@ def _node_dispatch_block_reason(
     native_verdicts: Optional[dict[str, dict]] = None,
 ) -> Optional[str]:
     """One pre-birth decision for node ownership plus boot reservation."""
+    node_key = f"node:{node_id}"
+    if native_verdicts is not None and node_key not in native_verdicts:
+        return "claim-verdict-unavailable"
     native_info = (
-        (native_verdicts.get(f"node:{node_id}", {"state": "free"}))
+        native_verdicts[node_key]
         if native_verdicts is not None
         else None
     )
@@ -3109,11 +3112,13 @@ def _claim_is_live(
     # "occupied" for dispatch: a live OR a suspect claim (x-ba4b) blocks
     # selection. suspect = TTL-unexpired, dead pid (respawned worker); the TTL
     # still protects the slot, so selection must skip it, never steal.
+    if verdicts is not None and key not in verdicts:
+        return True
     if key.startswith("node:"):
         return _observe_node_claim(
             key.removeprefix("node:"),
             node_cwd,
-            native_info=(verdicts.get(key, {"state": "free"}) if verdicts is not None else None),
+            native_info=(verdicts[key] if verdicts is not None else None),
         ).blocks_dispatch
 
     from fno.claims.verdict import claim_verdicts
