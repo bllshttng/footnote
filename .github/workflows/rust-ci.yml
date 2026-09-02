@@ -27,8 +27,6 @@ on:
       - tests/ci/test_provider_vocabulary_parity.sh
       - scripts/ci/check-session-identity-parity.sh
       - tests/ci/test_session_identity_parity.sh
-      - scripts/ci/check-session-id-provenance-rule.sh
-      - cli/tests/lint/test_check_session_id_provenance_rule.py
       - scripts/ci/check-spawn-lineage-parity.sh
       - tests/ci/test_spawn_lineage_parity.sh
       - scripts/ci/check-proto-version-bump.sh
@@ -270,14 +268,6 @@ jobs:
           bash scripts/ci/check-session-identity-parity.sh
           bash tests/ci/test_spawn_lineage_parity.sh
           bash scripts/ci/check-spawn-lineage-parity.sh
-
-      - name: Session-id provenance rule (both docstrings carry one canonical sentence)
-        # registry.py and self_identity.py state opposite readings of one
-        # registry lookup unless both carry the provenance rule verbatim. The
-        # sentence lives once in docs/architecture/coordination.md and prose
-        # cannot be DRYed across the L1/L5 boundary, so the gate, not an
-        # import, keeps the two statements agreeing.
-        run: bash scripts/ci/check-session-id-provenance-rule.sh
 
   stress:
     name: rust e2e concurrency stress (20 trials)

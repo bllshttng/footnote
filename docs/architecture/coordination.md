@@ -50,14 +50,6 @@ Holder shape is convention, not enforced. The verb-level invariants are:
 
 Final worker claims use exactly `target-session:<current harness session id>`. The session id is resolved anew for every acquire, including release-then-reacquire and successor handoff. `spawn-handover:<worker>` remains a typed launch reservation only and must be replaced before worker init. If the current harness session cannot be proven, init refuses with `holder_unattributable` and writes no final claim.
 
-The registry lookup that matches a live row by harness session id has two docstrings, and prose between them cannot be shared by import (the L1-to-L5 boundary gate refuses that edge), so the rule is stated once here and `scripts/ci/check-session-id-provenance-rule.sh` holds both sites to it verbatim.
-
-<!-- session-id-provenance-rule:begin -->
-Provenance decides a hit: self when the id under test is this session's own, foreign otherwise.
-<!-- session-id-provenance-rule:end -->
-
-Two live sessions cannot share a harness session id, which is why the premise under the lookup is safe; it is not, by itself, a verdict. A spawn mints the canonical stamp and the registry row in one act, so the same match reads self for the spawned worker and foreign for a session that merely inherited the id.
-
 `pid: null` is truthful only with `pid_unavailable: true` and a TTL expiry. TTL classification remains `suspect` until expiry without probing a process. PID-only claims require a positive PID. A shared substrate PID is never a worker identity or takeover authority.
 
 ### Liveness model
