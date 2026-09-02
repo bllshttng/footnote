@@ -1207,6 +1207,21 @@ def resolve_owned_identity_cmd() -> None:
         env["CLAUDE_CODE_SESSION_ID"] = env["TARGET_TRANSCRIPT_ID"]
 
     canonical = parse_canonical_identity(env)
+    # The caller's own binding, from a COMPLETE canonical stamp: spawn writes
+    # the stamp and the registry row in one act, so a live row agreeing with
+    # it on both halves is this worker's own and the detector never reports
+    # it. Read from the stamp + registry, never FNO_AGENT_SELF: that env
+    # write cannot reach a daemon-forked worker while the row survives the
+    # fork. A session with no complete stamp proves nothing about itself and
+    # passes the explicit sentinel, which keeps the ambient-leak detector at
+    # full strength for vendor markers.
+    own_binding: Optional[tuple[str, str]] = None
+    if (
+        canonical.disposition == "complete"
+        and canonical.harness
+        and canonical.session_id
+    ):
+        own_binding = (canonical.harness.strip().lower(), canonical.session_id.strip())
 
     def _owning_row_harness(sid: str) -> Optional[str]:
         """Harness of the live registry row holding ``sid``, if any."""
@@ -1223,22 +1238,8 @@ def resolve_owned_identity_cmd() -> None:
                 return (getattr(entry, "harness", "") or "").strip().lower()
         return None
 
-    def _self_row_backs(harness: str, sid: str) -> bool:
-        """The spawn-minted binding: spawn writes the canonical stamp and the
-        registry row in one act, so a live row agreeing with a COMPLETE stamp
-        on (harness, id) is this worker's own row. Read from the registry,
-        never FNO_AGENT_SELF: that env write cannot reach a daemon-forked
-        worker while the row survives the fork. Scoped to the stamp so a
-        vendor marker (provenance unverified) never self-checks, which keeps
-        the ambient-leak detector intact."""
-        if canonical.disposition != "complete":
-            return False
-        if (canonical.harness or "").strip().lower() != (harness or "").strip().lower():
-            return False
-        if session_identity_key(canonical.session_id or "") != session_identity_key(sid):
-            return False
-        row_harness = _owning_row_harness(sid)
-        return row_harness is not None and row_harness == (harness or "").strip().lower()
+    def _collide(harness: str, sid: str) -> Optional[str]:
+        return row_owning_session_id(sid, self_binding=own_binding)
 
     def _prove(harness: str, _sid: str) -> Optional[bool]:
         # Three states: True (this process mints this harness), False (the
@@ -1248,9 +1249,17 @@ def resolve_owned_identity_cmd() -> None:
         # collision-elimination so the verb still resolves in a headless runner.
         if true_harness is None:
             # No ancestor to walk: the spawn-minted registry binding is the
-            # remaining proof. Without it (no stamp, or no backing row) the
+            # remaining proof - the stamp and a live row of the same harness
+            # agree on this id. Without it (no stamp, or no backing row) the
             # answer stays None so collision-elimination decides.
-            return True if _self_row_backs(harness, _sid) else None
+            if (
+                own_binding
+                and own_binding[0] == (harness or "").strip().lower()
+                and session_identity_key(own_binding[1]) == session_identity_key(_sid)
+                and _owning_row_harness(_sid) == own_binding[0]
+            ):
+                return True
+            return None
         return harness == true_harness
 
     # The COLLIDER stays wired HERE and is deliberately not hoisted into the
@@ -1265,7 +1274,7 @@ def resolve_owned_identity_cmd() -> None:
     owned = resolve_owned_identity(
         env,
         prove=_prove,
-        collide=lambda _harness, sid: row_owning_session_id(sid),
+        collide=_collide,
     )
     # AC5-CON: record any non-trivial resolution (a refused collision or a
     # non-single disposition) so a future leak is reconstructable from the event

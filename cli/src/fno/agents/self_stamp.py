@@ -30,7 +30,12 @@ def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
     def collide(_harness: str, session_id: str) -> Optional[str]:
         from fno.agents.registry import row_owning_session_id
 
-        return row_owning_session_id(session_id)
+        # This layer resolves identity from scratch: it holds no binding it
+        # can prove independently of the markers under test, so the explicit
+        # sentinel is the written self-blind decision. The canonical-proven
+        # guard in claims.self_identity disables this detector exactly where
+        # a proven self would matter.
+        return row_owning_session_id(session_id, self_binding=None)
 
     return _resolve_self_identity(env, collide=collide)
 
