@@ -29,6 +29,7 @@ pub mod proto;
 pub mod pty;
 pub mod server;
 pub mod sideline_color;
+pub mod store_client;
 pub mod sprites;
 pub mod squad;
 pub mod squad_store;

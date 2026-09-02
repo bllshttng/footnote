@@ -3547,28 +3547,32 @@ async fn run_mail_send(name: &str, text: &str) -> String {
     }
 }
 
-/// (x-1d91) Shell one `fno backlog` reorder verb off-loop. The `fno` porcelain is
-/// the ONLY writer of `graph.json`; the mux shells it and reads the verdict. A
-/// 5s bound: these are graph mutations under a lock, not spawns, so a slow one is
-/// contention worth surfacing rather than waiting out. Failure returns the first
-/// stderr line so the footer names what went wrong, not just that it did.
+/// (x-1d91, native since x-b21e) Drive one reorder verb into the ported
+/// graph store. The `fno` shell-out is retired: the server is a store
+/// keeper client now ([`crate::store_client`]), so the write runs through
+/// the same bounded-lock, version-checked, atomically-published pipeline
+/// every other writer uses - no subprocess, no second writer identity. The
+/// blocking socket work runs off the async core; failure names what went
+/// wrong so the footer carries the cause, not just that it did.
 async fn run_backlog_verb(node: &str, verb: crate::proto::BacklogVerb) -> String {
-    const VERB_TIMEOUT: Duration = Duration::from_secs(5);
     let label = verb.label();
-    let mut command = crate::process_admission::tokio_command(fno_bin());
-    command
-        .args(verb.args(node))
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let fut = crate::process_admission::tokio_output(&mut command);
-    match tokio::time::timeout(VERB_TIMEOUT, fut).await {
-        Err(_) => format!("{label} {node}: timed out"),
-        Ok(Err(_)) => format!("{label} {node}: unavailable"),
-        Ok(Ok(o)) if o.status.success() => format!("{label}: {node}"),
-        Ok(Ok(o)) => first_line_or(
-            &String::from_utf8_lossy(&o.stderr),
-            &format!("{label} {node}: failed"),
-        ),
+    let graph = backlog_view::graph_path();
+    let target = node.to_string();
+    let outcome =
+        tokio::task::spawn_blocking(move || match verb {
+            crate::proto::BacklogVerb::RankTop => crate::store_client::rank_top(&graph, &target),
+            crate::proto::BacklogVerb::Defer => {
+                crate::store_client::defer(&graph, &target, crate::proto::DEFER_REASON)
+            }
+            crate::proto::BacklogVerb::EndMission => {
+                crate::store_client::end_mission(&graph, &target)
+            }
+        })
+        .await;
+    match outcome {
+        Ok(Ok(notice)) => notice,
+        Ok(Err(e)) => format!("{label} {node}: {e}"),
+        Err(_) => format!("{label} {node}: unavailable"),
     }
 }
 
