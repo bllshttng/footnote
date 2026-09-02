@@ -451,3 +451,29 @@ def test_review_invocation_verb_prints_the_render(monkeypatch, tmp_path):
     portable = CliRunner().invoke(target_app, ["review-invocation", "--harness", "agy"])
     assert portable.exit_code == 0, portable.output
     assert portable.output.strip() == f"/fno:review {sized} --comment"
+
+
+# --- automerge_floor_refusal (x-f324): one wording, every arming surface ---
+
+
+def test_automerge_floor_refuses_below_rung_three() -> None:
+    """no_review names the failing rung, the floor, and the exact remedy."""
+    from fno.config import ReviewBlock, resolve_review_posture
+    from fno.review_capability import automerge_floor_refusal
+
+    resolved = resolve_review_posture(ReviewBlock(posture="no_review"))
+    msg = automerge_floor_refusal(resolved)
+    assert msg is not None
+    assert "no_review" in msg
+    assert "self_review" in msg
+    assert "fno config set review.posture self_review --local" in msg
+
+
+def test_automerge_floor_allows_rung_three_and_up() -> None:
+    from fno.config import ReviewBlock, resolve_review_posture
+    from fno.review_capability import automerge_floor_refusal
+
+    for value in ("self_review", "peer_review", "self_github_and_peer"):
+        assert automerge_floor_refusal(
+            resolve_review_posture(ReviewBlock(posture=value))
+        ) is None

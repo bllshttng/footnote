@@ -897,6 +897,263 @@ def resolvable_reviewers(
     return {**registry, **_RESOLVABLE_REVIEWERS}
 
 
+# ── review.posture (x-f324) ──────────────────────────────────────────────────
+#
+# One leaf that names how much review a code PR must have before it may merge.
+# Two settings that must be coupled (`may the fleet merge` and `what review
+# must exist first`) previously sat in separate tables with nothing refusing
+# the dangerous combination: `auto_merge.enabled=true` with no review gate was
+# one flag away and taught no one. The posture names the rung; the merge grant
+# refuses below the floor. Rank is the ladder position (1 worst, 9 best), and
+# every field of a descriptor is exactly what the merge receipt prints, so a
+# user picking a posture sees what they bought and what it costs.
+#
+# This literal is a PARITY SOURCE: the Rust coverage reader mirrors the ranks
+# and component vocabulary, and scripts/ci/check-reviewer-descriptor-parity.sh
+# AST-parses it the way it does `_RESOLVABLE_REVIEWERS`. Keep it a literal.
+@dataclass(frozen=True)
+class ReviewPostureDescriptor:
+    """One rung of the review-posture ladder, immutable.
+
+    `components` names the evidence lanes coverage must satisfy, using the
+    vocabulary the Rust coverage reader shares: `self` (a real final-head
+    review, author context allowed), `independent` (the same, plus positive
+    fresh-context provenance that the reviewing context never authored the
+    diff), `github` (a configured App review at the final head), and `peer`
+    (a cross-model peer verdict at the final head).
+    """
+
+    value: str
+    rank: int
+    components: tuple[str, ...]
+    freshness: str
+    diversity: str
+    cost: str
+    summary: str
+
+
+REVIEW_POSTURES: dict[str, ReviewPostureDescriptor] = {
+    "no_review": ReviewPostureDescriptor(
+        value="no_review",
+        rank=1,
+        components=(),
+        freshness="none",
+        diversity="none",
+        cost="zero reviews",
+        summary="no review at all",
+    ),
+    "tests_pass": ReviewPostureDescriptor(
+        value="tests_pass",
+        rank=2,
+        components=(),
+        freshness="none",
+        diversity="none",
+        cost="zero reviews",
+        summary="settled green checks only, no review",
+    ),
+    "self_review": ReviewPostureDescriptor(
+        value="self_review",
+        rank=3,
+        components=("self",),
+        freshness="same context sufficient",
+        diversity="same model allowed",
+        cost="one review",
+        summary="one real final-head review, author context allowed",
+    ),
+    "independent_review": ReviewPostureDescriptor(
+        value="independent_review",
+        rank=4,
+        components=("independent",),
+        freshness="fresh reviewer context required",
+        diversity="same model allowed",
+        cost="one fresh reviewer",
+        summary="one final-head review with positive fresh-context provenance",
+    ),
+    "github_review": ReviewPostureDescriptor(
+        value="github_review",
+        rank=5,
+        components=("github",),
+        freshness="external",
+        diversity="configured App",
+        cost="one App review",
+        summary="a configured GitHub App review at the final head",
+    ),
+    "peer_review": ReviewPostureDescriptor(
+        value="peer_review",
+        rank=6,
+        components=("peer",),
+        freshness="fresh reviewer context required",
+        diversity="different model family required",
+        cost="one peer review",
+        summary="a cross-model peer verdict at the final head",
+    ),
+    "self_and_github": ReviewPostureDescriptor(
+        value="self_and_github",
+        rank=7,
+        components=("self", "github"),
+        freshness="mixed",
+        diversity="mixed",
+        cost="two reviews",
+        summary="self review plus a configured GitHub App review",
+    ),
+    "self_and_peer": ReviewPostureDescriptor(
+        value="self_and_peer",
+        rank=8,
+        components=("self", "peer"),
+        freshness="mixed",
+        diversity="mixed",
+        cost="two reviews",
+        summary="self review plus a cross-model peer verdict",
+    ),
+    "self_github_and_peer": ReviewPostureDescriptor(
+        value="self_github_and_peer",
+        rank=9,
+        components=("self", "github", "peer"),
+        freshness="mixed",
+        diversity="mixed",
+        cost="three reviews",
+        summary="self review, a GitHub App review, and a cross-model peer",
+    ),
+}
+
+# The floor the merge grant refuses below: auto-merge, per-run merge grants,
+# and GitHub-native arming all require a REAL review (rung 3), and the refusal
+# names this rung plus the remedy. `declare` satisfies no code-review rung and
+# can never clear this floor by assertion.
+MIN_AUTOMERGE_RANK = REVIEW_POSTURES["self_review"].rank
+
+# The reviewer names that contribute a `self` lane to legacy inference. sigma
+# is retired (a config naming it refuses at init) and `declare` is a self-cert
+# that satisfies no rung, so neither can make a legacy config LOOK reviewed.
+_SELF_LANE_EXCLUDED_REVIEWERS = frozenset({"declare", "sigma"})
+
+
+@dataclass(frozen=True)
+class ResolvedReviewPosture:
+    """The one posture a review block resolves to, with its provenance.
+
+    `source` is `explicit` (the leaf was set), `legacy` (inferred from the
+    pre-posture settings, migration command attached), or `default` (a bare
+    install; the shipped floor). `legacy` never silently hardens or weakens a
+    config: the inferred value and the exact command that makes it permanent
+    travel together on every surface that prints a posture.
+    """
+
+    value: str
+    descriptor: ReviewPostureDescriptor
+    source: str  # explicit | legacy | default
+    migration: Optional[str] = None  # exact command, when source == "legacy"
+    signals: tuple[str, ...] = ()  # what legacy inference read
+
+    @property
+    def rank(self) -> int:
+        return self.descriptor.rank
+
+    @property
+    def automerge_blocked(self) -> bool:
+        return self.rank < MIN_AUTOMERGE_RANK
+
+    def line(self) -> str:
+        detail = f" ({self.descriptor.summary}, {self.descriptor.cost})"
+        src = self.source
+        tail = f" [inferred from legacy settings; make it explicit: {self.migration}]" if src == "legacy" else ""
+        return f"posture={self.value} rank={self.rank} source={src}{detail}{tail}"
+
+
+def resolve_review_posture(review: "ReviewBlock") -> ResolvedReviewPosture:
+    """Resolve `review.posture` for one validated ReviewBlock. Total.
+
+    Explicit leaf wins. Absent, infer ONE visible posture from the legacy
+    settings (the shipped `self_review_required` floor, the github_apps gate,
+    peers, corroboration, and an explicit opt-out), preserving each: an
+    explicit `self_review_required=false` with nothing else reads `no_review`
+    today and must keep reading that, while a declared-empty github_apps list
+    (PR + CI only) reads `tests_pass`. Nothing configured at all is NOT
+    legacy - it is the shipped default floor, `self_review`, because the
+    default must not be rung 1.
+    """
+    if review.posture is not None:
+        return ResolvedReviewPosture(
+            value=review.posture,
+            descriptor=REVIEW_POSTURES[review.posture],
+            source="explicit",
+        )
+
+    github = bool(review.github_apps)
+    # required_bots is folded into github_apps by the validator only when
+    # github_apps itself is unset, so the resolved field is the whole signal.
+    declared_none = review.github_apps == []
+    peers = bool(review.peers)
+    explicit_sets = getattr(review, "model_fields_set", frozenset())
+    floor_off = (
+        not review.self_review_required
+        and "self_review_required" in explicit_sets
+    )
+    self_named = any(
+        name.strip().lstrip("/") not in _SELF_LANE_EXCLUDED_REVIEWERS
+        for name in review.reviewers
+    )
+    corroboration = review.require_corroboration
+
+    signals: list[str] = []
+    if declared_none:
+        signals.append("github_apps=[]")
+    if github:
+        signals.append("github_apps")
+    if peers:
+        signals.append("peers")
+    if corroboration:
+        signals.append("require_corroboration")
+    if floor_off:
+        signals.append("self_review_required=false")
+    if self_named:
+        signals.append("reviewers")
+
+    if declared_none and not github and not peers:
+        value = "tests_pass"
+    elif github and peers:
+        value = "self_github_and_peer" if not floor_off else "github_review"
+    elif github:
+        value = "self_and_github" if not floor_off else "github_review"
+    elif peers:
+        value = "self_and_peer" if not floor_off else "peer_review"
+    elif corroboration:
+        # The author's own attestation reads uncovered under corroboration, so
+        # the honest legacy reading is the rung that demands non-self evidence.
+        value = "independent_review"
+    elif self_named:
+        value = "self_review"
+    elif floor_off:
+        # An explicit opt-out with no other lane: the legacy effective state
+        # was no review gate. Preserve it visibly, never silently.
+        value = "no_review"
+    else:
+        # Bare install: no legacy signal anywhere. This is the shipped DEFAULT
+        # floor, not an inference, so no migration command is printed.
+        return ResolvedReviewPosture(
+            value="self_review",
+            descriptor=REVIEW_POSTURES["self_review"],
+            source="default",
+        )
+
+    # Name the floor when it is what supplied a self lane, so the signals
+    # tuple never claims a `reviewers` entry the config does not carry.
+    if (
+        "self" in REVIEW_POSTURES[value].components
+        and not floor_off
+        and not self_named
+    ):
+        signals.append("self_review_required")
+
+    return ResolvedReviewPosture(
+        value=value,
+        descriptor=REVIEW_POSTURES[value],
+        source="legacy",
+        migration=f"fno config set review.posture {value} --local",
+        signals=tuple(signals),
+    )
+
+
 # The reviewer vocabulary of the ADJACENT key: `config.review.external_reviewers`
 # names AI reviewers /pr requests a PR review from, and is the key an operator
 # writing `reviewers: [coderabbit]` almost always meant. Checked BEFORE difflib,
@@ -1089,6 +1346,14 @@ class ReviewBlock(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+    # The LADDER (x-f324): one leaf naming how much review a code PR needs
+    # before it may merge. One of the nine REVIEW_POSTURES values; None (the
+    # default) means "infer one visible posture from the legacy settings, or
+    # fall to the shipped self_review floor", which `resolve_review_posture`
+    # does and every posture-printing surface reports with its migration
+    # command. Auto-merge refuses below `self_review` (rung 3).
+    posture: Optional[str] = None
+
     # The GATE: GitHub App bot logins that must have reviewed (canonical).
     github_apps: Optional[list[str]] = None
     # Legacy alias for github_apps; resolved into github_apps by the validator
@@ -1204,6 +1469,29 @@ class ReviewBlock(BaseModel):
     # separate named SessionStart and therefore remains explicit and opt-in.
     agent_routes: dict[str, AgentRouteBlock] = Field(default_factory=dict)
     cross_model: CrossModelBlock = Field(default_factory=CrossModelBlock)
+
+    @field_validator("posture", mode="before")
+    @classmethod
+    def validate_posture(cls, v: object) -> object:
+        """Fail loud on a posture name the ladder does not carry.
+
+        A misspelled rung must never read as "unset": unset infers from legacy
+        and can only ever match a real rung, while a typo that fell through to
+        unset would silently ship under a different rung than the operator
+        wrote. None stays None (the infer-then-default path).
+        """
+        if v is None:
+            return None
+        if isinstance(v, str):
+            stripped = v.strip()
+            if stripped in REVIEW_POSTURES:
+                return stripped
+            raise ValueError(
+                f"review.posture {v!r} is not one of {sorted(REVIEW_POSTURES)}"
+            )
+        raise ValueError(
+            f"review.posture must be a posture name or be unset, got {v!r}"
+        )
 
     @field_validator("github_apps", "required_bots", mode="before")
     @classmethod
