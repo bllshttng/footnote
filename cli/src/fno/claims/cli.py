@@ -50,6 +50,7 @@ Three constraints shape the rest:
   A closed row, or one opened by an earlier real window under the same identity,
   is never touched.
 """
+
 from __future__ import annotations
 
 import json
@@ -67,6 +68,9 @@ from .core import (
     ClaimGoneAway,
     ClaimHeldByOther,
     ClaimValidationError,
+    ClaimVerdictError,
+    ClaimVerdictUnavailable,
+    ClaimState,
     HolderMismatch,
     acquire_claim,
     claim_status,
@@ -163,7 +167,9 @@ def acquire(
         None, "--max-lanes", help="With --lane: concurrency cap (>=1; 1 == sequential)."
     ),
     reason: str = typer.Option("", "--reason", "-R", help="Optional rationale recorded in audit"),
-    ttl: str = typer.Option("", "--ttl", help="TTL expression like 30m, 1h, 3600s (omit => PID-liveness)"),
+    ttl: str = typer.Option(
+        "", "--ttl", help="TTL expression like 30m, 1h, 3600s (omit => PID-liveness)"
+    ),
     metadata: str = typer.Option("{}", "--metadata", help="JSON object passed verbatim"),
     pid: Optional[int] = typer.Option(
         None,
@@ -229,8 +235,7 @@ def acquire(
     # not enforced and nothing on stderr to say so.
     if max_lanes is not None:
         typer.echo(
-            "validation error: --max-lanes is the lane-slot cap and requires "
-            "--lane <id>",
+            "validation error: --max-lanes is the lane-slot cap and requires --lane <id>",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -257,6 +262,7 @@ def acquire(
     if pid is None and not pid_unavailable:
         try:
             from .session_pid import resolve_session_pid
+
             pid = resolve_session_pid()
         except Exception:
             pid = None  # degrade to acquire_claim's os.getpid() default
@@ -359,6 +365,9 @@ def acquire(
     except (ClaimCorrupted, ClaimGoneAway) as exc:
         typer.echo(f"transient error: {exc}", err=True)
         raise typer.Exit(code=3)
+    except (ClaimVerdictError, ClaimVerdictUnavailable) as exc:
+        typer.echo(f"native verdict unavailable: {exc}", err=True)
+        raise typer.Exit(code=3)
     except ClaimContended as exc:
         # acquire_claim's own contention-retry-exhaustion guard: same
         # "caller should retry later" semantic as ClaimHeldByOther, so it
@@ -406,23 +415,27 @@ def release(
             "takes no --holder."
         ),
     ),
-    reason: str = typer.Option("", "--reason", "-R", help="With --force: required audit rationale."),
+    reason: str = typer.Option(
+        "", "--reason", "-R", help="With --force: required audit rationale."
+    ),
     strict: bool = typer.Option(False, "--strict", help="Raise if holder does not match"),
     stamp_do: bool = typer.Option(
-        False, "--stamp-do",
+        False,
+        "--stamp-do",
         help="Stamp a do provenance row (started_at from this claim's acquire time, "
-             "ended_at now). Set ONLY by a session releasing its OWN node claim at a "
-             "finished terminal - never a handoff, which runs under a successor's "
-             "identity and would mis-attribute the predecessor's window.",
+        "ended_at now). Set ONLY by a session releasing its OWN node claim at a "
+        "finished terminal - never a handoff, which runs under a successor's "
+        "identity and would mis-attribute the predecessor's window.",
     ),
     rollback_do: bool = typer.Option(
-        False, "--rollback-do",
+        False,
+        "--rollback-do",
         help="Remove the open do provenance row this claim's acquire opened. Set "
-             "by a releaser whose POST-ACQUIRE validation refused it: it took the "
-             "claim only to serialize, did no work, and must not leave the node "
-             "reading as in progress. Only an open row (no ended_at) whose "
-             "started_at matches this claim is removed. Mutually exclusive with "
-             "--stamp-do.",
+        "by a releaser whose POST-ACQUIRE validation refused it: it took the "
+        "claim only to serialize, did no work, and must not leave the node "
+        "reading as in progress. Only an open row (no ended_at) whose "
+        "started_at matches this claim is removed. Mutually exclusive with "
+        "--stamp-do.",
     ),
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
@@ -494,9 +507,7 @@ def release(
         )
         raise typer.Exit(code=2)
     try:
-        released = release_claim(
-            key=key, holder=holder, strict=strict, root=_node_aware_root(key)
-        )
+        released = release_claim(key=key, holder=holder, strict=strict, root=_node_aware_root(key))
     except HolderMismatch as exc:
         typer.echo(f"holder mismatch: {exc}", err=True)
         raise typer.Exit(code=4)
@@ -575,9 +586,9 @@ def _do_row_coordinates(key: str, claim, holder: str, action: str):
         return None
     from datetime import datetime, timezone
 
-    started = datetime.fromtimestamp(
-        claim.acquired_at / 1000, tz=timezone.utc
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    started = datetime.fromtimestamp(claim.acquired_at / 1000, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
     return node_id, harness, session_id, started, effort
 
 
@@ -623,9 +634,13 @@ def _stamp_do_on_acquire(key: str, claim, holder: str) -> None:
     node_id, harness, session_id, started, effort = coords
     try:
         found, _added = append_session_record(
-            graph_json(), node_id, phase="do",
-            harness=harness, session_id=session_id,
-            started_at=started, effort=effort,
+            graph_json(),
+            node_id,
+            phase="do",
+            harness=harness,
+            session_id=session_id,
+            started_at=started,
+            effort=effort,
         )
     except (Exception, SystemExit) as exc:
         typer.echo(
@@ -664,9 +679,14 @@ def _stamp_do_on_release(key: str, claim, holder: str) -> None:
     ended = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         found, _added = append_session_record(
-            graph_json(), node_id, phase="do",
-            harness=harness, session_id=session_id,
-            started_at=started, ended_at=ended, effort=effort,
+            graph_json(),
+            node_id,
+            phase="do",
+            harness=harness,
+            session_id=session_id,
+            started_at=started,
+            ended_at=ended,
+            effort=effort,
         )
     except (Exception, SystemExit) as exc:
         typer.echo(
@@ -710,8 +730,11 @@ def _rollback_do_on_release(key: str, claim, holder: str) -> None:
     node_id, harness, session_id, started, _effort = coords
     try:
         found, removed = remove_open_session_record(
-            graph_json(), node_id, phase="do",
-            harness=harness, session_id=session_id,
+            graph_json(),
+            node_id,
+            phase="do",
+            harness=harness,
+            session_id=session_id,
             started_at=started,
         )
     except (Exception, SystemExit) as exc:
@@ -747,7 +770,9 @@ def refresh(
 ) -> None:
     """Extend a TTL claim's expires_at. No-op for PID-liveness claims."""
     try:
-        result = refresh_claim(key=key, holder=holder, ttl_ms=_parse_ttl(ttl), root=_node_aware_root(key))
+        result = refresh_claim(
+            key=key, holder=holder, ttl_ms=_parse_ttl(ttl), root=_node_aware_root(key)
+        )
     except HolderMismatch as exc:
         typer.echo(f"holder mismatch: {exc}", err=True)
         raise typer.Exit(code=4)
@@ -759,6 +784,9 @@ def refresh(
         raise typer.Exit(code=2)
     except ClaimCorrupted as exc:
         typer.echo(f"corrupted claim: {exc}", err=True)
+        raise typer.Exit(code=3)
+    except (ClaimVerdictError, ClaimVerdictUnavailable) as exc:
+        typer.echo(f"native verdict unavailable: {exc}", err=True)
         raise typer.Exit(code=3)
     except ClaimContended as exc:
         # refresh_claim's own contention-retry-exhaustion guard; same exit
@@ -888,9 +916,7 @@ def read_roster(timeout: float = 10.0) -> RosterReading:
             unresolved.append(entry)
         if r.row_id:
             by_session[str(r.row_id)] = entry
-    return RosterReading(
-        True, len(rows), index, "", by_session, len(unresolved), tuple(unresolved)
-    )
+    return RosterReading(True, len(rows), index, "", by_session, len(unresolved), tuple(unresolved))
 
 
 def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) -> dict:
@@ -910,9 +936,7 @@ def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) ->
             "roster_skip_reason": reading.reason,
         }
     candidates = [
-        row["name"]
-        for row in reading.unresolved_rows
-        if Path(row.get("cwd") or "").name == node_id
+        row["name"] for row in reading.unresolved_rows if Path(row.get("cwd") or "").name == node_id
     ]
     return {
         "roster_consulted": True,
@@ -1003,10 +1027,7 @@ def _roster_verdict_line(info: dict) -> str:
                 f"{names}. Confirm with: fno agents peek {candidates[0]}"
             )
         return scanned
-    scanned = (
-        f"{state}, no live worker found "
-        f"(roster scanned: {info['roster_rows_scanned']} rows)"
-    )
+    scanned = f"{state}, no live worker found (roster scanned: {info['roster_rows_scanned']} rows)"
     if workers:
         rendered = ", ".join(w["name"] for w in workers)
         return f"{scanned}; {len(workers)} finished session(s) resolved to it: {rendered}"
@@ -1049,7 +1070,7 @@ def status(
     it never asked.
     """
     info = claim_status(key=key, root=_node_aware_root(key))
-    node_id = key[len("node:"):] if key.startswith("node:") else ""
+    node_id = key[len("node:") :] if key.startswith("node:") else ""
     crosschecked = roster and bool(node_id) and info.get("state") in _UNHELD_STATES
     if crosschecked:
         info.update(_roster_crosscheck(node_id))
@@ -1092,7 +1113,9 @@ def _merge_claims_across_roots(
 
     for candidate_root, cdir in deduped_roots:
         rows, _counts, states_by_key = list_claims_with_counts(
-            prefix=prefix or None, include_stale=include_stale, root=candidate_root,
+            prefix=prefix or None,
+            include_stale=include_stale,
+            root=candidate_root,
         )
         row_by_key = {r["key"]: r for r in rows}
         for key, state in states_by_key.items():
@@ -1274,13 +1297,6 @@ def list_cmd(
 HANDOVER_HOLDER_PREFIX = _HANDOVER_HOLDER_PREFIX
 
 
-
-
-
-
-
-
-
 def _node_settlement(reading: Optional[RosterReading] = None):
     """The closure-shaped reading ``sweep_verdict`` runs FIRST on a node claim
     (x-94f8): is this claim's own node still the holder's workplace?
@@ -1325,16 +1341,14 @@ def _node_settlement(reading: Optional[RosterReading] = None):
                 # "deferred:<ts>" row still carries deferral inside
                 # completed_at, and deferral is a returnable rung.
                 cache["terminal"] = frozenset(
-                    e.get("id")
-                    for e in read_graph(graph_json())
-                    if is_terminal_entry(e)
+                    e.get("id") for e in read_graph(graph_json()) if is_terminal_entry(e)
                 )
             except Exception:  # noqa: BLE001 - an unreadable graph proves nothing
                 cache["terminal"] = None
         return cache["terminal"]
 
     def _probe(claim, now=None) -> Optional[bool]:
-        node_id = claim.key[len("node:"):]
+        node_id = claim.key[len("node:") :]
         terminal = _terminal_ids()
         if terminal is not None and node_id in terminal:
             return True
@@ -1424,9 +1438,7 @@ def _transcript_says_finished(session_id: str, cwd: str) -> bool:
             tail_facts,
         )
 
-        return finished_with_the_tree(
-            tail_facts(session_id, cwd), time.time(), REAP_QUIET_AFTER_S
-        )
+        return finished_with_the_tree(tail_facts(session_id, cwd), time.time(), REAP_QUIET_AFTER_S)
     except Exception:  # noqa: BLE001 - an unreadable transcript proves nothing
         return False
 
@@ -1484,9 +1496,7 @@ def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optiona
         fno_bin = os.environ.get("FNO_BIN") or "fno"
 
         try:
-            return runner(
-                [fno_bin, *args], capture_output=True, text=True, timeout=10
-            )
+            return runner([fno_bin, *args], capture_output=True, text=True, timeout=10)
         except Exception:  # noqa: BLE001 - a probe never fails a sweep
             return None
 
@@ -1517,9 +1527,7 @@ def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optiona
             # A zero-pane session would only contribute an
             # ambiguous []; the probe never raises on a malformed row.
             continue
-        panes = _mux(
-            "mux", "pane", "ls", "--session", str(session), "--json"
-        )
+        panes = _mux("mux", "pane", "ls", "--session", str(session), "--json")
         if panes is None or getattr(panes, "returncode", 1) != 0:
             return None
         try:
@@ -1533,11 +1541,7 @@ def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optiona
             if not isinstance(pane, dict):
                 continue
             cwd_name = str(pane.get("cwd") or "").rstrip("/").rsplit("/", 1)[-1]
-            if (
-                pane.get("fno_id") in names
-                or pane.get("title") in names
-                or cwd_name in names
-            ):
+            if pane.get("fno_id") in names or pane.get("title") in names or cwd_name in names:
                 return False
     return True if saw_content else None
 
@@ -1659,8 +1663,8 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
                 return None
             if _handover_pane_probe_blocked(claim):
                 return None
-            worker = claim.holder[len(HANDOVER_HOLDER_PREFIX):]
-            node_id = claim.key[len("node:"):] if claim.key.startswith("node:") else ""
+            worker = claim.holder[len(HANDOVER_HOLDER_PREFIX) :]
+            node_id = claim.key[len("node:") :] if claim.key.startswith("node:") else ""
             pane_key = f"pane_absent:{worker}"
             if pane_key not in cache:
                 cache[pane_key] = _mux_pane_absent_for(worker, node_id)
@@ -1700,10 +1704,13 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
 
     return _probe
 
+
 @cli.command(name="reap")
 def reap_cmd(
     apply: bool = typer.Option(
-        False, "--apply", help="Archive dead claims. Default is dry-run: report what would be reaped."
+        False,
+        "--apply",
+        help="Archive dead claims. Default is dry-run: report what would be reaped.",
     ),
     root: Optional[List[Path]] = typer.Option(
         None,
@@ -1748,9 +1755,7 @@ def reap_cmd(
     if optout_sink:
         from fno.claims.optout_lease import restore_reaped_optouts
 
-        summary.setdefault("reap_failed", []).extend(
-            restore_reaped_optouts(optout_sink)
-        )
+        summary.setdefault("reap_failed", []).extend(restore_reaped_optouts(optout_sink))
 
     if json_output:
         typer.echo(json.dumps(summary))
@@ -1771,9 +1776,7 @@ def reap_cmd(
         if summary["kept_suspect_alive"]:
             suspect += f", {summary['kept_suspect_alive']} suspect (worker alive)"
         if summary["kept_suspect_unprobed"]:
-            suspect += (
-                f", {summary['kept_suspect_unprobed']} suspect (roster not consulted)"
-            )
+            suspect += f", {summary['kept_suspect_unprobed']} suspect (roster not consulted)"
         typer.echo(
             f"kept: {summary['kept_live']} live, {suspect}, "
             f"{summary['kept_offhost']} off-host, {summary['corrupted']} corrupted, "
@@ -1818,9 +1821,7 @@ def _acquire_lane(*, lane: str, max_lanes: int, ttl: str, json_output: bool) -> 
     from .lanes import acquire_lane_slot
 
     try:
-        claim = acquire_lane_slot(
-            max_lanes=max_lanes, lane_id=lane, ttl_ms=_parse_ttl(ttl or "1h")
-        )
+        claim = acquire_lane_slot(max_lanes=max_lanes, lane_id=lane, ttl_ms=_parse_ttl(ttl or "1h"))
     except ClaimValidationError as exc:
         typer.echo(f"validation error: {exc}", err=True)
         raise typer.Exit(code=2)

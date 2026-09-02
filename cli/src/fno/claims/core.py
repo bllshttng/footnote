@@ -15,6 +15,7 @@ Every state-changing verb appends an audit event to ``.fno/events.jsonl``
 through the typed builders in :mod:`fno.claims.events`. Audit-trail
 writes are best-effort: the YAML lock file write is authoritative.
 """
+
 from __future__ import annotations
 
 import os
@@ -52,7 +53,7 @@ from .io import (
 )
 from .self_identity import resolve_self_identity
 from ..mutex import acquire_dir_mutex, release_dir_mutex
-from .verdict import claim_verdicts
+from .verdict import ClaimVerdictError, ClaimVerdictUnavailable, claim_verdicts
 from .types import (
     MAX_ENCODED_FILENAME_BYTES,
     MAX_KEY_LENGTH,
@@ -116,7 +117,12 @@ class ClaimContended(Exception):
 # restated comment at each site. A caller that needs to read `.holder`/`.pid`/
 # `.host` (ClaimHeldByOther-only attributes) still needs its own separate
 # `except ClaimHeldByOther as exc:` block ahead of this one.
-CLAIM_UNAVAILABLE = (ClaimHeldByOther, ClaimContended)
+CLAIM_UNAVAILABLE = (
+    ClaimHeldByOther,
+    ClaimContended,
+    ClaimVerdictError,
+    ClaimVerdictUnavailable,
+)
 
 
 class RebindRefused(Exception):
@@ -152,6 +158,8 @@ __all__ = [
     "ClaimGoneAway",
     "ClaimHeldByOther",
     "ClaimValidationError",
+    "ClaimVerdictError",
+    "ClaimVerdictUnavailable",
     "HolderMismatch",
     "RebindRefused",
     "acquire_claim",
@@ -178,9 +186,7 @@ def _validate_inputs(
     if not key:
         raise ClaimValidationError("key must be non-empty")
     if len(key) > MAX_KEY_LENGTH:
-        raise ClaimValidationError(
-            f"key length {len(key)} exceeds MAX_KEY_LENGTH={MAX_KEY_LENGTH}"
-        )
+        raise ClaimValidationError(f"key length {len(key)} exceeds MAX_KEY_LENGTH={MAX_KEY_LENGTH}")
     # Raw length passing MAX_KEY_LENGTH does not guarantee the encoded
     # filename fits the filesystem's 255-byte name limit. Check the
     # URL-encoded form explicitly: keys with many reserved characters
@@ -200,9 +206,7 @@ def _validate_inputs(
     if pid is not None and pid <= 0:
         raise ClaimValidationError("pid must be positive")
     if ttl_ms is not None and not (MIN_TTL_MS <= ttl_ms <= MAX_TTL_MS):
-        raise ClaimValidationError(
-            f"ttl_ms={ttl_ms} out of range [{MIN_TTL_MS}, {MAX_TTL_MS}]"
-        )
+        raise ClaimValidationError(f"ttl_ms={ttl_ms} out of range [{MIN_TTL_MS}, {MAX_TTL_MS}]")
 
 
 def _resolve_pid_provenance(
@@ -268,9 +272,7 @@ def _make_claim(
 ) -> Claim:
     acquired = now_ms()
     return Claim(
-        schema_version=(
-            PID_UNAVAILABLE_SCHEMA_VERSION if pid_unavailable else SCHEMA_VERSION
-        ),
+        schema_version=(PID_UNAVAILABLE_SCHEMA_VERSION if pid_unavailable else SCHEMA_VERSION),
         key=key,
         holder=holder,
         acquired_at=acquired,
@@ -339,9 +341,7 @@ def acquire_claim(
     rather than recursing unbounded, mirroring Rust's bounded
     ``ACQUIRE_MAX_ATTEMPTS`` for-loop (crates/fno-agents/src/claims.rs).
     """
-    _validate_inputs(
-        key, holder, ttl_ms, pid=pid, pid_unavailable=pid_unavailable
-    )
+    _validate_inputs(key, holder, ttl_ms, pid=pid, pid_unavailable=pid_unavailable)
     path = claim_path(key, root=root)
     # Unconditional initial value (each branch below reassigns its own):
     # gives _release_and_retry's `nonlocal` an unambiguous prior binding
@@ -354,8 +354,7 @@ def acquire_claim(
         # 9-line call restated at each of the seven sites that need it.
         if _attempt + 1 >= ACQUIRE_MAX_ATTEMPTS:
             raise ClaimContended(
-                f"acquire_claim gave up after {ACQUIRE_MAX_ATTEMPTS} "
-                f"contention retries on {key!r}"
+                f"acquire_claim gave up after {ACQUIRE_MAX_ATTEMPTS} contention retries on {key!r}"
             )
         return acquire_claim(
             key,
@@ -407,8 +406,16 @@ def acquire_claim(
         pid_provenance = _resolve_pid_provenance(pid, ttl_ms, harness)
 
     new_claim = _make_claim(
-        key, holder, ttl_ms, reason, metadata, pid, host, harness,
-        pid_provenance, pid_unavailable,
+        key,
+        holder,
+        ttl_ms,
+        reason,
+        metadata,
+        pid,
+        host,
+        harness,
+        pid_provenance,
+        pid_unavailable,
     )
     payload = serialize_claim(new_claim)
 
@@ -474,8 +481,16 @@ def acquire_claim(
                 return _release_and_retry()
 
             refreshed = _make_claim(
-                key, holder, ttl_ms, reason, metadata, pid, host, harness,
-                pid_provenance, pid_unavailable,
+                key,
+                holder,
+                ttl_ms,
+                reason,
+                metadata,
+                pid,
+                host,
+                harness,
+                pid_provenance,
+                pid_unavailable,
             )
             _atomic_replace(path, serialize_claim(refreshed))
             emit_claim_idempotent_reacquired(refreshed, previous=fresh_existing)
@@ -528,8 +543,16 @@ def acquire_claim(
             if existing.holder == holder:
                 # Raced into the idempotent path while we were grabbing the lock.
                 refreshed = _make_claim(
-                    key, holder, ttl_ms, reason, metadata, pid, host, harness,
-                    pid_provenance, pid_unavailable,
+                    key,
+                    holder,
+                    ttl_ms,
+                    reason,
+                    metadata,
+                    pid,
+                    host,
+                    harness,
+                    pid_provenance,
+                    pid_unavailable,
                 )
                 _atomic_replace(path, serialize_claim(refreshed))
                 emit_claim_idempotent_reacquired(refreshed, previous=existing)
@@ -639,11 +662,7 @@ def _rebound_claim(
     if not pid_dies_with_session(written_harness):
         new_pid_provenance = "ambient"
     return Claim(
-        schema_version=(
-            PID_UNAVAILABLE_SCHEMA_VERSION
-            if new_pid_unavailable
-            else SCHEMA_VERSION
-        ),
+        schema_version=(PID_UNAVAILABLE_SCHEMA_VERSION if new_pid_unavailable else SCHEMA_VERSION),
         key=existing.key,
         holder=new_holder or existing.holder,
         acquired_at=acquired,
@@ -732,9 +751,7 @@ def compare_and_rebind(
     # Resolved BEFORE the recovery mutex below, for the same reason as
     # `acquire_claim`: the owned path walks the process tree, and everything
     # after the lock runs while other callers poll on it (x-20f1).
-    resolved_harness = (
-        new_harness if new_harness is not None else resolve_self_identity().harness
-    )
+    resolved_harness = new_harness if new_harness is not None else resolve_self_identity().harness
     # Same placement, same reason: the rebind rewrites the pid, so its
     # provenance is earned here against the prover or it resets to ambient.
     resolved_provenance = _resolve_pid_provenance(new_pid, ttl_ms, resolved_harness)
@@ -845,8 +862,12 @@ def compare_and_rebind(
             # free-read this whole change exists to close, reintroduced on the
             # one substrate that blocks.
             rebound = _rebound_claim(
-                existing, npid, ttl_ms, new_holder=effective_new_holder,
-                new_reason=effective_new_reason, new_harness=effective_new_harness,
+                existing,
+                npid,
+                ttl_ms,
+                new_holder=effective_new_holder,
+                new_reason=effective_new_reason,
+                new_harness=effective_new_harness,
                 new_metadata=effective_new_metadata,
                 new_pid_provenance=resolved_provenance,
                 new_pid_unavailable=npid_unavailable,
@@ -867,8 +888,12 @@ def compare_and_rebind(
             if existing.pid == npid:
                 # Idempotent: already bound to this process; refresh lease only.
                 rebound = _rebound_claim(
-                    existing, npid, ttl_ms, new_holder=effective_new_holder,
-                    new_reason=effective_new_reason, new_harness=effective_new_harness,
+                    existing,
+                    npid,
+                    ttl_ms,
+                    new_holder=effective_new_holder,
+                    new_reason=effective_new_reason,
+                    new_harness=effective_new_harness,
                     new_metadata=effective_new_metadata,
                     new_pid_unavailable=npid_unavailable,
                     new_pid_provenance=resolved_provenance,
@@ -907,12 +932,16 @@ def compare_and_rebind(
 
         # Local same-holder, prior PID dead: the resume rebind.
         rebound = _rebound_claim(
-                existing, npid, ttl_ms, new_holder=effective_new_holder,
-                new_reason=effective_new_reason, new_harness=effective_new_harness,
-                new_metadata=effective_new_metadata,
-                new_pid_provenance=resolved_provenance,
-                new_pid_unavailable=npid_unavailable,
-            )
+            existing,
+            npid,
+            ttl_ms,
+            new_holder=effective_new_holder,
+            new_reason=effective_new_reason,
+            new_harness=effective_new_harness,
+            new_metadata=effective_new_metadata,
+            new_pid_provenance=resolved_provenance,
+            new_pid_unavailable=npid_unavailable,
+        )
         _atomic_replace(path, serialize_claim(rebound))
         if emit:
             emit_claim_rebound(
@@ -970,9 +999,12 @@ ACQUIRE_MAX_ATTEMPTS = 5
 
 def _claim_verdict(claim: Claim, *, root: Optional[Path] = None) -> dict[str, Any]:
     """Read one claim verdict from the native batch door."""
-    return claim_verdicts([claim.key], root=root).get(
-        claim.key, {"key": claim.key, "state": ClaimState.FREE.value}
-    )
+    verdict = claim_verdicts([claim.key], root=root).get(claim.key)
+    if verdict is None:
+        raise ClaimVerdictError(
+            f"native claim verdict omitted readable claim {claim.key!r}; refusing to assume free"
+        )
+    return verdict
 
 
 def _claim_state(claim: Claim, *, root: Optional[Path] = None) -> ClaimState:
@@ -1208,9 +1240,7 @@ def refresh_claim(
     if not key or not holder:
         raise ClaimValidationError("key and holder must be non-empty")
     if ttl_ms is not None and not (MIN_TTL_MS <= ttl_ms <= MAX_TTL_MS):
-        raise ClaimValidationError(
-            f"ttl_ms={ttl_ms} out of range [{MIN_TTL_MS}, {MAX_TTL_MS}]"
-        )
+        raise ClaimValidationError(f"ttl_ms={ttl_ms} out of range [{MIN_TTL_MS}, {MAX_TTL_MS}]")
 
     path = claim_path(key, root=root)
     if not path.exists():
@@ -1315,7 +1345,15 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
             "path": str(path),
         }
 
-    return _claim_verdict(claim, root=root)
+    try:
+        return _claim_verdict(claim, root=root)
+    except (ClaimVerdictError, ClaimVerdictUnavailable) as exc:
+        return {
+            "key": key,
+            "state": ClaimState.CORRUPTED.value,
+            "error": str(exc),
+            "path": str(path),
+        }
 
 
 def _list_claims_impl(
@@ -1367,6 +1405,9 @@ def _list_claims_impl(
             except ClaimGoneAway:
                 counts[ClaimState.FREE.value] += 1
                 states_by_key[key] = ClaimState.FREE.value
+            else:
+                counts[ClaimState.CORRUPTED.value] += 1
+                states_by_key[key] = ClaimState.CORRUPTED.value
             continue
         state = status.get("state")
         if state in counts:
@@ -1486,7 +1527,10 @@ def force_release_claim(
 
         if not path.exists():
             emit_claim_force_overridden(
-                key=key, reason=reason, previous_holder=None, previous_pid=None,
+                key=key,
+                reason=reason,
+                previous_holder=None,
+                previous_pid=None,
             )
             return
 
@@ -1545,9 +1589,9 @@ def _pid_holder_map(dirs: list[Path]) -> dict[tuple[str, int], dict[str, Path]]:
                 continue
             if claim.pid is None:
                 continue
-            holders.setdefault(
-                (claim.machine_id or claim.host, claim.pid), {}
-            )[claim.holder] = entry
+            holders.setdefault((claim.machine_id or claim.host, claim.pid), {})[claim.holder] = (
+                entry
+            )
     return holders
 
 
@@ -1788,8 +1832,11 @@ def reap_dead_claims(
     reaped = 0
     would_reap = 0
     kept: dict[str, int] = {
-        "offhost": 0, "suspect": 0, "live": 0,
-        "suspect_alive": 0, "suspect_unprobed": 0,
+        "offhost": 0,
+        "suspect": 0,
+        "live": 0,
+        "suspect_alive": 0,
+        "suspect_unprobed": 0,
     }
 
     def _sweep_verdict(
@@ -1797,7 +1844,7 @@ def reap_dead_claims(
     ) -> tuple[bool, str]:
         native = native_verdict or native_verdicts.get(claim.key)
         if native is None:
-            return False, "unprobed"
+            return False, "suspect_unprobed"
         return sweep_verdict(
             claim,
             now=ts,
@@ -1906,9 +1953,7 @@ def reap_dead_claims(
                     # The native key read deliberately has unknown PID
                     # exclusivity: this is a TOCTOU re-read, not a reused batch
                     # scan. The first batch read carried the full sibling set.
-                    fresh_native = claim_verdicts(
-                        prefix="", root=cdir.parent.parent
-                    ).get(fresh.key)
+                    fresh_native = claim_verdicts(prefix="", root=cdir.parent.parent).get(fresh.key)
                     if fresh_native is None:
                         kept["suspect_unprobed"] += 1
                         continue
@@ -1962,10 +2007,7 @@ def reap_dead_claims(
                         # bearing on whether the archive itself worked.
                         reaped += 1
                         initial = native_verdicts.get(fresh.key, {})
-                        if (
-                            fresh.pid is not None
-                            and initial.get("basis") == "pid-shared"
-                        ):
+                        if fresh.pid is not None and initial.get("basis") == "pid-shared":
                             archived_shared_pids.add((fresh.machine_id or fresh.host, fresh.pid))
                         if fresh.key.startswith("config-optout:") and optout_sink is not None:
                             # The caller owns the opt-out restore: importing the
@@ -1996,9 +2038,7 @@ def reap_dead_claims(
                         # is not evidence. The source is still there and no
                         # archive was created, so the move did not happen
                         # (AC5).
-                        reap_failed.append(
-                            (str(entry), "archive_claim did not move the file")
-                        )
+                        reap_failed.append((str(entry), "archive_claim did not move the file"))
                 finally:
                     release_dir_mutex(recovery_lock, recovery_token)
                 continue
