@@ -752,10 +752,11 @@ def resolve_owned_identity(
     default ``None`` skips the check. Both default off so this module stays
     dependency-free; the consuming verb injects the real prover and collider.
 
-    Resolution order: a uniquely proven family wins; collision rejects ids a
-    live row owns (recorded regardless of proof, so the owner is named); a
-    marker the prover actively contradicts is excluded; among the rest, the sole
-    surviving family wins or the result degrades to ``None``.
+    Resolution order: proof beats collision - a proven marker wins without
+    consulting the collider, in both branches; collision then rejects ids a
+    live row owns when proof is absent or negative (the owner is named); a
+    marker the prover actively contradicts is excluded; among the rest, the
+    sole surviving family wins or the result degrades to ``None``.
     """
     environ = os.environ if env is None else env
     markers = present_harness_markers(environ)
@@ -769,6 +770,14 @@ def resolve_owned_identity(
         if not identity.session_id or not identity.harness:
             return OwnedHarnessIdentity(None, None, present, "ambiguous")
         verdict = prove(identity.harness, identity.session_id) if prove else None
+        if verdict is True:
+            # PROOF is self, same as the marker loop below: a live row holding
+            # this id is the session's own row (spawn mints the stamp and the
+            # row in one act), not a foreign owner, so a proven marker is never
+            # decided by collision (x-6d6c).
+            return OwnedHarnessIdentity(
+                identity.session_id, identity.harness, present, "canonical"
+            )
         owner = collide(identity.harness, identity.session_id) if collide else None
         if owner:
             canonical_rejected = (

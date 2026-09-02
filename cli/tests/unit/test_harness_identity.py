@@ -142,25 +142,102 @@ def test_canonical_pair_requires_process_proof_and_respects_collision():
     )
 
 
-def test_canonical_pair_does_not_skip_collision_on_family_proof():
+def test_canonical_proof_beats_own_row_collision():
+    """AC1-HP: proof is self. A spawned worker's stamped id is held in the
+    registry by the worker's OWN row (spawn mints both in one act), so a
+    proven canonical identity resolves even though a live row matches the
+    id (x-6d6c: the worker read as a competing holder of itself)."""
     session_id = "11111111-1111-4111-8111-111111111111"
     env = {
-        "FNO_HARNESS_NAME": "claude",
+        "FNO_HARNESS_NAME": "codex",
         "FNO_HARNESS_SESSION_ID": session_id,
-        "FNO_AGENT_SELF": "victim",
-        "CLAUDE_CODE_SESSION_ID": session_id,
+        "CODEX_THREAD_ID": session_id,
     }
 
     owned = resolve_owned_identity(
         env,
         prove=lambda _harness, _session: True,
-        collide=lambda _harness, _session: "victim",
+        collide=lambda _harness, _session: "t-32db-waves45",
+    )
+
+    assert owned.disposition == "canonical"
+    assert owned.session_id == session_id
+    assert owned.harness == "codex"
+    assert owned.rejected == ()
+
+
+def test_canonical_pair_without_proof_still_refuses_live_row():
+    """AC3-ERR: with no proof available a live row holding the id is still
+    contention, and the rejection names the owning row."""
+    session_id = "11111111-1111-4111-8111-111111111111"
+    env = {
+        "FNO_HARNESS_NAME": "codex",
+        "FNO_HARNESS_SESSION_ID": session_id,
+        "CODEX_THREAD_ID": session_id,
+    }
+
+    owned = resolve_owned_identity(
+        env,
+        prove=lambda _harness, _session: None,
+        collide=lambda _harness, _session: "other-live-row",
     )
 
     assert owned.disposition == "ambiguous"
     assert owned.session_id is None
     assert owned.harness is None
-    assert owned.rejected[0]["owner"] == "victim"
+    assert owned.rejected[0]["owner"] == "other-live-row"
+
+
+@pytest.mark.parametrize(
+    ("verdict", "owner"),
+    [
+        (True, "own-row"),
+        (None, "own-row"),
+        (False, "own-row"),
+        (True, None),
+    ],
+)
+def test_owned_branches_agree_on_proof_vs_collision(verdict, owner):
+    """AC9-EDGE: the canonical branch and the marker loop must reach the same
+    answer for the same proof/collision facts, so they can never disagree
+    about whether proof beats collision again. The (no proof, no collision)
+    cell is excluded on purpose: a canonical stamp alone is not proof (the
+    forged-pairing guard), while a lone vendor marker is the dominant
+    precedence case - that asymmetry has its own tests above."""
+    session_id = "11111111-1111-4111-8111-111111111111"
+    stamped = {
+        "FNO_HARNESS_NAME": "codex",
+        "FNO_HARNESS_SESSION_ID": session_id,
+        "CODEX_THREAD_ID": session_id,
+    }
+    bare = {"CODEX_THREAD_ID": session_id}
+
+    def run(env):
+        return resolve_owned_identity(
+            env,
+            prove=lambda _harness, _session: verdict,
+            collide=(lambda _harness, _session: owner) if owner else None,
+        )
+
+    stamped_result = run(stamped)
+    bare_result = run(bare)
+    resolved = {"canonical", "single", "proven"}
+    assert (stamped_result.disposition in resolved) == (
+        bare_result.disposition in resolved
+    )
+    if stamped_result.disposition in resolved:
+        assert (stamped_result.session_id, stamped_result.harness) == (
+            bare_result.session_id,
+            bare_result.harness,
+        )
+        assert stamped_result.rejected == ()
+        assert bare_result.rejected == ()
+    else:
+        assert stamped_result.session_id is None
+        assert bare_result.session_id is None
+        # Refusal reasons agree too: a collision is recorded by both branches
+        # or by neither.
+        assert bool(stamped_result.rejected) == bool(bare_result.rejected)
 
 
 def test_canonical_name_only_uses_same_family_vendor_session():
@@ -348,7 +425,7 @@ def test_owned_single_family_with_collision_degrades_not_promote_sibling(tmp_pat
     register_existing_session(provider="codex", session_id=foreign, cwd="/x", registry_path=reg)
 
     def collide(harness, sid):
-        return row_owning_session_id(sid, registry_path=reg)
+        return row_owning_session_id(sid, registry_path=reg, self_binding=None)
 
     env = {"CODEX_THREAD_ID": foreign, "CODEX_SESSION_ID": "sibling-maybe-foreign"}
     owned = resolve_owned_identity(env, collide=collide)  # no prove
@@ -412,17 +489,90 @@ def _register(tmp_path, session_id, provider="codex", status="live"):
 
 
 def test_row_owning_session_id_finds_live_owner(tmp_path):
-    """AC3-ERR: a live row owning a candidate id proves it is not this
-    session's; the collider returns the owner's name."""
+    """AC3-ERR: a live row owning a candidate id is contention for a caller
+    that proves no binding; the collider returns the owner's name."""
     from fno.agents.registry import row_owning_session_id
 
     sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
     name, reg = _register(tmp_path, sid)
-    assert row_owning_session_id(sid, registry_path=reg) == name
+    assert (
+        row_owning_session_id(sid, registry_path=reg, self_binding=None) == name
+    )
     # A different id is free.
-    assert row_owning_session_id("019fffff-0000-0000-0000-ffffffffffff", registry_path=reg) is None
+    assert (
+        row_owning_session_id(
+            "019fffff-0000-0000-0000-ffffffffffff",
+            registry_path=reg,
+            self_binding=None,
+        )
+        is None
+    )
     # Case-insensitive UUID match.
-    assert row_owning_session_id(sid.upper(), registry_path=reg) == name
+    assert (
+        row_owning_session_id(sid.upper(), registry_path=reg, self_binding=None)
+        == name
+    )
+
+
+def test_row_owning_session_id_self_row_is_not_contention(tmp_path):
+    """The spine: a live row matching the caller's own (harness, id) binding
+    is the caller's OWN row, and self is never reported as an owner."""
+    from fno.agents.registry import row_owning_session_id
+
+    sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+    name, reg = _register(tmp_path, sid, provider="codex")
+    assert (
+        row_owning_session_id(
+            sid, registry_path=reg, self_binding=("codex", sid)
+        )
+        is None
+    )
+    # The row exists; only the self verdict changed.
+    assert (
+        row_owning_session_id(sid, registry_path=reg, self_binding=None) == name
+    )
+
+
+def test_row_owning_session_id_self_binding_with_wrong_harness_still_owner(tmp_path):
+    """A row of a DIFFERENT harness holding the id under test is another
+    session's row even when the caller names the same id as its own: the
+    binding's harness half must agree with the row, or the id is foreign."""
+    from fno.agents.registry import row_owning_session_id
+
+    sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+    name, reg = _register(tmp_path, sid, provider="claude")
+    assert (
+        row_owning_session_id(
+            sid, registry_path=reg, self_binding=("codex", sid)
+        )
+        == name
+    )
+
+
+def test_row_owning_session_id_self_binding_of_another_id_still_owner(tmp_path):
+    """A caller that proves its own id elsewhere is still refused an id held
+    by a different live row."""
+    from fno.agents.registry import row_owning_session_id
+
+    sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+    mine = "019fc88e-aaaa-7c90-926a-6bdd7ebb186c"
+    name, reg = _register(tmp_path, sid)
+    assert (
+        row_owning_session_id(
+            sid, registry_path=reg, self_binding=("codex", mine)
+        )
+        == name
+    )
+
+
+def test_row_owning_session_id_self_binding_is_required():
+    """AC7-ERR: calling the detector without declaring what the caller knows
+    about itself is a TypeError at runtime; mypy makes it a type error under
+    guards.yml, so self-blindness is always a written decision."""
+    from fno.agents.registry import row_owning_session_id
+
+    with pytest.raises(TypeError):
+        row_owning_session_id("019fc87d-ddff-7c90-926a-6bdd7ebb186c")
 
 
 def test_row_owning_session_id_absent_or_unreadable_is_none(tmp_path):
@@ -430,11 +580,21 @@ def test_row_owning_session_id_absent_or_unreadable_is_none(tmp_path):
     collision) and never raises, so an unreadable registry never blocks init."""
     from fno.agents.registry import row_owning_session_id
 
-    assert row_owning_session_id("019fc87d-...", registry_path=tmp_path / "nope.json") is None
+    assert (
+        row_owning_session_id(
+            "019fc87d-...", registry_path=tmp_path / "nope.json", self_binding=None
+        )
+        is None
+    )
     corrupt = tmp_path / "agents.json"
     corrupt.write_text("{not valid json")
-    assert row_owning_session_id("019fc87d-...", registry_path=corrupt) is None
-    assert row_owning_session_id("", registry_path=corrupt) is None
+    assert (
+        row_owning_session_id(
+            "019fc87d-...", registry_path=corrupt, self_binding=None
+        )
+        is None
+    )
+    assert row_owning_session_id("", registry_path=corrupt, self_binding=None) is None
 
 
 def test_row_owning_session_id_exited_row_releases_ownership(tmp_path):
@@ -444,7 +604,7 @@ def test_row_owning_session_id_exited_row_releases_ownership(tmp_path):
     sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
     for terminal in ("exited", "orphaned", "permanent_dead"):
         _name, reg = _register(tmp_path, sid, status=terminal)
-        assert row_owning_session_id(sid, registry_path=reg) is None
+        assert row_owning_session_id(sid, registry_path=reg, self_binding=None) is None
 
 
 def test_resolve_owned_rejects_a_live_rows_id_via_real_collider(tmp_path):
@@ -457,7 +617,7 @@ def test_resolve_owned_rejects_a_live_rows_id_via_real_collider(tmp_path):
     owner, reg = _register(tmp_path, foreign)
 
     def collide(harness, sid):
-        return row_owning_session_id(sid, registry_path=reg)
+        return row_owning_session_id(sid, registry_path=reg, self_binding=None)
 
     env = {"CODEX_THREAD_ID": foreign, "CLAUDE_CODE_SESSION_ID": "mine"}
     owned = resolve_owned_identity(
@@ -487,7 +647,7 @@ def test_owned_proven_marker_wins_over_self_registration_collision(tmp_path):
     )
 
     def collide(harness, sid):
-        return row_owning_session_id(sid, registry_path=reg)
+        return row_owning_session_id(sid, registry_path=reg, self_binding=None)
 
     env = {"CODEX_THREAD_ID": foreign, "CLAUDE_CODE_SESSION_ID": mine}
     owned = resolve_owned_identity(

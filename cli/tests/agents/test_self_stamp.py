@@ -113,7 +113,9 @@ def test_resolve_self_identity_rejects_canonical_collision(monkeypatch):
     )
     monkeypatch.setattr(
         "fno.agents.registry.row_owning_session_id",
-        lambda session_id: "victim-king" if session_id == "victim-session" else None,
+        lambda session_id, *, self_binding: (
+            "victim-king" if session_id == "victim-session" else None
+        ),
     )
 
     identity = self_stamp.resolve_self_identity(env)
@@ -140,7 +142,9 @@ def test_resolve_self_identity_accepts_process_proven_canonical_row(monkeypatch)
     )
     monkeypatch.setattr(
         "fno.agents.registry.row_owning_session_id",
-        lambda session_id: "own-worker" if session_id == "own-session" else None,
+        lambda session_id, *, self_binding: (
+            "own-worker" if session_id == "own-session" else None
+        ),
     )
 
     identity = self_stamp.resolve_self_identity(env)
@@ -148,6 +152,35 @@ def test_resolve_self_identity_accepts_process_proven_canonical_row(monkeypatch)
     assert identity.disposition == "canonical"
     assert identity.session_id == "own-session"
     assert identity.harness == "claude"
+
+
+def test_self_stamp_passes_the_explicit_sentinel(monkeypatch):
+    """AC10-HP: the caller declares what it knows about itself. This layer
+    can prove nothing independent of the markers under test, so it passes
+    the sentinel - the self-blind decision is written at the call site, and
+    the detector still reports a foreign row under it."""
+    captured: dict = {}
+
+    def fake_detector(session_id, *, self_binding):
+        captured["self_binding"] = self_binding
+        return "some-row" if session_id == "victim-session" else None
+
+    env = {
+        "FNO_HARNESS_NAME": "claude",
+        "FNO_HARNESS_SESSION_ID": "victim-session",
+    }
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: "claude",
+    )
+    monkeypatch.setattr(
+        "fno.agents.registry.row_owning_session_id", fake_detector
+    )
+
+    identity = self_stamp.resolve_self_identity(env)
+
+    assert captured["self_binding"] is None
+    assert identity.rejected[0]["owner"] == "some-row"
 
 
 def test_ambiguity_message_names_the_strip_set(monkeypatch):
