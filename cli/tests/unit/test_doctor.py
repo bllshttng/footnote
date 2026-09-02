@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,7 @@ def _stub_signals(
     deployed_config_keys: frozenset[str] | None = frozenset({"backlog.id_prefix"}),
     source_config_keys: frozenset[str] | None = frozenset({"backlog.id_prefix"}),
     content_drift: int | None = 0,
+    source_checkout_sync: dict | None = None,
 ) -> None:
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: src)
     # Content-drift ground truth. Default 0 = "check ran, byte-identical" so a
@@ -53,6 +55,17 @@ def _stub_signals(
     # exercise no drift; drift tests pass differing sets explicitly.
     monkeypatch.setattr(doctor, "_deployed_config_keys", lambda: deployed_config_keys)
     monkeypatch.setattr(doctor, "_source_config_keys", lambda source: source_config_keys)
+    monkeypatch.setattr(
+        doctor,
+        "_source_checkout_sync",
+        lambda source: source_checkout_sync or {
+            "status": "current",
+            "behind": 0,
+            "source_head": "abc123",
+            "remote_head": "abc123",
+            "detail": "",
+        },
+    )
     # Post ab-716cd330 `revision` carries the binary's self-reported crates/ rev
     # (the verdict driver), not the installed-rust-rev marker. `rust_marker` is
     # the value the resolved binary reports here.
@@ -119,6 +132,199 @@ def test_ac1_err_missing_verb_reports_skew_and_exits_nonzero(
     assert result.exit_code != 0
     assert "missing: backlog capture" in result.stdout
     assert "fno doctor update" in result.stdout
+
+
+def test_source_checkout_sync_reports_positive_origin_main_distance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "cli"
+    source.mkdir()
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        if cmd[-2:] == ["rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="local\n", stderr="")
+        if cmd[-3:] == ["rev-parse", "--verify", "origin/main^{commit}"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="remote\n", stderr="")
+        if cmd[-4:] == ["merge-base", "--is-ancestor", "HEAD", "origin/main"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[-3:] == ["rev-list", "--count", "HEAD..origin/main"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="117\n", stderr="")
+        raise AssertionError(f"unexpected git command: {cmd}")
+
+    monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+
+    report = doctor._source_checkout_sync(source)
+
+    assert report == {
+        "status": "behind",
+        "behind": 117,
+        "source_head": "local",
+        "remote_head": "remote",
+        "detail": "",
+    }
+    assert not any("fetch" in call for call in calls)
+
+
+def test_source_checkout_sync_degrades_unknown_without_origin_main(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "cli"
+    source.mkdir()
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[-2:] == ["rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="local\n", stderr="")
+        return subprocess.CompletedProcess(
+            cmd, 128, stdout="", stderr="unknown revision"
+        )
+
+    monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+
+    report = doctor._source_checkout_sync(source)
+
+    assert report["status"] == "unknown"
+    assert report["behind"] is None
+    assert "origin/main" in report["detail"]
+
+
+def test_source_checkout_behind_is_a_doctor_blocker() -> None:
+    blockers = doctor._blockers(
+        {
+            "status": "fresh",
+            "source_checkout_sync": {
+                "status": "behind",
+                "behind": 117,
+                "source_head": "local",
+                "remote_head": "remote",
+            },
+        }
+    )
+
+    assert len(blockers) == 1
+    assert "117 commits behind origin/main" in blockers[0]
+    assert "freshness is relative" in blockers[0]
+
+
+def test_source_checkout_behind_makes_doctor_exit_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+        source_checkout_sync={
+            "status": "behind",
+            "behind": 117,
+            "source_head": "local",
+            "remote_head": "remote",
+            "detail": "",
+        },
+    )
+
+    result = runner.invoke(app, ["doctor", "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "fresh"
+    assert payload["source_checkout_sync"]["status"] == "behind"
+    assert payload["source_checkout_sync"]["behind"] == 117
+    assert "source checkout" in result.stderr
+
+
+def test_build_report_checks_source_sync_after_post_merge_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    source = Path("/src")
+
+    monkeypatch.setattr(doctor, "_resolve_source", lambda _: source)
+    monkeypatch.setattr(doctor, "_source_rev", lambda _: "source")
+    monkeypatch.setattr(doctor, "_read_marker", lambda: "source")
+    monkeypatch.setattr(doctor, "_probe_installed_verb", lambda: "present")
+    monkeypatch.setattr(doctor, "_rust_report", lambda: {"binary": None, "revision": None})
+    monkeypatch.setattr(doctor, "_rust_source_rev", lambda _: None)
+    monkeypatch.setattr(doctor, "_cargo_bin_present", lambda: False)
+    monkeypatch.setattr(doctor, "_deployed_config_keys", lambda: frozenset())
+    monkeypatch.setattr(doctor, "_source_config_keys", lambda _: frozenset())
+    monkeypatch.setattr(doctor, "_python_content_drift", lambda _: 0)
+    monkeypatch.setattr(doctor, "_verdict", lambda **_: {"status": "fresh"})
+    monkeypatch.setattr(
+        doctor,
+        "_post_merge_sync_health",
+        lambda: events.append("post-merge") or {},
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_source_checkout_sync",
+        lambda _: events.append("source-sync") or {"status": "current", "behind": 0},
+    )
+    for name in (
+        "_mux_front_door_report",
+        "_daemon_drift_warning",
+        "_orphan_report",
+        "_pr_watch_liveness",
+        "_fd_limit_report",
+        "_dead_letter_report",
+        "_codex_app_server_report",
+        "_managed_block_report",
+        "_harness_surface_report",
+        "_plugin_hooks_launch_report",
+        "_pre_push_hook_report",
+        "_groom_health",
+        "_archive_id_collisions",
+        "_launch_agent_failures",
+        "_self_attested_coverage_report",
+        "_plugin_cache_report",
+        "_silent_switch_report",
+        "_auto_merge_review_gap",
+    ):
+        monkeypatch.setattr(doctor, name, lambda *args, **kwargs: {})
+    monkeypatch.setattr(doctor, "_auto_merge_armed_manifests", lambda: [])
+
+    from fno import update
+
+    monkeypatch.setattr(update, "stale_mux_servers", lambda: [])
+
+    doctor.build_report(source)
+
+    assert events == ["post-merge", "source-sync"]
+
+
+def test_source_checkout_behind_refuses_fix_before_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="source",
+        marker="installed",
+        capture_present="present",
+        source_checkout_sync={
+            "status": "behind",
+            "behind": 117,
+            "source_head": "source",
+            "remote_head": "remote",
+            "detail": "",
+        },
+    )
+    monkeypatch.setattr(doctor, "_post_merge_sync_health", lambda: {})
+
+    from fno import update
+
+    def tripwire(*args, **kwargs):
+        raise AssertionError("repair must not run from a stale source checkout")
+
+    monkeypatch.setattr(update, "update_command", tripwire)
+
+    result = runner.invoke(app, ["doctor", "--fix"])
+
+    assert result.exit_code == 1
+    assert "behind origin/main" in result.stdout
+    assert "refused" in result.stderr
 
 
 # ---------------------------------------------------------------------------
