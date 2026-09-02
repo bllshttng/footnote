@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import subprocess
 import json
@@ -787,3 +788,37 @@ def test_ac1_err_subsystem_never_shells_out_to_retired_claim_spelling():
         text = path.read_text(encoding="utf-8")
         for retired in ('"fno", "claim"', '"fno", "agents", "claim", "release"', "fno claim release"):
             assert retired not in text, f"{path} still carries retired spelling {retired!r}"
+
+
+def test_ac2_hp_prepare_module_imports_through_the_shared_bootstrap():
+    """The exact bootstrap handoff.sh runs, with FNO_SRC explicitly unset.
+
+    The FNO_SRC PYTHONPATH pin was set only by test harness files, so
+    production ran the prepare leg with an empty PYTHONPATH and every
+    ordinary handoff reported prepare_failed for a missing module."""
+    repo_root = Path(__file__).parents[2]
+    env = {k: v for k, v in os.environ.items() if k != "FNO_SRC"}
+    proc = subprocess.run(
+        ["bash", "-c",
+         'source scripts/lib/fno-python.sh '
+         '&& fno_python_init "$(git rev-parse --show-toplevel)" '
+         '&& "$FNO_PYTHON" -m fno.state.outage_handoff prepare --help >/dev/null '
+         '&& echo BOOTSTRAP_OK'],
+        cwd=repo_root, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr[-800:]
+    assert "BOOTSTRAP_OK" in proc.stdout
+
+
+def test_ac2_err_handoff_names_bootstrap_failure_apart_from_prepare_failure():
+    """A real prepare refusal and a missing interpreter must not emit the
+    same event reason: the module owns exit 10/12; any other code means it
+    never reached its own error handling."""
+    script = (
+        Path(__file__).parents[2] / "skills" / "target" / "scripts" / "handoff.sh"
+    ).read_text(encoding="utf-8")
+    assert 'reason:"prepare_bootstrap_failed"' in script
+    assert 'reason:"prepare_failed"' in script
+    assert "10|12)" in script  # only the module's own codes read as prepare outcomes
+    assert "FNO_SRC" not in script  # the retired pin is gone, not just avoided
+    assert "fno-python.sh" in script  # the shared bootstrap is the source

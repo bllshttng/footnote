@@ -604,8 +604,8 @@ ARCHIVED_STATE="$PLAN_ARTIFACTS_DIR/target-state-${SESSION_ID}.md"
 
 _PREPARE_RC=0
 # Bootstrap the interpreter the way every other Python-delegating script does
-# (scripts/lib/fno-python.sh): FNO_SRC-style PYTHONPATH pins are set only by
-# test harnesses, so a production run must never depend on one.
+# (scripts/lib/fno-python.sh): a PYTHONPATH sourced from an env var that only
+# test harness files set left production running the leg with an empty path.
 _HANDOFF_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 _HANDOFF_PYTHON="python3"
 _HANDOFF_PKG_SRC=""
@@ -616,19 +616,51 @@ if [ -n "$_HANDOFF_REPO_ROOT" ] && [ -f "$_HANDOFF_REPO_ROOT/scripts/lib/fno-pyt
   _HANDOFF_PYTHON="${FNO_PYTHON:-python3}"
   _HANDOFF_PKG_SRC="${_HANDOFF_REPO_ROOT}/cli/src"
 fi
+_HANDOFF_PREPARE_LOG="$(mktemp "${TMPDIR:-/tmp}/fno-handoff-prepare.XXXXXX")"
 FNO_CLAIMS_ROOT="$HOME" PYTHONPATH="${_HANDOFF_PKG_SRC}${PYTHONPATH:+:${PYTHONPATH}}" \
   "$_HANDOFF_PYTHON" -m fno.state.outage_handoff prepare \
   --state "$STATE_FILE" \
   --archive "$ARCHIVED_STATE" \
   --claim-key "node:$NODE_ID" \
-  --holder "$CLAIM_HOLDER" >/dev/null 2>&1 || _PREPARE_RC=$?
+  --holder "$CLAIM_HOLDER" >"$_HANDOFF_PREPARE_LOG" 2>&1 || _PREPARE_RC=$?
+# A nonzero code the module did NOT emit (10/12 are its own outcomes) means
+# the module never ran to its own error handling: the interpreter or the
+# import failed. The two classes get different reasons and details, so an
+# operator reading the event can tell a broken bootstrap from a real
+# handoff refusal.
+_HANDOFF_PREPARE_STDOUT="$(cat "$_HANDOFF_PREPARE_LOG" 2>/dev/null)"
+rm -f "$_HANDOFF_PREPARE_LOG"
 
 if [ "$_PREPARE_RC" -ne 0 ]; then
   FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$DISPATCH_KEY" \
     --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
 
-  _emit_event "handoff_failed" \
-    "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"prepare_failed\",\"detail\":\"python prepare exited $_PREPARE_RC\"}"
+  case "$_PREPARE_RC" in
+    10|12)
+      # The module's own failure receipt (a JSON object on stdout) is the
+      # truth about what it refused; pass its fields through rather than
+      # paraphrasing them into a flat string.
+      _PREPARE_EVENT="$(printf '%s' "$_HANDOFF_PREPARE_STDOUT" \
+        | jq -c --arg node "$NODE_ID" --arg session "$SESSION_ID" \
+          '{node_id:$node, session_id:$session, reason:"prepare_failed",
+            detail:(.reason // "prepare failed"),
+            restored:(.restored // null), live_holder:(.live_holder // null)}' 2>/dev/null)"
+      if [ -z "$_PREPARE_EVENT" ]; then
+        _PREPARE_EVENT="$(jq -cn --arg node "$NODE_ID" --arg session "$SESSION_ID" \
+          --arg detail "$(printf '%s' "$_HANDOFF_PREPARE_STDOUT" | head -c 400)" \
+          '{node_id:$node, session_id:$session, reason:"prepare_failed", detail:$detail}')"
+      fi
+      ;;
+    *)
+      # Any other code means the module never reached its own error
+      # handling: the interpreter or the import failed.
+      _PREPARE_EVENT="$(jq -cn --arg node "$NODE_ID" --arg session "$SESSION_ID" \
+        --arg detail "interpreter or import failed (rc=$_PREPARE_RC): $(printf '%s' "$_HANDOFF_PREPARE_STDOUT" | head -3 | tr '\n' ' ' | head -c 300)" \
+        '{node_id:$node, session_id:$session, reason:"prepare_bootstrap_failed", detail:$detail}')"
+      ;;
+  esac
+
+  _emit_event "handoff_failed" "$_PREPARE_EVENT"
 
   if [ "$_PREPARE_RC" -eq 12 ]; then
     echo "handoff-restore-failed $NODE_ID reason=\"prepare failed + restore failed\""
