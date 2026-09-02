@@ -25,7 +25,10 @@
 // termination when the gate is unavailable.
 //
 // If there is no footnote session (no .fno/target-state.md in the project),
-// the extension no-ops, so a plain native pi session is unaffected.
+// the extension no-ops, so a plain native pi session is unaffected. And the
+// gate runs ONLY in a process fno spawned into the loop lane: the keeper sets
+// FNO_AGENT_SESSION_ID on its pi child, so a native pi session in a directory
+// whose stale manifest survives a finished run is never re-driven.
 
 import { execFile } from "node:child_process"
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs"
@@ -84,18 +87,21 @@ export default function (pi: {
   ) => void
 }): void {
   // In-flight guard: never run two loop-checks (or overlap a re-drive) at
-  // once. ponytail: single boolean - the turn lifecycle + loop-check's
-  // NoProgress backstop already bound a stuck session; this just prevents
-  // concurrent fires.
+  // once. One boolean: the turn lifecycle + loop-check's NoProgress backstop
+  // already bound a stuck session; this just prevents concurrent fires.
   let busy = false
 
   pi.on("agent_settled", async (_event, ctx) => {
+    // Spawn binding first: the keeper sets FNO_AGENT_SESSION_ID only on a
+    // process fno itself spawned into the loop lane, so a NATIVE pi session
+    // never gates here - no matter what cwd it sits in. Without this, any
+    // pi session opened in a directory whose stale .fno/target-state.md
+    // survives a finished run would be re-driven against a loop it never
+    // joined.
+    if (!process.env.FNO_AGENT_SESSION_ID) return
     const dir = process.cwd()
-    // Presence guard only: target-state.md's session_id is footnote's OWN
-    // generated loop key (timestamp-PID-random), a different namespace from
-    // pi's session id - they never match, so this is "is footnote running
-    // here?", not an equality check. A plain native session (no manifest)
-    // no-ops.
+    // Presence guard: the manifest is loop-check's state and the marker that
+    // a footnote run owns this directory.
     if (!fnoSessionId(dir)) return
     // ctx.isIdle() is true at agent_settled unless another extension started
     // a run; a busy pi is mid-re-drive or mid-tool and the next settle comes.

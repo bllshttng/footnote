@@ -157,10 +157,53 @@ def test_an_extension_harness_without_a_shipped_artifact_is_refused(monkeypatch)
     assert "has not written yet" in str(exc.value)
 
 
-def test_an_extension_harness_with_a_shipped_artifact_is_dispatched():
+def test_an_extension_harness_with_an_installed_artifact_is_dispatched(monkeypatch):
+    """Shipping the artifact is not enough: the gate requires the INSTALLED
+    copy at the harness's own load surface, because that is the only copy the
+    harness actually loads."""
+    import fno.setup.integration as integration
+
+    monkeypatch.setattr(integration, "_opencode_is_installed", lambda: True)
+    monkeypatch.setattr(integration, "_pi_is_installed", lambda: True)
     check_loop_participation("opencode", "/fno:target x-1")
-    # pi joined in x-43bd: the shipped footnote.ts extension satisfies the gate.
+    # pi joined in x-43bd: the installed footnote.ts extension satisfies the gate.
     check_loop_participation("pi", "/target x-1")
+
+
+def test_an_extension_harness_without_the_artifact_installed_is_refused(monkeypatch):
+    """pi on PATH with setup never run: the extension is not at pi's load
+    surface, so a looping dispatch would start a worker with nothing to stop
+    it. The refusal names the install path out."""
+    import fno.setup.integration as integration
+
+    monkeypatch.setattr(integration, "_pi_is_installed", lambda: False)
+    with pytest.raises(DispatchResolveError) as exc:
+        check_loop_participation("pi", "/target x-1")
+    message = str(exc.value)
+    assert "pi" in message
+    assert "fno config setup" in message
+    assert "absent or stale" in message
+
+
+def test_an_extension_harness_with_no_declared_installer_is_refused(monkeypatch):
+    """An extension row without an install arm is a gap, not a claim: the
+    checker treats it as not installed so the row and its installer ship
+    together, the way opencode's and pi's did."""
+    import fno.agents.harness_map as harness_map
+    import fno.setup.integration as integration
+
+    monkeypatch.setattr(integration, "_opencode_is_installed", lambda: True)
+    monkeypatch.setattr(integration, "_pi_is_installed", lambda: True)
+    monkeypatch.setattr(
+        harness_map,
+        "capabilities",
+        lambda h: {
+            "loop_participation": "extension",
+            "loop_extension": "cli/src/fno/setup/assets/future/footnote.ts",
+        },
+    )
+    with pytest.raises(DispatchResolveError):
+        check_loop_participation("future", "/target x-1")
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "agy"])
@@ -184,10 +227,13 @@ def test_a_non_looping_dispatch_is_never_refused(harness):
     check_loop_participation(harness, "\t\n")
 
 
-def test_resolve_dispatch_resolves_a_looping_target_at_pi():
+def test_resolve_dispatch_resolves_a_looping_target_at_pi(monkeypatch):
     """pi's loop extension shipped (x-43bd), so the resolver that used to
     refuse a looping /target here now resolves it: the worker has something
     to stop it."""
+    import fno.agents.harness_map as harness_map
+
+    monkeypatch.setattr(harness_map, "_loop_extension_installed", lambda h: True)
     resolved = resolve_dispatch(
         harness="pi", substrate="pane", trigger="attended", node_id="x-1"
     )

@@ -99,12 +99,16 @@ def test_partial_lane_thread_dispatch_still_refuses_at_the_gate(lane_b_home) -> 
     assert "substrate 'thread' is unsupported on harness 'agy'" in str(exc_info.value)
 
 
-def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit() -> None:
+def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit(monkeypatch) -> None:
     """pi's `thread` row is true behind its passing restart journey
     (test_thread_keeper_journey.py), so a one-shot dispatch resolves onto the
     lane this file builds. The autonomous `/target` template resolves too
     since x-43bd shipped pi's loop extension - the loop gate that used to
-    refuse it here now passes."""
+    refuse it here now passes (with the artifact installed; the install gate
+    is asserted in test_harness_loop_participation.py)."""
+    import fno.agents.harness_map as harness_map
+
+    monkeypatch.setattr(harness_map, "_loop_extension_installed", lambda h: True)
     assert capabilities("pi")["thread"] is True
     resolved = resolve_dispatch(harness="pi", substrate="thread", command="pi --version")
     assert resolved["substrate"] == "thread"
