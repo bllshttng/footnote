@@ -1559,7 +1559,11 @@ fn rm_take_worktree_with(
 
 fn rm_take_worktree(entry: &state::RegistryEntry) -> Option<String> {
     rm_take_worktree_with(entry, &worktree_gate, &|cwd| {
+        // Run git FROM the worktree: the daemon's own cwd is usually not a
+        // repository, and `git worktree remove` needs one to resolve against.
+        // A forced self-removal from inside the leaf is allowed by git.
         std::process::Command::new("git")
+            .current_dir(cwd)
             .args(["worktree", "remove", "--force", cwd])
             .output()
             .map_err(|e| e.to_string())
@@ -8402,8 +8406,11 @@ async fn handle_rm_with(
     }
     cleanup_king_manifest(&entry);
     // (x-d545) The row is gone from the registry: take its worktree, but only
-    // as far as the reapable gate allows. The receipt rides the event and the
-    // result; a refusal never blocks the removal that already happened.
+    // as far as the reapable gate allows. The receipt rides the RESULT (the
+    // operator's notice), deliberately NOT the event: agent_removed sits
+    // near the 500-byte event cap already, so the receipt would push every
+    // rm event over it and the writer would replace the whole record. The
+    // auditable event field is x-90ee's to land with a shape that fits.
     let worktree_receipt = rm_take_worktree(&entry);
     let pane_session = entry.mux.as_ref().map(|mux| mux.session.clone());
     let pane_id = entry.mux.as_ref().map(|mux| mux.pane_id);
@@ -8419,7 +8426,6 @@ async fn handle_rm_with(
         "pane_id": pane_id,
         "pane_removed": pane_outcome.removed_json(),
         "pane_reason": pane_outcome.reason(),
-        "worktree_receipt": worktree_receipt,
         "was_orphaned": was_orphaned,
     });
     let event_payload_len = serde_json::to_string(&event)
