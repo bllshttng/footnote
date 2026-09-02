@@ -339,6 +339,19 @@ def test_journey_harness_carries_its_build_prerequisite(tmp_path: Path) -> None:
     assert "tests/hooks/test_journey.sh" in names
 
 
+def test_native_claim_door_build_precedes_changed_pytest(tmp_path: Path) -> None:
+    from fno.test_cmd import _RUST_BUILD_STEP, _changed_steps
+
+    selections = [
+        {"kind": "pytest", "target": "cli/tests/unit/test_claim_verdict.py"},
+        {"kind": "step", "target": _RUST_BUILD_STEP},
+    ]
+
+    names = [name for name, _, _ in _changed_steps(tmp_path, selections)]
+
+    assert names[:2] == [_RUST_BUILD_STEP, "Pytest (changed subset, 1 file(s))"]
+
+
 def test_plain_harness_does_not_drag_in_the_rust_build(tmp_path: Path) -> None:
     """The prerequisite is conditional; a plain harness pays nothing for it."""
     from fno.test_cmd import _RUST_BUILD_STEP, _changed_steps

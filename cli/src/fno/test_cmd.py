@@ -1404,6 +1404,8 @@ def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, st
         steps.append((rel, ".", f"bash {shlex.quote(rel)}"))
     shell_targets = set(shell_rels)
     for name in sorted({s["target"] for s in selections if s["kind"] == "step"}):
+        if name == _RUST_BUILD_STEP:
+            continue
         step = by_name[name]
         if name == _RUST_BUILD_STEP and steps and steps[0] == step:
             continue  # already placed ahead of pytest; never run the build twice
@@ -1437,10 +1439,12 @@ def _preserve_claim_door(root: Path, env: dict[str, str]) -> None:
     )
     if source is None:
         return
-    preserved = _sandbox() / _CLAIM_DOOR_NAME
+    preserved_dir = _sandbox() / _CLAIM_DOOR_NAME
+    preserved_dir.mkdir(parents=True, exist_ok=True)
+    preserved = preserved_dir / "fno-agents"
     shutil.copyfile(source, preserved)
     preserved.chmod(source.stat().st_mode & 0o777)
-    env["FNO_AGENTS_BIN"] = str(preserved)
+    env["PATH"] = str(preserved_dir) + os.pathsep + env.get("PATH", "")
 
 
 def _write_changed_receipt(path: str, payload: dict) -> None:
@@ -1569,13 +1573,20 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
     # claim consumers are ordinary Python tests now, and cannot fall through to
     # an older PATH binary after this scrub.
     if any(n.startswith("Pytest (changed subset") for n, _, _ in steps):
-        _preserve_claim_door(root, env)
-        for rel in ("crates/fno-agents/target/debug/fno-agents",
-                    "crates/fno-agents/target/release/fno-agents"):
-            try:
-                (root / rel).unlink()
-            except OSError:
-                pass
+        if _RUST_BUILD_STEP in {name for name, _, _ in steps}:
+            # The changed-smoke job has Rust but no setup build. Its selected
+            # build step must run before claim tests, so keep the target path
+            # present and put its directory first on PATH after the build.
+            debug_dir = root / "crates/fno-agents/target/debug"
+            env["PATH"] = str(debug_dir) + os.pathsep + env.get("PATH", "")
+        else:
+            _preserve_claim_door(root, env)
+            for rel in ("crates/fno-agents/target/debug/fno-agents",
+                        "crates/fno-agents/target/release/fno-agents"):
+                try:
+                    (root / rel).unlink()
+                except OSError:
+                    pass
 
     e0 = time.monotonic()
     results, rc = _execute_steps(root, env, steps, keep_going=opts["keep_going"])
