@@ -1027,3 +1027,89 @@ def test_derivation_defaults_to_p2_without_a_node_priority(tmp_path, monkeypatch
     receipt = join_node("x-8d1d", None)
     assert receipt["priority"] == "p2"
     assert receipt["workers"] == 2
+
+
+# ---------------------------------------------------------------------------
+# The collision partition runs for EVERY wave (x-a804 task 5.1).
+#
+# It used to be gated on `mode == "parallel"`, so two tasks in one sequential
+# wave editing the same file read as simultaneously ready. 396 of 430 waves in
+# a fortnight are sequential, so the partition ran on roughly 8% of waves and
+# the label named `sequential` scheduled MORE in parallel than the one named
+# `parallel`. join could hand a joiner a task colliding with the holder's.
+#
+# Corpus re-measure over 532 plans carrying an Execution Strategy: 193 change,
+# every one downward, zero raised. The partition can only narrow.
+# ---------------------------------------------------------------------------
+
+SEQUENTIAL_SAME_FILE_PLAN = """---
+title: sequential same file
+status: ready
+---
+
+## Execution Strategy
+
+```yaml
+execution_mode: sequential
+waves:
+  - wave: 1
+    mode: sequential
+    tasks: ['1.1', '1.2', '1.3']
+tasks:
+  - id: '1.1'
+    title: a
+    surface: ['src/one.py']
+  - id: '1.2'
+    title: b
+    surface: ['src/one.py']
+  - id: '1.3'
+    title: c
+    surface: ['src/one.py']
+```
+"""
+
+SEQUENTIAL_DISJOINT_PLAN = SEQUENTIAL_SAME_FILE_PLAN.replace(
+    """  - id: '1.2'
+    title: b
+    surface: ['src/one.py']
+  - id: '1.3'
+    title: c
+    surface: ['src/one.py']""",
+    """  - id: '1.2'
+    title: b
+    surface: ['src/two.py']
+  - id: '1.3'
+    title: c
+    surface: ['src/three.py']""",
+)
+
+
+def test_sequential_wave_same_file_measures_one(tmp_path):
+    """AC10-ERR: three tasks in a sequential wave all naming one file are NOT
+    simultaneously ready. Before this, they measured 3 and join would spawn
+    two joiners onto the file the holder is editing."""
+    plan = tmp_path / "plan.md"
+    plan.write_text(SEQUENTIAL_SAME_FILE_PLAN)
+
+    assert _plan_parallel_width(plan) == 1
+
+
+def test_sequential_wave_disjoint_files_is_unchanged(tmp_path):
+    """AC10-HP: the partition only narrows where surfaces genuinely collide.
+    A sequential wave over disjoint files still measures its full width, so
+    this change costs no real parallelism anywhere."""
+    plan = tmp_path / "plan.md"
+    plan.write_text(SEQUENTIAL_DISJOINT_PLAN)
+
+    assert _plan_parallel_width(plan) == 3
+
+
+def test_parallel_wave_same_file_still_measures_one(tmp_path):
+    """The parallel case is unchanged: it was already the only one of the four
+    measured cells that read the same-file case correctly."""
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        SEQUENTIAL_SAME_FILE_PLAN.replace("mode: sequential", "mode: parallel")
+    )
+
+    assert _plan_parallel_width(plan) == 1

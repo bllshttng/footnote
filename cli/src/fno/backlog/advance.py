@@ -2136,7 +2136,7 @@ def _width_from_graph(graph: _PlanTaskGraph) -> int:
     ``apply_partition_edges`` + ``ready_tasks``) so join's width can never
     disagree with what a joined worker's ``--ready`` query actually returns:
     a declared ``blocked_by`` wins outright, an undeclared task inherits the
-    previous wave's whole task list, and parallel waves serialize collision
+    previous wave's whole task list, and every wave serializes collision
     groups (the derived partition edges). A plan with no Execution Strategy
     yields 0; the caller refuses anything below 2.
     """
@@ -2157,12 +2157,17 @@ def _width_from_graph(graph: _PlanTaskGraph) -> int:
             if tid not in blockers:
                 blockers[tid] = set(waves[pos - 1][1]) if pos else set()
 
-    # Derived within-wave edges for parallel waves (the orchestrator's
-    # partition_edges): group order serializes, unevaluated tasks wait out
-    # the evaluated ones.
+    # Derived within-wave edges (the orchestrator's partition_edges): group
+    # order serializes, unevaluated tasks wait out the evaluated ones.
+    #
+    # Runs for EVERY wave, mirroring `apply_partition_edges`. Both used to skip
+    # non-parallel waves, so two tasks in one `sequential` wave editing the
+    # same file read as simultaneously ready and the label named `sequential`
+    # scheduled MORE in parallel than the one named `parallel`. These two
+    # implementations of one scheduling rule must change together or join's
+    # width stops matching what a joined worker's --ready query returns, which
+    # is the invariant this function's docstring promises.
     for pos, (mode, tasks) in enumerate(waves):
-        if mode != "parallel":
-            continue
         items = [(tid, set(surfaces.get(tid, []))) for tid in tasks]
         groups, unevaluated = partition(items, shared_roots=HIDDEN_SHARED_OUTPUT_ROOTS)
         edges: dict[str, list[str]] = {}

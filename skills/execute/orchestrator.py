@@ -536,10 +536,21 @@ def apply_partition_edges(strategy: ExecutionStrategy, plan_path: str) -> None:
     A declared list is kept and extended, never replaced. A task with no
     declared entry keeps its previous-wave inheritance as the base, so a
     derived edge can never float a task ahead of an incomplete earlier wave.
+
+    Runs for EVERY wave, not only parallel ones. The partition used to be
+    gated on ``mode == "parallel"``, which made two tasks in one `sequential`
+    wave that edit the same file read as simultaneously ready - so the label
+    named `sequential` scheduled MORE in parallel than the one named
+    `parallel`. 396 of 430 waves in a fortnight are sequential, so the
+    partition ran on roughly 8% of waves and the over-report was the norm:
+    join could hand a joiner a task colliding with the one the holder is
+    running.
+
+    ``mode`` keeps its real meaning, which is intra-wave subagent fan-out
+    inside one worker, and stops doubling as a scheduling switch it was never
+    named for.
     """
     for wave in strategy.waves:
-        if wave.mode != "parallel":
-            continue
         for task_id, blockers in partition_edges(plan_path, wave, strategy.task_surfaces).items():
             if task_id in strategy.blocked_by:
                 base = set(strategy.blocked_by[task_id])
