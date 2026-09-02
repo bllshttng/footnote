@@ -514,6 +514,7 @@ pub mod basis {
     pub const ACCESS_DENIED: &str = "access-denied";
     pub const PID_REUSE: &str = "pid-reuse";
     pub const TTL_EXPIRED: &str = "ttl-expired";
+    pub const PID_SHARED: &str = "pid-shared";
 }
 
 /// Ask the OS what the pid's holder create time is, and name the failure.
@@ -701,6 +702,15 @@ pub fn classify_with_basis(
     now: Option<i64>,
     probe: &dyn Fn(i32) -> PidProbe,
 ) -> (ClaimState, &'static str) {
+    classify_with_basis_exclusive(rec, now, probe, None)
+}
+
+fn classify_with_basis_exclusive(
+    rec: &ClaimRecord,
+    now: Option<i64>,
+    probe: &dyn Fn(i32) -> PidProbe,
+    pid_exclusive: Option<bool>,
+) -> (ClaimState, &'static str) {
     let now = now.unwrap_or_else(now_ms);
     if is_expired(rec, now) {
         // Corroborated hybrid: the pid keeps the claim Live only when it was
@@ -725,6 +735,9 @@ pub fn classify_with_basis(
         {
             let (live, cause) = liveness_reading(rec, probe);
             if live {
+                if pid_exclusive == Some(false) {
+                    return (ClaimState::Suspect, basis::PID_SHARED);
+                }
                 return (ClaimState::Live, cause);
             }
         }
@@ -749,6 +762,56 @@ pub fn classify_with_basis(
     } else {
         (ClaimState::Suspect, cause)
     }
+}
+
+/// Classify one claim for a garbage-collection sweep. The bool is true only
+/// when the claim is provably dead from this host; otherwise the bucket names
+/// the reason it remains protected or opaque.
+pub fn classify_for_sweep(
+    rec: &ClaimRecord,
+    now: Option<i64>,
+    probe: &dyn Fn(i32) -> PidProbe,
+    pid_exclusive: Option<bool>,
+) -> (bool, &'static str) {
+    let now = now.unwrap_or_else(now_ms);
+    let same_machine = is_same_machine(&rec.host, rec.machine_id.as_deref());
+    let unidentifiable = rec.machine_id.is_none();
+    if !same_machine && !(unidentifiable && is_expired(rec, now)) {
+        return (false, basis::OFFHOST);
+    }
+    let (state, _) = classify_with_basis_exclusive(rec, Some(now), probe, pid_exclusive);
+    if state == ClaimState::Stale {
+        return (true, "");
+    }
+    (
+        false,
+        if state == ClaimState::Suspect {
+            "suspect"
+        } else {
+            "live"
+        },
+    )
+}
+
+/// Return sweep-time PID exclusivity keyed by the machine identity and pid.
+/// A false value means one prover-visible pid names more than one distinct
+/// holder; a single-key caller must pass `None` to classification because it
+/// has no sibling evidence from which to establish this property.
+pub fn pid_exclusivity(records: &[ClaimRecord]) -> std::collections::BTreeMap<(String, i32), bool> {
+    let mut holders: std::collections::BTreeMap<(String, i32), std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for rec in records {
+        let Some(pid) = rec.pid else { continue };
+        let identity = rec.machine_id.clone().unwrap_or_else(|| rec.host.clone());
+        holders
+            .entry((identity, pid))
+            .or_default()
+            .insert(rec.holder.clone());
+    }
+    holders
+        .into_iter()
+        .map(|(key, holders)| (key, holders.len() <= 1))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -3536,6 +3599,60 @@ mod tests {
         unp.pid_unavailable = true;
         unp.schema_version = 2;
         assert_eq!(basis_of(&unp, &probe_pid), basis::PID_UNAVAILABLE);
+    }
+
+    #[test]
+    fn sweep_classification_preserves_expiry_host_and_shared_pid_rules() {
+        let me = std::process::id() as i32;
+        let host = hostname();
+        let now = now_ms();
+        let mut proven = record(me, now, Some(now - 1), &host);
+        proven.pid_provenance = Some("session-prover".into());
+
+        assert_eq!(
+            classify_for_sweep(&proven, Some(now), &probe_pid, None),
+            (false, "live")
+        );
+        assert_eq!(
+            classify_for_sweep(&proven, Some(now), &probe_pid, Some(false)),
+            (false, "suspect")
+        );
+        assert_eq!(
+            classify_for_sweep(
+                &record(-1, now, Some(now - 1), &host),
+                Some(now),
+                &probe_pid,
+                None
+            ),
+            (true, "")
+        );
+        assert_eq!(
+            classify_for_sweep(
+                &record(me, now, None, "elsewhere.example"),
+                Some(now),
+                &probe_pid,
+                None,
+            ),
+            (false, "offhost")
+        );
+    }
+
+    #[test]
+    fn pid_exclusivity_counts_distinct_holders_not_claim_files() {
+        let me = std::process::id() as i32;
+        let host = hostname();
+        let mut first = record(me, now_ms(), None, &host);
+        first.holder = "holder-a".into();
+        let mut same_holder = first.clone();
+        same_holder.key = "session:y".into();
+        let mut other_holder = first.clone();
+        other_holder.key = "session:z".into();
+        other_holder.holder = "holder-b".into();
+
+        let one_holder = pid_exclusivity(&[first.clone(), same_holder]);
+        assert_eq!(one_holder.get(&(host.clone(), me)), Some(&true));
+        let shared = pid_exclusivity(&[first, other_holder]);
+        assert_eq!(shared.get(&(host, me)), Some(&false));
     }
 
     #[test]
