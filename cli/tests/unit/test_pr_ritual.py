@@ -801,13 +801,66 @@ def test_archive_runs_script_when_worktree_found(tmp_path, capsys, monkeypatch):
     assert "FNO_WT_REMOVE_CALLER=post-merge ritual" in archive_calls[0]
 
 
-def test_archive_skips_when_no_worktree(tmp_path, capsys, monkeypatch):
+def test_archive_missing_script_receipt_keeps_worktree_and_order(
+    tmp_path, capsys, monkeypatch
+):
+    runner = FakeRunner(branch="feature/x")
+    r = _bare(tmp_path, runner)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(wt))
+
+    r.leg_archive()
+
+    out = capsys.readouterr().out
+    assert "step=archive status=deferred" in out
+    assert f"worktree={wt}" in out
+    assert "archive-worktree.sh missing" in out
+    assert "reap-order reap:pr-7 standing" in out
+
+
+def test_archive_without_a_worktree_still_mints_the_reap_order(tmp_path, capsys, monkeypatch):
     runner = FakeRunner(branch="feature/x")
     r = _bare(tmp_path, runner)
     monkeypatch.setattr(r, "_find_worktree", lambda branch: None)
     r.leg_archive()
     out = capsys.readouterr().out
-    assert "step=archive status=skipped" in out
+    assert "step=archive status=deferred" in out
+    assert "no worktree for feature/x" in out
+    assert "reap-order reap:pr-7 standing" in out
+    assert any("reap:pr-7" in " ".join(call) for call in runner.calls)
+
+
+def test_archive_receipt_is_written_to_the_daemon_journal(
+    tmp_path, monkeypatch
+):
+    runner = FakeRunner(branch="feature/x")
+    r = _bare(tmp_path, runner)
+    monkeypatch.setattr(r, "_find_worktree", lambda branch: None)
+    events = []
+    monkeypatch.setattr(
+        _ritual,
+        "_emit_daemon_envelope",
+        lambda kind, data: events.append((kind, data)),
+        raising=False,
+    )
+
+    r.leg_archive()
+
+    assert events == [
+        (
+            "post_merge_archive",
+            {
+                "pr": 7,
+                "project": "",
+                "outcome": "deferred",
+                "detail": (
+                    "no worktree for feature/x; sweep-will-reap; "
+                    "reap-order reap:pr-7 standing (merged-pr)"
+                ),
+            },
+        )
+    ]
 
 
 # --- AC4: idempotency / mutex -------------------------------------------

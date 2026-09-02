@@ -46,6 +46,7 @@ from typing import Callable, Optional
 import typer
 
 from fno._subprocess_util import fno_py_cmd
+from fno.agents.events import _emit_daemon_envelope
 from fno.config import load_settings_for_repo
 from fno.pr._proc import Result, ToolMissing, run as _run
 
@@ -332,6 +333,16 @@ class Ritual:
         rec = Receipt(step, status, detail)
         self.ctx.receipts.append(rec)
         typer.echo(rec.line())
+        if step == "archive":
+            _emit_daemon_envelope(
+                "post_merge_archive",
+                {
+                    "pr": self.ctx.pr,
+                    "project": self.ctx.project,
+                    "outcome": status,
+                    "detail": detail,
+                },
+            )
 
     def _leg(self, step: str, argv: list[str], *, cwd: Optional[Path] = None,
              timeout: float = _LEG_TIMEOUT_S) -> Result:
@@ -613,9 +624,14 @@ class Ritual:
         if not branch:
             self._emit("archive", _SKIPPED, "no-branch")
             return
+        order = self._register_reap_order("merged-pr")
         wt = self._find_worktree(branch)
         if not wt:
-            self._emit("archive", _SKIPPED, f"no worktree for {branch}")
+            self._emit(
+                "archive",
+                _DEFERRED,
+                f"no worktree for {branch}; sweep-will-reap; {order}",
+            )
             return
         if Path(wt).resolve() == self.cwd.resolve():
             # Never self-remove. This is the DOMINANT path, because the worker
@@ -625,12 +641,15 @@ class Ritual:
             # in the detail line read as done and nobody ever ran it. The
             # order makes "later" a fact in the world: the daemon's sweep pays
             # this debt instead of a human remembering to.
-            self._emit("archive", _DEFERRED,
-                       f"sweep-will-reap; {self._register_reap_order('self-worktree')}")
+            self._emit("archive", _DEFERRED, f"worktree={wt}; sweep-will-reap; {order}")
             return
         script = self.canon / "scripts" / "setup" / "archive-worktree.sh"
         if not script.exists():
-            self._emit("archive", _SKIPPED, "archive-worktree.sh missing")
+            self._emit(
+                "archive",
+                _DEFERRED,
+                f"worktree={wt}; archive-worktree.sh missing; {order}",
+            )
             return
         try:
             # env(1) prefixes the caller into the removal event the script
@@ -639,20 +658,24 @@ class Ritual:
                              "bash", str(script), str(wt), "--yes"],
                             cwd=str(self.canon), timeout=120.0)
         except subprocess.TimeoutExpired:
-            self._emit("archive", _FAILED, "timeout")
+            self._emit("archive", _FAILED, f"worktree={wt}; timeout; {order}")
             return
         except (ToolMissing, subprocess.SubprocessError) as exc:
-            self._emit("archive", _FAILED, f"spawn-error: {exc}")
+            self._emit(
+                "archive", _FAILED, f"worktree={wt}; spawn-error: {exc}; {order}"
+            )
             return
         if r.ok:
-            self._emit("archive", _OK, "archived")
+            self._emit("archive", _OK, f"worktree={wt}; archived; {order}")
             return
         # A guarded refusal (live session in the tree, salvage, confirmation)
         # leaves the tree in place: the work is still owed, so the order
         # stands for the sweep to retry once the guard's cause is gone.
-        self._emit("archive", _FAILED,
-                   f"exit={r.returncode} (worktree left in place); "
-                   f"{self._register_reap_order('archive-refused')}")
+        self._emit(
+            "archive",
+            _FAILED,
+            f"worktree={wt}; exit={r.returncode} (worktree left in place); {order}",
+        )
 
     def _find_worktree(self, branch: str) -> Optional[str]:
         out = _git_text(["worktree", "list", "--porcelain"], self.canon)
