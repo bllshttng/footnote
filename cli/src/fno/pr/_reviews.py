@@ -117,6 +117,7 @@ _UNKNOWN_COVERAGE: dict[str, object] = {
     "self_attested_count": None,
     "head_sha": None,
     "stale_verdicts": [],
+    "note": "coverage probe failed",
 }
 
 #: The remedy an unmeasurable coverage answer names: the instrument is
@@ -139,6 +140,7 @@ _NOT_ASKED_COVERAGE: dict[str, object] = {
     "self_attested_count": 0,
     "head_sha": None,
     "stale_verdicts": [],
+    "note": "not asked: PR is terminal (merged or closed); this says nothing about coverage at merge time",
 }
 
 

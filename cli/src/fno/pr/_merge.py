@@ -1943,6 +1943,20 @@ def run_merge(
             file=sys.stderr,
         )
 
+    seg = next(
+        (
+            s
+            for s in note.split("; ")
+            if s.startswith(_coverage_gate.SELF_ATTESTED_NOTE_PREFIX)
+        ),
+        "",
+    )
+    if seg:
+        print(
+            "coverage " + seg[len(_coverage_gate.SELF_ATTESTED_NOTE_PREFIX) :],
+            file=sys.stderr,
+        )
+
     # covered_head (from the gate) pins the merge so a racing push after the
     # coverage check cannot land an unreviewed head (x-0eaf TOCTOU). The
     # staleness check inside the gate already refused a current mismatch; this

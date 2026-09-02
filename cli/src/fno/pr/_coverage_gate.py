@@ -96,6 +96,8 @@ GATE_NONBLOCKING_CATEGORIES = frozenset(
 # that cannot tell the two apart is a receipt that lies.
 OVERRIDE_NOTE_PREFIX = "override: "
 
+SELF_ATTESTED_NOTE_PREFIX = "self-attested only: "
+
 
 def _log_config_receipt(root: Path, key: str) -> None:
     """Log the root, deciding file, and searched candidates for a gate key."""
@@ -808,7 +810,34 @@ def _ordinary_verdict(
             remaining = _rounds_remaining_note(rounds, max_rounds)
             note = "; ".join(x for x in (recompute_note, unread_note, remaining) if x)
             return REFUSED, disposition_text, "", note, (head, disposition_hard)
-        notes = [n for n in (recompute_note, unread_note, disposition_note, filed_note) if n]
+        self_attested_note = ""
+        try:
+            from fno.config import load_settings_for_repo
+
+            root = _repo_root(cwd)
+            _log_config_receipt(root, "config.review.require_corroboration")
+            review = load_settings_for_repo(root).review
+            if not getattr(review, "require_corroboration", False) and cov is not None and rests_on_self_attestation_alone(
+                cov, _github_approval_satisfies(cwd)
+            ):
+                self_attested_note = (
+                    SELF_ATTESTED_NOTE_PREFIX
+                    + "coverage is the author's own local attestation, uncorroborated "
+                    "(config.review.require_corroboration = false)"
+                )
+        except Exception:  # noqa: BLE001 - additive signal, never tightens the gate
+            pass
+        notes = [
+            n
+            for n in (
+                recompute_note,
+                unread_note,
+                disposition_note,
+                filed_note,
+                self_attested_note,
+            )
+            if n
+        ]
         return COVERED, "", (cov.get("head_sha") or "") if cov else "", "; ".join(notes), None
     # x-aecc: a fail attestation answers this head, so an uncovered row in
     # that shape is uncovered BECAUSE of the non-terminal findings. Name them

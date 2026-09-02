@@ -1878,6 +1878,7 @@ def test_read_review_coverage_from_events(tmp_path):
         "self_attested_count": None,
         "head_sha": None,
         "stale_verdicts": [],
+        "note": "coverage probe failed",
     }
 
 
