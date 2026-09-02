@@ -437,3 +437,125 @@ def test_supersedes_must_be_a_decision_id(
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
     assert "supersedes must be a decision id" in result.output
     assert index.read_text() == ""
+
+
+# ── the waiver-subject carve-out ──────────────────────────────────────────────
+#
+# Subjects under `review-coverage-waiver` are the merge gate's waiver evidence:
+# they assert a person at a terminal read the diff. The door's chat_attested
+# value cannot carry that fact, because any harness-descended process records
+# the same value, so the write chokepoint refuses the whole family for every
+# non-operator authority (WaiverAuthorityRefusedError). The exact affirmative
+# decision value is the one an agent would reach for, so it is the probe.
+
+WAIVER_SUBJECT = "review-coverage-waiver:acme/widgets#42@" + ("c" * 40)
+WAIVER_DECISION = "review coverage waived for this head"
+
+
+def test_waiver_subject_refuses_a_chat_session_with_exit_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+
+    result = _run(
+        [
+            "set",
+            WAIVER_SUBJECT,
+            WAIVER_DECISION,
+            "--rationale",
+            "the diff was read and the risk is accepted",
+        ]
+    )
+
+    assert result.exit_code == LAW_REFUSED_EXIT, result.output
+    assert "coverage-waive" in result.output, result.output
+    assert index.read_text() == ""
+
+
+def test_waiver_refusal_is_the_subject_not_the_statement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The make-it-fail control: the same statement at a non-waiver subject
+    records, so the subject family is what the guard keys on."""
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+
+    result = _run(
+        [
+            "set",
+            "x-12ba",
+            WAIVER_DECISION,
+            "--rationale",
+            "the diff was read and the risk is accepted",
+        ]
+    )
+
+    assert result.exit_code == LAW_RECORDED_EXIT, result.output
+    assert result.output.strip().splitlines()[-1].startswith("d-")
+    assert index.read_text() != ""
+
+
+def test_operator_authority_still_records_at_a_waiver_subject(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The positive control the other direction: the guard locks agents out,
+    never the operator. An attended terminal with no harness identity records
+    the waiver through the same door."""
+    from types import SimpleNamespace
+
+    from fno import decide
+    from fno.agents import self_stamp
+
+    index = _isolate(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        self_stamp,
+        "resolve_self_identity",
+        lambda *a, **k: SimpleNamespace(session_id=None, harness=None),
+    )
+    monkeypatch.setattr(decide, "_attended_terminal", lambda: True)
+
+    result = _run(
+        [
+            "set",
+            WAIVER_SUBJECT,
+            WAIVER_DECISION,
+            "--rationale",
+            "operator read this diff by hand",
+        ]
+    )
+
+    assert result.exit_code == LAW_RECORDED_EXIT, result.output
+    rows = [json.loads(line) for line in index.read_text().splitlines() if line.strip()]
+    assert len(rows) == 1
+    assert rows[0]["data"]["authority_source"] == "operator"
+
+
+def test_library_refuses_chat_attested_at_both_waiver_subject_shapes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate holds below the CLI, for the scoped and the standing subject,
+    and the refusal is the specific subclass whose text names the attended
+    command (the generic refusal's advice points at this door, which is the
+    thing being closed)."""
+    from fno.decide import (
+        RefusedAuthorityError,
+        WaiverAuthorityRefusedError,
+        record_decision,
+    )
+
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+
+    for subject in (WAIVER_SUBJECT, "review-coverage-waiver"):
+        with pytest.raises(WaiverAuthorityRefusedError, match="coverage-waive"):
+            record_decision(
+                subject=subject,
+                decision=WAIVER_DECISION,
+                rationale="why",
+                authority_source="chat_attested",
+            )
+        # The subclass keeps the parent's contract, so existing handlers that
+        # catch RefusedAuthorityError keep working.
+        assert issubclass(WaiverAuthorityRefusedError, RefusedAuthorityError)
+    assert index.read_text() == ""
