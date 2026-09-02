@@ -17,9 +17,10 @@ Three assertions, one baseline, both-directional failure like state-roots:
    ``fno_bin()`` spelling) carries no env read, so it is caught by rule 1
    instead: its body line IS a new helper-call site.
 3. **pydoor** - ``cli/src/fno/rust_binary.py`` is the Python side's single
-   door to the Rust runtime. Any other production Python file that execs a
-   literal ``fno-agents`` through ``subprocess``/``os`` fails. There are no
-   baselined pydoor sites: the door stays single, full stop.
+   door to the Rust runtime. Any other production Python file that puts a
+   literal ``fno-agents`` in argv[0] position, or execs one through
+   ``subprocess``/``os``/``asyncio``, fails. There are no baselined pydoor
+   sites: the door stays single, full stop.
 
 The baseline is ``scripts/ci/seam-crossings-baseline.txt``. Matching is keyed
 on (rule, path, line-content) as a MULTISET, never on the line number alone:
@@ -71,23 +72,22 @@ _FN_DEF_RE = re.compile(
     r"fn\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
 
-# String and char literals, for brace counting only. The char form is
-# single-character on purpose so lifetimes (`'static`) never match; the
-# string form handles plain and byte strings and simple escapes.
-_RUST_LITERAL_RE = re.compile(
-    r'b?"(?:[^"\\]|\\.)*"'  # "..." / b"..."
-    r"|'(?:\\.|[^'\\])'"  # '{' '\n' 'x'
-)
-
-# A subprocess/os exec call opening. The argv[0]-position literal is checked
-# in a small window after it, because the argv list may wrap one line.
+# A subprocess/os/asyncio exec call opening, for the direct string-argument
+# form (`subprocess.run("fno-agents ...")`, `os.execl("fno-agents", ...)`).
+# The argv[0]-position literal below is checked on EVERY line by itself, not
+# in a window after a call: an argv assembled in a variable puts the list
+# literal on its own line, and a forward window from the call never sees it.
 _PY_DOOR_CALL_RE = re.compile(
     r"\b(?:subprocess|os)\.(?:Popen|run|call|check_output|check_call|"
     r"getoutput|getstatusoutput|exec[lv]p?e?|spawn[lv]p?e?|posix_spawn)\b"
+    r"|\basyncio\.create_subprocess_(?:exec|shell)\b"
 )
-_PY_DOOR_ARGV0_RE = re.compile(r"""[\[(]\s*["']fno-agents["']""")
+# A list literal whose first element is the binary. BRACKET only: an open
+# PAREN before the literal is a call argument (`shutil.which("fno-agents")`,
+# a locator, not an exec) or a name tuple, and treating it as argv0 ratchets
+# the tree's locators as execs.
+_PY_DOOR_ARGV0_RE = re.compile(r"""\[\s*["']fno-agents["']""")
 _PY_DOOR_DIRECT_RE = re.compile(r"""\(\s*["']fno-agents["']""")
-_PY_WINDOW = 2
 
 SITE_RULE = "crossing"
 RESOLVER_RULE = "resolver"
@@ -220,7 +220,13 @@ def _find_crossings(
 
 
 def _find_pydoor(repo_root: Path) -> list[tuple[str, int, str]]:
-    """Literal ``fno-agents`` argv[0] execs outside the single door."""
+    """Literal ``fno-agents`` argv[0] execs outside the single door.
+
+    Two independent shapes. The argv[0]-position literal is a violation on
+    ANY line: a list assembled into a variable crosses through that line,
+    whether or not the exec call sits nearby. The direct form needs the exec
+    call and a bare string argument on the same line.
+    """
     hits: list[tuple[str, int, str]] = []
     for path in _py_scan_files(repo_root):
         rel = path.relative_to(repo_root).as_posix()
@@ -228,12 +234,9 @@ def _find_pydoor(repo_root: Path) -> list[tuple[str, int, str]]:
         for i, line in enumerate(lines):
             if _is_comment(line):
                 continue
-            if _PY_DOOR_CALL_RE.search(line) is None:
-                continue
-            window = "\n".join(lines[i : i + _PY_WINDOW + 1])
-            if (
-                _PY_DOOR_ARGV0_RE.search(window) is not None
-                or _PY_DOOR_DIRECT_RE.search(line) is not None
+            if _PY_DOOR_ARGV0_RE.search(line) is not None or (
+                _PY_DOOR_CALL_RE.search(line) is not None
+                and _PY_DOOR_DIRECT_RE.search(line) is not None
             ):
                 hits.append((rel, i + 1, line.strip()))
     return hits

@@ -183,7 +183,9 @@ else
   note "PASS: helper case failed on shape with no crossing-count rise"
 fi
 
-# case 4: a Python file outside the door execing literal fno-agents fails.
+# case 4: a Python file outside the door execing literal fno-agents fails,
+# in BOTH shapes: the inline argv list, and an argv assembled into a
+# variable (the shape a call-line window misses).
 cat >> "$tmp/cli/src/fno/innocent.py" <<'PY'
 
 
@@ -197,6 +199,42 @@ else
     *innocent.py*) note "PASS: pydoor violation rejected, file named" ;;
     *) printf '%s\n' "$out" >&2; fail "pydoor failure does not name the file" ;;
   esac
+fi
+cp "$tmp/innocent.py.clean" "$tmp/cli/src/fno/innocent.py"
+
+cat >> "$tmp/cli/src/fno/innocent.py" <<'PY'
+
+
+def assembled_ping() -> None:
+    argv = ["fno-agents", "agents", "ping"]
+    subprocess.run(argv, check=False)
+PY
+if out=$(check_clean 2>&1); then
+  fail "variable-assembled fno-agents argv accepted"
+else
+  case "$out" in
+    *innocent.py*) note "PASS: variable-assembled argv rejected, file named" ;;
+    *) printf '%s\n' "$out" >&2; fail "assembled-argv failure does not name the file" ;;
+  esac
+fi
+cp "$tmp/innocent.py.clean" "$tmp/cli/src/fno/innocent.py"
+
+# case 4c: a LOCATOR is not an exec. `shutil.which("fno-agents")` carries the
+# literal as a call argument; the pydoor rule must stay green on it so the
+# argv0 shape never widens into ratcheting every mention.
+cat >> "$tmp/cli/src/fno/innocent.py" <<'PY'
+
+
+def locate() -> str:
+    import shutil
+
+    return shutil.which("fno-agents") or "fno-agents"
+PY
+if out=$(check_clean 2>&1); then
+  note "PASS: locator mention stays green (not an exec)"
+else
+  printf '%s\n' "$out" >&2
+  fail "pydoor ratcheted a locator call"
 fi
 cp "$tmp/innocent.py.clean" "$tmp/cli/src/fno/innocent.py"
 
