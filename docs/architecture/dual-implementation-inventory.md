@@ -112,11 +112,11 @@ Every `*_parity.rs` declares its stage and its oracle in its header. `scripts/ci
 //! parity-oracle: fno.agents.harnesses.claude
 ```
 
-`parity-stage` is exactly one of `differential` or `characterization`. `parity-oracle` is a repo-relative path or a Python dotted module, and nothing else.
+`parity-stage` is exactly one of `differential` or `characterization`. `parity-oracle` names the LEG, and it takes one of three forms: a repo-relative path for a leg that occupied a whole file, a dotted module for a leg that occupies a whole Python module, or a dotted module with one final symbol for a leg that lives inside a surviving module, naming a `def`, a `class`, or an assignment at that module's top level. The symbol form is the ordinary Python case: the module file survives the port, the ask functions inside it do not, and only a symbol can say which leg is gone. A file-existence rule read the two finished bash ports as proof that "the file is gone" and "the leg is gone" were the same sentence; they share that property by accident, and no Python oracle shares it at all.
 
-The check is two-sided on purpose. A `characterization` file must name an oracle that does NOT exist. The leg was deleted, and the golden stands in for it. A `differential` file must name one that DOES exist. A live second implementation is the only reason to run both legs. Either way the assertion has a positive marker rather than an absence. Either way it fails loudly the moment a port finishes or a new dual implementation appears.
+The check is two-sided on purpose. A `characterization` file must name an oracle that NO LONGER RESOLVES. The leg was deleted, and the golden stands in for it. A `differential` file must name one that DOES resolve. A live second implementation is the only reason to run both legs. Either way the assertion has a positive marker rather than an absence. Either way it fails loudly the moment a port finishes or a new dual implementation appears.
 
-The header carries no node id and no PR number. `scripts/ci/check-no-internal-refs.sh` fails on them. The oracle path is the identity.
+The header carries no node id and no PR number. `scripts/ci/check-no-internal-refs.sh` fails on them. The oracle is the identity: a path names a whole-file leg, a symbol names a leg inside a surviving module, and resolution is what both arms of the check test.
 
 ## Sequence
 

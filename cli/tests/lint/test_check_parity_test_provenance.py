@@ -163,6 +163,78 @@ def test_dotted_module_that_does_not_exist_fails_a_differential(
     assert "missing_parity.rs" in result.stdout + result.stderr
 
 
+# --- symbol-form oracles: a leg inside a surviving module --------------------
+
+
+def _codex_module(root: Path, defines_create: bool) -> None:
+    """Write harnesses/codex.py with or without the `create` ask leg."""
+    module = root / "cli" / "src" / "fno" / "agents" / "harnesses" / "codex.py"
+    body = "def create():\n    pass\n" if defines_create else "# leg deleted\n"
+    module.write_text(body, encoding="utf-8")
+
+
+def test_symbol_oracle_defined_passes_a_differential(tmp_path: Path) -> None:
+    """A symbol oracle on a live leg resolves through the parent module, and
+    the printed resolution names module:symbol so the mapping is visible."""
+    root = _tree(tmp_path)
+    _codex_module(root, defines_create=True)
+    _parity(
+        root, "sym", DIFFERENTIAL.format(oracle="fno.agents.harnesses.codex.create")
+    )
+
+    result = _run(root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "cli/src/fno/agents/harnesses/codex.py:create" in result.stdout
+    assert "(present)" in result.stdout
+
+
+def test_symbol_oracle_gone_fails_a_differential(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    _codex_module(root, defines_create=False)
+    _parity(
+        root, "gone", DIFFERENTIAL.format(oracle="fno.agents.harnesses.codex.create")
+    )
+
+    result = _run(root)
+    assert result.returncode != 0
+    assert "gone_parity.rs" in result.stdout + result.stderr
+
+
+def test_symbol_oracle_gone_passes_a_characterization(tmp_path: Path) -> None:
+    """The finished-port end state for a Python dual: the module file SURVIVES
+    the port and the leg inside it does not. A file-existence check would
+    refuse a correctly finished port here; the symbol is what says the leg is
+    gone."""
+    root = _tree(tmp_path)
+    _codex_module(root, defines_create=False)
+    _parity(
+        root,
+        "ported",
+        CHARACTERIZATION.format(oracle="fno.agents.harnesses.codex.create"),
+    )
+
+    result = _run(root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "cli/src/fno/agents/harnesses/codex.py:create" in result.stdout
+    assert "(absent, as required)" in result.stdout
+
+
+def test_symbol_still_defined_fails_a_characterization(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    _codex_module(root, defines_create=True)
+    _parity(
+        root,
+        "early",
+        CHARACTERIZATION.format(oracle="fno.agents.harnesses.codex.create"),
+    )
+
+    result = _run(root)
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "early_parity.rs" in combined
+    assert "codex.py:create" in combined
+
+
 # --- degenerate trees -------------------------------------------------------
 
 
