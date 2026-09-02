@@ -3360,6 +3360,7 @@ def dispatch_spawn(
             ctx_for_dispatch = build_context(
                 to_name=name,
                 to_provider=harness,
+                to_session_id=None,
                 transport="direct-cli",
                 from_name_override=from_name,
             )
@@ -7020,6 +7021,7 @@ def _mux_pane_send(
     review: bool = False,
     review_invocation_id: Optional[str] = None,
     origin: Optional[str] = None,
+    self_send: bool = False,
 ) -> bool | str:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
@@ -7231,6 +7233,7 @@ def _mux_pane_send(
                     target_cwd=getattr(entry, "cwd", None),
                     sender=sender,
                     origin=origin,
+                    self_send=self_send,
                     confirmed=confirmed,
                     source="daemon",
                 ),
@@ -7851,6 +7854,7 @@ def _mail_inject_claude(
     liveness_scaled: bool = False,
     harness: Optional[str] = None,
     origin: Optional[str] = None,
+    self_send: bool = False,
 ) -> bool:
     """Inject ``text`` into a live claude session over the daemon ``control.sock``
     via the ``fno-agents mail-inject`` verb (G1 substrate, node x-1f23).
@@ -7940,6 +7944,8 @@ def _mail_inject_claude(
         argv += ["--sender", sender]
     if origin:
         argv += ["--origin", origin]
+    if self_send:
+        argv.append("--self-send")
     timeout = _MAIL_INJECT_TIMEOUT_S
     if liveness_scaled:
         argv += ["--attempts", str(_MAIL_INJECT_LIVENESS_SCALED_ATTEMPTS)]
@@ -8441,6 +8447,7 @@ def _review_start_codex(
     audit_sender: str | None = None,
     audit_target_cwd: str | None = None,
     origin: str | None = None,
+    self_send: bool = False,
 ) -> dict[str, object]:
     """Start an inline Codex review and preserve its structured outcome receipt."""
     import json
@@ -8469,6 +8476,8 @@ def _review_start_codex(
         ):
             if value is not None:
                 argv.extend((flag, value))
+        if self_send:
+            argv.append("--audit-self-send")
         proc = subprocess.run(
             argv,
             capture_output=True,
@@ -9397,6 +9406,7 @@ def dispatch_send(
             ctx_for_dispatch = build_context(
                 to_name=name,
                 to_provider=existing.harness,
+                to_session_id=getattr(existing, "harness_session_id", None),
                 transport="direct-cli",
                 from_name_override=from_name,
             )
@@ -9624,6 +9634,7 @@ def dispatch_send(
                 ctx_for_timeout = build_context(
                     to_name=name,
                     to_provider=timeout_entry.harness,
+                    to_session_id=getattr(timeout_entry, "harness_session_id", None),
                     transport="direct-cli",
                     from_name_override=from_name,
                 )

@@ -83,8 +83,9 @@ def test_map_covers_current_surface_once():
     # allocation lands on the same merged tree -> 553.
     # The sigma panel's removal takes the `do review` group-callback row with
     # it (that row existed to keep the hidden sigma options inside the
-    # ratchet); classify and resolve-level keep their rows: 553 -> 552.
-    assert len(mapped) == 552, (
+    # ratchet); classify and resolve-level keep their rows: 553 -> 552. The
+    # event query adds two leaves: 552 -> 554.
+    assert len(mapped) == 554, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

@@ -415,11 +415,12 @@ def test_raw_codex_review_passes_sender_and_original_payload_to_transport_audit(
         (
             SID_CODEX,
             "uncommittedChanges",
-            {
-                "audit_payload": payload,
-                "audit_sender": SID_CLAUDE[:8],
-                "audit_target_cwd": entry.cwd,
-            },
+                {
+                    "audit_payload": payload,
+                    "audit_sender": SID_CLAUDE[:8],
+                    "audit_target_cwd": entry.cwd,
+                    "self_send": False,
+                },
         )
     ]
     assert not python_events, "the Rust transport owns the sole audit event"
