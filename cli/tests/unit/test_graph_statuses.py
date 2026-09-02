@@ -63,16 +63,28 @@ def test_ac2_err_is_stale_lock_bad_timestamp():
 
 
 @pytest.mark.parametrize(
-    ("locked_at", "expected"),
+    "quality",
     [
-        (datetime.now(timezone.utc).isoformat(), "fresh"),
-        ((datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(), "old"),
-        (None, "unreadable"),
-        ("not-a-date", "unreadable"),
+        "fresh",
+        "old",
+        "unreadable-missing",
+        "unreadable-corrupt",
     ],
 )
-def test_lock_timestamp_quality_is_diagnostic(locked_at, expected):
+def test_lock_timestamp_quality_is_diagnostic(quality):
     """Timestamp age/quality is metadata, never an owner-death verdict."""
+    if quality == "fresh":
+        locked_at = datetime.now(timezone.utc).isoformat()
+        expected = "fresh"
+    elif quality == "old":
+        locked_at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        expected = "old"
+    elif quality == "unreadable-missing":
+        locked_at = None
+        expected = "unreadable"
+    else:
+        locked_at = "not-a-date"
+        expected = "unreadable"
     entry = _entry("ab-lock-quality", locked_by="worker", locked_at=locked_at)
     assert lock_timestamp_quality(entry) == expected
 
