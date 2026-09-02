@@ -304,7 +304,7 @@ pub(crate) struct Settings {
     /// an other_session attestation is still not "independent", but it is a
     /// SECOND session, which is what this key demands.
     require_corroboration: Option<bool>,
-    /// config.review.posture : the named rung of the review ladder.
+    /// config.review.posture: the named rung of the review ladder.
     /// None = unset, which resolves through the legacy inference (mirroring
     /// `fno.config.resolve_review_posture`) or the shipped self_review floor.
     /// A value the ladder does not carry stays None here: the Python loader
@@ -9144,7 +9144,7 @@ pub(crate) fn resolve_review_inputs(
                 merged.require_corroboration = local.require_corroboration;
             }
             if local.posture.is_some() {
-                // Same presence rule : the rung is a project policy
+                // Same presence rule: the rung is a project policy
                 // leaf like corroboration, so a local explicit posture must
                 // override the global file and the inference must not silently
                 // read the global-only view.

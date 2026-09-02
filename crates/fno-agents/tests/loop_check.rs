@@ -10075,7 +10075,7 @@ fn operator_waiver_no_law_is_a_clean_no() {
     assert!(!unknown, "a verdict of none is an answer, not a failure");
 }
 
-// ── review.posture (x-f324): the coverage row carries the resolved rung ────
+// ── review.posture: the coverage row carries the resolved rung ────
 //
 // The Rust producer resolves review.posture (explicit, legacy-inferred, or the
 // shipped default), evaluates it against the same verdicts coverage used, and
