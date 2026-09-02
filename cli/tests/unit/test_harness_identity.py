@@ -425,7 +425,7 @@ def test_owned_single_family_with_collision_degrades_not_promote_sibling(tmp_pat
     register_existing_session(provider="codex", session_id=foreign, cwd="/x", registry_path=reg)
 
     def collide(harness, sid):
-        return row_owning_session_id(sid, registry_path=reg)
+        return row_owning_session_id(sid, registry_path=reg, self_binding=None)
 
     env = {"CODEX_THREAD_ID": foreign, "CODEX_SESSION_ID": "sibling-maybe-foreign"}
     owned = resolve_owned_identity(env, collide=collide)  # no prove
@@ -489,17 +489,90 @@ def _register(tmp_path, session_id, provider="codex", status="live"):
 
 
 def test_row_owning_session_id_finds_live_owner(tmp_path):
-    """AC3-ERR: a live row owning a candidate id proves it is not this
-    session's; the collider returns the owner's name."""
+    """AC3-ERR: a live row owning a candidate id is contention for a caller
+    that proves no binding; the collider returns the owner's name."""
     from fno.agents.registry import row_owning_session_id
 
     sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
     name, reg = _register(tmp_path, sid)
-    assert row_owning_session_id(sid, registry_path=reg) == name
+    assert (
+        row_owning_session_id(sid, registry_path=reg, self_binding=None) == name
+    )
     # A different id is free.
-    assert row_owning_session_id("019fffff-0000-0000-0000-ffffffffffff", registry_path=reg) is None
+    assert (
+        row_owning_session_id(
+            "019fffff-0000-0000-0000-ffffffffffff",
+            registry_path=reg,
+            self_binding=None,
+        )
+        is None
+    )
     # Case-insensitive UUID match.
-    assert row_owning_session_id(sid.upper(), registry_path=reg) == name
+    assert (
+        row_owning_session_id(sid.upper(), registry_path=reg, self_binding=None)
+        == name
+    )
+
+
+def test_row_owning_session_id_self_row_is_not_contention(tmp_path):
+    """The spine: a live row matching the caller's own (harness, id) binding
+    is the caller's OWN row, and self is never reported as an owner."""
+    from fno.agents.registry import row_owning_session_id
+
+    sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+    name, reg = _register(tmp_path, sid, provider="codex")
+    assert (
+        row_owning_session_id(
+            sid, registry_path=reg, self_binding=("codex", sid)
+        )
+        is None
+    )
+    # The row exists; only the self verdict changed.
+    assert (
+        row_owning_session_id(sid, registry_path=reg, self_binding=None) == name
+    )
+
+
+def test_row_owning_session_id_self_binding_with_wrong_harness_still_owner(tmp_path):
+    """A row of a DIFFERENT harness holding the id under test is another
+    session's row even when the caller names the same id as its own: the
+    binding's harness half must agree with the row, or the id is foreign."""
+    from fno.agents.registry import row_owning_session_id
+
+    sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+    name, reg = _register(tmp_path, sid, provider="claude")
+    assert (
+        row_owning_session_id(
+            sid, registry_path=reg, self_binding=("codex", sid)
+        )
+        == name
+    )
+
+
+def test_row_owning_session_id_self_binding_of_another_id_still_owner(tmp_path):
+    """A caller that proves its own id elsewhere is still refused an id held
+    by a different live row."""
+    from fno.agents.registry import row_owning_session_id
+
+    sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+    mine = "019fc88e-aaaa-7c90-926a-6bdd7ebb186c"
+    name, reg = _register(tmp_path, sid)
+    assert (
+        row_owning_session_id(
+            sid, registry_path=reg, self_binding=("codex", mine)
+        )
+        == name
+    )
+
+
+def test_row_owning_session_id_self_binding_is_required():
+    """AC7-ERR: calling the detector without declaring what the caller knows
+    about itself is a TypeError at runtime; mypy makes it a type error under
+    guards.yml, so self-blindness is always a written decision."""
+    from fno.agents.registry import row_owning_session_id
+
+    with pytest.raises(TypeError):
+        row_owning_session_id("019fc87d-ddff-7c90-926a-6bdd7ebb186c")
 
 
 def test_row_owning_session_id_absent_or_unreadable_is_none(tmp_path):
@@ -507,11 +580,21 @@ def test_row_owning_session_id_absent_or_unreadable_is_none(tmp_path):
     collision) and never raises, so an unreadable registry never blocks init."""
     from fno.agents.registry import row_owning_session_id
 
-    assert row_owning_session_id("019fc87d-...", registry_path=tmp_path / "nope.json") is None
+    assert (
+        row_owning_session_id(
+            "019fc87d-...", registry_path=tmp_path / "nope.json", self_binding=None
+        )
+        is None
+    )
     corrupt = tmp_path / "agents.json"
     corrupt.write_text("{not valid json")
-    assert row_owning_session_id("019fc87d-...", registry_path=corrupt) is None
-    assert row_owning_session_id("", registry_path=corrupt) is None
+    assert (
+        row_owning_session_id(
+            "019fc87d-...", registry_path=corrupt, self_binding=None
+        )
+        is None
+    )
+    assert row_owning_session_id("", registry_path=corrupt, self_binding=None) is None
 
 
 def test_row_owning_session_id_exited_row_releases_ownership(tmp_path):
@@ -521,7 +604,7 @@ def test_row_owning_session_id_exited_row_releases_ownership(tmp_path):
     sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
     for terminal in ("exited", "orphaned", "permanent_dead"):
         _name, reg = _register(tmp_path, sid, status=terminal)
-        assert row_owning_session_id(sid, registry_path=reg) is None
+        assert row_owning_session_id(sid, registry_path=reg, self_binding=None) is None
 
 
 def test_resolve_owned_rejects_a_live_rows_id_via_real_collider(tmp_path):
@@ -534,7 +617,7 @@ def test_resolve_owned_rejects_a_live_rows_id_via_real_collider(tmp_path):
     owner, reg = _register(tmp_path, foreign)
 
     def collide(harness, sid):
-        return row_owning_session_id(sid, registry_path=reg)
+        return row_owning_session_id(sid, registry_path=reg, self_binding=None)
 
     env = {"CODEX_THREAD_ID": foreign, "CLAUDE_CODE_SESSION_ID": "mine"}
     owned = resolve_owned_identity(
@@ -564,7 +647,7 @@ def test_owned_proven_marker_wins_over_self_registration_collision(tmp_path):
     )
 
     def collide(harness, sid):
-        return row_owning_session_id(sid, registry_path=reg)
+        return row_owning_session_id(sid, registry_path=reg, self_binding=None)
 
     env = {"CODEX_THREAD_ID": foreign, "CLAUDE_CODE_SESSION_ID": mine}
     owned = resolve_owned_identity(

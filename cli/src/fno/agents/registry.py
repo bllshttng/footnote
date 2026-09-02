@@ -43,7 +43,7 @@ import time
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal, Optional
+from typing import Any, Callable, Iterator, Literal, Optional, Tuple
 
 from fno import paths
 from fno.harness_identity import (
@@ -1424,20 +1424,31 @@ _OWNERSHIP_LIVE_STATUSES = frozenset(
 
 
 def row_owning_session_id(
-    session_id: str, registry_path: Optional[Path] = None
+    session_id: str,
+    registry_path: Optional[Path] = None,
+    *,
+    self_binding: Optional[Tuple[str, str]],
 ) -> Optional[str]:
     """Name of an active registry row whose ``harness_session_id`` is
     ``session_id``, or None.
 
-    Two live sessions cannot share a harness session id, but that premise
-    alone decides nothing. Provenance decides a hit: self when the id under test is this session's own, foreign otherwise.
-    This lookup is provenance-blind on purpose - it answers whether a live
-    row holds the id and leaves the reading to the caller, which owns the
-    provenance. A candidate id suspected of leaking in from the environment
-    turns a hit into the cause-agnostic ambient-leak detector; an id the
-    caller proved (process tree) or carries on its spawn stamp turns the
-    same hit into the caller's own row. Only rows in an ownership-live
-    status count; an exited row's id is free.
+    The cause-agnostic ambient-leak backstop: a live row already owning an id
+    makes that id contention for any session that cannot prove the row is its
+    own. ``self_binding`` is the caller's own ``(harness, session_id)`` pair
+    as proven upstream (a process-tree match or a spawn-minted stamp), and a
+    live row agreeing with it on both halves is the caller's OWN row, which
+    is never reported: self is not contention (three workers were refused
+    their own node by their own row in one evening before this parameter
+    existed). A caller that cannot prove any binding passes ``None`` - a
+    written self-blind decision, not an omission; the parameter is required
+    so no call site can skip the question, and mypy under guards.yml turns an
+    omission into a type error.
+
+    Two live sessions cannot share a harness session id, so when the binding
+    names the id under test the matching row is the caller's own by that
+    premise alone; the binding's harness half must still agree with the row,
+    or the id belongs to a different session and is reported. Only rows in
+    an ownership-live status count; an exited row's id is free.
 
     Degrade-safe by contract (AC4-ERR): an absent, unreadable, or alien-shape
     registry returns None (cannot prove a collision) rather than raising, so an
@@ -1449,6 +1460,12 @@ def row_owning_session_id(
     from fno.harness_identity import session_identity_key
 
     needle = session_identity_key(session_id)
+    own: Optional[Tuple[str, str]] = None
+    if self_binding is not None:
+        own = (
+            (self_binding[0] or "").strip().lower(),
+            session_identity_key(self_binding[1] or ""),
+        )
     try:
         entries = load_registry(registry_path)
     except Exception:
@@ -1459,6 +1476,8 @@ def row_owning_session_id(
             continue
         candidate = getattr(entry, "harness_session_id", None)
         if candidate and session_identity_key(candidate) == needle:
+            if own and own[1] == needle and own[0] == (getattr(entry, "harness", "") or "").strip().lower():
+                return None
             return entry.name
     return None
 
