@@ -3132,6 +3132,29 @@ mod tests {
         assert_eq!(reach("gm-row"), Reach::Locate);
     }
 
+    #[test]
+    fn cursor_agent_rows_never_derive_an_attach_id() {
+        use crate::proto::Reach;
+
+        // The capability row declares interactive_attach unsupported: a
+        // second --resume process is a rival TUI on the same remote chat,
+        // not a join. No pane row may claim the Drive reach that resolve of
+        // an attach id would grant; the row is driven by pane or by mail.
+        let chat_id = "fadad56b-8008-45f5-b809-f9fab7074534";
+        let raw = reg(&format!(
+            r#"{{"name":"cursor","cwd":"/w","status":"live","harness":"cursor-agent",
+                "host_mode":"interactive","short_id":"","harness_session_id":"{chat_id}",
+                "mux":{{"session":"s","pane_id":7}}}}"#
+        ));
+        let row = derive_rows(&raw, NOW).unwrap().remove(0);
+
+        assert_eq!(row.attach_id.as_deref(), None);
+        assert_ne!(
+            thread_reach(row.harness.as_deref(), row.attach_id.as_deref()),
+            Reach::Drive
+        );
+    }
+
     /// AC14-HP, AC16-EDGE (x-6678, x-296f): the viewport renders codex's
     /// attach from the DECLARATION, not from a hand-built argv. The declared
     /// form carries a bare `unix://`, so codex resolves `CODEX_HOME` itself

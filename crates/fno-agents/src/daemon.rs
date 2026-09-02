@@ -1380,6 +1380,31 @@ fn cascade_harness_session_result_with(
                 Err((_, reason)) => CascadeOutcome::Failed(reason),
             }
         }
+        "cursor-agent" => {
+            // rm runs after the liveness gate, so the owner pid is normally
+            // already gone and the census's ownership proof is unprovable by
+            // construction. Failed would brick every post-stop rm; the row
+            // goes and the leak, if any, is named. A reap that fails with
+            // handles in hand is different - servers are provably alive and
+            // surviving - and still fails the removal.
+            let handles =
+                match crate::cursor_agent::capture_detached_worker_servers(e.pid, e.pid_start_time)
+                {
+                    Ok(handles) => handles,
+                    Err(reason) => {
+                        return CascadeOutcome::Unverified(format!(
+                            "worker-server cleanup unverified: {reason}"
+                        ))
+                    }
+                };
+            match crate::cursor_agent::reap_detached_worker_servers(&handles) {
+                Ok(0) => CascadeOutcome::AlreadyAbsent(
+                    "cursor-agent worker-server was already absent".into(),
+                ),
+                Ok(_count) => CascadeOutcome::Removed,
+                Err(reason) => CascadeOutcome::Failed(reason),
+            }
+        }
         _ => CascadeOutcome::NotApplicable,
     }
 }

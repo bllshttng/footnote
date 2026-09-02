@@ -1022,6 +1022,10 @@ fn attach_argv(
 /// - pi, whose argv carries env-dependent `--provider`/`--model` no static
 ///   form can name: its own builder (x-c198).
 ///
+/// cursor-agent declares no attach form at all (a second `--resume` is a
+/// rival TUI on the same remote chat, not a join), so its rows never reach
+/// here: no attach id resolves for them in the viewport.
+///
 /// Any other harness falls through to the claude shape, which is what every
 /// caller did before a harness was passed at all; only rows that resolved an
 /// attach id ever reach here.
@@ -16556,6 +16560,16 @@ mod tests {
             form.render(uuid)
         );
         assert_eq!(form.render(uuid)[..2], ["sh".to_string(), "-c".to_string()]);
+
+        // Cursor Agent declares NO attach form: a second --resume process is
+        // a rival TUI on the same remote chat, not a join. Its rows are
+        // driven by pane or by mail, and the re-entry form (--resume with
+        // --trust) belongs to resume, not to the attach door.
+        assert!(agents_view::attach_form("cursor-agent").is_none());
+        assert!(
+            agents_view::resume_form("cursor-agent").is_some(),
+            "the resume lane stays the honest re-entry"
+        );
     }
 
     #[test]

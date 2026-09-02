@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import uuid
 import os
 import re
 import select
@@ -1686,11 +1687,70 @@ def _keeper_identify(sock: Path, timeout_sec: float = 10.0) -> dict:
     raise TimeoutError(f"no keeper answered Identify on {sock}: {last_err}")
 
 
+def _mint_thread_session_id(
+    harness: str, cwd: Path, requested: Optional[str] = None
+) -> str:
+    """The harness session id a keeper thread launches on, fixed BEFORE launch.
+
+    Two shapes, declared by the row's ``session_binding.strategy``:
+    caller-assigned (pi, the default) - fno mints a UUIDv4 and the harness
+    adopts it. ``callee-minted-read-back`` (cursor-agent) - only the harness
+    mints, so fno runs ``create-chat``, reads the one id line, and kills the
+    helper (it never exits on its own). Either way the id exists before any
+    worker starts and rides the registry row from birth. A caller-requested id
+    (``spawn --resume``) skips the mint and validates instead, because a
+    truncated or bare id is a picker or a rival chat, never a resume.
+    """
+    if requested is not None:
+        if harness == "cursor-agent":
+            from fno.agents.harnesses.cursor_agent import (
+                CursorAgentSessionError,
+                _require_chat_id,
+            )
+
+            try:
+                return _require_chat_id(requested)
+            except CursorAgentSessionError as exc:
+                raise DispatchAskError(str(exc), exit_code=2) from exc
+        return requested
+    if harness == "cursor-agent":
+        from fno.agents.harnesses.cursor_agent import (
+            CursorAgentSessionError,
+            create_chat,
+        )
+
+        try:
+            return create_chat(cwd)
+        except CursorAgentSessionError as exc:
+            raise DispatchAskError(str(exc), exit_code=2) from exc
+    return str(uuid.uuid4())
+
+
+def _keeper_pid_start_time(pid: int) -> Optional[int]:
+    """The keeper's process-start token, read while the spawner owns it.
+
+    A row pid alone is not an identity (the pitfalls corpus: argv-derived
+    fields outlive their process); the token is what lets a later stop prove
+    the pid was never recycled before capturing Cursor's worker-server
+    census."""
+    try:
+        from fno.agents.spawn_gate import _process_start_time
+
+        return _process_start_time(pid)
+    except Exception:  # noqa: BLE001 - a census failure must not kill the spawn
+        return None
+
+
 def _lane_b_thread_spawn(
     *,
     name: str,
     harness: str,
     cwd: Path,
+    model: Optional[str] = None,
+    yolo: bool = False,
+    permission_mode: Optional[str] = None,
+    add_dir: Optional[str] = None,
+    resume_session_id: Optional[str] = None,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
 ) -> dict:
     """Host a lane-B harness thread on a pane-less keeper (x-889a).
@@ -1716,8 +1776,6 @@ def _lane_b_thread_spawn(
     Returns the spawn receipt dict (session id, keeper socket, pids,
     rendered argv).
     """
-    import uuid
-
     from fno.agents.harness_map import render_session_argv, thread_lane
     from fno.harness_identity import scrub_ambient_identity
 
@@ -1756,7 +1814,9 @@ def _lane_b_thread_spawn(
                 exit_code=2,
             )
 
-        session_id = str(uuid.uuid4())
+        session_id = _mint_thread_session_id(
+            harness, cwd, requested=resume_session_id
+        )
         try:
             argv = render_session_argv(harness, "interactive_create", session_id)
         except DispatchResolveError as exc:
@@ -1765,7 +1825,38 @@ def _lane_b_thread_spawn(
                 f"argv: {exc}",
                 exit_code=2,
             ) from exc
-        if harness == "pi":
+        if harness == "cursor-agent":
+            # The pane lane's build_pane_argv appends the same completion. The
+            # declared form already carries --trust (an untrusted cwd refuses
+            # with Workspace Trust Required and fno always spawns into a fresh
+            # worktree); what rides here is the rest of the launch axes: the
+            # bypass, the one model axis, and the state-root grant the row's
+            # argv-add-dir cell declares.
+            from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
+            from fno.agents.mux_spawn import permission_pane_tokens
+
+            if permission_mode:
+                argv = [*argv, *permission_pane_tokens("cursor-agent", permission_mode)]
+            elif yolo:
+                argv = [*argv, "--force"]
+            if model:
+                argv = [*argv, "--model", model]
+            argv = [
+                *argv,
+                *add_dir_tokens(
+                    "cursor-agent",
+                    add_dir,
+                    worker_writable_dirs(cwd),
+                    unsupported=lambda flag: (_ for _ in ()).throw(
+                        DispatchAskError(
+                            f"{flag} is not supported on the cursor-agent "
+                            "thread lane",
+                            exit_code=2,
+                        )
+                    ),
+                ),
+            ]
+        elif harness == "pi":
             # Provider AND model, both, always: bare pi defaults to provider
             # google (credentials_not_configured here) and `--provider
             # openai-codex` without `--model` falls to a Bedrock model - the
@@ -1858,6 +1949,10 @@ def _lane_b_thread_spawn(
             # keeper: the daemon's restart sweep asserts it unchanged, so a
             # respawn wearing this row's name fails instead of recovering.
             keeper_child_pid=reply.get("child_pid"),
+            # The keeper's start token, captured while this process owns it:
+            # the cursor thread-stop arm proves ownership with the pair before
+            # it captures the worker-server census.
+            pid_start_time=_keeper_pid_start_time(proc.pid),
             messaging_socket_path=str(sock),
             spawned_by_session=_cx_session,
             spawned_by_harness=_cx_harness,
@@ -1892,6 +1987,171 @@ def _lane_b_thread_spawn(
         "child_pid": reply.get("child_pid"),
         "argv": argv,
     }
+
+
+def _strip_ansi(raw: bytes) -> bytes:
+    """Drop ANSI escape sequences from pty output so a marker match cannot be
+    broken by the TUI painting one character per escape-wrapped write. Mirrors
+    the Rust matcher input in mail_inject.rs; lossy on purpose."""
+    out = bytearray()
+    i = 0
+    n = len(raw)
+    while i < n:
+        b = raw[i]
+        if b == 0x1B:
+            if i + 1 < n and raw[i + 1 : i + 2] == b"[":
+                i += 2
+                while i < n and not 0x40 <= raw[i] <= 0x7E:
+                    i += 1
+                i += 1
+            else:
+                i += 2
+        else:
+            out.append(b)
+            i += 1
+    return bytes(out)
+
+
+def _keeper_seed_submit(
+    *,
+    name: str,
+    session_id: str,
+    sock: Path,
+    message: str,
+) -> None:
+    """Deliver a thread spawn's seed to its keeper-hosted TUI.
+
+    A spawn that leaves the worker idle is the x-f22f shape: a row that did
+    nothing. The keeper honors Input only from its ONE subscriber seat
+    (first come, first seated) and never replays its ring to a late
+    connection, so this drives the whole seed dance on ONE connection taken
+    as soon as the spawn returns: a Resize frame forces the TUI to repaint
+    whatever already painted, the idle marker read off the stream proves the
+    composer is up, and only then is the payload pasted and submitted. The
+    repaint of the submitted line is the landing proof, and its limit is
+    stated exactly: the echo shows the paste and the submit reached the
+    composer, not that the model answered - the journey carries that
+    stronger proof by waiting out the reply. A miss is a raised
+    error, never a silent drop - the caller refuses the spawn rather than
+    report a worker that will never start.
+    """
+    import socket as _socket
+    import time as _time
+
+    # Frame protocol (crates/fno-agents/src/pane_keeper.rs): u8 tag | u32 LE
+    # length | payload; Input is tag 1, Resize is tag 2 with rows/cols u16.
+    tag_input = 1
+    tag_resize = 2
+
+    def frame(tag: int, payload: bytes) -> bytes:
+        return bytes([tag]) + len(payload).to_bytes(4, "little") + payload
+
+    raw_pending = bytearray()
+
+    def _decode_frames(out: bytearray) -> None:
+        # The socket carries FRAMES (tag u8 | len u32 LE | payload), not a
+        # byte stream: matching over raw bytes would embed a 5-byte header
+        # inside any marker that straddles two Output frames. Decode
+        # payloads only; a partial tail frame stays buffered for the next
+        # recv.
+        while len(raw_pending) >= 5:
+            length = int.from_bytes(raw_pending[1:5], "little")
+            if length > 1_048_576 or len(raw_pending) < 5 + length:
+                break
+            out.extend(raw_pending[5 : 5 + length])
+            del raw_pending[: 5 + length]
+
+    conn = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    conn.settimeout(2.0)
+    text = bytearray()  # ANSI-stripped view: the TUI paints one character
+    # per escape-wrapped write, so no marker matches the raw stream.
+    try:
+        conn.connect(str(sock))
+        # The boot paint may have happened while nobody held the seat (the
+        # ring is not replayed to a late subscriber) and a same-size Resize
+        # fires no SIGWINCH, so the wait alternates sizes every few seconds
+        # to force a repaint until the marker arrives.
+        ready_marker = b"Plan, search, build anything"
+        deadline = _time.monotonic() + 60.0
+        flip = False
+        last_nudge = 0.0
+        while _time.monotonic() < deadline:
+            if ready_marker in bytes(text):
+                break
+            now = _time.monotonic()
+            if now - last_nudge >= 4.0:
+                flip = not flip
+                size = (25, 81) if flip else (24, 80)
+                conn.sendall(
+                    frame(
+                        tag_resize,
+                        size[0].to_bytes(2, "little") + size[1].to_bytes(2, "little"),
+                    )
+                )
+                last_nudge = now
+            try:
+                chunk = conn.recv(65536)
+            except _socket.timeout:
+                continue
+            if not chunk:
+                _time.sleep(0.2)
+                continue
+            raw_pending.extend(chunk)
+            decoded = bytearray()
+            _decode_frames(decoded)
+            text.extend(_strip_ansi(bytes(decoded)))
+        else:
+            raise DispatchAskError(
+                f"keeper thread for {name!r} never painted its idle composer "
+                f"within 60s; the seed was not delivered. Inspect with "
+                f"'fno agents peek {name}' and send the prompt by mail.",
+                exit_code=1,
+            )
+
+        payload = message.encode("utf-8")
+        conn.sendall(frame(tag_input, payload))
+        _time.sleep(0.1)  # the row's measured settle delay is 0ms; a beat
+        conn.sendall(frame(tag_input, b"\r"))
+
+        # A composer-wide prefix: the TUI wraps long lines, and a newline
+        # mid-marker would break a full-line match even after the strip.
+        # Chars, not bytes - the Rust matcher takes 48 chars, and a byte cut
+        # can split a multi-byte character into a partial codepoint that
+        # never appears in the complete-UTF-8 pty stream. An empty first
+        # line yields an empty needle, and an empty needle matches
+        # anything, so it refuses instead of confirming nothing.
+        marker = message.splitlines()[0][:48].encode("utf-8")
+        if not marker:
+            raise DispatchAskError(
+                f"the seed for keeper thread {name!r} starts with an empty "
+                "line, so its landing can never be confirmed; lead the seed "
+                "with the payload's first real line",
+                exit_code=2,
+            )
+        base = len(text)
+        deadline = _time.monotonic() + 120.0
+        while _time.monotonic() < deadline:
+            if marker in bytes(text[base:]):
+                return
+            try:
+                chunk = conn.recv(65536)
+            except _socket.timeout:
+                continue
+            if not chunk:
+                _time.sleep(0.2)
+                continue
+            raw_pending.extend(chunk)
+            decoded = bytearray()
+            _decode_frames(decoded)
+            text.extend(_strip_ansi(bytes(decoded)))
+        raise DispatchAskError(
+            f"the seed for keeper thread {name!r} never repainted after "
+            "submit; the worker may be idle. Send it by mail: "
+            f"fno agents mail send {name}",
+            exit_code=1,
+        )
+    finally:
+        conn.close()
 
 
 def _claude_create_path(
@@ -3403,6 +3663,75 @@ def dispatch_spawn(
             effective_message=effective_message,
         )
 
+    # 3b-2. cursor-agent threads are keeper-hosted lane B (x-61bc's generic
+    # thread lane). The harness has no daemon and no bidirectional transport:
+    # the keeper holds the TUI's pty so the thread survives supervisor death,
+    # and the chat id is minted by `create-chat` (callee-minted-read-back)
+    # before the child launches. The pane stays the attended substrate; the
+    # thread lane is the dispatch one.
+    if harness == "cursor-agent":
+        if once or headless:
+            raise DispatchAskError(
+                "cursor-agent has no headless lane: --print is output-only "
+                "(no --input-format, no rpc), so there is no one-shot form. "
+                "Use the thread substrate for a persistent worker or "
+                "--substrate pane for an attended one.",
+                exit_code=2,
+            )
+        unsupported = next(
+            (
+                flag
+                for flag, value in (
+                    ("--role", launch_role),
+                    ("--agent", agent),
+                    ("--tools", tools),
+                    ("--deny-tools", deny_tools),
+                    ("--effort", effort),
+                )
+                if value
+            ),
+            None,
+        )
+        if unsupported is not None:
+            raise DispatchAskError(
+                f"{unsupported} is not supported on the cursor-agent thread "
+                "lane; drop it or use --substrate pane",
+                exit_code=2,
+            )
+        receipt = _lane_b_thread_spawn(
+            name=name,
+            harness="cursor-agent",
+            cwd=cwd,
+            model=model,
+            yolo=yolo,
+            permission_mode=permission_mode,
+            add_dir=add_dir,
+            resume_session_id=resume_session_id,
+            lock_timeout=lock_timeout,
+        )
+        session_id = receipt["session_id"]
+        if message.strip():
+            _keeper_seed_submit(
+                name=name,
+                session_id=session_id,
+                sock=Path(receipt["keeper_socket"]),
+                message=message,
+            )
+        _emit_ev(
+            "agent_ask_done",
+            stage="dispatch",
+            name=name,
+            provider="cursor-agent",
+            substrate="thread",
+        )
+        return SpawnResult(
+            kind="created",
+            name=name,
+            provider="cursor-agent",
+            short_id=session_id,
+            effective_message=effective_message,
+        )
+
     registry_path = paths.agents_registry_path()
 
     def _on_wait() -> None:
@@ -4375,6 +4704,92 @@ def _stop_by_pid(name: str, existing: AgentEntry) -> StopResult:
     return StopResult(name=name, provider=existing.harness, claude_exit=None)
 
 
+def _stop_cursor_agent(name: str, existing: AgentEntry) -> StopResult:
+    """Stop a Cursor pane and reap its detached worker-server process."""
+    mux = existing.mux or {}
+    session = mux.get("session")
+    pane_id = mux.get("pane_id")
+    from fno.agents.harnesses.cursor_agent import (
+        capture_detached_worker_servers,
+        reap_detached_worker_servers,
+    )
+
+    try:
+        worker_servers = capture_detached_worker_servers(
+            existing.pid, existing.pid_start_time
+        )
+    except RuntimeError as exc:
+        raise DispatchAskError(str(exc), exit_code=1) from exc
+    if session and pane_id is not None:
+        try:
+            result = subprocess.run(
+                ["fno", "mux", "pane", "kill", "--session", str(session), str(pane_id)],
+                capture_output=True,
+                text=True,
+                timeout=_DEFAULT_CLAUDE_SHELLOUT_TIMEOUT,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DispatchAskError(
+                f"cursor-agent pane teardown failed for {name!r}: {exc}", exit_code=1
+            ) from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "no output").strip()
+            if "no such pane" not in detail.lower() and "already absent" not in detail.lower():
+                raise DispatchAskError(
+                    f"cursor-agent pane teardown failed for {name!r}: {detail}", exit_code=1
+                )
+    try:
+        reaped = reap_detached_worker_servers(worker_servers)
+    except RuntimeError as exc:
+        raise DispatchAskError(str(exc), exit_code=1) from exc
+    _mark_stopped_orphaned(name, existing)
+    events.emit(
+        "agent_stopped",
+        name=name,
+        provider="cursor-agent",
+        claude_exit=None,
+        stopped_by="pane",
+        worker_servers_reaped=reaped,
+    )
+    print(f"stopped: {name}", flush=True)
+    return StopResult(name=name, provider="cursor-agent", claude_exit=None)
+
+
+def _stop_cursor_agent_thread(
+    name: str, existing: AgentEntry, keeper_sock: str
+) -> StopResult:
+    """Stop a keeper-hosted cursor thread over its socket, then reap servers.
+
+    The keeper's Kill frame tears down the hosted TUI; Cursor's detached
+    worker-server is the TUI's child, so it is captured while the keeper pid
+    still proves ownership and reaped after the teardown. A census failure
+    degrades to an empty capture - the kill does not depend on it - while a
+    reap failure raises, because surviving servers are exactly what the
+    reaper exists to prevent.
+    """
+    from fno.agents.harnesses.cursor_agent import (
+        capture_detached_worker_servers,
+        reap_detached_worker_servers,
+    )
+
+    worker_servers: tuple = ()
+    try:
+        worker_servers = capture_detached_worker_servers(
+            existing.pid, existing.pid_start_time
+        )
+    except RuntimeError:
+        worker_servers = ()
+    result = _stop_keeper_thread(name, existing, keeper_sock)
+    try:
+        reaped = reap_detached_worker_servers(worker_servers)
+    except RuntimeError as exc:
+        raise DispatchAskError(str(exc), exit_code=1) from exc
+    if reaped:
+        print(f"cursor-agent worker-server processes reaped: {reaped}", flush=True)
+    return result
+
+
 def stop_agent(
     name: str,
     *,
@@ -4425,6 +4840,17 @@ def stop_agent(
             _lock_handle,
             existing,
         ):
+            if existing.harness == "cursor-agent":
+                keeper_sock = getattr(existing, "messaging_socket_path", None)
+                if keeper_sock and "mux/threads/" in keeper_sock:
+                    # A keeper-hosted thread row has no pane to tear down; the
+                    # Kill frame on its own socket is the only transport that
+                    # reaches the hosted TUI. The pane arm below would skip
+                    # straight to the reaper and mark the row orphaned while
+                    # keeper and child still run.
+                    return _stop_cursor_agent_thread(name, existing, keeper_sock)
+                return _stop_cursor_agent(name, existing)
+
             if existing.harness in ("codex", "gemini"):
                 # Locked Decision 5: stop is a no-op between asks for the
                 # synchronous providers. Emit the same event for symmetry
@@ -4634,6 +5060,48 @@ def _teardown_harness_session(
 
         if sid:
             print(opencode_mod.REGISTRY_ONLY_NOTE.format(sid=sid), flush=True)
+        return None
+
+    if harness == "cursor-agent":
+        from fno.agents.harnesses.cursor_agent import (
+            capture_detached_worker_servers,
+            reap_detached_worker_servers,
+        )
+
+        # rm runs after the owner is already gone, and the census's ownership
+        # proof needs a live owner pid: unprovable here is the normal shape,
+        # not a fault. Refusing would brick every post-stop rm; the row goes
+        # and the leak, if any, is named. A reap that FAILS with handles in
+        # hand is different - servers are provably alive and surviving - and
+        # still refuses.
+        census_unverified: Optional[str] = None
+        try:
+            worker_servers = capture_detached_worker_servers(
+                existing.pid, existing.pid_start_time
+            )
+        except RuntimeError as exc:
+            worker_servers = ()
+            census_unverified = str(exc)
+        # A keeper-hosted thread row's session IS the keeper process, so the
+        # Kill frame is the teardown; without it rm orphans the hosted TUI.
+        # Census first (it wants a provable owner), kill second, reap last.
+        keeper_sock = getattr(existing, "messaging_socket_path", None)
+        if keeper_sock and "mux/threads/" in keeper_sock:
+            _stop_keeper_thread(name, existing, keeper_sock)
+        try:
+            reaped = reap_detached_worker_servers(worker_servers)
+        except RuntimeError as exc:
+            return _fail(str(exc), exit_code=1)
+        if census_unverified:
+            print(
+                "cursor-agent worker-server cleanup unverified: "
+                f"{census_unverified}; if a worker-server survives, kill it "
+                "by pid",
+                flush=True,
+            )
+        print(
+            f"cursor-agent worker-server processes reaped: {reaped}", flush=True
+        )
         return None
 
     if not sid:
@@ -4860,7 +5328,7 @@ def rm_agent(
                             f"back under management.\n"
                         )
 
-            elif existing.harness in ("codex", "opencode"):
+            elif existing.harness in ("codex", "opencode", "cursor-agent"):
                 teardown_error = _teardown_harness_session(
                     existing,
                     name=name,

@@ -23,7 +23,11 @@ from pathlib import Path
 import pytest
 
 from fno.agents import dispatch as dispatch_mod
-from fno.agents.dispatch import DispatchAskError, _lane_b_thread_spawn
+from fno.agents.dispatch import (
+    DispatchAskError,
+    _lane_b_thread_spawn,
+    _mint_thread_session_id,
+)
 from fno.agents.harness_map import (
     DispatchResolveError,
     capabilities,
@@ -108,11 +112,14 @@ def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit() -> None:
         resolve_dispatch(harness="pi", substrate="thread")
 
 
-def test_lane_b_spawn_is_not_wired_into_dispatch_spawn() -> None:
-    """The explicit internal entry point is the ONLY caller surface: the
-    public dispatch_spawn body does not reference it."""
+def test_lane_b_spawn_wiring_names_only_the_wired_keeper_harness() -> None:
+    """The public dispatch_spawn body reaches the keeper entry point only
+    through the cursor-agent arm. pi's arm is still unbuilt, so pi must not
+    appear in the wiring: its spawn arm ships with its own journey."""
     source = inspect.getsource(dispatch_mod.dispatch_spawn)
-    assert "_lane_b_thread_spawn" not in source
+    assert 'harness="cursor-agent"' in source
+    assert "_lane_b_thread_spawn" in source
+    assert 'harness="pi"' not in source
 
 
 # ---------------------------------------------------------------------------
@@ -559,7 +566,7 @@ def test_stop_agent_stops_a_keeper_that_dies_between_probe_and_kill(lane_b_home)
     from fno.agents.dispatch import _stop_keeper_thread
     from fno.agents.registry import AgentEntry, load_registry, update_registry
 
-    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-"))
+    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-", dir="/tmp"))
     sock = short_state / "mux" / "threads" / "wk-vanish.sock"
     sock.parent.mkdir(parents=True, exist_ok=True)
     seen: dict[str, object] = {}
@@ -569,7 +576,11 @@ def test_stop_agent_stops_a_keeper_that_dies_between_probe_and_kill(lane_b_home)
     # Closing a listening AF_UNIX socket never unlinks its bound path.
     def _serve() -> None:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(str(sock))
+        try:
+            server.bind(str(sock))
+        except OSError as exc:
+            seen["error"] = repr(exc)
+            return
         server.listen(8)
         server.settimeout(5)
         seen["ready"] = True
@@ -584,8 +595,9 @@ def test_stop_agent_stops_a_keeper_that_dies_between_probe_and_kill(lane_b_home)
     thread = threading.Thread(target=_serve, daemon=True)
     thread.start()
     deadline = time.monotonic() + 5
-    while "ready" not in seen and time.monotonic() < deadline:
+    while "ready" not in seen and "error" not in seen and time.monotonic() < deadline:
         time.sleep(0.02)
+    assert "ready" in seen, f"the keeper never bound: {seen.get('error')}"
 
     entry = AgentEntry(
         name="wk-vanish",
@@ -611,3 +623,161 @@ def test_stop_agent_stops_a_keeper_that_dies_between_probe_and_kill(lane_b_home)
     finally:
         thread.join(timeout=5)
         shutil.rmtree(short_state, ignore_errors=True)
+
+
+def test_stop_agent_routes_a_cursor_thread_through_the_keeper_kill(
+    lane_b_home, monkeypatch
+) -> None:
+    """A keeper-hosted cursor-agent thread row must take the Kill-frame arm.
+
+    The pane arm finds no mux pane on a thread row: it would mark the row
+    orphaned while the keeper and the hosted TUI still run. Routing through
+    _stop_keeper_thread is the only stop that reaches the child, with the
+    worker-server census reaped after the teardown."""
+    from fno.agents.harnesses import cursor_agent as cursor_agent_mod
+    from fno.agents.registry import AgentEntry, load_registry, update_registry
+
+    # A SHORT bind root: AF_UNIX paths cap at ~104 bytes, and the default
+    # pytest tmpdir can exceed it, which would make bind fail and this test
+    # pass vacuously. The test asserts the bind and the accepted frames, so
+    # neither failure mode is silent.
+    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-cursor-", dir="/tmp"))
+    sock = short_state / "mux" / "threads" / "wk-cursor-stop.sock"
+    sock.parent.mkdir(parents=True, exist_ok=True)
+    seen: dict[str, object] = {}
+
+    # The keeper serves the liveness probe, then reads the Kill frame off a
+    # second connection before exiting - the real protocol, asserted.
+    def _serve() -> None:
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(sock))
+        server.listen(8)
+        server.settimeout(5)
+        seen["ready"] = True
+        try:
+            conn, _ = server.accept()
+            conn.close()
+            conn2, _ = server.accept()
+            seen["accepted"] = True
+            frame = b""
+            while len(frame) < 5:
+                chunk = conn2.recv(5 - len(frame))
+                if not chunk:
+                    break
+                frame += chunk
+            seen["kill_frame"] = frame
+            conn2.close()
+        except OSError as exc:
+            seen["error"] = repr(exc)
+        finally:
+            server.close()
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while "ready" not in seen and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert "ready" in seen, "the keeper never bound; the test cannot run"
+    assert "error" not in seen, f"keeper socket error: {seen.get('error')}"
+
+    entry = AgentEntry(
+        name="wk-cursor-stop",
+        cwd=str(lane_b_home),
+        log_path=str(lane_b_home / "keeper.log"),
+        harness="cursor-agent",
+        host_mode="interactive",
+        harness_session_id="fadad56b-8008-45f5-b809-f9fab7074534",
+        pid=4242,
+        keeper_child_pid=555,
+        messaging_socket_path=str(sock),
+        origin="spawn",
+    )
+    update_registry(lambda entries: entries + [entry])
+
+    reap_sizes: list[int] = []
+
+    def _fake_reap(handles):
+        reap_sizes.append(len(list(handles)))
+        return 1
+
+    monkeypatch.setattr(
+        cursor_agent_mod, "capture_detached_worker_servers", lambda owner_pid, owner_pid_start_time: ()
+    )
+    monkeypatch.setattr(cursor_agent_mod, "reap_detached_worker_servers", _fake_reap)
+
+    try:
+        result = dispatch_mod.stop_agent("wk-cursor-stop")
+        assert result.name == "wk-cursor-stop"
+        assert seen.get("accepted"), "no Kill connection ever reached the keeper"
+        assert seen.get("kill_frame") == b"\x03" + (0).to_bytes(
+            4, "little"
+        ), f"wrong frame: {seen.get('kill_frame')!r}"
+        row = next(e for e in load_registry() if e.name == "wk-cursor-stop")
+        assert row.status == "exited", "the Kill arm went terminal, not the pane arm's orphaned"
+        assert reap_sizes == [0], "the census runs against the live keeper, then reaps after"
+        assert not sock.exists(), "the stale socket file is reaped on the clean stop"
+    finally:
+        thread.join(timeout=5)
+        shutil.rmtree(short_state, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# cursor-agent: the callee-minted keeper harness
+# ---------------------------------------------------------------------------
+
+def test_lane_b_cursor_agent_mints_through_create_chat(
+    lane_b_home, monkeypatch
+) -> None:
+    """The row's id is CALLEE-minted: create-chat returns it before launch,
+    and it is never fno's uuid4."""
+    _fake_keeper(monkeypatch, lane_b_home)
+    minted = "fadad56b-8008-45f5-b809-f9fab7074534"
+
+    from fno.agents.harnesses import cursor_agent
+
+    monkeypatch.setattr(
+        cursor_agent, "create_chat", lambda cwd: minted
+    )
+    receipt = _lane_b_thread_spawn(
+        name="wk-cursor", harness="cursor-agent", cwd=lane_b_home
+    )
+    assert receipt["session_id"] == minted
+    row = next(e for e in load_registry() if e.name == "wk-cursor")
+    assert row.harness == "cursor-agent"
+    assert row.harness_session_id == minted
+
+
+def test_lane_b_cursor_agent_keeper_argv_carries_trust_and_grant(
+    lane_b_home, monkeypatch
+) -> None:
+    """The keeper tail is the declared form (--trust rides it) plus the
+    state-root grant the row's argv-add-dir cell declares - never a worktree
+    flag."""
+    recorded = _fake_keeper(monkeypatch, lane_b_home)
+    minted = "0f9e63ed-861d-4f9f-8efa-3e40c5e01266"
+
+    from fno.agents import dispatch as d
+
+    monkeypatch.setattr(
+        d, "_mint_thread_session_id", lambda harness, cwd, requested=None: minted
+    )
+    _lane_b_thread_spawn(
+        name="wk-cursor-argv", harness="cursor-agent", cwd=lane_b_home
+    )
+    argv = list(recorded["argv"])  # type: ignore[arg-type]
+    tail = argv[argv.index("--") + 1 :]
+    assert tail[:3] == ["cursor-agent", "--resume", minted]
+    assert tail.count("--trust") == 1, "the declared form carries it once, never duplicated"
+    assert "--add-dir" in tail, "the computed state-root grant rides the keeper argv"
+    assert not any(t in {"-w", "--worktree", "--worktree-base"} for t in tail)
+
+
+def test_lane_b_cursor_agent_refuses_a_truncated_resume_id(lane_b_home) -> None:
+    """spawn --resume with a head-8 handle: the pinned refusal names the
+    condition, because the wrong value has an obvious source."""
+    with pytest.raises(DispatchAskError) as caught:
+        _mint_thread_session_id("cursor-agent", lane_b_home, requested="74db359a")
+    message = str(caught.value)
+    assert "74db359a" in message
+    assert "8 hex characters" in message
+    assert "an fno session handle, not a chat id" in message

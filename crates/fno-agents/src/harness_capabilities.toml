@@ -4,7 +4,7 @@
 # resync BOTH copies, not just the first:
 #   bash scripts/ci/check-harness-capabilities-fresh.sh --write
 # scripts/ci/check-harness-capabilities-fresh.sh fails CI when any copy differs.
-map_version = 13
+map_version = 14
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -699,6 +699,114 @@ tokens = ["pi", "--session-id", "{session_id}"]
 # `direct` here would be a spelling borrowed from codex rather than a fact about
 # pi. The rpc lane's own driver reaches `set_model` directly.
 [harness.pi.model_switch_strategy]
+kind = "unsupported"
+tokens = []
+effort_labels = {}
+status_command = ""
+status_pattern = ""
+
+# cursor-agent is a pane-only fno harness. Its --print stream-json mode is
+# output-only: it has no input-format, rpc, acp, serve, or stdio drive lane.
+[harness.cursor-agent]
+permission_bypass = ["--force"]
+resume = "native-session"
+# TRUE, and the live journey is the evidence
+# (cli/scripts/smoke/cursor-agent-keeper-journey.py, journey wk-cursor, first
+# green 2026-09-01 on cursor-agent v2026.08.31-4057e58): fno's keeper hosts
+# the TUI's pty on x-61bc's generic keeper lane, the child survived SIGKILL
+# of BOTH the mux server and the daemon with pid, cwd and session id
+# unchanged, the restart sweep re-bound the same row, the chat id appeared in
+# no file under ~/.cursor (the store is remote), and a fresh turn recalled a
+# prior turn's codeword. The row is a statement about the lane dispatch
+# resolves onto - the same field pi's row carries - never a claim that the
+# harness grew a transport.
+thread = true
+autonomous_pane = false
+route_on_pane = false
+loop_participation = "extension"
+# hooks.json has a stop command, but this run did not capture a positive hook
+# firing marker. Keep looping dispatch refused until that boundary is proven.
+loop_extension = ""
+command_surface = "slash"
+slash_prefix = ""
+ready_marker = "idle_plan_build"
+ready_rule_ids = ["idle_plan_build"]
+manifest_rules = [{ id = "idle_plan_build", state = "idle" }]
+# Three 6KB-class / 43-line pastes followed immediately by Enter all returned
+# their marker with the composer clear on v2026.08.25 (a single-line control
+# also returned); the keeper journey re-measures the same shape on every run.
+# This is the live pane measurement, so the delay is 0 rather than a borrowed
+# default. The idle marker moved under a self-update: v2026.08.25 rendered
+# `-> Add a follow-up`, v2026.08.31-4057e58 renders
+# `-> Plan, search, build anything`. The old working rule (braille spinner
+# beside Working/Running) was deleted with the rot rather than kept unfired.
+send_keys_enter_delay_ms = 0
+submit_keys = ["enter"]
+# Stop is pane teardown; remove also runs cursor-agent's detached worker-server
+# reaper before deleting the registry row.
+stop_strategy = "registry-noop"
+remove_strategy = "registry-only"
+session_binding = { strategy = "callee-minted-read-back", required = true, timeout_ms = 60000 }
+
+[harness.cursor-agent.state_root_grant]
+# pane earned its marker on 2026-08-30: --add-dir carried the grant and a
+# write under the granted path landed. thread carries the same argv carrier
+# (the keeper spawn pins --add-dir in its argv test) but no write-marker has
+# been captured on that lane; the carrier is argv-proven, the write is not.
+# headless stays unmeasured: nothing has ever run there and no dispatch arm
+# reaches it.
+pane = "argv-add-dir"
+thread = "argv-add-dir"
+headless = "unmeasured"
+
+[harness.cursor-agent.permission_response.allow_once]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.cursor-agent.permission_response.allow_always]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.cursor-agent.permission_response.deny]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.cursor-agent.resume_strategy.forms.interactive_create]
+kind = "flag"
+tokens = ["cursor-agent", "--resume", "{session_id}", "--trust"]
+# Create and resume are the SAME launch once the id exists: create-chat mints
+# it, every later process rejoins it. --trust is NOT the bypass axis (--force
+# is): an untrusted cwd refuses with Workspace Trust Required and does no
+# work, and fno always spawns into a worktree it just created. -w/--worktree
+# is never passed; the worktree is fno's.
+
+[harness.cursor-agent.resume_strategy.forms.interactive_resume]
+kind = "flag"
+tokens = ["cursor-agent", "--resume", "{session_id}", "--trust"]
+
+# Attach is UNSUPPORTED, and that is what makes this a keeper-lane row. Lane
+# A's attach means a client JOINS the harness's live session (codex's
+# app-server, pi's rpc); cursor-agent has no such protocol - a second
+# `--resume` process is a RIVAL TUI on the same remote chat, not a join. fno
+# must hold the pty, so the lane answers keeper and the thread is the
+# keeper's child. The pane re-entry argv (the same --resume form) lives in
+# the harness module, never in this seam.
+[harness.cursor-agent.resume_strategy.forms.interactive_attach]
+kind = "unsupported"
+tokens = []
+
+[harness.cursor-agent.resume_strategy.forms.headless_create]
+kind = "unsupported"
+tokens = []
+
+[harness.cursor-agent.resume_strategy.forms.headless_resume]
+kind = "unsupported"
+tokens = []
+
+[harness.cursor-agent.model_switch_strategy]
 kind = "unsupported"
 tokens = []
 effort_labels = {}

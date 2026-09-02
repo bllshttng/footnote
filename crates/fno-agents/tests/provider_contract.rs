@@ -8,7 +8,10 @@ use fno_agents::provider::{
 };
 use fno_agents::ParsedEvent;
 
-const SESSION_ID: &str = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4";
+// A UUIDv4: the roster's strictest id validator (cursor-agent's chat-id
+// contract) refuses any other version, and every other provider renders the
+// string verbatim.
+const SESSION_ID: &str = "4b1f2a3c-9d8e-4f7a-b2c1-5e6d7a8b9c0d";
 
 fn create_context() -> CreateContext {
     CreateContext {
@@ -125,16 +128,41 @@ fn roster_drives_provider_argv_and_capability_coverage() {
 
     for name in KNOWN_PROVIDERS {
         let provider = for_name(name).expect("roster provider implementation");
-        let expected_create = contract
+        // A provider whose contract declares a headless lane UNSUPPORTED has
+        // no headless argv to render (cursor-agent: --print is output-only);
+        // the comparison drops to the interactive lane the provider's argv
+        // actually renders, so the contract stays covered on lanes that exist.
+        let create_lane = if contract
             .render_session_argv(name, "headless_create", Some(SESSION_ID))
+            .is_ok()
+        {
+            "headless_create"
+        } else {
+            "interactive_create"
+        };
+        let resume_lane = if contract
+            .render_session_argv(name, "headless_resume", Some(SESSION_ID))
+            .is_ok()
+        {
+            "headless_resume"
+        } else {
+            "interactive_resume"
+        };
+        if create_lane != "headless_create" || resume_lane != "headless_resume" {
+            eprintln!(
+                "SELF-SKIP provider-contract {name} headless lanes: the contract declares them unsupported; comparing {create_lane}/{resume_lane}"
+            );
+        }
+        let expected_create = contract
+            .render_session_argv(name, create_lane, Some(SESSION_ID))
             .unwrap();
         let expected_resume = contract
-            .render_session_argv(name, "headless_resume", Some(SESSION_ID))
+            .render_session_argv(name, resume_lane, Some(SESSION_ID))
             .unwrap();
         let create_argv = provider.create_argv(&create);
         let resume_argv = provider.resume_argv(&resume);
-        assert_ordered_tokens(name, &create_argv, &expected_create, "headless_create");
-        assert_ordered_tokens(name, &resume_argv, &expected_resume, "headless_resume");
+        assert_ordered_tokens(name, &create_argv, &expected_create, create_lane);
+        assert_ordered_tokens(name, &resume_argv, &expected_resume, resume_lane);
     }
 }
 

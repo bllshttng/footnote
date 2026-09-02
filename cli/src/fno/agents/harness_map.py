@@ -434,7 +434,7 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
             # harness scopes its lookup by cwd, so the identity is the PAIR and
             # the id alone addresses nothing. Distinct from "preassigned",
             # where the id is the whole handle.
-            "preassigned", "caller-assigned-cwd-scoped",
+            "preassigned", "caller-assigned-cwd-scoped", "callee-minted-read-back",
             "store-lookup", "unsupported",
         }:
             raise _contract_error(harness, "session_binding", "unknown strategy")

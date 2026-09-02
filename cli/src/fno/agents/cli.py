@@ -21,7 +21,7 @@ from fno.agents.rust_runtime import make_agents_group_cls
 agents_app = typer.Typer(
     name="agents",
     help=(
-        "Cross-CLI agent lifecycle (claude / codex / gemini): "
+        "Cross-CLI agent lifecycle (claude / codex / gemini / cursor-agent): "
         "spawn / watch / list / logs / stop. "
         "To message a peer, use `fno agents mail send <name>` (or the `/mail` skill)."
     ),
@@ -1153,11 +1153,11 @@ def cmd_spawn(
         "-H",
         help=(
             "The CLI binary to launch. The declared harnesses - claude, codex, "
-            "gemini, opencode, agy, pi - get the full lane. Any other binary on "
-            "PATH also spawns, into a pane with fno as the viewport; pass its "
-            "init flags after '--'. Defaults to the invoking harness, then "
-            "claude. NOTE: -H no longer means headless; for a one-shot use "
-            "--substrate headless / --headless / --once."
+            "gemini, opencode, agy, pi, cursor-agent - get the full lane. Any "
+            "other binary on PATH also spawns, into a pane with fno as the "
+            "viewport; pass its init flags after '--'. Defaults to the "
+            "invoking harness, then claude. NOTE: -H no longer means headless; "
+            "for a one-shot use --substrate headless / --headless / --once."
         ),
     ),
     vendor: str | None = typer.Option(
@@ -1326,7 +1326,7 @@ def cmd_spawn(
             "Model for the worker, forwarded as --model <m> to the provider's "
             "own CLI (exact passthrough, no fuzzy resolution). On the default "
             "pane substrate every provider honors it (claude/codex/gemini/agy/"
-            "opencode); on --substrate thread/headless it reaches claude, codex, and agy. "
+            "opencode/cursor-agent); on --substrate thread/headless it reaches claude, codex, and agy. "
             "Unset = provider default; opencode defaults to zai-coding-plan/glm-5.3."
         ),
     ),
@@ -1339,7 +1339,8 @@ def cmd_spawn(
             "plan|bypassPermissions (exact passthrough); gemini --approval-mode "
             "(or 'yolo'); codex a shortcut (full-auto|yolo) or <sandbox>:"
             "<approval> (e.g. workspace-write:on-request); opencode 'auto'; agy "
-            "'skip'. An unmappable value errors before spawn. Mutually exclusive "
+            "'skip'; cursor-agent 'force' or 'yolo'. An unmappable value errors "
+            "before spawn. Mutually exclusive "
             "with --yolo. Honored on claude thread/headless (Rust or Python "
             "fallback); codex/gemini thread/headless one-shots reject it (use "
             "--substrate pane)."
@@ -1372,8 +1373,8 @@ def cmd_spawn(
         "--add-dir",
         help=(
             "Grant the worker extra write access to a directory (x-b6e2). Maps to "
-            "the harness's own --add-dir on claude/codex/agy (additive to the "
-            "worker's own workspace); opencode/gemini reject it (fail-closed)."
+            "the harness's own --add-dir on claude/codex/agy/cursor-agent (additive "
+            "to the worker's own workspace); opencode/gemini reject it (fail-closed)."
         ),
     ),
     agent: str | None = typer.Option(
@@ -3119,7 +3120,10 @@ def cmd_ask(
 def cmd_list(
     cwd: str = typer.Option(None, "--cwd", help="Filter by working directory."),
     harness: str = typer.Option(
-        None, "--harness", "-H", help="Filter by harness (claude | codex | gemini)."
+        None,
+        "--harness",
+        "-H",
+        help="Filter by harness (claude | codex | gemini | cursor-agent).",
     ),
     _provider_tombstone: str = typer.Option(
         None,

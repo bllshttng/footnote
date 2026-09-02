@@ -89,7 +89,7 @@ __all__ = [
 WORKER_ADD_DIRS_ENV = "FNO_WORKER_ADD_DIRS"
 
 
-ADD_DIR_PROVIDERS = ("claude", "codex", "agy")
+ADD_DIR_PROVIDERS = ("claude", "codex", "agy", "cursor-agent")
 
 #: Providers already warned about the skipped grant, once per process.
 _SKIP_NOTED: set[str] = set()
