@@ -610,6 +610,36 @@ def test_spawn_pi_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) -> 
     ], "the pi branch must drive the keeper lane exactly once"
 
 
+def test_spawn_seam_refuses_an_absent_stance(monkeypatch) -> None:
+    """A future SPAWN_HARNESSES member whose row records no stance for the
+    requested substrate is refused beside the \"unmeasured\" one: silence
+    would let it inherit a pass from the lanes that did run."""
+    import fno.agents.harness_map as harness_map
+    from fno.agents import dispatch
+
+    monkeypatch.setattr(
+        dispatch,
+        "SPAWN_HARNESSES",
+        (*dispatch.SPAWN_HARNESSES, "future"),
+    )
+    real_caps = harness_map.capabilities_or_undeclared
+
+    def caps_without_stance(harness):
+        caps = dict(real_caps("claude"))
+        caps["state_root_grant"] = {"pane": "unsandboxed", "thread": "unsandboxed"}
+        return caps
+
+    monkeypatch.setattr(
+        harness_map, "capabilities_or_undeclared", caps_without_stance
+    )
+    dispatch._check_spawn_harness("future", headless=False)
+    with pytest.raises(dispatch.DispatchAskError) as caught:
+        dispatch._check_spawn_harness("future", headless=True)
+    message = str(caught.value)
+    assert "absent or unmeasured" in message
+    assert "headless" in message
+
+
 def test_route_on_an_undeclared_harness_refuses_cleanly(
     workdir, monkeypatch, tmp_path
 ) -> None:

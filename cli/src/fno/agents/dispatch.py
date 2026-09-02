@@ -498,13 +498,16 @@ def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
         stance = capabilities_or_undeclared(name).get("state_root_grant", {}).get(
             substrate
         )
-        if stance == "unmeasured":
+        # Absent refuses beside "unmeasured": a row that does not record a
+        # stance for the lane has not measured it, and silence would let a
+        # new member inherit a pass from the lanes that did run.
+        if stance is None or stance == "unmeasured":
             raise DispatchAskError(
                 f"{name!r} has a spawn arm, but its {substrate} lane is not "
                 "measured: the capability row records state_root_grant."
-                f"{substrate} = \"unmeasured\", and nothing has run that lane "
-                "unattended. An unattended journey for the lane is what clears "
-                f"it (pi's thread journey is the shape: "
+                f"{substrate} = {stance!r} (absent or unmeasured), and nothing "
+                "has run that lane unattended. An unattended journey for the "
+                f"lane is what clears it (pi's thread journey is the shape: "
                 "cli/tests/agents/test_pi_spawn_journey.py). "
                 f"Use --substrate pane, which every harness hosts.",
                 exit_code=2,
