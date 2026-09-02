@@ -5074,6 +5074,7 @@ def _teardown_harness_session(
         # and the leak, if any, is named. A reap that FAILS with handles in
         # hand is different - servers are provably alive and surviving - and
         # still refuses.
+        census_unverified: Optional[str] = None
         try:
             worker_servers = capture_detached_worker_servers(
                 existing.pid, existing.pid_start_time
@@ -5081,8 +5082,6 @@ def _teardown_harness_session(
         except RuntimeError as exc:
             worker_servers = ()
             census_unverified = str(exc)
-        else:
-            census_unverified = None
         # A keeper-hosted thread row's session IS the keeper process, so the
         # Kill frame is the teardown; without it rm orphans the hosted TUI.
         # Census first (it wants a provable owner), kill second, reap last.
