@@ -212,6 +212,7 @@ def test_top_prices_tree_rss_off_the_resolved_pid(tmp_path, monkeypatch):
         AgentEntry(
             name="t-xb57a-glm",
             harness="claude",
+            provider="anthropic",
             cwd="/tmp",
             log_path="/tmp/l",
             status="live",
