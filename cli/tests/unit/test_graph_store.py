@@ -55,10 +55,12 @@ def test_the_reaper_reaps_a_keeper_it_can_name(tmp_path, monkeypatch):
     """
     from fno.graph import store as store_mod
 
-    # The session bounds spawned keepers to 5s idle (conftest). On a loaded
-    # runner the gap between this test's read and its liveness assert can
-    # outrun that clock, and the keeper's own idle exit (rc 0) pre-kills the
-    # control. Spawn this one with idle exit disabled: the reaper, not the
+    # Clear the field first: earlier tests in this worker process spawned
+    # keepers too, and the session's 5s idle bound (conftest) may already
+    # have reaped them. The control then names ITS OWN spawn - a dead pid
+    # left in the ledger is the clock's prior work, not a reaper miss.
+    assert store_mod.reap_spawned_keepers(timeout=15.0) == []
+    # Idle exit disabled for this control's keeper: the reaper, not the
     # clock, must be what kills it.
     monkeypatch.setenv("FNO_STORE_KEEPER_IDLE_SECS", "0")
 
