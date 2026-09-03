@@ -41,10 +41,11 @@ def _utc_iso(value: datetime | str | None) -> str | None:
     if value is None:
         return None
     if isinstance(value, str):
+        raw = value
         try:
-            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         except ValueError:
-            return value  # junk in, junk out: the old writer stored it verbatim
+            return raw  # junk in, junk out: the old writer stored it verbatim
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat(timespec="seconds")
