@@ -3049,6 +3049,22 @@ impl<'a> SlotCapture<'a> {
 /// session to geometry, a thread binds a session to a row, and a persisted
 /// slot would re-bind a thread to a rectangle across a restart. `None` means
 /// nothing durable remains in this subtree.
+/// (x-8f9d) Does `portal_key` name the same ROW the reach resolved?
+///
+/// Not the same KEY: the TUI door keys a portal by the attach id while
+/// `fno agents attach` keys it by the registry name, and both doors advertise
+/// the same pane. Attach ids are unique per bg session, so a portal keyed by
+/// this row's attach id IS this row whatever door the reach came from - and the
+/// reverse (keyed by name, reached again by attach id) is the same row too,
+/// which is why the name comparison runs both directions.
+///
+/// One function, two callers: the same-row focus arm for the REQUESTED portal,
+/// and the one-row-one-viewer check across every OTHER portal. Two copies of
+/// this comparison drifting apart is how a duplicate viewer gets minted.
+fn row_matches_portal_key(row: &RegistryAgent, key: &str, portal_key: &str) -> bool {
+    portal_key == key || row.attach_id.as_deref() == Some(portal_key) || portal_key == row.name
+}
+
 fn node_without_leaf(node: &Node, skip: u64) -> Option<Node> {
     match node {
         Node::Leaf(p) => (*p != skip).then_some(Node::Leaf(*p)),
@@ -12378,7 +12394,7 @@ impl Core {
         client_id: u64,
         view: (u64, TabId),
         vp: Rect,
-        portal: u8,
+        portal_idx: u8,
         key: &str,
     ) -> Flow {
         // Resolve exactly one live paneless row for the key. Names are not
@@ -12400,6 +12416,59 @@ impl Core {
                 return Flow::Continue;
             }
         };
+        // (x-8f9d) ONE ROW, ONE VIEWER. A reach for a row that ANOTHER portal
+        // already shows focuses that portal rather than minting a second
+        // viewer for it. The single slot enforced this by construction: there
+        // was nowhere else for the row to be, so the same-row arm below caught
+        // every case. With several portals the same-row arm sees only the
+        // REQUESTED index, and everything past it opens fresh.
+        //
+        // A duplicate is not cosmetic. `attached` holds ONE pane per attach id,
+        // so the second viewer's insert overwrites the first and leaves a live
+        // pane no row points at - the duplicate-viewer problem this epic exists
+        // to remove, re-created one layer down.
+        if let Some((other_idx, other_seat, other_tab)) = self
+            .portals
+            .iter()
+            .find(|(idx, portal)| {
+                **idx != portal_idx
+                    && row_matches_portal_key(&row, key, &portal.row_key)
+                    // A stand-in shell is not a viewer of the row: its portal
+                    // is free to be repointed, so it never blocks this reach.
+                    && self
+                        .panes
+                        .get(&portal.seat)
+                        .is_some_and(|entry| entry.cmd.is_some())
+            })
+            .map(|(idx, portal)| (*idx, portal.seat, portal.tab))
+        {
+            match self.session.find_pane(other_seat) {
+                Some((sid, _)) => {
+                    self.set_view(client_id, sid, other_tab);
+                    if let Some(tab) = self.viewed_tab_mut((sid, other_tab)) {
+                        tab.focus = other_seat;
+                    }
+                    self.mark_seen_if_done(other_seat);
+                    self.notice(
+                        client_id,
+                        format!("portal {other_idx}: already showing {}", row.name),
+                    );
+                    self.push_layout(true);
+                    return Flow::Continue;
+                }
+                // Half-created pane, the same case the same-row arm below
+                // handles: tracked in `panes` but absent from the tab tree, so
+                // it shows the row to nobody. Reap it and drop its portal
+                // rather than focusing a pane with no place on screen, then
+                // fall through and open this reach fresh. Without the reap it
+                // leaks a child process, and without the drop the entry keeps
+                // blocking every later reach for this row.
+                None => {
+                    self.reap_pane(other_seat);
+                    self.portals.remove(&other_idx);
+                }
+            }
+        }
         let tier = agents_view::thread_reach(row.harness.as_deref(), row.attach_id.as_deref());
         let spawn_cwd = if row.cwd.is_empty() {
             self.session
@@ -12421,7 +12490,7 @@ impl Core {
                 // portal, so an off-loop replay returns to the index the
                 // operator reached, not to portal 0.
                 let placement = crate::proto::PanePlacement {
-                    portal: Some(portal),
+                    portal: Some(portal_idx),
                     ..Default::default()
                 };
                 let Some((argv, _cd)) = self.attach_gesture_argv(client_id, &id, &placement) else {
@@ -12446,7 +12515,7 @@ impl Core {
         // diff-pane stale-id guard - a recorded pane closed by any other path
         // reads as closed and never wedges the portal). Only this index is
         // removed; every other portal is untouched by this reach.
-        let slot = self.portals.remove(&portal);
+        let slot = self.portals.remove(&portal_idx);
         // (x-d545) The seat's tab id, kept out of the stale-seat paths: a
         // fresh-open (below) prefers it when the tab still exists.
         let mut remembered_tab_id: Option<TabId> = None;
@@ -12460,17 +12529,11 @@ impl Core {
             if self.panes.contains_key(&pid) {
                 if let Some((sid, ti)) = self.session.find_pane(pid) {
                     let tid = self.session.squad(sid).expect("find_pane live").tabs[ti].id;
-                    // Same ROW, not same key: the TUI door keys the slot by the
-                    // attach id while `fno agents attach` keys it by the registry
-                    // name, and both doors advertise the same pane. Attach ids
-                    // are unique per bg session, so a slot keyed by this row's
-                    // attach id is this row whatever door the reach came from -
-                    // and the reverse (slot keyed by name, reached again by
-                    // attach id) is the same row too, so the name comparison
-                    // has to run both directions.
-                    let same_row = slot_row == key
-                        || row.attach_id.as_deref() == Some(slot_row.as_str())
-                        || slot_row == row.name;
+                    // Same ROW, not same key. The comparison lives in
+                    // `row_matches_portal_key`, shared with the
+                    // one-row-one-viewer check above, so the two readings of
+                    // "is this the same row" cannot drift apart.
+                    let same_row = row_matches_portal_key(&row, key, &slot_row);
                     // (x-d545) A same-row reach is a focus only when the seat
                     // holds a LIVE viewer. After the viewer's child died, the
                     // seat holds the idle-shell stand-in (no argv provenance):
@@ -12483,7 +12546,7 @@ impl Core {
                         // was taken above; put it back - a focus is not a
                         // close.
                         self.portals.insert(
-                            portal,
+                            portal_idx,
                             Portal {
                                 row_key: slot_row,
                                 seat: pid,
@@ -12511,7 +12574,7 @@ impl Core {
                         Ok(p) => p,
                         Err(error) => {
                             self.portals.insert(
-                                portal,
+                                portal_idx,
                                 Portal {
                                     row_key: slot_row,
                                     seat: pid,
@@ -12528,7 +12591,7 @@ impl Core {
                         Ok(p) => p,
                         Err(e) => {
                             self.portals.insert(
-                                portal,
+                                portal_idx,
                                 Portal {
                                     row_key: slot_row,
                                     seat: pid,
@@ -12543,7 +12606,7 @@ impl Core {
                     let Some(tab) = self.viewed_tab_mut((sid, tid)) else {
                         self.reap_pane(new_pid);
                         self.portals.insert(
-                            portal,
+                            portal_idx,
                             Portal {
                                 row_key: slot_row,
                                 seat: pid,
@@ -12556,7 +12619,7 @@ impl Core {
                     if !tree::replace_leaf(tab, pid, new_pid) {
                         self.reap_pane(new_pid);
                         self.portals.insert(
-                            portal,
+                            portal_idx,
                             Portal {
                                 row_key: slot_row,
                                 seat: pid,
@@ -12576,7 +12639,7 @@ impl Core {
                     // showed keeps running daemon-hosted.
                     self.reap_pane(pid);
                     self.portals.insert(
-                        portal,
+                        portal_idx,
                         Portal {
                             row_key: key.to_string(),
                             seat: new_pid,
@@ -12666,7 +12729,7 @@ impl Core {
             self.attached.insert(id, pid);
         }
         self.portals.insert(
-            portal,
+            portal_idx,
             Portal {
                 row_key: key.to_string(),
                 seat: pid,
@@ -26449,6 +26512,69 @@ mod tests {
         assert_ne!(
             core.portals[&1].seat, a_seat,
             "two portals never share a seat"
+        );
+    }
+
+    #[test]
+    fn one_row_never_holds_two_portals() {
+        // The single slot enforced this by construction - there was nowhere
+        // else for a row to be. With several portals the same-row arm sees
+        // only the REQUESTED index, so a reach for a row another portal
+        // already shows fell through to the fresh-open and minted a SECOND
+        // viewer for it.
+        //
+        // That is not cosmetic. `attached` holds one pane per attach id, so
+        // the second insert overwrites the first and strands a live pane no
+        // row points at. Measured before the fix: portals=2, seats 2 and 3
+        // both showing deadbee1, attached moved 2 -> 3, pane 2 still alive.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _rx) = thread_core();
+        core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+        core.command(client_id, portal_reach_cmd("deadbee1", 0));
+        let seat = core.portals.get(&0).expect("portal 0 open").seat;
+        let attached_before = core.attached.get("deadbee1").copied();
+        let panes_before = core.panes.len();
+
+        // Reach the SAME row into a different portal.
+        core.command(client_id, portal_reach_cmd("deadbee1", 1));
+
+        assert!(
+            !core.portals.contains_key(&1),
+            "no second portal is minted for a row portal 0 already shows"
+        );
+        assert_eq!(core.portals.len(), 1, "still exactly one portal");
+        assert_eq!(
+            core.portals.get(&0).map(|e| e.seat),
+            Some(seat),
+            "portal 0 keeps its seat; the reach focused it"
+        );
+        assert_eq!(
+            core.panes.len(),
+            panes_before,
+            "no second viewer pane was spawned"
+        );
+        assert_eq!(
+            core.attached.get("deadbee1").copied(),
+            attached_before,
+            "the attach mapping still names the one live viewer"
+        );
+
+        // A row shown only through a STAND-IN is not being viewed, so its
+        // portal stays repointable and never blocks a reach elsewhere.
+        core.close_pane(seat);
+        let stand_in = core
+            .portals
+            .get(&0)
+            .expect("portal 0 holds a stand-in")
+            .seat;
+        assert!(
+            core.panes.get(&stand_in).is_some_and(|e| e.cmd.is_none()),
+            "fixture: the seat now holds an idle shell, not a viewer"
+        );
+        core.command(client_id, portal_reach_cmd("deadbee1", 1));
+        assert!(
+            core.portals.contains_key(&1),
+            "a stand-in does not block the row from opening a real portal"
         );
     }
 
