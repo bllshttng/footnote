@@ -576,7 +576,7 @@ consolidation:
 HEREDOC
 
 OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 0 ]] && echo "$OUTPUT" | grep -q "surface block (step 2b-bis gate): question"; then
+if [[ $EXIT_CODE -eq 0 ]] && grep -q "surface block (step 2b-bis gate): question" <<< "$OUTPUT"; then
     pass "AC10a: Well-formed surface block passes and prints its receipt"
 else
     fail "AC10a: Well-formed surface block should pass (exit $EXIT_CODE): $OUTPUT"
@@ -584,7 +584,7 @@ fi
 
 # V1, the gate bites: a post-gate non-quick plan with no block exits 1.
 OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_NOBLOCK" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "no surface: block in frontmatter"; then
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "no surface: block in frontmatter" <<< "$OUTPUT"; then
     pass "AC10b: Post-gate non-quick plan without surface block fails"
 else
     fail "AC10b: Missing block should fail closed (exit $EXIT_CODE): $OUTPUT"
@@ -651,7 +651,7 @@ tasks:
 ```
 HEREDOC
 OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_QUICK" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 0 ]] && echo "$OUTPUT" | grep -q "no surface: block (quick plan)"; then
+if [[ $EXIT_CODE -eq 0 ]] && grep -q "no surface: block (quick plan)" <<< "$OUTPUT"; then
     pass "AC10c: Quick plan without block warns and proceeds"
 else
     fail "AC10c: Quick plan graduation should warn-only (exit $EXIT_CODE): $OUTPUT"
@@ -661,7 +661,7 @@ fi
 PLAN_SURFACE_NOUN="$TMPDIR_BASE/surface_noun.md"
 sed 's/Is this row reachable?/row reachability/' "$PLAN_SURFACE" > "$PLAN_SURFACE_NOUN"
 OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_NOUN" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "does not end in a question mark"; then
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "does not end in a question mark" <<< "$OUTPUT"; then
     pass "AC10d: Noun-phrase question fails the question mark tooth"
 else
     fail "AC10d: Noun-phrase question should fail (exit $EXIT_CODE): $OUTPUT"
@@ -671,7 +671,7 @@ fi
 PLAN_SURFACE_NOREASON="$TMPDIR_BASE/surface_noreason.md"
 sed '/reason: "writer emits/d' "$PLAN_SURFACE" > "$PLAN_SURFACE_NOREASON"
 OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_NOREASON" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "Undisposed: src/writer.py:20"; then
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "Undisposed: src/writer.py:20" <<< "$OUTPUT"; then
     pass "AC10e: Out-of-scope without reason is named undisposed"
 else
     fail "AC10e: Missing reason should fail naming the answerer (exit $EXIT_CODE): $OUTPUT"
@@ -681,7 +681,7 @@ fi
 PLAN_SURFACE_NOREADS="$TMPDIR_BASE/surface_noreads.md"
 sed '/reads: "if row.ref:/d' "$PLAN_SURFACE" > "$PLAN_SURFACE_NOREADS"
 OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_NOREADS" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "names no feed for it"; then
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "names no feed for it" <<< "$OUTPUT"; then
     pass "AC10f: Changed answerer without reads fails with the feed refusal"
 else
     fail "AC10f: Missing reads should fail (exit $EXIT_CODE): $OUTPUT"
@@ -690,7 +690,7 @@ fi
 PLAN_SURFACE_NOEMITS="$TMPDIR_BASE/surface_noemits.md"
 sed 's/emits: "12 rows, 2 with null ref (measured)"/emits: ""/' "$PLAN_SURFACE" > "$PLAN_SURFACE_NOEMITS"
 OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_NOEMITS" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "names no feed for it"; then
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "names no feed for it" <<< "$OUTPUT"; then
     pass "AC10g: Changed answerer with empty emits still fails"
 else
     fail "AC10g: Empty emits should fail (exit $EXIT_CODE): $OUTPUT"
@@ -700,7 +700,7 @@ fi
 PLAN_SURFACE_COUNT="$TMPDIR_BASE/surface_count.md"
 sed 's/^  count: 3/  count: 1/' "$PLAN_SURFACE" > "$PLAN_SURFACE_COUNT"
 OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_COUNT" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "must match what was found"; then
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "must match what was found" <<< "$OUTPUT"; then
     pass "AC10h: Count disagreement with the answerer list fails"
 else
     fail "AC10h: Count mismatch should fail (exit $EXIT_CODE): $OUTPUT"
@@ -710,7 +710,7 @@ fi
 PLAN_SURFACE_SHRINK="$TMPDIR_BASE/surface_shrink.md"
 sed 's/^  count_after: 2/  count_after: 4/' "$PLAN_SURFACE" > "$PLAN_SURFACE_SHRINK"
 OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_SHRINK" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "exceeds count"; then
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "exceeds count" <<< "$OUTPUT"; then
     pass "AC10i: count_after above count fails"
 else
     fail "AC10i: Growing count_after should fail (exit $EXIT_CODE): $OUTPUT"
@@ -719,14 +719,14 @@ fi
 PLAN_SURFACE_CONTROL="$TMPDIR_BASE/surface_control.md"
 sed 's#control: src/reader.py:10#control: src/nowhere.py:1#' "$PLAN_SURFACE" > "$PLAN_SURFACE_CONTROL"
 OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_CONTROL" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "names no listed answerer"; then
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "names no listed answerer" <<< "$OUTPUT"; then
     pass "AC10j: A control that is not an answerer fails naming the control"
 else
     fail "AC10j: Phantom control should fail (exit $EXIT_CODE): $OUTPUT"
 fi
 
 OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 0 ]] && echo "$OUTPUT" | grep -q "control \`src/reader.py:10\` returned by the sweep"; then
+if [[ $EXIT_CODE -eq 0 ]] && grep -q "control \`src/reader.py:10\` returned by the sweep" <<< "$OUTPUT"; then
     pass "AC10k: A matching control prints its own receipt"
 else
     fail "AC10k: Matching control receipt missing (exit $EXIT_CODE): $OUTPUT"
