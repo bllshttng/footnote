@@ -20,6 +20,7 @@ crossing	crates/fno-agents/src/daemon.rs	3758	std::process::Command::new("fno")
 crossing	crates/fno-agents/src/daemon.rs	8104	let mut child = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/daemon.rs	8163	let mut child = match std::process::Command::new("fno")
 crossing	crates/fno-agents/src/daemon.rs	9246	let out = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/daemon.rs	1000	let output = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	472	let mut cmd = Command::new("fno");
 crossing	crates/fno-agents/src/finalize.rs	1861	let mut command = Command::new("fno");
 crossing	crates/fno-agents/src/finalize.rs	1917	let ok = Command::new("fno")

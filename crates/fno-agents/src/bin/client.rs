@@ -3291,6 +3291,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "restart [--force]  # --force: break-glass SIGKILL of the lockfile holder; plain restart is graceful",
     "reap [--json] [--dry-run]",
     "stop <name> [--force]",
+    // retired-ok: help names the existing Claude callee to describe actual behavior, not to teach a direct retired command.
     "rm <name> [--force]   --force drops the registry row even when the row is LIVE or harness teardown fails; a live pane worker that cannot be stopped is still refused; a claude row's harness session is removed too (claude rm <short_id>), and claude removes that session's WORKTREE under its own guards - it keeps a worktree with uncommitted changes and refuses one holding commits it cannot confirm are saved elsewhere; a non-claude bg or headless process survives, a mux-hosted pane is killed with it",
     "loop-check --state <target-state.md> --transcript <transcript.jsonl> --cwd <project-root> [--events <events.jsonl>] [--global-events <global.jsonl>] [--settings <config.toml>] [--ledger <ledger.json>] [--now <rfc3339>] [--gh-bin <path>] [--git-bin <path>]",
     "finalize --state <target-state.md> --cwd <project-root> --reason <TerminationReason> [--transcript <transcript.jsonl>]",
