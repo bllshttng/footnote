@@ -330,7 +330,7 @@ impl Popup {
             .flat_map(|r| match r {
                 PopupRow::Grid(cells) => cells
                     .iter()
-                    .map(|c| c.glyph.chars().count() + c.label.chars().count() + 3)
+                    .map(|c| chrome::str_cols(&c.glyph) + chrome::str_cols(&c.label) + 3)
                     .collect::<Vec<_>>(),
                 _ => vec![],
             })
@@ -341,13 +341,13 @@ impl Popup {
             .rows
             .iter()
             .map(|r| match r {
-                PopupRow::Header(s) | PopupRow::FullWidth(s) => s.chars().count() + 2,
+                PopupRow::Header(s) | PopupRow::FullWidth(s) => chrome::str_cols(s) + 2,
                 PopupRow::Rule => 0,
                 PopupRow::Entry {
                     glyph, label, hint, ..
                 } => {
                     // glyph + space + label + gap + hint
-                    glyph.chars().count() + 1 + label.chars().count() + 2 + hint.chars().count() + 2
+                    chrome::str_cols(glyph) + 1 + chrome::str_cols(label) + 2 + chrome::str_cols(hint) + 2
                 }
                 PopupRow::Grid(cells) => grid_cell_w * cells.len(),
             })
@@ -400,7 +400,7 @@ impl Popup {
                     // A clipped `grab-…` there is worse than absent, because it
                     // still looks like an id. The label is prose and survives
                     // clipping as something a reader can still recognise.
-                    let hint_w = hint.chars().count();
+                    let hint_w = chrome::str_cols(hint);
                     let left = format!(" {glyph} {label}");
                     let text = if hint_w == 0 {
                         pad(&left, width)
@@ -529,30 +529,43 @@ pub fn origin(anchor: Anchor, w: usize, h: usize, term: (usize, usize)) -> (usiz
     }
 }
 
-/// Truncate to `w` display chars (ellipsizing) and pad with spaces to `w`, so a
-/// line is a fixed-width block that fully overwrites the content beneath it.
-/// Mirrors `client::pad_to` (kept local so the widget is self-contained).
+/// Truncate to `w` display columns (ellipsizing) and pad with spaces to `w`, so
+/// a line is a fixed-width block that fully overwrites the content beneath it.
+/// Measured in terminal columns, not chars: a fullwidth glyph is one char and
+/// two cells (x-1b68). Mirrors `client::pad_to` (kept local so the widget is
+/// self-contained).
 fn pad(s: &str, w: usize) -> String {
-    let count = s.chars().count();
-    if count > w {
-        let mut t: String = s.chars().take(w.saturating_sub(1)).collect();
+    let cols = chrome::str_cols(s);
+    if cols > w {
+        let keep = w.saturating_sub(1);
+        let mut t = String::new();
+        let mut used = 0usize;
+        for ch in s.chars() {
+            let cw = chrome::char_cols(ch);
+            if used + cw > keep {
+                break;
+            }
+            t.push(ch);
+            used += cw;
+        }
         t.push('…');
         t
     } else {
         let mut t = s.to_string();
-        t.push_str(&" ".repeat(w - count));
+        t.push_str(&" ".repeat(w - cols));
         t
     }
 }
 
-/// Center `s` within `w` (space padded); truncates via [`pad`] when too wide.
+/// Center `s` within `w` display columns (space padded); truncates via [`pad`]
+/// when too wide.
 fn center(s: &str, w: usize) -> String {
-    let count = s.chars().count();
-    if count >= w {
+    let cols = chrome::str_cols(s);
+    if cols >= w {
         return pad(s, w);
     }
-    let left = (w - count) / 2;
-    let right = w - count - left;
+    let left = (w - cols) / 2;
+    let right = w - cols - left;
     format!("{}{}{}", " ".repeat(left), s, " ".repeat(right))
 }
 

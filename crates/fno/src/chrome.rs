@@ -19,6 +19,19 @@
 use crate::popup::Anchor;
 use crate::proto::Cell;
 use crate::theme::{cell_style, Role, Theme};
+use unicode_width::UnicodeWidthChar;
+
+/// The display width of one char in terminal columns. A fullwidth glyph is one
+/// char and two cells (x-1b68); zero-width and control chars still occupy one
+/// cell in the buffer model.
+pub(crate) fn char_cols(ch: char) -> usize {
+    ch.width().unwrap_or(1).max(1)
+}
+
+/// The display width of a string in terminal columns.
+pub(crate) fn str_cols(s: &str) -> usize {
+    s.chars().map(char_cols).sum()
+}
 
 /// How much chrome a block wears. Derived from the anchor; never passed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,11 +103,22 @@ impl Chrome {
     /// surfaces this change has no business resizing.
     pub fn fit_to(mut self, inner_w: usize) -> Self {
         let elide = |s: &str, w: usize| -> String {
-            if s.chars().count() <= w {
+            if str_cols(s) <= w {
                 return s.to_string();
             }
+            // Cut by display width, not char count: a wide char is two columns
+            // and must not straddle the cut.
             let keep = w.saturating_sub(1);
-            let head: String = s.chars().take(keep).collect();
+            let mut head = String::new();
+            let mut cols = 0usize;
+            for ch in s.chars() {
+                let cw = char_cols(ch);
+                if cols + cw > keep {
+                    break;
+                }
+                head.push(ch);
+                cols += cw;
+            }
             format!("{head}…")
         };
         if let Some(f) = self.footer.take() {
@@ -152,7 +176,7 @@ impl Chrome {
         let title_w = match self.level {
             Level::Bare => return ESC_INNER,
             Level::Full if self.title.is_empty() => ESC_INNER,
-            Level::Full => self.title.chars().count() + 9, // `─ {title} ─ esc `
+            Level::Full => str_cols(&self.title) + 9, // `─ {title} ─ esc `
         };
         // (x-b465) The subtitle and footer are chrome the caller never sized:
         // body lines arrive pre-padded to `body_w`, those two arrive raw. A
@@ -160,8 +184,8 @@ impl Chrome {
         // difference, so the box rendered one column ragged - visible the first
         // time a modal set a footer wider than its content. Widen to fit them
         // instead of cutting them.
-        let sub_w = self.subtitle.as_ref().map_or(0, |s| s.chars().count());
-        let foot_w = self.footer.as_ref().map_or(0, |f| f.chars().count());
+        let sub_w = self.subtitle.as_ref().map_or(0, |s| str_cols(s));
+        let foot_w = self.footer.as_ref().map_or(0, |f| str_cols(f));
         title_w.max(sub_w).max(foot_w)
     }
 }
@@ -307,10 +331,10 @@ pub fn frame(body: &[BodyLine], chrome: &Chrome, body_w: usize, scroll: Option<S
 /// never collide with a body row's real target (an index).
 pub const ESC_CLOSE_HIT: usize = usize::MAX;
 
-/// The `(char offset, char len)` of a footer's close affordance when it
-/// carries one: the words `esc close` when present, else a bare `esc`. Char
-/// offsets, matching how `content_row` lays the text out; `frame` shifts them
-/// into framed coordinates.
+/// The `(column offset, column len)` of a footer's close affordance when it
+/// carries one: the words `esc close` when present, else a bare `esc`. Column
+/// offsets, so they compare against `inner_w` and land the hit span on the
+/// painted columns; the words are ASCII, so the span length is its char count.
 fn esc_close_span(footer: &str) -> Option<(usize, usize)> {
     let chars: Vec<char> = footer.chars().collect();
     let find = |needle: &[char]| chars.windows(needle.len()).position(|w| w == needle);
@@ -319,6 +343,10 @@ fn esc_close_span(footer: &str) -> Option<(usize, usize)> {
     find(&long)
         .map(|o| (o, long.len()))
         .or_else(|| find(&short).map(|o| (o, short.len())))
+        .map(|(char_off, len)| {
+            let cols: usize = chars[..char_off].iter().map(|&c| char_cols(c)).sum();
+            (cols, len)
+        })
 }
 
 /// Framed width: left border + body + optional scrollbar + right border.
@@ -378,7 +406,8 @@ fn flatten(mut row: Vec<Seg>) -> FramedLine {
     }
 }
 
-/// Pad `inner` with `fill` up to `inner_w`, then wrap in left/right edges.
+/// Pad `inner` with `fill` up to `inner_w` (display columns), then wrap in
+/// left/right edges.
 fn edge_row(
     left: char,
     right: char,
@@ -386,9 +415,10 @@ fn edge_row(
     mut inner: Vec<Seg>,
     inner_w: usize,
 ) -> FramedLine {
-    let used = inner.len();
+    let mut used = inner.iter().map(|(c, _)| char_cols(*c)).sum();
     for _ in used..inner_w {
         inner.push((fill, Role::Border));
+        used += 1;
     }
     let mut row = Vec::with_capacity(inner_w + 2);
     row.push((left, Role::Border));
@@ -400,11 +430,21 @@ fn edge_row(
 /// `│ content │`, content left-aligned, padded with spaces (same role) so the
 /// inverse block stays a clean rectangle.
 fn content_row(content: &str, role: Role, inner_w: usize) -> FramedLine {
-    // Truncate as well as pad. `min_inner_w` widens the box to fit the subtitle
-    // and footer, so this only bites when the TERMINAL is too narrow for them -
-    // and there a clipped word beats a border pushed off the right edge.
-    let mut inner: Vec<Seg> = content.chars().take(inner_w).map(|c| (c, role)).collect();
-    let used = inner.len();
+    // Truncate as well as pad, by DISPLAY columns. `min_inner_w` widens the box
+    // to fit the subtitle and footer, so this only bites when the TERMINAL is
+    // too narrow for them - and there a clipped word beats a border pushed off
+    // the right edge. A wide char that does not fully fit is dropped whole
+    // rather than straddling the cut.
+    let mut inner: Vec<Seg> = Vec::with_capacity(inner_w);
+    let mut used = 0usize;
+    for ch in content.chars() {
+        let cw = char_cols(ch);
+        if used + cw > inner_w {
+            break;
+        }
+        inner.push((ch, role));
+        used += cw;
+    }
     for _ in used..inner_w {
         inner.push((' ', role));
     }
@@ -432,7 +472,8 @@ fn tab_row(tabs: &[(String, bool)], inner_w: usize) -> FramedLine {
 }
 
 fn content_row_from_segs(mut inner: Vec<Seg>, inner_w: usize) -> FramedLine {
-    let used = inner.len();
+    // Pad by DISPLAY columns: a wide seg claims two of them.
+    let mut used = inner.iter().map(|(c, _)| char_cols(*c)).sum();
     for _ in used..inner_w {
         inner.push((' ', Role::Tab(false)));
     }
@@ -465,16 +506,15 @@ fn esc_segs() -> Vec<Seg> {
 /// span.
 fn chip_border_row(left: char, right: char, mut inner: Vec<Seg>, inner_w: usize) -> FramedLine {
     let chip = esc_segs();
-    let used = inner.len();
-    let reserve = chip.len();
+    let mut used = inner.iter().map(|(c, _)| char_cols(*c)).sum();
+    let reserve = chip.iter().map(|(c, _)| char_cols(*c)).sum::<usize>();
     for _ in used..inner_w.saturating_sub(reserve) {
         inner.push(('─', Role::Border));
     }
-    let chip_pos = inner.len();
+    let chip_col = used;
     inner.extend(chip);
     let mut row = edge_row(left, right, '─', inner, inner_w);
-    row.hits
-        .push((ESC_CLOSE_HIT, chip_pos + 2, "esc".chars().count()));
+    row.hits.push((ESC_CLOSE_HIT, chip_col + 2, 3));
     row
 }
 
@@ -531,31 +571,41 @@ fn body_row(
         line.sel_span
             .is_some_and(|(off, len)| j >= off && j < off + len)
     };
-    for j in 0..body_w {
-        let (ch, role) = match chars.get(j) {
-            Some(&c) => {
-                let role = if line.disabled {
-                    Role::BodyDim
-                } else if line.header {
-                    Role::BodyHead
-                } else if in_sel(j) {
-                    Role::BodySel
-                } else {
-                    Role::Body
-                };
-                (c, role)
-            }
-            None => (
-                ' ',
-                if line.disabled {
-                    Role::BodyDim
-                } else {
-                    Role::Body
-                },
-            ),
+    // Walk by DISPLAY columns: a wide char claims two of the `body_w` cells,
+    // so a row of N chars is not N columns (x-1b68). `sel_span` offsets are
+    // char-based (full-row spans from the popup), so the role walk stays
+    // char-indexed while the cell walk is column-indexed.
+    let mut col = 0usize;
+    let mut char_idx = 0usize;
+    for &c in &chars {
+        if col >= body_w {
+            break;
+        }
+        let cw = char_cols(c);
+        if col + cw > body_w {
+            break;
+        }
+        let role = if line.disabled {
+            Role::BodyDim
+        } else if line.header {
+            Role::BodyHead
+        } else if in_sel(char_idx) {
+            Role::BodySel
+        } else {
+            Role::Body
         };
-        text.push(ch);
+        text.push(c);
         roles.push(role);
+        col += cw;
+        char_idx += 1;
+    }
+    for _ in col..body_w {
+        text.push(' ');
+        roles.push(if line.disabled {
+            Role::BodyDim
+        } else {
+            Role::Body
+        });
     }
 
     if let Some(s) = scroll {
