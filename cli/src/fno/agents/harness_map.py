@@ -64,7 +64,7 @@ _SLASH, _CODEX_SKILL, _REFUSED = "slash", "codex-skill", "refused"
 # being a control input): the flag is the deterministic carrier that survives
 # `fno do target start` resolving its argument to a bare node id, and unlike the
 # token it cannot be manufactured by prose an LLM wrote into a brief.
-_AUTONOMOUS_COMMAND = "/target --no-merge {id}"
+_AUTONOMOUS_COMMAND = AUTONOMOUS_COMMAND = "/target --no-merge {id}"
 _AUTONOMOUS_COMMAND_MERGE = "/target {id}"
 
 # The /target-family first tokens (the per-harness spellings normalize_command
@@ -134,6 +134,40 @@ def is_target_family(message: str) -> bool:
     """
     tokens = message.split(maxsplit=1) if message else []
     return bool(tokens) and tokens[0] in _TARGET_FAMILY
+
+
+def inject_no_merge_into_command(command: str) -> str:
+    """Insert the ``--no-merge`` flag into a /target-family command, right
+    after the verb token. Skipped when a standalone flag is already present
+    (word-padded, so ``--no-merge-guard`` never counts). Non-family commands
+    pass through untouched: a prose brief carries its posture in prose (x-9d11).
+
+    x-8151: this is the inject half the dispatch shell used to re-derive with a
+    two-spelling prefix match (the copy that missed ``/fno:target`` and dropped
+    opencode refusals). One vocabulary decides membership."""
+    if not is_target_family(command):
+        return command
+    if " --no-merge " in f" {command} ":
+        return command
+    parts = command.split()
+    return " ".join([parts[0], "--no-merge", *parts[1:]])
+
+
+def strip_no_merge_from_command(command: str) -> str:
+    """Remove the merge-refusal carrier from a /target-family command: the
+    first standalone ``--no-merge`` flag and the first standalone legacy bare
+    ``no-merge`` token (an old config template can still carry it). A
+    pathological id like ``no-merger-x`` is never touched (standalone tokens
+    only), and non-family commands pass through so a prose brief's text is
+    never mangled. Under an allow posture the resolver strips; the flag's
+    absence is what makes ``auto_merge.grant=dispatch`` live."""
+    if not is_target_family(command):
+        return command
+    parts = command.split()
+    for token in ("--no-merge", "no-merge"):
+        if token in parts[1:]:
+            parts.remove(token)
+    return " ".join(parts)
 
 
 def message_carries_no_merge(message: str) -> bool:
@@ -1048,6 +1082,7 @@ def resolve_dispatch(
     command: Optional[str] = None,
     verb: Optional[str] = None,
     brief: Optional[str] = None,
+    merge_posture: Optional[str] = None,
     trigger: str = "autonomous",
     settings: object = None,
     dispatch_cfg: Optional[Mapping[str, object]] = None,
@@ -1075,6 +1110,15 @@ def resolve_dispatch(
     once, else an error); when absent the template is returned literally (a bare
     ``--harness`` resolution just wants the harness/substrate decision).
 
+    ``merge_posture`` (x-8151) makes the resolver own the refusal carrier for
+    the whole command, whatever rung supplied it: ``no-merge`` injects the flag
+    into a /target-family command missing it, ``allow`` strips both spellings,
+    ``from-config`` resolves ``config.auto_merge.grant`` (grant == "dispatch"
+    grants, every error shape degrades to no-merge - the Locked Decision 6
+    posture the dispatch shell used to re-derive per node). ``None`` keeps the
+    historical behavior: the builtin rung keys on config, explicit templates
+    pass through untouched. Values are fail-closed: an unknown posture raises.
+
     Raises :class:`DispatchResolveError` on: an unknown harness (naming the map),
     an explicit ``thread`` on a harness without that lane (pointing at ``headless``), an
     unsupported autonomous ``pane``, an unknown trigger or substrate, or an
@@ -1091,6 +1135,16 @@ def resolve_dispatch(
         raise DispatchResolveError(
             f"unknown dispatch trigger {trigger!r}; valid: autonomous, attended"
         )
+    posture: Optional[str] = merge_posture
+    if posture is not None:
+        if posture == "from-config":
+            posture = "allow" if cfg.get("auto_merge") is True else "no-merge"
+            decision.append(f"merge-posture=from-config({posture})")
+        elif posture not in ("no-merge", "allow"):
+            raise DispatchResolveError(
+                f"unknown merge posture {merge_posture!r}; "
+                "valid: no-merge, allow, from-config"
+            )
 
     # 1. harness. An explicit flag is distinguished by ``is not None`` (present
     # vs omitted), NOT truthiness: an empty explicit ``--harness ""`` (e.g. a
@@ -1268,6 +1322,22 @@ def resolve_dispatch(
     if normalized != resolved_command:
         resolved_command = normalized
         decision.append("command=legacy-no-merge->--no-merge")
+    # x-8151: an explicit posture owns the carrier on EVERY rung. Inject after
+    # the legacy rewrite (a template carrying the bare token under no-merge
+    # ends at the same flag), strip under allow so a resolver-baked refusal
+    # cannot silently kill config-granted merge authority. This deleted the
+    # dispatch shell's prefix-matching inject/strip twin, which matched only
+    # two of the three family spellings and dropped opencode refusals.
+    if posture == "no-merge":
+        injected = inject_no_merge_into_command(resolved_command)
+        if injected != resolved_command:
+            resolved_command = injected
+            decision.append("merge-posture=no-merge(injected)")
+    elif posture == "allow":
+        stripped = strip_no_merge_from_command(resolved_command)
+        if stripped != resolved_command:
+            resolved_command = stripped
+            decision.append("merge-posture=allow(stripped)")
     env: dict[str, str] = {}
     if message_carries_no_merge(resolved_command):
         env["TARGET_NO_MERGE"] = "1"

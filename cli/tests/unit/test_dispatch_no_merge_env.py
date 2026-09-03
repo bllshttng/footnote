@@ -134,3 +134,109 @@ def test_guard_named_flag_is_not_the_carrier():
     import os
 
     assert "TARGET_NO_MERGE" not in os.environ
+
+
+# --------------------------------------------------------------------------- #
+# x-8151: merge_posture on resolve_dispatch - the resolver owns the carrier
+# for every rung, and the dispatch shell stops re-deriving it
+# --------------------------------------------------------------------------- #
+
+
+def test_posture_no_merge_injects_into_verb_resolved_family_command():
+    dispatch = resolve_dispatch(
+        harness="claude",
+        node_id="x-1",
+        command="/target {id}",
+        merge_posture="no-merge",
+        trigger="autonomous",
+    )
+    assert dispatch["command"] == "/target --no-merge x-1"
+    assert dispatch["env"]["TARGET_NO_MERGE"] == "1"
+
+
+def test_posture_no_merge_covers_the_namespaced_spellings():
+    for cmd in ("/fno:target {id}", "$fno:target {id}"):
+        dispatch = resolve_dispatch(
+            harness="codex",
+            node_id="x-1",
+            command=cmd,
+            merge_posture="no-merge",
+            trigger="autonomous",
+        )
+        assert "--no-merge" in dispatch["command"], cmd
+
+
+def test_posture_no_merge_skips_when_flag_already_present():
+    dispatch = resolve_dispatch(
+        harness="claude",
+        node_id="x-1",
+        command="/target --no-merge {id}",
+        merge_posture="no-merge",
+        trigger="autonomous",
+    )
+    assert dispatch["command"] == "/target --no-merge x-1"
+
+
+def test_posture_no_merge_leaves_prose_templates_alone():
+    dispatch = resolve_dispatch(
+        harness="opencode",
+        node_id="x-1",
+        command="Work on {id} and explain the refusal posture",
+        merge_posture="no-merge",
+        trigger="autonomous",
+    )
+    assert "--no-merge" not in dispatch["command"]
+
+
+def test_posture_allow_strips_flag_and_legacy_token():
+    dispatch = resolve_dispatch(
+        harness="claude",
+        node_id="x-1",
+        command="/target --no-merge {id}",
+        merge_posture="allow",
+        trigger="autonomous",
+    )
+    assert dispatch["command"] == "/target x-1"
+    assert "TARGET_NO_MERGE" not in dispatch["env"]
+    legacy = resolve_dispatch(
+        harness="codex",
+        node_id="x-1",
+        command="$fno:target no-merge {id}",
+        merge_posture="allow",
+        trigger="autonomous",
+    )
+    assert "no-merge" not in f" {legacy['command']} "
+    assert "TARGET_NO_MERGE" not in legacy["env"]
+
+
+def test_posture_from_config_reads_grant_and_degrades_to_no_merge():
+    granted = resolve_dispatch(
+        harness="claude",
+        node_id="x-1",
+        command="/target {id}",
+        merge_posture="from-config",
+        dispatch_cfg={"auto_merge": True},
+        trigger="autonomous",
+    )
+    assert "--no-merge" not in granted["command"]
+    refused = resolve_dispatch(
+        harness="claude",
+        node_id="x-1",
+        command="/target {id}",
+        merge_posture="from-config",
+        dispatch_cfg={},
+        trigger="autonomous",
+    )
+    assert refused["command"] == "/target --no-merge x-1"
+
+
+def test_posture_unknown_value_fails_closed():
+    from fno.agents.harness_map import DispatchResolveError
+
+    with pytest.raises(DispatchResolveError, match="unknown merge posture"):
+        resolve_dispatch(
+            harness="claude",
+            node_id="x-1",
+            merge_posture="merge-now",
+            trigger="autonomous",
+        )

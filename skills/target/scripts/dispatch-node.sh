@@ -116,7 +116,7 @@ while [[ $# -gt 0 ]]; do
     # Start-anchored, single replace (round 12): the legacy spelling was the
     # whole --flags value (or its leading token), and a GLOBAL rewrite would
     # mutate free text in --flags into the refusal flag.
-    --flags)      FLAGS="$(printf ' %s ' "${2:-}" | sed -e 's/^ no-merge / --no-merge /' -e 's/^ //' -e 's/ $//')"; shift 2 ;;
+    --flags)      FLAGS="${2:-}"; shift 2 ;;
     --allow-merge) ALLOW_MERGE=1; shift ;;
     --no-merge)   ALLOW_MERGE=0; shift ;;
     --max)        MAX="${2:-0}"; shift 2 ;;
@@ -137,49 +137,11 @@ if [[ -z "$PERMISSION_MODE" ]]; then
   PERMISSION_MODE="$(fno config get agents.spawn_permission_mode 2>/dev/null | tr -d '[:space:]' || true)"
 fi
 
-# x-4391/x-4be1: merge posture is resolved PER NODE (in the loop) so a batch
-# spanning projects reads each node's own config.auto_merge.grant from that
-# node's cwd (codex P2). The global $ALLOW_MERGE tri-state here carries ONLY an
-# explicit --allow-merge/--no-merge flag (applies to every node); "" = no flag =
-# resolve config per node below. resolve_node_posture prints 1 (allow) or 0
-# (no-merge) for a given node cwd: an explicit flag wins; else
-# config.auto_merge.grant read from THAT cwd. `fno config get` prints the value
-# alone on stdout (its source-file line is stderr-only) and has no cwd flag, so
-# cd in a subshell before the exact-`dispatch` compare; any error / wrong output
-# (stale fno, absent config, gone cwd) degrades to no-merge (Locked Decision 6:
-# never grant merge on error).
-resolve_node_posture() {
-  local node_cfg_cwd="$1"
-  if [[ -n "$ALLOW_MERGE" ]]; then printf '%s' "$ALLOW_MERGE"; return; fi
-  local am
-  am="$( ( [[ -n "$node_cfg_cwd" ]] && cd "$node_cfg_cwd" 2>/dev/null; fno config get auto_merge.grant 2>/dev/null ) | tr -d '[:space:]' || true)"
-  [[ "$am" == "dispatch" ]] && printf '1' || printf '0'
-}
-
-# x-4391: remove the standalone merge-refusal flag from a /target-family
-# command under allow posture. The resolver builtin (_AUTONOMOUS_COMMAND) and
-# config.dispatch.command can bake the refusal into the resolved command, so
-# skipping injection alone would leave it live and make auto_merge=true silently
-# dead. Both spellings are stripped: the `--no-merge` flag (the carrier since
-# free text stopped being a control input) and the legacy bare `no-merge` token
-# an old config template can still carry. Space-delimited replacement
-# (AC1-EDGE: never a substring - a pathological id like `no-merger-x` is
-# untouched); guarded to /target|/fno:target|$fno:target (all three renderings,
-# matching the family case below - round 12) so a non-/target command or a
-# prose brief's text is never mangled.
-strip_no_merge() {
-  local cmd="$1"
-  case "$cmd" in
-    "/target "*|"/fno:target "*|'$fno:target '*) : ;;
-    *) printf '%s' "$cmd"; return ;;
-  esac
-  local padded=" $cmd "
-  padded="${padded/ --no-merge / }"          # first standalone flag only
-  padded="${padded/ no-merge / }"            # then the legacy bare token
-  padded="${padded#"${padded%%[![:space:]]*}"}"   # ltrim the pad
-  padded="${padded%"${padded##*[![:space:]]}"}"   # rtrim the pad
-  printf '%s' "$padded"
-}
+# x-8151: the merge-posture machinery this file used to carry (the per-node
+# config reader, the legacy-token sed, the family-prefix strip helper) is
+# gone. The resolver owns all of it behind --merge-posture; this script only
+# chooses the posture input from the same tri-state the --allow-merge /
+# --no-merge flags have always fed.
 
 # ---- resolve the node set ---------------------------------------------------
 if [[ "$ALL_READY" -eq 1 ]]; then
@@ -675,104 +637,83 @@ for id in "${NODES[@]}"; do
       continue ;;
   esac
 
-  # x-4391: per-node merge posture, read from THIS node's project cwd so a batch
-  # spanning repos honors each project's config.auto_merge.grant (codex P2). An
-  # explicit flag (in $ALLOW_MERGE) wins for every node; else config-per-node.
-  node_allow_merge="$(resolve_node_posture "$(printf '%s' "$node_json" | jq -r '._resolved_cwd // .cwd // empty' 2>/dev/null)")"
-
   # ---- Build the worker command + resolve the launch cwd ----
-  # Command precedence, single source = `fno agents dispatch resolve`:
-  #   node dispatch_verb / dispatch_brief (US3, x-f78d)  >  per-harness builtin (x-567d)
-  # A node verb/brief goes through the resolver (validates the verb allowlist,
-  # caps the brief at 8 KB, emits TARGET_BRIEF); no override -> claude builds its
-  # native /target locally (--flags / --allow-merge, byte-identical) and every
-  # OTHER harness uses the per-harness command the initial resolve chose (codex
-  # `$fno:target`, agy `/target`, opencode/gemini prose brief). no-merge is a
-  # launcher flag for a /target-family command; a prose brief carries it in prose.
+  # x-8151: ONE resolver call builds the command for every branch, with the
+  # merge posture as an input. This shell no longer re-derives the carrier:
+  # the old prefix-matching inject missed /fno:target (opencode refusals were
+  # silently dropped), and the claude branch built /target by hand. The resolve
+  # runs in the node's project cwd so from-config honors THIS node's
+  # config.auto_merge.grant in a batch spanning repos (codex P2, x-4391).
+  # Command precedence (unchanged): node dispatch_verb / dispatch_brief (US3,
+  # x-f78d) > claude native /target > per-harness builtin (x-567d).
+  node_cwd="$(printf '%s' "$node_json" | jq -r '._resolved_cwd // .cwd // empty' 2>/dev/null)"
+  case "$ALLOW_MERGE" in
+    1) posture_args=(--merge-posture allow) ;;
+    0) posture_args=(--merge-posture no-merge) ;;
+    *) posture_args=(--merge-posture from-config) ;;
+  esac
   # select(. != "") before // empty: jq's // treats "" as truthy (repo idiom).
   dispatch_verb="$(printf '%s' "$node_json" | jq -r '.dispatch_verb | select(. != "") // empty' 2>/dev/null)"
   dispatch_brief="$(printf '%s' "$node_json" | jq -r '.dispatch_brief | select(. != "") // empty' 2>/dev/null)"
-  # Auto-brief for EVERY dispatch branch below (x-d1f4): resolve the node's brief
-  # chain (explicit dispatch_brief > sidecar > details > transcript tail) once,
-  # here, so a plain node with NO dispatch_verb/brief still cold-starts with
-  # context instead of an empty TARGET_BRIEF. No --brief is passed: the porcelain
-  # auto-resolves the whole chain from --node (its rung 1 already reads the graph
-  # node's dispatch_brief), which avoids word-splitting a multi-word brief. An
-  # oversized/refused explicit brief still fail-closes in the verb/brief branch's
-  # own resolve below. Best-effort: a resolve failure / stale fno leaves it empty.
-  TARGET_BRIEF_ENV="$(fno agents dispatch resolve --node "$id" --harness "$DISPATCH_PROVIDER" -J 2>/dev/null \
-    | jq -r '.env.TARGET_BRIEF | select(. != "") // empty' 2>/dev/null)"
+  resolve_args=(dispatch resolve --node "$id" --harness "$DISPATCH_PROVIDER" "${posture_args[@]}" -J)
   if [[ -n "$dispatch_verb" || -n "$dispatch_brief" ]]; then
     # --harness so the resolver normalizes the verb per-harness (x-a5e4): a
     # `/target` verb resolves to `$fno:target {id}` on codex, `/target {id}` on
-    # claude/agy, a prose brief on gemini/opencode. no-merge is injected below.
-    resolve_args=(dispatch resolve --node "$id" --harness "$DISPATCH_PROVIDER" -J)
+    # claude/agy, a prose brief on gemini/opencode.
     [[ -n "$dispatch_verb" ]] && resolve_args+=(--verb "$dispatch_verb")
     [[ -n "$dispatch_brief" ]] && resolve_args+=(--brief "$dispatch_brief")
-    resolved_json="$(fno "${resolve_args[@]}" 2>/dev/null)"; resolve_rc=$?
-    if [[ "$resolve_rc" -ne 0 ]] || ! printf '%s' "$resolved_json" | jq -e '.command' >/dev/null 2>&1; then
-      # Refused verb / oversized brief (or a stale fno without the flags): fail
-      # closed and leave the node re-dispatchable, never launch a wrong command.
-      fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
-      echo "failed $id reason=\"dispatch resolve refused verb/brief (rc=$resolve_rc); node not dispatched\""
-      n_failed=$((n_failed + 1))
-      continue
-    fi
-    tgt_cmd="$(printf '%s' "$resolved_json" | jq -r '.command')"
-    TARGET_BRIEF_ENV="$(printf '%s' "$resolved_json" | jq -r '.env.TARGET_BRIEF | select(. != "") // empty')"
-    # /target-family command (claude `/target`, codex `$fno:target`): thread
-    # --flags + the no-merge default. Both invoke the same target skill, so both
-    # must get no-merge - else a codex node with dispatch_verb=/target resolves to
-    # `$fno:target <id>` WITHOUT no-merge and a configured auto-merge could merge
-    # it (codex review P1). A prose brief carries "do not merge" in its prose.
-    tgt_prefix=""
-    [[ "$tgt_cmd" == "/target "* ]] && tgt_prefix="/target "
-    [[ "$tgt_cmd" == '$fno:target '* ]] && tgt_prefix='$fno:target '
-    if [[ -n "$tgt_prefix" ]]; then
-      rest="${tgt_cmd#"$tgt_prefix"}"
-      inject=""
-      [[ -n "$FLAGS" ]] && inject="$FLAGS "
-      if [[ "$node_allow_merge" -eq 0 && " $FLAGS " != *" --no-merge "* && " $rest " != *" --no-merge "* ]]; then
-        inject="${inject}--no-merge "
-      elif [[ "$node_allow_merge" -eq 1 ]]; then
-        # allow posture: strip a resolver-/template-baked no-merge from rest. A
-        # no-merge in --flags is per-run explicit (rung 1) and rides in $inject,
-        # untouched. strip on the bare rest, then re-add the prefix.
-        rest="$(strip_no_merge "${tgt_prefix}${rest}")"
-        rest="${rest#"$tgt_prefix"}"
-      fi
-      tgt_cmd="${tgt_prefix}${inject}${rest}"
-    fi
   elif [[ "$DISPATCH_PROVIDER" == "claude" ]]; then
-    # claude native /target, built locally: /target [FLAGS] [--no-merge] <id>
-    # (Locked Decision 4; --allow-merge opts out). The flag, never the bare
-    # token: free text is not a control input at the init fold.
-    tgt_cmd="/target"
-    [[ -n "$FLAGS" ]] && tgt_cmd="$tgt_cmd $FLAGS"
-    if [[ "$node_allow_merge" -eq 0 && " $FLAGS " != *" --no-merge "* ]]; then
-      tgt_cmd="$tgt_cmd --no-merge"
-    fi
-    tgt_cmd="$tgt_cmd $id"
+    # claude native /target (Locked Decision 4). --flags rides the template
+    # verbatim; the resolver normalizes, migrates a legacy bare token, and
+    # applies the posture (Locked Decision 6 lives in from-config now: every
+    # config error shape degrades to no-merge).
+    resolve_args+=(--command "/target${FLAGS:+ $FLAGS} {id}")
   elif [[ -n "$DISPATCH_COMMAND" ]]; then
-    # non-claude per-harness builtin (x-567d), {id} substituted (codex
-    # `$fno:target`, agy `/target`, opencode/gemini prose brief).
-    tgt_cmd="${DISPATCH_COMMAND//\{id\}/$id}"
-    # x-4391: the builtin template bakes no-merge (_AUTONOMOUS_COMMAND); under
-    # allow posture strip it from a /target-family command (a prose brief is
-    # guarded out by strip_no_merge's prefix check).
-    [[ "$node_allow_merge" -eq 1 ]] && tgt_cmd="$(strip_no_merge "$tgt_cmd")"
+    # non-claude per-harness builtin (x-567d): codex `$fno:target`, agy
+    # `/target`, opencode/gemini prose brief. Same posture input.
+    resolve_args+=(--command "$DISPATCH_COMMAND")
   else
     fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
     echo "failed $id reason=\"resolver returned no command for harness '$DISPATCH_PROVIDER'; update fno or set config.dispatch.command\""
     n_failed=$((n_failed + 1))
     continue
   fi
+  if [[ -n "$node_cwd" ]]; then
+    resolved_json="$( ( cd "$node_cwd" 2>/dev/null && fno "${resolve_args[@]}" 2>/dev/null ) )"; resolve_rc=$?
+  else
+    resolved_json="$(fno "${resolve_args[@]}" 2>/dev/null)"; resolve_rc=$?
+  fi
+  if [[ "$resolve_rc" -ne 0 ]] || ! printf '%s' "$resolved_json" | jq -e '.command' >/dev/null 2>&1; then
+    # Refused verb/brief/posture, oversized brief, or a stale fno without the
+    # posture flag: fail closed and leave the node re-dispatchable, never
+    # launch a wrong command.
+    fno agents claim release "$res_key" --holder "$res_holder" >/dev/null 2>&1 || true
+    echo "failed $id reason=\"dispatch resolve refused (rc=$resolve_rc); node not dispatched\""
+    n_failed=$((n_failed + 1))
+    continue
+  fi
+  tgt_cmd="$(printf '%s' "$resolved_json" | jq -r '.command')"
+  # Auto-brief (x-d1f4): the SAME resolve auto-resolves the node's brief chain
+  # (explicit dispatch_brief > sidecar > details > transcript tail) whenever
+  # --node is passed with no --brief, so a plain node cold-starts with context.
+  TARGET_BRIEF_ENV="$(printf '%s' "$resolved_json" | jq -r '.env.TARGET_BRIEF | select(. != "") // empty')"
+  # --flags is pure extra argv the operator asked the /target-family command to
+  # carry (a target-skill flag), composed after the verb token. It carries NO
+  # merge predicate - the posture already rode the resolve - and the family
+  # question is asked of the single source (x-8151), never a local prefix
+  # match; a prose command gets nothing threaded.
+  if [[ -n "$FLAGS" ]]; then
+    family="$(fno agents dispatch family --message "$tgt_cmd" 2>/dev/null || true)"
+    if [[ "$family" == "family" ]]; then
+      tgt_cmd="${tgt_cmd%% *} $FLAGS ${tgt_cmd#* }"
+    fi
+  fi
 
   # Launch in the node's _resolved_cwd (work-map root when project mapped;
   # falls back to recorded .cwd against an older installed fno without the
   # field; empty -> caller's cwd). The _resolved_cwd field is derived at
-  # read time by `fno backlog get` and never persisted to graph.json.
-  node_cwd="$(printf '%s' "$node_json" | jq -r '._resolved_cwd // .cwd // empty' 2>/dev/null)"
+  # read time by `fno backlog get` and never persisted to graph.json; $node_cwd
+  # was extracted before the resolve (the from-config posture reads it).
   # cwd precedence: an explicit node cwd (work-map root) wins. With no node cwd,
   # default to --fresh so a worker dispatched from a linked worktree starts from
   # canonical main instead of inheriting the dispatcher's worktree (the shared
