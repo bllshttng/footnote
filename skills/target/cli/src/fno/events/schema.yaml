@@ -244,6 +244,13 @@ event_types:
         retraction_reason:
           type: string
           description: "The --reason text a retraction was emitted with, verbatim. The audit trail for why a pass stopped counting."
+        output_contract:
+          type: string
+          enum: [json_block, report_findings, prose_unparseable, lost]
+          description: "The contract the review's result surfaced under, carried from the invocation row. `lost` marks the SETTLE row (review.invocation_ttl_minutes exhausted with no answering attestation): verdict fail by construction, emitted by the settle sweep with the invocation id in data. Coverage reads it as uncovered with a named reason - an answered loss, never silence."
+        settle_note:
+          type: string
+          description: "Human-readable provenance on a settle row: why the row exists (the invocation died unanswered) and that no review ran. Present only on output_contract lost."
         model:
           type: string
           description: "The model the attesting session CLAIMED to be running (read from ANTHROPIC_MODEL at emit). Optional and best-effort: it reports what the environment asserted, not proof of the model that answered. Empty means NOT OBSERVABLE, never proof of the primary model - an unrouted session leaves it unset, and so does a routed codex worker, whose route rides in `-c model=...` config args with only the API key in env. The producer now REFUSES to record a claim it can prove false: a non-`claude*` model name with an empty or anthropic.com base URL cannot be the model that answered (the request silently falls back to the primary Anthropic model), so that case records empty rather than a value a reader would take as fact. A live specimen produced exactly that wrong record on 2026-08-12. The residue is a claim that is merely unverified rather than known-false, and no environment-side check closes that one. Recorded because a routed worker renders its own verdict on the routed model - role guards are per-spawn and cannot see a verdict emitted later inside an already-routed process. Not read by loop-check; this is the audit trail a capability floor would need."
@@ -394,7 +401,7 @@ event_types:
           enum: [inline, fork]
         output_contract:
           type: string
-          enum: [report_findings, json_block, prose_unparseable]
+          enum: [report_findings, json_block, prose_unparseable, lost]
         subagent_count:
           type: integer
         band:
@@ -468,8 +475,8 @@ event_types:
                 description: "The commit this reviewer actually read: a github_app review object's `.commit.oid`, or a local attestation's own head_sha. Omitted when unknowable, which the freshness predicate treats as stale (fail closed). Its ABSENCE was the x-5b99 defect: head_sha below is stamped at EVAL time, so a bot verdict rendered hours and commits earlier serialized as coverage for a commit its author never saw."
               freshness:
                 type: string
-                enum: [fresh, carried_base_sync, carried_docs_only, carried_subset, stale]
-                description: "Whether reviewed_sha still describes the code at HEAD. `fresh` = the reviewer read this exact commit. `carried_base_sync` = the PR's own code delta is byte-identical and any tree difference came from the base moving (a rebase). `carried_docs_only` = only documentation paths changed since. `carried_subset` = the code delta only shrank: every raw diff line still shipping is byte-identical to one the reviewer read, and the vanished lines are paths the base absorbed on the rebase (a strict subset of the reviewed diff). `stale` = everything else, including every failure path. A carry requires a positive match between two successfully computed code-diff identities; two absences never match. Omitted on a verdict with no review behind it (absent, refused)."
+                pattern: '^(fresh|carried_base_sync|carried_docs_only|carried_subset|carried_interdiff\(n=[0-9]+, cap=[0-9]+\)|stale)$'
+                description: "Whether reviewed_sha still describes the code at HEAD. `fresh` = the reviewer read this exact commit. `carried_base_sync` = the PR's own code delta is byte-identical and any tree difference came from the base moving (a rebase). `carried_docs_only` = only documentation paths changed since. `carried_subset` = the code delta only shrank: every raw diff line still shipping is byte-identical to one the reviewer read, and the vanished lines are paths the base absorbed on the rebase (a strict subset of the reviewed diff). `carried_interdiff(n=<lines>, cap=<bound>)` = the PR's own code patch changed by fewer than `review.carry_interdiff_lines` lines (multiset symmetric difference of the two patches against base), the small-change carry of the attestation law d-608344c1; the numbers are measured, on the verdict. `stale` = everything else, including every failure path. A carry requires a positive match between two successfully computed code-diff identities; two absences never match. Omitted on a verdict with no review behind it (absent, refused)."
               human_approval:
                 type: boolean
               author_approval:

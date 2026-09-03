@@ -252,9 +252,20 @@ def parse_review_invocation(raw: str) -> dict[str, Any] | None:
 _UNJOINED = "UNJOINED"
 
 
+def invocation_ttl_minutes() -> int:
+    """The configured `review.invocation_ttl_minutes`, 15 on any unreadable
+    config - the same default the schema ships, so a broken config cannot
+    widen the settle sweep by accident."""
+    try:
+        from fno.config import load_settings
+
+        return int(getattr(load_settings().review, "invocation_ttl_minutes", 15))
+    except Exception:  # noqa: BLE001 - unreadable config keeps the shipped default
+        return 15
+
+
 def settle_lost_invocations(
     *,
-    home: Path | None = None,
     ttl_minutes: int = 15,
     cwd: Path | None = None,
     events_path: Path | None = None,

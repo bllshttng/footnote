@@ -2054,10 +2054,10 @@ def _review_invocation_report(
     settle_results: dict[str, dict[str, Any]] = {}
     settle_error = ""
     try:
-        from fno.review.invocation import settle_lost_invocations
+        from fno.review.invocation import invocation_ttl_minutes, settle_lost_invocations
 
         for row in settle_lost_invocations(
-            ttl_minutes=_invocation_ttl_minutes(), now=observed_at
+            ttl_minutes=invocation_ttl_minutes(), now=observed_at
         ):
             settle_results[str(row.get("invocation_id"))] = row
     except Exception as exc:  # noqa: BLE001 - report the refusal, never die
@@ -2088,17 +2088,6 @@ def _review_invocation_report(
     if len(lost) > 5:
         lines.append(f"  ... {len(lost) - 5} more lost invocation(s)")
     return lines
-
-
-def _invocation_ttl_minutes() -> int:
-    """The configured `review.invocation_ttl_minutes`, 15 on any unreadable
-    config, so a broken config cannot widen the settle sweep by accident."""
-    try:
-        from fno.config import load_settings
-
-        return int(getattr(load_settings().review, "invocation_ttl_minutes", 15))
-    except Exception:  # noqa: BLE001 - unreadable config keeps the shipped default
-        return 15
 
 
 def _emit_human(

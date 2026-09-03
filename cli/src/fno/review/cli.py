@@ -288,9 +288,18 @@ def post_dispositions(
         )
         raise typer.Exit(code=3)
 
-    # Idempotent at (pr, head): the marker line is the key.
+    # Idempotent at (pr, head): the marker line is the key. A failed read
+    # skips the post rather than risking a duplicate: the attestation is the
+    # gate evidence, and the comment can be re-posted by the next round's
+    # emit - a duplicate is the one outcome this command cannot undo.
     existing = run(["gh", "api", f"repos/{slug}/issues/{pr}/comments?per_page=100"])
-    if existing.ok and f"<!-- fno-review-round head={head} " in existing.stdout:
+    if not existing.ok:
+        typer.echo(
+            "post-dispositions: comments read failed; nothing posted "
+            f"(re-run the emit to retry): {(existing.stderr or '').strip()[:200]}"
+        )
+        return
+    if f"<!-- fno-review-round head={head} " in existing.stdout:
         typer.echo(f"post-dispositions: round comment for {head[:9]} already posted")
         return
 
@@ -321,14 +330,9 @@ def invocations() -> None:
     reads a named refusal instead of waiting on silence. Idempotent: an
     invocation with any answering attestation settles once and never again.
     """
-    from fno.review.invocation import settle_lost_invocations
+    from fno.review.invocation import invocation_ttl_minutes, settle_lost_invocations
 
-    try:
-        from fno.config import load_settings
-
-        ttl = int(getattr(load_settings().review, "invocation_ttl_minutes", 15))
-    except Exception:  # noqa: BLE001 - unreadable config keeps the shipped default
-        ttl = 15
+    ttl = invocation_ttl_minutes()
     rows = settle_lost_invocations(ttl_minutes=ttl)
     if not rows:
         typer.echo(f"invocations: none lost beyond the {ttl}m TTL")
