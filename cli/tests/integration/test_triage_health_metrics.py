@@ -155,3 +155,85 @@ def test_health_render_omits_sections_when_no_events(health_env):
     assert r.exit_code == 0, r.output
     assert "Executor routing" not in r.output
     assert "Triage applies" not in r.output
+
+
+# --- x-e451: supersession_unverified + blocked_by_held ---
+
+
+def test_health_lists_unverified_supersession_rows(health_env, monkeypatch):
+    """AC5-HP: a pending supersession whose successor merged with a PR but
+    left declared surfaces uncovered breaches, naming both ends and the
+    surfaces the evidence missed."""
+    import fno.graph._constants as gc
+
+    entries = [
+        {
+            "id": "ab-eb0e0001", "title": "old way", "status": "superseded",
+            "superseded_by": "ab-9c240001",
+            "supersession": {
+                "successor": "ab-9c240001",
+                "cause": "replaced by the settled lane",
+                "surfaces": ["cli/src/a.py", "cli/src/b.py"],
+                "matched_surfaces": ["cli/src/a.py"],
+                "verified_at": None,
+            },
+        },
+        {
+            "id": "ab-9c240001", "title": "new way", "status": "done",
+            "completed_at": "2026-08-30T00:00:00Z", "pr_number": 1307,
+        },
+    ]
+    gc.GRAPH_JSON.write_text(json.dumps({"entries": entries}) + "\n")
+    # The triage reader resolves through paths.graph_json(), not the module
+    # constant, so the redirect must land there or the test reads the live
+    # graph (which silently passes nothing and proves nothing).
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gc.GRAPH_JSON)
+
+    r = runner.invoke(
+        app, ["backlog", "triage", "health", "--check", "--json"],
+        catch_exceptions=False,
+    )
+    assert r.exit_code == 4, r.output
+    # --check prints the report JSON, then a one-line breach summary; parse
+    # the document only.
+    payload, _ = json.JSONDecoder().raw_decode(r.output)
+    report = payload.get("report", payload)
+    (row,) = report["supersession_unverified"]
+    assert row["predecessor"] == "ab-eb0e0001"
+    assert row["successor"] == "ab-9c240001"
+    assert row["evidence_pr"] == 1307
+    assert row["uncovered_surfaces"] == ["cli/src/b.py"]
+    kinds = [b["key"] for b in payload["breaches"]]
+    assert "supersession_unverified" in kinds
+
+
+def test_health_lists_blocked_by_held_rows(health_env, monkeypatch):
+    """AC4-EDGE: a deferred or missing blocker holds the dependent open, the
+    row names both, and --check exits 4."""
+    import fno.graph._constants as gc
+
+    entries = [
+        {
+            "id": "ab-held0001", "title": "waiting", "status": "idea",
+            "blocked_by": ["ab-defer001", "ab-ghost0001"],
+        },
+        {
+            "id": "ab-defer001", "title": "parked", "status": "deferred",
+            "deferred_at": "2026-08-01T00:00:00Z",
+        },
+    ]
+    gc.GRAPH_JSON.write_text(json.dumps({"entries": entries}) + "\n")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gc.GRAPH_JSON)
+
+    r = runner.invoke(
+        app, ["backlog", "triage", "health", "--check", "--json"],
+        catch_exceptions=False,
+    )
+    assert r.exit_code == 4, r.output
+    payload, _ = json.JSONDecoder().raw_decode(r.output)
+    report = payload.get("report", payload)
+    by_node = {row["node"]: row for row in report["blocked_by_held"]}
+    assert by_node["ab-held0001"]["blocker_status"] == "deferred"
+    assert by_node["ab-held0001"]["blocker"] == "ab-defer001"
+    kinds = [b["key"] for b in payload["breaches"]]
+    assert "blocked_by_held" in kinds
