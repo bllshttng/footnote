@@ -90,7 +90,7 @@ fn to_python_json<T: Serialize>(value: &T) -> String {
 /// Normalize `--key=value` tokens into `["--key", "value"]`, matching Click/Typer
 /// (which accept both the equals and space-separated forms). Only long options
 /// are split; positionals and `-n5`-style attached short options pass through.
-fn expand_eq(rest: &[String]) -> Vec<String> {
+pub(crate) fn expand_eq(rest: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(rest.len());
     for a in rest {
         if let Some(eq) = a.find('=') {
@@ -721,7 +721,7 @@ const ECHO_CAP: usize = 40;
 /// because the refusal ended in the prompt text. Quoting shows where the
 /// argument starts and stops; capping keeps the remedy on screen. Truncation
 /// is on char boundaries, so a multi-byte argument cannot panic here.
-fn echo_extra(arg: &str) -> String {
+pub(crate) fn echo_extra(arg: &str) -> String {
     let mut out: String = arg.chars().take(ECHO_CAP).collect();
     if arg.chars().count() > ECHO_CAP {
         out.push_str("...");
@@ -2688,82 +2688,14 @@ fn should_delegate_claude_live_attach(
 /// so the flag grammar is unit-testable without an `AgentsHome`/registry
 /// fixture; on error it prints the same diagnostic `run_resume` used to print
 /// inline and returns the exit code to propagate.
-fn parse_resume_args(
-    rest: &[String],
-) -> Result<(String, bool, Option<String>, bool, Option<String>), i32> {
-    let mut name: Option<String> = None;
-    let mut print_command = false;
-    let mut message: Option<String> = None;
-    let mut cross_project = false;
-    let mut cwd: Option<String> = None;
-    // Every sibling parser in this file (`parse_trace_args`, `parse_logs_args`)
-    // expands `--flag=value` into `--flag value` before iterating; without it
-    // `--message=continue` falls into the `starts_with("--")` unknown-flag arm
-    // instead of being recognized.
-    let rest = expand_eq(rest);
-    let mut iter = rest.iter();
-    while let Some(a) = iter.next() {
-        match a.as_str() {
-            "--print-command" => print_command = true,
-            "--cross-project" => cross_project = true,
-            "--message" | "-m" => {
-                message = Some(match iter.next() {
-                    Some(v) => v.clone(),
-                    None => {
-                        eprintln!("fno-agents: {a} needs a value");
-                        return Err(2);
-                    }
-                });
-            }
-            "--cwd" => {
-                cwd = Some(match iter.next() {
-                    Some(v) if !v.starts_with("--") => v.clone(),
-                    _ => {
-                        eprintln!("fno-agents: --cwd needs a value");
-                        return Err(2);
-                    }
-                });
-            }
-            other if other.starts_with("--") => {
-                eprintln!("fno-agents: unknown resume flag: {other}");
-                return Err(2);
-            }
-            other => {
-                if name.is_some() {
-                    // The remedy, not just the refusal: `resume` reattaches a
-                    // session and carries no message, so the operator who
-                    // typed a prompt wanted `ask`. Matches the sibling
-                    // refusal for a live pane worker, which already ends in
-                    // the command to run instead.
-                    eprintln!(
-                        "fno-agents: resume takes one NAME and no prompt (got extra: {}).",
-                        echo_extra(other)
-                    );
-                    eprintln!(
-                        "resume reattaches a session; it does not carry a message. \
-                         Send one with: fno agents ask <name> \"<prompt>\""
-                    );
-                    return Err(2);
-                }
-                name = Some(other.to_string());
-            }
-        }
-    }
-    match name {
-        Some(n) => Ok((n, print_command, message, cross_project, cwd)),
-        None => {
-            eprintln!("fno-agents: resume needs a <name>");
-            Err(2)
-        }
-    }
-}
+use crate::resume_args::parse_resume_args;
 
 pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
-    let (name, print_command, message, cross_project, cwd_override) = match parse_resume_args(rest)
-    {
-        Ok(v) => v,
-        Err(code) => return code,
-    };
+    let (name, print_command, message, cross_project, cwd_override, account) =
+        match parse_resume_args(rest) {
+            Ok(v) => v,
+            Err(code) => return code,
+        };
 
     if let Some(path) = cwd_override.as_deref() {
         if !Path::new(path).is_dir() {
@@ -2832,6 +2764,31 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         .filter(|s| !s.is_empty())
         .or_else(|| entry.get("provider").and_then(Value::as_str))
         .unwrap_or("");
+    // x-5cef: the account flag is parsed so a wake never exits 2 at argv. The
+    // ROW's recorded launch account stays the binding authority on this path -
+    // a wake continues a transcript that lives under the config dir it was
+    // created in, so an injected pick cannot move the namespace (the spawn
+    // seam's own `--resume` skip holds the same reasoning). The value is still
+    // validated when it NAMES SOMETHING ELSE: an account that does not resolve
+    // in the store is a typo reading as applied. The recorded account itself
+    // is never re-validated here - the reentry resolver below shells the same
+    // store for it, and a second spawn per wake buys nothing. Non-claude rows
+    // carry no account axis; the row's own lane bills itself.
+    if let Some(acct) = account.as_deref() {
+        let recorded = entry
+            .get("launch_account")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if harness == "claude" && acct != recorded {
+            if let Err(reason) = crate::reentry::shell_account_binding(acct) {
+                eprintln!(
+                    "fno agents resume: --account {acct:?} does not resolve: {reason}. \
+                     The row's recorded launch account stays the binding; restamp the row to re-bind."
+                );
+                return 13;
+            }
+        }
+    }
     let recorded_cwd = entry.get("cwd").and_then(Value::as_str).unwrap_or("");
     // claude keys transcript dirs by the session cwd, so a session that ran
     // EnterWorktree after registration has its transcript under a different
@@ -5910,41 +5867,6 @@ mod tests {
         assert!(!should_delegate_claude_live_attach("codex", &None, &None));
     }
 
-    #[test]
-    fn resume_args_accept_message_flag_long_and_short() {
-        // code-review finding: --message/-m must not die with "unknown resume
-        // flag" -- resume auto-routes to this binary by default, so this
-        // parser is the only door the claude wake's --message option has.
-        let (name, print_command, message, cross_project, cwd) = parse_resume_args(&[
-            "alpha".to_string(),
-            "--message".to_string(),
-            "continue please".to_string(),
-        ])
-        .unwrap();
-        assert_eq!(name, "alpha");
-        assert!(!print_command);
-        assert_eq!(message.as_deref(), Some("continue please"));
-        assert!(!cross_project);
-        assert_eq!(cwd, None);
-
-        let (name, _, message, cross_project, cwd) =
-            parse_resume_args(&["-m".to_string(), "hi".to_string(), "beta".to_string()]).unwrap();
-        assert_eq!(name, "beta");
-        assert_eq!(message.as_deref(), Some("hi"));
-        assert!(!cross_project);
-        assert_eq!(cwd, None);
-
-        // No --message given: still parses, message is None (unchanged
-        // pre-fix behavior for every other flag combination).
-        let (name, print_command, message, cross_project, cwd) =
-            parse_resume_args(&["gamma".to_string(), "--print-command".to_string()]).unwrap();
-        assert_eq!(name, "gamma");
-        assert!(print_command);
-        assert_eq!(message, None);
-        assert!(!cross_project);
-        assert_eq!(cwd, None);
-    }
-
     // ---- recover (x-d285 task 3.2) --------------------------------------
 
     fn forked_row() -> crate::state::RegistryEntry {
@@ -6051,22 +5973,6 @@ mod tests {
     }
 
     #[test]
-    fn resume_args_message_flag_needs_a_value() {
-        assert_eq!(
-            parse_resume_args(&["alpha".to_string(), "--message".to_string()]),
-            Err(2)
-        );
-    }
-
-    #[test]
-    fn resume_args_still_rejects_unknown_flags() {
-        assert_eq!(
-            parse_resume_args(&["alpha".to_string(), "--bogus".to_string()]),
-            Err(2)
-        );
-    }
-
-    #[test]
     fn heal_token_helper_forwards_cross_project_exactly_once() {
         let registry = Path::new("/tmp/registry.json");
         assert_eq!(
@@ -6145,34 +6051,6 @@ mod tests {
         assert_eq!(
             Path::new(fs::read_to_string(registry_marker).unwrap().trim()),
             expected_registry
-        );
-    }
-
-    #[test]
-    fn resume_args_accept_cross_project_and_replacement_cwd_forms() {
-        let parsed = parse_resume_args(&[
-            "full-session-id".to_string(),
-            "--cross-project".to_string(),
-            "--cwd".to_string(),
-            "/replacement/checkout".to_string(),
-        ])
-        .unwrap();
-        assert_eq!(parsed.0, "full-session-id");
-        assert!(parsed.3);
-        assert_eq!(parsed.4.as_deref(), Some("/replacement/checkout"));
-
-        let parsed = parse_resume_args(&[
-            "--cwd=/replacement/checkout".to_string(),
-            "--cross-project".to_string(),
-            "full-session-id".to_string(),
-        ])
-        .unwrap();
-        assert!(parsed.3);
-        assert_eq!(parsed.4.as_deref(), Some("/replacement/checkout"));
-
-        assert_eq!(
-            parse_resume_args(&["full-session-id".to_string(), "--cwd".to_string()]),
-            Err(2)
         );
     }
 

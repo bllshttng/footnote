@@ -16,6 +16,7 @@ use fno_agents::drift::drift_warning;
 use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::{ErrorCode, Request, ResponsePayload};
 use fno_agents::provider::{known_providers_csv, KNOWN_PROVIDERS};
+use fno_agents::usage::{verb_usage, CLIENT_VERB_USAGE};
 use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
 
@@ -3150,57 +3151,6 @@ fn exit_code_for(code: ErrorCode) -> i32 {
     }
 }
 
-/// Usage line per dispatchable verb; the leading token is the verb name and the
-/// slice order is the `--help` display order. This MUST cover every routable
-/// verb (the `build_request` match arms plus the directly-dispatched specials).
-/// `test_rust_client_verbs_match_client_rs` (Python) guards client.rs<->router
-/// parity; `print_help_lists_every_routable_verb` (below) guards this display
-/// list against that set, so a new verb cannot land without a `--help` entry
-/// (ab-351427cb).
-const CLIENT_VERB_USAGE: &[&str] = &[
-    "spawn <name> --provider <p> [--substrate pane|thread|headless] [-s <squad>] [-x left|right|up|down] [--cwd <dir>|--fresh|--here] [--force] [--no-wait] --argv -- <cmd...>",
-    "ask <name> <message> [--cwd <dir>|--fresh|--here]",
-    "list [--all] [--status <live|orphaned|unknown>] [--progress <advancing|awaiting-operator|parked|refused|unknown>]",
-    "status",
-    // --force is break-glass: it SIGKILLs a wedged lock holder (and would kill
-    // a healthy one too). Plain restart is the graceful path; say so here
-    // because this line is what `restart --help` prints.
-    "restart [--force]  # --force: break-glass SIGKILL of the lockfile holder; plain restart is graceful",
-    "reap [--json] [--dry-run]",
-    "stop <name> [--force]",
-    // retired-ok: help names the existing Claude callee to describe actual behavior, not to teach a direct retired command.
-    "rm <name> [--force]   --force drops the registry row even when the row is LIVE or harness teardown fails; a live pane worker that cannot be stopped is still refused; a claude row's harness session is removed too (claude rm <short_id>), and claude removes that session's WORKTREE under its own guards - it keeps a worktree with uncommitted changes and refuses one holding commits it cannot confirm are saved elsewhere; a non-claude bg or headless process survives, a mux-hosted pane is killed with it",
-    "loop-check --state <target-state.md> --transcript <transcript.jsonl> --cwd <project-root> [--events <events.jsonl>] [--global-events <global.jsonl>] [--settings <config.toml>] [--ledger <ledger.json>] [--now <rfc3339>] [--gh-bin <path>] [--git-bin <path>]",
-    "finalize --state <target-state.md> --cwd <project-root> --reason <TerminationReason> [--transcript <transcript.jsonl>]",
-    "reconcile",
-    "drive-authority [--json]",
-    "trace [options]",
-    "ping",
-    "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>]",
-    "adopt <session-id> [--cross-project]",
-    "attach <name>",
-    "logs <name> [--follow] [options]",
-    "loop run --driver target [options]",
-    "report --session-id <uuid> --seq <n> --state working|blocked|done [--reason <text>] [--ttl-ms <n>]",
-    "wait --agent <name> --state idle|blocked|done [--timeout-ms <n>] [--json]",
-    "subscribe [--agent <name>] [--kinds state,exit] [--json]",
-    "digest --session <s> [--since <ts> | --since-epoch <secs>] [--json]",
-    "needs [--since-epoch <secs>] [--fires-floor <n>] [--json]",
-    // `review-coverage` deliberately has NO entry here: the per-verb --help
-    // intercept would print a one-line usage and shadow the verb's own
-    // --help, which states the load-bearing contract (no way to assert
-    // coverage without the reads, and the strict manifest-less defaults).
-];
-
-/// Return the usage line for `verb` (matched on the leading token), or `None`
-/// for an unrecognized verb.
-fn verb_usage(verb: &str) -> Option<&'static str> {
-    CLIENT_VERB_USAGE
-        .iter()
-        .copied()
-        .find(|usage| usage.split_whitespace().next() == Some(verb))
-}
-
 fn warns_on_daemon_drift(verb: &str) -> bool {
     matches!(verb, "list" | "rm")
 }
@@ -3775,6 +3725,9 @@ mod tests {
         let resume = verb_usage("resume").expect("resume usage");
         assert!(resume.contains("--cross-project"), "{resume}");
         assert!(resume.contains("--cwd <existing-checkout>"), "{resume}");
+        // The seam appends --account on a wake; the usage line naming it is
+        // the parse contract that keeps the wake ladder honest.
+        assert!(resume.contains("--account <id>"), "{resume}");
 
         let adopt = verb_usage("adopt").expect("adopt usage");
         assert!(adopt.contains("--cross-project"), "{adopt}");

@@ -10879,12 +10879,18 @@ impl Core {
     }
 
     /// (x-b186) A registry row's message tail from the off-loop transcript map.
-    /// `None` for a row with no claude session uuid (a bare pane, a tombstone, a
-    /// non-claude worker) or one whose transcript yielded no prose - the
-    /// extended table then renders an EMPTY cell, never an inferred value.
+    /// `None` for a row with no session uuid (a bare pane, a tombstone) or one
+    /// whose transcript yielded no prose - the extended table then renders an
+    /// EMPTY cell, never an inferred value. The key is the row's transcript
+    /// identity: the claude uuid first, else the harness session id (the
+    /// rollout uuid a codex row carries) - the same key the tick builds.
     fn compose_tail(&self, a: &RegistryAgent) -> Option<String> {
         self.tail_by_session
-            .get(a.claude_session_uuid.as_deref()?)
+            .get(
+                a.claude_session_uuid
+                    .as_deref()
+                    .or(a.harness_session_id.as_deref())?,
+            )
             .cloned()
     }
 
@@ -15810,7 +15816,7 @@ async fn serve(
             // (x-b186) Carried across ticks so the tail pass can run even when
             // the row set did not move: the uuid set to look up, and the last
             // map pushed, so an unchanged result stays off the wire.
-            let mut last_uuids: Vec<String> = Vec::new();
+            let mut last_uuids: Vec<(String, Option<String>)> = Vec::new();
             let mut last_tails: HashMap<String, String> = HashMap::new();
             let mut last_truth = Instant::now();
             // (v48) Launch order for AgentTruth probes, so an out-of-order
@@ -15913,9 +15919,19 @@ async fn serve(
                     now,
                 );
                 if let Some(rows) = &changed {
+                    // The tail key is the row's transcript identity: the claude
+                    // uuid where one exists, else the harness session id (the
+                    // rollout uuid a codex row carries). log_path rides beside
+                    // it - a row naming its own transcript is read directly.
                     last_uuids = rows
                         .iter()
-                        .filter_map(|r| r.claude_session_uuid.clone())
+                        .filter_map(|r| {
+                            let uuid = r
+                                .claude_session_uuid
+                                .clone()
+                                .or_else(|| r.harness_session_id.clone())?;
+                            Some((uuid, r.log_path.clone()))
+                        })
                         .collect();
                 }
                 // (x-b186) Message tails are resolved on EVERY tick, not only
@@ -18013,6 +18029,7 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
@@ -18022,6 +18039,7 @@ mod tests {
                 agents_view::Liveness::Alive
             },
             harness: None,
+            ..Default::default()
         }
     }
 
@@ -18225,86 +18243,30 @@ mod tests {
             // A pane hosted by ANOTHER session -> that session's server renders
             // it; correctly skipped here.
             RegistryAgent {
-                model: None,
-                route: None,
-                spawned_by_session: None,
-                session_id: None,
-                harness_session_id: None,
-                predecessor_session_ids: Vec::new(),
-                forked_from_session_id: None,
                 name: "foreign-pane".into(),
                 cwd: "/other".into(),
-                exited: false,
-                dnd: false,
-                badge: None,
-                reason: None,
                 mux: Some(("other".into(), 5)),
-                answerable: None,
-                attach_id: None,
-                external: false,
-                account: None,
-                claude_session_uuid: None,
-                updated_at: None,
-                crown_level: None,
-                crown_scope: None,
                 liveness: agents_view::Liveness::Alive,
-                harness: None,
+                ..Default::default()
             },
             // A bg worker: paneless, no squad match -> watch-only orphan, and
             // it carries a claude jobId so the sideline can attach it.
             RegistryAgent {
-                model: None,
-                route: None,
-                spawned_by_session: None,
-                session_id: None,
-                harness_session_id: None,
-                predecessor_session_ids: Vec::new(),
-                forked_from_session_id: None,
                 name: "bg-worker".into(),
                 cwd: "/bg".into(),
-                exited: false,
-                dnd: false,
-                badge: None,
-                reason: None,
-                mux: None,
-                answerable: None,
                 attach_id: Some("c19cd2c3".into()),
-                external: false,
-                account: None,
-                claude_session_uuid: None,
-                updated_at: None,
-                crown_level: None,
-                crown_scope: None,
                 liveness: agents_view::Liveness::Alive,
-                harness: None,
+                ..Default::default()
             },
             // A live codex worker with a session identity but no pane or attach
             // target must project the typed branch-four recovery reason.
             RegistryAgent {
-                model: None,
-                route: None,
-                spawned_by_session: None,
-                session_id: None,
                 harness_session_id: Some("codex-live-id".into()),
-                predecessor_session_ids: Vec::new(),
-                forked_from_session_id: None,
                 name: "live-paneless".into(),
                 cwd: "/live".into(),
-                exited: false,
-                dnd: false,
-                badge: None,
-                reason: None,
-                mux: None,
-                answerable: None,
-                attach_id: None,
-                external: false,
-                account: None,
-                claude_session_uuid: None,
-                updated_at: None,
-                crown_level: None,
-                crown_scope: None,
                 liveness: agents_view::Liveness::Alive,
                 harness: Some("codex".into()),
+                ..Default::default()
             },
         ];
         let rows = core.agent_rows();
@@ -18420,30 +18382,10 @@ mod tests {
             // but its registry cwd "/w" matches no origin - membership must win.
             agent_in("main", 42, None, false),
             RegistryAgent {
-                model: None,
-                route: None,
-                spawned_by_session: None,
-                session_id: None,
-                harness_session_id: None,
-                predecessor_session_ids: Vec::new(),
-                forked_from_session_id: None,
                 name: "watcher".into(),
                 cwd: "/grp/backend/sub/dir".into(),
-                exited: false,
-                dnd: false,
-                badge: None,
-                reason: None,
-                mux: None,
-                answerable: None,
-                attach_id: None,
-                external: false,
-                account: None,
-                claude_session_uuid: None,
-                updated_at: None,
-                crown_level: None,
-                crown_scope: None,
                 liveness: agents_view::Liveness::Alive,
-                harness: None,
+                ..Default::default()
             },
         ];
         let rows = core.agent_rows();
@@ -18521,6 +18463,7 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
@@ -18556,57 +18499,22 @@ mod tests {
         let mut core = empty_core();
         core.agents = vec![
             RegistryAgent {
-                model: None,
-                route: None,
-                spawned_by_session: None,
-                session_id: None,
-                harness_session_id: None,
-                predecessor_session_ids: Vec::new(),
-                forked_from_session_id: None,
                 name: "think-x-9999".into(),
                 cwd: "/w".into(),
-                exited: false,
-                dnd: false,
-                badge: None,
-                reason: None,
-                mux: None,
-                answerable: None,
                 attach_id: Some("ab12cd34".into()),
                 external: true,
-                account: None,
-                claude_session_uuid: None,
-                updated_at: None,
-                crown_level: None,
-                crown_scope: None,
                 liveness: agents_view::Liveness::Alive,
-                harness: None,
+                ..Default::default()
             },
             // An exited external row (dead pane beat the upgrade): not attachable.
             RegistryAgent {
-                model: None,
-                route: None,
-                spawned_by_session: None,
-                session_id: None,
-                harness_session_id: None,
-                predecessor_session_ids: Vec::new(),
-                forked_from_session_id: None,
                 name: "dead-ext".into(),
                 cwd: "/w".into(),
                 exited: true,
-                dnd: false,
-                badge: None,
-                reason: None,
-                mux: None,
-                answerable: None,
                 attach_id: Some("ffffffff".into()),
                 external: true,
-                account: None,
-                claude_session_uuid: None,
-                updated_at: None,
-                crown_level: None,
-                crown_scope: None,
                 liveness: agents_view::Liveness::Dead,
-                harness: None,
+                ..Default::default()
             },
         ];
         assert!(
@@ -18644,30 +18552,13 @@ mod tests {
         // merge_rows would have set exited=false + external=true on this row,
         // but its mux pane (77) is absent from core.panes -> pane_dead.
         core.agents = vec![RegistryAgent {
-            model: None,
-            route: None,
-            spawned_by_session: None,
-            session_id: None,
-            predecessor_session_ids: Vec::new(),
-            forked_from_session_id: None,
-            harness_session_id: None,
             name: "upgraded".into(),
             cwd: "/w".into(),
-            exited: false,
-            dnd: false,
             liveness: agents_view::Liveness::Alive,
-            badge: None,
-            reason: None,
             mux: Some(("main".into(), 77)),
-            answerable: None,
             attach_id: Some("ab12cd34".into()),
             external: true,
-            account: None,
-            claude_session_uuid: None,
-            updated_at: None,
-            crown_level: None,
-            crown_scope: None,
-            harness: None,
+            ..Default::default()
         }];
         let rows = core.agent_rows();
         let row = rows.iter().find(|r| r.name == "upgraded").unwrap();
@@ -21501,10 +21392,12 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: uuid.map(str::to_owned),
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
             harness: None,
+            ..Default::default()
         }
     }
 
@@ -22639,30 +22532,13 @@ mod tests {
             },
         );
         core.agents = vec![RegistryAgent {
-            model: None,
-            route: None,
-            spawned_by_session: None,
-            session_id: None,
-            predecessor_session_ids: Vec::new(),
-            forked_from_session_id: None,
             harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
-            dnd: false,
             exited: true,
-            badge: None,
-            reason: None,
-            mux: None,
-            answerable: None,
-            attach_id: None,
-            external: false,
-            account: None,
-            claude_session_uuid: None,
-            updated_at: None,
-            crown_level: None,
-            crown_scope: None,
             liveness: agents_view::Liveness::Dead,
+            ..Default::default()
         }];
         let (c, mut rx) = client_with_rx(1);
         core.clients.push(c);
@@ -22722,30 +22598,13 @@ mod tests {
             },
         );
         core.agents = vec![RegistryAgent {
-            model: None,
-            route: None,
-            spawned_by_session: None,
-            session_id: None,
-            predecessor_session_ids: Vec::new(),
-            forked_from_session_id: None,
             harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
-            dnd: false,
             exited: true,
-            badge: None,
-            reason: None,
-            mux: None,
-            answerable: None,
-            attach_id: None,
-            external: false,
-            account: None,
-            claude_session_uuid: None,
-            updated_at: None,
-            crown_level: None,
-            crown_scope: None,
             liveness: agents_view::Liveness::Dead,
+            ..Default::default()
         }];
         let (c, mut rx) = client_with_rx(1);
         core.clients.push(c);
@@ -22809,30 +22668,13 @@ mod tests {
             },
         );
         let live_row = RegistryAgent {
-            model: None,
-            route: None,
-            spawned_by_session: None,
-            session_id: None,
-            predecessor_session_ids: Vec::new(),
-            forked_from_session_id: None,
             harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
             name: "live-codex".into(),
             cwd: "/tmp".into(),
-            exited: false,
-            dnd: false,
-            badge: None,
-            reason: None,
             mux: Some(("test".into(), live)),
-            answerable: None,
-            attach_id: None,
-            external: false,
-            account: None,
-            claude_session_uuid: None,
-            updated_at: None,
-            crown_level: None,
-            crown_scope: None,
             liveness: agents_view::Liveness::Alive,
+            ..Default::default()
         };
         core.agents = vec![live_row];
         let (c, mut rx) = client_with_rx(1);
@@ -22936,30 +22778,13 @@ mod tests {
         // and the branch-four reason. A LIVE claude bg row with a jobId still
         // uses attach, but its disposition remains live-paneless.
         let base = || RegistryAgent {
-            model: None,
-            route: None,
-            spawned_by_session: None,
-            session_id: None,
             harness_session_id: Some("01a027ad".into()),
-            predecessor_session_ids: Vec::new(),
-            forked_from_session_id: None,
             harness: Some("codex".into()),
             name: "w".into(),
             cwd: "/w".into(),
             exited: true,
-            dnd: false,
-            badge: None,
-            reason: None,
-            mux: None,
-            answerable: None,
-            attach_id: None,
-            external: false,
-            account: None,
-            claude_session_uuid: None,
-            updated_at: None,
-            crown_level: None,
-            crown_scope: None,
             liveness: agents_view::Liveness::Alive,
+            ..Default::default()
         };
         assert_eq!(
             Core::row_resume_disposition(&base()),
@@ -23072,30 +22897,13 @@ mod tests {
         // same sideline told the operator its backend was not live. The
         // narrowed BackendNotLive fires only on the falsified case (Dead).
         let base = || RegistryAgent {
-            model: None,
-            route: None,
-            spawned_by_session: None,
-            session_id: None,
             harness_session_id: Some("01a027ad".into()),
-            predecessor_session_ids: Vec::new(),
-            forked_from_session_id: None,
             harness: Some("codex".into()),
             name: "w".into(),
             cwd: "/w".into(),
             exited: true,
-            dnd: false,
-            badge: None,
-            reason: None,
-            mux: None,
-            answerable: None,
-            attach_id: None,
-            external: false,
-            account: None,
-            claude_session_uuid: None,
-            updated_at: None,
-            crown_level: None,
-            crown_scope: None,
             liveness: agents_view::Liveness::Alive,
+            ..Default::default()
         };
         let mut unmeasured = base();
         unmeasured.exited = false;
@@ -23230,31 +23038,13 @@ mod tests {
         );
         core.panes.get_mut(&pid).unwrap().resume_target = Some("01a03a4e-b862".into());
         let mut row = RegistryAgent {
-            model: None,
-            route: None,
-            spawned_by_session: None,
-            session_id: None,
             harness_session_id: Some("01a03a4e-b862".into()),
-            predecessor_session_ids: Vec::new(),
-            forked_from_session_id: None,
             harness: Some("claude".into()),
             name: "worker".into(),
             cwd: "/w".into(),
-            dnd: false,
-            exited: false,
-            badge: None,
-            reason: None,
-            mux: None,
-            answerable: None,
-            attach_id: None,
-            external: false,
-            account: None,
-            claude_session_uuid: None,
-            updated_at: None,
-            crown_level: None,
-            crown_scope: None,
             // The reading that used to print "backend is not live".
             liveness: agents_view::Liveness::Unmeasured,
+            ..Default::default()
         };
         assert_eq!(
             core.row_resume_disposition_in_session(&row),
@@ -25837,10 +25627,12 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
             harness: None,
+            ..Default::default()
         }
     }
 
@@ -27015,30 +26807,13 @@ mod tests {
             },
         );
         core.agents = vec![RegistryAgent {
-            model: None,
-            route: None,
-            spawned_by_session: None,
-            session_id: None,
-            predecessor_session_ids: Vec::new(),
-            forked_from_session_id: None,
             harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
-            dnd: false,
             exited: true,
-            badge: None,
-            reason: None,
-            mux: None,
-            answerable: None,
-            attach_id: None,
-            external: false,
-            account: None,
-            claude_session_uuid: None,
-            updated_at: None,
-            crown_level: None,
-            crown_scope: None,
             liveness: agents_view::Liveness::Dead,
+            ..Default::default()
         }];
         core.squad_members.insert(
             7u64,
@@ -27129,30 +26904,13 @@ mod tests {
             },
         );
         core.agents = vec![RegistryAgent {
-            model: None,
-            route: None,
-            spawned_by_session: None,
-            session_id: None,
-            predecessor_session_ids: Vec::new(),
-            forked_from_session_id: None,
             harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
-            dnd: false,
             exited: true,
-            badge: None,
-            reason: None,
-            mux: None,
-            answerable: None,
-            attach_id: None,
-            external: false,
-            account: None,
-            claude_session_uuid: None,
-            updated_at: None,
-            crown_level: None,
-            crown_scope: None,
             liveness: agents_view::Liveness::Dead,
+            ..Default::default()
         }];
         core.squad_members.insert(
             7u64,
@@ -27204,30 +26962,13 @@ mod tests {
             },
         );
         core.agents = vec![RegistryAgent {
-            model: None,
-            route: None,
-            spawned_by_session: None,
-            session_id: None,
-            predecessor_session_ids: Vec::new(),
-            forked_from_session_id: None,
             harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
-            dnd: false,
             exited: true,
-            badge: None,
-            reason: None,
-            mux: None,
-            answerable: None,
-            attach_id: None,
-            external: false,
-            account: None,
-            claude_session_uuid: None,
-            updated_at: None,
-            crown_level: None,
-            crown_scope: None,
             liveness: agents_view::Liveness::Dead,
+            ..Default::default()
         }];
         core.squad_members.insert(
             7u64,
