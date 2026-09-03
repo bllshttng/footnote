@@ -839,10 +839,7 @@ fn is_open_entry(entry: &Value) -> bool {
         return true;
     }
     match entry.get("supersession") {
-        Some(r) if r.is_object() => r
-            .get("verified_at")
-            .map(|v| v.is_null())
-            .unwrap_or(true),
+        Some(r) if r.is_object() => r.get("verified_at").map(|v| v.is_null()).unwrap_or(true),
         _ => false,
     }
 }
@@ -900,11 +897,20 @@ pub fn settle_blocked_by_edges(
                 .map(|v| v.is_null())
                 .unwrap_or(true)
             {
-                receipts.push(json_receipt("blocked_by_pruned", &node_id, bid, "blocker done"));
+                receipts.push(json_receipt(
+                    "blocked_by_pruned",
+                    &node_id,
+                    bid,
+                    "blocker done",
+                ));
                 changed = true;
                 continue;
             }
-            if target.get("superseded_by").and_then(Value::as_str).is_none() {
+            if target
+                .get("superseded_by")
+                .and_then(Value::as_str)
+                .is_none()
+            {
                 if is_deferred_blocker(target) {
                     receipts.push(json_receipt(
                         "blocked_by_held",
@@ -2537,10 +2543,7 @@ mod tests {
         ];
         let by_id = readiness_fixture(entries);
         let a = json!({"id": "ab-1", "blocked_by": ["ab-2"]});
-        assert_eq!(
-            compute_readiness(&a, &by_id),
-            ("ready".to_string(), None)
-        );
+        assert_eq!(compute_readiness(&a, &by_id), ("ready".to_string(), None));
     }
 
     #[test]
@@ -2579,10 +2582,7 @@ mod tests {
         let a = json!({"id": "ab-1", "blocked_by": ["ab-2"]});
         assert_eq!(
             compute_readiness(&a, &by_id),
-            (
-                "blocked-by-deferred".to_string(),
-                Some("ab-2".to_string())
-            )
+            ("blocked-by-deferred".to_string(), Some("ab-2".to_string()))
         );
         let cycle = json!({"id": "ab-4", "blocked_by": ["ab-c1"]});
         assert_eq!(
@@ -2610,7 +2610,8 @@ mod tests {
         let (entries, receipts, _) = settle_blocked_by_edges(entries);
         let by_id = index_by_id(&entries);
         let edge = |id: &str| {
-            by_id.get(id)
+            by_id
+                .get(id)
                 .map(|e| e.get("blocked_by").cloned())
                 .unwrap_or(None)
         };
