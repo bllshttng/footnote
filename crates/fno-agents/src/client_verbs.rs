@@ -2769,11 +2769,17 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // a wake continues a transcript that lives under the config dir it was
     // created in, so an injected pick cannot move the namespace (the spawn
     // seam's own `--resume` skip holds the same reasoning). The value is still
-    // validated, never silently swallowed: an account that does not resolve in
-    // the store is a typo reading as applied. Non-claude rows carry no account
-    // axis; the row's own lane bills itself.
+    // validated when it NAMES SOMETHING ELSE: an account that does not resolve
+    // in the store is a typo reading as applied. The recorded account itself
+    // is never re-validated here - the reentry resolver below shells the same
+    // store for it, and a second spawn per wake buys nothing. Non-claude rows
+    // carry no account axis; the row's own lane bills itself.
     if let Some(acct) = account.as_deref() {
-        if harness == "claude" {
+        let recorded = entry
+            .get("launch_account")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if harness == "claude" && acct != recorded {
             if let Err(reason) = crate::reentry::shell_account_binding(acct) {
                 eprintln!(
                     "fno agents resume: --account {acct:?} does not resolve: {reason}. \
