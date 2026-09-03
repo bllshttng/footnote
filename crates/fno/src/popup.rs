@@ -14,7 +14,7 @@
 
 use crate::chrome::{self, BodyLine, Chrome, FramedLine, Scroll};
 use crate::proto::Cell;
-use crate::theme::{cell_style, Role, Theme};
+use crate::theme::{Role, Theme};
 
 /// Popup content never renders wider than this (fixed max width); longer
 /// lines ellipsize. Anchored menus are usually far narrower.

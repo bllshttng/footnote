@@ -170,13 +170,11 @@ fn round_trip(stream: &mut UnixStream, method: &str, params: Value) -> Result<Va
         return Ok(reply.get("result").cloned().unwrap_or(Value::Null));
     }
     let error = reply.get("error").cloned().unwrap_or(Value::Null);
-    Err(format!(
-        "{}",
-        error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("store refused")
-    ))
+    Err(error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("store refused")
+        .to_string())
 }
 
 fn read_exact(stream: &mut UnixStream, buf: &mut [u8]) -> Result<(), String> {

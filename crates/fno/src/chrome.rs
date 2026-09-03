@@ -359,6 +359,7 @@ pub fn chrome_frame_width(body_w: usize, has_scroll: bool) -> usize {
 /// `WIDE_SPACER` continuation cell, which every renderer of the buffer skips so
 /// the glyph renders across both columns (x-1b68). Roles are one per char and
 /// walk in lockstep with the text.
+#[allow(clippy::too_many_arguments)] // one shared loop for both painters
 pub(crate) fn paint_line(
     cells: &mut [Cell],
     rows: usize,
@@ -451,10 +452,9 @@ fn edge_row(
     mut inner: Vec<Seg>,
     inner_w: usize,
 ) -> FramedLine {
-    let mut used = inner.iter().map(|(c, _)| char_cols(*c)).sum();
+    let used = inner.iter().map(|(c, _)| char_cols(*c)).sum();
     for _ in used..inner_w {
         inner.push((fill, Role::Border));
-        used += 1;
     }
     let mut row = Vec::with_capacity(inner_w + 2);
     row.push((left, Role::Border));
@@ -509,7 +509,7 @@ fn tab_row(tabs: &[(String, bool)], inner_w: usize) -> FramedLine {
 
 fn content_row_from_segs(mut inner: Vec<Seg>, inner_w: usize) -> FramedLine {
     // Pad by DISPLAY columns: a wide seg claims two of them.
-    let mut used = inner.iter().map(|(c, _)| char_cols(*c)).sum();
+    let used = inner.iter().map(|(c, _)| char_cols(*c)).sum();
     for _ in used..inner_w {
         inner.push((' ', Role::Tab(false)));
     }
@@ -535,14 +535,14 @@ fn esc_segs() -> Vec<Seg> {
 /// share, so the chip's placement math and its clickable span can never
 /// drift apart between the Full title bar and a Bare menu's inline hint.
 ///
-/// The hit offset: `chip_pos` is `inner.len()` right before the chip segs are
-/// appended, so `+1` skips the row's own left border (added by `edge_row`)
-/// and `+1` again skips the chip's leading padding space - the same "past
-/// the left border" shift [`frame`] already applies to the footer's close
-/// span.
+/// The hit offset: `chip_col` is the column the chip starts at (the width of
+/// everything already on the row), so `+1` skips the row's own left border
+/// (added by `edge_row`) and `+1` again skips the chip's leading padding
+/// space - the same "past the left border" shift [`frame`] already applies
+/// to the footer's close span.
 fn chip_border_row(left: char, right: char, mut inner: Vec<Seg>, inner_w: usize) -> FramedLine {
     let chip = esc_segs();
-    let mut used = inner.iter().map(|(c, _)| char_cols(*c)).sum();
+    let used = inner.iter().map(|(c, _)| char_cols(*c)).sum();
     let reserve = chip.iter().map(|(c, _)| char_cols(*c)).sum::<usize>();
     for _ in used..inner_w.saturating_sub(reserve) {
         inner.push(('─', Role::Border));
@@ -612,8 +612,7 @@ fn body_row(
     // char-based (full-row spans from the popup), so the role walk stays
     // char-indexed while the cell walk is column-indexed.
     let mut col = 0usize;
-    let mut char_idx = 0usize;
-    for &c in &chars {
+    for (char_idx, &c) in chars.iter().enumerate() {
         if col >= body_w {
             break;
         }
@@ -633,7 +632,6 @@ fn body_row(
         text.push(c);
         roles.push(role);
         col += cw;
-        char_idx += 1;
     }
     for _ in col..body_w {
         text.push(' ');
