@@ -3223,7 +3223,7 @@ def _codex_review_target(
         return f"commit:{remainder}", False
     if remainder.startswith("custom:") and remainder != "custom:":
         return remainder, False
-    return "uncommittedChanges", True
+    return None, False
 
 
 def _raw_send(
@@ -3560,7 +3560,7 @@ def _raw_send(
                 if stripped in _CODEX_REVIEW_VERBS
                 else None
             )
-            target, ignored_remainder = _codex_review_target(
+            target, _ignored_remainder = _codex_review_target(
                 stripped, default_base=default_base
             )
             # Fire-side empty-subject guard: a baseBranch target diffs the
@@ -3620,11 +3620,10 @@ def _raw_send(
             # owns the one codex_rpc review_invocation event.
             if receipt.get("delivered"):
                 _record_raw(raw_msg_id, authored_words)
-                note = " (unrecognized remainder ignored)" if ignored_remainder else ""
                 print(
                     f"review/start target={target} delivery=inline "
                     f"turn={receipt.get('turn_id', '')} "
-                    f"review_thread={receipt.get('review_thread_id', '')}{note}"
+                    f"review_thread={receipt.get('review_thread_id', '')}"
                 )
                 raise typer.Exit(code=0)
             reason = str(receipt.get("reason") or "rpc-error")
