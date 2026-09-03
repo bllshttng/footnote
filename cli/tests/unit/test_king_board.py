@@ -731,23 +731,20 @@ def test_an_unmergeable_pr_is_not_the_kings_work(monkeypatch):
     assert read.rows() == []
 
 
-def test_missing_bindings_warn_for_pending_red_and_green_prs(monkeypatch, tmp_path):
-    from fno import paths
+def test_missing_bindings_warn_for_pending_red_and_green_prs(monkeypatch):
+    """Hermetic: the graph read is patched at the store seam. The real
+    `read_graph_strict` rides the Rust store keeper, which a CI runner
+    without the built worker cannot spawn (measured on PR 1437's
+    changed-smoke), and these tests subject the BINDING logic, not the
+    store."""
     from fno.king import board as board_mod
 
-    graph_path = tmp_path / "graph.json"
-    graph_path.write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {"id": "x-1111", "status": "ready"},
-                    {"id": "x-2222", "status": "ready"},
-                    {"id": "x-3333", "status": "ready"},
-                ]
-            }
-        )
-    )
-    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
+    entries = [
+        {"id": "x-1111", "status": "ready"},
+        {"id": "x-2222", "status": "ready"},
+        {"id": "x-3333", "status": "ready"},
+    ]
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda _path: entries)
     listing = [
         {
             "number": 1,
@@ -880,18 +877,15 @@ def test_every_fetched_pr_is_judged(monkeypatch):
 # --- the open-PR node rows (undriven_pr's source) -----------------------------
 
 
-def test_read_prs_carries_the_bound_node_rows_as_their_own_source(monkeypatch, tmp_path):
+def test_read_prs_carries_the_bound_node_rows_as_their_own_source(monkeypatch):
     """`fno backlog ready` removes live-claimed rows AND never returns
     in_review, so an undriven-PR queue's candidates can only come from here:
-    the open-PR listing intersected with the graph."""
-    from fno import paths
+    the open-PR listing intersected with the graph. Hermetic at the store
+    seam (see the missing-bindings test for why)."""
     from fno.king import board as board_mod
 
-    graph_path = tmp_path / "graph.json"
-    graph_path.write_text(
-        json.dumps({"entries": [{"id": "x-a0a3", "status": "in_review", "pr_number": 1394}]})
-    )
-    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
+    entries = [{"id": "x-a0a3", "status": "in_review", "pr_number": 1394}]
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda _path: entries)
     listing = [
         {
             "number": 1394,
