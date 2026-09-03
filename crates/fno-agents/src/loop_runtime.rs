@@ -58,6 +58,82 @@ const JOURNAL_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 /// Using a distinct type prevents silent positional swap of the two same-type args.
 pub struct ProjectJournalPath(pub PathBuf);
 
+/// One health read of `loop_unit_dispatched`: how many rows carry a fixture
+/// title and how many name a real crown scope.
+///
+/// Measured 2026-09-02 across both journals on the reference machine: 757
+/// rows, 756 of them fixture-titled, exactly one real (`king reign over fno`,
+/// iteration 1). A raw COUNT of this event therefore reads as a busy
+/// subsystem while the loop has never autonomously dispatched anything - any
+/// health check must separate the two through [`is_fixture_dispatch_title`]
+/// and treat only `real` (and, for the acceptance bar,
+/// `real_at_iteration_two_or_later`) as signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DispatchCensus {
+    pub fixture: u64,
+    pub real: u64,
+    /// Real crown-scope dispatches at iteration 2 or higher. Iteration 1
+    /// already happened once under a board that could not be read twice, so
+    /// it is not evidence the loop works.
+    pub real_at_iteration_two_or_later: u64,
+}
+
+/// Whether a dispatch title names a test fixture rather than a real crown
+/// scope. The discriminator is the TITLE - nothing else in the row separates
+/// a fixture run from a real one. These are the titles the repo's own suites
+/// mint (`crates/fno-agents/tests/loop_target.rs` manifests plus the king
+/// fixture scope `epic-x`); a new fixture title must be added here, and a
+/// health read built on this predicate reports zero real dispatches - never
+/// 756 - for a journal of only fixture rows.
+pub fn is_fixture_dispatch_title(title: &str) -> bool {
+    let t = title.trim();
+    if t.is_empty() {
+        return true;
+    }
+    const FIXTURE_TITLES: [&str; 6] = [
+        "king reign over epic-x",
+        "persist history test",
+        "ceiling mission",
+        "real driver test",
+        "happy path mission",
+        "env test",
+    ];
+    FIXTURE_TITLES.contains(&t)
+}
+
+/// Count `loop_unit_dispatched` rows in one journal's text, split by whether
+/// the title names a fixture. Malformed lines are skipped, matching every
+/// other reader of this journal.
+pub fn census_loop_unit_dispatches(journal: &str) -> DispatchCensus {
+    let mut census = DispatchCensus::default();
+    for line in journal.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(|v| v.as_str()) != Some("loop_unit_dispatched") {
+            continue;
+        }
+        let data = value.get("data");
+        let title = data
+            .and_then(|d| d.get("title"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let iteration = data
+            .and_then(|d| d.get("iteration"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if is_fixture_dispatch_title(title) {
+            census.fixture += 1;
+        } else {
+            census.real += 1;
+            if iteration >= 2 {
+                census.real_at_iteration_two_or_later += 1;
+            }
+        }
+    }
+    census
+}
+
 impl ProjectJournalPath {
     pub fn from_caller_root(cwd: &Path) -> Self {
         Self(

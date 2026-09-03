@@ -258,3 +258,42 @@ def compute_board(
     )
 
     return {"just_finished": just_finished, "in_progress": in_progress, "on_deck": on_deck}
+
+
+# The board's render vocabulary moved here from the CLI module (which is over
+# the shrink-only line budget) together with the degrade path that uses it: a
+# module named by the question it answers, not a server2.py.
+BOARD_SECTIONS = (
+    ("just_finished", "Just finished"),
+    ("in_progress", "In progress"),
+    ("on_deck", "On deck"),
+)
+
+
+def board_unreadable_payload(reason: str) -> dict:
+    return {
+        key: {"rows": [], "more": 0, "note": None, "unknown": reason} for key, _ in BOARD_SECTIONS
+    }
+
+
+def print_board(board: dict, echo) -> None:
+    for key, title in BOARD_SECTIONS:
+        section = board.get(key) or {}
+        echo(title)
+        unknown = section.get("unknown")
+        if unknown:
+            echo(f"  (unknown: {unknown})")
+            echo("")
+            continue
+        note = section.get("note")
+        if note:
+            echo(f"  ({note})")
+        rows = section.get("rows") or []
+        if not rows:
+            echo("  (none)")
+        for row in rows:
+            echo(f"  {row['id']}  {row['title']}   {row['fact']}")
+        more = section.get("more") or 0
+        if more:
+            echo(f"  ... and {more} more")
+        echo("")

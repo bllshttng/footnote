@@ -5820,41 +5820,6 @@ def cmd_lanes(
 
 # -- board --
 
-_BOARD_SECTIONS = (
-    ("just_finished", "Just finished"),
-    ("in_progress", "In progress"),
-    ("on_deck", "On deck"),
-)
-
-
-def _board_unreadable_graph_payload(reason: str) -> dict:
-    return {
-        key: {"rows": [], "more": 0, "note": None, "unknown": reason} for key, _ in _BOARD_SECTIONS
-    }
-
-
-def _print_board(board: dict) -> None:
-    for key, title in _BOARD_SECTIONS:
-        section = board.get(key) or {}
-        typer.echo(title)
-        unknown = section.get("unknown")
-        if unknown:
-            typer.echo(f"  (unknown: {unknown})")
-            typer.echo("")
-            continue
-        note = section.get("note")
-        if note:
-            typer.echo(f"  ({note})")
-        rows = section.get("rows") or []
-        if not rows:
-            typer.echo("  (none)")
-        for row in rows:
-            typer.echo(f"  {row['id']}  {row['title']}   {row['fact']}")
-        more = section.get("more") or 0
-        if more:
-            typer.echo(f"  ... and {more} more")
-        typer.echo("")
-
 
 @cli.command("board", hidden=True)
 def cmd_board(
@@ -5872,8 +5837,12 @@ def cmd_board(
     exhausts the quota. An unreadable source renders as an explicit
     unknown, never as an empty section.
     """
-    from fno.graph.board import compute_board
-    from fno.graph.store import GraphUnreadableError, read_graph_strict
+    from fno.graph.board import (
+        board_unreadable_payload,
+        compute_board,
+        print_board,
+    )
+    from fno.graph.store import GraphUnreadableError, StoreUnavailable, read_graph_strict
     from fno.tracker import active_backend_name
 
     # The board spans done + in-progress + ready sections, which needs
@@ -5883,23 +5852,34 @@ def cmd_board(
     # external backend degrades the same way an unreadable graph already
     # does, rather than reading the wrong store.
     if active_backend_name() != "graph":
-        payload = _board_unreadable_graph_payload(
+        payload = board_unreadable_payload(
             f"board is unavailable under the {active_backend_name()} tracker backend"
         )
         if json_output:
             typer.echo(json.dumps(payload))
         else:
-            _print_board(payload)
+            print_board(payload, typer.echo)
         raise typer.Exit(code=1)
 
     try:
         entries = read_graph_strict(_graph_path())
     except GraphUnreadableError as exc:
-        payload = _board_unreadable_graph_payload(f"graph unreadable ({exc})")
+        payload = board_unreadable_payload(f"graph unreadable ({exc})")
         if json_output:
             typer.echo(json.dumps(payload))
         else:
-            _print_board(payload)
+            print_board(payload, typer.echo)
+        raise typer.Exit(code=1)
+    except StoreUnavailable as exc:
+        # Same degradation as an unreadable graph: the store's keeper being
+        # unreachable (a pip-only box with no fno-agents-worker, a packet
+        # that has not built the binary yet) is an unreadable SOURCE, and
+        # this command's contract is an explicit unknown, never a traceback.
+        payload = board_unreadable_payload(f"graph store unavailable ({exc})")
+        if json_output:
+            typer.echo(json.dumps(payload))
+        else:
+            print_board(payload, typer.echo)
         raise typer.Exit(code=1)
 
     proj = project
@@ -5912,7 +5892,7 @@ def cmd_board(
     if json_output:
         typer.echo(json.dumps(board))
         return
-    _print_board(board)
+    print_board(board, typer.echo)
 
 
 @cli.command("render-views", hidden=True)

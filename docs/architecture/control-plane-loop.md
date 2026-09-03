@@ -242,6 +242,16 @@ All events land in BOTH `<cwd>/.fno/events.jsonl` AND `~/.fno/events.jsonl` with
 
 Legacy manifests (those with a `status:` key written by the pre-wedge init) are recognized and handled in allow-exit mode. The `loop_check_legacy_manifest` event is emitted for observability. No automatic migration occurs.
 
+## The king board's budget, and the dispatch census
+
+Two measured facts shaped this, both from 2026-09-02 on the reference machine. First, the board was unreadable. `read_king_board` wrapped the whole board in a 30s kill. The Python board handed each of its 13 subprocess reads a 60s budget of its own. That is twice the outer bound, so no inner timeout ever fired. Thirteen interpreter startups cost about 41s against a 30s ceiling, and ~0.25s of that was query time. Second, the same load killed the dispatch channel. A `fno agents mail send` killed at 180s wrote nothing. Its durable bus row came only after a 70.37s `resolve_or_suggest` and a missed inject ladder.
+
+The remedy for both is a port, and the file-budget gate decides that, not preference: Python is the compatibility shell, and the king board plus the mail send lane are the two Python surfaces this failure indicts. Both porting efforts are filed in the backlog with the measurements and the built-but-unlanded branch work attached. The board port ends with `king/board.py` retired entirely; the mail port ends with a send whose durable row exists before resolution runs, so a kill in the resolution window leaves the message on the bus.
+
+What landed here is the part that is already Rust.
+
+**The positive marker, and the trap that defeats a naive one.** Measured 2026-09-02 across both journals, 57,784 rows: 757 `loop_unit_dispatched` rows. 756 carried fixture titles from the test suites, `king reign over epic-x` among them. Exactly one was real: `king reign over fno`, iteration 1. It fired only after the operator hand-cleared two blockers, then hit the board timeout and never reached iteration 2. A raw count of that event reads as a busy subsystem. `census_loop_unit_dispatches` (`crates/fno-agents/src/loop_runtime.rs`) splits fixture from real through `is_fixture_dispatch_title`. `real_at_iteration_two_or_later` is the only dispatch number that is evidence of anything: a king dispatched twice or more, with no operator hand-clearing in the window. Iteration 1 alone is not the bar. It already happened once, under a board that was unreadable twice.
+
 ## What arrived
 
 - **Step 5 group 1**: `run-target-loop.sh` replaced by the Rust loop runtime + target driver + 74-line exec shim. See [unified-loop.md](unified-loop.md).
