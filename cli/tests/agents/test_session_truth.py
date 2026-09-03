@@ -39,6 +39,31 @@ import pytest
         # trailing USER turn clears a stale assistant signal -> worker's move
         ("user", "<promise>done</promise> (quoted by the operator)", 10, "working"),
         ("user", "here is your answer", 99999, "stalled"),
+        # x-1182: a trailing option prompt is your-move immediately, not a
+        # two-hour mtime wait. This is the exact tail that stalled a worker
+        # for 50 minutes and read "working" the whole time.
+        (
+            "assistant",
+            "Canonical main is protected. Create a dedicated worktree "
+            "for x-884f and continue there? [Y/n]",
+            3000,  # 50 minutes, well under STALLED_AFTER_S (2h)
+            "your-move",
+        ),
+        ("assistant", "run the migration now? [y/N]", 10, "your-move"),
+        ("assistant", "overwrite the file? (y/N)", 10, "your-move"),
+        ("assistant", "proceed with the merge? (Y/n)", 10, "your-move"),
+        ("assistant", "pick a target: [1/2/3]", 10, "your-move"),
+        # mid-body mention is prose about a prompt, not a prompt -- must not
+        # fire the option-prompt grammar
+        (
+            "assistant",
+            "the worker asked [Y/n] and then kept going with more analysis",
+            99999,
+            "stalled",
+        ),
+        # a trailing user turn clears an option-prompt signal exactly as it
+        # already clears "?" and <help> (the operator answered)
+        ("user", "continue? [Y/n]", 99999, "stalled"),
     ],
 )
 def test_classify_tail_precedence(role, text, age, expected):
