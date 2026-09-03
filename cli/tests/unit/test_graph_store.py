@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,137 @@ def test_the_reaper_reaps_a_keeper_it_can_name(tmp_path):
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
     assert proc.poll() is not None, "the named keeper must be dead after the reap"
+
+
+# Pids the fixture-under-test pair leaves behind for its mid-run leg. Module
+# global because the assertion that matters spans a fixture boundary: xdist
+# workers are long-lived, so the pid list survives from one test to the next
+# inside the same worker process.
+_ZOMBIE_PROBE_PIDS: list[int] = []
+
+
+def _zombie_children_of_this_process() -> set[int]:
+    """Zombie pids among this process's direct children, read from psutil.
+
+    psutil, not a shell pipeline: a shell `ps | wc -l` gave three different
+    answers in four minutes on the machine that measured this defect,
+    including 31 when the truth was 1800.
+    """
+    import psutil
+
+    me = psutil.Process()
+    return {
+        child.pid
+        for child in me.children(recursive=False)
+        if child.status() == psutil.STATUS_ZOMBIE
+    }
+
+
+def _wait_until_zombies(pids: list[int], timeout: float = 15.0) -> set[int]:
+    """Wait (polling ps, never the Popen handles) until every pid is a zombie.
+
+    poll() would reap the child and erase the evidence, so the Popen handles
+    must stay untouched until the drain under test. Keepers read
+    FNO_STORE_KEEPER_IDLE_SECS at spawn, so the caller pins it short first.
+    """
+    deadline = time.monotonic() + timeout
+    zombies: set[int] = set()
+    wanted = set(pids)
+    while time.monotonic() < deadline:
+        zombies = _zombie_children_of_this_process() & wanted
+        if zombies == wanted:
+            return zombies
+        time.sleep(0.25)
+    return zombies
+
+
+def _spawn_idle_keepers(tmp_path: Path, count: int) -> list[int]:
+    from fno.graph import store as store_mod
+
+    pids = []
+    for i in range(count):
+        graph = tmp_path / f"drain-{i}.json"
+        graph.write_text('{"entries": []}\n')
+        pids.append(store_mod._spawn_keeper(graph).pid)
+    return pids
+
+
+def test_exited_keepers_are_zombies_until_drained(tmp_path, monkeypatch):
+    """Positive control for the mid-run zombie defect and its drain (x-b366).
+
+    A keeper that self-exits stays in the process table as a zombie under
+    this worker's pid until someone collects its status; before the drain
+    existed, the only collector was the session-scoped teardown, so a run
+    accumulated ~52 zombies per minute under four xdist workers. Measured by
+    number, mid-run: three keepers must appear as zombies BEFORE any drain,
+    and drain_exited_keepers() must reap exactly those three.
+    """
+    from fno.graph import store as store_mod
+
+    monkeypatch.setenv("FNO_STORE_KEEPER_IDLE_SECS", "1")
+    pids = _spawn_idle_keepers(tmp_path, 3)
+    zombies = _wait_until_zombies(pids)
+    assert zombies == set(pids), (
+        f"exited keepers must appear as zombies under this pid before any "
+        f"drain; saw {sorted(zombies)} of {sorted(pids)}"
+    )
+
+    reaped = store_mod.drain_exited_keepers()
+    assert reaped == len(pids), f"drain must name every exited keeper; reaped {reaped}"
+    import psutil
+
+    for pid in pids:
+        with pytest.raises(psutil.NoSuchProcess):
+            psutil.Process(pid).status()
+
+
+@pytest.mark.xdist_group(name="keeper-zombie")
+def test_spawned_zombies_persist_into_next_test_without_drain(tmp_path, monkeypatch):
+    """Spawn leg of the mid-run pair: leave exited keepers behind, drain none.
+
+    The body deliberately does NOT reap; the autouse drain fixture under test
+    is what should collect these before the companion assertion runs. On code
+    without the fixture the companion fails naming these pids, which is the
+    defect reproduced live.
+    """
+    monkeypatch.setenv("FNO_STORE_KEEPER_IDLE_SECS", "1")
+    pids = _spawn_idle_keepers(tmp_path, 3)
+    zombies = _wait_until_zombies(pids)
+    assert zombies == set(pids), (
+        f"keepers must be exited zombies before this test ends; saw "
+        f"{sorted(zombies)} of {sorted(pids)}"
+    )
+    _ZOMBIE_PROBE_PIDS.clear()
+    _ZOMBIE_PROBE_PIDS.extend(pids)
+
+
+@pytest.mark.xdist_group(name="keeper-zombie")
+def test_drain_fixture_reaps_zombies_between_tests_midrun():
+    """Mid-run leg of the pair: the previous test's zombies must be gone.
+
+    The session-scoped reaper has NOT run yet - this assertion fires between
+    tests, exactly where the defect lived. The pids must be out of the
+    process table (reaped, not merely SIGTERMed: a zombie answers kill(pid,
+    0)) and the spawn ledger must be empty. Pair runs on one xdist worker via
+    the keeper-zombie group; alone it would assert nothing, so it skips.
+    """
+    if not _ZOMBIE_PROBE_PIDS:
+        pytest.skip("companion spawn leg did not run in this worker")
+    import psutil
+
+    still_zombie = [
+        pid
+        for pid in _ZOMBIE_PROBE_PIDS
+        if pid in _zombie_children_of_this_process()
+    ]
+    assert not still_zombie, (
+        f"{len(still_zombie)} keeper zombie(s) survived past the test "
+        f"boundary mid-run (pids {still_zombie}); the autouse drain fixture "
+        f"must reap between tests, not only at session teardown"
+    )
+    for pid in _ZOMBIE_PROBE_PIDS:
+        with pytest.raises(psutil.NoSuchProcess):
+            psutil.Process(pid).status()
 
 
 def test_locked_by_normalized_from_legacy_session_id():

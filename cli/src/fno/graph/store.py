@@ -300,6 +300,26 @@ def reap_spawned_keepers(timeout: float = 10.0) -> "list[int]":
     return survivors
 
 
+def drain_exited_keepers() -> int:
+    """poll() every keeper in the spawn ledger and drop the ones that exited.
+
+    An exited child stays in the process table as a zombie until someone
+    collects its status, and the only collector used to be the session-scoped
+    teardown: measured 2026-09-03 at ~52 zombie keepers per minute under four
+    xdist workers (549 zombies, 31% of the process table). This reaps
+    continuously instead. It is exactly what reap_spawned_keepers() does to an
+    already-dead keeper, only sooner and more often, so live keepers still
+    reach the session teardown untouched. Returns how many were reaped.
+    """
+    reaped = 0
+    for pid in list(_SPAWNED_KEEPERS):
+        proc, _sock = _SPAWNED_KEEPERS[pid]
+        if proc.poll() is not None:
+            del _SPAWNED_KEEPERS[pid]
+            reaped += 1
+    return reaped
+
+
 class _Keeper:
     """One request to one store keeper socket. Frames are one-shot: connect,
     send, read the reply, close. Persistence buys nothing at CLI rates and

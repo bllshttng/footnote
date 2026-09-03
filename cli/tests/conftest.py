@@ -134,6 +134,26 @@ def _reap_store_keepers():
 
 
 @pytest.fixture(autouse=True)
+def _drain_exited_keepers():
+    """Reap exited store keepers between tests, not only at session end.
+
+    The session reaper above runs ONCE, at teardown, and an exited child stays
+    in the process table as a zombie until someone collects its status - so
+    every keeper that self-exits mid-run holds a table slot under its xdist
+    worker pid until the whole session ends. Measured 2026-09-03: ~52 zombie
+    keepers per minute under four workers, 549 zombies at 31% of the process
+    table, with two suites running. Draining around every test bounds the
+    corpse window to one test; the session reaper above stays as the SIGTERM
+    backstop for keepers still LIVE at teardown, and its assert stays.
+    """
+    from fno.graph.store import drain_exited_keepers
+
+    drain_exited_keepers()
+    yield
+    drain_exited_keepers()
+
+
+@pytest.fixture(autouse=True)
 def _stable_fno_py_cmd(monkeypatch):
     """Pin source self-shellouts to a bare ``["fno-py"]`` prefix (x-69b3).
 
