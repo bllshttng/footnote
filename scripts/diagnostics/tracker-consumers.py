@@ -277,14 +277,42 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        for i, line in enumerate(text.splitlines()):
-            if re.search(r'"?graph\.json"?', line) and not line.strip().startswith("//"):
-                total += 1
-                if rel not in rust_allow:
-                    problems.append(
-                        f"unclassified rust consumer: {rel}:{i + 1}: {line.strip()[:80]}"
-                    )
+        for i, line in rust_graph_json_sites(text):
+            total += 1
+            if rel not in rust_allow:
+                problems.append(
+                    f"unclassified rust consumer: {rel}:{i + 1}: {line.strip()[:80]}"
+                )
     return total, problems
+
+
+def rust_graph_json_sites(text):
+    """Line sites of direct graph.json literals in one Rust source.
+
+    Production only: a Rust unit test lives INSIDE src/*.rs (there is no
+    tests/ directory for lib tests), so a `#[cfg(test)] mod ...` module is a
+    fixture, not a consumer. Rust test modules sit at file end, so the first
+    cfg(test)-annotated `mod` line switches the scan off for everything
+    below it; a cfg(test) line annotating anything else (a fn, a use) does
+    not.
+    """
+    sites = []
+    pending_cfg_test = False
+    in_test_module = False
+    pattern = re.compile(r'"?graph\.json"?')
+    for i, line in enumerate(text.splitlines()):
+        stripped = line.strip()
+        if in_test_module:
+            continue
+        if pattern.search(line) and not stripped.startswith("//"):
+            sites.append((i, line))
+        if re.fullmatch(r"#\[cfg\(test\)\]", stripped):
+            pending_cfg_test = True
+        elif pending_cfg_test and re.match(r"mod\s+\w+", stripped):
+            in_test_module = True
+        elif stripped:
+            pending_cfg_test = False
+    return sites
 
 
 def self_test() -> int:
@@ -306,9 +334,11 @@ def self_test() -> int:
     bad = "# read_graph()\nx = read_graph(path)"
     pattern = re.compile(r"\bread_graph\b")
     hits = [
-        (i + 1, l.strip())
-        for i, l in enumerate(bad.splitlines())
-        if pattern.search(l) and "import" not in l and not l.strip().startswith("#")
+        (i + 1, bad_line.strip())
+        for i, bad_line in enumerate(bad.splitlines())
+        if pattern.search(bad_line)
+        and "import" not in bad_line
+        and not bad_line.strip().startswith("#")
     ]
     if not hits:
         failures.append("injected forbidden reader not detected")
@@ -317,6 +347,25 @@ def self_test() -> int:
     fired, detail = _guard_fires_runtime()
     if not fired:
         failures.append(f"runtime guard control failed: {detail}")
+
+    # Rust modality controls: a production literal must be found, and a
+    # cfg(test) module's fixture must be skipped - both edges, or the latch
+    # is unproven in whichever direction it fails.
+    rust_prod = 'fn main() {\n    let p = Path::new("graph.json");\n}\n'
+    rust_fixt = (
+        "fn helper() {}\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        '    #[test]\n'
+        '    fn t() {\n'
+        '        let p = dir.join("graph.json");\n'
+        "    }\n"
+        "}\n"
+    )
+    if len(rust_graph_json_sites(rust_prod)) != 1:
+        failures.append("rust census control: production graph.json literal not detected")
+    if rust_graph_json_sites(rust_fixt):
+        failures.append("rust census control: cfg(test) fixture was not skipped")
 
     if failures:
         for f in failures:

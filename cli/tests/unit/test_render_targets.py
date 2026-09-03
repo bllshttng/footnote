@@ -92,11 +92,14 @@ def _isolate(
         "html": tmp_path / "graph.html",
         "target": tmp_path / "out" / "fno-backlog.html",
     }
-    # Canonical by default: the mutator's GRAPH_JSON comparison resolves
-    # against these pinned constants, so renders stay inside tmp_path.
-    monkeypatch.setattr(gc, "GRAPH_JSON", graph)
-    monkeypatch.setattr(gc, "GRAPH_MD", paths["md"])
-    monkeypatch.setattr(gc, "GRAPH_HTML", paths["html"])
+    # Canonical by default: pin the RESOLVER the mutator consults (setattr on
+    # the lazy facade would bake the path into the module at undo, and the
+    # resolver is what canonicality reads), then the render targets through
+    # setitem so their undo unbakes too.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setitem(vars(gc), "GRAPH_JSON", graph)
+    monkeypatch.setitem(vars(gc), "GRAPH_MD", paths["md"])
+    monkeypatch.setitem(vars(gc), "GRAPH_HTML", paths["html"])
     yield paths
     config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
 
