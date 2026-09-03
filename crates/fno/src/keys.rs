@@ -880,7 +880,7 @@ impl KeySection {
             KeySection::Navigation => "navigation",
             KeySection::WorkspacesTabs => "workspaces & tabs",
             KeySection::Panes => "panes",
-            KeySection::SidelineRows => "sideline rows (no prefix)",
+            KeySection::SidelineRows => "sideline rows (no prefix, not rebindable)",
         }
     }
 }
@@ -1401,10 +1401,12 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
         ),
         // (x-8f9d) Enter reaches portal 0; P opens the next free portal so a
         // second thread lands BESIDE the first instead of repointing it. The
-        // tab menu's Join actions then tile them.
+        // tab menu's Join actions then tile them. Like the 1-9 row, it states
+        // its own ceiling and names the way past it (x-0719): any portal is
+        // findable by index through the navigator.
         (
             "P".into(),
-            "show this row in a new portal (Enter uses portal 0)".into(),
+            "open the next free portal (Enter uses portal 0; f finds one by index)".into(),
             KeySection::SidelineRows,
         ),
         (
