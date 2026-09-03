@@ -173,15 +173,14 @@ def test_cell1_inject_body_is_envelope_wrapped(runner, mailbox, monkeypatch, tmp
     assert "<fno_mail" in bodies[0]
 
 
-def test_durable_row_is_written_before_the_inject_attempt(
+def test_cell1_inject_is_attempted_before_any_durable_write(
     runner, mailbox, monkeypatch, tmp_path
 ):
-    """Durable-first supersedes the old inject-first pin: the durable row is written
-    BEFORE resolution and the live rungs, so a kill in the resolution window
-    (resolve_or_suggest measured 70.37s under load) leaves the message on the
-    bus instead of destroying it. The row existing first is the point; the
-    inject rung is still attempted, and a confirmed delivery suppresses the
-    twin on read."""
+    """Ladder ORDER, not just outcome: demotion must never precede a live rung.
+
+    Asserting only the final state would let a refactor that writes durable
+    first and injects second still pass. This pins the sequence.
+    """
     # Seed a reachable-but-asleep session and fail every live lane, so the send
     # actually reaches the durable floor and there is an order to assert.
     # Load mail.cli before patching the store so its module-level reply-path
@@ -205,10 +204,9 @@ def test_durable_row_is_written_before_the_inject_attempt(
     runner.invoke(app, ["agents", "mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
 
     assert "inject" in order, "the socket rung was skipped entirely"
-    assert "durable" in order
-    # Exactly ONE durable write for one send: the durable-first row IS the
-    # floor, and the ladder must not write a sibling.
-    assert order.count("durable") == 1, f"the durable row was written twice: {order}"
+    assert order.index("inject") < order.index("durable"), (
+        f"durable write preceded the inject attempt: {order}"
+    )
 
 
 def _recording_durable(order):
@@ -536,7 +534,7 @@ def test_cell5_no_wake_is_attempted_for_an_unknown_token(
 
 
 # ---------------------------------------------------------------------------
-# Cell 6a / 6b: the retired-handle discriminator.
+# Cell 6a / 6b: the retired-handle discriminator (PR #491).
 # Caller-error refuses; data-artifact migrates. The two directions never blur.
 # ---------------------------------------------------------------------------
 
@@ -1018,18 +1016,10 @@ def test_exactly_one_receipt_line_per_send(
     from fno.bus.log import iter_messages
 
     rows = [m for m in iter_messages() if m.from_ == "web"]
+    assert len(rows) == 1
     if expected == "queued (durable)":
-        # One durable row, written before the rungs; the miss reuses
-        # it, so there is still exactly one row per send.
-        assert len(rows) == 1
         assert rows[0].delivery is None
         assert [m.id for m in scan_unread(rows[0].to)] == [rows[0].id]
     else:
-        # A confirmed live delivery leaves the durable-first twin PLUS the
-        # delivered_at audit record on the same msg_id; unread suppresses the
-        # twin, so the recipient never drains a second copy.
-        assert len(rows) == 2, f"expected twin + delivered_at record, got {rows}"
-        assert len({r.id for r in rows}) == 1
-        delivered = [r for r in rows if r.delivery == "hosted"]
-        assert delivered and delivered[0].delivered_at
+        assert rows[0].delivery == "hosted"
         assert scan_unread(rows[0].to) == []

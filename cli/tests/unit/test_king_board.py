@@ -345,14 +345,15 @@ def test_collect_observer_unwraps_receipt_rows(monkeypatch):
     from fno.king import board as board_mod
 
     node = _node("x-receipt")
-    # The read is in process now: patch the function the verb wraps,
-    # not a subprocess boundary.
     monkeypatch.setattr(
-        "fno.backlog.undispatched.read_planned_unclaimed",
-        lambda **kwargs: {"status": "ok", "entries_scanned": 1, "rows": [node]},
+        board_mod,
+        "_run_json",
+        lambda *args, **kwargs: _ok(
+            {"status": "ok", "entries_scanned": 1, "rows": [node]}
+        ),
     )
 
-    read = board_mod._read_undispatched()
+    read = board_mod._read_undispatched(timeout=1)
 
     assert read.ok
     assert read.rows() == [node]
@@ -361,11 +362,9 @@ def test_collect_observer_unwraps_receipt_rows(monkeypatch):
 def test_collect_observer_rejects_unreadable_receipt(monkeypatch):
     from fno.king import board as board_mod
 
-    monkeypatch.setattr(
-        "fno.backlog.undispatched.read_planned_unclaimed", lambda **kwargs: []
-    )
+    monkeypatch.setattr(board_mod, "_run_json", lambda *args, **kwargs: _ok([]))
 
-    read = board_mod._read_undispatched()
+    read = board_mod._read_undispatched(timeout=1)
 
     assert not read.ok
     assert "receipt" in read.error

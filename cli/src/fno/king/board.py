@@ -34,11 +34,10 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
-import time
+import subprocess
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from fno import paths
 from fno.agents.reachability import _ACTIVE_STATES as ACTIVE_STATES
@@ -585,14 +584,11 @@ def build_board(
 # ---------------------------------------------------------------------------
 
 
-def _run_json(cmd: list[str], *, timeout: float) -> SourceRead:
+def _run_json(cmd: list[str], *, timeout: int = 60) -> SourceRead:
     """Run a verb and parse its JSON. Every failure arrives as an error string.
 
     A non-zero exit, a timeout, a missing binary and unparseable output are all
-    the same thing to the board: this queue could not be read. The timeout is
-    REQUIRED and always the caller's derived slice of the whole-board budget -
-    there is no default, because an independent per-source default is the
-    inversion this module exists to prevent.
+    the same thing to the board: this queue could not be read.
     """
     try:
         proc = subprocess.run(
@@ -605,7 +601,7 @@ def _run_json(cmd: list[str], *, timeout: float) -> SourceRead:
     except FileNotFoundError:
         return SourceRead(error=f"{cmd[0]}: not found")
     except subprocess.TimeoutExpired:
-        return SourceRead(error=f"{' '.join(cmd)}: timed out after {timeout:.1f}s")
+        return SourceRead(error=f"{' '.join(cmd)}: timed out after {timeout}s")
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()[:500]
         return SourceRead(error=f"exit {proc.returncode}: {detail}")
@@ -615,7 +611,7 @@ def _run_json(cmd: list[str], *, timeout: float) -> SourceRead:
         return SourceRead(error=f"unparseable output: {exc}")
 
 
-def _read_prs(timeout: float, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
+def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
     """Open PRs that are green, mergeable and unmerged.
 
     Costs exactly ONE call: the rollup arrives inside the listing, so there is
@@ -712,22 +708,13 @@ def _read_prs(timeout: float, max_pr_reads: int) -> tuple[SourceRead, list[str]]
 _CAPTURE_PROJECT_CAP = 8
 
 
-def _read_outstanding() -> SourceRead:
-    """The whole four-stream payload; one in-process read feeds three queues.
-
-    `fno.outstanding.core.collect` is exactly what `fno inbox outstanding`
-    serializes, so the board calls it and carries the same dict shape.
-    """
-    from fno.outstanding.cli import _storage_root
-    from fno.outstanding.core import OutstandingError, collect
-
-    try:
-        payload = collect(_storage_root(), lane=read_lane()).as_dict()
-    except OutstandingError as exc:
-        return SourceRead(error=f"fno inbox outstanding: {exc}")
-    except Exception as exc:  # noqa: BLE001 - one unreadable queue, not a dead board
-        return SourceRead(error=f"fno inbox outstanding: {exc}")
-    return SourceRead(payload=payload if isinstance(payload, dict) else {})
+def _read_outstanding(timeout: int) -> SourceRead:
+    """The whole four-stream payload; one subprocess read feeds three queues."""
+    read = _run_json([*_fno(), "inbox", "outstanding", "--json"], timeout=timeout)
+    if not read.ok:
+        return read
+    payload = read.payload if isinstance(read.payload, dict) else {}
+    return SourceRead(payload=payload)
 
 
 def _read_lane() -> SourceRead:
@@ -774,20 +761,15 @@ def _resolve_holder_activity(holders: set[str]) -> dict[str, dict]:
 MAX_CLAIMED_NODE_READS = 20
 
 
-def _read_claimed_nodes(claims: SourceRead) -> tuple[SourceRead, set[str], list[str]]:
+def _read_claimed_nodes(
+    claims: SourceRead, timeout: int
+) -> tuple[SourceRead, set[str], list[str]]:
     """Look up the backlog row behind each LIVE node claim.
 
     This is the read that makes `stalled_holder` reachable at all. Every other
     queue starts from a list of nodes; this one starts from a list of LOCKS,
     because `fno backlog ready` has already removed exactly the nodes a wedged
     worker is holding.
-
-    In process, and this is where the fan-out died: the subprocess shape was
-    one fresh `fno` interpreter PER live claim (measured: eight live claims
-    made thirteen board spawns), each paying ~3.5s of startup to ask this
-    running package a question it can answer with one graph read. The graph
-    is read ONCE and each claim resolves against it - the same exact-only
-    `resolve_node` tiers `fno backlog get` applies.
     """
     if not claims.ok:
         return SourceRead(error=claims.error), set(), []
@@ -812,31 +794,18 @@ def _read_claimed_nodes(claims: SourceRead) -> tuple[SourceRead, set[str], list[
 
     nodes: list[dict] = []
     holders: set[str] = set()
-    from fno.graph.fuzzy import resolve_node
     from fno.graph.statuses import TERMINAL_RUNGS
-    from fno.graph.store import read_graph_strict
-
-    try:
-        entries = read_graph_strict(paths.graph_json())
-    except Exception as exc:  # noqa: BLE001 - an unreadable graph is an unreadable queue
-        return SourceRead(error=f"backlog get: {exc}"), set(), warnings
 
     for node_id, holder in held:
-        try:
-            match = resolve_node(node_id, entries)
-        except Exception as exc:  # noqa: BLE001 - one unreadable node is not an unreadable queue
-            warnings.append(f"stalled_holder: {node_id} unreadable: {exc}")
-            continue
-        node = (
-            match.candidates[0]
-            if match.kind == "exact" and match.candidates
-            else None
-        )
-        if not isinstance(node, dict):
+        read = _run_json([*_fno(), "backlog", "get", node_id], timeout=timeout)
+        if not read.ok:
             # One unreadable node is not an unreadable queue: the other claims
             # still answer. It is reported so a silent gap never reads as a
             # clean lane.
-            warnings.append(f"stalled_holder: {node_id} unreadable: not found")
+            warnings.append(f"stalled_holder: {node_id} unreadable: {read.error}")
+            continue
+        node = read.payload if isinstance(read.payload, dict) else None
+        if not node:
             continue
         # A terminal node's claim is a leak the closure release or the
         # node-aware reaper owns. Drop it at the source so it never reaches a
@@ -849,165 +818,41 @@ def _read_claimed_nodes(claims: SourceRead) -> tuple[SourceRead, set[str], list[
     return SourceRead(payload=nodes), holders, warnings
 
 
-def collect_inputs(*, budget_ms: int, max_pr_reads: int = 20) -> BoardInputs:
-    """Fetch every source inside ONE whole-board budget. Never raises; every
-    failure lands in a SourceRead - including the budget itself running out,
-    which lands as a SourceRead naming the source, never as a killed process.
-
-    ``budget_ms`` is the TOTAL the caller enforces (the Rust stop gate passes
-    its own bound in via ``--budget-ms``) or the hand-run constant. Every
-    per-source slice is derived HERE from what remains, minus the
-    serialization reserve: there is deliberately no second, independent
-    per-source timeout to invert. As the budget runs out the board stops
-    starting reads, marks each unstarted source, and emits the payload it
-    has, so the caller parses an answer instead of timing out.
-    """
-    deadline = time.monotonic() + budget_ms / 1000.0
-    state: dict[str, Optional[str]] = {"last": None}
-
-    def slice_s() -> Optional[float]:
-        """The seconds this next source may spend, or None once spent."""
-        left = deadline - time.monotonic() - SERIALIZE_RESERVE_MS / 1000.0
-        return left if left > 0 else None
-
-    def spent_error() -> str:
-        last = state["last"]
-        if last is None:
-            return "not-read: board budget exhausted before any source"
-        return f"not-read: board budget exhausted after {last}"
-
-    def start(name: str) -> Optional[float]:
-        """Claim the budget for `name`; returns its slice or None once spent."""
-        s = slice_s()
-        if s is not None:
-            state["last"] = name
-        return s
-
-    def safe(read: "Callable[[], SourceRead]") -> SourceRead:
-        """A read that raises lands as a SourceRead, exactly as a non-zero
-        exit does. This is the collector-side half of the contract; each
-        in-process reader also catches its own, so one bad source can never
-        take the board down from either layer."""
-        try:
-            return read()
-        except Exception as exc:  # noqa: BLE001 - one unreadable queue, not a dead board
-            return SourceRead(error=f"{type(exc).__name__}: {exc}")
-
-    # Fixed reads. `undispatched`, `claims`, `outstanding` and the per-claim
-    # `backlog get` run IN PROCESS (they are functions the verbs already wrap;
-    # a fresh interpreter of this same package per read cost ~3.5s of startup
-    # against ~0.25s of query). `ready` and `needs` stay subprocesses and say
-    # why at their call sites.
-    s = start("backlog undispatched")
-    undispatched = (
-        safe(_read_undispatched) if s is not None else SourceRead(error=spent_error())
+def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
+    """Fetch every source. Never raises; every failure lands in a SourceRead."""
+    undispatched = _read_undispatched(timeout)
+    claims = _run_json([*_fno(), "agents", "claim", "list", "-J", "--include-stale", "--prefix", "node:"],
+        timeout=timeout,
     )
-
-    s = start("agents claim list")
-    claims = safe(_read_claims) if s is not None else SourceRead(error=spent_error())
-
-    warnings: list[str] = []
-    s = start(SRC_PRS)
-    if s is None:
-        prs = SourceRead(error=spent_error())
-    else:
-        try:
-            prs, warnings = _read_prs(s, max_pr_reads)
-        except Exception as exc:  # noqa: BLE001 - one unreadable queue, not a dead board
-            prs, warnings = SourceRead(error=f"{type(exc).__name__}: {exc}"), []
-
-    holders: set[str] = set()
-    claimed_warnings: list[str] = []
-    s = start("stalled_holder lookups")
-    if s is None:
-        claimed_nodes = SourceRead(error=spent_error())
-    else:
-        try:
-            claimed_nodes, holders, claimed_warnings = _read_claimed_nodes(claims)
-        except Exception as exc:  # noqa: BLE001 - one unreadable queue, not a dead board
-            claimed_nodes = SourceRead(error=f"{type(exc).__name__}: {exc}")
-            holders, claimed_warnings = set(), []
+    prs, warnings = _read_prs(timeout, max_pr_reads)
+    claimed_nodes, holders, claimed_warnings = _read_claimed_nodes(claims, timeout)
     warnings.extend(claimed_warnings)
 
-    s = start(SRC_READY)
-    # `backlog ready` stays a subprocess: its selection logic lives inline in
-    # the typer command with no function behind it, and the plan for this
-    # change forbids rewriting the verb to make it importable - a second
-    # implementation of its filter chain here would drift from `next`'s.
-    ready = (
-        _run_json([*_fno(), "backlog", "ready", "--json", "-A"], timeout=s)
-        if s is not None
-        else SourceRead(error=spent_error())
-    )
-
-    s = start(SRC_QUESTIONS)
-    outstanding = (
-        safe(_read_outstanding) if s is not None else SourceRead(error=spent_error())
-    )
-
-    s = start(SRC_NEEDS)
-    # `agents needs` is owned by the Rust runtime binary, not this package:
-    # there is no Python function behind the verb to call in process, so the
-    # read crosses a real language boundary exactly like the `gh` one.
-    needs = (
-        _run_json([*_fno(), "agents", "needs", "--json"], timeout=s)
-        if s is not None
-        else SourceRead(error=spent_error())
-    )
-
     return BoardInputs(
-        ready=ready,
+        ready=_run_json([*_fno(), "backlog", "ready", "--json", "-A"], timeout=timeout),
         claims=claims,
         claimed_nodes=claimed_nodes,
         holder_activity=_resolve_holder_activity(holders),
         prs=prs,
-        outstanding=outstanding,
-        needs=needs,
+        outstanding=_read_outstanding(timeout),
+        needs=_run_json([*_fno(), "agents", "needs", "--json"], timeout=timeout),
         lane=_read_lane(),
         warnings=warnings,
         undispatched=undispatched,
     )
 
 
-def _read_undispatched() -> SourceRead:
-    """Unwrap and validate the observer receipt before board construction.
-
-    In process: `read_planned_unclaimed` is exactly the function
-    `fno backlog undispatched` wraps.
-    """
-    from fno.backlog.undispatched import read_planned_unclaimed
-
-    try:
-        receipt = read_planned_unclaimed(graph_path=paths.graph_json())
-    except Exception as exc:  # noqa: BLE001 - one unreadable queue, not a dead board
-        return SourceRead(error=f"undispatched: {exc}")
-    if not isinstance(receipt, dict) or receipt.get("status") != "ok":
+def _read_undispatched(timeout: int) -> SourceRead:
+    """Unwrap and validate the observer receipt before board construction."""
+    read = _run_json([*_fno(), "backlog", "undispatched", "--json"], timeout=timeout)
+    if not read.ok:
+        return read
+    payload = read.payload
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
         return SourceRead(error="undispatched: unreadable observer receipt")
-    rows = receipt.get("rows")
+    rows = payload.get("rows")
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         return SourceRead(error="undispatched: receipt rows are unreadable")
-    return SourceRead(payload=rows)
-
-
-def _read_claims() -> SourceRead:
-    """Live + dead node claims, in process.
-
-    The function `fno agents claim list` wraps: both roots read and merged
-    exactly as the command merges them, so a claim visible to the verb is
-    visible here and never only to one of the two.
-    """
-    from fno.claims.cli import _merge_claims_across_roots, _node_aware_root
-    from fno.claims.io import dedup_claims_roots, global_claims_root
-
-    try:
-        roots = dedup_claims_roots(
-            [global_claims_root(), _node_aware_root("node:")]
-        )
-        rows, _row_roots, _totals = _merge_claims_across_roots(
-            roots, prefix="node:", include_stale=True
-        )
-    except Exception as exc:  # noqa: BLE001 - one unreadable queue, not a dead board
-        return SourceRead(error=f"agents claim list: {exc}")
     return SourceRead(payload=rows)
 
 
@@ -1040,57 +885,41 @@ def autonomous_merge_enabled() -> bool:
         return False
 
 
-#: Whole-board budget when a human runs `fno inbox board` by hand and passes
-#: no `--budget-ms`. This is the budget for the ENTIRE board, never a
-#: per-source one: every per-source slice is derived from it (or from the
-#: caller's `--budget-ms`) at collection time. An independent per-source
-#: default is exactly what must not exist here - the old 60s-per-read default
-#: was twice the Rust caller's 30s whole-board kill, so no inner timeout could
-#: ever fire and thirteen sequential interpreter startups blew the ceiling
-#: before a single query ran.
-HAND_RUN_BUDGET_MS = 30_000
-
-#: Held back from the sources so the board can still serialize and print its
-#: payload before the caller's outer timer fires.
-SERIALIZE_RESERVE_MS = 1_000
+DEFAULT_BOARD_TIMEOUT = 60
 
 
-def _hand_run_budget_ms() -> int:
-    """Read the hand-run whole-board budget, degrading loudly on a bad value.
+def _board_timeout() -> int:
+    """Read the per-source timeout, degrading loudly on a bad value.
 
-    The env override keeps its historical unit (seconds) and its historical
-    name; what it bounds changed with this module: it now budgets the whole
-    board, not each read. A bare `int(...)` used to raise on a non-numeric
-    override, and the Rust caller saw that as "king board output unparseable" -
-    a misconfigured env var wearing the costume of a broken board. Name the
-    real cause and carry on with the default, because a typo in an env var
-    must not read as an unreadable board.
+    A bare `int(...)` raised on a non-numeric override, and the Rust caller saw
+    that as "king board output unparseable" - a misconfigured env var wearing
+    the costume of a broken board. Name the real cause and carry on with the
+    default, because a typo in an env var must not read as an unreadable board.
     """
     raw = os.environ.get("FNO_KING_BOARD_TIMEOUT")
     if raw is None:
-        return HAND_RUN_BUDGET_MS
+        return DEFAULT_BOARD_TIMEOUT
     try:
         value = int(raw)
     except ValueError:
         print(
             f"king: FNO_KING_BOARD_TIMEOUT={raw!r} is not an integer; "
-            f"using {HAND_RUN_BUDGET_MS}ms",
+            f"using {DEFAULT_BOARD_TIMEOUT}s",
             file=sys.stderr,
         )
-        return HAND_RUN_BUDGET_MS
+        return DEFAULT_BOARD_TIMEOUT
     if value <= 0:
         print(
             f"king: FNO_KING_BOARD_TIMEOUT={value} must be positive; "
-            f"using {HAND_RUN_BUDGET_MS}ms",
+            f"using {DEFAULT_BOARD_TIMEOUT}s",
             file=sys.stderr,
         )
-        return HAND_RUN_BUDGET_MS
-    return value * 1000
+        return DEFAULT_BOARD_TIMEOUT
+    return value
 
 
-def read_board(*, scope: Optional[str] = None, budget_ms: Optional[int] = None) -> dict:
-    if budget_ms is None:
-        budget_ms = _hand_run_budget_ms()
+def read_board(*, scope: Optional[str] = None) -> dict:
+    timeout = _board_timeout()
     scope_ids = None
     if scope is not None:
         try:
@@ -1114,7 +943,7 @@ def read_board(*, scope: Optional[str] = None, budget_ms: Optional[int] = None) 
                 "exit_code": 1,
             }
     return build_board(
-        collect_inputs(budget_ms=budget_ms),
+        collect_inputs(timeout=timeout),
         autonomous_merge=autonomous_merge_enabled(),
         crown_scope=scope,
         scope_ids=scope_ids,

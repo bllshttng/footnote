@@ -164,13 +164,6 @@ def scan_unread(
     # three paths would leave the nag firing on a message the sender retracted,
     # which is the symptom withdrawal exists to end.
     retracted = withdrawn_ids(msgs)
-    # A durable-first row whose msg_id also carries a confirmed-delivery record
-    # (delivered_at) was already handed to a live lane: surfacing the durable
-    # twin would deliver the message a second time. The log is
-    # append-only, so the suppression can only ride the later record's id. The
-    # cursor is never advanced on the recipient's behalf - it is positional,
-    # and moving it would silently skip anything queued behind this message.
-    delivered = {m.id for m in msgs if m.delivered_at}
 
     def _mine(m: Envelope) -> bool:
         if m.to != name:
@@ -178,8 +171,6 @@ def scan_unread(
         if not is_deliverable(m):
             return False
         if m.id in retracted:
-            return False
-        if m.id in delivered:
             return False
         if excl and (m.from_ in excl or (m.from_session and m.from_session in excl)):
             return False
