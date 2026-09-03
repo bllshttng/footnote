@@ -684,8 +684,47 @@ pub fn normalize_lock_fields(entries: &mut [Value]) {
     }
 }
 
+/// A blocker that is deferred holds its dependents, but the KIND of hold is
+/// a human decision, not an in-flight one: `fno backlog defer` parked it.
+fn is_deferred_blocker(blocker: &Value) -> bool {
+    blocker
+        .get("deferred_at")
+        .map(|v| !v.is_null())
+        .unwrap_or(false)
+        || blocker.get("status").and_then(Value::as_str) == Some("deferred")
+}
+
+/// Follow a superseded blocker to the node that actually owns the work
+/// (the `superseded_by` chain, bounded so a cycle reads as an unknown dep
+/// instead of looping). `Ok` carries the effective entry and id; `Err`
+/// carries the last id visited when the chain hits a missing row or
+/// overruns the hop bound.
+fn effective_blocker(
+    blocker: &Value,
+    blocker_id: &str,
+    by_id: &std::collections::HashMap<String, Value>,
+) -> Result<(Value, String), String> {
+    const MAX_CHAIN_HOPS: usize = 8;
+    let mut current = blocker.clone();
+    let mut current_id = blocker_id.to_string();
+    for _ in 0..MAX_CHAIN_HOPS {
+        let Some(next_id) = current.get("superseded_by").and_then(Value::as_str) else {
+            return Ok((current, current_id));
+        };
+        let Some(next) = by_id.get(next_id).cloned() else {
+            return Err(next_id.to_string());
+        };
+        current_id = next_id.to_string();
+        current = next;
+    }
+    Err(current_id) // overrun: a chain this long is a cycle in disguise
+}
+
 /// Read-time dependency readiness for one entry: never a boolean
-/// (statuses.compute_readiness).
+/// (statuses.compute_readiness). A blocker superseded by another node is
+/// chased to its live successor, so a done successor releases the dependent
+/// and an open one is named in the reason; a deferred blocker holds with a
+/// kind of its own (statuses stays blocked for both).
 pub fn compute_readiness(
     entry: &Value,
     by_id: &std::collections::HashMap<String, Value>,
@@ -705,7 +744,22 @@ pub fn compute_readiness(
             .map(|v| v.is_null())
             .unwrap_or(true)
         {
-            return ("blocked-by".to_string(), Some(bid.to_string()));
+            let (effective, effective_id) = match effective_blocker(blocker, bid, by_id) {
+                Ok(pair) => pair,
+                // Chain overrun or missing link (a cycle in disguise): the
+                // last id visited is the honest name for what holds this edge.
+                Err(last_id) => return ("unknown-dep".to_string(), Some(last_id)),
+            };
+            if effective
+                .get("completed_at")
+                .map(|v| v.is_null())
+                .unwrap_or(true)
+            {
+                if is_deferred_blocker(&effective) {
+                    return ("blocked-by-deferred".to_string(), Some(effective_id));
+                }
+                return ("blocked-by".to_string(), Some(effective_id));
+            }
         }
     }
     ("ready".to_string(), None)
@@ -2313,5 +2367,74 @@ mod tests {
         let graph = dir.path().join("graph.json");
         std::fs::write(&graph, raw).unwrap();
         assert!(matches!(read_raw(&graph), Ok(RawRead::Entries(_))));
+    }
+
+    fn readiness_fixture(entries: Vec<Value>) -> std::collections::HashMap<String, Value> {
+        index_by_id(&entries)
+    }
+
+    #[test]
+    fn readiness_releases_a_dependent_whose_blocker_is_superseded_by_a_done_node() {
+        // x-eb0e shape: the named blocker will never carry completed_at; only
+        // its live successor decides the edge.
+        let entries = vec![
+            json!({"id": "ab-1", "blocked_by": ["ab-2"]}),
+            json!({"id": "ab-2", "superseded_by": "ab-3"}),
+            json!({"id": "ab-3", "completed_at": "2026-09-01T00:00:00Z"}),
+        ];
+        let by_id = readiness_fixture(entries);
+        let a = json!({"id": "ab-1", "blocked_by": ["ab-2"]});
+        assert_eq!(
+            compute_readiness(&a, &by_id),
+            ("ready".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn readiness_names_the_live_successor_of_a_superseded_blocker() {
+        let entries = vec![
+            json!({"id": "ab-1", "blocked_by": ["ab-2"]}),
+            json!({"id": "ab-2", "superseded_by": "ab-3"}),
+            json!({"id": "ab-3"}),
+        ];
+        let by_id = readiness_fixture(entries);
+        let a = json!({"id": "ab-1", "blocked_by": ["ab-2"]});
+        assert_eq!(
+            compute_readiness(&a, &by_id),
+            ("blocked-by".to_string(), Some("ab-3".to_string()))
+        );
+    }
+
+    #[test]
+    fn readiness_marks_a_deferred_blocker_and_never_loops_a_cycle() {
+        let by_id = readiness_fixture(vec![
+            json!({"id": "ab-1", "blocked_by": ["ab-2"]}),
+            json!({"id": "ab-2", "deferred_at": "2026-08-01T00:00:00Z"}),
+            // A ring of nine rows, each superseding into the next: the chase
+            // hits the hop bound and answers unknown-dep, never loops.
+            json!({"id": "ab-4", "blocked_by": ["ab-c1"]}),
+            json!({"id": "ab-c1", "superseded_by": "ab-c2"}),
+            json!({"id": "ab-c2", "superseded_by": "ab-c3"}),
+            json!({"id": "ab-c3", "superseded_by": "ab-c4"}),
+            json!({"id": "ab-c4", "superseded_by": "ab-c5"}),
+            json!({"id": "ab-c5", "superseded_by": "ab-c6"}),
+            json!({"id": "ab-c6", "superseded_by": "ab-c7"}),
+            json!({"id": "ab-c7", "superseded_by": "ab-c8"}),
+            json!({"id": "ab-c8", "superseded_by": "ab-c9"}),
+            json!({"id": "ab-c9", "superseded_by": "ab-c1"}),
+        ]);
+        let a = json!({"id": "ab-1", "blocked_by": ["ab-2"]});
+        assert_eq!(
+            compute_readiness(&a, &by_id),
+            (
+                "blocked-by-deferred".to_string(),
+                Some("ab-2".to_string())
+            )
+        );
+        let cycle = json!({"id": "ab-4", "blocked_by": ["ab-c1"]});
+        assert_eq!(
+            compute_readiness(&cycle, &by_id),
+            ("unknown-dep".to_string(), Some("ab-c9".to_string()))
+        );
     }
 }
