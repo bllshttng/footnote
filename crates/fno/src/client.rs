@@ -2476,6 +2476,54 @@ fn lane_axis_entries(
     }
 }
 
+/// (x-1b68) Push one axis's listing rows: every key the resolution cascade
+/// knows, configured entries first (unmarked - the operator set them), then
+/// each built-in default the config does NOT override, marked `(default)` so
+/// an unconfigured install still shows what every lane resolves to. Defaults
+/// stay resolve-time values: they are never written to config. When
+/// `add_label` is `Some`, an add-key row closes the group.
+fn push_lane_axis_rows(
+    rows: &mut Vec<PopupRow>,
+    actions: &mut Vec<AuxAction>,
+    pal: &crate::sideline_color::SidelinePalette,
+    axis: &str,
+    add_label: Option<String>,
+) {
+    let entries = lane_axis_entries(pal, axis);
+    for (k, v) in &entries {
+        rows.push(PopupRow::Entry {
+            glyph: "○".into(),
+            label: format!("{k} = {v}"),
+            hint: String::new(),
+            enabled: true,
+        });
+        actions.push(AuxAction::LaneColorEdit(axis.to_string(), k.clone()));
+    }
+    let configured: std::collections::HashSet<&str> =
+        entries.iter().map(|(k, _)| k.as_str()).collect();
+    for (k, v) in crate::sideline_color::builtin_defaults(axis) {
+        if configured.contains(k) {
+            continue; // an override renders from config, unmarked
+        }
+        rows.push(PopupRow::Entry {
+            glyph: "○".into(),
+            label: format!("{k} = {v} (default)"),
+            hint: String::new(),
+            enabled: true,
+        });
+        actions.push(AuxAction::LaneColorEdit(axis.to_string(), (*k).to_string()));
+    }
+    if let Some(label) = add_label {
+        rows.push(PopupRow::Entry {
+            glyph: "＋".into(),
+            label,
+            hint: String::new(),
+            enabled: true,
+        });
+        actions.push(AuxAction::LaneColorAdd(axis.to_string()));
+    }
+}
+
 /// (x-e4f1) The color currently configured for one (axis, key), if any.
 fn current_lane_color(
     pal: &crate::sideline_color::SidelinePalette,
@@ -2562,40 +2610,24 @@ fn build_lane_color_rows(
         return (rows, actions);
     }
     if let Some((axis, buf)) = &ui.key_entry {
-        // Key-naming entry: live echo + the keys already on this axis.
+        // Key-naming entry: live echo + every key this axis resolves for
+        // (configured and default), so the operator names one that is new.
         rows.push(PopupRow::Header(format!("{axis} key: {buf}")));
         rows.push(PopupRow::Rule);
-        for (k, v) in lane_axis_entries(pal, axis) {
-            rows.push(PopupRow::Entry {
-                glyph: "○".into(),
-                label: format!("{k} = {v}"),
-                hint: String::new(),
-                enabled: true,
-            });
-            actions.push(AuxAction::LaneColorEdit(axis.clone(), k));
-        }
+        push_lane_axis_rows(&mut rows, &mut actions, pal, axis, None);
         return (rows, actions);
     }
     if let Some(axis) = &ui.axis {
         // Key list: this axis's mappings + the add-key row.
         rows.push(PopupRow::Header(axis.clone()));
         rows.push(PopupRow::Rule);
-        for (k, v) in lane_axis_entries(pal, axis) {
-            rows.push(PopupRow::Entry {
-                glyph: "○".into(),
-                label: format!("{k} = {v}"),
-                hint: String::new(),
-                enabled: true,
-            });
-            actions.push(AuxAction::LaneColorEdit(axis.clone(), k));
-        }
-        rows.push(PopupRow::Entry {
-            glyph: "＋".into(),
-            label: "add key".into(),
-            hint: String::new(),
-            enabled: true,
-        });
-        actions.push(AuxAction::LaneColorAdd(axis.clone()));
+        push_lane_axis_rows(
+            &mut rows,
+            &mut actions,
+            pal,
+            axis,
+            Some("add key".into()),
+        );
         return (rows, actions);
     }
     // Axis list: every axis's mappings grouped under its header, each group
@@ -2604,22 +2636,13 @@ fn build_lane_color_rows(
     rows.push(PopupRow::Rule);
     for axis in LANE_AXES {
         rows.push(PopupRow::Header((*axis).into()));
-        for (k, v) in lane_axis_entries(pal, axis) {
-            rows.push(PopupRow::Entry {
-                glyph: "○".into(),
-                label: format!("{k} = {v}"),
-                hint: String::new(),
-                enabled: true,
-            });
-            actions.push(AuxAction::LaneColorEdit((*axis).into(), k));
-        }
-        rows.push(PopupRow::Entry {
-            glyph: "＋".into(),
-            label: format!("add {axis} key"),
-            hint: String::new(),
-            enabled: true,
-        });
-        actions.push(AuxAction::LaneColorAdd((*axis).into()));
+        push_lane_axis_rows(
+            &mut rows,
+            &mut actions,
+            pal,
+            axis,
+            Some(format!("add {axis} key")),
+        );
     }
     (rows, actions)
 }
@@ -26392,13 +26415,161 @@ mod tests {
         assert!(rows
             .iter()
             .any(|r| matches!(r, PopupRow::Entry { label, .. } if label == "openai = blue")));
+        // The configured pair (zai, openai) plus the two route defaults the
+        // config does not override (openrouter, anthropic) are all pickable.
         assert_eq!(
             actions
                 .iter()
                 .filter(|a| matches!(a, AuxAction::LaneColorEdit(_, _)))
                 .count(),
-            2
+            4
         );
+    }
+
+    // (x-1b68) An unconfigured install renders every built-in default the
+    // cascade knows, marked, instead of four empty groups.
+    #[test]
+    fn unconfigured_palette_renders_the_cascade_defaults_marked() {
+        let (rows, actions) = build_lane_color_rows(&Default::default(), &LaneColorsUi::default());
+        let defaults = [
+            "zai = green (default)",
+            "openrouter = magenta (default)",
+            "openai = blue (default)",
+            "anthropic = cyan (default)",
+            "codex = blue (default)",
+            "agy = yellow (default)",
+            "opencode = light_magenta (default)",
+            "cursor = light_blue (default)",
+            "pi = light_yellow (default)",
+        ];
+        for want in defaults {
+            assert!(
+                rows.iter().any(
+                    |r| matches!(r, PopupRow::Entry { label, .. } if label == want)
+                ),
+                "default row {want:?} rendered"
+            );
+        }
+        // Every default is pickable: clicking it opens the picker to override.
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|a| matches!(a, AuxAction::LaneColorEdit(_, _)))
+                .count(),
+            defaults.len(),
+            "each default row carries its edit action"
+        );
+        // No configured row and no "(default)" marker leaked into model/row,
+        // the two config-only axes.
+        assert!(!rows.iter().any(
+            |r| matches!(r, PopupRow::Entry { label, .. } if label.contains("(default)") && (label.starts_with("model") || label.contains("add")))
+        ));
+    }
+
+    // (x-1b68) A configured key renders from config, unmarked, and suppresses
+    // its default row - what changed is visible against what is in effect.
+    #[test]
+    fn a_configured_override_renders_unmarked_and_hides_its_default_row() {
+        let pal = lane_pal(&[("zai", "red")]);
+        let (rows, actions) = build_lane_color_rows(&pal, &LaneColorsUi::default());
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r, PopupRow::Entry { label, .. } if label == "zai = red")),
+            "the override renders from config"
+        );
+        assert!(
+            !rows.iter().any(
+                |r| matches!(r, PopupRow::Entry { label, .. } if label.contains("zai = green"))
+            ),
+            "the overridden default row is suppressed"
+        );
+        assert!(
+            rows.iter().any(
+                |r| matches!(r, PopupRow::Entry { label, .. }
+                    if label == "openrouter = magenta (default)")
+            ),
+            "the untouched defaults still render marked"
+        );
+        // Nothing in this render path writes config.
+        assert!(actions
+            .iter()
+            .all(|a| matches!(a, AuxAction::LaneColorEdit(_, _) | AuxAction::LaneColorAdd(_))));
+    }
+
+    // (x-1b68) The REAL render path, not the row builder: the Colors tab
+    // rendered through Popup::render + popup::draw (what the live client
+    // calls), on a short viewport so the scrollbar appears. Every row must
+    // close its right border on the same column - add-key rows carrying the
+    // fullwidth glyph and plain rows alike - and the wide glyph must claim
+    // its spacer cell.
+    #[test]
+    fn colors_tab_render_path_keeps_the_right_border_on_one_column() {
+        let (rows, _) = build_lane_color_rows(&Default::default(), &LaneColorsUi::default());
+        let popup = Popup::new(rows, Anchor::Center)
+            .title("settings")
+            .tabs(vec![
+                ("general".to_string(), false),
+                ("theme".to_string(), false),
+                ("keys".to_string(), false),
+                ("colors".to_string(), true),
+            ])
+            .footer("tab switches section · esc close");
+        let term = (20u16, 60u16);
+        let rendered = popup.render(term);
+        let theme = Theme::default_theme();
+        let cols = term.1 as usize;
+        let rows_n = term.0 as usize;
+        let mut cells = vec![Cell::default(); rows_n * cols];
+        popup::draw(&mut cells, rows_n, cols, &rendered, &theme);
+        let (r0, c0) = rendered.origin;
+        let w = rendered.width;
+        let mut add_rows = 0usize;
+        let mut body_rows = 0usize;
+        let mut scrollbar_cells = 0usize;
+        for (i, line) in rendered.lines.iter().enumerate() {
+            let row = r0 + i;
+            let at = |col: usize| cells[row * cols + col].c;
+            assert!(
+                matches!(at(c0 + w - 1), '│' | '┐' | '┘'),
+                "row {i} closes its right border on one column: {:?}",
+                line.text
+            );
+            if line.text.contains('＋') {
+                add_rows += 1;
+                let lead = (c0..c0 + w)
+                    .find(|&col| cells[row * cols + col].c == '＋')
+                    .expect("the lead glyph is painted");
+                assert!(
+                    cells[row * cols + lead + 1].flags & crate::proto::cell_flags::WIDE_SPACER != 0,
+                    "the fullwidth glyph claims its spacer cell"
+                );
+            }
+            // Body rows sit between the top chrome (title + tabs) and the
+            // bottom chrome (footer + border); the scrollbar column rides
+            // inside their right border.
+            if i > 2 && i < rendered.lines.len() - 2 {
+                body_rows += 1;
+                if matches!(at(c0 + w - 2), '█' | '░') {
+                    scrollbar_cells += 1;
+                }
+            }
+        }
+        // The 15-row viewport shows harness + route groups (harness lists
+        // first); model/row add rows sit below the fold - the scroll that
+        // the scrollbar assertion below pins.
+        assert!(add_rows >= 2, "visible axes show their add rows: {add_rows}");
+        assert_eq!(
+            scrollbar_cells, body_rows,
+            "the panel scrolled and every body row carries the scrollbar column"
+        );
+        // The defaults reached the paint surface, not just the row builder.
+        let painted: String = cells
+            .iter()
+            .filter(|c| c.flags & crate::proto::cell_flags::WIDE_SPACER == 0)
+            .map(|c| c.c)
+            .collect();
+        assert!(painted.contains("light_magenta (default)"));
+        assert!(painted.contains("(default)"), "defaults visible on screen");
     }
 
     #[test]
