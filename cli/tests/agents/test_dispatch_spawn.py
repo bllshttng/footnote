@@ -501,8 +501,6 @@ def test_spawn_thread_refusal_names_axis_and_actual_accept_set(workdir) -> None:
         ],
     )
 
-    from fno.harness_names import SPAWN_HARNESSES
-
     assert result.exit_code == 2
     # 'zai' is a VENDOR name with no capability row, so the undeclared arm
     # answers first: it names the harness, says pane is the only substrate, and
@@ -516,9 +514,8 @@ def test_spawn_thread_refusal_names_axis_and_actual_accept_set(workdir) -> None:
     assert "gemini" not in result.output
     assert "agy" not in result.output
 
-    # A DECLARED pane-only harness keeps the accept-set message (x-8f7f).
-    # pi joined SPAWN_HARNESSES in x-43bd, so the declared pane-only name
-    # asserted here is agy, the harness the message itself names.
+    # A DECLARED pane-only harness is refused by its row, not as an unknown
+    # name: the seam reads features.spawn and says what the row says.
     declared = _make_runner().invoke(
         agents_app,
         [
@@ -527,31 +524,9 @@ def test_spawn_thread_refusal_names_axis_and_actual_accept_set(workdir) -> None:
         ],
     )
     assert declared.exit_code == 2
-    assert (
-        "unknown harness 'agy' on the thread substrate (--harness names the "
-        f"CLI BINARY); accepted here: {', '.join(SPAWN_HARNESSES)}."
-    ) in declared.output
-    assert "agy and gemini launch on --substrate pane only." in declared.output
-
-
-def test_spawn_thread_refusal_renders_from_accept_set(monkeypatch) -> None:
-    from fno.agents import dispatch
-
-    dispatch._check_spawn_harness("opencode")
-    monkeypatch.setattr(
-        dispatch, "SPAWN_HARNESSES", (*dispatch.SPAWN_HARNESSES, "future")
-    )
-
-    with pytest.raises(dispatch.DispatchAskError) as caught:
-        # A DECLARED harness outside SPAWN_HARNESSES renders the accept set;
-        # an undeclared name takes the undeclared arm instead, so the set is
-        # asserted through a declared pane-only harness (agy; pi joined the
-        # set in x-43bd).
-        dispatch._check_spawn_harness("agy")
-
-    expected = ", ".join((*dispatch.SPAWN_HARNESSES,))
-    assert f"accepted here: {expected}" in str(caught.value)
-    assert expected.endswith("future"), "the monkeypatched name must be rendered"
+    assert "features.spawn" in declared.output
+    assert "'absent'" in declared.output
+    assert "--substrate pane" in declared.output
 
 
 def test_spawn_pi_thread_passes_the_seam_and_headless_refuses_unmeasured() -> None:
@@ -635,17 +610,16 @@ def test_spawn_pi_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) -> 
 
 
 def test_spawn_seam_refuses_an_absent_stance(monkeypatch) -> None:
-    """A future SPAWN_HARNESSES member whose row records no stance for the
+    """A native spawn row whose state_root_grant records no stance for the
     requested substrate is refused beside the \"unmeasured\" one: silence
     would let it inherit a pass from the lanes that did run."""
     import fno.agents.harness_map as harness_map
     from fno.agents import dispatch
 
     monkeypatch.setattr(
-        dispatch,
-        "SPAWN_HARNESSES",
-        (*dispatch.SPAWN_HARNESSES, "future"),
+        harness_map, "feature_claim", lambda name, key: "native"
     )
+    monkeypatch.setattr(harness_map, "is_declared", lambda name: True)
     real_caps = harness_map.capabilities_or_undeclared
 
     def caps_without_stance(harness):

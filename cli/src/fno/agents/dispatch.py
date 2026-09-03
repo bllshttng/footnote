@@ -55,7 +55,7 @@ from fno.agents import rm_notice
 from fno.agents.context import EventContext, build_context
 from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
-from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
+from fno.agents.harnesses import KNOWN_PROVIDERS
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.reachability import mux_ref_names_a_pane
 from fno.agents.registry import (
@@ -441,43 +441,27 @@ class DispatchAskError(RuntimeError):
 def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
     """Validate a harness at the thread/headless spawn seam.
 
-    Substrate-aware (x-43bd): membership in ``SPAWN_HARNESSES`` says a seam
-    arm exists, and the capability row says which of the two lanes it opens.
-    A harness whose ``state_root_grant`` stance for the requested substrate
-    reads ``"unmeasured"`` is refused here rather than silently inheriting a
-    stance from the lanes that have run - the state-root gate downstream only
-    refuses an ABSENT key, so an ``"unmeasured"`` value would pass it.
+    The capability row is the only authority (x-a3e8): ``features.spawn``
+    says whether a seam arm is wired, and the four states get four
+    answers. A harness whose ``state_root_grant`` stance for the requested
+    substrate reads ``"unmeasured"`` is refused here rather than silently
+    inheriting a stance from the lanes that have run - the state-root gate
+    downstream only refuses an ABSENT key, so an ``"unmeasured"`` value
+    would pass it.
     """
-    if name in SPAWN_HARNESSES:
-        substrate = "headless" if headless else "thread"
-        from fno.agents.harness_map import capabilities_or_undeclared
-
-        stance = capabilities_or_undeclared(name).get("state_root_grant", {}).get(
-            substrate
-        )
-        # Absent refuses beside "unmeasured": a row that does not record a
-        # stance for the lane has not measured it, and silence would let a
-        # new member inherit a pass from the lanes that did run.
-        if stance is None or stance == "unmeasured":
-            raise DispatchAskError(
-                f"{name!r} has a spawn arm, but its {substrate} lane is not "
-                "measured: the capability row records state_root_grant."
-                f"{substrate} = {stance!r} (absent or unmeasured), and nothing "
-                "has run that lane unattended. An unattended journey for the "
-                f"lane is what clears it (pi's thread journey is the shape: "
-                "cli/tests/agents/test_pi_spawn_journey.py). "
-                f"Use --substrate pane, which every harness hosts.",
-                exit_code=2,
-            )
-        return
-    from fno.agents.harness_map import is_declared
+    substrate = "headless" if headless else "thread"
+    from fno.agents.harness_map import (
+        capabilities_or_undeclared,
+        feature_claim,
+        is_declared,
+    )
 
     if not is_declared(name):
         # x-f579: an undeclared harness HAS a lane - the pane - so this refusal
         # must name that lane rather than the accept set. It must not fall into
-        # the deprecated-harness text below either: that one names agy as a
+        # a deprecated-harness text either: one of those names agy as a
         # successor, a harness the operator never mentioned (the same trap the
-        # SPAWN_HARNESSES comment records for pi).
+        # spawn-roster comment records for pi).
         raise DispatchAskError(
             f"harness {name!r} declares no capability row (no entry in "
             "harness_capabilities.toml); --substrate pane is the only substrate "
@@ -487,14 +471,52 @@ def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
             "If you meant a model VENDOR, that is -P/--provider.",
             exit_code=2,
         )
-    accepted = ", ".join(SPAWN_HARNESSES)
-    raise DispatchAskError(
-        f"unknown harness {name!r} on the thread substrate (--harness names "
-        f"the CLI BINARY); accepted here: {accepted}.\n"
-        "agy and gemini launch on --substrate pane only.\n"
-        "If you meant a model VENDOR, that is -P/--provider.",
-        exit_code=2,
+    state = feature_claim(name, "spawn")
+    if state != "native":
+        # capable and absent are different remedies, so they refuse in
+        # different words: capable means fno has not wired the arm yet
+        # (an fno-side gap), absent means there is no arm to wire. Both,
+        # like unmeasured, name the probe that would settle the row.
+        remedy = {
+            "capable": (
+                "exposes a spawn surface, but fno has no wired arm for it: "
+                "the arm is unwired, which is fno's gap, not the harness's "
+                "limitation. Wiring it takes a driver plus an unattended "
+                "journey."
+            ),
+            "absent": (
+                "has no spawn arm on this lane; the pane is its lane."
+            ),
+            "unmeasured": (
+                "has not had its spawn lane measured; nobody has looked, "
+                "so fno will not guess."
+            ),
+        }[state]
+        raise DispatchAskError(
+            f"harness {name!r} is refused on the {substrate} substrate: "
+            f"features.spawn = {state!r} in harness_capabilities.toml. "
+            f"{remedy} Settle it with 'fno agents harness probe {name}' "
+            "when the instrument exists. "
+            f"Use --substrate pane, which every harness hosts.",
+            exit_code=2,
+        )
+    stance = capabilities_or_undeclared(name).get("state_root_grant", {}).get(
+        substrate
     )
+    # Absent refuses beside "unmeasured": a row that does not record a
+    # stance for the lane has not measured it, and silence would let a
+    # new member inherit a pass from the lanes that did run.
+    if stance is None or stance == "unmeasured":
+        raise DispatchAskError(
+            f"{name!r} has a spawn arm, but its {substrate} lane is not "
+            "measured: the capability row records state_root_grant."
+            f"{substrate} = {stance!r} (absent or unmeasured), and nothing "
+            "has run that lane unattended. An unattended journey for the "
+            f"lane is what clears it (pi's thread journey is the shape: "
+            "cli/tests/agents/test_pi_spawn_journey.py). "
+            f"Use --substrate pane, which every harness hosts.",
+            exit_code=2,
+        )
 
 
 # Exit-code taxonomy (documented here for cross-language parity with Rust Task 1.3):
