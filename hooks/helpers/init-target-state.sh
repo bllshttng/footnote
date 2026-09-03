@@ -417,7 +417,9 @@ fi
 # The legacy interactive spelling gets a LOUD no-op, never a quiet one: prose
 # still manufactures nothing (that is x-9d11's whole point), but an operator
 # typing the pre-x-9d11 bare token deserves to learn their refusal did not
-# land rather than discover it from a merged PR. Warn-only by design.
+# land rather than discover it from a merged PR. Warn-only by design; the
+# carrier vocabulary's owner is harness_map (_TARGET_FAMILY and the flag
+# spelling), not this script.
 if [[ " ${INITIAL_INPUT:-} " == *" no-merge "* ]]; then
   echo "[init-target-state] note: input contains a bare 'no-merge' token, which is no longer a control input - it set nothing. Pass --no-merge to 'fno do target start/init' for the refusal posture." >&2
 fi
