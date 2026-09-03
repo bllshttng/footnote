@@ -196,10 +196,12 @@ fi
 # read" (the 2026-08-30 shape: open PRs sat uncovered while their reviews
 # reported clean over empty diffs).
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
-session_id=""; harness=""
+session_id=""; harness_session_id=""; harness=""
 if [[ -f "$repo_root/.fno/target-state.md" ]]; then
   session_id=$(grep '^session_id:' "$repo_root/.fno/target-state.md" \
     | head -1 | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
+  harness_session_id=$(grep '^harness_session_id:' "$repo_root/.fno/target-state.md" \
+    | head -1 | sed 's/^harness_session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
   harness=$(grep '^harness:' "$repo_root/.fno/target-state.md" \
     | head -1 | sed 's/^harness:[[:space:]]*//' | tr -d '[:space:]' || true)
 fi
@@ -211,13 +213,13 @@ if [[ -n "$local_branch" ]]; then
 fi
 invocation_id="$(printf '%s' "$hold_json" \
   | jq -r '.metadata.invocation_id // empty' 2>/dev/null || true)"
-if [[ -z "$invocation_id" && -n "$session_id" ]]; then
+if [[ -z "$invocation_id" && -n "$harness_session_id" && "$harness_session_id" != "null" ]]; then
   invocation_id="$(jq -r '.invocation_id // empty' \
-    "${FNO_HOME:-$HOME/.fno}/review-invocations/${session_id}.json" \
+    "${FNO_HOME:-$HOME/.fno}/review-invocations/${harness_session_id}.json" \
     2>/dev/null || true)"
 fi
 if [[ -z "$invocation_id" ]]; then
-  invocation_id="ri-$(date -u +%s 2>/dev/null || echo 0)-$$"
+  invocation_id="UNJOINED"
 fi
 review_verb="$(printf '%s' "$hold_json" | jq -r '.metadata.verb // "/code-review"' 2>/dev/null || echo /code-review)"
 # jq reads EMPTY stdin as zero inputs: no output, exit 0, so the || default

@@ -66,6 +66,35 @@ stored() { # echoes one field of the last emitted payload: stored <jq-path>
   tail -1 "$TMP/last-emit.txt" | jq -r "$1 // \"<missing>\""
 }
 
+# 0. The sender sidecar is keyed by the harness session, not the target run.
+# The two manifest fields are deliberately different so the old lookup cannot
+# pass by reading the target-run name.
+mkdir -p "$REPO/.fno" "$TMP/fno-home/review-invocations"
+cat > "$REPO/.fno/target-state.md" <<'STATE'
+session_id: target-run
+harness_session_id: harness-run
+harness: claude
+STATE
+printf '%s\n' '{"invocation_id":"ri-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","target_session_id":"harness-run"}' \
+  > "$TMP/fno-home/review-invocations/harness-run.json"
+rm -f "$TMP/last-emit.txt"
+(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+  FNO="$TMP/fno-stub" FNO_HOME="$TMP/fno-home" bash "$EMITTER" code-review pass) >/dev/null 2>&1
+got="$(stored '.invocation_id')"
+[[ "$got" == "ri-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ]] \
+  && pass "emitter adopts sidecar by harness_session_id" \
+  || fail "sidecar key: want sender id, got '$got'"
+
+# A missing bridge is a visible state, not a locally minted id.
+rm -f "$TMP/fno-home/review-invocations/harness-run.json" "$TMP/last-emit.txt"
+(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+  FNO="$TMP/fno-stub" FNO_HOME="$TMP/fno-home" bash "$EMITTER" code-review pass) >/dev/null 2>&1
+got="$(stored '.invocation_id')"
+[[ "$got" == "UNJOINED" ]] \
+  && pass "missing sidecar emits UNJOINED" \
+  || fail "missing sidecar marker: want UNJOINED, got '$got'"
+rm -f "$REPO/.fno/target-state.md"
+
 # 1. On a branch: the payload records the branch, and the receipt names it.
 rm -f "$TMP/last-emit.txt"
 RECEIPT="$(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
