@@ -702,3 +702,65 @@ def test_reap_open_session_record_does_not_remove_closed_row(tmp_path):
     assert result["row_removed"] is False
     assert result["remaining_open_do"] == 0
     assert json.loads(path.read_text())["entries"][0]["sessions"][0]["ended_at"]
+
+
+# -- blocked_by edge settlement (settle_edges verb) --
+
+
+def test_settle_blocked_by_edges_prunes_rewires_and_holds():
+    """The full sweep's write-side twin of the readiness chase: an edge to a
+    done blocker prunes, one superseded by an open successor rewires to name
+    it, and a deferred or missing blocker holds with a receipt naming why."""
+    from fno.graph.store import settle_blocked_by_edges_via_store
+
+    entries = [
+        {"id": "ab-1", "blocked_by": ["ab-done"]},
+        {"id": "ab-done", "completed_at": "2026-09-01T00:00:00Z"},
+        {"id": "ab-2", "blocked_by": ["ab-old"]},
+        {"id": "ab-old", "superseded_by": "ab-new"},
+        {"id": "ab-new"},
+        {"id": "ab-3", "blocked_by": ["ab-def"]},
+        {"id": "ab-def", "deferred_at": "2026-08-01T00:00:00Z"},
+        {"id": "ab-4", "blocked_by": ["ab-ghost"]},
+        {"id": "ab-5", "blocked_by": ["ab-live"]},
+        {"id": "ab-live"},
+    ]
+    out = settle_blocked_by_edges_via_store(entries)
+    by_id = {e["id"]: e for e in out["entries"]}
+    assert by_id["ab-1"]["blocked_by"] == []
+    assert by_id["ab-2"]["blocked_by"] == ["ab-new"]
+    # Deferred and missing hold: a human decision and data loss are not a
+    # sweep's to erase.
+    assert by_id["ab-3"]["blocked_by"] == ["ab-def"]
+    assert by_id["ab-4"]["blocked_by"] == ["ab-ghost"]
+    # A live blocker gets no receipt: a correct edge is not a finding.
+    assert by_id["ab-5"]["blocked_by"] == ["ab-live"]
+    kinds = sorted(r["kind"] for r in out["receipts"])
+    assert kinds == [
+        "blocked_by_held",
+        "blocked_by_held",
+        "blocked_by_pruned",
+        "blocked_by_rewired",
+    ]
+    rewired = next(r for r in out["receipts"] if r["kind"] == "blocked_by_rewired")
+    assert rewired["node"] == "ab-2"
+    assert rewired["blocker"] == "ab-old"
+    assert set(out["blocked_by"].keys()) == {"ab-1", "ab-2"}
+
+
+def test_settle_blocked_by_edges_superseded_by_done_prunes_with_the_chain():
+    """A dead blocker whose successor already shipped prunes, and the receipt
+    names the chain so the receipt alone explains the drop."""
+    from fno.graph.store import settle_blocked_by_edges_via_store
+
+    entries = [
+        {"id": "ab-1", "blocked_by": ["ab-old"]},
+        {"id": "ab-old", "superseded_by": "ab-done"},
+        {"id": "ab-done", "completed_at": "2026-09-01T00:00:00Z"},
+    ]
+    out = settle_blocked_by_edges_via_store(entries)
+    by_id = {e["id"]: e for e in out["entries"]}
+    assert by_id["ab-1"]["blocked_by"] == []
+    (receipt,) = out["receipts"]
+    assert receipt["kind"] == "blocked_by_pruned"
+    assert "superseded by ab-done" in receipt["reason"]

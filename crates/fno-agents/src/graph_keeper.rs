@@ -413,6 +413,11 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
             graph_store::apply_readiness_overlay(&mut entries);
             entries
         }),
+        // The blocked_by edge settlement (the full-sweep mutator's write-side
+        // twin of the overlay chase): client-shipped rows in, rewritten rows
+        // plus one receipt per settled edge out. No file I/O, no publish -
+        // the caller persists under the graph lock.
+        "settle_edges" => handle_settle_edges(&params),
         "normalize_plan_path" => {
             let normalized = graph_store::normalize_plan_path(opt_str(&params, "path"));
             Ok(json!({ "path": normalized }))
@@ -472,6 +477,23 @@ fn handle_pure(
         .clone();
     let out = f(entries, params);
     Ok(json!({ "entries": out }))
+}
+
+/// The blocked_by edge settlement over client-shipped rows: rewritten rows,
+/// one receipt per settled edge, and the per-node change map
+/// (graph_store::settle_blocked_by_edges).
+fn handle_settle_edges(params: &Value) -> Result<Value, StoreError> {
+    let entries: Vec<Value> = params
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| StoreError::Invalid("settle_edges needs entries".into()))?
+        .clone();
+    let (entries, receipts, changes) = graph_store::settle_blocked_by_edges(entries);
+    Ok(json!({
+        "entries": entries,
+        "receipts": receipts,
+        "blocked_by": changes,
+    }))
 }
 
 /// The raw file bytes + their digest, for the hash-validated read

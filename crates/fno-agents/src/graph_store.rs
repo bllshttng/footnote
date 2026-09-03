@@ -821,6 +821,159 @@ pub fn pending_supersession_reason(entry: &Value) -> Option<String> {
     ))
 }
 
+/// Open in the `_reconcile.node_is_open` sense: neither done nor
+/// superseded-closed. Keyed off the underlying fields so it holds on rows
+/// that have not been through a status recompute.
+fn is_open_entry(entry: &Value) -> bool {
+    if entry
+        .get("completed_at")
+        .map(|v| !v.is_null())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    let Some(successor) = entry.get("superseded_by").and_then(Value::as_str) else {
+        return true;
+    };
+    if successor.is_empty() {
+        return true;
+    }
+    match entry.get("supersession") {
+        Some(r) if r.is_object() => r
+            .get("verified_at")
+            .map(|v| v.is_null())
+            .unwrap_or(true),
+        _ => false,
+    }
+}
+
+/// The blocked_by edge settlement: the write-side twin of the chase in
+/// `compute_readiness`. For every open node, prune an edge whose blocker is
+/// done (directly or through its supersession chain), rewire one superseded
+/// to its live successor, and hold the deferred or missing with a receipt -
+/// a deferred blocker is a human decision and a missing one is data loss,
+/// neither is a sweep's to erase. A live blocker gets no receipt: a correct
+/// edge is not a finding. Returns the rewritten entries, one receipt per
+/// settled edge, and the per-node new `blocked_by` list for every node the
+/// sweep changed; the caller persists under the graph lock (the Python full
+/// sweep applies the change map and reports the receipts).
+pub fn settle_blocked_by_edges(
+    mut entries: Vec<Value>,
+) -> (
+    Vec<Value>,
+    Vec<Value>,
+    std::collections::BTreeMap<String, Vec<Value>>,
+) {
+    let by_id = index_by_id(&entries);
+    let mut receipts: Vec<Value> = Vec::new();
+    let mut changes: std::collections::BTreeMap<String, Vec<Value>> = Default::default();
+    for e in entries.iter_mut() {
+        if !is_dict(e) || !is_open_entry(e) {
+            continue;
+        }
+        let Some(blockers) = e.get("blocked_by").and_then(Value::as_array) else {
+            continue;
+        };
+        if blockers.is_empty() {
+            continue;
+        }
+        let node_id = entry_id(e).unwrap_or("").to_string();
+        let mut settled: Vec<Value> = Vec::with_capacity(blockers.len());
+        let mut changed = false;
+        for blocker_id in blockers {
+            let Some(bid) = blocker_id.as_str() else {
+                settled.push(blocker_id.clone());
+                continue;
+            };
+            let Some(target) = by_id.get(bid) else {
+                receipts.push(json_receipt(
+                    "blocked_by_held",
+                    &node_id,
+                    bid,
+                    "blocker missing from graph",
+                ));
+                settled.push(blocker_id.clone());
+                continue;
+            };
+            if !target
+                .get("completed_at")
+                .map(|v| v.is_null())
+                .unwrap_or(true)
+            {
+                receipts.push(json_receipt("blocked_by_pruned", &node_id, bid, "blocker done"));
+                changed = true;
+                continue;
+            }
+            if target.get("superseded_by").and_then(Value::as_str).is_none() {
+                if is_deferred_blocker(target) {
+                    receipts.push(json_receipt(
+                        "blocked_by_held",
+                        &node_id,
+                        bid,
+                        "blocker deferred",
+                    ));
+                    settled.push(blocker_id.clone());
+                } else {
+                    settled.push(blocker_id.clone());
+                }
+                continue;
+            }
+            let (effective, effective_id) = match effective_blocker(target, bid, &by_id) {
+                Ok(pair) => pair,
+                Err(last_id) => {
+                    receipts.push(json_receipt(
+                        "blocked_by_held",
+                        &node_id,
+                        bid,
+                        &format!("supersession chain stops at {last_id}"),
+                    ));
+                    settled.push(blocker_id.clone());
+                    continue;
+                }
+            };
+            if effective
+                .get("completed_at")
+                .map(|v| v.is_null())
+                .unwrap_or(true)
+            {
+                let already_named = settled
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|s| s == effective_id);
+                if !already_named {
+                    settled.push(Value::String(effective_id.clone()));
+                }
+                receipts.push(json_receipt(
+                    "blocked_by_rewired",
+                    &node_id,
+                    bid,
+                    "blocker superseded; edge now names the live successor",
+                ));
+                changed = true;
+            } else {
+                receipts.push(json_receipt(
+                    "blocked_by_pruned",
+                    &node_id,
+                    bid,
+                    &format!("superseded by {effective_id}, which is done"),
+                ));
+                changed = true;
+            }
+        }
+        if changed {
+            changes.insert(node_id.clone(), settled.clone());
+            e.as_object_mut()
+                .unwrap()
+                .insert("blocked_by".to_string(), Value::Array(settled));
+        }
+    }
+    (entries, receipts, changes)
+}
+
+fn json_receipt(kind: &str, node: &str, blocker: &str, reason: &str) -> Value {
+    serde_json::json!({"kind": kind, "node": node, "blocker": blocker, "reason": reason})
+}
+
 /// The one overlay wrapper every status consumer shares
 /// (statuses.readiness_status): terminal statuses pass through, everything
 /// else overlays compute_readiness.
@@ -2435,6 +2588,76 @@ mod tests {
         assert_eq!(
             compute_readiness(&cycle, &by_id),
             ("unknown-dep".to_string(), Some("ab-c9".to_string()))
+        );
+    }
+
+    #[test]
+    fn settle_prunes_rewires_and_holds_blocked_by_edges() {
+        let entries = vec![
+            json!({"id": "ab-1", "blocked_by": ["ab-done"]}),
+            json!({"id": "ab-done", "completed_at": "2026-09-01T00:00:00Z"}),
+            json!({"id": "ab-2", "blocked_by": ["ab-old"]}),
+            json!({"id": "ab-old", "superseded_by": "ab-new"}),
+            json!({"id": "ab-new"}),
+            json!({"id": "ab-3", "blocked_by": ["ab-old2"]}),
+            json!({"id": "ab-old2", "superseded_by": "ab-done2"}),
+            json!({"id": "ab-done2", "completed_at": "2026-09-01T00:00:00Z"}),
+            json!({"id": "ab-4", "blocked_by": ["ab-def"]}),
+            json!({"id": "ab-def", "deferred_at": "2026-08-01T00:00:00Z"}),
+            // A record-less superseded row is itself closed: never settled.
+            json!({"id": "ab-9", "superseded_by": "ab-new", "blocked_by": ["ab-done"]}),
+        ];
+        let (entries, receipts, _) = settle_blocked_by_edges(entries);
+        let by_id = index_by_id(&entries);
+        let edge = |id: &str| {
+            by_id.get(id)
+                .map(|e| e.get("blocked_by").cloned())
+                .unwrap_or(None)
+        };
+        assert_eq!(edge("ab-1"), Some(json!([])));
+        assert_eq!(edge("ab-2"), Some(json!(["ab-new"])));
+        assert_eq!(edge("ab-3"), Some(json!([])));
+        assert_eq!(edge("ab-4"), Some(json!(["ab-def"])));
+        // ab-9 is closed (superseded, no record): its edge is untouched.
+        assert_eq!(edge("ab-9"), Some(json!(["ab-done"])));
+        let kinds: Vec<&str> = receipts
+            .iter()
+            .filter_map(|r| r.get("kind").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "blocked_by_pruned",
+                "blocked_by_rewired",
+                "blocked_by_pruned",
+                "blocked_by_held",
+            ]
+        );
+        let pruned2 = receipts
+            .iter()
+            .find(|r| r.get("blocker").and_then(Value::as_str) == Some("ab-old2"))
+            .unwrap();
+        assert!(pruned2["reason"]
+            .as_str()
+            .unwrap()
+            .contains("superseded by ab-done2"));
+    }
+
+    #[test]
+    fn settle_is_idempotent_over_a_settled_graph() {
+        let entries = vec![
+            json!({"id": "ab-1", "blocked_by": ["ab-2"]}),
+            json!({"id": "ab-2", "superseded_by": "ab-3"}),
+            json!({"id": "ab-3"}),
+        ];
+        let (entries, receipts, _) = settle_blocked_by_edges(entries);
+        assert_eq!(receipts.len(), 1);
+        let (entries2, receipts2, _) = settle_blocked_by_edges(entries);
+        assert!(receipts2.is_empty(), "{receipts2:?}");
+        let by_id = index_by_id(&entries2);
+        assert_eq!(
+            by_id.get("ab-1").unwrap().get("blocked_by").cloned(),
+            Some(json!(["ab-3"]))
         );
     }
 }
