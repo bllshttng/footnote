@@ -56,7 +56,7 @@ import json
 import re
 from pathlib import Path
 from types import MappingProxyType
-from typing import List, Mapping, NamedTuple, Optional
+from typing import Callable, List, Mapping, NamedTuple, Optional
 
 import typer
 
@@ -1121,6 +1121,124 @@ def _merge_claims_across_roots(
     return all_rows, row_roots, totals
 
 
+class ClaimSilenceRow(NamedTuple):
+    """One live claim whose transcript is silent (or unreadable). ``age_s``
+    is None only for the unreadable bucket."""
+
+    key: str
+    holder: str
+    age_s: Optional[float]
+
+
+class ClaimSilenceReport(NamedTuple):
+    """The whole `--silent-after` read: what was scanned and what it found.
+
+    ``scanned`` is the count of LIVE claims examined (suspect/stale/corrupted
+    claims are a different lane's concern - reap - not this one's). Always
+    populated, including at zero, so the caller can print a positive marker
+    on a healthy fleet rather than nothing at all (x-1182: a detector that
+    prints nothing on a healthy fleet is indistinguishable from one that
+    never ran, which is how a 50-minute stall went unnoticed).
+    """
+
+    scanned: int
+    silent: List[ClaimSilenceRow]
+    unreadable: List[ClaimSilenceRow]
+
+
+def _row_worktree_cwd(row: Mapping) -> Optional[str]:
+    """The worktree path a claim ROW's metadata carries, if any.
+
+    Mirrors :func:`_claim_worktree_cwd`'s field precedence, but for a plain
+    ``dict`` row (as returned by ``list_claims_with_counts``) rather than a
+    ``Claim`` object with attribute access - ``getattr(a_dict, "metadata",
+    None)`` silently returns ``None`` for every dict, so the two cannot share
+    one implementation without a type-shape bug.
+    """
+    meta = row.get("metadata") or {}
+    for key in ("worktree", "cwd"):
+        value = meta.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _default_claim_age_lookup(session_id: str, cwd: str) -> Optional[float]:
+    """The real silence probe: seconds since a session's transcript last
+    advanced, or None when unreadable. Read-only; never raises.
+
+    Reuses the same tail resolver the watchdog and the reap predicate trust
+    (:func:`fno.agents.watchdog.tail_facts`) rather than writing a fourth
+    transcript reader.
+    """
+    try:
+        import time as _time
+
+        from fno.agents.watchdog import tail_facts
+
+        facts = tail_facts(session_id, cwd)
+        if facts is None or facts.last_event_epoch is None:
+            return None
+        return max(0.0, _time.time() - facts.last_event_epoch)
+    except Exception:  # noqa: BLE001 - an unreadable transcript answers nothing
+        return None
+
+
+def _claim_silence_report(
+    rows: List[dict],
+    *,
+    threshold_s: float,
+    age_lookup: Callable[[str, str], Optional[float]],
+) -> ClaimSilenceReport:
+    """Pure over injected rows + an injected age lookup - no live fleet needed.
+
+    Only ``state == "live"`` rows are silence candidates. This REPORTS and
+    never acts: it must never feed `reap_cmd`, whose abandonment probe
+    deliberately demands a stronger signal (abandonment proven by FINDING the
+    holder, never by failing to find it) than a bare silence read supplies.
+
+    An unreadable holder, cwd, or transcript is its own bucket, never folded
+    into "silent" (would falsely accuse a healthy claim this lane cannot
+    read) or "healthy" (would hide the gap from the operator).
+    """
+    scanned = 0
+    silent: List[ClaimSilenceRow] = []
+    unreadable: List[ClaimSilenceRow] = []
+    for row in rows:
+        if row.get("state") != "live":
+            continue
+        scanned += 1
+        key = row.get("key", "")
+        holder = row.get("holder") or ""
+        session_id = _holder_session_id(holder)
+        cwd = _row_worktree_cwd(row)
+        if not session_id or not cwd:
+            unreadable.append(ClaimSilenceRow(key, holder, None))
+            continue
+        age_s = age_lookup(session_id, cwd)
+        if age_s is None:
+            unreadable.append(ClaimSilenceRow(key, holder, None))
+        elif age_s > threshold_s:
+            silent.append(ClaimSilenceRow(key, holder, age_s))
+    return ClaimSilenceReport(scanned=scanned, silent=silent, unreadable=unreadable)
+
+
+def _render_claim_silence_report(report: ClaimSilenceReport, *, threshold_s: float) -> str:
+    """Human-readable summary line, ALWAYS a positive marker (never empty,
+    never silent on a healthy fleet)."""
+    minutes = threshold_s / 60.0
+    line = (
+        f"scanned {report.scanned} live claim(s); {len(report.silent)} silent "
+        f"past {minutes:g}m"
+    )
+    for row in report.silent:
+        age_m = row.age_s / 60.0 if row.age_s is not None else 0.0
+        line += f"\n  SILENT {row.key} holder={row.holder} age={age_m:.1f}m"
+    for row in report.unreadable:
+        line += f"\n  unreadable {row.key} holder={row.holder}"
+    return line
+
+
 @cli.command(name="list")
 def list_cmd(
     prefix: str = typer.Option("", "--prefix", help="Filter keys starting with this prefix"),
@@ -1128,6 +1246,17 @@ def list_cmd(
     json_output: bool = typer.Option(False, "--json", "-J"),
     root: Optional[Path] = typer.Option(
         None, "--root", help="Explicit claims root (repo root); overrides the both-roots default"
+    ),
+    silent_after: Optional[str] = typer.Option(
+        None,
+        "--silent-after",
+        help=(
+            "Opt-in: report every LIVE claim whose holder's transcript has "
+            "not advanced in this long ('15m', '1h'). Harness-neutral - "
+            "catches codex/opencode/hand-started workers the claude-only "
+            "watchdog fleet_rows cannot see. Off by default: a per-row "
+            "transcript stat is not free (574 lockfiles measured in one root)."
+        ),
     ),
 ) -> None:
     """Enumerate claims under the claims directory.
@@ -1154,6 +1283,28 @@ def list_cmd(
         deduped_roots, prefix=prefix, include_stale=include_stale
     )
     n_roots = len(deduped_roots)
+
+    if silent_after is not None:
+        ttl_ms = _parse_ttl(silent_after)
+        if ttl_ms is None:
+            raise typer.BadParameter("--silent-after requires a duration, e.g. '15m'")
+        threshold_s = ttl_ms / 1000.0
+        report = _claim_silence_report(
+            all_rows, threshold_s=threshold_s, age_lookup=_default_claim_age_lookup
+        )
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "scanned": report.scanned,
+                        "silent": [r._asdict() for r in report.silent],
+                        "unreadable": [r._asdict() for r in report.unreadable],
+                    }
+                )
+            )
+        else:
+            typer.echo(_render_claim_silence_report(report, threshold_s=threshold_s))
+        return
 
     if json_output:
         # Bare list, matching the original shape: a scripted caller already
