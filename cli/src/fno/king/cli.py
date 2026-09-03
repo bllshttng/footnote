@@ -98,6 +98,64 @@ def init_cmd(
     typer.echo(f"king: manifest written: {manifest_path}")
     typer.echo(f"fno_id: {fields['fno_id']}")
     typer.echo(f"scope:  {fields['scope']}")
+    _warn_uncrowned_row(scope)
+
+
+def _warn_uncrowned_row(scope: str) -> None:
+    """Say out loud when the manifest is armed but the row carries no crown.
+
+    Arming and authority are separate on purpose: `king init` writes the
+    manifest and never stamps the row, because a session that could stamp its
+    own crown could crown itself. `fno agents crown` owns that write and needs
+    an attended shell or a superior crown.
+
+    The split is correct and the SILENCE about it is not. Three readers -
+    `king done`, `king manifest-path`, and `hooks/king-postcompact-reinject.sh`
+    - all key on the row's crown fields, and all three fail CLOSED and QUIETLY
+    when it is absent: done refuses, manifest-path answers empty at exit 0, and
+    the post-compact brief never arrives. A king can hold a valid manifest all
+    evening and never learn its authority is invisible to the machine.
+
+    So this warns, and never refuses: the manifest is written and the loop arms
+    on the FILE, which works. Warning-only also keeps a legitimate arm-then-
+    crown ordering usable.
+
+    Three outcomes, kept distinct because an absence has more than one cause.
+    A resolved row with no crown is the real gap. An unresolvable row is an
+    unanswered question, not a finding, and says so rather than claiming the
+    crown is missing.
+    """
+    from fno.agents.crown import (
+        AGENT_UNREGISTERED,
+        REGISTRY_UNREADABLE,
+        calling_agent_row,
+        crown_reading,
+    )
+
+    try:
+        row = calling_agent_row()
+    except Exception:  # noqa: BLE001 - a warning never breaks a written manifest
+        return
+    if row is REGISTRY_UNREADABLE or row is AGENT_UNREGISTERED or row is None:
+        typer.echo(
+            "king: warning: manifest armed, but this session resolves to no "
+            "registry row, so its crown cannot be checked. Run `/fno-me` to "
+            "register, then have an attended shell run "
+            f"`fno agents crown <handle> --scope {scope}`.",
+            err=True,
+        )
+        return
+    if crown_reading(row) is not None:
+        return
+    handle = getattr(row, "name", "") or "<handle>"
+    typer.echo(
+        "king: warning: manifest armed, but this row carries NO crown, so "
+        "`fno agents king done` will refuse, `fno agents king manifest-path` "
+        "will answer empty, and the post-compact king brief will never arrive. "
+        "Ask an attended shell to run "
+        f"`fno agents crown {handle} --scope {scope}`.",
+        err=True,
+    )
 
 
 @king_app.command("done")

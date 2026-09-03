@@ -276,6 +276,16 @@ if [[ -f "${SCRIPT_DIR}/outstanding-session-start.sh" ]]; then
     outstanding_content=$(bash "${SCRIPT_DIR}/outstanding-session-start.sh" 2>/dev/null || true)
 fi
 
+# 7a. standing law — the operator rulings this session must not re-derive.
+#     Delegates to the same hook Claude registers directly in hooks.json, so
+#     both harnesses run ONE implementation. Never gated on a crown: law is
+#     fleet-wide, and gating an injection on a field a different verb writes is
+#     what made king-postcompact-reinject.sh exit 0 for every king in the fleet.
+law_content=""
+if [[ -f "${SCRIPT_DIR}/law-session-start.sh" ]]; then
+    law_content=$(bash "${SCRIPT_DIR}/law-session-start.sh" 2>/dev/null || true)
+fi
+
 # 7b. spawn seed provenance (x-3a64) — the <fno_mail> envelope for the seed that
 #     started this worker. The seed itself must stay byte-identical (normalize.sh
 #     and the harness REPL both key off its leading slash), so the attribution
@@ -380,6 +390,7 @@ append_section "$hygiene_content"
 append_section "$nudge_content"
 append_section "$mail_content"
 append_section "$outstanding_content"
+append_section "$law_content"
 append_section "$seed_prov_content"
 append_section "$orphan_content"
 
