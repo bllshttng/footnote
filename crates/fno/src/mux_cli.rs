@@ -7558,7 +7558,7 @@ mod tests {
         // `--dead-only` skips the fold: every tab is "kept" only in the sense
         // that nobody looked, and the receipt says so instead of folding them
         // into a real reason.
-        let tabs = vec![used_shell_tab(51), used_shell_tab(52)];
+        let tabs = [used_shell_tab(51), used_shell_tab(52)];
         let outcome = TabPruneOutcome {
             kept: tabs.len(),
             kept_not_probed: tabs.len(),
