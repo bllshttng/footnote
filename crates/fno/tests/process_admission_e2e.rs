@@ -1,8 +1,8 @@
-use fno::process_admission::BYPASS_HINT;
 use fno::process_admission::{
     configured_max_processes, decide_panes, decide_processes, AdmissionDecision, Census, MaxPanes,
     MaxProcesses, PaneCount, Scope,
 };
+use fno::process_admission::{ADMISSION_ACCEPTED, BYPASS_HINT};
 use std::process::Stdio;
 use std::sync::{Arc, Barrier, Mutex, OnceLock};
 
@@ -237,14 +237,22 @@ fn ac5_err_invalid_off_switch_fails_closed_with_accepted_values() {
     let previous_mode = std::env::var_os("FNO_PROCESS_ADMISSION");
 
     std::env::set_var("FNO_PROCESS_ADMISSION", "maybe");
-    let error = match fno::process_admission::admit_fleet() {
-        Ok(_) => panic!("invalid switch must refuse"),
+    let outcome = fno::process_admission::admit_fleet().map(|_| ());
+    // Restore before asserting: an assertion that panics with the switch
+    // still set leaks "maybe" into every later test in this binary, and the
+    // cascade reads as unrelated failures.
+    restore_env("FNO_PROCESS_ADMISSION", previous_mode);
+
+    let error = match outcome {
+        Ok(()) => panic!("invalid switch must refuse"),
         Err(error) => error,
     };
-
     assert!(error.detail().contains("FNO_PROCESS_ADMISSION"));
-    assert!(error.detail().contains("on|off"));
-    restore_env("FNO_PROCESS_ADMISSION", previous_mode);
+    assert!(
+        error.detail().contains(ADMISSION_ACCEPTED),
+        "{}",
+        error.detail()
+    );
 }
 
 fn restore_env(name: &str, previous: Option<std::ffi::OsString>) {

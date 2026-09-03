@@ -186,11 +186,12 @@ impl AdmissionPermit {
             return Ok(());
         }
         let path = admission_marker_path()?;
-        let start = crate::proto::pid_start_time(pid).ok_or_else(|| {
-            io::Error::other(format!(
-                "process start time unavailable for child pid {pid}"
-            ))
-        })?;
+        // An unrecorded child undercounts the census by one. A killed child
+        // is a lost spawn, and every caller kills on Err. The smaller harm
+        // wins, so an unreadable start time skips the marker.
+        let Some(start) = marker_start_time(pid, crate::proto::pid_start_time) else {
+            return Ok(());
+        };
         let mut markers = OpenOptions::new().create(true).append(true).open(&path)?;
         #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
@@ -281,19 +282,47 @@ const LOCK_FILE: &str = "fno-process-admission.lock";
 const CHILD_MARKERS_FILE: &str = "fno-process-admission.children";
 const ADMISSION_SWITCH: &str = "FNO_PROCESS_ADMISSION";
 
+/// The accepted spellings. An invalid value refuses the spawn, so this is
+/// the one switch in the codebase whose vocabulary an operator meets while
+/// already wedged; it accepts the obvious synonyms rather than failing
+/// closed on a plausible one. The arrays are the parser and
+/// `ADMISSION_ACCEPTED` is what the operator reads, so a test holds the two
+/// together rather than a comment asking that they be kept in step.
+const ADMISSION_OFF: [&str; 4] = ["off", "false", "0", "no"];
+const ADMISSION_ON: [&str; 4] = ["on", "true", "1", "yes"];
+/// Shared with the e2e assertions, like `BYPASS_HINT`, so the accepted set
+/// an operator is shown can only drift in one place.
+pub const ADMISSION_ACCEPTED: &str = "on|true|1|yes and off|false|0|no";
+
+/// True when the switch says the gate is disabled.
+fn parse_admission_switch(value: &str) -> Result<bool, String> {
+    // Trimming first: a templated env file loves to append a newline or a
+    // trailing space, and a switch that refuses on whitespace is a switch
+    // that strands a wedged fleet over invisible bytes.
+    let trimmed = value.trim();
+    if ADMISSION_OFF
+        .iter()
+        .any(|accepted| trimmed.eq_ignore_ascii_case(accepted))
+    {
+        return Ok(true);
+    }
+    if ADMISSION_ON
+        .iter()
+        .any(|accepted| trimmed.eq_ignore_ascii_case(accepted))
+    {
+        return Ok(false);
+    }
+    Err(format!(
+        "{ADMISSION_SWITCH}={value:?} is invalid; accepted values are {ADMISSION_ACCEPTED}"
+    ))
+}
+
 fn admission_disabled() -> Result<bool, String> {
     match std::env::var(ADMISSION_SWITCH) {
-        // Trimming first: a templated env file loves to append a newline or a
-        // trailing space, and a switch that refuses on whitespace is a switch
-        // that strands a wedged fleet over invisible bytes.
-        Ok(value) if value.trim().eq_ignore_ascii_case("off") => Ok(true),
-        Ok(value) if value.trim().eq_ignore_ascii_case("on") => Ok(false),
-        Ok(value) => Err(format!(
-            "{ADMISSION_SWITCH}={value:?} is invalid; accepted values are on|off"
-        )),
+        Ok(value) => parse_admission_switch(&value),
         Err(std::env::VarError::NotPresent) => Ok(false),
         Err(std::env::VarError::NotUnicode(_)) => Err(format!(
-            "{ADMISSION_SWITCH} is not valid UTF-8; accepted values are on|off"
+            "{ADMISSION_SWITCH} is not valid UTF-8; accepted values are {ADMISSION_ACCEPTED}"
         )),
     }
 }
@@ -758,7 +787,46 @@ fn process_census() -> Census {
     }
 }
 
+/// Count the live children the ledger records, and rewrite the ledger to
+/// just those. An `Err` here collapses the whole census to
+/// `Census::Unavailable`, which refuses every spawn on the machine, so it is
+/// reserved for a failure to read state AT ALL: no marker path, an
+/// unreadable ledger file, no process root names. A single entry that is
+/// dead, unreadable or unparseable counts as nothing and is pruned.
 fn marker_count(rows: &[ProcessRow], attributed: &HashSet<u32>) -> Result<usize, String> {
+    marker_count_with(rows, attributed, crate::proto::pid_start_time)
+}
+
+/// The bounded start-time read both the ledger census and `record_child`
+/// depend on. A just-spawned or just-exited child can briefly report alive
+/// before macOS exposes its start time, so retry a little; positive death
+/// evidence ends the wait early. `None` means the pid contributes nothing:
+/// on macOS `pid_start_time` and `pid_is_zombie` share one `proc_pidinfo`
+/// call, so a defunct process reads as no-start-time AND not-a-zombie, and
+/// `kill(pid, 0)` answers EPERM rather than ESRCH for a process that is not
+/// ours. Unreadable is the only honest verdict, and it is never fatal.
+fn marker_start_time(pid: u32, read: fn(u32) -> Option<u64>) -> Option<u64> {
+    for attempt in 0..=5 {
+        if let Some(start) = read(pid) {
+            return Some(start);
+        }
+        if crate::proto::pid_confirmed_dead(pid as libc::pid_t)
+            || crate::proto::pid_is_zombie(pid as libc::pid_t)
+        {
+            return None;
+        }
+        if attempt < 5 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+    None
+}
+
+fn marker_count_with(
+    rows: &[ProcessRow],
+    attributed: &HashSet<u32>,
+    read_start: fn(u32) -> Option<u64>,
+) -> Result<usize, String> {
     let path =
         admission_marker_path().map_err(|e| format!("child marker state unavailable: {e}"))?;
     let raw = match std::fs::read_to_string(&path) {
@@ -775,16 +843,17 @@ fn marker_count(rows: &[ProcessRow], attributed: &HashSet<u32>) -> Result<usize,
     let mut seen = HashSet::new();
     let mut unattributed_live = 0;
     for line in raw.lines().filter(|line| !line.trim().is_empty()) {
-        let (pid, recorded_start) = line
-            .trim()
-            .split_once(':')
-            .ok_or_else(|| "malformed child marker ledger: missing start time".to_string())?;
-        let pid = pid
-            .parse::<u32>()
-            .map_err(|error| format!("malformed child marker ledger: {error}"))?;
-        let recorded_start = recorded_start
-            .parse::<u64>()
-            .map_err(|error| format!("malformed child marker ledger: {error}"))?;
+        // The ledger is appended to by concurrent spawns, so a torn line is
+        // possible. It names no pid anyone can verify, so it counts as
+        // nothing and is pruned below. Refusing every spawn on the machine
+        // over one unparseable line is never the smaller harm.
+        let Some((pid, recorded_start)) = line.trim().split_once(':') else {
+            continue;
+        };
+        let (Ok(pid), Ok(recorded_start)) = (pid.parse::<u32>(), recorded_start.parse::<u64>())
+        else {
+            continue;
+        };
         if !seen.insert(pid) {
             continue;
         }
@@ -793,33 +862,12 @@ fn marker_count(rows: &[ProcessRow], attributed: &HashSet<u32>) -> Result<usize,
         {
             continue;
         }
-        let mut observed_start = None;
-        for attempt in 0..=5 {
-            observed_start = crate::proto::pid_start_time(pid);
-            if observed_start.is_some() {
-                break;
-            }
-            // A just-spawned or just-exited child can briefly report alive
-            // before macOS exposes its start time. Keep the bound tiny and
-            // require positive death evidence or a later readable start time.
-            if crate::proto::pid_confirmed_dead(pid as libc::pid_t)
-                || crate::proto::pid_is_zombie(pid as libc::pid_t)
-            {
-                break;
-            }
-            if attempt < 5 {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        }
-        let Some(observed_start) = observed_start else {
-            if crate::proto::pid_confirmed_dead(pid as libc::pid_t)
-                || crate::proto::pid_is_zombie(pid as libc::pid_t)
-            {
-                continue;
-            }
-            return Err(format!(
-                "process start time unavailable for marker pid={pid}"
-            ));
+        // A pid whose start time will not resolve can never be matched
+        // against its recorded one, so it can never be confirmed as this
+        // child. Dropping it is the correct census, not a degradation, and
+        // leaving it out of `live` prunes it from the ledger below.
+        let Some(observed_start) = marker_start_time(pid, read_start) else {
+            continue;
         };
         if observed_start != recorded_start {
             continue;
@@ -1080,4 +1128,204 @@ fn snapshot_linux() -> Result<Vec<ProcessRow>, String> {
         return Err("process snapshot is empty".into());
     }
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The namespace is a process-global env var, so two of these tests
+    /// running in parallel would each resolve the other's ledger path. The
+    /// guard is held for the whole test, not just the setup.
+    static LEDGER_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Holds the ledger lock and puts both env vars back on drop.
+    ///
+    /// Neither var may leak past the test. `server.rs` latches `FNO_E2E`
+    /// into a `OnceLock` for the life of the process, and `pty.rs` reads it
+    /// per call, so one leaked set here turns on E2E behavior for every
+    /// later test in this binary. Neither may simply be left unset either:
+    /// without `FNO_E2E`, `admission_state_suffix()` answers `global` and
+    /// this helper would delete the operator's live ledger.
+    struct LedgerEnv {
+        _guard: Option<std::sync::MutexGuard<'static, ()>>,
+        previous: [(&'static str, Option<std::ffi::OsString>); 2],
+    }
+
+    impl LedgerEnv {
+        /// Save both vars now and put them back on drop. The lock is
+        /// optional so a caller already holding it can save and restore
+        /// inside its own critical section.
+        fn capture(guard: Option<std::sync::MutexGuard<'static, ()>>) -> Self {
+            Self {
+                _guard: guard,
+                previous: [
+                    ("FNO_E2E", std::env::var_os("FNO_E2E")),
+                    (
+                        "FNO_MUX_ADMISSION_NAMESPACE",
+                        std::env::var_os("FNO_MUX_ADMISSION_NAMESPACE"),
+                    ),
+                ],
+            }
+        }
+    }
+
+    impl Drop for LedgerEnv {
+        fn drop(&mut self) {
+            for (name, value) in &self.previous {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    fn isolate(label: &str) -> (LedgerEnv, PathBuf) {
+        let guard = LEDGER_ENV
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let env = LedgerEnv::capture(Some(guard));
+        std::env::set_var("FNO_E2E", "1");
+        std::env::set_var(
+            "FNO_MUX_ADMISSION_NAMESPACE",
+            format!("{label}-{}", std::process::id()),
+        );
+        let path = admission_marker_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        (env, path)
+    }
+
+    /// The guard is the whole reason these tests may touch a process-global
+    /// env var at all, so prove it puts both back rather than trusting the
+    /// shape of the Drop impl.
+    #[test]
+    fn ledger_guard_restores_both_env_vars_on_drop() {
+        // The lock is taken here, not by `capture`, so the before-read, the
+        // mutation and the after-read all sit in one critical section. A
+        // baseline read outside it would see a sibling's value and this test
+        // would report that as a leak.
+        let _lock = LEDGER_ENV
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = (
+            std::env::var_os("FNO_E2E"),
+            std::env::var_os("FNO_MUX_ADMISSION_NAMESPACE"),
+        );
+        {
+            let _env = LedgerEnv::capture(None);
+            std::env::set_var("FNO_E2E", "1");
+            std::env::set_var("FNO_MUX_ADMISSION_NAMESPACE", "guard-restores");
+            assert_eq!(std::env::var_os("FNO_E2E").as_deref(), Some("1".as_ref()));
+        }
+        assert_eq!(std::env::var_os("FNO_E2E"), before.0);
+        assert_eq!(std::env::var_os("FNO_MUX_ADMISSION_NAMESPACE"), before.1);
+    }
+
+    /// The measured 2026-09-02 wedge: one alive-but-unreadable marker pid
+    /// took the whole census down and refused every spawn on the machine.
+    /// Our own pid stands in for it (alive, not a zombie, not confirmed
+    /// dead) paired with a reader that never resolves a start time.
+    #[test]
+    fn unreadable_marker_pid_is_skipped_and_pruned_not_fatal() {
+        let (_guard, path) = isolate("marker-unreadable");
+        let pid = std::process::id();
+        std::fs::write(&path, format!("{pid}:12345\n")).unwrap();
+
+        let count = marker_count_with(&[], &HashSet::new(), |_| None)
+            .expect("an unreadable marker pid must not collapse the census");
+
+        assert_eq!(count, 0);
+        assert!(
+            !path.exists(),
+            "the unreadable entry must be pruned from the ledger"
+        );
+    }
+
+    /// A readable marker still counts, so the skip above is a targeted drop
+    /// and not a census that always answers zero.
+    #[test]
+    fn readable_unattributed_marker_still_counts() {
+        let (_guard, path) = isolate("marker-readable");
+        let pid = std::process::id();
+        std::fs::write(&path, format!("{pid}:777\n")).unwrap();
+
+        let count = marker_count_with(&[], &HashSet::new(), |_| Some(777)).unwrap();
+
+        assert_eq!(count, 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `record_child` runs in exactly the window the bounded retry exists
+    /// for, and every caller kills the child on Err. An unreadable start
+    /// time must cost one uncounted marker, never the spawn.
+    #[test]
+    fn record_child_skips_the_marker_rather_than_killing_the_child() {
+        let (_guard, path) = isolate("record-child");
+        let permit = AdmissionPermit {
+            _lock: None,
+            scope: Scope::Fleet,
+            count: 0,
+            ceiling: DEFAULT_MAX_PROCESSES,
+            track_children: true,
+        };
+
+        // Far above any OS pid ceiling, so it cannot exist and has no
+        // readable start time. Positive as an i32: u32::MAX would cast to
+        // -1, and kill(-1, 0) addresses every process we may signal.
+        permit
+            .record_child(0x7fff_fff0)
+            .expect("an unreadable start time must not fail the spawn");
+
+        assert!(!path.exists(), "no marker line may be written");
+    }
+
+    /// The ledger is appended to by concurrent spawns, so a torn line is
+    /// possible. One must not refuse every spawn on the machine.
+    #[test]
+    fn malformed_ledger_line_is_skipped_and_pruned_not_fatal() {
+        let (_guard, path) = isolate("marker-malformed");
+        let pid = std::process::id();
+        std::fs::write(&path, format!("not-a-marker\n{pid}:777\n")).unwrap();
+
+        let count = marker_count_with(&[], &HashSet::new(), |_| Some(777))
+            .expect("a torn ledger line must not collapse the census");
+
+        assert_eq!(count, 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{pid}:777\n")
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A recovery switch that refuses on a plausible spelling strands the
+    /// operator it exists to rescue.
+    #[test]
+    fn recovery_switch_accepts_every_documented_synonym() {
+        for value in ["off", "OFF", " false ", "0", "No"] {
+            assert_eq!(parse_admission_switch(value), Ok(true), "{value:?}");
+        }
+        for value in ["on", "ON", " true ", "1", "Yes"] {
+            assert_eq!(parse_admission_switch(value), Ok(false), "{value:?}");
+        }
+        let error = parse_admission_switch("maybe").unwrap_err();
+        assert!(error.contains(ADMISSION_ACCEPTED), "{error}");
+    }
+
+    /// The refusal an operator reads must list every spelling the parser
+    /// takes. A synonym added to an array and forgotten in the string would
+    /// otherwise leave the recovery vocabulary understated.
+    #[test]
+    fn accepted_set_text_lists_every_spelling_the_parser_takes() {
+        for accepted in ADMISSION_OFF.iter().chain(ADMISSION_ON.iter()) {
+            assert!(
+                ADMISSION_ACCEPTED
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|word| word == *accepted),
+                "{accepted:?} is accepted but missing from {ADMISSION_ACCEPTED:?}"
+            );
+        }
+    }
 }
