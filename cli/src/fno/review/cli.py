@@ -179,22 +179,17 @@ def classify(
     )
 
 
-#: The machine-parseable marker every round comment carries. The head is the
-#: FULL sha the attestation pinned, so idempotency and reader parsing key on
-#: one string.
+#: The machine-parseable marker every round comment carries: idempotency key
+#: and reader contract in one string, keyed on the FULL attested head.
 _ROUND_MARKER = "<!-- fno-review-round head={head} round={round} reviewer={reviewer} -->"
 
 
 def _render_round_comment(
     record: dict[str, Any], head: str, round_no: int, reviewer: str
 ) -> str:
-    """The classified record into one human- and machine-readable comment.
-
-    The marker line is the idempotency key and the parser contract; the body
-    names each finding's outcome, and a finding with no disposition is listed
-    as such - the law's sentence that an undisposed finding keeps the PR
-    uncovered, rendered where the human reading the PR can see it.
-    """
+    """The record as one human- and machine-readable comment: one line per
+    finding, an undisposed finding listed as such (it keeps the PR uncovered,
+    rendered where the human reading the PR can see it)."""
     findings = record.get("findings") or []
     dispositions = {
         entry.get("finding_key"): entry
@@ -219,38 +214,6 @@ def _render_round_comment(
     return "\n".join(lines)
 
 
-def _gh_api(args: list[str], *, timeout: float = 30.0) -> tuple[int, str, str]:
-    """One bounded `gh api` REST call: `(returncode, stdout, stderr)`."""
-    import subprocess
-
-    proc = subprocess.run(
-        ["gh", "api", *args], capture_output=True, text=True, timeout=timeout
-    )
-    return proc.returncode, proc.stdout, proc.stderr
-
-
-def _pr_for_head_branch(slug: str, branch: str) -> tuple[Optional[int], str]:
-    """The open PR whose head branch is `branch`, over REST. `(None, reason)`
-    on a miss - the caller posts nothing, which is the no-PR posture."""
-    owner = slug.split("/")[0]
-    rc, out, err = _gh_api(
-        [
-            "-X", "GET",
-            f"repos/{slug}/pulls?head={owner}:{branch}&state=open&per_page=10",
-        ]
-    )
-    if rc != 0:
-        return None, (err.strip() or "pull list read failed")
-    try:
-        rows = json.loads(out)
-    except ValueError:
-        return None, "pull list returned output that is not JSON"
-    if not isinstance(rows, list) or not rows:
-        return None, f"no open PR for branch {branch}"
-    number = rows[0].get("number")
-    return (int(number), "") if isinstance(number, int) else (None, "pull list malformed")
-
-
 @review_app.command("post-dispositions", hidden=True)
 def post_dispositions(
     findings_file: Path = typer.Option(
@@ -265,24 +228,17 @@ def post_dispositions(
     pr: Optional[int] = typer.Option(
         None, "--pr", help="The PR number; resolved from the current branch when omitted."
     ),
-    branch: Optional[str] = typer.Option(
-        None, "--branch", help="The head branch to resolve the PR from (default: current)."
-    ),
 ) -> None:
     """Post ONE per-round disposition comment on the PR, over REST.
 
     The comment is the human-visible index of a round's outcomes: one line per
     finding, each naming its disposition or its absence. Idempotent at
-    (pr, head): the marker line is the key, and a second post at the same head
-    exits 0 having written nothing. A round with no dispositions posts nothing
-    - the comment exists to carry outcomes.
+    (pr, head) via the marker line; a round with no dispositions posts nothing.
     """
     import subprocess
-    from pathlib import Path as _Path
 
     try:
-        text = findings_file.read_text(encoding="utf-8")
-        payload = json.loads(text)
+        payload = json.loads(findings_file.read_text(encoding="utf-8"))
     except OSError as exc:
         typer.secho(f"post-dispositions: cannot read {findings_file}: {exc}", err=True)
         raise typer.Exit(code=2) from exc
@@ -299,58 +255,33 @@ def post_dispositions(
         typer.echo("post-dispositions: no dispositions in the record; nothing posted")
         return
 
-    # The round number rides the record when the producer supplied one.
-    round_no = record.get("review_round") or 1
+    # Slug, PR number, and PR head all resolve through the pr REST module -
+    # one implementation, not a review-side twin.
+    from fno.pr._proc import run
+    from fno.pr._rest import (
+        _slug_or_reason,
+        fetch_pr_info_rest,
+        resolve_current_pr_number_rest,
+    )
 
-    # The repo identity is LOCAL (a git remote parse), never a network read.
-    from fno.paths import repo_identity_from_remote_url
-
-    try:
-        remote = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=10, check=True,
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError) as exc:
-        typer.secho(f"post-dispositions: no origin remote to resolve the repo: {exc}", err=True)
-        raise typer.Exit(code=3) from exc
-    identity = repo_identity_from_remote_url(remote)
-    # The REST path wants `owner/repo`; the identity carries the host as its
-    # first segment, and gh's own auth decides whether it is reachable.
-    slug = identity.split("/", 1)[1] if identity and identity.count("/") >= 2 else identity
-    if not slug or slug.count("/") != 1:
-        typer.secho(f"post-dispositions: origin remote does not name a GitHub repo: {remote}", err=True)
+    slug, why = _slug_or_reason(None)
+    if not slug:
+        typer.secho(f"post-dispositions: {why}", err=True)
         raise typer.Exit(code=3)
-
     if pr is None:
-        if not branch:
-            try:
-                branch = subprocess.run(
-                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                    capture_output=True, text=True, timeout=10, check=True,
-                ).stdout.strip()
-            except (OSError, subprocess.SubprocessError):
-                branch = ""
-        if not branch or branch == "HEAD":
-            typer.secho("post-dispositions: no PR given and no branch to resolve one from", err=True)
-            raise typer.Exit(code=3)
-        pr, reason = _pr_for_head_branch(slug, branch)
+        # No PR yet: the attestation stands alone, the comment waits for the
+        # PR. Not an error - a pre-push emit is a legitimate shape.
+        pr, why = resolve_current_pr_number_rest()
         if pr is None:
-            # No PR yet: the attestation stands alone, the comment waits for
-            # the PR. Not an error - a pre-push emit is a legitimate shape.
-            typer.echo(f"post-dispositions: no PR to post on ({reason}); nothing posted")
+            typer.echo(f"post-dispositions: no PR to post on ({why}); nothing posted")
             return
-
     # Head-pin check, the same rule request-self-review applies: the comment
     # describes one head and must never attach to another.
-    rc, out, err = _gh_api(["-X", "GET", f"repos/{slug}/pulls/{pr}"])
-    if rc != 0:
-        typer.secho(f"post-dispositions: PR read failed: {err.strip()}", err=True)
+    info, why = fetch_pr_info_rest(str(pr))
+    if info is None:
+        typer.secho(f"post-dispositions: PR read failed: {why}", err=True)
         raise typer.Exit(code=3)
-    try:
-        pr_head = (json.loads(out) or {}).get("head", {}).get("sha")
-    except ValueError:
-        typer.secho("post-dispositions: PR read returned output that is not JSON", err=True)
-        raise typer.Exit(code=3)
+    pr_head = info.get("head_sha")
     if pr_head and pr_head != head:
         typer.secho(
             f"post-dispositions: refusing: PR {pr} head {str(pr_head)[:9]} is not the "
@@ -360,59 +291,49 @@ def post_dispositions(
         raise typer.Exit(code=3)
 
     # Idempotent at (pr, head): the marker line is the key.
-    rc, out, _ = _gh_api(
-        ["-X", "GET", f"repos/{slug}/issues/{pr}/comments?per_page=100"]
-    )
-    if rc == 0 and f"<!-- fno-review-round head={head} " in out:
+    existing = run(["gh", "api", f"repos/{slug}/issues/{pr}/comments?per_page=100"])
+    if existing.ok and f"<!-- fno-review-round head={head} " in existing.stdout:
         typer.echo(f"post-dispositions: round comment for {head[:9]} already posted")
         return
 
-    body = _render_round_comment(record, head, int(round_no), reviewer)
-    write = subprocess.run(
-        ["gh", "api", "-X", "POST", f"repos/{slug}/issues/{pr}/comments", "-f", f"body={body}"],
-        capture_output=True, text=True, timeout=30,
+    round_no = int(record.get("review_round") or 1)
+    body = _render_round_comment(record, head, round_no, reviewer)
+    write = run(
+        [
+            "gh", "api", "-X", "POST", f"repos/{slug}/issues/{pr}/comments",
+            "-f", f"body={body}",
+        ]
     )
-    if write.returncode != 0:
-        typer.secho(f"post-dispositions: comment post failed: {write.stderr.strip()}", err=True)
+    if not write.ok:
+        typer.secho(
+            f"post-dispositions: comment post failed: {(write.stderr or '').strip()}",
+            err=True,
+        )
         raise typer.Exit(code=3)
     typer.echo(f"post-dispositions: posted round comment on PR {pr} at {head[:9]}")
 
 
 @review_app.command("invocations", hidden=True)
-def invocations(
-    action: str = typer.Argument(
-        "list",
-        help="`list` reports lost invocations; `settle` emits one lost "
-        "attestation per unanswered one older than the TTL.",
-    ),
-) -> None:
-    """Report or settle lost review invocations.
+def invocations() -> None:
+    """Settle lost review invocations into the attestation ledger.
 
     A sent invocation with no answering attestation after
     `review.invocation_ttl_minutes` is a dispatch the fleet paid for that
-    coverage never saw. `settle` turns each into one `lost` attestation row,
-    so the gate reads a named refusal instead of waiting on silence.
-    Idempotent: an invocation with any answering attestation settles once
-    and never again.
+    coverage never saw; each becomes one `lost` attestation row, so the gate
+    reads a named refusal instead of waiting on silence. Idempotent: an
+    invocation with any answering attestation settles once and never again.
     """
     from fno.review.invocation import settle_lost_invocations
 
-    if action not in ("list", "settle"):
-        typer.secho(f"invocations: unknown action '{action}' (list | settle)", err=True)
-        raise typer.Exit(code=2)
     try:
         from fno.config import load_settings
 
         ttl = int(getattr(load_settings().review, "invocation_ttl_minutes", 15))
     except Exception:  # noqa: BLE001 - unreadable config keeps the shipped default
         ttl = 15
-    rows = settle_lost_invocations(ttl_minutes=ttl, emit=action == "settle")
+    rows = settle_lost_invocations(ttl_minutes=ttl)
     if not rows:
         typer.echo(f"invocations: none lost beyond the {ttl}m TTL")
-        return
-    if action == "list":
-        for row in rows:
-            typer.echo(f"  lost {row['invocation_id']}: {row.get('reason', 'unanswered')}")
         return
     settled = sum(1 for row in rows if row.get("settled"))
     typer.echo(f"invocations: {len(rows)} lost, {settled} settled now")

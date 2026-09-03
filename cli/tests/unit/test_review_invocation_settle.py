@@ -121,17 +121,6 @@ def test_fresh_invocation_stays_unsettled(tmp_path):
     assert rows == []
 
 
-def test_dry_run_reports_without_writing(tmp_path):
-    events = _write_journal(tmp_path, [_invocation_line("ri-4", _sent_20m_ago())])
-    repo = _git_init(tmp_path)
-    before = events.read_text(encoding="utf-8")
-    rows = settle_lost_invocations(
-        ttl_minutes=15, cwd=repo, events_path=events, now=NOW, emit=False
-    )
-    assert len(rows) == 1
-    assert events.read_text(encoding="utf-8") == before
-
-
 def test_no_git_repo_refuses_with_a_named_reason(tmp_path):
     events = _write_journal(tmp_path, [_invocation_line("ri-5", _sent_20m_ago())])
     nowhere = tmp_path / "nowhere"

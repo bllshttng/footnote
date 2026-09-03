@@ -247,10 +247,8 @@ def parse_review_invocation(raw: str) -> dict[str, Any] | None:
     }
 
 
-#: The invocation id the single writer stamps when it cannot join a real one.
-#: Never treated as a settle marker: a writer that could not join emitted no
-#: row this module can close, so an attestation carrying this sentinel settles
-#: nothing.
+#: The invocation id the single writer stamps when it cannot join a real one;
+#: an attestation carrying it settles nothing (no row exists to close).
 _UNJOINED = "UNJOINED"
 
 
@@ -261,31 +259,18 @@ def settle_lost_invocations(
     cwd: Path | None = None,
     events_path: Path | None = None,
     now: Any = None,
-    emit: bool = True,
 ) -> "list[dict[str, Any]]":
     """Turn every lost review invocation into one settled ledger row.
 
     A ``review_invocation`` row with ``stage: sent`` and no answering
-    ``review_attestation`` after ``ttl_minutes`` (the doctor's lost threshold,
-    promoted to config as ``review.invocation_ttl_minutes``) is a dispatch the
-    fleet paid for and coverage never saw. Left alone it reads as "never
-    asked": the gate waits on a row that will never come. This emits ONE
-    ``review_attestation`` per lost row through the single validated builder -
-    verdict ``fail``, ``output_contract: lost``, the invocation id carried in
-    ``data`` - so the gate's next read says ``uncovered`` with a named reason
-    instead of silence, and the loop that already re-fires on uncovered does
-    the re-dispatching. No new scheduler: settling makes the loss VISIBLE;
-    what acts on it is the machinery that exists.
-
-    Idempotent by a positive marker, never by absence: an invocation with any
-    attestation row carrying its id is answered (a real review, a refusal row,
-    or an earlier settle) and is never settled twice. A second run adds zero
-    rows.
-
-    Returns one dict per invocation examined: ``{"invocation_id", "settled",
-    "reason"}``, where ``settled`` is False with a reason naming why the emit
-    was refused (unreadable head, detached HEAD) - a settle that cannot pin a
-    commit writes nothing, exactly like the writer it extends.
+    ``review_attestation`` after ``ttl_minutes`` reads as "never asked"; this
+    emits ONE ``review_attestation`` per lost row through the single validated
+    builder (verdict ``fail``, ``output_contract: lost``), so coverage reads
+    ``uncovered`` with a named reason and the loop that already re-fires on
+    uncovered re-dispatches. Settling makes the loss VISIBLE; it schedules
+    nothing new. Idempotent by a positive marker: any attestation carrying the
+    id answers it, once. ``settled: False`` names the refusal and writes
+    nothing.
     """
     from datetime import datetime, timedelta, timezone
 
@@ -299,14 +284,8 @@ def settle_lost_invocations(
     answered: "set[str]" = set()
     try:
         with Path(events_path).open(encoding="utf-8") as stream:
-            for raw in stream:
-                # Substring prefilter before the JSON parse: the journal is
-                # shared and reaches tens of MB, and this sweep runs on the
-                # stop path. A line without either type name cannot match.
-                if (
-                    "review_invocation" not in raw
-                    and "review_attestation" not in raw
-                ):
+            for raw in stream:  # prefiltered: the journal is tens of MB on the stop path
+                if "review_invocation" not in raw and "review_attestation" not in raw:
                     continue
                 try:
                     event = json.loads(raw)
@@ -330,48 +309,38 @@ def settle_lost_invocations(
                             continue
                         if event_time.tzinfo is None:
                             event_time = event_time.replace(tzinfo=timezone.utc)
-                        # First sent row wins: a retry of the same id carries
-                        # the same attempt, and the OLDER timestamp is the
+                        # First sent row wins: the OLDER timestamp is the
                         # conservative TTL input.
                         sent.setdefault(invocation_id, (event_time, data))
                     elif data.get("stage") == "refused":
                         answered.add(invocation_id)
                 elif event.get("type") == "review_attestation":
                     answered.add(invocation_id)
-    except FileNotFoundError:
-        return []
-    except OSError:
+    except (FileNotFoundError, OSError):
         return []
 
+    lost = [
+        (invocation_id, event_time, data)
+        for invocation_id, (event_time, data) in sorted(sent.items())
+        if event_time <= cutoff and invocation_id not in answered
+    ]
+    if not lost:
+        return []
+    head_sha, branch = _settle_head_pin(cwd)
     results: "list[dict[str, Any]]" = []
-    for invocation_id, (event_time, data) in sorted(sent.items()):
-        if event_time > cutoff or invocation_id in answered:
-            continue
-        head_sha, branch = _settle_head_pin(cwd)
+    for invocation_id, _event_time, data in lost:
         if not head_sha or not branch:
             results.append(
                 {
                     "invocation_id": invocation_id,
                     "settled": False,
-                    "reason": (
-                        "no readable head to pin (not a git repo or detached HEAD); "
-                        "the row stays unsettled"
-                    ),
+                    "reason": "no readable head to pin (not a git repo or detached HEAD)",
                 }
             )
             continue
         from fno.events import _build, append_event
 
         reviewer = str(data.get("verb") or "/code-review").lstrip("/").split(":")[-1]
-        if not emit:
-            results.append(
-                {
-                    "invocation_id": invocation_id,
-                    "settled": False,
-                    "reason": "dry run (emit=False): no row written",
-                }
-            )
-            continue
         try:
             append_event(
                 _build(
@@ -404,12 +373,8 @@ def settle_lost_invocations(
 
 
 def _settle_head_pin(cwd: Path | None) -> "tuple[str, str]":
-    """`(head_sha, branch)` at ``cwd``, both empty when either is unreadable.
-
-    The writer refuses a detached HEAD because an empty branch field would
-    read as a pre-branch-field event no carry can scope; the settle inherits
-    the refusal rather than writing an unscopeable row.
-    """
+    """`(head_sha, branch)` at ``cwd``, both empty when either is unreadable
+    (the writer refuses a detached HEAD; the settle inherits that refusal)."""
     import subprocess
 
     def _git(*args: str) -> str:

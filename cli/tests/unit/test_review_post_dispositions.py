@@ -63,66 +63,62 @@ def test_renders_marker_and_per_finding_outcomes():
 def test_no_dispositions_posts_nothing(tmp_path, monkeypatch):
     findings = tmp_path / "f.json"
     findings.write_text(json.dumps(_payload(None)), encoding="utf-8")
-    posted: list = []
-    monkeypatch.setattr(
-        review_cli, "_gh_api", lambda args, timeout=30.0: posted.append(args) or (0, "", "")
-    )
+    calls: list = []
+    monkeypatch.setattr("fno.pr._proc.run", lambda cmd, **kw: calls.append(cmd))
     result = runner.invoke(
         review_app,
         ["post-dispositions", "--findings-file", str(findings), "--head", HEAD, "--pr", "7"],
     )
     assert result.exit_code == 0
     assert "nothing posted" in result.output
-    assert posted == [], "a disposition-free round must not touch the network"
+    assert calls == [], "a disposition-free round must not touch the network"
 
 
-class _FakeProc:
-    def __init__(self, stdout: str = "") -> None:
-        self.returncode = 0
+class _FakeResult:
+    def __init__(self, stdout: str = "", returncode: int = 0) -> None:
+        self.returncode = returncode
         self.stdout = stdout
         self.stderr = ""
 
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
 
-def _stub_remote(monkeypatch, posts: list) -> None:
-    """The local remote read answers a GitHub URL; gh POSTs are recorded."""
+
+def _stub_rest(monkeypatch, posts: list, comments_stdout: str = "[]") -> None:
+    """Slug and PR-head resolve from stubs; gh calls ride a fake run that
+    records POSTs and answers the comments read with `comments_stdout`."""
 
     def fake_run(cmd, **kwargs):
-        if cmd[:3] == ["git", "remote", "get-url"]:
-            return _FakeProc("https://github.com/own/repo.git\n")
         if cmd[:2] == ["gh", "api"] and "POST" in cmd:
             posts.append(cmd)
-            return _FakeProc("{}\n")
-        return _FakeProc()
+            return _FakeResult("{}\n")
+        return _FakeResult(comments_stdout)
 
-    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("fno.pr._proc.run", fake_run)
+    monkeypatch.setattr(
+        "fno.pr._rest._slug_or_reason", lambda cwd=None, runner=None, repo=None: ("own/repo", "")
+    )
+    monkeypatch.setattr(
+        "fno.pr._rest.fetch_pr_info_rest",
+        lambda pr, cwd=None, runner=None, repo=None: ({"head_sha": HEAD}, ""),
+    )
+
+
+_DISPOSED = [
+    {
+        "finding_key": "cli/src/a.py:10:correctness",
+        "disposition": "fixed",
+        "reason": "fixed at def5678",
+    }
+]
 
 
 def test_posts_once_per_head(tmp_path, monkeypatch):
     findings = tmp_path / "f.json"
-    findings.write_text(
-        json.dumps(
-            _payload(
-                [
-                    {
-                        "finding_key": "cli/src/a.py:10:correctness",
-                        "disposition": "fixed",
-                        "reason": "fixed at def5678",
-                    }
-                ]
-            )
-        ),
-        encoding="utf-8",
-    )
+    findings.write_text(json.dumps(_payload(_DISPOSED)), encoding="utf-8")
     posts: list = []
-    _stub_remote(monkeypatch, posts)
-
-    def fake_gh_api(args, timeout=30.0):
-        joined = " ".join(args)
-        if "pulls/7" in joined and "GET" in joined:
-            return 0, json.dumps({"head": {"sha": HEAD}}), ""
-        return 0, json.dumps([]), ""  # empty comments list
-
-    monkeypatch.setattr(review_cli, "_gh_api", fake_gh_api)
+    _stub_rest(monkeypatch, posts)
     result = runner.invoke(
         review_app,
         ["post-dispositions", "--findings-file", str(findings), "--head", HEAD, "--pr", "7"],
@@ -135,46 +131,26 @@ def test_posts_once_per_head(tmp_path, monkeypatch):
 
     # A second post at the same head sees the marker and writes nothing.
     marker = review_cli._ROUND_MARKER.format(head=HEAD, round=1, reviewer="code-review")
-
-    def fake_gh_api_again(args, timeout=30.0):
-        joined = " ".join(args)
-        if "issues/7/comments" in joined:
-            return 0, json.dumps([{"body": marker}]), ""
-        return 0, json.dumps({"head": {"sha": HEAD}}), ""
-
-    monkeypatch.setattr(review_cli, "_gh_api", fake_gh_api_again)
+    posts.clear()
+    _stub_rest(monkeypatch, posts, comments_stdout=json.dumps([{"body": marker}]))
     result2 = runner.invoke(
         review_app,
         ["post-dispositions", "--findings-file", str(findings), "--head", HEAD, "--pr", "7"],
     )
     assert result2.exit_code == 0
     assert "already posted" in result2.output
-    assert len(posts) == 1, "the second run must not post"
+    assert posts == [], "the second run must not post"
 
 
 def test_head_mismatch_refuses(tmp_path, monkeypatch):
     findings = tmp_path / "f.json"
-    findings.write_text(
-        json.dumps(
-            _payload(
-                [
-                    {
-                        "finding_key": "cli/src/a.py:10:correctness",
-                        "disposition": "fixed",
-                        "reason": "fixed",
-                    }
-                ]
-            )
-        ),
-        encoding="utf-8",
-    )
+    findings.write_text(json.dumps(_payload(_DISPOSED)), encoding="utf-8")
     posts: list = []
-    _stub_remote(monkeypatch, posts)
-
-    def fake_gh_api(args, timeout=30.0):
-        return 0, json.dumps({"head": {"sha": "b" * 40}}), ""
-
-    monkeypatch.setattr(review_cli, "_gh_api", fake_gh_api)
+    _stub_rest(monkeypatch, posts)
+    monkeypatch.setattr(
+        "fno.pr._rest.fetch_pr_info_rest",
+        lambda pr, cwd=None, runner=None, repo=None: ({"head_sha": "b" * 40}, ""),
+    )
     result = runner.invoke(
         review_app,
         ["post-dispositions", "--findings-file", str(findings), "--head", HEAD, "--pr", "7"],
