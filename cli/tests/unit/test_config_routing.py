@@ -7,6 +7,7 @@ no code path reads must still parse and carry the fields the schema names.
 from __future__ import annotations
 
 import tomllib
+from types import SimpleNamespace
 from pathlib import Path
 
 from fno.config import RoutingBlock, RoutingModelBlock, SettingsModel
@@ -19,6 +20,27 @@ _SAMPLE = _REPO_ROOT / "cli" / "src" / "fno" / "routing_sample.toml"
 
 def _settings(payload: dict) -> SettingsModel:
     return SettingsModel.model_validate(payload)
+
+
+def test_auto_merge_grant_is_true_only_for_dispatch():
+    from fno.config import auto_merge_grant
+
+    assert auto_merge_grant(_settings({"auto_merge": {"grant": "dispatch"}}))
+    assert not auto_merge_grant(_settings({"auto_merge": {"grant": "none"}}))
+    assert not auto_merge_grant(SimpleNamespace(auto_merge=SimpleNamespace(grant=True)))
+    assert not auto_merge_grant(None)
+
+
+def test_auto_merge_grant_degrades_when_settings_are_incomplete_or_broken():
+    from fno.config import auto_merge_grant
+
+    class Broken:
+        @property
+        def auto_merge(self):
+            raise RuntimeError("broken settings")
+
+    assert not auto_merge_grant(SimpleNamespace())
+    assert not auto_merge_grant(Broken())
 
 
 def test_empty_routing_block_defaults():
