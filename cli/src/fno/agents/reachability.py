@@ -88,7 +88,7 @@ the sole POSITIVE term rather than the whole answer:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, TypeGuard
 
 from fno.agents.session_truth import (
     STALE_ATTENTION_S,
@@ -354,9 +354,14 @@ def exit_falsifier(entry: Any) -> Optional[str]:
     return "exit-recorded" if stored == _STORED_EXITED else None
 
 
-def mux_ref_names_a_pane(mux: Any) -> bool:
+def mux_ref_names_a_pane(mux: Any) -> TypeGuard[dict]:
     """True when ``mux`` could name a real pane: a dict with a non-empty
     session and an integer pane_id of at least 1.
+
+    A :data:`~typing.TypeGuard`, not a plain ``bool``: callers gate pane
+    access on it (``entry.mux["session"]`` under ``if mux_ref_names_a_pane(
+    entry.mux):``), and the checker must narrow the ref to a dict there the
+    way the old truthiness test accidentally did.
 
     Pane ids are allocated from a floor of 1 -- ``pane_id_floor`` in
     ``crates/fno/src/server.rs`` returns ``persisted.max(registry_floor).max(1)``,
