@@ -583,11 +583,7 @@ def settle_blocked_by_edges_via_store(entries: list[dict]) -> dict:
     ``settle_blocked_by_edges``): rewritten entries, one receipt per settled
     edge, and the per-node new ``blocked_by`` lists."""
     result = _client_for(GRAPH_JSON).request("settle_edges", {"entries": entries})
-    return {
-        "entries": result["entries"],
-        "receipts": result["receipts"],
-        "blocked_by": result["blocked_by"],
-    }
+    return {key: result[key] for key in ("entries", "receipts", "blocked_by")}
 
 
 def canonical_field_order() -> "list[str]":

@@ -67,6 +67,8 @@ There are four, in retirement order. The ask adapters and the graph store are re
 
 **`pending_supersession_reason`.** Dual, disposition dual-logic, port owed, not in this PR. Python leg `cli/src/fno/graph/statuses.py:220`, Rust leg `crates/fno-agents/src/graph_store.rs:770`. Both answer whether a supersession lacks merged-PR proof, and both are correct today. The blocked_by edge settlement landed beside them and recorded this row. A port deletes the Python leg and converts the guard to characterization. The readiness predicate it sits beside is already Rust-only.
 
+**`node_is_open`.** Dual, disposition dual-logic, port owed, not in this PR. Python leg `cli/src/fno/graph/_reconcile.py` (`node_is_open`, the selection fan-out's open count), Rust leg `crates/fno-agents/src/graph_store.rs` (`is_open_entry`, the settlement's row filter). Both key off the underlying fields rather than the derived status so they hold on rows that never saw a recompute, and both are correct today. A port deletes the Python leg once the fan-out answers through the store.
+
 Nothing else in the tree is a confirmed dual implementation today.
 
 ## The eight CI parity scripts

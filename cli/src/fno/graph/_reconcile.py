@@ -483,14 +483,10 @@ def successors_owing_verification(entries: list[dict]) -> dict[str, dict]:
 
 
 def settle_blocked_by_edges(entries: list[dict]) -> dict:
-    """The blocked_by edge settlement, answered by the ported store
-    (graph_store.rs ``settle_blocked_by_edges``, the write-side twin of the
-    read path's chase): prune edges whose blocker is done, rewire superseded
-    ones to their live successor, hold the deferred and missing with a
-    receipt - a human decision and data loss are not a sweep's to erase.
-    Pure over the given rows; returns ``{"entries", "receipts", "blocked_by"}``
-    and the caller persists under the graph lock. One implementation, in Rust.
-    """
+    """The blocked_by edge settlement via the ported store verb (the
+    write-side twin of the read path's chase): prune done blockers, rewire
+    superseded to their live successor, hold deferred and missing with a
+    receipt; the caller persists under the graph lock."""
     from fno.graph.store import settle_blocked_by_edges_via_store
 
     return settle_blocked_by_edges_via_store(entries)

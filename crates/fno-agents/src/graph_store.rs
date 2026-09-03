@@ -874,7 +874,12 @@ pub fn settle_blocked_by_edges(
         if blockers.is_empty() {
             continue;
         }
-        let node_id = entry_id(e).unwrap_or("").to_string();
+        // An id-less row is malformed: the change map keys on the node id, so
+        // no caller could apply its settlement - emit nothing, touch nothing.
+        let Some(node_id) = entry_id(e) else {
+            continue;
+        };
+        let node_id = node_id.to_string();
         let mut settled: Vec<Value> = Vec::with_capacity(blockers.len());
         let mut changed = false;
         for blocker_id in blockers {
@@ -2534,8 +2539,8 @@ mod tests {
 
     #[test]
     fn readiness_releases_a_dependent_whose_blocker_is_superseded_by_a_done_node() {
-        // x-eb0e shape: the named blocker will never carry completed_at; only
-        // its live successor decides the edge.
+        // The measured shape (2026-09-03 graph walk): the named blocker will
+        // never carry completed_at; only its live successor decides the edge.
         let entries = vec![
             json!({"id": "ab-1", "blocked_by": ["ab-2"]}),
             json!({"id": "ab-2", "superseded_by": "ab-3"}),

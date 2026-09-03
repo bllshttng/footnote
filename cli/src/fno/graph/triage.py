@@ -1698,10 +1698,9 @@ def cmd_health(
         dnm = {"violations": [], "unknown": [], "checked": 0, "window_days": 0}
 
     # Supersessions nothing can ever settle (x-e451): the successor merged but
-    # the declared surfaces were not all in its PR, so the sweep re-reports the
-    # row every run and the only moves are unsupersede or done. A done
-    # predecessor reads as accepted: `fno backlog done` never stamps the
-    # record, so without the completed_at skip the row outlives its remedy.
+    # the declared surfaces were not all in its PR; the only moves are
+    # unsupersede or done. A done predecessor reads as accepted: `fno backlog
+    # done` never stamps the record, so the completed_at skip keeps it settled.
     _health_idx = {
         e.get("id"): e for e in all_entries
         if isinstance(e, dict) and isinstance(e.get("id"), str)

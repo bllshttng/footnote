@@ -11721,8 +11721,14 @@ def cmd_reconcile(
 
         # Edge settlement probe (x-e451): computes the plan once; the mutator
         # applies its change map under the lock and reports its receipts.
-        edge_settlement = settle_blocked_by_edges(entries)
-        edge_settlement_pending = bool(edge_settlement["receipts"])
+        # Fail-open like every self-heal leg above: a keeper binary older than
+        # the settle_edges verb costs this run its settlement, never the sweep.
+        try:
+            edge_settlement = settle_blocked_by_edges(entries)
+            edge_settlement_pending = bool(edge_settlement["receipts"])
+        except Exception as _es_exc:  # noqa: BLE001 - never abort the sweep
+            typer.echo(f"warning: the blocked_by settlement probe failed: {_es_exc}; "
+                       "dead edges keep their blockers this run", err=True)
 
     closed: list[dict] = []
     healed_epics: list[str] = []
