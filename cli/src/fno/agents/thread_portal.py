@@ -1,10 +1,6 @@
 """Portal placement for the thread substrate (x-9b60): one spawn call ends
-with the portal open where the caller asked. Its own module by budget
-necessity (mux_spawn may only shrink); it builds the same argv a manual
-second command would type, the ``fno mux thread`` reach, so no parallel
-portal path exists to drift."""
-
-from __future__ import annotations
+with the portal open where the caller asked, through the same ``fno mux
+thread`` reach a manual second command would type. Own module (budget)."""
 
 import subprocess
 from typing import Callable, Optional
@@ -24,9 +20,8 @@ def place_thread_portal(
 ) -> str:
     """Open portal ``portal`` showing ``name`` through the one door that
     creates a portal - the ``fno mux thread`` reach. Returns the landing
-    notice. Raises DispatchAskError on any refusal; the worker itself is
-    already live, so the caller reports this failure AFTER its spawn
-    receipt, never instead of it.
+    notice. Raises DispatchAskError on any refusal; the worker is already
+    live, so the caller reports this failure AFTER its spawn receipt.
     """
     args = ["mux", "thread", name, "--portal", str(int(portal))]
     if workspace:

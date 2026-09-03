@@ -198,8 +198,7 @@ def placement_refusal(
             "combine with --portal"
         )
     if placement_requested and substrate == "bg" and portal is None:
-        # AC8-EDGE: a placement with nothing to place. Name the missing
-        # piece; never silently ignore the flag.
+        # AC8-EDGE: a placement with nothing to place; name the missing piece.
         return (
             "--workspace/-s, --split/-x, --at, and --tab on --substrate "
             "thread need --portal N: a thread hosts no pane until a portal "
