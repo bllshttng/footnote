@@ -311,6 +311,22 @@ struct RowArm {
     expires: Instant,
 }
 
+/// (x-f191) Whether a notice names `row_name` tightly enough to be its
+/// verdict: the name must sit at a token boundary, and the notice must not
+/// be an in-flight progress line (those end in `…` and never resolve the
+/// arm - the external verbs emit "stopping X…" long before the verdict).
+fn notice_names_row(text: &str, row_name: &str) -> bool {
+    if text.ends_with('…') {
+        return false;
+    }
+    let Some(i) = text.find(row_name) else {
+        return false;
+    };
+    let before = text[..i].chars().next_back();
+    let after = text[i + row_name.len()..].chars().next();
+    !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+}
+
 /// The client-side pane identity overlay follows the scanner's repeat grace.
 pub const PANE_ID_REVEAL_WINDOW: Duration = PANE_IDS_REPEAT_WINDOW;
 
@@ -6025,10 +6041,10 @@ impl View {
             self.row_arm = None;
             return;
         }
-        if !text.contains(&arm.name) {
+        let name = arm.name.clone();
+        if !notice_names_row(text, &name) {
             return;
         }
-        let name = arm.name.clone();
         let failure = ROW_FAILURE_MARKS.iter().any(|m| text.contains(m));
         self.row_arm = None;
         self.row_stamp = Some(RowStamp {
@@ -8776,11 +8792,27 @@ impl View {
             if r > 0 {
                 if let Some((failure, stamp_text)) = row_stamp {
                     let mark = if failure { "✗ " } else { "✓ " };
-                    let stamp: Vec<(char, usize)> = format!("{mark}{stamp_text}")
-                        .chars()
-                        .map(|ch| (ch, glyph_cols(ch)))
-                        .collect();
-                    let width: usize = stamp.iter().map(|(_, w)| *w).sum();
+                    // (x-f191 review) Ellipsize to leave the row's leading
+                    // identity cells: a stamp that swallows the name is a
+                    // placement fix that eats its own target.
+                    let cap = text_w.saturating_sub(4);
+                    let full = format!("{mark}{stamp_text}");
+                    let mut stamp: Vec<(char, usize)> = Vec::new();
+                    let mut width = 0usize;
+                    let mut truncated = false;
+                    for ch in full.chars() {
+                        let w = glyph_cols(ch);
+                        if width + w > cap {
+                            truncated = true;
+                            break;
+                        }
+                        width += w;
+                        stamp.push((ch, w));
+                    }
+                    if truncated && width < cap {
+                        stamp.push(('…', 1));
+                        width += 1;
+                    }
                     let mut start = text_w.saturating_sub(width);
                     for (ch, w) in stamp {
                         if start + w > text_w {
@@ -17502,5 +17534,8 @@ fn map_color(c: Color) -> CtColor {
         Color::Indexed(i) => CtColor::AnsiValue(i),
         Color::Rgb(r, g, b) => CtColor::Rgb { r, g, b },
     }
+}
+
+#[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;

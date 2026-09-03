@@ -2380,6 +2380,11 @@ pub fn gc_sweep(
     // caller from `agents.reap_receipts.retain_days` the same way the grace
     // window is resolved from `agents.dead_row_grace`.
     retain_days: u64,
+    // (x-f191) Per-row stderr progress. Only the bounded manual verb wants
+    // it (its caller reads partial output on a timeout); the daemon's idle
+    // tick runs the same sweep every few seconds and must not log a line
+    // per row per tick.
+    progress: bool,
 ) -> GcSummary {
     let store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
@@ -2393,6 +2398,7 @@ pub fn gc_sweep(
         grace_for_harness,
         false,
         retain_days,
+        progress,
         &live_truth_tail_states,
         &|e| store.borrow_mut().matches(e),
         &prober,
@@ -2426,7 +2432,8 @@ pub fn gc_sweep_dry_run(
         &emitter,
         grace_for_harness,
         true,
-        0, // dry-run never expires: a rehearsal that pruned would not be one
+        0,    // dry-run never expires: a rehearsal that pruned would not be one
+        true, // a rehearsal is manual: its progress is the point
         &live_truth_tail_states,
         &|e| store.borrow_mut().matches(e),
         &prober,
@@ -2558,6 +2565,7 @@ fn gc_sweep_impl(
         grace_for_harness,
         dry_run,
         retain_days,
+        false, // test-only wrapper: no progress lines to assert
         truth_tail_states,
         store_matches,
         row_liveness,
@@ -2574,6 +2582,8 @@ fn gc_sweep_impl_with_node_cascade(
     dry_run: bool,
     // Reap-receipt retention in days (x-6db9); expiry is skipped on dry_run.
     retain_days: u64,
+    // (x-f191) Per-row stderr progress; only the bounded manual verb sets it.
+    progress: bool,
     // The dormant gate's tail read, BATCHED: one call for every handle the
     // stat gate escalated, keyed by handle. A handle absent from the answer
     // behaves exactly as `None` did on the per-row seam.
@@ -2668,8 +2678,12 @@ fn gc_sweep_impl_with_node_cascade(
         // (x-f191) Progress on stderr, one line per row: a sweep that outlives
         // its 20s caller bound can still say how far it got. stdout stays the
         // --json contract; stderr lines are free-form and every consumer of
-        // this sweep already treats stderr as log.
-        eprintln!("reap: scan {}", e.name);
+        // this sweep already treats stderr as log. Gated: the daemon's idle
+        // tick runs this sweep every few seconds and must not log a line per
+        // row per tick.
+        if progress {
+            eprintln!("reap: scan {}", e.name);
+        }
         let grace_secs = grace_for_harness(e.harness_name()).as_secs() as i64;
         // x-91f3: the ladder answers for EVERY row, not only the stamped
         // live-ish rows the consult below used to gate it to. `short_id` is
@@ -3079,7 +3093,9 @@ fn gc_sweep_impl_with_node_cascade(
             // (x-f191) The write is one atomic pass, so the removed count is
             // known here - before the per-row cascade work below, which is
             // where a sweep under load spends its time.
-            eprintln!("reap: removed {}", reaped_names.len());
+            if progress {
+                eprintln!("reap: removed {}", reaped_names.len());
+            }
             // Emit only AFTER a successful write so the event log never diverges
             // from disk (AC1-ERR), and only for rows actually removed under the
             // lock (a stale candidate whose identity changed is not a reap).
@@ -3087,7 +3103,9 @@ fn gc_sweep_impl_with_node_cascade(
                 if reaped_names.contains(&e.name) {
                     // (x-f191) The row whose accounting + cascade is now in
                     // flight; the next scan/cascade line supersedes it.
-                    eprintln!("reap: cascade {}", e.name);
+                    if progress {
+                        eprintln!("reap: cascade {}", e.name);
+                    }
                     let node_id = dispatch_node_id(&e.name);
                     let mut target_session_id = None;
                     let mut termination_event = false;
@@ -4091,7 +4109,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         };
                         let retain_days =
                             crate::agents_config::reap_receipt_retain_days(&grace_cwd);
-                        let _ = gc_sweep(&home, &emitter, &grace_for_harness, retain_days);
+                        let _ = gc_sweep(&home, &emitter, &grace_for_harness, retain_days, false);
                     });
                 }
                 // Worktree sweep: the backstop for what the merge ritual
@@ -12840,7 +12858,7 @@ mod tests {
         })
         .unwrap();
 
-        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7, false);
 
         assert_eq!(summary.reaped, vec!["ask-old".to_string()]);
 
@@ -13334,7 +13352,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         })
         .unwrap();
 
-        gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
+        gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7, false);
 
         let reg = state::load_registry(&home.registry_json()).unwrap();
         let stamps: std::collections::BTreeSet<String> = reg
@@ -13388,7 +13406,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     fn gc_sweep_empty_registry_is_noop() {
         let home = tmp_home("gc-empty");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7, false);
         assert!(summary.reaped.is_empty());
         assert!(summary.kept_dirty.is_empty());
         assert!(summary.kept_uncorroborated.is_empty());
@@ -13778,7 +13796,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let old = write_receipt_at(&home, "claude-old-sess.json", &rfc3339_days_ago(8));
 
-        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7, false);
 
         assert!(!old.exists(), "the receipt past the window must be gone");
         assert_eq!(
@@ -13793,13 +13811,13 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let recent = write_receipt_at(&home, "claude-recent-sess.json", &rfc3339_days_ago(6));
 
-        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7, false);
         assert!(recent.exists());
         assert!(summary.expired_receipts.is_empty());
 
         // The same 6-day-old receipt under a 5-day window expires: the
         // configured value reaches the sweep, the default is not hardcoded.
-        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 5);
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 5, false);
         assert!(!recent.exists());
         assert_eq!(
             summary.expired_receipts,
@@ -13814,7 +13832,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let broken = write_receipt_at(&home, "claude-broken-sess.json", "");
         let missing = write_receipt_at(&home, "claude-missing-sess.json", "not-a-date");
 
-        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7, false);
 
         // A failed read is not evidence of age: both survive, and the sweep
         // names what it kept so a silent pile-up is never mistaken for health.
@@ -14235,6 +14253,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &|_| Duration::from_secs(3600),
             false,
             7,
+            false, // (x-f191) no progress lines to assert
             &no_tails,
             &|_| Some(Vec::new()),
             &live_row_liveness, // x-5d96: injectable so tests stage the ladder
@@ -14292,6 +14311,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             &|_| Duration::from_secs(3600),
             false,
             7,
+            false, // (x-f191) no progress lines to assert
             &no_tails,
             &|_| Some(Vec::new()),
             &live_row_liveness, // x-5d96: injectable so tests stage the ladder
@@ -15019,7 +15039,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         })
         .unwrap();
 
-        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(0), 7);
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(0), 7, false);
 
         assert!(summary.reaped.is_empty());
         let registry = state::load_registry(&home.registry_json()).unwrap();
@@ -15062,7 +15082,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         .unwrap();
         std::fs::create_dir_all(global_events_path(&home)).unwrap();
 
-        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(0), 7);
+        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(0), 7, false);
 
         assert!(summary.reaped.is_empty());
         let registry = state::load_registry(&home.registry_json()).unwrap();

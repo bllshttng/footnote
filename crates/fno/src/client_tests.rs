@@ -19072,8 +19072,7 @@ fn sideline_stamp_ellipsizes_and_keeps_the_row_identity() {
     view.layout.agents.push(corpse_row());
     view.row_stamp = Some(RowStamp {
         name: "corpse".into(),
-        text: "stop corpse: failed: a very long daemon reason that cannot fit any sideline"
-            .into(),
+        text: "stop corpse: failed: a very long daemon reason that cannot fit any sideline".into(),
         failure: true,
         expires: Instant::now() + ROW_STAMP_TTL,
     });

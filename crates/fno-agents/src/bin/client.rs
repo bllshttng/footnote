@@ -1711,6 +1711,7 @@ fn run_reap(rest: &[String]) -> i32 {
             &emitter,
             &grace_for_harness,
             fno_agents::agents_config::reap_receipt_retain_days(&cwd),
+            true, // (x-f191) the manual verb is the bounded caller: its progress is the point
         )
     };
 
