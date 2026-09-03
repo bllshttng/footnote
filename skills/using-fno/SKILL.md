@@ -38,7 +38,7 @@ Everything else stays invocable by full name: `blueprint`, `execute` (`execute w
 
 Atomic, lock-protected, schema-validated. Use for exact state transitions, not orchestration.
 
-Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `pane` is mux-hosted at a fixed place. `thread` is the persistent lane and hosts no pane until one is created; view: dedicated pane. `headless` is the only non-interactive substrate, and it is one-shot. `bg` is a deprecated one-release alias naming that same interactive `thread`. New commands and capability keys use `thread`. `fno mux where` reporting `hosts no live pane` is an absence of a PANE, never of life. Observe with `fno agents peek`, drive with `fno agents attach`, or mail.
+Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `pane` is mux-hosted at a fixed place. `thread` is the persistent lane and hosts no pane until one is created; view: a `portal`, 0-indexed, several at once (`--portal N`). `headless` is the only non-interactive substrate, and it is one-shot. `bg` is a deprecated one-release alias naming that same interactive `thread`. New commands and capability keys use `thread`. `fno mux where` reporting `hosts no live pane` is an absence of a PANE, never of life. Observe with `fno agents peek`, drive with `fno agents attach`, or mail.
 
 | Verb family | What it owns |
 |-------------|--------------|

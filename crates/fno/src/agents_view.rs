@@ -2287,9 +2287,10 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .or_else(|| {
-                if row.get("harness").is_none() {
-                    return None; // pre-v10 shape: provider WAS the harness axis
-                }
+                // pre-v10 shape: provider WAS the harness axis, so a row with
+                // no `harness` key yields no route rather than mounting the
+                // harness name on the route axis.
+                row.get("harness")?;
                 row.get("provider")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())

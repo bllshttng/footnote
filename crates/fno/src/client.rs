@@ -8510,6 +8510,14 @@ impl View {
                     {
                         text.push_str(&format!(" {tok}"));
                     }
+                    // (x-8f9d) The portal index, when this row is shown
+                    // through one. The server derives it per frame from the
+                    // open portals, so a row moving between portals stays ONE
+                    // row whose marker changes - never a second row. Absent
+                    // means no portal, never an unknown one.
+                    if let Some(idx) = a.portal {
+                        text.push_str(&format!(" ◫{idx}"));
+                    }
                     // (x-132c) Indent the row under its lineage parent: one
                     // step per depth, read from the compose-pass depth vec.
                     // Zero steps -> no prefix -> a section with no parent
@@ -9399,19 +9407,23 @@ fn agent_hit(a: &AgentRow, _active_squad: u64) -> ChromeHit {
     match a.pane_id {
         Some(pid) => ChromeHit::Cmds(vec![Command::FocusPane(pid)]),
         None if !a.exited => {
-            // (x-07c2) Every paneless live row reaches the dedicated thread
-            // pane: Drive attaches, Follow tails the transcript, Locate
-            // renders the explanation screen. One command, no placement
-            // dialog - the server owns the tier (the row set lives there).
-            // The command's id is the attach id for a claude row and the row
-            // NAME for every other harness (Follow/Locate rows carry no
-            // attach id); the x-e10f refusal invariant holds by construction
-            // because the client never chooses between attach and focus.
+            // (x-07c2) Every paneless live row reaches a portal: Drive
+            // attaches, Follow tails the transcript, Locate renders the
+            // explanation screen. One command, no placement dialog - the
+            // server owns the tier (the row set lives there). The command's id
+            // is the attach id for a claude row and the row NAME for every
+            // other harness (Follow/Locate rows carry no attach id); the
+            // x-e10f refusal invariant holds by construction because the
+            // client never chooses between attach and focus.
+            //
+            // (x-8f9d) The default gesture names portal 0, which is exactly
+            // where the single thread pane always landed. `P` opens the next
+            // free portal beside it; nothing about this path changed.
             let id = a.attach_id.clone().unwrap_or_else(|| a.name.clone());
             ChromeHit::Cmds(vec![Command::AttachAgent {
                 id,
                 placement: PanePlacement {
-                    thread_pane: true,
+                    portal: Some(0),
                     ..PanePlacement::default()
                 },
             }])
@@ -14140,6 +14152,7 @@ async fn execute_row_menu_action(
                 &ClientMsg::Command(Command::AttachAgent {
                     id,
                     placement: PanePlacement {
+                        portal_new: false,
                         target: PaneTarget::CurrentRoute,
                         split,
                         here: false,
@@ -14148,6 +14161,7 @@ async fn execute_row_menu_action(
                         fallback: PlacementFallback::NewTab,
                         max_panes: None,
                         thread_pane: false,
+                        portal: None,
                     },
                 }),
             )
@@ -15353,8 +15367,8 @@ async fn peek_keys(
             b'l' | b'\r' | b'\n' => {
                 // Attach from peek (US4) through the shared agent_hit -> apply_hit
                 // path a click / selector Enter uses: a pane-hosted row focuses;
-                // a paneless live row reaches the ONE dedicated thread pane with
-                // no placement dialog (x-07c2; the explicit picker is `p`). A
+                // a paneless live row reaches PORTAL 0 with no placement dialog
+                // (x-07c2; the explicit picker is `p`, a new portal is `P`). A
                 // Notice refusal (a dead or unresolvable row) keeps BOTH
                 // overlays open (x-260a locked 3). Right-arrow folds to `l`.
                 let hit = match view.display_rows().get(cursor) {
@@ -15735,6 +15749,47 @@ async fn selector_keys(
                     }
                     Some(_) => view.set_notice("no workspace to attach into".into()),
                     None => view.set_notice("placement requires an attachable agent".into()),
+                }
+            }
+            b'P' => {
+                // (x-8f9d) Open this row in the NEXT FREE portal, so a second
+                // thread lands beside the first instead of repointing it. Enter
+                // stays portal 0, unchanged; this is the only gesture that
+                // mints a new index.
+                //
+                // A bare digit was the obvious spelling and is not available:
+                // `b'0'..=b'9'` here is the x-c929 answerable-prompt path. `P`
+                // is free, and pairs with `p` (the placement picker) the way
+                // `X`/`x` already pair.
+                let picked = match view.display_rows().get(cur) {
+                    Some(DisplayRow::Agent(a)) if a.pane_id.is_none() && !a.exited => {
+                        Some(a.attach_id.clone().unwrap_or_else(|| a.name.clone()))
+                    }
+                    _ => None,
+                };
+                match picked {
+                    Some(id) => {
+                        view.clear_peek();
+                        view.selector = None;
+                        apply_hit(
+                            view,
+                            ChromeHit::Cmds(vec![Command::AttachAgent {
+                                id,
+                                // The SERVER picks the index. A client
+                                // computing it from the rows it last rendered
+                                // races every other client onto the same
+                                // number, and the loser's new portal is
+                                // silently repointed.
+                                placement: PanePlacement {
+                                    portal_new: true,
+                                    ..PanePlacement::default()
+                                },
+                            }]),
+                            sock_w,
+                        )
+                        .await?;
+                    }
+                    None => view.set_notice("a portal shows a paneless live row".into()),
                 }
             }
             b'X' => {
@@ -16218,6 +16273,7 @@ async fn attach_place_keys(
             &ClientMsg::Command(Command::AttachAgent {
                 id: picker.id,
                 placement: PanePlacement {
+                    portal_new: false,
                     target: match dst.filter(|_| !here) {
                         Some(sid) => PaneTarget::SquadId(sid),
                         None => PaneTarget::CurrentRoute,
@@ -16229,6 +16285,7 @@ async fn attach_place_keys(
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
                     thread_pane: false,
+                    portal: None,
                 },
             }),
         )
@@ -17453,6 +17510,7 @@ mod tests {
         assert_eq!(agent_lattice_state(&unseen), LatticeState::DoneUnseen);
         assert_eq!(lattice_glyph(agent_lattice_state(&unseen)).0, '✓');
         let seen = AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -17475,6 +17533,7 @@ mod tests {
         assert_eq!(lattice_glyph(agent_lattice_state(&confirmed_dead)).0, '✗');
 
         let uncorroborated = AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -17500,6 +17559,7 @@ mod tests {
         // at all renders Unmeasured for the absence, which is the new
         // predicate, not the old bug.)
         let live_with_stale_bit = AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -17570,6 +17630,7 @@ mod tests {
             squad: Some(1),
             name: "a".into(),
             pane_id: Some(7),
+            portal: None,
             badge: None,
             reason: None,
             exited: false,
@@ -17607,6 +17668,7 @@ mod tests {
             model: None,
             route: None,
             pane_id: None,
+            portal: None,
             attach_id: Some("job1".into()),
             ..hosted.clone()
         };
@@ -17614,7 +17676,7 @@ mod tests {
             agent_hit(&bg, 2),
             ChromeHit::Cmds(c) if c == vec![Command::AttachAgent {
                 id: "job1".into(),
-                placement: PanePlacement { thread_pane: true, ..Default::default() },
+                placement: PanePlacement { portal: Some(0), ..Default::default() },
             }]
         ));
         // A TOMBSTONE row keeps its attach_id (the client needs it to dismiss),
@@ -17625,6 +17687,7 @@ mod tests {
             model: None,
             route: None,
             pane_id: None,
+            portal: None,
             attach_id: Some("job1".into()),
             exited: true,
             dnd: false,
@@ -17641,6 +17704,7 @@ mod tests {
             route: None,
             name: "t-live-paneless".into(),
             pane_id: None,
+            portal: None,
             attach_id: None,
             no_pane_reason: Some(AgentNoPaneReason::LivePaneless),
             ..hosted.clone()
@@ -17649,7 +17713,7 @@ mod tests {
             agent_hit(&orphan, 2),
             ChromeHit::Cmds(c) if c == vec![Command::AttachAgent {
                 id: "t-live-paneless".into(),
-                placement: PanePlacement { thread_pane: true, ..Default::default() },
+                placement: PanePlacement { portal: Some(0), ..Default::default() },
             }]
         ));
         // The LivePaneless notice itself still exists (render paths and the
@@ -17673,6 +17737,7 @@ mod tests {
             (AgentNoPaneReason::UnsupportedHarness, "unsupported harness"),
         ] {
             let dead = AgentRow {
+                portal: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -17713,6 +17778,7 @@ mod tests {
             squad: Some(1),
             name: "t-codex-one".into(),
             pane_id: None,
+            portal: None,
             badge: None,
             reason: None,
             exited: true,
@@ -17748,6 +17814,7 @@ mod tests {
         // session, attaching is the cheaper truth, and resuming a live row
         // would mint a second writer (the LivePaneless warning).
         let attachable = AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -17762,7 +17829,7 @@ mod tests {
             agent_hit(&attachable, 2),
             ChromeHit::Cmds(c) if matches!(
                 c.as_slice(),
-                [Command::AttachAgent { placement, .. }] if placement.thread_pane
+                [Command::AttachAgent { placement, .. }] if placement.portal_target() == Some(0)
             )
         ));
     }
@@ -17784,6 +17851,7 @@ mod tests {
             squad: Some(1),
             name: "sib".into(),
             pane_id: None,
+            portal: None,
             badge: None,
             reason: None,
             exited: false,
@@ -17813,9 +17881,9 @@ mod tests {
             ChromeHit::Cmds(c) => assert!(
                 matches!(
                     c.as_slice(),
-                    [Command::AttachAgent { id, placement }] if id == "job1" && placement.thread_pane
+                    [Command::AttachAgent { id, placement }] if id == "job1" && placement.portal_target() == Some(0)
                 ),
-                "expected a thread-pane reach, got {c:?}"
+                "expected a portal 0 reach, got {c:?}"
             ),
             other => panic!(
                 "expected a thread-pane reach, got {}",
@@ -18043,6 +18111,7 @@ mod tests {
     // x-df4c US4 helper: an AgentRow in squad 1 with the given tab/badge/exit.
     fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
         AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -18575,6 +18644,7 @@ mod tests {
     // An agent row hosting a given pane, under squad 1.
     fn focus_agent(pane: u64) -> AgentRow {
         AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -18886,6 +18956,7 @@ mod tests {
         let mut view = two_pane_view();
         for p in 100..140u64 {
             view.layout.agents.push(AgentRow {
+                portal: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -20589,6 +20660,7 @@ mod tests {
     // (squad, exited) matter; badge/seen round out a plausible row.
     fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
         AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -21281,6 +21353,7 @@ mod tests {
             squad: Some(1),
             name: name.into(),
             pane_id: None,
+            portal: None,
             badge: None,
             reason: None,
             exited,
@@ -21476,6 +21549,7 @@ mod tests {
             squad: Some(99), // no such squad -> orphan -> `~ elsewhere`
             name: "stray".into(),
             pane_id: None,
+            portal: None,
             badge: None,
             reason: None,
             exited: false,
@@ -21797,6 +21871,7 @@ mod tests {
             squad: Some(99), // no such squad -> orphan
             name: name.into(),
             pane_id: None,
+            portal: None,
             badge: None,
             reason: None,
             exited,
@@ -21859,6 +21934,7 @@ mod tests {
             squad: Some(99),
             name: name.into(),
             pane_id: None,
+            portal: None,
             badge: None,
             reason: None,
             exited,
@@ -21979,6 +22055,7 @@ mod tests {
             squad: Some(1),
             name: "worker".into(),
             pane_id: Some(10),
+            portal: None,
             badge: Some(AgentBadge::Working),
             reason: None,
             exited: false,
@@ -22017,6 +22094,7 @@ mod tests {
             squad: None,
             name: "bg-claude".into(),
             pane_id: None,
+            portal: None,
             badge: None,
             reason: None,
             exited: false,
@@ -22054,6 +22132,7 @@ mod tests {
             squad: None,
             name: "bg-other".into(),
             pane_id: None,
+            portal: None,
             badge: None,
             reason: None,
             exited: false,
@@ -22096,9 +22175,9 @@ mod tests {
                     matches!(
                         c.as_slice(),
                         [Command::AttachAgent { id, placement }]
-                            if id == want_id && placement.thread_pane
+                            if id == want_id && placement.portal_target() == Some(0)
                     ),
-                    "row {row} must reach the thread pane, got {c:?}"
+                    "row {row} must reach portal 0, got {c:?}"
                 ),
                 other => panic!(
                     "row {row}: expected a thread reach, got {}",
@@ -22135,6 +22214,7 @@ mod tests {
                 squad: Some(1),
                 name: format!("a{i}"),
                 pane_id: Some(100 + i),
+                portal: None,
                 badge: Some(AgentBadge::Working),
                 reason: None,
                 exited: false,
@@ -22680,6 +22760,7 @@ mod tests {
         // row gets focus and NO splits (already placed); an exited row gets
         // remove and no stop.
         let mk = |name: &str, pane_id: Option<u64>, attach: Option<&str>, exited: bool| AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -23916,6 +23997,7 @@ mod tests {
         // identity (pane_id/attach_id) so Focus acts on the row it was opened on,
         // never the other same-named row.
         let mk = |name: &str, pane_id: Option<u64>| AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -25749,6 +25831,7 @@ mod tests {
     /// A pane-hosted sideline row, the shape the move/break-out menu acts on.
     fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
         AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -25789,6 +25872,7 @@ mod tests {
     /// Split grid, the Move grid's twin.
     fn attachable_row(name: &str, attach_id: &str) -> AgentRow {
         AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -27134,6 +27218,7 @@ mod tests {
                     squad: Some(1),
                     name: "peer".into(),
                     pane_id: Some(10),
+                    portal: None,
                     badge: Some(AgentBadge::Blocked),
                     reason: Some("perm prompt".into()),
                     exited: false,
@@ -27169,6 +27254,7 @@ mod tests {
                     squad: Some(1),
                     name: "dead".into(),
                     pane_id: Some(99),
+                    portal: None,
                     badge: None,
                     reason: None,
                     exited: true,
@@ -27204,6 +27290,7 @@ mod tests {
                     squad: None,
                     name: "bg-watch".into(),
                     pane_id: None,
+                    portal: None,
                     badge: Some(AgentBadge::Working),
                     reason: None,
                     exited: false,
@@ -27306,6 +27393,7 @@ mod tests {
         // all-exited squad keeps its ✗ count so dead agents stay discoverable.
         fn ar(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
             AgentRow {
+                portal: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -27516,6 +27604,7 @@ mod tests {
         footnote.tabs[1].name = "reviews".into();
         footnote.tabs[1].named = true;
         let here = AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -27524,6 +27613,7 @@ mod tests {
             ..focus_agent(0)
         };
         let elsewhere = AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -27578,6 +27668,7 @@ mod tests {
                 route: None,
                 name: format!("a{i}"),
                 pane_id: Some(100 + i),
+                portal: None,
                 ..focus_agent(0)
             })
             .collect();
@@ -27631,6 +27722,7 @@ mod tests {
                 route: None,
                 name: format!("a{i}"),
                 pane_id: Some(100 + i),
+                portal: None,
                 ..focus_agent(0)
             })
             .collect();
@@ -27745,6 +27837,7 @@ mod tests {
                     squad: None,
                     name: "z-exited".into(),
                     pane_id: None,
+                    portal: None,
                     badge: None,
                     reason: None,
                     exited: true,
@@ -27780,6 +27873,7 @@ mod tests {
                     squad: None,
                     name: "z-external".into(),
                     pane_id: None,
+                    portal: None,
                     badge: None,
                     reason: None,
                     exited: false,
@@ -27815,6 +27909,7 @@ mod tests {
                     squad: None,
                     name: "z-fnolive".into(),
                     pane_id: None,
+                    portal: None,
                     badge: None,
                     reason: None,
                     exited: false,
@@ -27853,6 +27948,7 @@ mod tests {
                     squad: None,
                     name: "z-extblocked".into(),
                     pane_id: None,
+                    portal: None,
                     badge: Some(AgentBadge::Blocked),
                     reason: None,
                     exited: false,
@@ -28357,6 +28453,7 @@ mod tests {
     /// 10 "~ backlog" · 11 ready card · 12 blocked card · 13 in-flight card.
     fn unified_rows_view() -> View {
         let agent = |squad: Option<u64>, name: &str, pane_id, attach_id: Option<&str>| AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -29101,6 +29198,7 @@ mod tests {
             squad: None,
             name: "w".into(),
             pane_id: Some(3),
+            portal: None,
             badge: Some(AgentBadge::Blocked),
             reason: Some("waiting on a menu".into()),
             exited: false,
@@ -29451,7 +29549,11 @@ mod tests {
         match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
             ClientMsg::Command(Command::AttachAgent { id, placement }) => {
                 assert_eq!(id, "c19cd2c3");
-                assert!(placement.thread_pane, "the reach drives the thread pane");
+                assert_eq!(
+                    placement.portal_target(),
+                    Some(0),
+                    "the reach drives portal 0"
+                );
                 assert!(placement.split.is_none() && !placement.here);
             }
             other => panic!("expected AttachAgent, got {other:?}"),
@@ -29545,6 +29647,7 @@ mod tests {
             squad: Some(1),
             name: "cc-deadbeef".into(),
             pane_id: None,
+            portal: None,
             badge: None,
             reason: None,
             exited: true,
@@ -29592,6 +29695,7 @@ mod tests {
     /// A plain (non-tombstone) registry agent row under squad 1, varied by state.
     fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRow {
         AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -29937,7 +30041,35 @@ mod tests {
         match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
             ClientMsg::Command(Command::AttachAgent { id, placement }) => {
                 assert_eq!(id, "c19cd2c3");
-                assert!(placement.thread_pane, "drives the dedicated thread pane");
+                assert_eq!(placement.portal_target(), Some(0), "drives portal 0");
+                assert!(placement.split.is_none() && !placement.here && placement.at.is_none());
+            }
+            other => panic!("expected AttachAgent, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn selector_shift_p_asks_the_server_for_a_new_portal() {
+        // (x-8f9d) `P` opens ANOTHER portal beside the one Enter uses, so two
+        // threads sit side by side. It names no index: the client must not
+        // choose one, or two clients pick the same number and the second
+        // reach repoints the first one's new portal.
+        let mut v = unified_rows_view();
+        v.selector = Some(8); // bg-claude
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"P", &mut buf).await.unwrap();
+        assert_eq!(v.selector, None, "the reach closes the selector");
+        assert!(v.attach_place.is_none(), "no placement dialog on a reach");
+        let mut cur = std::io::Cursor::new(&buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::AttachAgent { id, placement }) => {
+                assert_eq!(id, "c19cd2c3");
+                assert!(placement.portal_new, "asks the server to allocate");
+                assert_eq!(
+                    placement.portal, None,
+                    "and names no index of its own - that is the whole point"
+                );
+                assert!(placement.wants_portal(), "still routes as a portal reach");
                 assert!(placement.split.is_none() && !placement.here && placement.at.is_none());
             }
             other => panic!("expected AttachAgent, got {other:?}"),
@@ -29994,6 +30126,8 @@ mod tests {
             ClientMsg::Command(Command::AttachAgent {
                 id: "c19cd2c3".into(),
                 placement: PanePlacement {
+                    portal_new: false,
+                    portal: None,
                     tab: None,
                     at: None,
                     target: PaneTarget::SquadId(2),
@@ -30356,6 +30490,8 @@ mod tests {
             ClientMsg::Command(Command::AttachAgent {
                 id: "c19cd2c3".into(),
                 placement: PanePlacement {
+                    portal_new: false,
+                    portal: None,
                     tab: None,
                     at: None,
                     target: PaneTarget::SquadId(1),
@@ -30407,6 +30543,8 @@ mod tests {
             ClientMsg::Command(Command::AttachAgent {
                 id: "c19cd2c3".into(),
                 placement: PanePlacement {
+                    portal_new: false,
+                    portal: None,
                     tab: None,
                     at: None,
                     target: PaneTarget::SquadId(10),
@@ -30650,6 +30788,7 @@ mod tests {
                 squad: Some(1),
                 name: "build".into(),
                 pane_id: Some(10),
+                portal: None,
                 badge: Some(AgentBadge::Working),
                 reason: None,
                 exited: false,
@@ -30685,6 +30824,7 @@ mod tests {
                 squad: Some(1),
                 name: "watcher".into(),
                 pane_id: None,
+                portal: None,
                 badge: None,
                 reason: None,
                 exited: false,
@@ -30759,6 +30899,7 @@ mod tests {
             squad: Some(1),
             name: name.into(),
             pane_id: Some(pane),
+            portal: None,
             badge,
             reason: None,
             exited: false,
@@ -30785,6 +30926,7 @@ mod tests {
             pane_activity: None,
         };
         let bare = AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -30840,6 +30982,7 @@ mod tests {
             squad: Some(2),
             name: "stuck".into(),
             pane_id: Some(9),
+            portal: None,
             badge: Some(AgentBadge::Blocked),
             reason: None,
             exited: false,
@@ -30969,6 +31112,7 @@ mod tests {
                 squad: Some(2),
                 name: "finished-seen".into(),
                 pane_id: Some(9),
+                portal: None,
                 badge: Some(AgentBadge::Done),
                 reason: None,
                 exited: false,
@@ -31004,6 +31148,7 @@ mod tests {
                 squad: Some(2),
                 name: "finished-unseen".into(),
                 pane_id: Some(10),
+                portal: None,
                 badge: Some(AgentBadge::Done),
                 reason: None,
                 exited: false,
@@ -31232,6 +31377,7 @@ mod tests {
             squad: Some(2),
             name: "stuck".into(),
             pane_id: Some(9),
+            portal: None,
             badge: None,
             reason: None,
             exited: false,
@@ -31698,6 +31844,7 @@ mod tests {
             squad: Some(1),
             name: "worker".into(),
             pane_id: Some(10),
+            portal: None,
             badge: None,
             reason: None,
             exited: false,
@@ -31862,6 +32009,7 @@ mod tests {
 
     fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow {
         AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -32066,6 +32214,7 @@ mod tests {
     #[test]
     fn sort_toggle_reorders_by_attention_and_relabels() {
         let stale = AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -32074,6 +32223,7 @@ mod tests {
             ..agent_row("stale-live", 4, Some(AgentBadge::Working), false)
         };
         let fresh = AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -32082,6 +32232,7 @@ mod tests {
             ..agent_row("fresh-live", 5, Some(AgentBadge::Working), false)
         };
         let sunk = AgentRow {
+            portal: None,
             harness: None,
             model: None,
             route: None,
@@ -32261,6 +32412,7 @@ mod tests {
             .iter()
             .map(|r| {
                 let row = AgentRow {
+                    portal: None,
                     harness: None,
                     model: None,
                     route: None,

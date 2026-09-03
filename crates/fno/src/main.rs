@@ -78,7 +78,10 @@ enum Role {
     /// location; a selector naming no agent is retried as a tab location -
     /// ordinal, stable id, or name (x-1499).
     MuxWhere(Vec<OsString>),
-    /// (x-07c2, hidden) `mux thread <name>`: drive the dedicated thread pane.
+    /// (x-07c2, hidden) `mux thread <name> [--portal N]`: show a thread row
+    /// through a portal. `--portal` names the index (default 0), so two calls
+    /// naming 0 and 1 put two threads in two panes for the tab menu's Join
+    /// actions to tile.
     MuxThread(Vec<OsString>),
     /// (x-b80d) `mux view <selector> [--url] [--fzf] [--json]`: point the
     /// operator's view at the pane hosting an agent, selected by node id,

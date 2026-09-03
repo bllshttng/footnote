@@ -22,7 +22,7 @@
 //! Decision 8) - THAT sends `Bye` and exits, superseding Phase 1's rendered
 //! "exited" state.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -800,11 +800,12 @@ enum CoreMsg {
         pane: u64,
         reply: ControlReply,
     },
-    /// (x-07c2) `fno agents attach` with a live mux: reach `name` through the
-    /// dedicated thread pane (the TUI reach's twin; see
+    /// (x-07c2) `fno agents attach` with a live mux: reach `name` through
+    /// portal `portal` (the TUI reach's twin; see
     /// [`ControlVerb::ThreadPane`]).
     ThreadPane {
         name: String,
+        portal: u8,
         agents: Option<Vec<RegistryAgent>>,
         reply: ControlReply,
     },
@@ -2146,6 +2147,22 @@ struct DetachedPane {
     tab_name: Option<String>,
 }
 
+/// (x-8f9d) One open portal: the row it shows, the pane seating it, and the
+/// tab that pane lives in. Named rather than a 3-tuple because 31 production
+/// readers of `(String, u64, TabId)` already sat at the edge of legibility
+/// and the portal index is one more thing to carry.
+///
+/// `row_key` is the attach id (claude) or the registry name (every other
+/// harness - the command's `id` field). `seat` is a live viewer iff
+/// `panes[seat].cmd` is `Some`; after a stand-in swap it names the idle
+/// shell, not the dead viewer.
+#[derive(Clone)]
+struct Portal {
+    row_key: String,
+    seat: u64,
+    tab: TabId,
+}
+
 impl DetachedPane {
     fn from_agent(
         agent: &RegistryAgent,
@@ -2325,6 +2342,12 @@ enum BatchReplay {
 /// The still-held spawn receipts from journal text: a thin view over
 /// [`parse_journal_events`], which walks receipts and never-bound markers in
 /// one pass.
+///
+/// Test-only, and gated as such: production reads both halves in one pass, so
+/// this accessor exists purely to keep the receipts half independently
+/// testable (as the sibling doc below says). Without the gate it reads as dead
+/// code in a release build.
+#[cfg(test)]
 fn parse_spawn_receipts(raw: &str) -> HashMap<(String, String), HeldWorker> {
     parse_journal_events(raw).receipts
 }
@@ -2750,30 +2773,43 @@ struct Core {
     /// glance, and one operator wanting two at once is the case to hear about
     /// before building per-view state for it.
     diff_pane: Option<(String, u64)>,
-    /// (x-07c2) The ONE pane dedicated to thread-substrate rows:
-    /// `(row key, pane id)`, where the row key is the attach id (claude) or
-    /// the registry name (every other harness - the command's `id` field).
-    /// Same singleton contract as `diff_pane` above, with one deliberate
-    /// difference: re-reaching the SAME row is a no-op focus ("show me"),
-    /// never a close - closing is the ordinary close-pane gesture. A repoint
-    /// to a different row reuses the open-here mechanic (spawn-first,
-    /// `tree::replace_leaf`, reap-last) so the geometry never moves. NEVER
-    /// persisted and NEVER rebuilt by restore: a pane binds a session to
-    /// geometry, a thread binds a session to a row, and persisting the slot
-    /// would re-bind a thread to a rectangle across a restart.
+    /// (x-07c2, x-8f9d) The open PORTALS: the panes dedicated to
+    /// thread-substrate rows, keyed by the operator-facing index. A portal is
+    /// the thing you go through to reach a live harness thread, so several
+    /// threads can each hold one and the existing Join actions tile them side
+    /// by side.
     ///
-    /// (x-d545) The tuple is (row key, seat pane, tab id): after a viewer's
-    /// child dies, the seat keeps the tab alive as an idle-shell stand-in and
-    /// the slot names the STAND-IN, so the next reach repoints the seat in the
-    /// same tab instead of minting a second viewport tab. The seat pane is a
+    /// This is deliberately NOT the singleton contract `diff_pane` above
+    /// keeps. A diff is a glance and one at a time is its design; a portal is
+    /// a window onto a running thread and the cap of one was the defect
+    /// (x-8f9d lifted it). Substrate semantics are untouched either way: a
+    /// thread still hosts no pane until one is created.
+    ///
+    /// Per index, the mechanics are exactly the old single slot's. Re-reaching
+    /// the SAME row is a no-op focus ("show me"), never a close - closing is
+    /// the ordinary close-pane gesture. A repoint to a different row reuses
+    /// the open-here mechanic (spawn-first, `tree::replace_leaf`, reap-last)
+    /// so the geometry never moves, and it touches only its own index. NEVER
+    /// persisted and NEVER rebuilt by restore: a pane binds a session to
+    /// geometry, a thread binds a session to a row, and persisting a portal
+    /// would re-bind a thread to a rectangle across a restart. `BTreeMap`
+    /// rather than `HashMap` so iteration is index-ordered and the sideline's
+    /// portal column cannot reshuffle between frames.
+    ///
+    /// (x-d545) After a viewer's child dies, the seat keeps the tab alive as
+    /// an idle-shell stand-in and the entry names the STAND-IN, so the next
+    /// reach repoints the seat in the same tab instead of minting a second
+    /// portal tab. That swap now fires only for the LAST open portal: it
+    /// exists so a dying viewer never deletes the only window onto the fleet,
+    /// and with another portal open that premise is false. The seat pane is a
     /// live viewer iff `panes[seat].cmd` is `Some` (shells carry no argv
     /// provenance); the same-row focus arm requires it.
-    thread_pane: Option<(String, u64, TabId)>,
+    portals: BTreeMap<u8, Portal>,
     /// (x-07c2) One-shot latch for the discoverability notice: the first
-    /// thread row to appear with no thread pane open tells the operator the
-    /// reach gesture exists. A notice is not state - the latch only mutes
+    /// thread row to appear with no portal open tells the operator the reach
+    /// gesture exists. A notice is not state - the latch only mutes
     /// repetition, it never gates behavior.
-    thread_pane_noticed: bool,
+    portal_noticed: bool,
     /// (x-8f11) Durable membership of each PERSISTED named squad: squad id ->
     /// its recruited members (attach-ids + tombstone bits). Populated only by
     /// `NewSquad`, `RecruitAgents`, and restore; presence here is what marks a
@@ -3013,6 +3049,22 @@ impl<'a> SlotCapture<'a> {
 /// session to geometry, a thread binds a session to a row, and a persisted
 /// slot would re-bind a thread to a rectangle across a restart. `None` means
 /// nothing durable remains in this subtree.
+/// (x-8f9d) Does `portal_key` name the same ROW the reach resolved?
+///
+/// Not the same KEY: the TUI door keys a portal by the attach id while
+/// `fno agents attach` keys it by the registry name, and both doors advertise
+/// the same pane. Attach ids are unique per bg session, so a portal keyed by
+/// this row's attach id IS this row whatever door the reach came from - and the
+/// reverse (keyed by name, reached again by attach id) is the same row too,
+/// which is why the name comparison runs both directions.
+///
+/// One function, two callers: the same-row focus arm for the REQUESTED portal,
+/// and the one-row-one-viewer check across every OTHER portal. Two copies of
+/// this comparison drifting apart is how a duplicate viewer gets minted.
+fn row_matches_portal_key(row: &RegistryAgent, key: &str, portal_key: &str) -> bool {
+    portal_key == key || row.attach_id.as_deref() == Some(portal_key) || portal_key == row.name
+}
+
 fn node_without_leaf(node: &Node, skip: u64) -> Option<Node> {
     match node {
         Node::Leaf(p) => (*p != skip).then_some(Node::Leaf(*p)),
@@ -7914,6 +7966,9 @@ impl Core {
             .iter()
             .map(|(pane, name)| (*pane, name.as_str()))
             .collect();
+        // (x-8f9d) Every portal seat, collected once: the per-tab prune below
+        // folds over all of them.
+        let seats: Vec<u64> = self.portals.values().map(|p| p.seat).collect();
         let mut trees = Vec::with_capacity(sq.tabs.len());
         let mut active_tab = 0;
         // If pruning hollows out the active tab itself, `active_tab` has no
@@ -7922,24 +7977,41 @@ impl Core {
         // defaulting to index 0 (an unrelated tab picked as "active").
         let mut active_pruned_at: Option<usize> = None;
         for (i, t) in sq.tabs.iter().enumerate() {
-            // (x-07c2) Prune the thread pane's leaf before capture: it is
+            // (x-07c2) Prune every portal's leaf before capture: portals are
             // never persisted, so restore rebuilds no pane (and no split) for
             // a thread. A tab the prune hollowed out entirely is not captured,
             // and a skipped tab - the active one included - never leaves a
             // dangling `active_tab` index behind (position IS the tab's
             // durable identity in `tab_trees`).
-            let pruned = match self.thread_pane.as_ref().map(|(_, pid, _)| *pid) {
-                None => None,
-                Some(pid) => match node_without_leaf(&t.root, pid) {
-                    Some(root) => Some(root),
+            //
+            // (x-8f9d) The FOLD is the load-bearing part, not the rename.
+            // `node_without_leaf` removes ONE leaf per call, and two portals
+            // can tile in one tab - which is the whole point of portals - so
+            // a single call would capture the second and restore would
+            // rebuild it. The single-slot shape hid this because one slot
+            // could only ever put one leaf in a tab. A seat that is not in
+            // this tab is a no-op, so folding over all of them is safe.
+            let mut pruned: Option<Node> = None;
+            let mut hollowed = false;
+            for seat in seats.iter() {
+                let next = match pruned.as_ref() {
+                    Some(node) => node_without_leaf(node, *seat),
+                    None => node_without_leaf(&t.root, *seat),
+                };
+                match next {
+                    Some(root) => pruned = Some(root),
                     None => {
-                        if i == sq.active_tab {
-                            active_pruned_at = Some(trees.len());
-                        }
-                        continue;
+                        hollowed = true;
+                        break;
                     }
-                },
-            };
+                }
+            }
+            if hollowed {
+                if i == sq.active_tab {
+                    active_pruned_at = Some(trees.len());
+                }
+                continue;
+            }
             if i == sq.active_tab {
                 active_tab = trees.len();
             }
@@ -10659,6 +10731,51 @@ impl Core {
         subline_from(self.branch_by_cwd.get(cwd).map(String::as_str), cwd)
     }
 
+    /// (x-8f9d) Which portal shows `pane`, DERIVED from the open portals every
+    /// time the rows are built. Nothing is stored per row: the row-to-pane
+    /// relation is a pointer, so a row moving between portals stays ONE row
+    /// whose index changes, and no row can carry an index that has gone stale.
+    ///
+    /// `None` means this pane is not a portal seat - never "unknown". The
+    /// comparison is EQUALITY on the seat id, and the `Option` is matched
+    /// rather than tested: pane ids allocate from zero (`next_pane_id`), so
+    /// pane 0 is a valid seat and a truthiness test on it is the x-d914
+    /// defect that made six live workers invisible.
+    /// (x-8f9d) The lowest portal index nothing LIVE holds.
+    ///
+    /// Server-side on purpose. A client computing this from the rows it last
+    /// rendered races every other client: two of them pick the same number and
+    /// the second reach repoints the first one's brand-new portal. The server
+    /// handles reaches one at a time, so allocating here cannot collide.
+    ///
+    /// Liveness, not presence, the same read `close_pane` uses: an entry whose
+    /// pane closed elsewhere is stale, and its index is free to reuse. The
+    /// reach's own stale-slot path then reads the leftover entry for its
+    /// remembered tab, so reusing the index lands the new viewer where the old
+    /// one was.
+    ///
+    /// Saturates at `u8::MAX` rather than wrapping to 0, which would silently
+    /// repoint portal 0 instead of opening a new one. 256 live portals is not
+    /// a case worth a refusal path.
+    fn next_free_portal(&self) -> u8 {
+        (0..=u8::MAX)
+            .find(|idx| {
+                !self
+                    .portals
+                    .get(idx)
+                    .is_some_and(|portal| self.panes.contains_key(&portal.seat))
+            })
+            .unwrap_or(u8::MAX)
+    }
+
+    fn portal_of(&self, pane: Option<u64>) -> Option<u8> {
+        let pane = pane?;
+        self.portals
+            .iter()
+            .find(|(_, portal)| portal.seat == pane)
+            .map(|(idx, _)| *idx)
+    }
+
     /// (x-b186) A registry row's message tail from the off-loop transcript map.
     /// `None` for a row with no claude session uuid (a bare pane, a tombstone, a
     /// non-claude worker) or one whose transcript yielded no prose - the
@@ -10759,6 +10876,9 @@ impl Core {
                                 squad: Some(squad.id),
                                 name: a.name.clone(),
                                 pane_id: Some(pid),
+                                // Derived every build from the open portals; the row
+                                // stores no index of its own.
+                                portal: self.portal_of(Some(pid)),
                                 badge: if exited { None } else { a.badge },
                                 reason: if exited { None } else { a.reason.clone() },
                                 exited,
@@ -10825,6 +10945,9 @@ impl Core {
                                     e.and_then(|e| e.cmd.as_deref()),
                                 ),
                                 pane_id: Some(pid),
+                                // Derived every build from the open portals; the row
+                                // stores no index of its own.
+                                portal: self.portal_of(Some(pid)),
                                 badge: None,
                                 reason: None,
                                 exited: pane_dead
@@ -10912,6 +11035,9 @@ impl Core {
                         squad,
                         name: a.name.clone(),
                         pane_id: None,
+                        // No pane, so no portal seat. Absent means NOT shown
+                        // through a portal, never "unknown".
+                        portal: None,
                         badge: detached_live.then_some(a.badge).flatten(),
                         reason: detached_live.then(|| a.reason.clone()).flatten(),
                         exited: if detached.is_some() {
@@ -10971,6 +11097,7 @@ impl Core {
                         squad,
                         name: a.name.clone(),
                         pane_id: None,
+                        portal: None,
                         badge: if a.exited { None } else { a.badge },
                         reason: if a.exited { None } else { a.reason.clone() },
                         exited: a.exited,
@@ -11039,6 +11166,7 @@ impl Core {
                     squad: Some(sid),
                     name: format!("cc-{}", m.attach_id),
                     pane_id: None,
+                    portal: None,
                     badge: None,
                     reason: None,
                     exited: true,
@@ -11118,6 +11246,7 @@ impl Core {
                 squad,
                 name: r.name.clone(),
                 pane_id: None,
+                portal: None,
                 badge: None,
                 reason,
                 exited,
@@ -11988,15 +12117,18 @@ impl Core {
     /// session (Locked 8). Idempotent: an unknown pane (double-close race,
     /// AC4-ERR) is a no-op.
     ///
-    /// (x-d545) The recorded thread viewport is the one exception, and only
-    /// when it is alone in its tab: the tab belongs to every thread (one
-    /// dedicated pane, repointed per reach), so a viewer whose child died must
+    /// (x-d545) A portal seat is the one exception, and only when it is alone
+    /// in its tab AND is the LAST open portal: a viewer whose child died must
     /// not delete the only window onto the fleet. An idle shell takes the leaf
-    /// (`tree::replace_leaf`, the repoint mechanic) and the slot names the
+    /// (`tree::replace_leaf`, the repoint mechanic) and the entry names the
     /// shell as a stand-in seat, so the next reach lands in the SAME tab. A
     /// spawn failure falls through to today's behavior: losing the tab is bad,
     /// wedging a tab around a dead pane is worse. A plain pane keeps today's
-    /// semantics exactly (AC8-FR) - the arm is gated on the recorded slot id.
+    /// semantics exactly (AC8-FR) - the arm is gated on a recorded seat id.
+    ///
+    /// (x-8f9d) With another portal open, "the only window" is false, so the
+    /// swap does not fire and the closing portal simply goes away with its
+    /// pane. Either way the entry is dropped unless a stand-in took the seat.
     fn close_pane(&mut self, pid: u64) -> Flow {
         let Some((sid, ti)) = self.session.find_pane(pid) else {
             // Unknown to the tree; still reap a stray registry entry so a
@@ -12004,15 +12136,40 @@ impl Core {
             self.reap_pane(pid);
             return Flow::Continue;
         };
-        let seat = self
-            .thread_pane
-            .clone()
-            .is_some_and(|(_, sp, _)| sp == pid)
+        // (x-8f9d) Which portal, if any, this pane seats. Equality against the
+        // recorded seat, never a truthiness test: pane ids allocate from zero,
+        // so pane 0 is a valid seat (the x-d914 defect).
+        let seat_portal = self
+            .portals
+            .iter()
+            .find(|(_, portal)| portal.seat == pid)
+            .map(|(idx, _)| *idx);
+        let seat = seat_portal.is_some()
             // A stand-in shell seat closing must NOT re-arm the swap: the tab
             // has to stay closable by hand, so only a real viewer (argv
             // provenance) triggers the replacement.
             && self.panes.get(&pid).is_some_and(|e| e.cmd.is_some());
+        // (x-8f9d) The stand-in exists because "a viewer whose child died must
+        // not delete the only window onto the fleet". With another portal open
+        // that premise is false, so only the LAST portal keeps its seat alive.
+        // Without this, closing four portals leaves four idle stand-in shells
+        // each holding a tab open.
+        //
+        // LIVE seats, not `portals.len()`. An entry whose pane closed by some
+        // other path stays in the map on purpose - the reach reads its tab id
+        // to land a replacement viewer back where the operator had it, the
+        // stale-slot behavior the single slot always had. Counting entries
+        // would let one of those dead rows disarm the swap for a real portal.
+        // The dying pane is still in `panes` here (the reap is last), so it
+        // counts itself: `<= 1` means it is the only live one.
+        let live_portals = self
+            .portals
+            .values()
+            .filter(|portal| self.panes.contains_key(&portal.seat))
+            .count();
+        let last_portal = live_portals <= 1;
         let lone = seat
+            && last_portal
             && self.session.squad(sid).is_some_and(|sq| {
                 sq.tabs
                     .get(ti)
@@ -12034,8 +12191,8 @@ impl Core {
                 if tree::replace_leaf(tab, pid, shell_pid) {
                     // Spawn-first paid off: swap the seat to the stand-in and
                     // reap the dead viewer last, the repoint arm's ordering.
-                    if let Some((key, _, tid)) = self.thread_pane.take() {
-                        self.thread_pane = Some((key, shell_pid, tid));
+                    if let Some(portal) = seat_portal.and_then(|idx| self.portals.get_mut(&idx)) {
+                        portal.seat = shell_pid;
                     }
                     self.reap_pane(pid);
                     self.push_layout(true);
@@ -12046,6 +12203,13 @@ impl Core {
                 self.reap_pane(shell_pid);
             }
         }
+        // (x-8f9d) No stand-in took the seat. The entry is deliberately LEFT
+        // naming the now-dead pane, exactly as closing the single dedicated
+        // pane always did: the reach treats a recorded pane the tree no longer
+        // knows as absent, and reads its remembered tab id so a replacement
+        // viewer lands back where the operator had it. Liveness is computed
+        // from `panes` above, so a stale row can never be mistaken for an open
+        // portal.
         self.reap_pane(pid);
         let ident = self.squad_identity(sid);
         let tid = self
@@ -12239,22 +12403,25 @@ impl Core {
     }
 
     /// (x-07c2) Reach `key` (an attach id for a claude row, a registry name
-    /// for every other harness) through the ONE dedicated thread pane. The
-    /// tier is capability-computed (`agents_view::thread_reach`): Drive runs
-    /// the account-wrapped attach argv, Follow tails the transcript with
+    /// for every other harness) through portal `portal`. The tier is
+    /// capability-computed (`agents_view::thread_reach`): Drive runs the
+    /// account-wrapped attach argv, Follow tails the transcript with
     /// `fno agents peek --follow`, Locate renders the self-teaching screen.
-    /// Resolution order: no slot opens one through the ordinary placement
-    /// path; a slot on another row repoints it in place (the open-here
-    /// mechanic: spawn-first, `tree::replace_leaf`, reap-last - the geometry
-    /// never moves); a slot on this row focuses it; a recorded pane the tree
-    /// no longer knows reads as absent. NEVER persists a squad member and is
-    /// never rebuilt by restore: a pane binds a session to geometry, a thread
-    /// binds a session to a row.
-    fn reach_thread_pane(
+    ///
+    /// (x-8f9d) Resolution order is per INDEX, and every arm touches only its
+    /// own portal: no portal at `portal` opens one through the ordinary
+    /// placement path; a portal at `portal` on another row repoints it in
+    /// place (the open-here mechanic: spawn-first, `tree::replace_leaf`,
+    /// reap-last - the geometry never moves); a portal at `portal` on this row
+    /// focuses it; a recorded pane the tree no longer knows reads as absent.
+    /// NEVER persists a squad member and is never rebuilt by restore: a pane
+    /// binds a session to geometry, a thread binds a session to a row.
+    fn reach_portal(
         &mut self,
         client_id: u64,
         view: (u64, TabId),
         vp: Rect,
+        portal_idx: u8,
         key: &str,
     ) -> Flow {
         // Resolve exactly one live paneless row for the key. Names are not
@@ -12276,6 +12443,59 @@ impl Core {
                 return Flow::Continue;
             }
         };
+        // (x-8f9d) ONE ROW, ONE VIEWER. A reach for a row that ANOTHER portal
+        // already shows focuses that portal rather than minting a second
+        // viewer for it. The single slot enforced this by construction: there
+        // was nowhere else for the row to be, so the same-row arm below caught
+        // every case. With several portals the same-row arm sees only the
+        // REQUESTED index, and everything past it opens fresh.
+        //
+        // A duplicate is not cosmetic. `attached` holds ONE pane per attach id,
+        // so the second viewer's insert overwrites the first and leaves a live
+        // pane no row points at - the duplicate-viewer problem this epic exists
+        // to remove, re-created one layer down.
+        if let Some((other_idx, other_seat, other_tab)) = self
+            .portals
+            .iter()
+            .find(|(idx, portal)| {
+                **idx != portal_idx
+                    && row_matches_portal_key(&row, key, &portal.row_key)
+                    // A stand-in shell is not a viewer of the row: its portal
+                    // is free to be repointed, so it never blocks this reach.
+                    && self
+                        .panes
+                        .get(&portal.seat)
+                        .is_some_and(|entry| entry.cmd.is_some())
+            })
+            .map(|(idx, portal)| (*idx, portal.seat, portal.tab))
+        {
+            match self.session.find_pane(other_seat) {
+                Some((sid, _)) => {
+                    self.set_view(client_id, sid, other_tab);
+                    if let Some(tab) = self.viewed_tab_mut((sid, other_tab)) {
+                        tab.focus = other_seat;
+                    }
+                    self.mark_seen_if_done(other_seat);
+                    self.notice(
+                        client_id,
+                        format!("portal {other_idx}: already showing {}", row.name),
+                    );
+                    self.push_layout(true);
+                    return Flow::Continue;
+                }
+                // Half-created pane, the same case the same-row arm below
+                // handles: tracked in `panes` but absent from the tab tree, so
+                // it shows the row to nobody. Reap it and drop its portal
+                // rather than focusing a pane with no place on screen, then
+                // fall through and open this reach fresh. Without the reap it
+                // leaks a child process, and without the drop the entry keeps
+                // blocking every later reach for this row.
+                None => {
+                    self.reap_pane(other_seat);
+                    self.portals.remove(&other_idx);
+                }
+            }
+        }
         let tier = agents_view::thread_reach(row.harness.as_deref(), row.attach_id.as_deref());
         let spawn_cwd = if row.cwd.is_empty() {
             self.session
@@ -12292,10 +12512,12 @@ impl Core {
                 let id = row.attach_id.clone().expect("Drive implies attach_id");
                 // (x-d285) The Drive argv is the canonical re-entry plan for a
                 // claude row. `None` means the plan is resolving off-loop; the
-                // replay carries a thread_pane placement, which re-lands in
-                // this reach with the verdict staged.
+                // replay carries a portal placement, which re-lands in this
+                // reach with the verdict staged. (x-8f9d) It names THIS
+                // portal, so an off-loop replay returns to the index the
+                // operator reached, not to portal 0.
                 let placement = crate::proto::PanePlacement {
-                    thread_pane: true,
+                    portal: Some(portal_idx),
                     ..Default::default()
                 };
                 let Some((argv, _cd)) = self.attach_gesture_argv(client_id, &id, &placement) else {
@@ -12316,29 +12538,29 @@ impl Core {
             // observer client).
             .filter(|(r, c)| *r > 0 && *c > 0)
             .unwrap_or((vp.rows, vp.cols));
-        // Slot: take it, then verify against the live tree (the diff-pane
-        // stale-id guard - a recorded pane closed by any other path reads as
-        // closed and never wedges the slot).
-        let slot = self.thread_pane.take();
+        // Entry: take THIS portal, then verify against the live tree (the
+        // diff-pane stale-id guard - a recorded pane closed by any other path
+        // reads as closed and never wedges the portal). Only this index is
+        // removed; every other portal is untouched by this reach.
+        let slot = self.portals.remove(&portal_idx);
         // (x-d545) The seat's tab id, kept out of the stale-seat paths: a
         // fresh-open (below) prefers it when the tab still exists.
         let mut remembered_tab_id: Option<TabId> = None;
-        if let Some((slot_row, pid, slot_tid)) = slot {
+        if let Some(Portal {
+            row_key: slot_row,
+            seat: pid,
+            tab: slot_tid,
+        }) = slot
+        {
             remembered_tab_id = Some(slot_tid);
             if self.panes.contains_key(&pid) {
                 if let Some((sid, ti)) = self.session.find_pane(pid) {
                     let tid = self.session.squad(sid).expect("find_pane live").tabs[ti].id;
-                    // Same ROW, not same key: the TUI door keys the slot by the
-                    // attach id while `fno agents attach` keys it by the registry
-                    // name, and both doors advertise the same pane. Attach ids
-                    // are unique per bg session, so a slot keyed by this row's
-                    // attach id is this row whatever door the reach came from -
-                    // and the reverse (slot keyed by name, reached again by
-                    // attach id) is the same row too, so the name comparison
-                    // has to run both directions.
-                    let same_row = slot_row == key
-                        || row.attach_id.as_deref() == Some(slot_row.as_str())
-                        || slot_row == row.name;
+                    // Same ROW, not same key. The comparison lives in
+                    // `row_matches_portal_key`, shared with the
+                    // one-row-one-viewer check above, so the two readings of
+                    // "is this the same row" cannot drift apart.
+                    let same_row = row_matches_portal_key(&row, key, &slot_row);
                     // (x-d545) A same-row reach is a focus only when the seat
                     // holds a LIVE viewer. After the viewer's child died, the
                     // seat holds the idle-shell stand-in (no argv provenance):
@@ -12350,7 +12572,14 @@ impl Core {
                         // the pane is the ordinary close gesture. The slot
                         // was taken above; put it back - a focus is not a
                         // close.
-                        self.thread_pane = Some((slot_row, pid, slot_tid));
+                        self.portals.insert(
+                            portal_idx,
+                            Portal {
+                                row_key: slot_row,
+                                seat: pid,
+                                tab: slot_tid,
+                            },
+                        );
                         self.set_view(client_id, sid, tid);
                         if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
                             tab.focus = pid;
@@ -12371,7 +12600,14 @@ impl Core {
                     let permit = match crate::process_admission::admit_pane(0, None) {
                         Ok(p) => p,
                         Err(error) => {
-                            self.thread_pane = Some((slot_row, pid, slot_tid));
+                            self.portals.insert(
+                                portal_idx,
+                                Portal {
+                                    row_key: slot_row,
+                                    seat: pid,
+                                    tab: slot_tid,
+                                },
+                            );
                             self.notice(client_id, format!("thread pane failed: {error}"));
                             return Flow::Continue;
                         }
@@ -12381,7 +12617,14 @@ impl Core {
                     {
                         Ok(p) => p,
                         Err(e) => {
-                            self.thread_pane = Some((slot_row, pid, slot_tid));
+                            self.portals.insert(
+                                portal_idx,
+                                Portal {
+                                    row_key: slot_row,
+                                    seat: pid,
+                                    tab: slot_tid,
+                                },
+                            );
                             self.notice(client_id, format!("thread pane failed: {e}"));
                             return Flow::Continue;
                         }
@@ -12389,13 +12632,27 @@ impl Core {
                     self.name_thread_viewer_pane(new_pid, &row, &tier);
                     let Some(tab) = self.viewed_tab_mut((sid, tid)) else {
                         self.reap_pane(new_pid);
-                        self.thread_pane = Some((slot_row, pid, slot_tid));
+                        self.portals.insert(
+                            portal_idx,
+                            Portal {
+                                row_key: slot_row,
+                                seat: pid,
+                                tab: slot_tid,
+                            },
+                        );
                         self.notice(client_id, "thread pane: the tab closed under the repoint");
                         return Flow::Continue;
                     };
                     if !tree::replace_leaf(tab, pid, new_pid) {
                         self.reap_pane(new_pid);
-                        self.thread_pane = Some((slot_row, pid, slot_tid));
+                        self.portals.insert(
+                            portal_idx,
+                            Portal {
+                                row_key: slot_row,
+                                seat: pid,
+                                tab: slot_tid,
+                            },
+                        );
                         self.notice(client_id, "thread pane: its pane left the tree");
                         return Flow::Continue;
                     }
@@ -12408,7 +12665,14 @@ impl Core {
                     // Reap-last: the displaced viewer dies, the session it
                     // showed keeps running daemon-hosted.
                     self.reap_pane(pid);
-                    self.thread_pane = Some((key.to_string(), new_pid, tid));
+                    self.portals.insert(
+                        portal_idx,
+                        Portal {
+                            row_key: key.to_string(),
+                            seat: new_pid,
+                            tab: tid,
+                        },
+                    );
                     self.set_view(client_id, sid, tid);
                     if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
                         tab.focus = new_pid;
@@ -12445,8 +12709,10 @@ impl Core {
         let owner = self.session.find_by_cwd(&spawn_cwd).unwrap_or(view.0);
         let (dest, effective) = match remembered_tab {
             Some((sid, tid)) => {
-                let mut eff = PanePlacement::default();
-                eff.tab = Some(crate::proto::TabSel::Id(tid));
+                let eff = PanePlacement {
+                    tab: Some(crate::proto::TabSel::Id(tid)),
+                    ..Default::default()
+                };
                 (Some(sid), eff)
             }
             None => {
@@ -12489,7 +12755,14 @@ impl Core {
         if let Some(id) = row.attach_id.clone() {
             self.attached.insert(id, pid);
         }
-        self.thread_pane = Some((key.to_string(), pid, tid));
+        self.portals.insert(
+            portal_idx,
+            Portal {
+                row_key: key.to_string(),
+                seat: pid,
+                tab: tid,
+            },
+        );
         self.set_view(client_id, sid, tid);
         if fell_back {
             self.notice(client_id, "tab full - opened as tab");
@@ -12525,13 +12798,18 @@ impl Core {
     /// (x-07c2) The outside-the-TUI reach (`fno agents attach` with a live
     /// mux), run as the exact command a TUI reach runs: a synthetic OBSERVER
     /// client (0,0 - read-only, no squad or PTY of its own) whose reliable
-    /// channel collects the notices, then the real AttachAgent thread-pane
+    /// channel collects the notices, then the real AttachAgent portal
     /// command. One implementation, two doors, no drift; the observer is
     /// removed through the same Gone path a Detach takes, and the reply is
     /// the landing notice on success or the refusal's Err.
-    fn thread_pane_ctl(
+    ///
+    /// (x-8f9d) `portal` is the index the caller named (`--portal N`, default
+    /// 0). This door is the addressing surface an operator uses to put two
+    /// threads side by side without touching the TUI.
+    fn portal_ctl(
         &mut self,
         name: &str,
+        portal: u8,
         agents: Option<Vec<RegistryAgent>>,
         reply: ControlReply,
     ) {
@@ -12542,7 +12820,7 @@ impl Core {
             self.agents = rows;
         }
         // Names are not unique; a name that matches two rows must refuse,
-        // never pick, same as reach_thread_pane's own guard.
+        // never pick, same as reach_portal's own guard.
         let mut named_hits = self
             .agents
             .iter()
@@ -12602,7 +12880,7 @@ impl Core {
             Command::AttachAgent {
                 id: name.to_string(),
                 placement: PanePlacement {
-                    thread_pane: true,
+                    portal: Some(portal),
                     ..Default::default()
                 },
             },
@@ -12617,14 +12895,17 @@ impl Core {
             }
         };
         let _ = self.self_tx.try_send(CoreMsg::Gone(CONTROL_CLIENT));
-        // Row-aware, not key-aware: a focus on a slot keyed by the attach id
+        // Row-aware, not key-aware: a focus on a portal keyed by the attach id
         // (the TUI door) reached through the registry name (this door) leaves
-        // the slot keyed by the attach id - that is a landing, not a refusal.
-        let landed = self.thread_pane.as_ref().is_some_and(|(k, _, _)| {
+        // it keyed by the attach id - that is a landing, not a refusal.
+        // (x-8f9d) Read the portal the caller named, not any portal: landing
+        // in a DIFFERENT index would be a refusal reported as success.
+        let landed = self.portals.get(&portal).is_some_and(|p| {
+            let k = p.row_key.as_str();
             k == name
                 || self.agents.iter().any(|a| {
                     (a.attach_id.as_deref() == Some(k) && a.name == name)
-                        || (a.name == k.as_str() && a.attach_id.as_deref() == Some(name))
+                        || (a.name == k && a.attach_id.as_deref() == Some(name))
                 })
         });
         let msg = match (landed, landing) {
@@ -13061,24 +13342,38 @@ impl Core {
                 Flow::Continue
             }
             Command::AttachAgent { id, placement } => {
-                // (x-07c2) The dedicated thread-pane reach routes BEFORE the
-                // attach-shaped gates: `id` is an 8-hex attach id for a
-                // claude row but a registry NAME for every other harness
-                // (Follow/Locate rows carry no attach id), so the hex gate
-                // and the attach catalog gate do not apply. The reach
-                // resolves its own row, fail-closed. The dedicated pane owns
-                // its geometry, so any explicit placement contradicts it.
-                if placement.thread_pane {
+                // (x-07c2) The portal reach routes BEFORE the attach-shaped
+                // gates: `id` is an 8-hex attach id for a claude row but a
+                // registry NAME for every other harness (Follow/Locate rows
+                // carry no attach id), so the hex gate and the attach catalog
+                // gate do not apply. The reach resolves its own row,
+                // fail-closed. A portal owns its geometry, so any explicit
+                // placement contradicts it.
+                //
+                // (x-8f9d) THE DECODE EDGE. `portal_target` folds the
+                // deprecated `thread_pane` bool into the index here, once, so
+                // nothing past this point sees two fields that overlap: a
+                // pre-v64 client's `thread_pane: true` lands in portal 0,
+                // exactly where it always did.
+                if placement.wants_portal() {
                     if placement.here
                         || placement.split.is_some()
                         || placement.at.is_some()
                         || placement.tab.is_some()
                         || !matches!(placement.target, PaneTarget::CurrentRoute)
                     {
-                        self.notice(client_id, "thread pane takes no split, target, or anchor");
+                        self.notice(client_id, "a portal takes no split, target, or anchor");
                         return Flow::Continue;
                     }
-                    return self.reach_thread_pane(client_id, view, vp, &id);
+                    // An explicit index wins over "any". `portal_new` names no
+                    // index BECAUSE the caller must not choose one: allocating
+                    // here, where reaches are handled one at a time, is what
+                    // makes two clients opening a portal at once safe.
+                    let portal = match placement.portal_target() {
+                        Some(idx) => idx,
+                        None => self.next_free_portal(),
+                    };
+                    return self.reach_portal(client_id, view, vp, portal, &id);
                 }
                 // Validate the jobId shape (8 hex digits) BEFORE it reaches the
                 // argv - defense in depth even though spawn_pane_cmd never
@@ -13242,17 +13537,19 @@ impl Core {
                     // Reap-last (Locked 4): F's viewer dies but the displaced session keeps running detached
                     // and resurfaces watch-only (x-7561 external-lifecycle - viewport moved, nothing killed).
                     self.reap_pane(focus);
-                    // (x-07c2) An explicit open-here onto the thread pane
-                    // repurposed its geometry for an ordinary attach: the
-                    // dedicated slot no longer describes what that pane
-                    // shows. Clear it so a later reach opens fresh instead
-                    // of trusting a slot that names the wrong row.
-                    if self
-                        .thread_pane
-                        .as_ref()
-                        .is_some_and(|&(_, p, _)| p == focus)
+                    // (x-07c2) An explicit open-here onto a portal seat
+                    // repurposed its geometry for an ordinary attach: that
+                    // portal no longer describes what the pane shows. Drop it
+                    // so a later reach opens fresh instead of trusting an
+                    // entry that names the wrong row. (x-8f9d) Only the portal
+                    // seated on THIS pane is dropped; the rest are untouched.
+                    if let Some(idx) = self
+                        .portals
+                        .iter()
+                        .find(|(_, portal)| portal.seat == focus)
+                        .map(|(idx, _)| *idx)
                     {
-                        self.thread_pane = None;
+                        self.portals.remove(&idx);
                     }
                     // Persist B as a member of the viewed squad so it survives a
                     // restart pane-hosted (US2); the take-over already succeeded.
@@ -14933,10 +15230,11 @@ impl Core {
             }
             CoreMsg::ThreadPane {
                 name,
+                portal,
                 agents,
                 reply,
             } => {
-                self.thread_pane_ctl(&name, agents, reply);
+                self.portal_ctl(&name, portal, agents, reply);
                 Flow::Continue
             }
             CoreMsg::TabJoin {
@@ -15006,17 +15304,19 @@ impl Core {
             } => {
                 let identity_published = self.worker_identity_published(&rows);
                 // (x-07c2) Discoverability, once per server lifetime: the
-                // first paneless live row to appear with no thread pane open
-                // names the gesture. "Explicit and lazy" must not mean
+                // first paneless live row to appear with no portal open names
+                // the gesture. "Explicit and lazy" must not mean
                 // "undiscoverable". A notice is not state - the latch only
-                // mutes repetition, it never gates behavior.
-                if !self.thread_pane_noticed
-                    && self.thread_pane.is_none()
+                // mutes repetition, it never gates behavior. (x-8f9d) The
+                // notice names both doors, because opening a SECOND portal is
+                // the gesture an operator cannot guess from the first.
+                if !self.portal_noticed
+                    && self.portals.is_empty()
                     && rows.iter().any(|a| a.mux.is_none() && !a.exited)
                 {
-                    self.thread_pane_noticed = true;
+                    self.portal_noticed = true;
                     self.notice_all(
-                        "thread row present: reach a row (Enter or click) to open the dedicated thread pane",
+                        "thread row present: reach a row (Enter or click) to open portal 0; P opens another portal beside it",
                     );
                 }
                 self.agents = rows;
@@ -15362,8 +15662,8 @@ async fn serve(
         held_workers: HashMap::new(),
         detached_panes: HashMap::new(),
         diff_pane: None,
-        thread_pane: None,
-        thread_pane_noticed: false,
+        portals: BTreeMap::new(),
+        portal_noticed: false,
         squad_members: HashMap::new(),
         template_specs: HashMap::new(),
         pending_template_restores: Vec::new(),
@@ -16472,11 +16772,14 @@ async fn handle_control(
                 })
                 .await
         }
-        ControlVerb::ThreadPane { name } => {
+        ControlVerb::ThreadPane { name, portal } => {
             let agents = read_guard_agents().await;
             core_tx
                 .send(CoreMsg::ThreadPane {
                     name,
+                    // (x-8f9d) An absent index is portal 0, where every
+                    // pre-v64 caller landed.
+                    portal: portal.unwrap_or(0),
                     agents,
                     reply: reply_tx,
                 })
@@ -19483,6 +19786,8 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
+                    portal: None,
                     target: PaneTarget::SquadId(1),
                     split: Some(Dir::Down),
                     here: false,
@@ -19517,6 +19822,8 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
+                    portal: None,
                     target: PaneTarget::SquadId(1),
                     split: Some(Dir::Down),
                     here: false,
@@ -19554,6 +19861,8 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
+                    portal: None,
                     target: PaneTarget::SquadId(1),
                     split: Some(Dir::Down),
                     here: false,
@@ -21097,6 +21406,8 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
+                    portal: None,
                     tab: None,
                     at: None,
                     target: PaneTarget::SquadName("work".into()),
@@ -21150,6 +21461,8 @@ mod tests {
             80,
             false,
             PanePlacement {
+                portal_new: false,
+                portal: None,
                 tab: None,
                 at: None,
                 target: PaneTarget::SquadName("work".into()),
@@ -21192,6 +21505,8 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
+                    portal: None,
                     tab: None,
                     at: None,
                     target: PaneTarget::SquadName("work".into()),
@@ -23231,6 +23546,8 @@ mod tests {
             Command::AttachAgent {
                 id: "deadbee1".into(),
                 placement: PanePlacement {
+                    portal_new: false,
+                    portal: None,
                     tab: None,
                     at: None,
                     target: PaneTarget::SquadName("ghost".into()),
@@ -23447,7 +23764,10 @@ mod tests {
             "exactly one pane opened"
         );
         assert!(
-            matches!(&core.thread_pane, Some((k, p, _)) if k == "deadbee1" && *p == new_pid),
+            core.portals.get(&0).is_some_and(|e| {
+                let (k, p) = (&e.row_key, &e.seat);
+                k == "deadbee1" && *p == new_pid
+            }),
             "the slot records row A"
         );
         assert!(core.squad_members.is_empty(), "no squad member persisted");
@@ -23480,7 +23800,7 @@ mod tests {
             bg_row("target-b", "/tmp/seen", Some("deadbee2")),
         ];
         core.command(client_id, thread_reach_cmd("deadbee1"));
-        let (_, slot_a, _) = core.thread_pane.clone().unwrap();
+        let slot_a = core.portals.get(&0).expect("portal 0 open").seat;
         let (slot_sid, slot_ti) = core.session.find_pane(slot_a).unwrap();
         let slot_tab_id = core.session.squad(slot_sid).unwrap().tabs[slot_ti].id;
         let panes_after_open = core.panes.len();
@@ -23490,7 +23810,10 @@ mod tests {
 
         assert_eq!(core.panes.len(), panes_after_open, "pane count unchanged");
         assert!(
-            matches!(&core.thread_pane, Some((k, p, _)) if k == "deadbee2" && *p == new_pid),
+            core.portals.get(&0).is_some_and(|e| {
+                let (k, p) = (&e.row_key, &e.seat);
+                k == "deadbee2" && *p == new_pid
+            }),
             "the slot now names B"
         );
         assert!(!core.panes.contains_key(&slot_a), "A's viewer reaped");
@@ -23522,13 +23845,23 @@ mod tests {
         set_attach_program(&["/bin/cat"]);
         let (mut core, client_id, _p1, _rx) = thread_core();
         core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
-        core.thread_pane = Some(("deadbee1".to_string(), 99_999, 0)); // closed elsewhere
+        core.portals.insert(
+            0,
+            Portal {
+                row_key: "deadbee1".to_string(),
+                seat: 99_999,
+                tab: 0,
+            },
+        ); // closed elsewhere
         let new_pid = core.next_pane_id;
 
         core.command(client_id, thread_reach_cmd("deadbee2"));
 
         assert!(
-            matches!(&core.thread_pane, Some((k, p, _)) if k == "deadbee2" && *p == new_pid),
+            core.portals.get(&0).is_some_and(|e| {
+                let (k, p) = (&e.row_key, &e.seat);
+                k == "deadbee2" && *p == new_pid
+            }),
             "fresh pane recorded"
         );
         assert!(core.panes.contains_key(&new_pid));
@@ -23547,14 +23880,17 @@ mod tests {
         let (mut core, client_id, _p1, mut rx) = thread_core();
         core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
         core.command(client_id, thread_reach_cmd("deadbee1"));
-        let (_, pid, _) = core.thread_pane.clone().unwrap();
+        let pid = core.portals.get(&0).expect("portal 0 open").seat;
         let panes_after_open = core.panes.len();
 
         core.command(client_id, thread_reach_cmd("deadbee1"));
 
         assert_eq!(core.panes.len(), panes_after_open, "no respawn");
         assert!(
-            matches!(&core.thread_pane, Some((k, p, _)) if k == "deadbee1" && *p == pid),
+            core.portals.get(&0).is_some_and(|e| {
+                let (k, p) = (&e.row_key, &e.seat);
+                k == "deadbee1" && *p == pid
+            }),
             "the slot keeps the row and its pane"
         );
         let view = core.client_view(client_id).unwrap();
@@ -23579,14 +23915,17 @@ mod tests {
         let (mut core, client_id, _p1, mut rx) = thread_core();
         core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
         core.command(client_id, thread_reach_cmd("deadbee1"));
-        let (_, pid, _) = core.thread_pane.clone().unwrap();
+        let pid = core.portals.get(&0).expect("portal 0 open").seat;
         let panes_after_open = core.panes.len();
 
         core.command(client_id, thread_reach_cmd("target-a"));
 
         assert_eq!(core.panes.len(), panes_after_open, "no respawn, no repoint");
         assert!(
-            matches!(&core.thread_pane, Some((k, p, _)) if k == "deadbee1" && *p == pid),
+            core.portals.get(&0).is_some_and(|e| {
+                let (k, p) = (&e.row_key, &e.seat);
+                k == "deadbee1" && *p == pid
+            }),
             "the slot keeps its original key and pane"
         );
         assert!(drain_notices(&mut rx)
@@ -23604,10 +23943,10 @@ mod tests {
         let (mut core, _client_id, _p1, _rx) = thread_core();
         core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
         core.command(9, thread_reach_cmd("deadbee1"));
-        let (_, pid, _) = core.thread_pane.clone().unwrap();
+        let pid = core.portals.get(&0).expect("portal 0 open").seat;
         let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
 
-        core.thread_pane_ctl("target-a", None, tx);
+        core.portal_ctl("target-a", 0, None, tx);
 
         match rx.blocking_recv().expect("a reply") {
             ServerMsg::Notice { text } => assert!(
@@ -23617,7 +23956,10 @@ mod tests {
             other => panic!("expected a Notice landing, got {other:?}"),
         }
         assert!(
-            matches!(&core.thread_pane, Some((k, p, _)) if k == "deadbee1" && *p == pid),
+            core.portals.get(&0).is_some_and(|e| {
+                let (k, p) = (&e.row_key, &e.seat);
+                k == "deadbee1" && *p == pid
+            }),
             "the slot keeps the row and its pane"
         );
         core.reap_pane(pid);
@@ -23635,7 +23977,7 @@ mod tests {
         hosted.mux = Some(("other-session".to_string(), 42));
         let agents = vec![hosted];
 
-        core.thread_pane_ctl("far-row", Some(agents), tx);
+        core.portal_ctl("far-row", 0, Some(agents), tx);
 
         match rx.blocking_recv().expect("a reply") {
             ServerMsg::Notice { text } => assert!(
@@ -23644,7 +23986,7 @@ mod tests {
             ),
             other => panic!("expected a Notice, got {other:?}"),
         }
-        assert!(core.thread_pane.is_none(), "no thread pane minted");
+        assert!(core.portals.is_empty(), "no thread pane minted");
     }
 
     #[test]
@@ -23665,7 +24007,7 @@ mod tests {
         core.agents = vec![codex, gem];
 
         core.command(client_id, thread_reach_cmd("codex-row"));
-        let (_, follow_pid, _) = core.thread_pane.clone().unwrap();
+        let follow_pid = core.portals.get(&0).expect("portal 0 open").seat;
         assert_eq!(
             core.panes[&follow_pid].cmd.as_deref(),
             Some("cat"),
@@ -23677,7 +24019,7 @@ mod tests {
         );
 
         core.command(client_id, thread_reach_cmd("gem-row"));
-        let (_, locate_pid, _) = core.thread_pane.clone().unwrap();
+        let locate_pid = core.portals.get(&0).expect("portal 0 open").seat;
         assert_eq!(
             core.panes[&locate_pid].cmd.as_deref(),
             Some("sh"),
@@ -23755,7 +24097,7 @@ mod tests {
         let notices = drain_notices(&mut rx);
         assert!(notices.iter().any(|t| t.contains("no such agent")));
         assert!(notices.iter().any(|t| t.contains("more than one row")));
-        assert!(core.thread_pane.is_none(), "no slot recorded on a refusal");
+        assert!(core.portals.is_empty(), "no slot recorded on a refusal");
     }
 
     #[test]
@@ -23769,10 +24111,13 @@ mod tests {
         let agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
         let new_pid = core.next_pane_id;
 
-        core.thread_pane_ctl("deadbee1", Some(agents), tx);
+        core.portal_ctl("deadbee1", 0, Some(agents), tx);
 
         assert!(
-            matches!(&core.thread_pane, Some((k, p, _)) if k == "deadbee1" && *p == new_pid),
+            core.portals.get(&0).is_some_and(|e| {
+                let (k, p) = (&e.row_key, &e.seat);
+                k == "deadbee1" && *p == new_pid
+            }),
             "the control reach records the slot"
         );
         assert!(core.squad_members.is_empty(), "no squad member persisted");
@@ -23793,7 +24138,7 @@ mod tests {
         let (mut core, _client_id, _p1, _rx) = thread_core();
         let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
 
-        core.thread_pane_ctl("nosuchrow", None, tx);
+        core.portal_ctl("nosuchrow", 0, None, tx);
 
         match rx.blocking_recv().expect("a reply") {
             ServerMsg::Err { msg, .. } => {
@@ -23801,7 +24146,7 @@ mod tests {
             }
             other => panic!("expected an Err refusal, got {other:?}"),
         }
-        assert!(core.thread_pane.is_none());
+        assert!(core.portals.is_empty());
         assert!(core.panes.len() == 1, "nothing spawned");
     }
 
@@ -23817,7 +24162,7 @@ mod tests {
         core.session_name = "test".to_string();
         let agents = vec![hosted];
 
-        core.thread_pane_ctl("hosted-row", Some(agents), tx);
+        core.portal_ctl("hosted-row", 0, Some(agents), tx);
 
         core.session_name = name;
         match rx.blocking_recv().expect("a reply") {
@@ -23827,7 +24172,7 @@ mod tests {
             ),
             other => panic!("expected a Notice, got {other:?}"),
         }
-        assert!(core.thread_pane.is_none(), "no thread pane minted");
+        assert!(core.portals.is_empty(), "no thread pane minted");
     }
 
     #[test]
@@ -23843,7 +24188,7 @@ mod tests {
         let (mut core, client_id, _p1, _rx) = thread_core();
         core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
         core.command(client_id, thread_reach_cmd("deadbee1"));
-        let (_, thread_pid, _) = core.thread_pane.clone().unwrap();
+        let thread_pid = core.portals.get(&0).expect("portal 0 open").seat;
         let (sid, _ti) = core
             .session
             .find_pane(thread_pid)
@@ -23870,7 +24215,7 @@ mod tests {
         // session - the pane is still there and still the dedicated slot.
         assert!(core.session.find_pane(thread_pid).is_some());
         assert_eq!(
-            core.thread_pane.as_ref().map(|&(_, p, _)| p),
+            core.portals.get(&0).map(|entry| entry.seat),
             Some(thread_pid)
         );
     }
@@ -23886,7 +24231,7 @@ mod tests {
         let (mut core, client_id, _p1, _rx) = thread_core();
         core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
         core.command(client_id, thread_reach_cmd("deadbee1"));
-        let (_, thread_pid, _) = core.thread_pane.clone().unwrap();
+        let thread_pid = core.portals.get(&0).expect("portal 0 open").seat;
         let (sid, thread_tab_idx) = core
             .session
             .find_pane(thread_pid)
@@ -23943,7 +24288,14 @@ mod tests {
                 focus: lone_viewer,
             },
         );
-        core.thread_pane = Some(("row-x".to_string(), lone_viewer, 900));
+        core.portals.insert(
+            0,
+            Portal {
+                row_key: "row-x".to_string(),
+                seat: lone_viewer,
+                tab: 900,
+            },
+        );
 
         let flow = core.close_pane(lone_viewer);
 
@@ -23962,10 +24314,11 @@ mod tests {
             core.panes[&shell].cmd.is_none(),
             "the seat holds an idle shell, not a viewer"
         );
+        let entry = core.portals.get(&0).expect("portal 0 still open");
         assert_eq!(
-            core.thread_pane,
-            Some(("row-x".to_string(), shell, 900)),
-            "the slot names the stand-in seat"
+            (entry.row_key.as_str(), entry.seat, entry.tab),
+            ("row-x", shell, 900),
+            "the portal names the stand-in seat"
         );
         assert!(
             !core.panes.contains_key(&lone_viewer),
@@ -23985,21 +24338,33 @@ mod tests {
             bg_row("target-b", "/tmp/seen", Some("deadbee2")),
         ];
         core.command(client_id, thread_reach_cmd("deadbee1"));
-        let (_, a_viewer, a_tid) = core.thread_pane.clone().unwrap();
+        let (a_viewer, a_tid) = {
+            let e = core.portals.get(&0).expect("portal 0 open");
+            (e.seat, e.tab)
+        };
         let squad_tabs = core.session.squad(1).unwrap().tabs.len();
 
         core.close_pane(a_viewer);
-        let (_, seat, seat_tid) = core.thread_pane.clone().unwrap();
+        let (seat, seat_tid) = {
+            let e = core.portals.get(&0).expect("portal 0 open");
+            (e.seat, e.tab)
+        };
         assert_eq!(seat_tid, a_tid, "the stand-in seat keeps the tab id");
         let panes_before_b = core.panes.len();
 
         core.command(client_id, thread_reach_cmd("deadbee2"));
 
         assert!(
-            matches!(&core.thread_pane, Some((k, p, t)) if k == "deadbee2" && *p != seat && *t == a_tid),
+            core.portals.get(&0).is_some_and(|e| {
+                let (k, p, t) = (&e.row_key, &e.seat, &e.tab);
+                k == "deadbee2" && *p != seat && *t == a_tid
+            }),
             "B's viewer takes the seat in the same tab"
         );
-        let (_, b_pid, b_tid) = core.thread_pane.clone().unwrap();
+        let (b_pid, b_tid) = {
+            let e = core.portals.get(&0).expect("portal 0 open");
+            (e.seat, e.tab)
+        };
         let (sid, ti) = core.session.find_pane(b_pid).unwrap();
         assert_eq!(
             core.session.squad(sid).unwrap().tabs[ti].id,
@@ -24037,7 +24402,14 @@ mod tests {
             root: Node::Leaf(p2),
             focus: p2,
         });
-        core.thread_pane = Some(("row-x".to_string(), 99_999, 0)); // viewer elsewhere
+        core.portals.insert(
+            0,
+            Portal {
+                row_key: "row-x".to_string(),
+                seat: 99_999,
+                tab: 0,
+            },
+        ); // viewer elsewhere
 
         let flow = core.close_pane(p2);
 
@@ -24066,9 +24438,12 @@ mod tests {
         let (mut core, client_id, _p1, _rx) = thread_core();
         core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
         core.command(client_id, thread_reach_cmd("deadbee1"));
-        let (_, a_viewer, a_tid) = core.thread_pane.clone().unwrap();
+        let (a_viewer, a_tid) = {
+            let e = core.portals.get(&0).expect("portal 0 open");
+            (e.seat, e.tab)
+        };
         core.close_pane(a_viewer); // the stand-in takes the seat
-        let (_, shell, _) = core.thread_pane.clone().unwrap();
+        let shell = core.portals.get(&0).expect("portal 0 open").seat;
 
         core.close_pane(shell);
 
@@ -24083,7 +24458,10 @@ mod tests {
             "the hand-closed stand-in still removes the tab"
         );
         assert!(
-            matches!(&core.thread_pane, Some((k, p, t)) if k == "deadbee1" && *p == shell && *t == a_tid),
+            core.portals.get(&0).is_some_and(|e| {
+                let (k, p, t) = (&e.row_key, &e.seat, &e.tab);
+                k == "deadbee1" && *p == shell && *t == a_tid
+            }),
             "the slot stays stale-named, exactly as closing a dedicated pane always did"
         );
     }
@@ -24097,7 +24475,10 @@ mod tests {
         let (mut core, client_id, _p1, mut rx) = thread_core();
         core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
         core.command(client_id, thread_reach_cmd("deadbee1"));
-        let (_, a_viewer, a_tid) = core.thread_pane.clone().unwrap();
+        let (a_viewer, a_tid) = {
+            let e = core.portals.get(&0).expect("portal 0 open");
+            (e.seat, e.tab)
+        };
         core.close_pane(a_viewer);
         let panes_before = core.panes.len();
 
@@ -24110,8 +24491,10 @@ mod tests {
             "a stand-in seat never reads as already showing"
         );
         assert!(
-            matches!(&core.thread_pane, Some((k, p, t)) if k == "deadbee1" && *t == a_tid && core.panes[p].cmd.is_some()),
-            "the slot names a fresh live viewer in the same tab"
+            core.portals.get(&0).is_some_and(|e| {
+                e.row_key == "deadbee1" && e.tab == a_tid && core.panes[&e.seat].cmd.is_some()
+            }),
+            "the portal names a fresh live viewer in the same tab"
         );
         assert_eq!(
             core.panes.len(),
@@ -24149,7 +24532,7 @@ mod tests {
             assert_eq!(core.panes.len(), panes_before, "no pane spawned");
             assert!(drain_notices(&mut rx)
                 .iter()
-                .any(|t| t.contains("thread pane takes no split")));
+                .any(|t| t.contains("a portal takes no split")));
         }
     }
 
@@ -24957,6 +25340,8 @@ mod tests {
             Command::AttachAgent {
                 id: "deadbee2".into(),
                 placement: PanePlacement {
+                    portal_new: false,
+                    portal: None,
                     tab: None,
                     at: None,
                     target: PaneTarget::CurrentRoute,
@@ -26094,6 +26479,395 @@ mod tests {
                 .all(|s| s.members.iter().all(|m| m.attach_id != "deadbee2")),
             "nothing written to the store"
         );
+    }
+
+    // ---- (x-8f9d) portals: the one thread pane becomes an addressable set --
+
+    /// The reach command naming an explicit portal index.
+    fn portal_reach_cmd(id: &str, portal: u8) -> Command {
+        Command::AttachAgent {
+            id: id.into(),
+            placement: PanePlacement {
+                portal: Some(portal),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn portal_target_folds_the_deprecated_thread_pane_alias() {
+        // AC2-HP: a pre-v64 client sends `thread_pane: true` and no `portal`.
+        // It must resolve to portal 0 - where it always landed - so the
+        // compatibility floor never has to move.
+        let legacy = PanePlacement {
+            thread_pane: true,
+            ..Default::default()
+        };
+        assert_eq!(legacy.portal_target(), Some(0), "the alias is portal 0");
+
+        // AC1-HP: an explicit index wins outright.
+        let explicit = PanePlacement {
+            portal: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(explicit.portal_target(), Some(1));
+
+        // An explicit index wins even against a contradicting alias: one
+        // normalisation, one answer, no code past the edge sees both.
+        let both = PanePlacement {
+            thread_pane: true,
+            portal: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(both.portal_target(), Some(3));
+
+        // Neither set is no portal at all, not portal 0.
+        assert_eq!(PanePlacement::default().portal_target(), None);
+    }
+
+    #[test]
+    fn a_second_portal_opens_beside_the_first_and_leaves_it_alone() {
+        // AC6-HP: reaching row B at portal 1 while portal 0 shows row A
+        // leaves BOTH open. This is the whole feature: before x-8f9d the
+        // second reach repointed the one slot and A vanished.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _rx) = thread_core();
+        core.agents = vec![
+            bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+            bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+        ];
+        core.command(client_id, portal_reach_cmd("deadbee1", 0));
+        let a_seat = core.portals.get(&0).expect("portal 0 open").seat;
+
+        core.command(client_id, portal_reach_cmd("deadbee2", 1));
+
+        assert_eq!(core.portals.len(), 2, "both portals are open");
+        assert_eq!(
+            core.portals.get(&0).map(|e| e.seat),
+            Some(a_seat),
+            "portal 0 still seats A's viewer, untouched by the second reach"
+        );
+        assert_eq!(
+            core.portals.get(&1).map(|e| e.row_key.as_str()),
+            Some("deadbee2"),
+            "portal 1 shows B"
+        );
+        assert_ne!(
+            core.portals[&1].seat, a_seat,
+            "two portals never share a seat"
+        );
+    }
+
+    #[test]
+    fn the_server_allocates_the_next_free_portal() {
+        // `portal_new` names no index because the CALLER must not choose one.
+        // Two clients computing "next free" from the rows they last rendered
+        // pick the same number, and the second reach repoints the first one's
+        // brand-new portal. The server handles reaches one at a time, so
+        // allocating here cannot collide.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _rx) = thread_core();
+        core.agents = vec![
+            bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+            bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+            bg_row("target-c", "/tmp/seen", Some("deadbee3")),
+        ];
+        let new_portal = |id: &str| Command::AttachAgent {
+            id: id.into(),
+            placement: PanePlacement {
+                portal_new: true,
+                ..Default::default()
+            },
+        };
+
+        core.command(client_id, new_portal("deadbee1"));
+        assert_eq!(
+            core.portals.keys().copied().collect::<Vec<_>>(),
+            vec![0],
+            "the first new portal is 0"
+        );
+        core.command(client_id, new_portal("deadbee2"));
+        assert_eq!(
+            core.portals.keys().copied().collect::<Vec<_>>(),
+            vec![0, 1],
+            "the second lands beside it, not on top of it"
+        );
+
+        // An explicit index still wins over "any": addressing is unchanged.
+        core.command(client_id, portal_reach_cmd("deadbee3", 0));
+        assert_eq!(
+            core.portals.get(&0).map(|e| e.row_key.as_str()),
+            Some("deadbee3"),
+            "an addressed reach repoints the index it named"
+        );
+        assert_eq!(core.portals.len(), 2, "and mints nothing new");
+    }
+
+    #[test]
+    fn a_stale_portal_index_is_free_to_reuse() {
+        // Liveness, not presence. An entry whose pane closed elsewhere holds
+        // no portal, so its index is available - and the reach's own
+        // stale-slot path then reads that leftover entry for its remembered
+        // tab, landing the new viewer where the old one was.
+        let mut core = empty_core();
+        core.portals.insert(
+            0,
+            Portal {
+                row_key: "gone".to_string(),
+                seat: 99_999, // never in `panes`
+                tab: 1,
+            },
+        );
+        assert_eq!(
+            core.next_free_portal(),
+            0,
+            "a stale entry does not reserve its index"
+        );
+    }
+
+    #[test]
+    fn one_row_never_holds_two_portals() {
+        // The single slot enforced this by construction - there was nowhere
+        // else for a row to be. With several portals the same-row arm sees
+        // only the REQUESTED index, so a reach for a row another portal
+        // already shows fell through to the fresh-open and minted a SECOND
+        // viewer for it.
+        //
+        // That is not cosmetic. `attached` holds one pane per attach id, so
+        // the second insert overwrites the first and strands a live pane no
+        // row points at. Measured before the fix: portals=2, seats 2 and 3
+        // both showing deadbee1, attached moved 2 -> 3, pane 2 still alive.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _rx) = thread_core();
+        core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+        core.command(client_id, portal_reach_cmd("deadbee1", 0));
+        let seat = core.portals.get(&0).expect("portal 0 open").seat;
+        let attached_before = core.attached.get("deadbee1").copied();
+        let panes_before = core.panes.len();
+
+        // Reach the SAME row into a different portal.
+        core.command(client_id, portal_reach_cmd("deadbee1", 1));
+
+        assert!(
+            !core.portals.contains_key(&1),
+            "no second portal is minted for a row portal 0 already shows"
+        );
+        assert_eq!(core.portals.len(), 1, "still exactly one portal");
+        assert_eq!(
+            core.portals.get(&0).map(|e| e.seat),
+            Some(seat),
+            "portal 0 keeps its seat; the reach focused it"
+        );
+        assert_eq!(
+            core.panes.len(),
+            panes_before,
+            "no second viewer pane was spawned"
+        );
+        assert_eq!(
+            core.attached.get("deadbee1").copied(),
+            attached_before,
+            "the attach mapping still names the one live viewer"
+        );
+
+        // A row shown only through a STAND-IN is not being viewed, so its
+        // portal stays repointable and never blocks a reach elsewhere.
+        core.close_pane(seat);
+        let stand_in = core
+            .portals
+            .get(&0)
+            .expect("portal 0 holds a stand-in")
+            .seat;
+        assert!(
+            core.panes.get(&stand_in).is_some_and(|e| e.cmd.is_none()),
+            "fixture: the seat now holds an idle shell, not a viewer"
+        );
+        core.command(client_id, portal_reach_cmd("deadbee1", 1));
+        assert!(
+            core.portals.contains_key(&1),
+            "a stand-in does not block the row from opening a real portal"
+        );
+    }
+
+    #[test]
+    fn reaching_an_occupied_portal_repoints_only_that_index() {
+        // AC7-HP: the repoint mechanic is unchanged, but scoped. Reaching a
+        // third row at portal 0 must repoint portal 0 and leave portal 1 as
+        // it was - the single-slot code had no way to express this.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _rx) = thread_core();
+        core.agents = vec![
+            bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+            bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+            bg_row("target-c", "/tmp/seen", Some("deadbee3")),
+        ];
+        core.command(client_id, portal_reach_cmd("deadbee1", 0));
+        core.command(client_id, portal_reach_cmd("deadbee2", 1));
+        let b_seat = core.portals.get(&1).expect("portal 1 open").seat;
+        let b_tab = core.portals[&1].tab;
+
+        core.command(client_id, portal_reach_cmd("deadbee3", 0));
+
+        assert_eq!(core.portals.len(), 2, "no third portal was minted");
+        assert_eq!(
+            core.portals.get(&0).map(|e| e.row_key.as_str()),
+            Some("deadbee3"),
+            "portal 0 repointed to C"
+        );
+        assert_eq!(
+            core.portals.get(&1).map(|e| (e.seat, e.tab)),
+            Some((b_seat, b_tab)),
+            "portal 1 is byte-identical: same seat, same tab"
+        );
+    }
+
+    #[test]
+    fn stored_tab_trees_prunes_every_portal_seat_tiled_in_one_tab() {
+        // AC9-HP, and the reason Change 3 is its own change rather than a
+        // rename. `node_without_leaf` removes ONE leaf per call and the
+        // capture loop calls it once per tab, so a mechanical port of the
+        // single-slot prune captures the SECOND portal and restore rebuilds
+        // a pane for a thread - the exact re-bind the declaration forbids.
+        //
+        // A ONE-portal restart passes either way, so it cannot be this test.
+        // Two seats in one tab is the discriminating fixture.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _rx) = thread_core();
+        core.agents = vec![
+            bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+            bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+        ];
+        core.command(client_id, portal_reach_cmd("deadbee1", 0));
+        core.command(client_id, portal_reach_cmd("deadbee2", 1));
+        let seats: Vec<u64> = core.portals.values().map(|e| e.seat).collect();
+        assert_eq!(seats.len(), 2, "fixture: two portals are open");
+
+        // Tile them: BOTH seats plus one ordinary pane in ONE named tab, the
+        // shape Join produces. The ordinary pane is load-bearing - it keeps
+        // the tab from being hollowed away entirely, so the assertion counts
+        // survivors rather than reading an absent tab. A single-call prune
+        // leaves 2 slots here; the fold leaves 1.
+        let (sid, ti) = core.session.find_pane(seats[0]).expect("seat 0 placed");
+        let plain = core.spawn_pane(24, 40, "/tmp/seen").expect("plain pane");
+        let tab = &mut core.session.squad_mut(sid).expect("live squad").tabs[ti];
+        tab.name = Some("tiled".into());
+        tab.root = Node::Branch {
+            axis: Axis::Vertical,
+            children: vec![
+                (0.34, Node::Leaf(plain)),
+                (0.33, Node::Leaf(seats[0])),
+                (0.33, Node::Leaf(seats[1])),
+            ],
+        };
+        tab.focus = plain;
+
+        let (trees, _active) = core.stored_tab_trees(sid).expect("squad captured");
+        let tiled = trees
+            .iter()
+            .find(|t| t.tab_name.as_deref() == Some("tiled"))
+            .expect("the tiled tab survives capture: one ordinary pane remains");
+        assert_eq!(
+            tiled.slots.len(),
+            1,
+            "only the ordinary pane is captured - BOTH portal seats were pruned. \
+             A prune that removes one leaf per tab leaves 2 here; slots = {:?}",
+            tiled.slots
+        );
+
+        // Positive control: the prune touched the CAPTURE, not the live tree.
+        assert_eq!(core.portals.len(), 2, "both portals still open");
+        assert!(core.session.find_pane(seats[1]).is_some());
+    }
+
+    #[test]
+    fn a_closing_portal_spawns_no_stand_in_while_another_is_open() {
+        // AC13-HP. The stand-in exists so a dying viewer never deletes the
+        // ONLY window onto the fleet. With portal 0 open that premise is
+        // false for portal 1, so no idle shell is minted and portal 1 simply
+        // goes away. Without this, closing four portals leaves four idle
+        // shells each holding a tab open.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _rx) = thread_core();
+        core.agents = vec![
+            bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+            bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+        ];
+        core.command(client_id, portal_reach_cmd("deadbee1", 0));
+        core.command(client_id, portal_reach_cmd("deadbee2", 1));
+        let a_seat = core.portals.get(&0).expect("portal 0 open").seat;
+        let b_seat = core.portals.get(&1).expect("portal 1 open").seat;
+        let panes_before = core.panes.len();
+
+        core.close_pane(b_seat);
+
+        assert!(
+            !core.panes.contains_key(&b_seat),
+            "portal 1's pane is gone; its entry may stay stale-named, which is \
+             what the reach reads to land a replacement in the same tab"
+        );
+        assert_eq!(
+            core.portals.get(&0).map(|e| e.seat),
+            Some(a_seat),
+            "portal 0 is untouched"
+        );
+        assert_eq!(
+            core.panes.len(),
+            panes_before - 1,
+            "the viewer was reaped and NO stand-in shell replaced it"
+        );
+
+        // The other half of the pair: the LAST portal still gets its
+        // stand-in. Either behavior alone looks correct in isolation, which
+        // is why both halves live in one test.
+        core.close_pane(a_seat);
+        let seat = core
+            .portals
+            .get(&0)
+            .expect("the last portal keeps its seat as a stand-in")
+            .seat;
+        assert!(
+            core.panes.get(&seat).is_some_and(|e| e.cmd.is_none()),
+            "the last portal's seat holds an idle shell stand-in"
+        );
+    }
+
+    #[test]
+    fn the_portal_index_is_derived_and_pane_zero_is_a_valid_seat() {
+        // AC19-EDGE, the x-d914 regression control. Pane ids allocate from
+        // zero, so a portal seated on pane 0 is ordinary. A lookup written
+        // as a truthiness test (or `pane_id > 0`) reads that seat as absent -
+        // the defect that made six live workers invisible, in Rust this time.
+        // It is invisible on every other pane id, so it needs its own test.
+        let mut core = empty_core();
+        core.portals.insert(
+            0,
+            Portal {
+                row_key: "row-zero".to_string(),
+                seat: 0,
+                tab: 1,
+            },
+        );
+        assert_eq!(
+            core.portal_of(Some(0)),
+            Some(0),
+            "pane 0 is a valid seat, not an absent one"
+        );
+
+        // A pane that seats no portal, and a row with no pane at all, both
+        // read as no portal - never as an unknown one.
+        assert_eq!(core.portal_of(Some(7)), None);
+        assert_eq!(core.portal_of(None), None);
+
+        // Derived, not stored: moving the seat moves the index with it, and
+        // nothing about the row had to be rewritten.
+        core.portals.insert(
+            1,
+            Portal {
+                row_key: "row-zero".to_string(),
+                seat: 7,
+                tab: 1,
+            },
+        );
+        assert_eq!(core.portal_of(Some(7)), Some(1));
     }
 
     // ---- (x-d285) mux gestures through the canonical re-entry plan -------
@@ -28370,8 +29144,8 @@ mod tests {
             held_workers: HashMap::new(),
             detached_panes: HashMap::new(),
             diff_pane: None,
-            thread_pane: None,
-            thread_pane_noticed: false,
+            portals: BTreeMap::new(),
+            portal_noticed: false,
             squad_members: HashMap::new(),
             template_specs: HashMap::new(),
             pending_template_restores: Vec::new(),
@@ -28554,6 +29328,8 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
+                    portal: None,
                     tab: None,
                     at: None,
                     target: PaneTarget::SquadName("review".into()),
@@ -28611,6 +29387,8 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
+                    portal: None,
                     tab: None,
                     at: None,
                     target: PaneTarget::SquadName("readyrule".into()),
@@ -28671,6 +29449,8 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
+                    portal: None,
                     tab: None,
                     at: None,
                     target: PaneTarget::SquadName("   ".into()),
@@ -29985,7 +30765,7 @@ mod tests {
 
     #[test]
     fn emergency_roster_kills_plain_child_and_spares_keeper_child() {
-        let plain = std::process::Command::new("/bin/sh")
+        let mut plain = std::process::Command::new("/bin/sh")
             .args(["-c", "exec sleep 30"])
             .spawn()
             .unwrap();
@@ -30019,6 +30799,9 @@ mod tests {
 
         unsafe { libc::kill(keeper_pid as libc::pid_t, libc::SIGKILL) };
         keeper.wait().unwrap();
+        // Reap the killed plain child too, so the test leaves no zombie
+        // behind. After the assertions, so what they read is unchanged.
+        let _ = plain.wait();
     }
 
     #[test]

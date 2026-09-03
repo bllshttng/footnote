@@ -3190,6 +3190,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 claim,
                 worker,
                 placement: PanePlacement {
+                    portal_new: false,
                     target: squad
                         .map(PaneTarget::SquadName)
                         .unwrap_or(PaneTarget::CurrentRoute),
@@ -3200,6 +3201,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     fallback,
                     max_panes,
                     thread_pane: false,
+                    portal: None,
                 },
             },
         });
@@ -4955,11 +4957,15 @@ pub fn view(args: &[OsString], env_session: Option<&str>) -> i32 {
     focus_pane(verb, &session, pane, true, json)
 }
 
-/// `fno mux thread <name>` (x-07c2, hidden): the outside-the-TUI reach behind
-/// `fno agents attach <name>`. Sends the ThreadPane control verb, which runs
-/// the exact command a TUI reach runs, and prints where it landed. A missing
-/// server is its own exit code so the CLI caller can fall through to the
-/// inline attach instead of reading a generic failure as one.
+/// `fno mux thread <name> [--portal N]` (x-07c2, hidden): the outside-the-TUI
+/// reach behind `fno agents attach <name>`. Sends the ThreadPane control verb,
+/// which runs the exact command a TUI reach runs, and prints where it landed.
+/// A missing server is its own exit code so the CLI caller can fall through to
+/// the inline attach instead of reading a generic failure as one.
+///
+/// (x-8f9d) `--portal N` names which portal to reach through; omitted is
+/// portal 0. This is the addressing door: two calls naming 0 and 1 put two
+/// threads in two panes, which the tab menu's Join actions then tile.
 pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
     let (session_flag, _json, rest) = match take_common_flags(args) {
         Ok(t) => t,
@@ -4968,7 +4974,40 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
             return EXIT_USAGE;
         }
     };
-    let Some(name) = rest
+    // Split `--portal N` out of the positionals before the one-name check, so
+    // the flag can sit on either side of the name.
+    let mut portal: Option<u8> = None;
+    let mut positionals: Vec<String> = Vec::new();
+    let mut it = rest.iter();
+    while let Some(arg) = it.next() {
+        let text = arg.as_str();
+        if text == "--portal" {
+            let Some(value) = it.next() else {
+                eprintln!("fno mux thread: --portal needs an index");
+                return EXIT_USAGE;
+            };
+            match value.parse::<u8>() {
+                Ok(n) => portal = Some(n),
+                Err(_) => {
+                    eprintln!("fno mux thread: --portal takes an index 0-255");
+                    return EXIT_USAGE;
+                }
+            }
+            continue;
+        }
+        if let Some(value) = text.strip_prefix("--portal=") {
+            match value.parse::<u8>() {
+                Ok(n) => portal = Some(n),
+                Err(_) => {
+                    eprintln!("fno mux thread: --portal takes an index 0-255");
+                    return EXIT_USAGE;
+                }
+            }
+            continue;
+        }
+        positionals.push(text.to_string());
+    }
+    let Some(name) = positionals
         .first()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -4976,12 +5015,12 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
         eprintln!("fno mux thread: needs an agent name or attach id");
         return EXIT_USAGE;
     };
-    if rest.len() > 1 {
+    if positionals.len() > 1 {
         eprintln!("fno mux thread: takes exactly one name");
         return EXIT_USAGE;
     }
     // A paneless row owns no session routing: the operator's ambient session
-    // (FNO_SESSION / the default) is the server whose thread pane this drives.
+    // (FNO_SESSION / the default) is the server whose portal this drives.
     let session = resolve_session(
         session_flag
             .as_deref()
@@ -5005,7 +5044,7 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
     };
     match send_control(
         stream,
-        ControlVerb::ThreadPane { name },
+        ControlVerb::ThreadPane { name, portal },
         CONTROL_TIMEOUT,
         CONTROL_REPLY_DEADLINE,
         &session,

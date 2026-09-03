@@ -1303,6 +1303,14 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
             "reap all exited agents".into(),
             KeySection::SidelineRows,
         ),
+        // (x-8f9d) Enter reaches portal 0; P opens the next free portal so a
+        // second thread lands BESIDE the first instead of repointing it. The
+        // tab menu's Join actions then tile them.
+        (
+            "P".into(),
+            "show this row in a new portal (Enter uses portal 0)".into(),
+            KeySection::SidelineRows,
+        ),
         (
             "right-click".into(),
             // (x-7683) All three triggers of the same menu, so a terminal that
