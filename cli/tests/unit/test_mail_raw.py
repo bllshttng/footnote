@@ -456,6 +456,20 @@ def test_raw_codex_review_uses_process_owned_sender_with_inherited_marker(
     assert calls[0]["audit_sender"] == SID_CLAUDE[:8]
 
 
+def test_codex_review_target_parser_has_a_named_module():
+    from fno.mail.codex_review_target import (
+        explicit_review_pr_number,
+        resolve_codex_review_target,
+    )
+
+    assert resolve_codex_review_target(
+        "/review medium --comment 1427 HEAD abc1234 against origin/main"
+    ) == ("baseBranch:origin/main", False)
+    assert explicit_review_pr_number(
+        "medium --comment 1427 HEAD abc1234 against origin/main"
+    ) == 1427
+
+
 def test_raw_accepts_target_self_review_codex_payload(
     mailbox, monkeypatch, capsys
 ):
