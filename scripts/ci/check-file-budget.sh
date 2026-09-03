@@ -36,6 +36,13 @@
 #                      Default 100.
 #   PR_BASE_REF        base branch name, no remote prefix. Default: main.
 #   PR_REMOTE          remote holding the base. Default: origin.
+#   FILE_BUDGET_BASE_SHA  explicit base sha to diff instead of the merge base;
+#                      the push-to-main alarm (guards.yml passes
+#                      github.event.before). The all-zeros sha counts as unset
+#                      (a branch's first push has no previous tip); anything
+#                      else that does not resolve exits 2 - never a silent
+#                      fall back to the merge base, which on main IS HEAD and
+#                      would diff nothing.
 
 set -euo pipefail
 
@@ -75,33 +82,58 @@ BASE_REF="${PR_BASE_REF:-main}"
 # refusal (never a silent pass against a missing ref) when the base cannot be
 # established. The count printed by every refusal is computed live so the
 # message reports progress without a second script.
-if ! git fetch --quiet "$REMOTE" \
-        "+refs/heads/$BASE_REF:refs/remotes/$REMOTE/$BASE_REF"; then
-    echo "check-file-budget: cannot fetch $REMOTE/$BASE_REF - unable to establish the merge base" >&2
-    echo "       (fetch it, or set PR_BASE_REF/PR_REMOTE)" >&2
-    exit 2
+PUSH_ALARM=0
+BASE_SHA="${FILE_BUDGET_BASE_SHA:-}"
+if [[ "$BASE_SHA" == "0000000000000000000000000000000000000000" ]]; then
+    BASE_SHA=""   # a branch's first push: no previous tip exists to diff
 fi
-BASE_TIP="$(git rev-parse --verify --quiet "$REMOTE/$BASE_REF")" || {
-    echo "check-file-budget: cannot resolve $REMOTE/$BASE_REF - unable to establish the merge base" >&2
-    echo "       (fetch it, or set PR_BASE_REF/PR_REMOTE)" >&2
-    exit 2
-}
-BASE="$(git merge-base "$BASE_TIP" HEAD 2>/dev/null)" || {
-    # A shallow checkout (actions/checkout's default depth is 1) leaves HEAD
-    # and the base in disconnected graphs, and merge-base then fails with no
-    # output. Heal the shallow case by fetching full history once; local
-    # clones and deep CI checkouts never pay for this. If a base still cannot
-    # be established, refuse - never a silent pass.
-    if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
-        git fetch --quiet --unshallow "$REMOTE" 2>/dev/null || true
-        BASE="$(git merge-base "$BASE_TIP" HEAD 2>/dev/null)" || true
-    fi
+if [[ -n "$BASE_SHA" ]]; then
+    # The push-to-main alarm (guards.yml passes github.event.before). An
+    # explicit sha never falls back to the merge base: on main the merge base
+    # IS HEAD, and that silent empty diff is the green-on-nothing trap this
+    # override exists to close.
+    BASE="$(git rev-parse --verify --quiet "$BASE_SHA^{commit}")" || {
+        # A shallow checkout does not hold the previous tip; heal like the
+        # merge-base path below, then refuse if it still will not resolve.
+        if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
+            git fetch --quiet --unshallow "$REMOTE" 2>/dev/null || true
+            BASE="$(git rev-parse --verify --quiet "$BASE_SHA^{commit}")" || true
+        fi
+    }
     if [[ -z "${BASE:-}" ]]; then
-        echo "check-file-budget: cannot establish a merge base between $REMOTE/$BASE_REF and HEAD" >&2
-        echo "       (shallow or unrelated histories? fetch --unshallow, or fix PR_BASE_REF/PR_REMOTE)" >&2
+        echo "check-file-budget: FILE_BUDGET_BASE_SHA $BASE_SHA does not resolve" >&2
         exit 2
     fi
-}
+    PUSH_ALARM=1
+else
+    if ! git fetch --quiet "$REMOTE" \
+            "+refs/heads/$BASE_REF:refs/remotes/$REMOTE/$BASE_REF"; then
+        echo "check-file-budget: cannot fetch $REMOTE/$BASE_REF - unable to establish the merge base" >&2
+        echo "       (fetch it, or set PR_BASE_REF/PR_REMOTE)" >&2
+        exit 2
+    fi
+    BASE_TIP="$(git rev-parse --verify --quiet "$REMOTE/$BASE_REF")" || {
+        echo "check-file-budget: cannot resolve $REMOTE/$BASE_REF - unable to establish the merge base" >&2
+        echo "       (fetch it, or set PR_BASE_REF/PR_REMOTE)" >&2
+        exit 2
+    }
+    BASE="$(git merge-base "$BASE_TIP" HEAD 2>/dev/null)" || {
+        # A shallow checkout (actions/checkout's default depth is 1) leaves HEAD
+        # and the base in disconnected graphs, and merge-base then fails with no
+        # output. Heal the shallow case by fetching full history once; local
+        # clones and deep CI checkouts never pay for this. If a base still cannot
+        # be established, refuse - never a silent pass.
+        if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
+            git fetch --quiet --unshallow "$REMOTE" 2>/dev/null || true
+            BASE="$(git merge-base "$BASE_TIP" HEAD 2>/dev/null)" || true
+        fi
+        if [[ -z "${BASE:-}" ]]; then
+            echo "check-file-budget: cannot establish a merge base between $REMOTE/$BASE_REF and HEAD" >&2
+            echo "       (shallow or unrelated histories? fetch --unshallow, or fix PR_BASE_REF/PR_REMOTE)" >&2
+            exit 2
+        fi
+    }
+fi
 
 _CACHED_COUNT=""
 live_count() {
@@ -146,7 +178,17 @@ while IFS=$'\t' read -r added deleted path; do
 
     if git cat-file -e "$BASE:$path" 2>/dev/null; then
         if [[ "$added" -gt "$deleted" ]]; then
-            echo "check-file-budget: $path is $head_lines lines (budget $BUDGET) and this change grows it by +$added/-$deleted. A file over budget may only shrink. Put the new code in a module named by the question it answers (never server2.rs), and move the code you touched with it. Files over budget today: $(live_count); each shrink is banked." >> "$findings"
+            if [[ "$PUSH_ALARM" -eq 1 ]]; then
+                # A red push run is an alarm, not a refusal: the merge already
+                # happened. The shrink number is the measured net growth, so
+                # the next author gets the exact size of the owed payback.
+                net=$((added - deleted))
+                echo "check-file-budget: main advanced $(git rev-parse --short "$BASE")..$(git rev-parse --short HEAD) and grew $path by +$added/-$deleted" >> "$findings"
+                echo "  ($head_lines lines, budget $BUDGET). This landed without the gate running on its PR head." >> "$findings"
+                echo "  The next change touching this file must shrink it by at least $net lines." >> "$findings"
+            else
+                echo "check-file-budget: $path is $head_lines lines (budget $BUDGET) and this change grows it by +$added/-$deleted. A file over budget may only shrink. Put the new code in a module named by the question it answers (never server2.rs), and move the code you touched with it. Files over budget today: $(live_count); each shrink is banked." >> "$findings"
+            fi
             fails=1
         elif [[ "$QUIET" -eq 0 ]]; then
             net=$((deleted - added))

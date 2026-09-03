@@ -333,12 +333,16 @@ jobs:
         run: bash scripts/ci/check-preamble-budget.sh
 
       # A tracked source file over 5,000 lines is shrink-only relative to the
-      # merge base; the refusal names the module-per-question remedy.
+      # merge base; the refusal names the module-per-question remedy. On a
+      # push to main the merge base IS HEAD, so the gate would diff nothing;
+      # FILE_BUDGET_BASE_SHA pins the diff to the previous tip and turns a
+      # growth that slipped past a pre-gate PR head into a red alarm.
       - name: Oversized files are shrink-only
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         env:
           PR_BASE_REF: ${{ github.base_ref || 'main' }}
+          FILE_BUDGET_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: bash scripts/ci/check-file-budget.sh
 
       # From review-invocation-single-source.yml.
