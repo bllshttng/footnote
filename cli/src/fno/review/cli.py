@@ -226,7 +226,8 @@ def post_dispositions(
         "code-review", "--reviewer", help="The reviewer name the round is attributed to."
     ),
     pr: Optional[int] = typer.Option(
-        None, "--pr", help="The PR number; resolved from the current branch when omitted."
+        None, "--pr-number", "--pr",
+        help="The PR number; resolved from the current branch when omitted.",
     ),
 ) -> None:
     """Post ONE per-round disposition comment on the PR, over REST.
