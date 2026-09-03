@@ -230,6 +230,48 @@ else
     fail "target shim sent the prefixed Codex basename (rc=$CODEX_RC resolver=$(cat "$TMP/resolver-id" 2>/dev/null))"
 fi
 
+# Codex WITHOUT CODEX_THREAD_ID. The hook runner calls `env_clear()` and replays
+# only the session snapshot plus the hook's own declared env, and fno declares
+# none - so the var the test above supplies is absent in production. The uuid is
+# still in the payload twice: codex sends `session_id` (StopCommandInput) and the
+# rollout basename carries it as a suffix. Measured 2026-09-02: without this the
+# resolver got `rollout-<utc>-<uuid>`, missed, and the hook took the silent-allow
+# path - 1666 claude loop_check events against 2 codex over six days.
+rm -f "$TMP/resolver-id" "$TMP/state-record"
+CODEX_NOENV_RC=0
+(
+    cd "$TMP/b" || exit 1
+    env HOME="$TMP/home" FNO_AGENTS_BIN="$STUB" \
+        CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= \
+        SELECTED_STATE="$TMP/a/.fno/target-state.md" RESOLVER_RC=0 \
+        RESOLVER_ID_RECORD="$TMP/resolver-id" STATE_RECORD="$TMP/state-record" CWD_RECORD="$TMP/cwd-record" \
+        bash "$TARGET_HOOK" <<< "{\"session_id\":\"session-a\",\"transcript_path\":\"$CODEX_TRANSCRIPT\"}"
+) >/dev/null 2>/dev/null || CODEX_NOENV_RC=$?
+if [[ "$CODEX_NOENV_RC" -eq 2 && "$(cat "$TMP/resolver-id" 2>/dev/null)" == "session-a" \
+    && "$(cat "$TMP/state-record" 2>/dev/null)" == "$TMP/a/.fno/target-state.md" ]]; then
+    pass "target shim resolves a Codex rollout with no CODEX_THREAD_ID in env"
+else
+    fail "target shim silently allowed with no CODEX_THREAD_ID (rc=$CODEX_NOENV_RC resolver=$(cat "$TMP/resolver-id" 2>/dev/null))"
+fi
+
+# Same session, transcript_path absent. `StopCommandInput.transcript_path` is
+# NullableString, so the payload `session_id` has to carry the resolve on its own.
+rm -f "$TMP/resolver-id" "$TMP/state-record"
+CODEX_NOPATH_RC=0
+(
+    cd "$TMP/b" || exit 1
+    env HOME="$TMP/home" FNO_AGENTS_BIN="$STUB" \
+        CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= \
+        SELECTED_STATE="$TMP/a/.fno/target-state.md" RESOLVER_RC=0 \
+        RESOLVER_ID_RECORD="$TMP/resolver-id" STATE_RECORD="$TMP/state-record" CWD_RECORD="$TMP/cwd-record" \
+        bash "$TARGET_HOOK" <<< "{\"session_id\":\"session-a\",\"transcript_path\":null}"
+) >/dev/null 2>/dev/null || CODEX_NOPATH_RC=$?
+if [[ "$(cat "$TMP/resolver-id" 2>/dev/null)" == "session-a" ]]; then
+    pass "target shim resolves by payload session_id with a null transcript_path"
+else
+    fail "target shim lost the session on a null transcript_path (rc=$CODEX_NOPATH_RC resolver=$(cat "$TMP/resolver-id" 2>/dev/null))"
+fi
+
 cp "$TMP/b/.fno/target-state.md" "$TMP/b/.fno/target-state.md.full"
 cat > "$TMP/b/.fno/target-state.md" <<STATE
 ---

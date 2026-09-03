@@ -67,8 +67,27 @@ HOOK_INPUT=$(cat)
 HOOK_TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" | sed -n \
     's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 HOOK_HARNESS_ID=$(basename "$HOOK_TRANSCRIPT_PATH" .jsonl 2>/dev/null || true)
+# Every harness sends its own session id in the payload, and it is the ONLY
+# source that is already the bare id the resolver wants. Codex names its
+# transcript rollout-<utc>-<thread-uuid>, so the basename needs stripping, and
+# `transcript_path` is nullable in codex's own stop.command.input schema, so the
+# basename can be absent entirely. Deriving the id from the path alone worked
+# only when CODEX_THREAD_ID happened to be exported to supply the answer, and
+# the hook runner calls env_clear() and replays the session snapshot plus the
+# hook's declared env (fno declares none), so in production it is not there.
+# Measured 2026-09-02: the resolver got the prefixed basename, missed, and the
+# hook took the silent-allow path below - 1666 claude loop-check events against
+# 2 codex over six days, while other Stop hooks in the same group fired fine.
+HOOK_SESSION_ID=$(printf '%s' "$HOOK_INPUT" | sed -n \
+    's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+# The transcript basename stays the TRANSCRIPT identity that the ownership
+# guards below compare against; only the resolver argument changes here. When
+# the payload carries no path, the session id is the only identity there is.
+[[ -n "$HOOK_HARNESS_ID" ]] || HOOK_HARNESS_ID="$HOOK_SESSION_ID"
 RESOLVE_HARNESS_ID="$HOOK_HARNESS_ID"
-if [[ -n "${CODEX_THREAD_ID:-}" ]] \
+if [[ -n "$HOOK_SESSION_ID" ]]; then
+    RESOLVE_HARNESS_ID="$HOOK_SESSION_ID"
+elif [[ -n "${CODEX_THREAD_ID:-}" ]] \
     && { [[ "$HOOK_HARNESS_ID" == "$CODEX_THREAD_ID" ]] \
         || [[ "$HOOK_HARNESS_ID" == *"-$CODEX_THREAD_ID" ]]; }; then
     RESOLVE_HARNESS_ID="$CODEX_THREAD_ID"
