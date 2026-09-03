@@ -266,10 +266,69 @@ CODEX_NOPATH_RC=0
         RESOLVER_ID_RECORD="$TMP/resolver-id" STATE_RECORD="$TMP/state-record" CWD_RECORD="$TMP/cwd-record" \
         bash "$TARGET_HOOK" <<< "{\"session_id\":\"session-a\",\"transcript_path\":null}"
 ) >/dev/null 2>/dev/null || CODEX_NOPATH_RC=$?
-if [[ "$(cat "$TMP/resolver-id" 2>/dev/null)" == "session-a" ]]; then
-    pass "target shim resolves by payload session_id with a null transcript_path"
+# rc 2 is the assertion, not incidental: with the manifest resolved and no
+# transcript to hand `loop-check --transcript`, the hook MUST take the bounded
+# unavailable-block path rather than allow. Asserting the resolver id alone
+# would pass on a run where the session resolved and the gate was still off.
+if [[ "$(cat "$TMP/resolver-id" 2>/dev/null)" == "session-a" && "$CODEX_NOPATH_RC" -eq 2 ]]; then
+    pass "target shim resolves by payload session_id and blocks with no transcript"
 else
-    fail "target shim lost the session on a null transcript_path (rc=$CODEX_NOPATH_RC resolver=$(cat "$TMP/resolver-id" 2>/dev/null))"
+    fail "target shim lost the session or allowed with a null transcript_path (rc=$CODEX_NOPATH_RC resolver=$(cat "$TMP/resolver-id" 2>/dev/null))"
+fi
+
+# No payload session_id and no CODEX_THREAD_ID: the uuid has to come off the
+# rollout basename by shape. The ladder is what keeps the gate armed if the
+# payload key is ever absent or renamed.
+UUID_TRANSCRIPT="$TMP/rollout-2026-08-25T21-00-00-01a06212-1e0e-79a3-a4c0-5af187a5cbfc.jsonl"
+printf '{"message":{"role":"assistant","content":"working"}}\n' > "$UUID_TRANSCRIPT"
+rm -f "$TMP/resolver-id" "$TMP/state-record"
+CODEX_SHAPE_RC=0
+(
+    cd "$TMP/b" || exit 1
+    env HOME="$TMP/home" FNO_AGENTS_BIN="$STUB" \
+        CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= \
+        SELECTED_STATE="$TMP/a/.fno/target-state.md" RESOLVER_RC=0 \
+        RESOLVER_ID_RECORD="$TMP/resolver-id" STATE_RECORD="$TMP/state-record" CWD_RECORD="$TMP/cwd-record" \
+        bash "$TARGET_HOOK" <<< "{\"transcript_path\":\"$UUID_TRANSCRIPT\"}"
+) >/dev/null 2>/dev/null || CODEX_SHAPE_RC=$?
+if [[ "$(cat "$TMP/resolver-id" 2>/dev/null)" == "01a06212-1e0e-79a3-a4c0-5af187a5cbfc" ]]; then
+    pass "target shim strips the uuid off a rollout basename with no id anywhere else"
+else
+    fail "target shim kept the rollout prefix (rc=$CODEX_SHAPE_RC resolver=$(cat "$TMP/resolver-id" 2>/dev/null))"
+fi
+
+# The resolver is a LADDER, not one shot. The first candidate misses (rc 1) and
+# the next one hits. A one-shot resolve reads that first miss as "no manifest
+# names this session" and takes the silent allow this PR exists to remove.
+rm -f "$TMP/resolver-id" "$TMP/state-record"
+LADDER_STUB="$TMP/fno-agents-ladder"
+cat > "$LADDER_STUB" <<'LADDER'
+#!/usr/bin/env bash
+case "$1" in
+  manifest-for-session)
+    printf '%s\n' "$3" >> "$RESOLVER_ID_RECORD"
+    if [[ "$3" == "session-a" ]]; then printf '%s\n' "$SELECTED_STATE"; exit 0; fi
+    exit 1
+    ;;
+  loop-check) printf '%s\n' '{"decision":"block","message":"keep going"}'; exit 0 ;;
+  *) exit 0 ;;
+esac
+LADDER
+chmod +x "$LADDER_STUB"
+LADDER_RC=0
+(
+    cd "$TMP/b" || exit 1
+    env HOME="$TMP/home" FNO_AGENTS_BIN="$LADDER_STUB" \
+        CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= CODEX_THREAD_ID="session-a" \
+        SELECTED_STATE="$TMP/a/.fno/target-state.md" \
+        RESOLVER_ID_RECORD="$TMP/resolver-id" STATE_RECORD="$TMP/state-record" CWD_RECORD="$TMP/cwd-record" \
+        bash "$TARGET_HOOK" <<< "{\"session_id\":\"not-the-stamped-id\",\"transcript_path\":\"$CODEX_TRANSCRIPT\"}"
+) >/dev/null 2>/dev/null || LADDER_RC=$?
+if grep -qx "not-the-stamped-id" "$TMP/resolver-id" 2>/dev/null \
+    && grep -qx "session-a" "$TMP/resolver-id" 2>/dev/null; then
+    pass "target shim falls past a missed payload id to the next candidate"
+else
+    fail "target shim stopped at the first miss (rc=$LADDER_RC tried=$(tr '\n' ',' < "$TMP/resolver-id" 2>/dev/null))"
 fi
 
 cp "$TMP/b/.fno/target-state.md" "$TMP/b/.fno/target-state.md.full"
