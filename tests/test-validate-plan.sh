@@ -62,7 +62,7 @@ if [[ $EXIT_CODE -eq 0 ]]; then
 else
     fail "AC2: Should exit 0 for warnings-only (got exit $EXIT_CODE)"
 fi
-if echo "$OUTPUT" | grep -q "WARN"; then
+if grep -q "WARN" <<< "$OUTPUT"; then
     pass "AC2: Shows WARN for missing Acceptance Criteria/Steps"
 else
     fail "AC2: Should show WARN for missing sections"
@@ -106,7 +106,7 @@ if [[ $EXIT_CODE -eq 0 ]]; then
 else
     fail "AC6a: Feature scope with resolved path should exit 0 (got $EXIT_CODE)"
 fi
-if echo "$OUTPUT" | grep -q "No stubs in critical path"; then
+if grep -q "No stubs in critical path" <<< "$OUTPUT"; then
     pass "AC6a: Reports no stubs"
 else
     fail "AC6a: Should report no stubs"
@@ -139,7 +139,7 @@ if [[ $EXIT_CODE -eq 1 ]]; then
 else
     fail "AC6b: Feature scope with unresolved stubs should exit 1 (got $EXIT_CODE)"
 fi
-if echo "$OUTPUT" | grep -q "ERROR.*unresolved stub"; then
+if grep -q "ERROR.*unresolved stub" <<< "$OUTPUT"; then
     pass "AC6b: Reports ERROR for unresolved stubs"
 else
     fail "AC6b: Should report ERROR for unresolved stubs"
@@ -173,7 +173,7 @@ if [[ $EXIT_CODE -eq 0 ]]; then
 else
     fail "AC6c: Scaffolding scope with stubs should exit 0 (got $EXIT_CODE)"
 fi
-if echo "$OUTPUT" | grep -q "WARN.*unresolved stub"; then
+if grep -q "WARN.*unresolved stub" <<< "$OUTPUT"; then
     pass "AC6c: Reports WARN (not ERROR) for scaffolding stubs"
 else
     fail "AC6c: Should report WARN for scaffolding stubs"
@@ -208,7 +208,7 @@ if [[ $EXIT_CODE -eq 0 ]]; then
 else
     fail "AC6f: POC scope with stubs should exit 0 (got $EXIT_CODE)"
 fi
-if echo "$OUTPUT" | grep -q "WARN.*unresolved stub"; then
+if grep -q "WARN.*unresolved stub" <<< "$OUTPUT"; then
     pass "AC6f: Reports WARN (not ERROR) for poc stubs"
 else
     fail "AC6f: Should report WARN for poc stubs"
@@ -231,7 +231,7 @@ if [[ $EXIT_CODE -eq 0 ]]; then
 else
     fail "AC6d: Legacy plan without trace should exit 0 (got $EXIT_CODE)"
 fi
-if echo "$OUTPUT" | grep -q "WARN.*No Critical Path Trace"; then
+if grep -q "WARN.*No Critical Path Trace" <<< "$OUTPUT"; then
     pass "AC6d: Reports WARN for legacy plan"
 else
     fail "AC6d: Should report WARN for legacy plan"
@@ -259,7 +259,7 @@ if [[ $EXIT_CODE -eq 1 ]]; then
 else
     fail "AC6e: Plan with scope but no trace should exit 1 (got $EXIT_CODE)"
 fi
-if echo "$OUTPUT" | grep -q "ERROR.*missing Critical Path Trace"; then
+if grep -q "ERROR.*missing Critical Path Trace" <<< "$OUTPUT"; then
     pass "AC6e: Reports ERROR for scope without trace"
 else
     fail "AC6e: Should report ERROR for scope without trace"
@@ -291,7 +291,7 @@ if [[ $EXIT_CODE -eq 0 ]]; then
 else
     fail "AC6g: Should not abort (pipefail bug) when scope classification is absent (got exit $EXIT_CODE)"
 fi
-if echo "$OUTPUT" | grep -q "No scope classification found"; then
+if grep -q "No scope classification found" <<< "$OUTPUT"; then
     pass "AC6g: Reports WARN for missing scope classification"
 else
     fail "AC6g: Should warn about missing scope classification"
@@ -343,12 +343,12 @@ tasks:
 ```
 HEREDOC
 OUTPUT=$(bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1)
-if ! echo "$OUTPUT" | grep -q "WARN:"; then
+if ! grep -q "WARN:" <<< "$OUTPUT"; then
     pass "AC7a: Semantic plan needs no task/wave/critical-path headings"
 else
     fail "AC7a: Semantic plan should have zero warnings: $OUTPUT"
 fi
-if echo "$OUTPUT" | grep -q "semantic execution contract valid"; then
+if grep -q "semantic execution contract valid" <<< "$OUTPUT"; then
     pass "AC7a: Wrapper delegates to semantic validator"
 else
     fail "AC7a: Semantic validator receipt missing"
@@ -358,7 +358,7 @@ PLAN_PLACEHOLDER="$TMPDIR_BASE/semantic-placeholder.md"
 sed 's#bash tests/test-validate-plan.sh#\# fill in verify command#' \
     "$PLAN_SEMANTIC" > "$PLAN_PLACEHOLDER"
 OUTPUT=$(bash "$VALIDATE" "$PLAN_PLACEHOLDER" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "tasks.1.1.verify"; then
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "tasks.1.1.verify" <<< "$OUTPUT"; then
     pass "AC7b: Placeholder verification fails with exact task field"
 else
     fail "AC7b: Placeholder verification should fail loud: $OUTPUT"
@@ -372,7 +372,7 @@ PLAN_TRAILING="$TMPDIR_BASE/semantic-trailing.md"
 sed 's/^## Execution Strategy$/## Execution Strategy   /' \
     "$PLAN_PLACEHOLDER" > "$PLAN_TRAILING"
 OUTPUT=$(bash "$VALIDATE" "$PLAN_TRAILING" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "tasks.1.1.verify"; then
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "tasks.1.1.verify" <<< "$OUTPUT"; then
     pass "AC8a: Trailing heading whitespace stays on semantic path"
 else
     fail "AC8a: Trailing heading whitespace bypassed semantics: $OUTPUT"
@@ -394,7 +394,7 @@ project: fno
 Only context.
 HEREDOC
 OUTPUT=$(bash "$VALIDATE" "$PLAN_QUOTED_QUICK" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "Changes"; then
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "Changes" <<< "$OUTPUT"; then
     pass "AC8b: Quoted quick-plan kind stays on semantic path"
 else
     fail "AC8b: Quoted quick-plan kind bypassed semantics: $OUTPUT"
@@ -432,7 +432,7 @@ waves:
 - The change works.
 HEREDOC
 OUTPUT=$(bash "$VALIDATE" "$PLAN_LEGACY" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "Execution Strategy must declare at least one task"; then
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "Execution Strategy must declare at least one task" <<< "$OUTPUT"; then
     pass "AC8c: Every Execution Strategy uses semantic validation"
 else
     fail "AC8c: Incomplete Execution Strategy bypassed semantics: $OUTPUT"
@@ -440,7 +440,7 @@ fi
 
 OUTPUT=$(cd "$TMPDIR_BASE" && bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1) \
     && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 0 ]] && echo "$OUTPUT" | grep -q "semantic execution contract valid"; then
+if [[ $EXIT_CODE -eq 0 ]] && grep -q "semantic execution contract valid" <<< "$OUTPUT"; then
     pass "AC8d: Validator resolves worktree source outside a Git cwd"
 else
     fail "AC8d: Portable invocation used a stale installed CLI: $OUTPUT"
@@ -452,7 +452,7 @@ fi
 if command -v uv >/dev/null 2>&1; then
     OUTPUT=$(FNO_PYTHON=/usr/bin/python3 bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1) \
         && EXIT_CODE=0 || EXIT_CODE=$?
-    if [[ $EXIT_CODE -eq 0 ]] && echo "$OUTPUT" | grep -q "semantic execution contract valid"; then
+    if [[ $EXIT_CODE -eq 0 ]] && grep -q "semantic execution contract valid" <<< "$OUTPUT"; then
         pass "AC8g: uv fallback runs the source validator when no venv interpreter works"
     else
         fail "AC8g: uv fallback did not run the source validator (exit $EXIT_CODE): $OUTPUT"
@@ -483,7 +483,7 @@ dispatch_hold:
 # Held plan
 HEREDOC
 OUTPUT=$(bash "$VALIDATE" "$PLAN_HOLD" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 0 ]] && echo "$OUTPUT" | grep -q "dispatch_hold has reason"; then
+if [[ $EXIT_CODE -eq 0 ]] && grep -q "dispatch_hold has reason" <<< "$OUTPUT"; then
     pass "AC9a: Complete attributable dispatch_hold validates"
 else
     fail "AC9a: Complete dispatch_hold rejected: $OUTPUT"
@@ -498,7 +498,7 @@ for malformed in scalar partial invalid-date blank-setter; do
         blank-setter) sed 's/set_by: king:119e3c52/set_by: "   "/' "$PLAN_HOLD" > "$TMPDIR_BASE/hold-$malformed.md" ;;
     esac
     OUTPUT=$(bash "$VALIDATE" "$TMPDIR_BASE/hold-$malformed.md" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-    if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "malformed dispatch_hold"; then
+    if [[ $EXIT_CODE -eq 1 ]] && grep -q "malformed dispatch_hold" <<< "$OUTPUT"; then
         pass "AC9b: $malformed dispatch_hold fails closed"
     else
         fail "AC9b: $malformed dispatch_hold did not fail closed: $OUTPUT"
@@ -510,7 +510,7 @@ done
 # than hand the plan to it. PATH is stripped so uv is unreachable too.
 OUTPUT=$(PATH=/usr/bin:/bin FNO_PYTHON=/usr/bin/python3 bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1) \
     && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 2 ]] && echo "$OUTPUT" | grep -q "is not runnable"; then
+if [[ $EXIT_CODE -eq 2 ]] && grep -q "is not runnable" <<< "$OUTPUT"; then
     pass "AC8e: Unrunnable source refuses instead of delegating to an installed CLI"
 else
     fail "AC8e: Unrunnable source did not refuse with exit 2 (exit $EXIT_CODE): $OUTPUT"
@@ -518,7 +518,7 @@ fi
 
 # A broken validator must not be reported as an invalid plan: callers are told to
 # stop and rewrite the plan on ERROR, and the underlying cause must survive.
-if echo "$OUTPUT" | grep -q "TOOLFAIL" && echo "$OUTPUT" | grep -q "last probe error:"; then
+if grep -q "TOOLFAIL" <<< "$OUTPUT" && grep -q "last probe error:" <<< "$OUTPUT"; then
     pass "AC8f: Tool failure is distinct from a plan violation and keeps its cause"
 else
     fail "AC8f: Tool failure was indistinguishable or lost its cause: $OUTPUT"
