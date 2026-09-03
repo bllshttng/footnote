@@ -114,6 +114,11 @@ pub(crate) struct Ctx<'a> {
     pub check: &'a str,
     pub workflow: &'a str,
     pub log: &'a str,
+    /// The `gh pr checks` bucket. Some classes are decided by the check's
+    /// STATE, never by its log: a cancelled run leaves a log with nothing in
+    /// it, and reading that absence as an unrecognized failure is the
+    /// absence-has-three-explanations trap.
+    pub bucket: &'a str,
 }
 
 /// A signature: how a class of failure is recognized, and what to do about it.
@@ -135,6 +140,19 @@ const PINNED_FMT: &str = "+1.94.1";
 /// ruff and mypy both name a `.py` line, and the guard-script catch-all would
 /// otherwise swallow anything a guard printed alongside a real failure.
 const SIGNATURES: &[Signature] = &[
+    Signature {
+        name: "cancelled",
+        plan: "escalate: not a verdict; the run was superseded or killed",
+        matches: |c| c.bucket == "cancel",
+        // Measured on three open PRs: every `unknown` heal reported was a
+        // CANCELLED check whose log carried one line. A cancelled run
+        // concluded nothing, so there is no defect to name and no signature
+        // to add. The action is a rerun, which is a person's call.
+        resolve: |_| Remedy::Escalate {
+            repro: "the run was cancelled, so it reached no verdict; push again or rerun it"
+                .to_string(),
+        },
+    },
     Signature {
         name: "rustfmt-drift",
         plan: "auto: cargo +1.94.1 fmt --all in each crate rustfmt named",
@@ -463,25 +481,6 @@ fn pytest_nodeids(log: &str) -> Vec<String> {
 /// and starts being a paste of the log.
 const PYTEST_REPRO_CAP: usize = 5;
 
-/// The shards a fan-in gate folded, from its own `<name>=<result>` echo.
-/// `Some` only when at least one of them failed.
-fn shard_rollup_shards(log: &str) -> Option<String> {
-    let re =
-        Regex::new(r"(?m)^([a-z0-9-]+=(?:success|failure)(?: [a-z0-9-]+=(?:success|failure))+)$")
-            .expect("static regex");
-    let line = re.captures(log)?.get(1)?.as_str();
-    let failed: Vec<&str> = line
-        .split_whitespace()
-        .filter(|pair| pair.ends_with("=failure"))
-        .map(|pair| pair.trim_end_matches("=failure"))
-        .collect();
-    if failed.is_empty() {
-        None
-    } else {
-        Some(failed.join(", "))
-    }
-}
-
 /// The cargo tests that failed, from `test <path> ... FAILED`.
 fn cargo_test_names(log: &str) -> Vec<String> {
     let re = Regex::new(r"(?m)^test (\S+) \.\.\. FAILED").expect("static regex");
@@ -496,6 +495,34 @@ fn smoke_failed_step(log: &str) -> Option<String> {
     let re = Regex::new(r"(?m)^smoke: step failed, stopping \(fail-fast\): (.+)$")
         .expect("static regex");
     re.captures(log).map(|c| c[1].trim().to_string())
+}
+
+/// The shards a fan-in gate folded, from its own `<name>=<result>` echo.
+/// `Some` only when at least one of them did not pass.
+///
+/// `cancelled` and `skipped` belong in the vocabulary beside `failure`. A
+/// regex that accepted only `success|failure` missed every rollup carrying a
+/// cancelled shard, and those are common: a push over a run in flight
+/// cancels one, which is the exact harm this verb exists to stop. The gate
+/// then read `unknown` and printed 38 lines of runner boilerplate.
+fn shard_rollup_shards(log: &str) -> Option<String> {
+    let word = "(?:success|failure|cancelled|skipped|timed_out)";
+    let re = Regex::new(&format!(
+        r"(?m)^([a-z0-9-]+={word}(?: [a-z0-9-]+={word})+)$"
+    ))
+    .expect("static regex");
+    let line = re.captures(log)?.get(1)?.as_str();
+    let bad: Vec<String> = line
+        .split_whitespace()
+        .filter_map(|pair| pair.split_once('='))
+        .filter(|(_, result)| *result != "success" && *result != "skipped")
+        .map(|(name, result)| format!("{name} ({result})"))
+        .collect();
+    if bad.is_empty() {
+        None
+    } else {
+        Some(bad.join(", "))
+    }
 }
 
 /// The guard that REFUSED, from its own `check-<name>: ` line prefix. Only the
@@ -888,11 +915,13 @@ fn findings_for(a: &Args, pr: &str, head: &str) -> Result<Vec<Finding>, String> 
             None => "log unavailable: not an Actions job".to_string(),
         };
         let stripped = strip_timestamps(&log);
+        let bucket = row["bucket"].as_str().unwrap_or("").to_string();
         out.push(classify(
             &Ctx {
                 check: &check,
                 workflow: &workflow,
                 log: &stripped,
+                bucket: &bucket,
             },
             inherited.iter().any(|n| n == &check),
         ));
@@ -1042,18 +1071,21 @@ fn apply_edit_body(a: &Args, pr: &str, body: &str, findings: &[Finding]) -> Resu
 }
 
 /// Print the report and return the exit code the findings imply.
-fn report(findings: &[Finding], dry_run: bool) -> i32 {
+fn report(findings: &[Finding], dry_run: bool, terse: bool) -> i32 {
     if dry_run {
         println!("dry run: nothing was changed, nothing was pushed");
     }
     for f in findings {
-        println!(
-            "{}  {}  {}  {}",
-            f.check,
-            f.signature,
-            f.action(),
+        // A 40-line log tail per unrecognized check is the right answer for
+        // ONE PR and unreadable across every open one: 13 unknowns buried the
+        // whole `--all` report in runner boilerplate. Terse mode names the
+        // check and points at the single-PR run.
+        let detail = if terse {
+            f.detail().lines().next().unwrap_or_default().to_string()
+        } else {
             f.detail()
-        );
+        };
+        println!("{}  {}  {}  {}", f.check, f.signature, f.action(), detail);
     }
     let own: Vec<&Finding> = findings.iter().filter(|f| f.counts_against_pr()).collect();
     if own.is_empty() {
@@ -1188,7 +1220,7 @@ fn run_one(a: &Args, pr: &str) -> i32 {
         }
     };
     if !a.apply {
-        return report(&findings, true);
+        return report(&findings, true, a.all);
     }
 
     let healed = apply_auto(a, &mut findings);
@@ -1211,7 +1243,7 @@ fn run_one(a: &Args, pr: &str) -> i32 {
         }
     }
 
-    let code = report(&findings, false);
+    let code = report(&findings, false, a.all);
     if !committed {
         return code;
     }
@@ -1268,6 +1300,16 @@ mod tests {
             check,
             workflow,
             log,
+            bucket: "fail",
+        }
+    }
+
+    fn cancelled_ctx<'a>(check: &'a str, log: &'a str) -> Ctx<'a> {
+        Ctx {
+            check,
+            workflow: "",
+            log,
+            bucket: "cancel",
         }
     }
 
@@ -1460,9 +1502,51 @@ mod tests {
 
     #[test]
     fn an_all_green_rollup_is_not_a_shard_rollup_finding() {
-        // The gate only classifies when a shard actually failed; an all-green
+        // The gate only classifies when a shard did not pass; an all-green
         // echo in some other job's log must not capture that job.
         assert_eq!(shard_rollup_shards("a=success b=success"), None);
+        assert_eq!(shard_rollup_shards("a=success b=skipped"), None);
+    }
+
+    #[test]
+    fn a_cancelled_shard_is_named_not_read_as_unknown() {
+        // A real rollup off PR 1413. `cancelled` was outside the accepted
+        // vocabulary, so the gate read `unknown` and printed 38 lines of
+        // runner boilerplate. A cancelled shard is common precisely because a
+        // push over a run in flight cancels one.
+        let log = concat!(
+            "##[group]Run echo \"smoke-pytest=cancelled smoke-rest=success\"\n",
+            "smoke-pytest=cancelled smoke-rest=success\n",
+            "##[error]Process completed with exit code 1.\n",
+        );
+        let f = classify(&ctx("smoke", "guards", log), false);
+        assert_eq!(f.signature, "shard-rollup");
+        match f.remedy {
+            Remedy::Escalate { repro } => {
+                assert!(repro.contains("smoke-pytest (cancelled)"), "{repro}");
+                assert!(
+                    !repro.contains("smoke-rest"),
+                    "a passing shard is not named"
+                );
+            }
+            other => panic!("expected Escalate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terse_mode_keeps_one_line_per_check_for_the_all_report() {
+        // 13 unrecognized checks across every open PR buried the --all report
+        // in 40-line log tails. Terse keeps the first line only.
+        let findings = vec![classify(
+            &ctx("mystery", "w", "line one\nline two\nline three"),
+            false,
+        )];
+        assert_eq!(findings[0].signature, "unknown");
+        assert!(
+            findings[0].detail().lines().count() > 1,
+            "the full detail is multi-line"
+        );
+        assert_eq!(report(&findings, true, true), EXIT_ESCALATIONS);
     }
 
     #[test]
@@ -1551,6 +1635,32 @@ mod tests {
             "{:?}",
             f.remedy
         );
+    }
+
+    #[test]
+    fn a_cancelled_check_is_not_an_unrecognized_failure() {
+        // Measured on three open PRs: every `unknown` heal reported was a
+        // cancelled check whose log carried one line. An empty log has three
+        // explanations, and "the run concluded nothing" is the one that was
+        // true. Deciding this on the log instead of the bucket produced seven
+        // "add a signature to heal.rs" rows for a superseded run.
+        let f = classify(&cancelled_ctx("guards", "Current runner version"), false);
+        assert_eq!(f.signature, "cancelled");
+        match f.remedy {
+            Remedy::Escalate { repro } => {
+                assert!(repro.contains("reached no verdict"), "{repro}");
+                assert!(!repro.contains("add a signature"), "{repro}");
+            }
+            other => panic!("expected Escalate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cancelled_check_red_on_main_still_reads_inherited() {
+        // inherited is checked before the table, so main's problem never
+        // becomes this PR's whatever the bucket says.
+        let f = classify(&cancelled_ctx("guards", ""), true);
+        assert_eq!(f.signature, "inherited");
     }
 
     #[test]
