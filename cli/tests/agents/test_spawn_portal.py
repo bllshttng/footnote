@@ -105,6 +105,77 @@ def test_cmd_spawn_thread_placement_refuses_without_portal(
     assert res.exit_code == 2, res.output
     assert "--portal" in res.output
 
+def test_cmd_spawn_portal_with_once_names_the_once_flag(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # A one-shot hosts no persistent session, so --portal refuses - and the
+    # refusal names --once (the flag to drop), not the substrate the caller
+    # set correctly.
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.dispatch as dispatch_mod
+
+    def boom(**_kwargs):
+        raise AssertionError("no spawn may run")
+
+    monkeypatch.setattr(dispatch_mod, "dispatch_spawn", boom)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    res = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "--name", "w2", "work", "--substrate", "thread", "--once", "--portal", "1"],
+    )
+    assert res.exit_code == 2, res.output
+    assert "--once" in res.output
+
+def test_cmd_spawn_bounded_placement_on_thread_is_a_one_step_refusal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Bounded placement can never combine with a portal, so the refusal must
+    # not send the caller to --portal first.
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.dispatch as dispatch_mod
+
+    def boom(**_kwargs):
+        raise AssertionError("no spawn may run")
+
+    monkeypatch.setattr(dispatch_mod, "dispatch_spawn", boom)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    res = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "--name", "w2", "work", "--substrate", "thread", "--bounded-placement"],
+    )
+    assert res.exit_code == 2, res.output
+    assert "--bounded-placement" in res.output
+
+def test_cmd_spawn_at_current_refused_before_spawn_on_thread(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The mux thread door refuses `current` (a thread spawn has no calling
+    # pane), so the guard refuses it up front instead of after the worker
+    # is live - with or without --portal.
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.dispatch as dispatch_mod
+
+    def boom(**_kwargs):
+        raise AssertionError("no spawn may run")
+
+    monkeypatch.setattr(dispatch_mod, "dispatch_spawn", boom)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    res = CliRunner().invoke(
+        agents_cli.agents_app,
+        [
+            "spawn", "--name", "w2", "work", "--substrate", "thread",
+            "--portal", "1", "--at", "current", "--split", "right",
+        ],
+    )
+    assert res.exit_code == 2, res.output
+    assert "--at" in res.output
+
 def test_cmd_spawn_portal_refused_off_the_thread_substrate(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -187,20 +187,21 @@ def placement_refusal(
         return "--workspace/-s needs a nonblank workspace name"
     if portal is not None and not 0 <= portal <= 255:
         return "--portal takes an index 0-255"
-    if portal is not None and (substrate != "bg" or once):
+    if portal is not None and substrate != "bg":
         return (
             "--portal applies only to --substrate thread; a pane hosts its "
             "own geometry and headless hosts no session at all"
         )
-    if bounded_placement and portal is not None:
-        return (
-            "--bounded-placement selects its own tab for a pane and cannot "
-            "combine with --portal"
-        )
+    if portal is not None and once:
+        return "--portal places a persistent thread worker; --once hosts no session to show"
+    if bounded_placement and substrate == "bg":
+        return "--bounded-placement selects its own tab for a pane; a thread cannot be bounded"
+    if at is not None and substrate == "bg":
+        return "--at applies only to --substrate pane (a thread has no calling pane)"
     if placement_requested and substrate == "bg" and portal is None:
         # AC8-EDGE: a placement with nothing to place; name the missing piece.
         return (
-            "--workspace/-s, --split/-x, --at, and --tab on --substrate "
+            "--workspace/-s, --split/-x, and --tab on --substrate "
             "thread need --portal N: a thread hosts no pane until a portal "
             "opens one, so the placement has nothing to place"
         )
