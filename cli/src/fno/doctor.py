@@ -2072,11 +2072,16 @@ def _review_invocation_report(
             f"  {invocation_id}: transport={data.get('transport', 'unmeasured')} "
             f"receipt={data.get('receipt', 'unmeasured')}"
         )
-        row = settle_results.get(invocation_id)
-        if row and row.get("settled"):
-            lines.append(f"  settled {base[2:]} (lost attestation at {str(row.get('head', ''))[:9]})")
-        elif row:
-            lines.append(f"  lost {base[2:]} (settle refused: {row.get('reason')})")
+        settled_row = settle_results.get(invocation_id)
+        if settled_row and settled_row.get("settled"):
+            lines.append(
+                f"  settled {base[2:]} "
+                f"(lost attestation at {str(settled_row.get('head', ''))[:9]})"
+            )
+        elif settled_row:
+            lines.append(
+                f"  lost {base[2:]} (settle refused: {settled_row.get('reason')})"
+            )
         else:
             suffix = f" (settle sweep failed: {settle_error})" if settle_error else ""
             lines.append(f"  lost {base[2:]}{suffix}")
