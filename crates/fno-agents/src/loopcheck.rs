@@ -14805,12 +14805,14 @@ mod tests {
     }
 
     #[test]
-    fn resolver_carries_an_identical_rebase_and_expires_a_conflict() {
-        // The whole x-e8db contract on the resolver itself: a rebase that
-        // rewrote every commit but changed no content keeps the attestation
-        // (a Carried verdict counts), and a conflict resolution that changed
-        // the delta loses it. One test, both directions, so a regression in
-        // either can never leave the other green-looking.
+    fn resolver_carries_an_identical_rebase_and_a_small_conflict() {
+        // The x-e8db contract on the resolver itself, as amended by the
+        // interdiff arm (law d-608344c1): a rebase that rewrote every commit
+        // but changed no content keeps the attestation (CarriedBaseSync), and
+        // a tiny conflict resolution carries as CarriedInterdiff with the
+        // measured line count. The expiry boundary itself (>= cap stales) is
+        // the pure tests' in review_freshness; a fixture cannot hit it
+        // without a 100-line conflict edit.
         let (tmp, reviewed, head) = rebased_repo(false);
         let repo = tmp.path().join("r");
         let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
@@ -14821,7 +14823,11 @@ mod tests {
         let repo = tmp.path().join("r");
         let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
         let verdict = resolver.freshness(&reviewed);
-        assert_eq!(verdict, Freshness::Stale, "conflict resolution must expire");
+        assert_eq!(
+            verdict,
+            Freshness::CarriedInterdiff { lines: 4, cap: 100 },
+            "a 4-line conflict resolution must carry"
+        );
     }
 
     #[test]
