@@ -991,21 +991,60 @@ if true; then
     && pass "x-3218 stale fno still dispatches its worker" \
     || fail "x-3218 stale fno lost the dispatch: $(ask_count)"
 
-  # A bridge that emits a warning ahead of the name must NOT have that warning
-  # adopted into the name. Streams are merged, so the guard must match the WHOLE
-  # capture; a per-line `grep -q` passes here and poisons the spawn.
+  # A bridge that emits a warning ahead of the name must still have that name
+  # ADOPTED - the guard reads the LAST line of the merged capture, so a warning
+  # (never the last line) stays unadoptable without discarding the owner's
+  # answer. Neither half of the old cure works: a per-line `grep -q` adopts the
+  # warning itself, and a whole-capture match degrades to the fallback. The
+  # bridge therefore returns a name DISTINCT from the fallback assembly, so
+  # adoption is provable: the whole-capture guard would launch the fallback
+  # target-ab-aaaa1111 and the distinct name would never appear.
   reset_mock
   set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
   NOISY_BRIDGE="$TMP/noisy-bridge"
-  printf '#!/usr/bin/env bash\necho "DeprecationWarning: something" >&2\necho "target-ab-aaaa1111"\nexit 0\n' > "$NOISY_BRIDGE"
+  printf '#!/usr/bin/env bash\necho "WARNING: merge-gating opt-out review.optional_apps revoked: claim instrument is free" >&2\necho "canonical-ab-aaaa1111"\nexit 0\n' > "$NOISY_BRIDGE"
   chmod +x "$NOISY_BRIDGE"
   out="$(NAME_BRIDGE="$NOISY_BRIDGE" bash "$DISPATCH" ab-aaaa1111 2>&1)"
-  echo "$out" | grep -q "^launched ab-aaaa1111 name=target-ab-aaaa1111 " \
-    && pass "x-3218 a warning on stderr degrades instead of poisoning the name" \
-    || fail "x-3218 stderr poisoning: $out"
-  echo "$out" | grep -q "name=.*DeprecationWarning" \
+  echo "$out" | grep -q "^launched ab-aaaa1111 name=canonical-ab-aaaa1111 " \
+    && pass "x-3218 a warning on stderr never poisons the adopted name" \
+    || fail "x-3218 stderr noise lost the canonical name: $out"
+  echo "$out" | grep -q "name=.*WARNING" \
     && fail "x-3218 warning text reached the agent name: $out" \
     || pass "x-3218 the stray warning never reaches the agent name"
+
+  # The x-93a7 regression, as it fired live: a LONG node id plus one stderr
+  # warning dispatched NOTHING. The whole-capture guard rejected the two-line
+  # capture, the degrade arm assembled an uncapped target-<id>-<slug30> that
+  # overflowed 64, and the overflow refusal fired before any spawn. Here the
+  # warning is the live optout-lease one and the bridge still delegates to the
+  # REAL canonical owner (NAME_BRIDGE is captured before the per-call override,
+  # else the wrapper would exec itself), so the adopted name is the shipped
+  # policy's answer, not a fixture's guess.
+  reset_mock
+  LONGID="regready-pipeline-2c4f9a1b3d"
+  set_status "$LONGID" ready; set_claim "$LONGID" free
+  echo "path consolidation wave 0 delegate handoff" > "$MOCKSTATE/slug_$LONGID"
+  REAL_BRIDGE="$NAME_BRIDGE"
+  NOISY_REAL="$TMP/noisy-real-bridge"
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'echo "WARNING: merge-gating opt-out review.optional_apps revoked: claim instrument is free" >&2'
+    echo "exec \"$REAL_BRIDGE\" \"\$@\""
+  } > "$NOISY_REAL"
+  chmod +x "$NOISY_REAL"
+  out="$(NAME_BRIDGE="$NOISY_REAL" bash "$DISPATCH" "$LONGID" 2>&1)"
+  launched_name="$(printf '%s' "$out" | sed -n 's/.* name=\([^ ]*\).*/\1/p' | head -1)"
+  if [[ -n "$launched_name" && "${#launched_name}" -le 64 ]]; then
+    pass "x-93a7 long node id + stderr noise still yields a name within the 64-char limit (${#launched_name})"
+  else
+    fail "x-93a7 noisy long-id name: ${#launched_name} chars: $out"
+  fi
+  [[ "$launched_name" == "target-$LONGID"* ]] \
+    && pass "x-93a7 full node identity survives the noisy capture" \
+    || fail "x-93a7 node identity dropped: $launched_name"
+  [[ "$(ask_count)" == "1" ]] \
+    && pass "x-93a7 noisy long-id dispatch launches exactly one worker" \
+    || fail "x-93a7 noisy long-id launch count: $(ask_count)"
 
   # Ordinary names are byte-for-byte unchanged.
   reset_mock
