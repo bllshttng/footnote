@@ -767,12 +767,12 @@ async fn run(args: Vec<String>) -> i32 {
                         serde_json::to_string_pretty(&result).unwrap_or_default()
                     );
                 }
-                // Drift warning on `list` (ab-1891cdff), stderr-only so a
-                // `list --json` stdout consumer stays clean (US4). `list` already
+                // Drift warning on read/removal verbs, stderr-only so a
+                // `--json` stdout consumer stays clean. These verbs already
                 // ensured a daemon is up via `call`; a freshly lazy-started one
                 // reads Fresh, so no false warning. A separate status probe keeps
                 // this off every other verb's hot path.
-                if verb_owned == "list" {
+                if warns_on_daemon_drift(&verb_owned) {
                     let state = check_daemon_drift(&home).await;
                     if let Some(w) = drift_warning(&state, None) {
                         eprintln!("{w}");
@@ -2008,6 +2008,10 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--permission-mode",
         "--effort",
         "--add-dir",
+        "--audit-actor",
+        "--audit-reason",
+        "--audit-request-id",
+        "--audit-reclaimed-bytes",
         "--agent",
         "--tools",
         "--deny-tools",
@@ -2204,6 +2208,29 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 // an account spawn re-execs the Python CLI on EVERY substrate (see
                 // the spawn intercept) rather than duplicating the resolver here.
                 params.insert("account".into(), str_arg(&mut it, "--account")?);
+            }
+            "--audit-actor" => {
+                params.insert("audit_actor".into(), str_arg(&mut it, "--audit-actor")?);
+            }
+            "--audit-reason" => {
+                params.insert("audit_reason".into(), str_arg(&mut it, "--audit-reason")?);
+            }
+            "--audit-request-id" => {
+                params.insert(
+                    "audit_request_id".into(),
+                    str_arg(&mut it, "--audit-request-id")?,
+                );
+            }
+            "--audit-reclaimed-bytes" => {
+                let value = str_arg(&mut it, "--audit-reclaimed-bytes")?;
+                let bytes = value
+                    .as_str()
+                    .and_then(|raw| raw.parse::<u64>().ok())
+                    .ok_or("--audit-reclaimed-bytes needs a non-negative integer")?;
+                params.insert("audit_reclaimed_bytes".into(), Value::from(bytes));
+            }
+            "--audit-worktree-touched" => {
+                params.insert("audit_worktree_touched".into(), Value::Bool(true));
             }
             "--substrate" => {
                 // The session-substrate selector (x-2c27): pane (owned-PTY,
@@ -2733,6 +2760,15 @@ fn format_success(
                     .unwrap_or("unknown error");
                 notes.push(format!("event record not written: {reason}"));
             }
+            if result.get("worktree_outcome").and_then(Value::as_str) == Some("removed") {
+                let bytes = result
+                    .get("reclaimed_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                notes.push(format!(
+                    "WARNING: worktree removed by guarded cleanup (reclaimed_bytes={bytes})"
+                ));
+            }
             if removed.len() == 1
                 && notes.is_empty()
                 && result.get("pane_removed").is_none_or(Value::is_null)
@@ -3255,7 +3291,8 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "restart [--force]  # --force: break-glass SIGKILL of the lockfile holder; plain restart is graceful",
     "reap [--json] [--dry-run]",
     "stop <name> [--force]",
-    "rm <name> [--force]   --force drops the registry row even when the row is LIVE or harness teardown fails; a live pane worker that cannot be stopped is still refused; the process survives for bg and headless rows, a mux-hosted pane is killed with it",
+    // retired-ok: help names the existing Claude callee to describe actual behavior, not to teach a direct retired command.
+    "rm <name> [--force]   --force drops the registry row even when the row is LIVE or harness teardown fails; a live pane worker that cannot be stopped is still refused; a claude row's harness session is removed too (claude rm <short_id>), and claude removes that session's WORKTREE under its own guards - it keeps a worktree with uncommitted changes and refuses one holding commits it cannot confirm are saved elsewhere; a non-claude bg or headless process survives, a mux-hosted pane is killed with it",
     "loop-check --state <target-state.md> --transcript <transcript.jsonl> --cwd <project-root> [--events <events.jsonl>] [--global-events <global.jsonl>] [--settings <config.toml>] [--ledger <ledger.json>] [--now <rfc3339>] [--gh-bin <path>] [--git-bin <path>]",
     "finalize --state <target-state.md> --cwd <project-root> --reason <TerminationReason> [--transcript <transcript.jsonl>]",
     "reconcile",
@@ -3285,6 +3322,10 @@ fn verb_usage(verb: &str) -> Option<&'static str> {
         .iter()
         .copied()
         .find(|usage| usage.split_whitespace().next() == Some(verb))
+}
+
+fn warns_on_daemon_drift(verb: &str) -> bool {
+    matches!(verb, "list" | "rm")
 }
 
 /// True when `--help`/`-h` appears in the verb's OWN options, i.e. before an
@@ -3391,6 +3432,54 @@ mod tests {
         assert!(verb_usage("loop").unwrap().starts_with("loop run"));
         assert!(verb_usage("loop-check").unwrap().starts_with("loop-check"));
         assert!(verb_usage("definitely-not-a-verb").is_none());
+    }
+
+    #[test]
+    fn rm_usage_names_the_claude_cascade_and_worktree() {
+        let usage = verb_usage("rm").expect("rm usage line");
+        assert!(
+            usage.contains("claude rm"),
+            "rm help must name the cascade verb"
+        );
+        assert!(usage.contains("short_id"), "rm help must name the join key");
+        assert!(
+            usage.to_ascii_lowercase().contains("worktree"),
+            "rm help must say a removal can remove a worktree"
+        );
+    }
+
+    #[test]
+    fn rm_runs_the_same_daemon_drift_probe_as_list() {
+        assert!(warns_on_daemon_drift("list"));
+        assert!(warns_on_daemon_drift("rm"));
+        assert!(!warns_on_daemon_drift("spawn"));
+    }
+
+    #[test]
+    fn rm_preserves_internal_audit_context_flags() {
+        let (method, params) = build_request(
+            "rm",
+            &[
+                "worker".into(),
+                "--audit-actor".into(),
+                "post-merge".into(),
+                "--audit-reason".into(),
+                "pr-merged".into(),
+                "--audit-request-id".into(),
+                "merge-cleanup-1".into(),
+                "--audit-worktree-touched".into(),
+                "--audit-reclaimed-bytes".into(),
+                "42".into(),
+            ],
+        )
+        .expect("audit flags parse");
+        assert_eq!(method, "agent.rm");
+        assert_eq!(params["name"], "worker");
+        assert_eq!(params["audit_actor"], "post-merge");
+        assert_eq!(params["audit_reason"], "pr-merged");
+        assert_eq!(params["audit_request_id"], "merge-cleanup-1");
+        assert_eq!(params["audit_worktree_touched"], true);
+        assert_eq!(params["audit_reclaimed_bytes"], 42);
     }
 
     // -----------------------------------------------------------------------
@@ -3733,6 +3822,26 @@ mod tests {
         });
         let out = format_success("rm", "bar-agent", &result, false, true, false);
         assert_eq!(out, Some("removed: bar-agent (fno + claude)".to_string()));
+    }
+
+    #[test]
+    fn format_success_rm_warns_when_a_worktree_was_removed() {
+        let result = json!({
+            "removed": true,
+            "registry_removed": true,
+            "harness": "claude",
+            "harness_removed": true,
+            "worktree_touched": true,
+            "worktree_outcome": "removed",
+            "reclaimed_bytes": 4096
+        });
+        let out = format_success("rm", "bar-agent", &result, false, true, false)
+            .expect("rm renders a receipt");
+        assert!(
+            out.contains("WARNING"),
+            "worktree deletion must be visible: {out}"
+        );
+        assert!(out.to_ascii_lowercase().contains("worktree"), "{out}");
     }
 
     /// A reap that really removed a harness row names the verb that puts it

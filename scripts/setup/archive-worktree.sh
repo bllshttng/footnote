@@ -17,6 +17,7 @@
 #   --yes         Skip the process-kill confirmation prompt.
 #   --delete-branch  After removing the worktree, delete its branch with
 #                    `git branch -D` (force). Default: keep branch.
+#   --merge-triggered  Require HEAD to be reachable from refreshed origin/main.
 #
 # Exit codes:
 #   0  worktree removed
@@ -32,6 +33,7 @@ set -euo pipefail
 FORCE=0
 ASSUME_YES=0
 DELETE_BRANCH=0
+MERGE_TRIGGERED=0
 TARGET_ARG=""
 
 while [[ $# -gt 0 ]]; do
@@ -39,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --force) FORCE=1; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
     --delete-branch) DELETE_BRANCH=1; shift ;;
+    --merge-triggered) MERGE_TRIGGERED=1; shift ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# //; s/^#//'
       exit 0
@@ -148,9 +151,30 @@ if [[ "$BRANCH" == "HEAD" ]]; then
   BRANCH="(detached)"
 fi
 
+if [[ "$MERGE_TRIGGERED" -eq 1 ]]; then
+  _MERGE_REACHABILITY_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" 2>/dev/null && pwd)/worktree-unpushed.sh"
+  if [[ -f "$_MERGE_REACHABILITY_LIB" ]]; then
+    # shellcheck source=/dev/null
+    source "$_MERGE_REACHABILITY_LIB"
+  fi
+  if ! git -C "$CANONICAL" fetch origin main >/dev/null 2>&1; then
+    echo "archive-worktree: merge-triggered origin/main refresh failed; keeping $TARGET" >&2
+    exit 2
+  fi
+  if ! wt_head_reachable_from_origin_main "$TARGET"; then
+    echo "archive-worktree: merge-triggered HEAD is not reachable from origin/main; keeping $TARGET" >&2
+    exit 2
+  fi
+fi
+
 echo "=== Archiving worktree ===" >&2
 echo "    Path:   $TARGET" >&2
 echo "    Branch: $BRANCH" >&2
+
+WORKTREE_BYTES=0
+if WORKTREE_BYTES_KIB="$(du -sk "$TARGET" 2>/dev/null | awk 'NR==1 {print $1}')" && [[ "$WORKTREE_BYTES_KIB" =~ ^[0-9]+$ ]]; then
+  WORKTREE_BYTES=$((WORKTREE_BYTES_KIB * 1024))
+fi
 
 # ---- Strict pre-removal checks and force disclosure -----------------------
 # Measure every strict condition in both modes. --force may override positive
@@ -646,7 +670,7 @@ if declare -F _wt_emit_removal_event >/dev/null 2>&1; then
   [[ "$FORCE" -eq 1 ]] && _WT_EVENT_FORCED=true
   _wt_emit_removal_event "$CANONICAL" "$TARGET" \
     "${FNO_WT_REMOVE_CALLER:-manual archive}" \
-    "$_WT_EVENT_CLAIM" "$_WT_EVENT_REASON" "$BRANCH" "$_WT_EVENT_FORCED"
+    "$_WT_EVENT_CLAIM" "$_WT_EVENT_REASON" "$BRANCH" "$_WT_EVENT_FORCED" "$WORKTREE_BYTES"
 fi
 
 # ---- Branch handling -----------------------------------------------------

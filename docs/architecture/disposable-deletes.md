@@ -6,6 +6,8 @@ This repo uses bare `rm` in most scripts and `command -p rm ... || /bin/rm ...` 
 
 Wrapping `rm` to a trash tool is a common safety setup. On such a machine a bare `rm` MOVES the path to the trash instead of unlinking it. For almost every delete in this repo that is tolerable. The path leaves its old location either way, so the calling script's own logic is unaffected. The cost is disk consumption on that host, which is a property of the host's `rm` configuration.
 
+The mux sideline delete, `fno agents rm`, and `claude rm` are one chain. The cascade is Claude-only. Claude's UUIDv4 short-id join is safe. A Codex UUIDv7 head-8 is a roughly 65.5-second clock bucket and can collide. `claude rm` removes the session's worktree under Claude's guards. It is the callee instead of the agent-view Ctrl+X path. Agent view discards an uncommitted worktree without refusing.
+
 ## The criterion
 
 Use the two-rung form where footnote deletes state it created itself AND that state is either:

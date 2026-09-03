@@ -37,7 +37,7 @@ envelope:
       # daemon.rs). Per-agent worker sources (worker:<id>, stream-worker:<id>) are
       # pattern sources, validated by both the Python and bash validators via the
       # `patterns` list below (previously only the parity-script layer checked them).
-      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, agents, observer, skill_diff, active-backlog, approvals, bash, config]
+      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config]
       patterns:
         - '^(worker|stream-worker):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
@@ -1763,6 +1763,9 @@ event_types:
         forced:
           type: boolean
           description: "True when --force overrode the disclosed positive checks."
+        reclaimed_bytes:
+          type: integer
+          minimum: 0
     consumers: [audit]
 
   - name: worktree_overlap_observed
@@ -2038,16 +2041,18 @@ event_types:
           type: integer
 
   - name: agent_removed
-    description: "An agent registry entry was removed (fno-agents rm)."
-    sources: [daemon]
+    description: "An agent registry entry was removed (fno-agents rm) with an attributable, reversible audit record."
+    sources: [daemon, python]
     data:
-      required: []
+      required: [name, registry_changed, harness, actor, reason, request_id, worktree_touched, reclaimed_bytes]
       properties:
         name:
           type: string
         short_id:
           type: string
         registry_removed:
+          type: boolean
+        registry_changed:
           type: boolean
         harness:
           type: string
@@ -2059,6 +2064,20 @@ event_types:
           type: [boolean, "null"]
         harness_reason:
           type: [string, "null"]
+        actor:
+          type: string
+        reason:
+          type: string
+        request_id:
+          type: string
+        worktree_touched:
+          type: boolean
+        worktree_outcome:
+          type: string
+          enum: [not-touched, removed, kept]
+        reclaimed_bytes:
+          type: integer
+          minimum: 0
         pane_session:
           type: [string, "null"]
         pane_id:
@@ -2067,6 +2086,64 @@ event_types:
           type: [boolean, "null"]
         pane_reason:
           type: [string, "null"]
+
+  - name: merge_cleanup_requested
+    retention: durable
+    description: "A confirmed merged PR requested guarded worktree pruning and session-row removal."
+    sources: [python, daemon]
+    data:
+      required: [request_id, repo, pr, branch, worktree, node_ids]
+      properties:
+        request_id:
+          type: string
+        repo:
+          type: string
+        project:
+          type: string
+        pr:
+          type: integer
+        branch:
+          type: string
+        worktree:
+          type: [string, "null"]
+        node_ids:
+          type: array
+          items: { type: string }
+        candidate_row_names:
+          type: array
+          items: { type: string }
+
+  - name: merge_cleanup_completed
+    retention: durable
+    description: "A merge cleanup request passed all guards, pruned its worktree, and removed its session row."
+    sources: [daemon, python]
+    data:
+      required: [request_id, repo, pr, reclaimed_bytes]
+      properties:
+        request_id:
+          type: string
+        repo:
+          type: string
+        pr:
+          type: integer
+        reclaimed_bytes:
+          type: integer
+
+  - name: merge_cleanup_refused
+    retention: durable
+    description: "A merge cleanup request was retained or refused by a guarded safety predicate."
+    sources: [daemon, python]
+    data:
+      required: [request_id, repo, pr, reason]
+      properties:
+        request_id:
+          type: string
+        repo:
+          type: string
+        pr:
+          type: integer
+        reason:
+          type: string
 
   - name: agent_inconsistent
     description: "Agent state is inconsistent (missing state.json, unexpected status, etc.)."

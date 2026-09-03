@@ -55,6 +55,26 @@ def emit(kind: str, *, path: Optional[Path] = None, **data: Any) -> None:
         **data: Arbitrary keyword fields that flatten into the JSON object
             alongside ``ts`` and ``kind``.
     """
+    if kind == "agent_removed":
+        data = dict(data)
+        data.setdefault("harness", data.get("provider") or "unknown")
+        data.setdefault("registry_changed", bool(data.get("registry_changed", False)))
+        data.setdefault("actor", "operator")
+        data.setdefault(
+            "reason",
+            data.get("teardown_error") or data.get("error") or "rm-request",
+        )
+        data.setdefault(
+            "request_id",
+            f"agent-rm:{data.get('name') or 'unknown'}",
+        )
+        touched = data.get("worktree_touched")
+        if not isinstance(touched, bool):
+            touched = bool(data.get("worktree_receipt"))
+        data["worktree_touched"] = touched
+        data.setdefault("worktree_outcome", "removed" if touched else "not-touched")
+        data.setdefault("reclaimed_bytes", 0)
+
     target = path if path is not None else (paths.state_dir() / "events.jsonl")
     # Put ts and kind LAST so a stray data={"ts": ..., "kind": ...} kwarg
     # cannot overwrite the canonical fields. The dict's order-preserving

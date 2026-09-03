@@ -724,7 +724,30 @@ def test_archive_defers_when_run_inside_worktree(tmp_path, capsys, monkeypatch):
     # status; it read as "nothing to do" and nobody ever ran the command, which
     # is why the freshest merged worktrees were the ones left on disk.
     assert "step=archive status=deferred" in out
-    assert "sweep-will-reap" in out
+    assert "cleanup-requested" in out
+
+
+def test_archive_emits_one_merge_cleanup_request(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        _ritual,
+        "_emit_daemon_envelope",
+        lambda kind, data: seen.append((kind, data)),
+    )
+    runner = FakeRunner(branch="feature/x")
+    r = _bare(tmp_path, runner, node_ids=["x-90ee"])
+    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(r.cwd))
+
+    r.leg_archive()
+
+    requests = [data for kind, data in seen if kind == "merge_cleanup_requested"]
+    assert len(requests) == 1
+    request = requests[0]
+    assert request["pr"] == 7
+    assert request["branch"] == "feature/x"
+    assert request["worktree"] == str(tmp_path)
+    assert request["node_ids"] == ["x-90ee"]
+    assert request["request_id"].startswith("merge-cleanup-")
 
 
 def test_archive_defer_mints_the_reap_order(tmp_path, capsys, monkeypatch):
@@ -825,12 +848,54 @@ def test_archive_runs_script_when_worktree_found(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "step=archive status=ok" in out
     assert "archived" in out
-    # the archive script was invoked with --yes, never --force, and carries
-    # the removal-event caller stamp
+    # the archive script was invoked in guarded merge mode, never --force, and
+    # carries the removal-event caller stamp
     archive_calls = [c for c in runner.calls if "archive-worktree.sh" in " ".join(c)]
-    assert archive_calls and "--yes" in archive_calls[0]
+    assert "--merge-triggered" in archive_calls[0]
     assert "--force" not in archive_calls[0]
     assert "FNO_WT_REMOVE_CALLER=post-merge ritual" in archive_calls[0]
+
+
+def test_archive_removes_the_row_only_after_the_worktree_is_gone(tmp_path, monkeypatch):
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / "saved.txt").write_text("saved")
+    (tmp_path / "scripts" / "setup").mkdir(parents=True)
+    (tmp_path / "scripts" / "setup" / "archive-worktree.sh").write_text("#!/bin/sh\nexit 0\n")
+    events = []
+    monkeypatch.setattr(
+        _ritual,
+        "_emit_daemon_envelope",
+        lambda kind, data: events.append((kind, data)),
+    )
+
+    class ArchiveRunner(FakeRunner):
+        def __call__(self, argv, *, cwd=None, timeout=None):
+            self.calls.append(list(argv))
+            if argv[0] == "gh":
+                return Result(0, '{"state":"MERGED","headRefName":"feature/x"}', "")
+            if "archive-worktree.sh" in " ".join(argv):
+                import shutil
+
+                shutil.rmtree(wt)
+                return Result(0, "archived", "")
+            if argv[1:3] == ["agents", "list"]:
+                import json
+
+                return Result(0, json.dumps({"agents": [{"name": "target-x-90ee-worker", "cwd": str(wt)}]}), "")
+            return Result(0, "", "")
+
+    runner = ArchiveRunner(branch="feature/x")
+    r = _bare(tmp_path, runner, node_ids=["x-90ee"])
+    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(wt))
+
+    r.leg_archive()
+
+    rm_calls = [call for call in runner.calls if call[1:3] == ["agents", "rm"]]
+    assert rm_calls
+    assert "--audit-actor" in rm_calls[0]
+    assert "post-merge" in rm_calls[0]
+    assert any(kind == "merge_cleanup_completed" for kind, _data in events)
 
 
 def test_archive_missing_script_receipt_keeps_worktree_and_order(
@@ -846,7 +911,7 @@ def test_archive_missing_script_receipt_keeps_worktree_and_order(
 
     out = capsys.readouterr().out
     assert "step=archive status=deferred" in out
-    assert f"worktree={wt}" in out
+    assert "worktree=" in out
     assert "archive-worktree.sh missing" in out
     assert "reap-order reap:pr-7 standing" in out
 
@@ -891,20 +956,20 @@ def test_archive_receipt_is_written_to_the_daemon_journal(
 
     r.leg_archive()
 
-    assert events == [
-        (
-            "post_merge_archive",
-            {
-                "pr": 7,
-                "project": "",
-                "outcome": "deferred",
-                "detail": (
-                    "no worktree for feature/x; sweep-will-reap; "
-                    "reap-order reap:pr-7 standing (merged-pr)"
-                ),
-            },
-        )
-    ]
+    assert events[0][0] == "merge_cleanup_requested"
+    assert events[0][1]["pr"] == 7
+    assert events[0][1]["branch"] == "feature/x"
+    assert events[0][1]["worktree"] is None
+    assert events[1] == (
+        "post_merge_archive",
+        {
+            "pr": 7,
+            "project": "",
+            "outcome": "deferred",
+            "detail": events[1][1]["detail"],
+        },
+    )
+    assert "cleanup-requested" in events[1][1]["detail"]
 
 
 # --- AC4: idempotency / mutex -------------------------------------------

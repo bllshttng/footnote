@@ -746,6 +746,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_stop_refused",
     "agent_exited",
     "agent_removed",
+    "merge_cleanup_requested",
+    "merge_cleanup_completed",
+    "merge_cleanup_refused",
     "agent_inconsistent",
     "agent_ask_done",
     "agent_create_no_session",
@@ -945,7 +948,7 @@ pub fn emit_schema_json() -> serde_json::Value {
                 "source": {
                     "type": "string",
                     "anyOf": [
-                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "skill_diff", "subagent", "target", "test"] },
+                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "python", "skill_diff", "subagent", "target", "test"] },
                         { "pattern": "^(worker|stream-worker):.+$" }
                     ],
                     "description": "Producer identity: a fixed-string source or a per-agent worker (worker:<id> / stream-worker:<id>)"

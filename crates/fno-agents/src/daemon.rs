@@ -787,7 +787,261 @@ fn registry_repo_roots(home: &AgentsHome) -> Vec<String> {
             seen.insert(root);
         }
     }
+    if let Ok(contents) = std::fs::read_to_string(home.events_jsonl()) {
+        for line in contents.lines() {
+            let Ok(event) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if event.get("type").and_then(Value::as_str) != Some("merge_cleanup_requested") {
+                continue;
+            }
+            let Some(repo) = event
+                .get("data")
+                .and_then(|data| data.get("repo"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if std::path::Path::new(repo).is_dir() {
+                seen.insert(repo.to_string());
+            }
+        }
+    }
     seen.into_iter().collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MergeCleanupRequest {
+    request_id: String,
+    repo: String,
+    pr: i64,
+    worktree: Option<String>,
+    node_ids: Vec<String>,
+    candidate_row_names: Vec<String>,
+}
+
+fn pending_merge_cleanup_requests(home: &AgentsHome, repo: &str) -> Vec<MergeCleanupRequest> {
+    let Ok(contents) = std::fs::read_to_string(home.events_jsonl()) else {
+        return Vec::new();
+    };
+    let mut requested = std::collections::BTreeMap::<String, MergeCleanupRequest>::new();
+    let mut finished = std::collections::HashSet::<String>::new();
+    for line in contents.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(kind) = event.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(data) = event.get("data") else {
+            continue;
+        };
+        let Some(request_id) = data.get("request_id").and_then(Value::as_str) else {
+            continue;
+        };
+        match kind {
+            "merge_cleanup_requested" => {
+                let Some(request_repo) = data.get("repo").and_then(Value::as_str) else {
+                    continue;
+                };
+                if request_repo != repo {
+                    continue;
+                }
+                let Some(pr) = data.get("pr").and_then(Value::as_i64) else {
+                    continue;
+                };
+                let node_ids = data
+                    .get("node_ids")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect();
+                let candidate_row_names = data
+                    .get("candidate_row_names")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect();
+                requested.insert(
+                    request_id.to_owned(),
+                    MergeCleanupRequest {
+                        request_id: request_id.to_owned(),
+                        repo: request_repo.to_owned(),
+                        pr,
+                        worktree: data
+                            .get("worktree")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        node_ids,
+                        candidate_row_names,
+                    },
+                );
+            }
+            "merge_cleanup_completed" | "merge_cleanup_refused" => {
+                finished.insert(request_id.to_owned());
+            }
+            _ => {}
+        }
+    }
+    requested
+        .into_values()
+        .filter(|request| !finished.contains(&request.request_id))
+        .collect()
+}
+
+fn merge_cleanup_requested(home: &AgentsHome, repo: &str) -> bool {
+    !pending_merge_cleanup_requests(home, repo).is_empty()
+}
+
+fn merge_cleanup_reclaimed_bytes(home: &AgentsHome, worktree: &str) -> u64 {
+    let Ok(contents) = std::fs::read_to_string(home.events_jsonl()) else {
+        return 0;
+    };
+    contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("worktree_removed"))
+        .filter_map(|event| event.get("data").cloned())
+        .filter(|data| data.get("path").and_then(Value::as_str) == Some(worktree))
+        .filter_map(|data| data.get("reclaimed_bytes").and_then(Value::as_u64))
+        .last()
+        .unwrap_or(0)
+}
+
+fn merge_cleanup_guard_reason(repo: &str, worktree: &str) -> Option<String> {
+    let status = std::process::Command::new("git")
+        .current_dir(worktree)
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()?;
+    if !status.status.success() {
+        return Some("git-status-unreadable".into());
+    }
+    if !status.stdout.is_empty() {
+        return Some("dirty".into());
+    }
+    let origin = std::process::Command::new("git")
+        .current_dir(repo)
+        .args(["rev-parse", "--verify", "--quiet", "origin/main"])
+        .output()
+        .ok()?;
+    if !origin.status.success() {
+        return Some("origin-main-unreadable".into());
+    }
+    let merged = std::process::Command::new("git")
+        .current_dir(worktree)
+        .args(["merge-base", "--is-ancestor", "HEAD", "origin/main"])
+        .status()
+        .ok()?;
+    if !merged.success() {
+        return Some("unreachable-from-origin-main".into());
+    }
+    None
+}
+
+fn merge_cleanup_row_names(home: &AgentsHome, request: &MergeCleanupRequest) -> Vec<String> {
+    let Ok(registry) = state::load_registry(&home.registry_json()) else {
+        return Vec::new();
+    };
+    let mut names = request.candidate_row_names.clone();
+    names.extend(
+        registry
+            .entries
+            .into_iter()
+            .filter(|entry| {
+                request
+                    .worktree
+                    .as_deref()
+                    .is_some_and(|worktree| entry.cwd == worktree)
+                    || request
+                        .node_ids
+                        .iter()
+                        .any(|node| entry.name.starts_with(&format!("target-{node}-")))
+            })
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>(),
+    );
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn consume_merge_cleanup_requests(home: &AgentsHome, roots: &[String], emitter: &EventEmitter) {
+    for root in roots {
+        for request in pending_merge_cleanup_requests(home, root) {
+            if let Some(worktree) = request.worktree.as_deref() {
+                if std::path::Path::new(worktree).exists() {
+                    if let Some(reason) = merge_cleanup_guard_reason(root, worktree) {
+                        let _ = emitter.emit(
+                            "merge_cleanup_refused",
+                            &json!({
+                                "request_id": request.request_id,
+                                "repo": request.repo,
+                                "pr": request.pr,
+                                "reason": reason,
+                            }),
+                        );
+                    }
+                    continue;
+                }
+            }
+            let reclaimed_bytes = request
+                .worktree
+                .as_deref()
+                .map(|worktree| merge_cleanup_reclaimed_bytes(home, worktree))
+                .unwrap_or(0);
+            let names = merge_cleanup_row_names(home, &request);
+            let mut failed = None;
+            for name in names {
+                let output = std::process::Command::new("fno")
+                    .current_dir(root)
+                    .args([
+                        "agents",
+                        "rm",
+                        &name,
+                        "--audit-actor",
+                        "post-merge",
+                        "--audit-reason",
+                        "pr-merged",
+                        "--audit-request-id",
+                        &request.request_id,
+                        "--audit-worktree-touched",
+                        "--audit-reclaimed-bytes",
+                        &reclaimed_bytes.to_string(),
+                    ])
+                    .output();
+                if !output.as_ref().is_ok_and(|output| output.status.success()) {
+                    failed = Some(name);
+                    break;
+                }
+            }
+            if let Some(name) = failed {
+                let _ = emitter.emit(
+                    "merge_cleanup_refused",
+                    &json!({
+                        "request_id": request.request_id,
+                        "repo": request.repo,
+                        "pr": request.pr,
+                        "reason": format!("row-removal-failed:{name}"),
+                    }),
+                );
+                continue;
+            }
+            let _ = emitter.emit(
+                "merge_cleanup_completed",
+                &json!({
+                    "request_id": request.request_id,
+                    "repo": request.repo,
+                    "pr": request.pr,
+                    "reclaimed_bytes": reclaimed_bytes,
+                }),
+            );
+        }
+    }
 }
 
 /// How long between worktree report sweeps. A 24-hour reap order spans at
@@ -1785,6 +2039,72 @@ fn rm_take_worktree(entry: &state::RegistryEntry) -> Option<String> {
                 }
             })
     })
+}
+
+#[derive(Debug, Clone)]
+struct RemovalAuditContext {
+    actor: String,
+    reason: String,
+    request_id: String,
+    worktree_touched: Option<bool>,
+    reclaimed_bytes: Option<u64>,
+}
+
+impl RemovalAuditContext {
+    fn from_request(req: &Request, entry: &state::RegistryEntry) -> Self {
+        let string_param = |key: &str| {
+            req.params
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned)
+        };
+        let actor = string_param("audit_actor").unwrap_or_else(|| {
+            [
+                "FNO_HARNESS_SESSION_ID",
+                "CLAUDE_CODE_SESSION_ID",
+                "CODEX_THREAD_ID",
+            ]
+            .iter()
+            .find_map(|key| std::env::var(key).ok())
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("session:{value}"))
+            .unwrap_or_else(|| "operator".into())
+        });
+        let reason = string_param("audit_reason").unwrap_or_else(|| "operator-requested".into());
+        let request_id = string_param("audit_request_id")
+            .unwrap_or_else(|| format!("agent-rm:{}:{}", entry.name, entry.created_at));
+        Self {
+            actor,
+            reason,
+            request_id,
+            worktree_touched: req
+                .params
+                .get("audit_worktree_touched")
+                .and_then(Value::as_bool),
+            reclaimed_bytes: req
+                .params
+                .get("audit_reclaimed_bytes")
+                .and_then(Value::as_u64),
+        }
+    }
+}
+
+fn directory_bytes(path: &std::path::Path) -> Option<u64> {
+    fn walk(path: &std::path::Path, total: &mut u64) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let metadata = std::fs::symlink_metadata(entry.path())?;
+            if metadata.is_dir() {
+                walk(&entry.path(), total)?;
+            } else {
+                *total = total.saturating_add(metadata.len());
+            }
+        }
+        Ok(())
+    }
+    let mut total = 0;
+    walk(path, &mut total).ok().map(|()| total)
 }
 
 /// Wall-clock epoch seconds, for GC grace math. Degrades to 0 (a pre-1970 clock
@@ -3771,10 +4091,12 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         let roots = registry_repo_roots(&home);
                         let now = now_epoch_secs();
                         worktree_sweep(&home, &emitter, now, &roots, &|root| {
-                            // Live reap orders anywhere (both claim roots are
-                            // read by `list`): each is minted only by a ritual
-                            // that gh-confirmed MERGED, so its standing is the
-                            // merge-trigger for this tick's apply pass.
+                            if merge_cleanup_requested(&home, root) {
+                                return WorktreeSweepOrderRead::from(true);
+                            }
+                            // Compatibility with requests minted by older
+                            // rituals: a standing claim still authorizes the
+                            // guarded report/apply sweep during the deploy window.
                             std::process::Command::new("fno")
                                 .current_dir(root)
                                 .args(["agents", "claim", "list", "--prefix", "reap:", "-J"])
@@ -3813,9 +4135,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                 )
                         }, &|root, apply| {
                             let mut cmd = std::process::Command::new("fno");
-                            cmd.current_dir(root).args([
+                            cmd.current_dir(root)
+                                .env("FNO_AGENTS_HOME", home.root())
+                                .args([
                                 "agents", "workspace", "worktree", "cleanup", "--merged",
-                            ]);
+                                ]);
                             if apply {
                                 cmd.arg("--apply");
                             }
@@ -3832,6 +4156,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                 },
                             }
                         });
+                        consume_merge_cleanup_requests(&home, &roots, &emitter);
                     });
                 }
                 // Terminal-stop sweep (x-fcbf): exit fire-and-forget `claude --bg`
@@ -8441,6 +8766,7 @@ async fn handle_rm_with(
             Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
         };
     let name = entry.name.clone();
+    let audit = RemovalAuditContext::from_request(req, &entry);
     // Computed once (self-review finding): every other reference in this
     // handler reuses this allocation instead of re-deriving the same short id.
     let harness_row_id = claude_row_id(&entry);
@@ -8676,22 +9002,45 @@ async fn handle_rm_with(
     // near the 500-byte event cap already, so the receipt would push every
     // rm event over it and the writer would replace the whole record. The
     // auditable event field is x-90ee's to land with a shape that fits.
+    let worktree_path = std::path::Path::new(&entry.cwd);
+    let detected_worktree = is_linked_worktree(&entry.cwd);
+    let worktree_touched = audit.worktree_touched.unwrap_or(detected_worktree);
+    let measured_bytes = if detected_worktree {
+        directory_bytes(worktree_path)
+    } else {
+        None
+    };
     let worktree_receipt = rm_take_worktree(&entry);
+    let worktree_removed = worktree_touched && !worktree_path.exists();
+    let reclaimed_bytes = audit.reclaimed_bytes.unwrap_or_else(|| {
+        if worktree_removed {
+            measured_bytes.unwrap_or(0)
+        } else {
+            0
+        }
+    });
+    let worktree_outcome = if !worktree_touched {
+        "not-touched"
+    } else if worktree_removed {
+        "removed"
+    } else {
+        "kept"
+    };
     let pane_session = entry.mux.as_ref().map(|mux| mux.session.clone());
     let pane_id = entry.mux.as_ref().map(|mux| mux.pane_id);
     let event = json!({
         "name": name,
-        "registry_removed": true,
+        "registry_changed": true,
         "harness": entry.harness_name(),
         "harness_session_id": entry.harness_session_id,
-        "harness_row_id": harness_row_id,
+        "actor": audit.actor,
+        "reason": audit.reason,
+        "request_id": audit.request_id,
+        "worktree_touched": worktree_touched,
+        "worktree_outcome": worktree_outcome,
+        "reclaimed_bytes": reclaimed_bytes,
         "harness_removed": harness_outcome.removed_json(),
-        "harness_reason": harness_outcome.reason(),
-        "pane_session": pane_session,
-        "pane_id": pane_id,
         "pane_removed": pane_outcome.removed_json(),
-        "pane_reason": pane_outcome.reason(),
-        "was_orphaned": was_orphaned,
     });
     let event_payload_len = serde_json::to_string(&event)
         .map(|encoded| encoded.len())
@@ -8706,6 +9055,7 @@ async fn handle_rm_with(
     let result = json!({
         "removed": true,
         "registry_removed": true,
+        "registry_changed": true,
         "harness": entry.harness_name(),
         "harness_row_id": harness_row_id,
         // The FULL session id, distinct from harness_row_id above: that one
@@ -8721,6 +9071,12 @@ async fn handle_rm_with(
         "pane_removed": pane_outcome.removed_json(),
         "pane_reason": pane_outcome.reason(),
         "worktree_receipt": worktree_receipt,
+        "actor": audit.actor,
+        "reason": audit.reason,
+        "request_id": audit.request_id,
+        "worktree_touched": worktree_touched,
+        "worktree_outcome": worktree_outcome,
+        "reclaimed_bytes": reclaimed_bytes,
         "event_written": event_error.is_none(),
         "event_reason": event_error,
         "was_orphaned": was_orphaned,
@@ -10720,6 +11076,7 @@ fn fill_random(buf: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     /// The e2e restart-storm test only exercises `state_error_code` when the
     /// scheduler happens to race a task into shutdown-cancellation, so its
@@ -10857,6 +11214,52 @@ mod tests {
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .collect()
+    }
+
+    #[test]
+    fn merge_cleanup_fold_keeps_requests_until_completed_or_refused() {
+        let home = tmp_home("merge-cleanup-fold");
+        let request = json!({
+            "ts": "2026-09-02T00:00:00Z",
+            "type": "merge_cleanup_requested",
+            "source": "python",
+            "data": {
+                "request_id": "merge-cleanup-1",
+                "repo": "/repo",
+                "pr": 42,
+                "branch": "feature/session",
+                "worktree": "/repo/worktree",
+                "node_ids": ["x-90ee"]
+            }
+        });
+        std::fs::write(
+            home.events_jsonl(),
+            format!("{}\n", serde_json::to_string(&request).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(pending_merge_cleanup_requests(&home, "/repo").len(), 1);
+        assert!(merge_cleanup_requested(&home, "/repo"));
+
+        let completed = json!({
+            "ts": "2026-09-02T00:01:00Z",
+            "type": "merge_cleanup_completed",
+            "source": "daemon",
+            "data": {
+                "request_id": "merge-cleanup-1",
+                "repo": "/repo",
+                "pr": 42,
+                "reclaimed_bytes": 12
+            }
+        });
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(home.events_jsonl())
+            .unwrap()
+            .write_all(format!("{}\n", serde_json::to_string(&completed).unwrap()).as_bytes())
+            .unwrap();
+        assert!(pending_merge_cleanup_requests(&home, "/repo").is_empty());
+        assert!(!merge_cleanup_requested(&home, "/repo"));
+        std::fs::remove_dir_all(home.root()).ok();
     }
 
     // One-shot ask row (empty short_id + no pid): terminal, reapable on grace
@@ -11551,7 +11954,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rm_reports_when_an_oversized_event_is_replaced() {
+    async fn rm_keeps_the_audit_event_compact_when_diagnostics_are_oversized() {
         let home = short_home("rmeventoversize");
         let row = claude_rm_row(
             "stopped-worker",
@@ -11581,11 +11984,8 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.result().unwrap()["event_written"], false);
-        assert!(response.result().unwrap()["event_reason"]
-            .as_str()
-            .unwrap()
-            .contains("event_payload_too_large"));
+        assert_eq!(response.result().unwrap()["event_written"], true);
+        assert!(response.result().unwrap()["event_reason"].is_null());
         std::fs::remove_dir_all(home.root()).ok();
     }
 

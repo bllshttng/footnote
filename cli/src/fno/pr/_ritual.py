@@ -36,6 +36,7 @@ honors the existing dedup apparatus (markers + claims) unchanged.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -621,6 +622,91 @@ class Ritual:
             return f"reap-order {key} already standing ({why})"
         return f"reap-order-unwritten (exit={r.returncode}, {why})"
 
+    def _register_cleanup_request(
+        self, branch: str, worktree: Optional[str], why: str
+    ) -> str:
+        """Persist one merge-triggered cleanup request before deferring.
+
+        The request is keyed by the exact merge, branch, worktree, and closed
+        node set. The append-only journal is the durable source; the standing
+        claim remains during the compatibility window so older daemons keep
+        their existing guarded sweep behavior.
+        """
+        request_id = self._cleanup_request_id(branch, worktree)
+        node_ids = sorted(str(node) for node in self.ctx.node_ids)
+        _emit_daemon_envelope(
+            "merge_cleanup_requested",
+            {
+                "request_id": request_id,
+                "repo": str(self.canon),
+                "project": self.ctx.project,
+                "pr": self.ctx.pr,
+                "branch": branch,
+                "worktree": worktree,
+                "node_ids": node_ids,
+                "candidate_row_names": self._rows_for_cleanup(worktree) if worktree else [],
+            },
+        )
+        legacy = self._register_reap_order(why)
+        return f"cleanup-requested request_id={request_id}; {legacy}"
+
+    def _cleanup_request_id(self, branch: str, worktree: Optional[str]) -> str:
+        node_ids = sorted(str(node) for node in self.ctx.node_ids)
+        identity = "|".join(
+            [str(self.ctx.project), str(self.ctx.pr), branch, worktree or "", *node_ids]
+        )
+        return "merge-cleanup-" + hashlib.sha256(identity.encode()).hexdigest()[:20]
+
+    def _rows_for_cleanup(self, worktree: str) -> list[str]:
+        try:
+            r = self._sh(["agents", "list", "--json"])
+        except (ToolMissing, subprocess.SubprocessError):
+            return []
+        if not r.ok:
+            return []
+        try:
+            payload = json.loads(r.stdout or "{}")
+        except json.JSONDecodeError:
+            return []
+        rows = payload if isinstance(payload, list) else payload.get("agents") or []
+        node_ids = {str(node) for node in self.ctx.node_ids}
+        out = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "")
+            if row.get("cwd") == worktree or any(
+                name.startswith(f"target-{node}-") for node in node_ids
+            ):
+                out.append(name)
+        return out
+
+    def _remove_rows_after_archive(
+        self, worktree: str, request_id: str, reclaimed_bytes: int
+    ) -> bool:
+        if Path(worktree).exists():
+            return False
+        removed = True
+        for name in self._rows_for_cleanup(worktree):
+            result = self._sh(
+                [
+                    "agents",
+                    "rm",
+                    name,
+                    "--audit-actor",
+                    "post-merge",
+                    "--audit-reason",
+                    "pr-merged",
+                    "--audit-request-id",
+                    request_id,
+                    "--audit-worktree-touched",
+                    "--audit-reclaimed-bytes",
+                    str(reclaimed_bytes),
+                ],
+            )
+            removed = removed and result.ok
+        return removed
+
     def leg_archive(self) -> None:
         """Step 4: best-effort worktree archive; defer when run from inside it."""
         state, branch = self._merged_state()
@@ -633,14 +719,14 @@ class Ritual:
         if not branch:
             self._emit("archive", _SKIPPED, "no-branch")
             return
-        order = self._register_reap_order("merged-pr")
-        order_written = not order.startswith("reap-order-unwritten")
         wt = self._find_worktree(branch)
+        order = self._register_cleanup_request(branch, wt, "merged-pr")
+        order_written = "cleanup-requested" in order and "reap-order-unwritten" not in order
         if not wt:
             self._emit(
                 "archive",
                 _DEFERRED if order_written else _FAILED,
-                f"no worktree for {branch}; sweep-will-reap; {order}",
+                f"{order}; no worktree for {branch}",
             )
             return
         if Path(wt).resolve() == self.cwd.resolve():
@@ -654,7 +740,7 @@ class Ritual:
             self._emit(
                 "archive",
                 _DEFERRED if order_written else _FAILED,
-                f"sweep-will-reap; worktree={wt}; {order}",
+                f"{order}; worktree={wt}",
             )
             return
         script = self.canon / "scripts" / "setup" / "archive-worktree.sh"
@@ -662,14 +748,24 @@ class Ritual:
             self._emit(
                 "archive",
                 _DEFERRED if order_written else _FAILED,
-                f"worktree={wt}; archive-worktree.sh missing; {order}",
+                f"{order}; archive-worktree.sh missing; worktree={wt}",
             )
             return
+        worktree_bytes = 0
+        try:
+            worktree_bytes = sum(
+                os.lstat(Path(root) / name).st_size
+                for root, dirs, files in os.walk(wt, followlinks=False)
+                for name in files
+            )
+        except OSError:
+            worktree_bytes = 0
         try:
             # env(1) prefixes the caller into the removal event the script
             # emits; the runner has no env parameter by design (test seams).
-            r = self.runner(["env", "FNO_WT_REMOVE_CALLER=post-merge ritual",
-                             "bash", str(script), str(wt), "--yes"],
+            r = self.runner(["env", f"FNO_AGENTS_HOME={agents_home_dir()}",
+                             "FNO_WT_REMOVE_CALLER=post-merge ritual",
+                             "bash", str(script), str(wt), "--merge-triggered"],
                             cwd=str(self.canon), timeout=120.0)
         except subprocess.TimeoutExpired:
             self._emit("archive", _FAILED, f"worktree={wt}; timeout; {order}")
@@ -680,6 +776,18 @@ class Ritual:
             )
             return
         if r.ok:
+            request_id = self._cleanup_request_id(branch, wt)
+            rows_removed = self._remove_rows_after_archive(wt, request_id, worktree_bytes)
+            if rows_removed:
+                _emit_daemon_envelope(
+                    "merge_cleanup_completed",
+                    {
+                        "request_id": request_id,
+                        "repo": str(self.canon),
+                        "pr": self.ctx.pr,
+                        "reclaimed_bytes": worktree_bytes,
+                    },
+                )
             self._emit(
                 "archive",
                 _OK if order_written else _FAILED,

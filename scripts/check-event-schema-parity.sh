@@ -345,7 +345,13 @@ collisions = python_types & rust_kinds
 # Everything else that lands in both sets is an accidental name reuse and
 # still fails below. x-a879: the registry removal instrument fires at the
 # Rust and Python write choke points by design.
-dual_owner_kinds = {"registry_row_removed"}
+dual_owner_kinds = {
+    "registry_row_removed",
+    "agent_removed",
+    "merge_cleanup_requested",
+    "merge_cleanup_completed",
+    "merge_cleanup_refused",
+}
 collisions -= dual_owner_kinds
 if collisions:
     print("COLLISION: the following event names appear in both Python and Rust:")

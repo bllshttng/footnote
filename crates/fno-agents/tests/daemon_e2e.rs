@@ -1354,6 +1354,31 @@ exit 2
     assert_eq!(String::from_utf8_lossy(&post_claude.stdout).trim(), "[]");
     assert_eq!(String::from_utf8_lossy(&post_mux.stdout).trim(), "[]");
 
+    let removed = std::fs::read_to_string(home.events_jsonl())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| event.get("type").and_then(|value| value.as_str()) == Some("agent_removed"))
+        .expect("successful removal must leave an audit event");
+    let data = removed.get("data").expect("agent_removed data");
+    assert_eq!(data.get("registry_changed"), Some(&json!(true)));
+    assert_eq!(
+        data.get("harness_session_id"),
+        Some(&json!("e6f78b98-e594-47ed-ad81-84f8a78b8bb7"))
+    );
+    for field in [
+        "actor",
+        "reason",
+        "request_id",
+        "worktree_touched",
+        "reclaimed_bytes",
+    ] {
+        assert!(
+            data.get(field).is_some(),
+            "audit event missing {field}: {data}"
+        );
+    }
+
     unsafe {
         libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
     }

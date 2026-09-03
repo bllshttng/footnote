@@ -17,7 +17,7 @@ _wt_json_escape() {
     printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
-# _wt_emit_removal_event <repo-root> <path> <caller> <claim> <reason> [branch] [forced]
+# _wt_emit_removal_event <repo-root> <path> <caller> <claim> <reason> [branch] [forced] [reclaimed-bytes]
 #
 # Best-effort but LOUD: a failed emit never blocks the removal (a broken
 # journal must not strand every worktree on disk), and the failure line names
@@ -27,12 +27,12 @@ _wt_json_escape() {
 # new type, and repo-first means rows land the same day the branch does.
 _wt_emit_removal_event() {
     local root="$1" path="$2" caller="$3" claim="$4" reason="$5"
-    local branch="${6:-}" forced="${7:-false}"
+    local branch="${6:-}" forced="${7:-false}" reclaimed_bytes="${8:-0}"
     local data rc=1
-    data="$(printf '{"path":"%s","caller":"%s","claim":"%s","reason":"%s","branch":"%s","forced":%s}' \
+    data="$(printf '{"path":"%s","caller":"%s","claim":"%s","reason":"%s","branch":"%s","forced":%s,"reclaimed_bytes":%s}' \
         "$(_wt_json_escape "$path")" "$(_wt_json_escape "$caller")" \
         "$(_wt_json_escape "$claim")" "$(_wt_json_escape "$reason")" \
-        "$(_wt_json_escape "$branch")" "$forced")"
+        "$(_wt_json_escape "$branch")" "$forced" "$reclaimed_bytes")"
     if [[ -n "$root" && -x "$root/cli/.venv/bin/python" ]]; then
         PYTHONPATH="$root/cli/src" "$root/cli/.venv/bin/python" -m fno.cli doctor event emit \
             -t worktree_removed -s bash -d "$data" >/dev/null 2>&1 && rc=0
@@ -42,6 +42,22 @@ _wt_emit_removal_event() {
     fi
     if [[ "$rc" -ne 0 ]] && command -v fno >/dev/null 2>&1; then
         fno doctor event emit -t worktree_removed -s bash -d "$data" >/dev/null 2>&1 && rc=0
+    fi
+    # A daemon-owned cleanup needs the byte receipt in the agents journal it
+    # reads for deferred merge requests. Keep this opt-in so standalone/manual
+    # archive tests do not write into the developer's real agents home.
+    if [[ -n "${FNO_AGENTS_HOME:-}" ]]; then
+        local agents_events="$FNO_AGENTS_HOME/events.jsonl"
+        if [[ "$agents_events" != "$root/.fno/events.jsonl" ]]; then
+            if [[ -n "$root" && -x "$root/cli/.venv/bin/python" ]]; then
+                FNO_EVENTS_PATH="$agents_events" PYTHONPATH="$root/cli/src" \
+                    "$root/cli/.venv/bin/python" -m fno.cli doctor event emit \
+                    -t worktree_removed -s bash -d "$data" >/dev/null 2>&1 || true
+            elif command -v fno-py >/dev/null 2>&1; then
+                FNO_EVENTS_PATH="$agents_events" fno-py doctor event emit \
+                    -t worktree_removed -s bash -d "$data" >/dev/null 2>&1 || true
+            fi
+        fi
     fi
     if [[ "$rc" -ne 0 ]]; then
         echo "worktree-removal-event: row NOT emitted for $path caller=$caller (no usable fno); removal proceeds, row lost" >&2
