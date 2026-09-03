@@ -96,7 +96,15 @@ impl Finding {
                 format!("fno do pr closure-trailer {}", nodes.join(" "))
             }
             Remedy::Escalate { repro } => repro.clone(),
-            Remedy::Inherited => "inherited from main; not this PR's to fix".to_string(),
+            // Matched by CHECK NAME, which is all the main-HEAD read gives.
+            // Measured: the same check was red on both, and the failing TEST
+            // differed (two flakes in one suite). So this says the check is
+            // not this PR's to fix, never that the two failures are the same
+            // one.
+            Remedy::Inherited => {
+                "the same check is red on main HEAD, so it is not this PR's to fix                  (matched by check name, not by the failing test)"
+                    .to_string()
+            }
         }
     }
 
