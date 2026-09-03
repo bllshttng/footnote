@@ -2125,23 +2125,6 @@ def _checks_verdict(
     return (verdict, counts, (data.get("headRefOid") or "").strip())
 
 
-def _already_armed(pr_number: int, repo: str) -> bool:
-    """True when GitHub's native auto-merge queue owns this PR (finalize armed
-    it). ONE probe argv shared by every executor that must stand down (x-9d11
-    AC5-CON), so a probe-shape change cannot drift between merge paths.
-
-    x-8151: the MERGE path no longer calls this - _guarded_merge answers the
-    armed question from the same REST payload as the checks verdict, retiring
-    the sequential gh pr view round-trip. The probe survives for executors
-    that need the armed answer alone."""
-    res = _gh(
-        ["pr", "view", str(pr_number), "--json", "autoMergeRequest",
-         "-q", ".autoMergeRequest.enabled"],
-        repo,
-    )
-    return res.ok and res.stdout.strip() == "true"
-
-
 class _MergeGuard(NamedTuple):
     """The pre-merge guard answers, from the fewest reads (x-8151).
 
@@ -2198,7 +2181,7 @@ def _guarded_merge(
     head = (info.get("head_sha") or "").strip()
     if armed or not enforce_checks:
         return _MergeGuard(
-            data={"headRefOid": head, "state": info.get("state")},
+            data=None,
             fetch_reason="",
             armed=armed,
             checks_read=False,

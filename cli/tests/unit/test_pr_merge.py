@@ -2023,12 +2023,6 @@ def test_a_missing_gh_during_the_already_armed_probe_keeps_exit_127(
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 127
     assert _last_json(capsys, stream="err")["reason"] == "gh CLI not installed"
 
-    fake = _GhVanishes(toplevel=str(tmp_path))
-    monkeypatch.setattr(_merge, "run", fake)
-
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 127
-    assert _last_json(capsys, stream="err")["reason"] == "gh CLI not installed"
-
 
 def test_a_red_refusal_marks_the_node_failed_not_still_queued(
     enabled, monkeypatch, capsys, tmp_path
