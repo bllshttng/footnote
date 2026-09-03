@@ -66,6 +66,39 @@ consolidation:
   # appended_to:
   #   - id: x-0000
   #     reason: <why this content belongs on that node>
+# surface: the step 2b-bis Answerer Enumeration Gate's recorded outcome. One
+#                                 # question, every answerer, a count, and a
+#                                 # disposition per answerer in principle 9's
+#                                 # vocabulary (dual-logic | shared-vocabulary |
+#                                 # generated-artifact) plus out-of-scope with a
+#                                 # reason. MANDATORY on non-quick plans created
+#                                 # after 2026-09-03: validate-plan.sh refuses a
+#                                 # missing block there and warns on quick plans
+#                                 # and pre-gate plans. Full protocol:
+#                                 # references/answerer-enumeration.md.
+surface:
+  question: "Which nodes need dispatch?"   # ONE line, phrased as a question
+  ruling: d-00000000                       # optional: the live law the question is quoted from
+  sweep: "rg -n 'plan_path' cli/src/fno/king/"  # the exact command run; must return the control below
+  control: cli/src/fno/king/board.py:275   # an answerer known BEFORE the sweep ran
+  answerers:
+    - at: cli/src/fno/king/board.py:275
+      disposition: dual-logic              # dual-logic | shared-vocabulary | generated-artifact | out-of-scope
+      reads: "for node in undispatched_read.rows()"   # the expression the site evaluates, quoted
+      feed: "fno backlog undispatched --json"         # the command believed to supply the site
+      emits: "31 rows, 31 with plan_path, 0 without (measured 2026-09-02)"
+    - at: cli/src/fno/king/board.py:306
+      disposition: out-of-scope
+      reason: "already correct; its feed is SRC_READY, measured above"
+  count: 2                                 # the PR estimate, stated
+  count_after: 1                           # answerers left once this plan lands
+# `reads` is deliberately separate from `feed`: `feed` is what the author
+# believes supplies the answerer, `reads` is the expression it actually
+# evaluates, quoted with its line. When the two disagree the plan is wrong and
+# the block shows it. `reads`, `feed` and `emits` are required on every CHANGED
+# answerer (dual-logic or shared-vocabulary); an `out-of-scope` answerer needs
+# only its reason. `count_after` turns the gate from a permanent tax into a
+# decreasing one: it is the number the next plan on this question will find.
 # kill_criteria: abort conditions target/do evaluate at wave + iteration boundaries.
 # Emit these defaults unless the plan overrides them (see SKILL.md "Kill Criteria
 # Declaration"). They live HERE in frontmatter, never under a `## Kill Criteria` heading.

@@ -26,6 +26,9 @@ def _make_plan(plan_path: Path, stage_lines: str = "") -> None:
         title: Test Plan
         scope: feature
         project: test
+        # Pre-gate date: the surface gate refuses an undated plan, and these
+        # tests exercise the impeccable_stages rules, not the gates.
+        created: 2026-08-01
         execution_mode: sequential
         waves:
           - wave: 1

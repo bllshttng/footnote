@@ -17,6 +17,10 @@ _INDEX_TEMPLATE = (
     "---\n"
     "plan: foo\n"
     "scope: feature\n"
+    # Pre-gate date: these fixtures exercise the legacy project/structure
+    # checks on a minimal plan, and an undated plan would trip the surface
+    # gate's undated-plan refusal instead of what each test asserts.
+    "created: 2026-08-01\n"
     "{project_line}"
     "execution_mode: sequential\n"
     "consolidation:\n"

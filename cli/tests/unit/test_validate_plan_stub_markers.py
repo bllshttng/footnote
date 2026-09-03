@@ -138,7 +138,10 @@ def test_validator_ignores_why_on_non_group_plan(tmp_path):
     # A normal quick-plan (no parent_epic) is not forced to grow a Why section.
     plan = tmp_path / "normal.md"
     plan.write_text(
-        "---\ntitle: X\nproject: fno\nconsolidation:\n  outcome: proceed_alone\n"
+        "---\ntitle: X\nproject: fno\n"
+        # Pre-gate date: the surface gate refuses an undated plan outright,
+        # and this fixture exercises the Why-section rule, not the gates.
+        "created: 2026-08-01\nconsolidation:\n  outcome: proceed_alone\n"
         "  proceed_alone_against: []\n---\n\n# X\n\n"
         "### Task 1.1: do it\n\n**Files**: foo.py\n**Verify**: pytest\n"
     )
