@@ -1505,6 +1505,18 @@ def cmd_spawn(
             "with room, or create the next. --substrate pane only."
         ),
     ),
+    portal: int | None = typer.Option(
+        None,
+        "--portal",
+        help=(
+            "Portal placement (x-9b60): open portal N (0-255) showing the new "
+            "worker, in one call. --substrate thread only: a thread hosts no "
+            "pane until a portal opens one, and this is that one call. Makes "
+            "--workspace/-s, --split/-x, --at, and --tab meaningful for a "
+            "thread: a fresh portal open honors them; a portal that already "
+            "has a live viewer keeps its geometry."
+        ),
+    ),
     bounded_placement: bool = typer.Option(
         False,
         "--bounded-placement",
@@ -1859,7 +1871,37 @@ def cmd_spawn(
     if squad is not None and not squad.strip():
         print("--workspace/-s needs a nonblank workspace name", file=sys.stderr)
         raise typer.Exit(code=2)
-    if placement_requested and (substrate != "pane" or once):
+    # x-9b60 portal placement: a portal is the pane a thread hosts, so the
+    # placement flags become legal for a thread WHEN --portal names it, and
+    # stay refused for a bare thread where they would still mean nothing.
+    if portal is not None and not 0 <= portal <= 255:
+        print("--portal takes an index 0-255", file=sys.stderr)
+        raise typer.Exit(code=2)
+    if portal is not None and (substrate != "bg" or once):
+        print(
+            "--portal applies only to --substrate thread; a pane hosts its "
+            "own geometry and headless hosts no session at all",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+    if bounded_placement and portal is not None:
+        print(
+            "--bounded-placement selects its own tab for a pane and cannot "
+            "combine with --portal",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+    if placement_requested and substrate == "bg" and portal is None:
+        # AC8-EDGE: a placement with nothing to place. Name the missing
+        # piece; never silently ignore the flag.
+        print(
+            "--workspace/-s, --split/-x, --at, and --tab on --substrate "
+            "thread need --portal N: a thread hosts no pane until a portal "
+            "opens one, so the placement has nothing to place",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+    if placement_requested and portal is None and (substrate != "pane" or once):
         print(
             "--workspace/-s, --split/-x, --at, and --tab apply only to --substrate pane "
             "(bg/headless have no pane geometry)",
@@ -2883,6 +2925,22 @@ def cmd_spawn(
             from fno.agents.spawn_gate import qos_demote_bg_worker
 
             qos_demote_bg_worker(result.short_id)
+        # x-9b60: one call places a portal. The bg lane owns no pane geometry,
+        # so the portal is opened through the one door that creates one (the
+        # `fno mux thread` reach), carrying the placement flags. After the
+        # receipt flush so line-parsing consumers never wait on it.
+        if substrate == "bg" and portal is not None:
+            from fno.agents.mux_spawn import place_thread_portal
+
+            try:
+                landing = place_thread_portal(
+                    name, portal, workspace=squad, split=split, at=at, tab=tab
+                )
+            except DispatchAskError as exc:
+                print(str(exc), file=sys.stderr)
+                raise typer.Exit(code=exc.exit_code) from exc
+            if landing:
+                print(landing, flush=True)
     else:
         # once path: reply verbatim on stdout (no added newline per ask contract).
         sys.stdout.write(result.reply or "")

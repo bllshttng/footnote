@@ -114,6 +114,8 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
         "--route", "--account", "--crown", "-k", "--dispatch-account",
         # x-6928: --at's value (current|<pane>) must not read as a positional.
         "--at",
+        # x-9b60: --portal's index is a value, never a prompt word.
+        "--portal",
         # x-4342: the sessions-row phase names a phase, not a prompt word.
         "--session-phase",
         # The join call site's per-worker policy file: its PATH is a value,
