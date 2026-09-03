@@ -248,6 +248,7 @@ crates/fno-agents/tests/claude_ask_dispatch.rs
 crates/fno-agents/tests/claude_ask_parity.rs
 crates/fno/src/agents_view.rs
 crates/fno/src/connections_view.rs
+crates/fno/src/transcript_tail.rs
 hooks/attest-model.sh
 hooks/cache-keepalive-inject.sh
 hooks/corrections-git-postcommit.sh
