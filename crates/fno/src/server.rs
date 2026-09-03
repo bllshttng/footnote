@@ -25,7 +25,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -74,6 +74,11 @@ const RELIABLE_CAP: usize = 256;
 /// correctness.
 const BYE_FLUSH: Duration = Duration::from_millis(250);
 
+/// Give a responsive core time to flush topology and run normal cleanup after
+/// the signal waiter submits its shutdown message before taking the emergency
+/// path for a wedged core.
+const SIGNAL_CORE_GRACE: Duration = Duration::from_secs(2);
+
 /// The droppable outbound path: newest unsent frame per pane, per client.
 type DirtyMap = Arc<Mutex<HashMap<u64, Frame>>>;
 
@@ -112,6 +117,153 @@ struct PaneCounters {
 /// reaped pane's final partial window is lost, which is the accepted cost of
 /// not growing a second store.
 type PaneStats = Arc<RwLock<HashMap<u64, Arc<PaneCounters>>>>;
+
+/// The only pane state visible to the emergency signal waiter. Keeper-hosted
+/// children belong to their keeper and survive this server; plain children
+/// belong to this server's shutdown sweep.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct PaneChild {
+    pid: u32,
+    keeper_hosted: bool,
+}
+
+type PaneChildRoster = Arc<Mutex<HashSet<PaneChild>>>;
+
+/// Block termination signals and start the one waiter that can end a wedged
+/// core loop. Threads created later inherit this blocked mask.
+fn install_signal_reaper(
+    socket: &Path,
+    core_tx: mpsc::Sender<CoreMsg>,
+    shutdown_complete: Arc<AtomicBool>,
+) -> Result<PaneChildRoster, String> {
+    let mut signal_set = unsafe { std::mem::zeroed::<libc::sigset_t>() };
+    let empty = unsafe { libc::sigemptyset(&mut signal_set) };
+    if empty != 0 {
+        return Err(format!(
+            "sigwait setup failed at sigemptyset: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    for signal in [libc::SIGTERM, libc::SIGINT] {
+        let added = unsafe { libc::sigaddset(&mut signal_set, signal) };
+        if added != 0 {
+            return Err(format!(
+                "sigwait setup failed at sigaddset({signal}): {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    let blocked =
+        unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &signal_set, std::ptr::null_mut()) };
+    if blocked != 0 {
+        return Err(format!(
+            "sigwait setup failed at pthread_sigmask: {}",
+            std::io::Error::from_raw_os_error(blocked)
+        ));
+    }
+    let roster = Arc::new(Mutex::new(HashSet::new()));
+    let waiter_roster = Arc::clone(&roster);
+    let waiter_socket = socket.to_path_buf();
+    let waiter_complete = Arc::clone(&shutdown_complete);
+    std::thread::Builder::new()
+        .name("fno-mux-sigwait".into())
+        .spawn(move || {
+            signal_waiter(
+                signal_set,
+                waiter_roster,
+                waiter_socket,
+                core_tx,
+                waiter_complete,
+            )
+        })
+        .map_err(|e| format!("sigwait setup failed to spawn waiter: {e}"))?;
+    Ok(roster)
+}
+
+fn signal_waiter(
+    signal_set: libc::sigset_t,
+    roster: PaneChildRoster,
+    socket: PathBuf,
+    core_tx: mpsc::Sender<CoreMsg>,
+    shutdown_complete: Arc<AtomicBool>,
+) {
+    let mut received = 0;
+    let result = unsafe { libc::sigwait(&signal_set, &mut received) };
+    if result != 0 {
+        eprintln!(
+            "fno mux: sigwait failed for SIGTERM/SIGINT: {}",
+            std::io::Error::from_raw_os_error(result)
+        );
+        unsafe { libc::_exit(1) }
+    }
+    if core_tx.try_send(CoreMsg::Kill).is_ok() {
+        let deadline = Instant::now() + SIGNAL_CORE_GRACE;
+        while !shutdown_complete.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if shutdown_complete.load(Ordering::Acquire) {
+            return;
+        }
+    }
+    let snapshot = match roster.lock() {
+        Ok(children) => children.iter().copied().collect::<HashSet<_>>(),
+        Err(_) => {
+            eprintln!("fno mux: emergency pane roster lock poisoned");
+            unsafe { libc::_exit(1) }
+        }
+    };
+    kill_plain_children(&snapshot);
+    let _ = crate::proto::remove_session_files(&socket);
+    crate::proto::remove_startup_guard(&socket);
+    unsafe { libc::_exit(0) }
+}
+
+fn kill_plain_children(roster: &HashSet<PaneChild>) {
+    let plain = roster
+        .iter()
+        .filter(|child| !child.keeper_hosted)
+        .copied()
+        .collect::<Vec<_>>();
+    for child in &plain {
+        let result = unsafe { libc::kill(child.pid as libc::pid_t, libc::SIGKILL) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                eprintln!(
+                    "fno mux: emergency SIGKILL failed for pane child {}: {error}",
+                    child.pid
+                );
+            }
+        }
+    }
+    for child in plain {
+        reap_plain_child(child.pid);
+    }
+}
+
+fn reap_plain_child(pid: u32) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut status = 0;
+    loop {
+        let result = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        if result == pid as libc::pid_t {
+            return;
+        }
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ECHILD | libc::ESRCH)) {
+                return;
+            }
+            eprintln!("fno mux: emergency waitpid failed for pane child {pid}: {error}");
+            return;
+        }
+        if Instant::now() >= deadline {
+            eprintln!("fno mux: emergency waitpid timed out for pane child {pid}");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 /// Lines a single wheel notch scrolls a mux-interpreted pane. ONE, because the
 /// host terminal already did the accumulation and a notch here IS one cell of
@@ -1862,6 +2014,20 @@ pub fn run(socket: PathBuf) -> i32 {
         eprintln!("fno mux: warn: could not write pid sidecar: {e}");
     }
 
+    // Install signal ownership before constructing the Tokio runtime. Every
+    // runtime thread inherits the blocked mask; only the dedicated waiter can
+    // consume SIGTERM/SIGINT.
+    let (signal_tx, signal_rx) = mpsc::channel(1);
+    let shutdown_complete = Arc::new(AtomicBool::new(false));
+    let pane_children =
+        match install_signal_reaper(&socket, signal_tx, Arc::clone(&shutdown_complete)) {
+            Ok(roster) => roster,
+            Err(e) => {
+                eprintln!("fno mux: cannot install emergency signal reaper: {e}");
+                return 1;
+            }
+        };
+
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
@@ -1873,7 +2039,14 @@ pub fn run(socket: PathBuf) -> i32 {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| crate::proto::DEFAULT_SESSION.to_string());
-    runtime.block_on(serve(listener, &socket, session_name))
+    runtime.block_on(serve(
+        listener,
+        &socket,
+        session_name,
+        pane_children,
+        signal_rx,
+        shutdown_complete,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -2425,6 +2598,8 @@ struct Core {
     /// `frames_emitted` leg. Kept in lockstep with `panes` in
     /// [`Core::register_pane`] / [`Core::reap_pane`], same as `pane_watch`.
     pane_stats: PaneStats,
+    /// Minimal live child roster shared with the off-loop signal waiter.
+    pane_children: PaneChildRoster,
     clients: Vec<Client>,
     /// Monotonic, never reused (Locked Decision 6).
     next_pane_id: u64,
@@ -3829,7 +4004,7 @@ impl Core {
             None,
             None,
             None,
-        );
+        )?;
         Ok(id)
     }
 
@@ -3924,7 +4099,7 @@ impl Core {
             account,
             resume_target,
             refused_worker_from_argv(argv),
-        );
+        )?;
         // The keeper's handshake replay carries everything the child printed
         // before the reader thread existed; the VT only now exists, so feed
         // it here (the re-adopt path feeds its ring the same way).
@@ -3986,9 +4161,23 @@ impl Core {
         account: Option<String>,
         resume_target: Option<String>,
         refused_worker: Option<String>,
-    ) {
+    ) -> Result<(), String> {
+        let Some(child_pid) = pty.child_pid() else {
+            pty.kill();
+            return Err(format!("pane {id} has no confirmed child pid"));
+        };
+        let child = PaneChild {
+            pid: child_pid,
+            keeper_hosted: pty.is_keeper_hosted(),
+        };
+        let mut children = match self.pane_children.lock() {
+            Ok(children) => children,
+            Err(_) => {
+                pty.kill();
+                return Err("pane child roster lock poisoned".into());
+            }
+        };
         self.next_pane_id = self.next_pane_id.max(id.saturating_add(1));
-        e2e_log(format_args!("pane {id} registered ({rows}x{cols})"));
         let stats = Arc::new(PaneCounters::default());
         self.panes.insert(
             id,
@@ -4009,6 +4198,9 @@ impl Core {
         self.pane_stats.write().unwrap().insert(id, stats);
         let (tx, _rx) = watch::channel(WaitTick::default());
         self.pane_watch.insert(id, tx);
+        children.insert(child);
+        e2e_log(format_args!("pane {id} registered ({rows}x{cols})"));
+        Ok(())
     }
 
     /// Kill+reap a pane's PTY and retire its watch (flipping `exited` so any
@@ -4016,7 +4208,18 @@ impl Core {
     /// leave `panes`/`pane_watch`, so the two maps never drift. Idempotent.
     fn reap_pane(&mut self, pid: u64) {
         if let Some(entry) = self.panes.remove(&pid) {
-            entry.pty.kill();
+            if let Ok(mut children) = self.pane_children.lock() {
+                if let Some(child_pid) = entry.pty.child_pid() {
+                    let child = PaneChild {
+                        pid: child_pid,
+                        keeper_hosted: entry.pty.is_keeper_hosted(),
+                    };
+                    children.remove(&child);
+                }
+                entry.pty.kill();
+            } else {
+                entry.pty.kill();
+            }
         }
         // Pane exit releases the writer claim UNCONDITIONALLY (Locked 5): a
         // held claim never blocks the close cascade.
@@ -8503,7 +8706,7 @@ impl Core {
                         .map(|p| p as u32);
                     let rows = num_field("rows");
                     let cols = num_field("cols");
-                    self.register_pane(
+                    if let Err(e) = self.register_pane(
                         id,
                         adoption.shell,
                         rows,
@@ -8515,7 +8718,13 @@ impl Core {
                         account_from_argv(&argv),
                         resume_target_from_argv(&argv),
                         refused_worker_from_argv(&argv),
-                    );
+                    ) {
+                        self.notice_all(format!(
+                            "keeper readopt: {} refused registration ({e}); child was not adopted",
+                            sock.display()
+                        ));
+                        continue;
+                    }
                     // The detached window (AC3-HP): the keeper replayed its
                     // ring during the handshake; feed it before any layout
                     // push so the first frame the operator sees carries it.
@@ -15082,6 +15291,9 @@ async fn serve(
     listener: std::os::unix::net::UnixListener,
     socket: &Path,
     session_name: String,
+    pane_children: PaneChildRoster,
+    mut signal_rx: mpsc::Receiver<CoreMsg>,
+    shutdown_complete: Arc<AtomicBool>,
 ) -> i32 {
     if let Err(e) = listener.set_nonblocking(true) {
         eprintln!("fno mux: listener setup failed: {e}");
@@ -15113,6 +15325,7 @@ async fn serve(
         pane_watch: HashMap::new(),
         pane_stats: Arc::new(RwLock::new(HashMap::new())),
         pane_stats_emit_failures: Arc::new(AtomicU64::new(0)),
+        pane_children,
         clients: Vec::new(),
         next_pane_id: pane_id_floor(
             persisted_pane_floor,
@@ -15569,10 +15782,6 @@ async fn serve(
         }
     });
 
-    let mut sigterm =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
-    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok();
-
     eprintln!("fno mux: serving {}", socket.display());
 
     // Re-adopt surviving keeper panes BEFORE any attach can restore: this
@@ -15610,6 +15819,10 @@ async fn serve(
     // with the pty reader thread's own first-chunk line to split "shell never
     // spoke" from "core loop never drained it".
     let mut e2e_first_out: HashSet<u64> = HashSet::new();
+    // Explicit e2e-only fault seam: after a real pane registration, park the
+    // core-loop thread forever so SIGTERM cannot be handled by this loop.
+    let core_wedge_e2e = std::env::var_os("FNO_E2E_CORE_WEDGE").is_some();
+    let mut core_wedge_armed = false;
 
     let flow = loop {
         tokio::select! {
@@ -15754,6 +15967,17 @@ async fn serve(
                 } else if core.handle(msg) == Flow::Shutdown {
                     break Flow::Shutdown;
                 }
+                if core_wedge_e2e && !core_wedge_armed && !core.panes.is_empty() {
+                    core_wedge_armed = true;
+                    e2e_log(format_args!("core wedge armed"));
+                    std::thread::park();
+                }
+            }
+            signal = signal_rx.recv() => {
+                let Some(signal) = signal else { break Flow::Shutdown };
+                if core.handle(signal) == Flow::Shutdown {
+                    break Flow::Shutdown;
+                }
             }
             // A client-count change is activity (covers the 0->1 attach edge):
             // re-arm the grace window. Disabled in prod (the reaper arm below
@@ -15779,8 +16003,6 @@ async fn serve(
                 }
                 idle_deadline = tokio::time::Instant::now() + idle_grace;
             }
-            _ = async { sigterm.as_mut().unwrap().recv().await }, if sigterm.is_some() => break Flow::Shutdown,
-            _ = async { sigint.as_mut().unwrap().recv().await }, if sigint.is_some() => break Flow::Shutdown,
         }
         // Loop-tail choke point (x-4e30): the out_rx/exit_rx arms mutate
         // `clients` via the dead-client sweeps (broadcast_pane /
@@ -15807,6 +16029,7 @@ async fn serve(
         // "session ended (server closed)" client-side, so this is best-effort.
         tokio::time::sleep(BYE_FLUSH).await;
     }
+    shutdown_complete.store(true, Ordering::Release);
     0
 }
 
@@ -28113,6 +28336,7 @@ mod tests {
             pane_watch: HashMap::new(),
             pane_stats: Arc::new(RwLock::new(HashMap::new())),
             pane_stats_emit_failures: Arc::new(AtomicU64::new(0)),
+            pane_children: Arc::new(Mutex::new(HashSet::new())),
             clients: Vec::new(),
             next_pane_id: 1,
             next_squad_id: 1,
@@ -29727,7 +29951,8 @@ mod tests {
                 None,
                 None,
                 None,
-            );
+            )
+            .unwrap();
             id
         };
 
@@ -29756,6 +29981,44 @@ mod tests {
             "the shutdown sweep must never send a Kill frame to a keeper pane"
         );
         assert!(core.panes.contains_key(&keeper_pane));
+    }
+
+    #[test]
+    fn emergency_roster_kills_plain_child_and_spares_keeper_child() {
+        let plain = std::process::Command::new("/bin/sh")
+            .args(["-c", "exec sleep 30"])
+            .spawn()
+            .unwrap();
+        let mut keeper = std::process::Command::new("/bin/sh")
+            .args(["-c", "exec sleep 30"])
+            .spawn()
+            .unwrap();
+        let plain_pid = plain.id();
+        let keeper_pid = keeper.id();
+        let roster = HashSet::from([
+            PaneChild {
+                pid: plain_pid,
+                keeper_hosted: false,
+            },
+            PaneChild {
+                pid: keeper_pid,
+                keeper_hosted: true,
+            },
+        ]);
+
+        kill_plain_children(&roster);
+        assert!(
+            unsafe { libc::kill(plain_pid as libc::pid_t, 0) } != 0,
+            "plain roster child must be killed"
+        );
+        assert_eq!(
+            unsafe { libc::kill(keeper_pid as libc::pid_t, 0) },
+            0,
+            "keeper roster child must survive"
+        );
+
+        unsafe { libc::kill(keeper_pid as libc::pid_t, libc::SIGKILL) };
+        keeper.wait().unwrap();
     }
 
     #[test]

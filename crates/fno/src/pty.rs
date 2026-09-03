@@ -655,6 +655,10 @@ impl PtyShell {
         }
     }
 
+    pub fn is_keeper_hosted(&self) -> bool {
+        matches!(self, PtyShell::Keeper(_))
+    }
+
     pub fn write_input(&self, bytes: &[u8]) -> Result<(), PtyError> {
         match self {
             PtyShell::Local(local) => local.write_input(bytes),
