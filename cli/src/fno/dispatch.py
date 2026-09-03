@@ -111,11 +111,9 @@ def cmd_resolve(
         "--merge-posture",
         help=(
             "no-merge|allow|from-config (x-8151): the resolver owns the "
-            "--no-merge carrier for the whole command - inject (no-merge), "
-            "strip both spellings (allow), or read config.auto_merge.grant "
-            "from this cwd (from-config; every error shape degrades to "
-            "no-merge). Omitted: builtin rung keys on config, explicit "
-            "templates pass through."
+            "--no-merge carrier for the whole command. from-config reads "
+            "config.auto_merge.grant from this cwd and degrades to no-merge "
+            "on any error shape."
         ),
     ),
     trigger: str = typer.Option(
@@ -270,16 +268,12 @@ def cmd_family(
         help="The payload whose FIRST token is tested for /target-family membership.",
     ),
 ) -> None:
-    """Answer one question: is this message a /target-family command?
-
-    x-8151: prints ``family`` or ``other`` and exits 0 either way - the same
-    nothing-at-runtime contract as ``dispatch resolve`` (no spawn, no claim,
-    no config read). The /target-family vocabulary lives in the canonical
-    merge_posture table (``merge_posture.toml``, authored in the Rust tree and
-    shipped here as generated package data) and this verb is its only
-    shell-readable surface, so the dispatch and normalize scripts ask instead
-    of carrying hand-copied pattern lists (the copies drifted; opencode
-    refusals were dropped by a two-spelling prefix match)."""
+    """Is this message a /target-family command? Prints ``family`` or
+    ``other``, exit 0 either way - the same nothing-at-runtime contract as
+    ``dispatch resolve``. The vocabulary is the canonical merge_posture table;
+    this verb is its only shell-readable surface, so the dispatch and
+    normalize scripts ask instead of carrying hand-copied pattern lists (the
+    copies drifted)."""
     from fno.agents.harness_map import is_target_family
 
     typer.echo("family" if is_target_family(message) else "other")

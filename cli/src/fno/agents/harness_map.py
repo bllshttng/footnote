@@ -70,18 +70,11 @@ _AUTONOMOUS_COMMAND_MERGE = "/target {id}"
 
 @cache
 def _carrier_vocab() -> tuple[tuple[str, ...], str, str]:
-    """The merge-refusal carrier's vocabulary, read from the ONE canonical
-    table (x-8151/d-450caaeb).
-
-    ``merge_posture.toml`` is authored in the Rust tree
-    (``crates/fno-agents/src/``) and shipped here as generated package data
-    (``build.rs`` produces the byte copy; ``scripts/ci/check-merge-posture-
-    fresh.sh`` trips on a hand edit), the same distribution the harness
-    capability table rides. The spellings, the flag, and the legacy token are
-    DATA, so they are single-sourced as a file - the Rust engine
-    (``fno_agents::merge_posture``) and these readers answer from the same
-    table and cannot drift the way the old hand-copied spelling lists did.
-    """
+    """The carrier vocabulary from the ONE canonical merge_posture table
+    (x-8151/d-450caaeb): authored in the Rust tree, shipped here as generated
+    package data (build.rs byte copy; check-merge-posture-fresh.sh tripwire),
+    the same distribution the harness capability table rides. The Rust engine
+    and these readers answer from the same file and cannot drift."""
     import tomllib
     from importlib.resources import files
 
@@ -169,10 +162,8 @@ def inject_no_merge_into_command(command: str) -> str:
     after the verb token. Skipped when a standalone flag is already present
     (word-padded, so ``--no-merge-guard`` never counts). Non-family commands
     pass through untouched: a prose brief carries its posture in prose (x-9d11).
-
-    x-8151: this is the inject half the dispatch shell used to re-derive with a
-    two-spelling prefix match (the copy that missed ``/fno:target`` and dropped
-    opencode refusals). One vocabulary decides membership."""
+    Replaces the dispatch shell's two-spelling prefix match, which missed
+    ``/fno:target`` and dropped opencode refusals."""
     _spellings, flag, _legacy = _carrier_vocab()
     if not is_target_family(command):
         return command
@@ -183,13 +174,12 @@ def inject_no_merge_into_command(command: str) -> str:
 
 
 def strip_no_merge_from_command(command: str) -> str:
-    """Remove the merge-refusal carrier from a /target-family command: the
-    first standalone ``--no-merge`` flag and the first standalone legacy bare
-    ``no-merge`` token (an old config template can still carry it). A
-    pathological id like ``no-merger-x`` is never touched (standalone tokens
-    only), and non-family commands pass through so a prose brief's text is
-    never mangled. Under an allow posture the resolver strips; the flag's
-    absence is what makes ``auto_merge.grant=dispatch`` live."""
+    """Remove the carrier from a /target-family command: the first standalone
+    flag and the first standalone legacy token. A pathological id like
+    ``no-merger-x`` is never touched, and non-family commands pass through so
+    a prose brief's text is never mangled. Under an allow posture the resolver
+    strips; the flag's absence is what makes ``auto_merge.grant=dispatch``
+    live."""
     _spellings, flag, legacy = _carrier_vocab()
     if not is_target_family(command):
         return command
@@ -212,22 +202,14 @@ def message_carries_no_merge(message: str) -> bool:
 
 
 def apply_merge_posture_env(message: str, *, note_stream=None) -> str | None:
-    """One carrier owner for every spawn lane: set or clear ``TARGET_NO_MERGE``
-    in ``os.environ`` from the message, and return the prior value.
-
-    Semantics, unchanged since their rounds: a family message with
-    the flag arms the carrier; a family message with a bare token OUTSIDE flag
-    position neither arms nor clears (ambiguous, round 11); a family message
-    with no token clears an inherited carrier loudly (the message is
-    authoritative, round 8); a non-family message clears NOTHING (an operator's
-    exported carrier is a documented control input, and a leak errs toward
-    refusing merges, the safe side). The same verdict runs inside the Rust
-    binary's spawn lane (``fno_agents::merge_posture``), from the same table.
-
-    Returns the prior ``os.environ`` value (or None) so a caller that must
-    restore the process env (the spawn path's finally) captured it BEFORE the
-    mutation.
-    """
+    """Set or clear ``TARGET_NO_MERGE`` in ``os.environ`` from the message,
+    and return the prior value (so a caller restoring the process env captured
+    it BEFORE the mutation). Semantics: flag arms; a family bare token outside
+    flag position neither arms nor clears (round 11); a family message with no
+    token clears an inherited carrier loudly (round 8); non-family clears
+    NOTHING (an operator's exported carrier is a documented control input, and
+    a leak errs toward refusing merges, the safe side). The same verdict runs
+    inside the binary's spawn lane, from the same table."""
     import os
     import sys
 
@@ -1140,13 +1122,10 @@ def resolve_dispatch(
     ``--harness`` resolution just wants the harness/substrate decision).
 
     ``merge_posture`` (x-8151) makes the resolver own the refusal carrier for
-    the whole command, whatever rung supplied it: ``no-merge`` injects the flag
-    into a /target-family command missing it, ``allow`` strips both spellings,
-    ``from-config`` resolves ``config.auto_merge.grant`` (grant == "dispatch"
-    grants, every error shape degrades to no-merge - the Locked Decision 6
-    posture the dispatch shell used to re-derive per node). ``None`` keeps the
-    historical behavior: the builtin rung keys on config, explicit templates
-    pass through untouched. Values are fail-closed: an unknown posture raises.
+    the whole command: ``no-merge`` injects, ``allow`` strips, ``from-config``
+    resolves ``config.auto_merge.grant`` (grant == "dispatch" grants; every
+    error shape degrades to no-merge). ``None`` keeps the historical behavior.
+    Unknown values raise.
 
     Raises :class:`DispatchResolveError` on: an unknown harness (naming the map),
     an explicit ``thread`` on a harness without that lane (pointing at ``headless``), an
@@ -1352,11 +1331,8 @@ def resolve_dispatch(
         resolved_command = normalized
         decision.append("command=legacy-no-merge->--no-merge")
     # x-8151: an explicit posture owns the carrier on EVERY rung. Inject after
-    # the legacy rewrite (a template carrying the bare token under no-merge
-    # ends at the same flag), strip under allow so a resolver-baked refusal
-    # cannot silently kill config-granted merge authority. This deleted the
-    # dispatch shell's prefix-matching inject/strip twin, which matched only
-    # two of the three family spellings and dropped opencode refusals.
+    # the legacy rewrite; strip under allow so a resolver-baked refusal cannot
+    # silently kill config-granted merge authority.
     if posture == "no-merge":
         injected = inject_no_merge_into_command(resolved_command)
         if injected != resolved_command:

@@ -202,7 +202,7 @@ def _spawn_target_worker(node_id: str, cwd: Optional[str]) -> bool:
     else:
         cmd += ["--fresh"]
     # x-8151: the spelling comes from harness_map.AUTONOMOUS_COMMAND, never a
-    # second hardcoded string that drifts when the carrier changes.
+    # second hardcoded string that drifts.
     from fno.agents.harness_map import AUTONOMOUS_COMMAND
 
     cmd += ["--name", name, AUTONOMOUS_COMMAND.format(id=node_id)]

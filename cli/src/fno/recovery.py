@@ -1139,7 +1139,7 @@ def _redispatch(
         # autonomous worker lands a PR for review, never auto-merges.
         axis = list(flags) if flags else ["--harness", "claude", "--substrate", "bg"]
         # x-8151: the spelling comes from harness_map.AUTONOMOUS_COMMAND, never
-        # a second hardcoded string that drifts when the carrier changes.
+        # a second hardcoded string that drifts.
         from fno.agents.harness_map import AUTONOMOUS_COMMAND
 
         proc = subprocess.run(
