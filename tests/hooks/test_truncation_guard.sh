@@ -14,6 +14,7 @@
 #   T5  a producer in a later segment of a compound -> deny
 #   T6  cat piped into head          -> allow (not a count-or-existence read)
 #   T7  a non-Bash tool              -> allow
+#   T9  pgrep piped into tail -F     -> allow (GNU follow-with-retry, not a byte/row count)
 
 set -uo pipefail
 
@@ -79,6 +80,8 @@ expect_allow "T6 cat | head is not a count-or-existence read" \
   'cat README.md | head -20'
 expect_allow "T7 a non-Bash tool is allowed" \
   'pgrep x | head -1' 'Edit'
+expect_allow "T9 pgrep piped into tail -F is allowed (follow-with-retry, uppercase)" \
+  'pgrep -fl fno-agents | tail -F'
 
 # The positive marker: the guard wrote one liveness row per run, so a silent
 # allow is distinguishable from a guard that never launched.

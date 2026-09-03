@@ -60,15 +60,16 @@ REASON = (
 def _truncates(stage):
     """True when this pipeline stage is a head/tail that CUTS ROWS.
 
-    ``-c`` is a byte bound and ``-f`` is a follow, so neither drops a matching
-    row from a finished listing. Both pass.
+    ``-c`` is a byte bound and ``-f``/``-F`` (GNU tail's follow-with-retry)
+    are both a follow, so none of the three drops a matching row from a
+    finished listing. All pass.
     """
     words = stage.split()
     if not words or words[0] not in ("head", "tail"):
         return False
     for word in words[1:]:
         if word.startswith("-") and not word.startswith("--"):
-            if "c" in word[1:] or "f" in word[1:]:
+            if "c" in word[1:].lower() or "f" in word[1:].lower():
                 return False
         elif word in ("--bytes", "--follow") or word.startswith(
             ("--bytes=", "--follow=")
