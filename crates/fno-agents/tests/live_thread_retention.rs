@@ -20,30 +20,11 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         harness_session_id: Some(session_id.into()),
     };
     let registry = RegistryAgent {
-        model: None,
-        route: None,
-        spawned_by_session: None,
-        session_id: None,
-        harness_session_id: Some(session_id.into()),
-        predecessor_session_ids: Vec::new(),
-        forked_from_session_id: None,
         name: worker.into(),
         cwd: "/repo/worktree".into(),
         harness: Some(harness.into()),
-        exited: false,
-        badge: None,
-        reason: None,
-        mux: None,
-        answerable: None,
-        attach_id: None,
-        external: false,
-        account: None,
-        claude_session_uuid: None,
-        updated_at: None,
-        crown_level: None,
-        crown_scope: None,
-        liveness: Liveness::Alive,
-        dnd: false,
+        harness_session_id: Some(session_id.into()),
+        ..Default::default()
     };
     let mut evidence = MemberEvidence::from_sets(
         [worker.to_string(), session_id.to_string()]
