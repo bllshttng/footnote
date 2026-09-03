@@ -896,8 +896,18 @@ fn rest_bucket(run: &Value) -> &'static str {
 /// Classify every failing row of one PR.
 fn findings_for(a: &Args, pr: &str, head: &str) -> Result<Vec<Finding>, String> {
     let checks = read_checks(a, head)?;
-    let inherited =
-        crate::loopcheck::main_head_failing_checks(&a.gh_bin, &a.cwd, 20).unwrap_or_default();
+    // `None` means the main-head read did not answer, which is NOT the same
+    // as "main is green". Defaulting it to an empty set silently reclassified
+    // every inherited failure as this PR's own, so the caller is told instead
+    // and the report says the classification was unavailable.
+    let inherited = crate::loopcheck::main_head_failing_checks(&a.gh_bin, &a.cwd, 20);
+    if inherited.is_none() {
+        println!(
+            "note: could not read main's HEAD, so no row can be shown as inherited; \
+             a failure below may be main's rather than this PR's"
+        );
+    }
+    let inherited = inherited.unwrap_or_default();
     let mut out = Vec::new();
     for row in failing_rows(&checks) {
         let check = row["name"].as_str().unwrap_or("").to_string();
@@ -959,11 +969,20 @@ fn refuse_wrong_worktree(a: &Args, head_ref: &str) -> Option<String> {
     }
 }
 
+/// The worktree's uncommitted state, verbatim. Compared BEFORE and AFTER each
+/// remedy, because "is the tree dirty" is a whole-worktree question and the
+/// remedies share one worktree: the first remedy's edits are still
+/// uncommitted when the second runs, so a second remedy that changed nothing
+/// read as dirty and took credit for the first one's work.
+fn porcelain(a: &Args) -> String {
+    run(&a.git_bin, &["status", "--porcelain"], &a.cwd, READ_TIMEOUT)
+        .map(|(_, out, _)| out.trim().to_string())
+        .unwrap_or_default()
+}
+
 /// Whether the worktree carries uncommitted changes.
 fn dirty(a: &Args) -> bool {
-    run(&a.git_bin, &["status", "--porcelain"], &a.cwd, READ_TIMEOUT)
-        .map(|(_, out, _)| !out.trim().is_empty())
-        .unwrap_or(false)
+    !porcelain(a).is_empty()
 }
 
 /// Apply the auto remedies. Returns the signatures that were fixed and
@@ -975,6 +994,7 @@ fn apply_auto(a: &Args, findings: &mut [Finding]) -> Vec<String> {
         let Remedy::Auto { run: cmds, verify } = f.remedy.clone() else {
             continue;
         };
+        let before = porcelain(a);
         let mut failure: Option<String> = None;
         for cmd in cmds.iter().chain(verify.iter()) {
             let dir = a.cwd.join(&cmd.cwd);
@@ -996,12 +1016,13 @@ fn apply_auto(a: &Args, findings: &mut [Finding]) -> Vec<String> {
             }
         }
         match failure {
-            // A remedy whose run AND verify both exit 0 while the tree stays
-            // clean fixed nothing: CI is red on something this checkout does
-            // not reproduce (a different toolchain, or a check that has not
-            // re-run). Counting that as healed reported exit 0 with the check
-            // still red, which is the false green heal exists to end.
-            None if !dirty(a) => {
+            // A remedy whose run AND verify both exit 0 while leaving the
+            // worktree BYTE-FOR-BYTE as it found it fixed nothing: CI is red
+            // on something this checkout does not reproduce (a different
+            // toolchain, or a check that has not re-run). Counting that as
+            // healed reported exit 0 with the check still red, which is the
+            // false green heal exists to end.
+            None if porcelain(a) == before => {
                 f.remedy = Remedy::Escalate {
                     repro: format!(
                         "the remedy ran clean and changed nothing, so this red \
@@ -1024,9 +1045,14 @@ fn apply_auto(a: &Args, findings: &mut [Finding]) -> Vec<String> {
 
 /// Append the missing closure trailers to the PR body. No commit and no push:
 /// the closure workflow re-fires on an `edited` event.
-fn apply_edit_body(a: &Args, pr: &str, body: &str, findings: &[Finding]) -> Result<bool, String> {
+fn apply_edit_body(
+    a: &Args,
+    pr: &str,
+    body: &str,
+    findings: &mut [Finding],
+) -> Result<bool, String> {
     let mut lines: Vec<String> = Vec::new();
-    for f in findings {
+    for f in findings.iter() {
         let Remedy::EditBody { nodes } = &f.remedy else {
             continue;
         };
@@ -1224,22 +1250,48 @@ fn run_one(a: &Args, pr: &str) -> i32 {
     }
 
     let healed = apply_auto(a, &mut findings);
-    match apply_edit_body(a, pr, &body, &findings) {
-        Ok(_) => {}
-        Err(msg) => eprintln!("pr-heal: body edit skipped: {msg}"),
+    // A failed body edit must DEMOTE its rows. Logging the error and leaving
+    // them as `EditBody` let `report` see zero escalations and exit 0 with the
+    // trailer never appended and the check still red.
+    if let Err(msg) = apply_edit_body(a, pr, &body, &mut findings) {
+        eprintln!("pr-heal: body edit failed: {msg}");
+        for f in findings.iter_mut() {
+            if let Remedy::EditBody { nodes } = f.remedy.clone() {
+                f.remedy = Remedy::Escalate {
+                    repro: format!(
+                        "the body edit failed ({msg}); add it by hand: \
+                         fno do pr closure-trailer {}",
+                        nodes.join(" ")
+                    ),
+                };
+            }
+        }
     }
 
     let mut committed = false;
-    if !healed.is_empty() {
-        let dirty = run(&a.git_bin, &["status", "--porcelain"], &a.cwd, READ_TIMEOUT)
-            .map(|(_, out, _)| !out.trim().is_empty())
-            .unwrap_or(false);
-        if dirty {
-            let msg = format!("style: heal {}", healed.join(", "));
-            let _ = run(&a.git_bin, &["add", "-u"], &a.cwd, READ_TIMEOUT);
-            let (ok, _, _) = run(&a.git_bin, &["commit", "-m", &msg], &a.cwd, READ_TIMEOUT)
-                .unwrap_or((false, String::new(), String::new()));
-            committed = ok;
+    if !healed.is_empty() && dirty(a) {
+        let msg = format!("style: heal {}", healed.join(", "));
+        let _ = run(&a.git_bin, &["add", "-u"], &a.cwd, READ_TIMEOUT);
+        let (ok, _, err) = run(&a.git_bin, &["commit", "-m", &msg], &a.cwd, READ_TIMEOUT)
+            .unwrap_or((false, String::new(), String::new()));
+        committed = ok;
+        // A fix that could not be committed was not applied, whatever the
+        // remedy's own exit code said. A pre-commit hook, a signing failure
+        // or a full disk all land here, and reporting the row as healed
+        // exited 0 with nothing pushed and the check still red.
+        if !ok {
+            eprintln!(
+                "pr-heal: the fix is in the worktree but git commit failed: {}",
+                err.trim()
+            );
+            for f in findings.iter_mut() {
+                if matches!(f.remedy, Remedy::Auto { .. }) {
+                    f.remedy = Remedy::Escalate {
+                        repro: "the remedy ran but git commit failed; commit and push by hand"
+                            .to_string(),
+                    };
+                }
+            }
         }
     }
 
@@ -1834,6 +1886,45 @@ exit 0
         );
     }
 
+    /// A stub `cargo` that always succeeds and never touches the tree. It
+    /// stands for a remedy whose red does not reproduce locally.
+    fn stub_cargo_noop(dir: &Path) {
+        std::fs::create_dir_all(dir.join("crates/fno-agents")).unwrap();
+        std::fs::create_dir_all(dir.join("crates/fno")).unwrap();
+        write_exec(
+            dir,
+            "cargo",
+            r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "cargo $*" >> "$D/cargo.log"
+exit 0
+"#,
+        );
+    }
+
+    /// A stub `git` whose `commit` always fails, standing for a rejecting
+    /// pre-commit hook or a signing failure.
+    fn stub_git_commit_fails(dir: &Path, branch: &str) -> std::path::PathBuf {
+        write_exec(
+            dir,
+            "git",
+            &format!(
+                r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "git $*" >> "$D/git.log"
+case "$1 $2" in
+  "rev-parse --abbrev-ref") echo {branch}; exit 0 ;;
+  "status --porcelain") if [ -f "$D/fixed" ]; then echo ' M src/x.rs'; fi; exit 0 ;;
+esac
+case "$1" in
+  commit) echo "pre-commit hook refused" >&2; exit 1 ;;
+esac
+exit 0
+"#
+            ),
+        )
+    }
+
     fn log_of(dir: &Path, name: &str) -> String {
         std::fs::read_to_string(dir.join(name)).unwrap_or_default()
     }
@@ -1917,6 +2008,58 @@ exit 0
         let git = log_of(d, "git.log");
         assert_eq!(git.matches("git commit").count(), 1, "the fix is kept");
         assert!(!git.contains("git push"), "but never pushed: {git}");
+    }
+
+    #[test]
+    fn a_remedy_that_changed_nothing_takes_no_credit_for_a_dirty_tree() {
+        // `dirty` is a WHOLE-WORKTREE question and the remedies share one
+        // worktree, so an earlier remedy's uncommitted edit made a later
+        // no-op remedy read as dirty and take credit for work it did not do.
+        // Each remedy is measured against its own before/after now.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh(d, false);
+        stub_git(d, "feature/x", false);
+        stub_cargo_noop(d);
+
+        let mut findings = vec![classify(
+            &ctx("cargo fmt --check (pinned)", "rust-ci", "log unavailable"),
+            false,
+        )];
+        let args = parse_args(&args_for(d, &["--apply"])).unwrap();
+        // The tree is already dirty when the remedy runs, exactly as it would
+        // be after a previous finding's fix.
+        std::fs::write(d.join("fixed"), "").unwrap();
+
+        let healed = apply_auto(&args, &mut findings);
+        assert!(
+            healed.is_empty(),
+            "a no-op remedy is never healed: {healed:?}"
+        );
+        assert!(
+            matches!(&findings[0].remedy, Remedy::Escalate { repro } if repro.contains("changed nothing")),
+            "{:?}",
+            findings[0].remedy
+        );
+    }
+
+    #[test]
+    fn a_failed_commit_never_reports_the_pr_clean() {
+        // The fix is in the worktree but no commit and no push happened, so
+        // the check is still red on the remote. Exiting 0 there is the false
+        // green the no-op arm was written to close, left open on this path.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh(d, false);
+        stub_git_commit_fails(d, "feature/x");
+        stub_cargo(d);
+
+        let code = run_heal(&args_for(d, &["--apply"]));
+        assert_ne!(code, EXIT_CLEAN, "a failed commit is not a clean PR");
+        assert!(
+            !log_of(d, "git.log").contains("git push"),
+            "and nothing is pushed"
+        );
     }
 
     #[test]
