@@ -1102,8 +1102,8 @@ def resolve_dispatch(
     ``merge_posture`` (x-8151): ``no-merge`` injects the flag into a
     /target-family command missing it; ``allow`` overrides the builtin rung's
     config read (an explicit template is never edited - a refusal it carries
-    wins, every refusal outranks every grant); ``from-config`` resolves
-    ``config.auto_merge.grant`` and degrades to no-merge on any error shape.
+    wins); ``from-config`` resolves ``config.auto_merge.grant``, errors
+    degrading to no-merge.
 
     Raises :class:`DispatchResolveError` on: an unknown harness (naming the map),
     an explicit ``thread`` on a harness without that lane (pointing at ``headless``), an

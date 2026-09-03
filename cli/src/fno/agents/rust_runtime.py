@@ -1106,8 +1106,7 @@ def route_to_rust(
 
     x-8151/d-450caaeb: this door carries NO carrier logic. The TARGET_NO_MERGE
     verdict for a rust-lane spawn is computed inside the binary itself
-    (``merge_posture::apply_env_from_message`` in the spawn handler), and the
-    Python lane asks the same owner through ``fno.agents.rust_posture``.
+    (``merge_posture::apply_env_from_message`` in the spawn handler).
 
     The ``_exec`` / ``_resolve`` / ``_stderr`` hooks exist purely so the decision
     logic is unit-testable without actually replacing the test process.
