@@ -5788,6 +5788,11 @@ impl View {
                         card.map(|c| c.id.clone()).unwrap_or_default(),
                         card.map(|c| c.slug.clone()).unwrap_or_default(),
                         s.name.clone(),
+                        // (x-0719) The portal index joins the match key so an
+                        // EXISTING portal is reachable by number through the
+                        // navigator; the `portal:` prefix keeps it from
+                        // colliding with pane ids and node hex.
+                        a.portal.map(|p| format!("portal:{p}")).unwrap_or_default(),
                     ],
                 ));
             }
@@ -5807,6 +5812,7 @@ impl View {
                     a.pane_id.map(|p| p.to_string()).unwrap_or_default(),
                     card.map(|c| c.id.clone()).unwrap_or_default(),
                     card.map(|c| c.slug.clone()).unwrap_or_default(),
+                    a.portal.map(|p| format!("portal:{p}")).unwrap_or_default(),
                 ],
             ));
         }
@@ -31383,6 +31389,55 @@ mod tests {
         assert!(
             rows("notes").iter().any(|r| r.label == "notes"),
             "label substrings still match (the workspace half of the ask)"
+        );
+    }
+
+    #[test]
+    fn nav_filter_matches_a_portal_index() {
+        // x-0719 AC1-HP/AC2-UI/AC3-EDGE/AC4-REG: the portal index joins the
+        // match key as a `portal:<n>` token, so an EXISTING portal is reachable
+        // by number through the navigator that already exists. The token is
+        // composed, never displayed (x-e10f): a hit renders the `·portal:2`
+        // reason, a label hit renders bare, and a row shown through no portal
+        // gains no token at all.
+        let mut v = two_pane_view();
+        let mut shown = agent_row("claude", 11, None, false);
+        shown.portal = Some(2);
+        v.layout.agents = vec![shown, agent_row("omega", 12, None, false)];
+        let rows = v.nav_rows();
+        let portal_row = rows.iter().find(|r| r.label.contains("claude")).unwrap();
+        assert!(
+            portal_row.match_key.contains("portal:2"),
+            "the match key carries the portal index"
+        );
+        let plain_row = rows.iter().find(|r| r.label.contains("omega")).unwrap();
+        assert!(
+            !plain_row.match_key.contains("portal:"),
+            "a row shown through no portal gains no stray token"
+        );
+        let q = |s: &str| NavView {
+            query: s.into(),
+            state_filter: None,
+            cursor: 0,
+        };
+        let all = v.nav_filtered(&q(""));
+        assert!(
+            all.iter().any(|r| r.label.contains("omega")),
+            "an empty query still lists the portal-less row"
+        );
+        let hits = v.nav_filtered(&q("portal:2"));
+        assert_eq!(hits.len(), 1, "portal:2 finds exactly the portal-2 row");
+        assert!(hits[0].label.contains("claude"));
+        let lines = nav_overlay_lines(&hits, &q("portal:2"));
+        assert!(
+            lines.iter().any(|l| l.contains("·portal:2")),
+            "an invisible-token hit names its reason"
+        );
+        let label_hits = v.nav_filtered(&q("claude"));
+        let lines = nav_overlay_lines(&label_hits, &q("claude"));
+        assert!(
+            lines.iter().all(|l| !l.contains("·")),
+            "a label hit renders bare, as x-e10f locked"
         );
     }
 
