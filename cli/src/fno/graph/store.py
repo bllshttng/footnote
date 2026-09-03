@@ -578,6 +578,14 @@ def apply_readiness_overlay_via_store(entries: list[dict]) -> list[dict]:
     return result["entries"]
 
 
+def settle_blocked_by_edges_via_store(entries: list[dict]) -> dict:
+    """The blocked_by edge settlement (graph_store.rs
+    ``settle_blocked_by_edges``): rewritten entries, one receipt per settled
+    edge, and the per-node new ``blocked_by`` lists."""
+    result = _client_for(GRAPH_JSON).request("settle_edges", {"entries": entries})
+    return {key: result[key] for key in ("entries", "receipts", "blocked_by")}
+
+
 def canonical_field_order() -> "list[str]":
     """The canonical key order the store publishes, from the one source of
     truth (graph_store.rs CANONICAL_FIELD_ORDER)."""

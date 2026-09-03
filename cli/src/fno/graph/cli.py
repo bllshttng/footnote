@@ -8432,73 +8432,6 @@ def cmd_unqueue(
         typer.echo(f"Unqueued {tid}")
 
 
-def _pick_format_line(entry: dict, id_to_entry: dict[str, dict] | None = None) -> str:
-    """Format a graph entry as a single fzf row.
-
-    Shape: ``[marker] kind priority project ab-id title [blockers]``.
-
-    Marker semantics:
-      ``[ ]`` ready / idea, not queued
-      ``[Q]`` queued (already on tomorrow's plate)
-      ``[B]`` blocked by an open dependency, not queued
-      ``[Q!]`` queued AND blocked (will fire once unblocked)
-
-    Kind column: ``plan`` if a plan_path exists, else ``idea``.
-    Useful to spot pre-plan rows that need /think+/blueprint before
-    target can pick them up.
-
-    For blocked rows, the open blocker IDs are appended to the title so
-    you can see at a glance why something is gated - useful when you
-    want to queue A and the nodes it blocks together.
-    """
-    is_queued = bool(entry.get("queued_at"))
-    is_blocked = entry.get("status") == "blocked"
-    if is_queued and is_blocked:
-        marker = "[Q!]"
-    elif is_queued:
-        marker = "[Q]"
-    elif is_blocked:
-        marker = "[B]"
-    else:
-        marker = "[ ]"
-    kind = "plan" if entry.get("plan_path") else "idea"
-    prio = entry.get("priority") or "p2"
-    project = entry.get("project") or "-"
-    if len(project) > 22:
-        project = project[:21] + "."
-    title = (entry.get("title") or "").replace("\n", " ").strip() or "(untitled)"
-    if len(title) > 75:
-        title = title[:74] + "."
-    blocker_suffix = ""
-    if is_blocked and id_to_entry is not None:
-        open_blockers: list[str] = []
-        for bid in entry.get("blocked_by", []) or []:
-            if not isinstance(bid, str):
-                continue
-            b = id_to_entry.get(bid)
-            if b and not b.get("completed_at"):
-                open_blockers.append(bid)
-        if open_blockers:
-            blocker_suffix = f"  (blocked by {','.join(open_blockers)})"
-    marker_col = f"{marker:5s}"  # pad to width 5 so [Q!] doesn't shift columns
-    return f"{marker_col} {kind}  {prio}  {project:22s}  {entry['id']}  {title}{blocker_suffix}"
-
-
-def _pick_extract_id(line: str) -> str | None:
-    """Recover the node ID from a picker row. None if not found.
-
-    Extraction from a free-form row, so use the STRICT well-formed matcher (not
-    the liberal prefix pre-check) - otherwise a non-id token that merely starts
-    with the prefix (e.g. a project name ``fno-cli``) would be misread as an id.
-    """
-    from fno.graph._constants import is_wellformed_node_id
-
-    for tok in line.split():
-        if is_wellformed_node_id(tok):
-            return tok
-    return None
-
-
 def _tsv_safe(s: str | None) -> str:
     """Strip TSV-breaking characters from a candidate field."""
     if not s:
@@ -11736,10 +11669,14 @@ def cmd_reconcile(
     # them. Full sweep only, matching the other self-heal legs.
     owed_evidence: dict[str, dict] = {}
     owed_evidence_failures: list[dict[str, str]] = []
+    edge_settlement: dict = {}
+    edge_settlement_pending = False
     if _full_sweep and not dry_run:
         from fno.graph._reconcile import (
             _DEFAULT_QUERY_PR_MERGE_STATE,
+            apply_edge_settlement,
             query_pr_merge_state,
+            settle_blocked_by_edges,
             successors_owing_verification,
         )
 
@@ -11782,11 +11719,25 @@ def cmd_reconcile(
                 "merged_at": merged.merged_at,
             }
 
+        # Edge settlement probe (x-e451): computes the plan once; the mutator
+        # applies its change map under the lock and reports its receipts.
+        # Fail-open like every self-heal leg above: a keeper binary older than
+        # the settle_edges verb costs this run its settlement, never the sweep.
+        try:
+            edge_settlement = settle_blocked_by_edges(entries)
+            edge_settlement_pending = bool(edge_settlement["receipts"])
+        except Exception as _es_exc:  # noqa: BLE001 - never abort the sweep
+            typer.echo(f"warning: the blocked_by settlement probe failed: {_es_exc}; "
+                       "dead edges keep their blockers this run", err=True)
+
     closed: list[dict] = []
     healed_epics: list[str] = []
     contained_closed: list[str] = []
     contained_errors: list[dict] = []
     supersession_unverified: list[dict] = []
+    # Blocked_by edges the sweep settled (x-e451): pruned to done blockers,
+    # rewired to live successors, or held with a receipt naming why.
+    blocked_by_settlement: list[dict] = []
     # Set below only on the dry-run simulate branch; epics_waiting reuses it
     # (x-59a6 review fix) so its "still open" read agrees with the same
     # preview `candidates`/`healed_epics` already report as would-close.
@@ -11797,6 +11748,7 @@ def cmd_reconcile(
 
     if not dry_run and (
         closeable or strandable or strandable_contained or owed_evidence or status_drift
+        or edge_settlement_pending
     ):
         # Apply every close in ONE locked mutation rather than locking once
         # per node: locked_mutate_graph acquires a file lock and rewrites the
@@ -11822,6 +11774,7 @@ def cmd_reconcile(
         # nodes open forever with no signal reaching any automated reader.
         contained_errors_acc: list = []
         supersession_unverified_acc: list[dict] = []
+        blocked_by_settlement_acc: list[dict] = []
 
         # Ledger rollup, precomputed outside the lock (ledger I/O must not block
         # other graph mutations). Reconcile is the MAINSTREAM close: a session
@@ -11845,6 +11798,7 @@ def cmd_reconcile(
             actually_closed.clear()
             cascade_closed_acc.clear()
             supersession_unverified_acc.clear()
+            blocked_by_settlement_acc.clear()
             for record in closeable:
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
@@ -11992,6 +11946,10 @@ def cmd_reconcile(
                         "stay blocked (`fno backlog reconcile` retries next run)",
                         err=True,
                     )
+                # Apply the probe's settlement plan (x-e451), idempotent.
+                blocked_by_settlement_acc.extend(
+                    apply_edge_settlement(entries, edge_settlement)
+                )
             return entries
 
         # Capture the POST-lock graph (codex P2): resolving a closed node's
@@ -12000,6 +11958,7 @@ def cmd_reconcile(
         # cascade parent only reachable in the locked graph would resolve to None.
         post_entries = locked_mutate_graph(_graph_path(), mutator)
         supersession_unverified.extend(supersession_unverified_acc)
+        blocked_by_settlement.extend(blocked_by_settlement_acc)
 
         def _auto_continue_after_close(node_id, project, root):
             """Merge-triggered auto-continue dispatch for one just-closed node:
@@ -12444,6 +12403,7 @@ def cmd_reconcile(
             "open_pr_bound": open_bound,
             "open_binding_advisories": open_binding_advisories,
             "supersession_unverified": supersession_unverified,
+            "blocked_by_settlement": blocked_by_settlement,
             # Parent epics of this run's closure claims that are still open,
             # each naming its still-open sibling children exactly (x-59a6).
             "epics_waiting": epics_waiting,
@@ -12519,6 +12479,7 @@ def cmd_reconcile(
         and not owed_evidence_failures
         and not closure_claims
         and not status_drift
+        and not blocked_by_settlement
     ):
         typer.echo("No merged-PR drift found. Backlog is in sync.")
         return
@@ -12572,6 +12533,11 @@ def cmd_reconcile(
             )
         for node_id, (before, after) in status_drift.items():
             typer.echo(f"reclaimed {node_id}: {before} -> {after}")
+
+    if blocked_by_settlement:
+        from fno.graph._reconcile import summarize_edge_settlement
+
+        typer.echo(summarize_edge_settlement(blocked_by_settlement))
 
     if promise_unmet:
         # Held open, not failed: the PR merged but the plan promised more. The

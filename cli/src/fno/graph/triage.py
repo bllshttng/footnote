@@ -1697,6 +1697,54 @@ def cmd_health(
     except Exception:  # noqa: BLE001
         dnm = {"violations": [], "unknown": [], "checked": 0, "window_days": 0}
 
+    # Supersessions nothing can ever settle (x-e451): the successor merged but
+    # the declared surfaces were not all in its PR; the only moves are
+    # unsupersede or done. A done predecessor reads as accepted: `fno backlog
+    # done` never stamps the record, so the completed_at skip keeps it settled.
+    _health_idx = {
+        e.get("id"): e for e in all_entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    supersession_unverified: list[dict] = []
+    for e in entries:
+        record = e.get("supersession")
+        if not isinstance(record, dict) or record.get("verified_at") or e.get("completed_at"):
+            continue
+        successor = _health_idx.get(e.get("superseded_by"))
+        if (
+            not isinstance(successor, dict)
+            or not successor.get("completed_at")
+            or not isinstance(successor.get("pr_number"), int)
+        ):
+            continue
+        supersession_unverified.append({
+            "predecessor": e.get("id"),
+            "successor": e.get("superseded_by"),
+            "evidence_pr": successor.get("pr_number"),
+            "uncovered_surfaces": [
+                s for s in (record.get("surfaces") or [])
+                if s not in (record.get("matched_surfaces") or [])
+            ],
+        })
+
+    # Edges the sweep holds open (x-e451): a deferred blocker is a human
+    # decision, a missing one is data loss - both named, neither erased. The
+    # readiness kind comes from the read overlay, the one Rust answers.
+    blocked_by_held: list[dict] = []
+    for e in entries:
+        kind, _, blocker_id = (e.get("blocked_reason") or "").partition(":")
+        if kind not in ("blocked-by-deferred", "unknown-dep") or not blocker_id:
+            continue
+        blocker = _health_idx.get(blocker_id) or {}
+        blocked_by_held.append({
+            "node": e.get("id"),
+            "blocker": blocker_id,
+            "blocker_status": (
+                blocker.get("status") or ("done" if blocker.get("completed_at") else "open")
+                if blocker else "missing"
+            ),
+        })
+
     report = {
         "scope": _resolve_scope(project, all_projects, entries),
         **({"routing": routing_metrics} if routing_metrics else {}),
@@ -1712,6 +1760,8 @@ def cmd_health(
         **({"orphan_feature_nodes": orphan_nodes} if orphan_rate is not None else {}),
         "done_not_merged": dnm["violations"],
         "done_not_merged_unknown": dnm["unknown"],
+        "supersession_unverified": supersession_unverified,
+        "blocked_by_held": blocked_by_held,
         "stranded_by_failed_blocker": stranded_payload,
         **({"batch_verdict": batch_verdict} if batch_verdict else {}),
         **({"evals": evals_summary} if evals_summary else {}),

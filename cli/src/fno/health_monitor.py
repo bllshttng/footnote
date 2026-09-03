@@ -45,6 +45,8 @@ MetricKey = Literal[
     "project_cwd_mismatch",
     "orphan_feature_rate",
     "done_not_merged",
+    "supersession_unverified",
+    "blocked_by_held",
 ]
 
 
@@ -344,6 +346,31 @@ def evaluate_thresholds(
             threshold=0,
             kind="presence",
             hint="closed over an unmerged PR",
+        ))
+
+    # 8. Unsettleable supersessions (presence, x-e451): the successor merged but
+    # the declared surfaces were not in its PR; the sweep never settles it alone.
+    if (su_count := len(report.get("supersession_unverified", []))) > 0:
+        breaches.append(_make_breach(
+            "supersession_unverified",
+            actual=su_count,
+            threshold=0,
+            kind="presence",
+            hint=("successor merged but declared surfaces were not in its PR. Reopen with "
+                  "fno backlog unsupersede <id>, or accept with fno backlog done <id>; "
+                  "the sweep will never settle it alone."),
+        ))
+
+    # 9. Edges held open by a deferred or missing blocker (presence, x-e451).
+    if (bh_count := len(report.get("blocked_by_held", []))) > 0:
+        breaches.append(_make_breach(
+            "blocked_by_held",
+            actual=bh_count,
+            threshold=0,
+            kind="presence",
+            hint=("a deferred or missing blocker holds this node; undefer the blocker, "
+                  "drop the edge with fno backlog update <node> --blocked-by ..., or "
+                  "defer the dependent too."),
         ))
 
     return breaches

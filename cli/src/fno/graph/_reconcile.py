@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -479,6 +480,34 @@ def successors_owing_verification(entries: list[dict]) -> dict[str, dict]:
         if isinstance(successor.get("pr_number"), int):
             owed[successor_id] = successor
     return owed
+
+
+def settle_blocked_by_edges(entries: list[dict]) -> dict:
+    """The blocked_by edge settlement via the ported store verb (the
+    write-side twin of the read path's chase): prune done blockers, rewire
+    superseded to their live successor, hold deferred and missing with a
+    receipt; the caller persists under the graph lock."""
+    from fno.graph.store import settle_blocked_by_edges_via_store
+
+    return settle_blocked_by_edges_via_store(entries)
+
+
+def apply_edge_settlement(entries: list[dict], settlement: dict) -> list[dict]:
+    """Apply the settlement's ``blocked_by`` map to rows in place; receipts."""
+    for node in entries:
+        if isinstance(node, dict) and node.get("id") in settlement.get("blocked_by", {}):
+            node["blocked_by"] = settlement["blocked_by"][node["id"]]
+    return settlement.get("receipts") or []
+
+
+def summarize_edge_settlement(receipts: list[dict]) -> str:
+    """One line for the sweep report; held edges name why they stay."""
+    counts = Counter(r["kind"] for r in receipts)
+    return (
+        f"blocked_by edges settled: {counts.get('blocked_by_pruned', 0)} pruned, "
+        f"{counts.get('blocked_by_rewired', 0)} rewired, "
+        f"{counts.get('blocked_by_held', 0)} held (a deferred or missing blocker stays)"
+    )
 
 
 def node_is_open(node: dict) -> bool:

@@ -584,7 +584,13 @@ def test_heal_is_idempotent_across_repeated_sweeps(world, monkeypatch, dispatche
     result = _reconcile()
     assert result.exit_code == 0
     assert read()[KID_A]["completed_at"] == first
-    assert "in sync" in result.output
+    # The heal is a no-op, but sweep 2 is not literally silent: closing
+    # KID_A made DEP's edge prunable, so the settle pass drops it and says
+    # so (x-e451).
+    assert "blocked_by edges settled: 1 pruned" in result.output
+    assert read()[DEP]["blocked_by"] == []
+    # And sweep 3, with the dead edge gone, is in sync again.
+    assert "in sync" in _reconcile().output
 
 
 # -- sigma round: defects the panel found in the first cut --
