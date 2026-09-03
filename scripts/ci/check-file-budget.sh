@@ -56,6 +56,17 @@ cd "$REPO_ROOT"
 
 BUDGET="${FILE_BUDGET_LINES:-5000}"
 PY_ALLOWANCE="${PY_TREE_ALLOWANCE:-100}"
+# An env override is caller configuration, so garbage there is refused loudly -
+# under set -e a non-numeric value would otherwise kill the arithmetic test with
+# no output at all.
+case "$BUDGET" in '' | *[!0-9]*)
+    echo "check-file-budget: FILE_BUDGET_LINES must be a number, got '$BUDGET'" >&2
+    exit 2 ;;
+esac
+case "$PY_ALLOWANCE" in '' | *[!0-9]*)
+    echo "check-file-budget: PY_TREE_ALLOWANCE must be a number, got '$PY_ALLOWANCE'" >&2
+    exit 2 ;;
+esac
 REMOTE="${PR_REMOTE:-origin}"
 BASE_REF="${PR_BASE_REF:-main}"
 
@@ -95,8 +106,12 @@ BASE="$(git merge-base "$BASE_TIP" HEAD 2>/dev/null)" || {
 _CACHED_COUNT=""
 live_count() {
     if [[ -z "$_CACHED_COUNT" ]]; then
-        _CACHED_COUNT="$(git ls-files '*.rs' '*.py' '*.sh' '*.ts' '*.tsx' \
-            | xargs wc -l | awk -v b="$BUDGET" '$1 > b && $2 != "total"' \
+        # -z / xargs -0: a quoted or spaced path must count, never split. The
+        # diff below reads with core.quotepath=off for the same reason - a
+        # changed file that arrives quoted would fail cat-file and silently
+        # escape the gate.
+        _CACHED_COUNT="$(git -c core.quotepath=off ls-files -z '*.rs' '*.py' '*.sh' '*.ts' '*.tsx' \
+            | xargs -0 wc -l | awk -v b="$BUDGET" '$1 > b && $2 != "total"' \
             | wc -l | tr -d ' ')"
     fi
     echo "$_CACHED_COUNT"
@@ -147,7 +162,7 @@ while IFS=$'\t' read -r added deleted path; do
         echo "check-file-budget: $path is a new file at $head_lines lines (budget $BUDGET). A production file is not born over budget. Put the new code in a module named by the question it answers (never server2.rs), and move the code you touched with it. Files over budget today: $(live_count); each shrink is banked." >> "$findings"
         fails=1
     fi
-done < <(git diff --numstat -M "$BASE"...HEAD -- '*.rs' '*.py' '*.sh' '*.ts' '*.tsx')
+done < <(git -c core.quotepath=off diff --numstat -M "$BASE"...HEAD -- '*.rs' '*.py' '*.sh' '*.ts' '*.tsx')
 
 py_net=$((py_added - py_deleted))
 if [[ "$py_net" -gt "$PY_ALLOWANCE" ]]; then
