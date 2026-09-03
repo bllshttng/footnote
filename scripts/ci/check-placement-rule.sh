@@ -88,6 +88,10 @@
 #      here too: its login-wizard default config dir `~/.claude-<id>` is a
 #      per-account CLAUDE_CONFIG_DIR (a Claude Code config dir, not footnote
 #      state), the same multi-account convention managed.py already uses.
+#      transcript_tail.rs joins ~/.claude/projects for the same category-1
+#      reason: it reads Claude Code's own transcript tree (mirrored, not
+#      imported, from fno-agents' claude_drive - the FILE is the contract).
+#      Read-only; footnote stores nothing there.
 #   2. The worktree-harness integration: `.claude/worktrees/<name>` is the
 #      documented, SANCTIONED harness-native worktree default (see
 #      .claude/rules/worktrees.md - "this is now allowed"), and
