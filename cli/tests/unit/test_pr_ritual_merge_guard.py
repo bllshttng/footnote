@@ -161,11 +161,11 @@ def test_inside_own_worktree_defers_rather_than_advising(tmp_path: Path) -> None
     r.leg_archive()
 
     # The receipt still defers (never `skipped`), and the detail now also
-    # carries the minted reap order that makes the deferral collectable.
+    # carries the durable cleanup request that makes the deferral collectable.
     assert len(seen) == 1
     assert seen[0][0] == "archive"
     assert seen[0][1] == "deferred"
-    assert seen[0][2].startswith("sweep-will-reap; ")
+    assert seen[0][2].startswith("cleanup-requested request_id=")
     assert f"worktree={tmp_path}" in seen[0][2]
     assert "reap-order" in seen[0][2]
 
