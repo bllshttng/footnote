@@ -2164,10 +2164,10 @@ struct DetachedPane {
 /// `panes[seat].cmd` is `Some`; after a stand-in swap it names the idle
 /// shell, not the dead viewer.
 #[derive(Clone)]
-struct Portal {
-    row_key: String,
-    seat: u64,
-    tab: TabId,
+pub(crate) struct Portal {
+    pub(crate) row_key: String,
+    pub(crate) seat: u64,
+    pub(crate) tab: TabId,
 }
 
 impl DetachedPane {
@@ -4519,23 +4519,11 @@ impl Core {
         pid: u64,
         agents: &'a [RegistryAgent],
     ) -> Option<&'a RegistryAgent> {
-        let portal = self.portals.values().find(|portal| portal.seat == pid)?;
-        let key = portal.row_key.as_str();
-        let mut matches = agents.iter().filter(|row| {
-            row.mux.is_none()
-                && !row.exited
-                && (row.name == key
-                    || row.effective_identity() == Some(key)
-                    || row.attach_id.as_deref() == Some(key))
-        });
-        let row = matches.next()?;
-        matches.next().is_none().then_some(row)
+        crate::thread_viewer::row_for_pane(&self.portals, pid, agents)
     }
 
     fn thread_viewer_fno_id(&self, pid: u64, agents: &[RegistryAgent]) -> Option<String> {
-        self.thread_viewer_row(pid, agents)
-            .and_then(|row| row.effective_identity())
-            .map(str::to_string)
+        crate::thread_viewer::identity_for_pane(&self.portals, pid, agents)
     }
 
     fn resolve_placement_target(
@@ -11887,7 +11875,7 @@ impl Core {
                 .collect();
             let viewer_row = matches
                 .is_empty()
-                .then(|| self.thread_viewer_row(pane, rows))
+                .then(|| crate::thread_viewer::row_for_pane(&self.portals, pane, rows))
                 .flatten();
             let mut occupants: Vec<&RegistryAgent> = Vec::new();
             for row in matches {
@@ -12775,7 +12763,6 @@ impl Core {
                             return Flow::Continue;
                         }
                     };
-                    self.claim_eligible.insert(new_pid);
                     self.name_thread_viewer_pane(new_pid, &row, &tier);
                     let Some(tab) = self.viewed_tab_mut((sid, tid)) else {
                         self.reap_pane(new_pid);
@@ -12891,7 +12878,6 @@ impl Core {
                 return Flow::Continue;
             }
         };
-        self.claim_eligible.insert(pid);
         self.name_thread_viewer_pane(pid, &row, &tier);
         let (sid, tid, fell_back) = match self.place_with(dest, &spawn_cwd, pid, &effective) {
             Ok(landing) => landing,
@@ -12925,6 +12911,7 @@ impl Core {
     /// a Follow/Locate pane carries the row's name so the tab reads as the
     /// worker it views, not as `sh` or `fno`.
     fn name_thread_viewer_pane(&mut self, pid: u64, row: &RegistryAgent, tier: &Reach) {
+        self.claim_eligible.insert(pid);
         // (x-6678) `name_attached_pane` resolves a name through the claude
         // attach catalog, so only a claude Drive pane goes that way. A codex
         // Drive pane takes the row's name, the way Follow and Locate panes
@@ -17493,6 +17480,9 @@ async fn client_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[path = "../server_thread_viewer_tests.rs"]
+    mod thread_viewer_tests;
     use crate::proto::TemplateName; // x-c4d4 tests; not referenced by name in non-test code
 
     // (x-0719) The portal test family lives in its own module; this file
@@ -18207,30 +18197,6 @@ mod tests {
                 Some("target-id"),
                 Ok(vec![first, duplicate]),
             ),
-            ServerMsg::Ok
-        ));
-    }
-
-    #[test]
-    fn pane_send_accepts_the_dedicated_thread_viewer_identity() {
-        let (mut core, pane) = template_core();
-        core.session_name = "sess".into();
-        core.panes.get_mut(&pane).unwrap().name = Some("thread".into());
-        core.portals.insert(
-            0,
-            Portal {
-                row_key: "thread-id".into(),
-                seat: pane,
-                tab: 5,
-            },
-        );
-        let mut thread = agent_in("other", 99, None, false);
-        thread.name = "thread".into();
-        thread.mux = None;
-        thread.session_id = Some("thread-id".into());
-
-        assert!(matches!(
-            core.pane_send(pane, b"payload", false, Some("thread-id"), Ok(vec![thread]),),
             ServerMsg::Ok
         ));
     }
@@ -19770,17 +19736,6 @@ mod tests {
             core.backlog_holders.get("x-identity").map(String::as_str),
             "mux identity and node claim holder must be the same peer"
         );
-        core.agents[0].mux = None;
-        core.agents[0].name = "thread".into();
-        core.portals.insert(
-            0,
-            Portal {
-                row_key: "CODEX-THREAD".into(),
-                seat: 1,
-                tab: 5,
-            },
-        );
-        assert_eq!(core.fno_id_for_pane(1), Some("CODEX-THREAD".into()));
     }
 
     #[test]
@@ -20730,33 +20685,6 @@ mod tests {
         match core.pane_where_from_fresh_agents("019fb024-fresh", None) {
             ServerMsg::Err { code, .. } => assert_eq!(code, err_code::REGISTRY_UNAVAILABLE),
             other => panic!("registry failure must surface, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pane_ls_publishes_thread_identity_on_the_dedicated_viewer() {
-        let (mut core, pane_id) = template_core();
-        core.session_name = "sess".into();
-        core.panes.get_mut(&pane_id).unwrap().name = Some("thread".into());
-        core.portals.insert(
-            0,
-            Portal {
-                row_key: "thread-id".into(),
-                seat: pane_id,
-                tab: 5,
-            },
-        );
-        let mut thread = agent_in("other", 99, None, false);
-        thread.name = "thread".into();
-        thread.mux = None;
-        thread.session_id = Some("thread-id".into());
-
-        match core.pane_ls_from_fresh_agents(Some(&[thread])) {
-            ServerMsg::PaneList { panes } => {
-                let pane = panes.iter().find(|pane| pane.pane_id == pane_id).unwrap();
-                assert_eq!(pane.fno_id.as_deref(), Some("thread-id"));
-            }
-            other => panic!("pane ls should identify the thread viewer, got {other:?}"),
         }
     }
 

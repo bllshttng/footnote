@@ -1468,8 +1468,7 @@ def _lane_b_thread_spawn(
             origin="spawn",
             # The keeper-hosted thread lane; the event below spells it
             # "thread" already.
-            substrate="thread",
-            fno_id=session_id,
+            substrate="thread", fno_id=session_id,
         )
         try:
             update_registry(lambda es: es + [new_entry])
@@ -1991,7 +1990,6 @@ def _claude_create_path(
     # with no session env. Never a caller-supplied value - a row that could name
     # its own grantor proves nothing.
     crown_grantor_val = (spawned_by_session or "human") if crown_level is not None else None
-    thread_ref_id = session_uuid or short_id
 
     # Registry write. Create the file the row records (x-7bcd AC4): a
     # log_path pointing at nothing is a claim, not evidence, and the
@@ -2046,8 +2044,7 @@ def _claude_create_path(
         # dispatch_spawn (mux_spawn owns them) and headless returns above, so
         # every row born here ran the detached thread. The event this path
         # emits already says substrate="thread".
-        substrate="thread",
-        fno_id=thread_ref_id,
+        substrate="thread", fno_id=session_uuid or short_id,
         # x-ae2d: the route this launch got, so a relaunch can come back on it.
         # ROUTE only, never an account overlay: the account settings file omits
         # CLAUDE_CONFIG_DIR by construction (it cannot live in a file read FROM
