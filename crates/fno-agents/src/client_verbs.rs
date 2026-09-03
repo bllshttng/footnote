@@ -2690,12 +2690,23 @@ fn should_delegate_claude_live_attach(
 /// inline and returns the exit code to propagate.
 fn parse_resume_args(
     rest: &[String],
-) -> Result<(String, bool, Option<String>, bool, Option<String>), i32> {
+) -> Result<
+    (
+        String,
+        bool,
+        Option<String>,
+        bool,
+        Option<String>,
+        Option<String>,
+    ),
+    i32,
+> {
     let mut name: Option<String> = None;
     let mut print_command = false;
     let mut message: Option<String> = None;
     let mut cross_project = false;
     let mut cwd: Option<String> = None;
+    let mut account: Option<String> = None;
     // Every sibling parser in this file (`parse_trace_args`, `parse_logs_args`)
     // expands `--flag=value` into `--flag value` before iterating; without it
     // `--message=continue` falls into the `starts_with("--")` unknown-flag arm
@@ -2720,6 +2731,20 @@ fn parse_resume_args(
                     Some(v) if !v.starts_with("--") => v.clone(),
                     _ => {
                         eprintln!("fno-agents: --cwd needs a value");
+                        return Err(2);
+                    }
+                });
+            }
+            "--account" => {
+                // x-5cef: the spawn seam's account picker rides the shared
+                // worker-dir seam, so a wake arrives with `--account` appended.
+                // The spawn arm parses the flag; this arm refused it at parse,
+                // which exited 2 before the name ever resolved and broke the
+                // wake ladder three receipts advertise. Parse it here.
+                account = Some(match iter.next() {
+                    Some(v) if !v.starts_with("--") => v.clone(),
+                    _ => {
+                        eprintln!("fno-agents: --account needs a value");
                         return Err(2);
                     }
                 });
@@ -2750,7 +2775,7 @@ fn parse_resume_args(
         }
     }
     match name {
-        Some(n) => Ok((n, print_command, message, cross_project, cwd)),
+        Some(n) => Ok((n, print_command, message, cross_project, cwd, account)),
         None => {
             eprintln!("fno-agents: resume needs a <name>");
             Err(2)
@@ -2759,11 +2784,11 @@ fn parse_resume_args(
 }
 
 pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
-    let (name, print_command, message, cross_project, cwd_override) = match parse_resume_args(rest)
-    {
-        Ok(v) => v,
-        Err(code) => return code,
-    };
+    let (name, print_command, message, cross_project, cwd_override, account) =
+        match parse_resume_args(rest) {
+            Ok(v) => v,
+            Err(code) => return code,
+        };
 
     if let Some(path) = cwd_override.as_deref() {
         if !Path::new(path).is_dir() {
@@ -2832,6 +2857,25 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         .filter(|s| !s.is_empty())
         .or_else(|| entry.get("provider").and_then(Value::as_str))
         .unwrap_or("");
+    // x-5cef: the account flag is parsed so a wake never exits 2 at argv. The
+    // ROW's recorded launch account stays the binding authority on this path -
+    // a wake continues a transcript that lives under the config dir it was
+    // created in, so an injected pick cannot move the namespace (the spawn
+    // seam's own `--resume` skip holds the same reasoning). The value is still
+    // validated, never silently swallowed: an account that does not resolve in
+    // the store is a typo reading as applied. Non-claude rows carry no account
+    // axis; the row's own lane bills itself.
+    if let Some(acct) = account.as_deref() {
+        if harness == "claude" {
+            if let Err(reason) = crate::reentry::shell_account_binding(acct) {
+                eprintln!(
+                    "fno agents resume: --account {acct:?} does not resolve: {reason}. \
+                     The row's recorded launch account stays the binding; restamp the row to re-bind."
+                );
+                return 13;
+            }
+        }
+    }
     let recorded_cwd = entry.get("cwd").and_then(Value::as_str).unwrap_or("");
     // claude keys transcript dirs by the session cwd, so a session that ran
     // EnterWorktree after registration has its transcript under a different
@@ -5915,7 +5959,7 @@ mod tests {
         // code-review finding: --message/-m must not die with "unknown resume
         // flag" -- resume auto-routes to this binary by default, so this
         // parser is the only door the claude wake's --message option has.
-        let (name, print_command, message, cross_project, cwd) = parse_resume_args(&[
+        let (name, print_command, message, cross_project, cwd, _) = parse_resume_args(&[
             "alpha".to_string(),
             "--message".to_string(),
             "continue please".to_string(),
@@ -5927,7 +5971,7 @@ mod tests {
         assert!(!cross_project);
         assert_eq!(cwd, None);
 
-        let (name, _, message, cross_project, cwd) =
+        let (name, _, message, cross_project, cwd, _) =
             parse_resume_args(&["-m".to_string(), "hi".to_string(), "beta".to_string()]).unwrap();
         assert_eq!(name, "beta");
         assert_eq!(message.as_deref(), Some("hi"));
@@ -5936,7 +5980,7 @@ mod tests {
 
         // No --message given: still parses, message is None (unchanged
         // pre-fix behavior for every other flag combination).
-        let (name, print_command, message, cross_project, cwd) =
+        let (name, print_command, message, cross_project, cwd, _) =
             parse_resume_args(&["gamma".to_string(), "--print-command".to_string()]).unwrap();
         assert_eq!(name, "gamma");
         assert!(print_command);
@@ -6174,6 +6218,57 @@ mod tests {
             parse_resume_args(&["full-session-id".to_string(), "--cwd".to_string()]),
             Err(2)
         );
+    }
+
+    #[test]
+    fn resume_parses_account_and_reaches_name_resolution() {
+        // Regression for the exit-2 trap: the wake seam appends --account, so
+        // `resume <name> --account <id>` must PARSE. A miss at parse printed
+        // `unknown resume flag: --account` before the name ever resolved,
+        // which broke the wake path three runtime receipts advertise.
+        let (name, _, _, _, _, account) = parse_resume_args(&[
+            "zzz-nonexistent-probe".to_string(),
+            "--account".to_string(),
+            "probeacct".to_string(),
+        ])
+        .expect("resume with --account parses");
+        assert_eq!(name, "zzz-nonexistent-probe");
+        assert_eq!(account.as_deref(), Some("probeacct"));
+        // The control: no account named still parses (the seam only appends
+        // when the caller named none, so both shapes arrive here).
+        let (name, _, _, _, _, account) =
+            parse_resume_args(&["zzz-nonexistent-probe".to_string()]).expect("bare resume parses");
+        assert_eq!(name, "zzz-nonexistent-probe");
+        assert_eq!(account, None);
+        // Equals form rides the same expansion every sibling flag uses.
+        let (_, _, _, _, _, account) = parse_resume_args(&[
+            "zzz-nonexistent-probe".to_string(),
+            "--account=probeacct".to_string(),
+        ])
+        .expect("resume --account= parses");
+        assert_eq!(account.as_deref(), Some("probeacct"));
+        // A value-less --account is a usage error, not an unknown flag.
+        assert_eq!(
+            parse_resume_args(&["zzz-nonexistent-probe".to_string(), "--account".to_string()]),
+            Err(2)
+        );
+    }
+
+    #[test]
+    fn resume_message_and_account_parse_together() {
+        // The arms now differ deliberately: ask carries a message and re-execs
+        // Python where the overlay resolves; resume binds the row's recorded
+        // account. Both accept the flag at parse.
+        let (_, _, message, _, _, account) = parse_resume_args(&[
+            "zzz-nonexistent-probe".to_string(),
+            "--message".to_string(),
+            "hi".to_string(),
+            "--account".to_string(),
+            "probeacct".to_string(),
+        ])
+        .expect("resume with message + account parses");
+        assert_eq!(message.as_deref(), Some("hi"));
+        assert_eq!(account.as_deref(), Some("probeacct"));
     }
 
     #[test]

@@ -3299,7 +3299,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "drive-authority [--json]",
     "trace [options]",
     "ping",
-    "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>]",
+    "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>] [--account <id>]",
     "adopt <session-id> [--cross-project]",
     "attach <name>",
     "logs <name> [--follow] [options]",
@@ -3897,6 +3897,9 @@ mod tests {
         let resume = verb_usage("resume").expect("resume usage");
         assert!(resume.contains("--cross-project"), "{resume}");
         assert!(resume.contains("--cwd <existing-checkout>"), "{resume}");
+        // The seam appends --account on a wake; the usage line naming it is
+        // the parse contract that keeps the wake ladder honest.
+        assert!(resume.contains("--account <id>"), "{resume}");
 
         let adopt = verb_usage("adopt").expect("adopt usage");
         assert!(adopt.contains("--cross-project"), "{adopt}");
