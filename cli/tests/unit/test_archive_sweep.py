@@ -2,17 +2,32 @@
 
 Pure logic (partition guards, age filter, dedup merge) plus the command's
 dry-run/apply behavior and `backlog get`'s read-through into the archive.
+
+Since the store port every command here rides the keeper, so the module
+needs the compiled runtime and skips whole where the smoke harness deleted
+the worker binary (the parity-test convention).
 """
 from __future__ import annotations
 
-import json
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+import pytest
 
-from typer.testing import CliRunner
+from fno.rust_binary import find_dev_binary
 
-from fno.cli import app
-from fno.graph.archive import (
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+pytestmark = requires_rust
+
+import json  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from typer.testing import CliRunner  # noqa: E402
+
+from fno.cli import app  # noqa: E402
+from fno.graph.archive import (  # noqa: E402
     merge_into_archive,
     partition_for_archive,
     remint_archive_collisions,
@@ -105,9 +120,15 @@ def _route(tmp_path, monkeypatch) -> tuple[Path, Path]:
 
     g = tmp_path / "graph.json"
     g.write_text('{"entries": []}\n')
-    monkeypatch.setattr(gc, "GRAPH_JSON", g)
-    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
-    monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json")
+    # _constants serves these names through module __getattr__, so they are
+    # NOT real attributes. monkeypatch.setattr would save the resolved value
+    # and its undo would setattr it back, BAKING a frozen path into the module
+    # for every later test in the process (the closure-release tests failed on
+    # exactly that). setitem undoes by deleting the key, so the lazy
+    # __getattr__ keeps answering after this test.
+    monkeypatch.setitem(vars(gc), "GRAPH_JSON", g)
+    monkeypatch.setitem(vars(gc), "GRAPH_MD", tmp_path / "graph.md")
+    monkeypatch.setitem(vars(gc), "GRAPH_ARCHIVE_JSON", tmp_path / "graph-archive.json")
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
     # Seam readers (guarded metadata/display reads) resolve paths.graph_json
     # at call time; pin the resolver to the same hermetic file.

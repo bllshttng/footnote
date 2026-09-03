@@ -1428,71 +1428,45 @@ def test_target_start_redirects_before_creating_a_worktree(tmp_path, monkeypatch
     _clear_root_cache()
 
 
-def test_check_contained_reads_under_the_graph_lock(tmp_path, monkeypatch):
-    """codex P1: `read_graph` takes no lock, so the re-check was still raceable.
+def test_check_contained_reads_through_the_keeper(tmp_path, monkeypatch):
+    """The ordering the flock used to totalize is structural now.
 
-    decompose holds the graph flock and sees no claim, the bootstrap acquires
-    the claim, this read returns the PRE-adoption graph because decompose has
-    not done its atomic replace yet, and decompose then commits `contained_in`
-    while the worker proceeds. Taking the same flock totalizes the ordering.
-
-    Asserts the lock is actually held ACROSS the resolve - a lock acquired and
-    dropped before the read would pass a "did we lock" assertion and serialize
-    nothing.
+    decompose's commit is a keeper transaction and every read is served under
+    the keeper's gate, so a reader sees pre-commit or post-commit, never a
+    torn graph; the client exposes no raw flock pair to take. The gate still
+    refuses a contained node through the new path.
     """
     import fno.graph.store as gs
 
     _contained_graph(tmp_path, monkeypatch)
-    held = {"during_resolve": False, "acquired": 0}
-
-    real_acquire, real_release = gs._acquire_flock, gs._release_flock
-    state = {"open": False}
-
-    def acq(p):
-        state["open"] = True
-        held["acquired"] += 1
-        return real_acquire(p)
-
-    def rel(fd):
-        state["open"] = False
-        return real_release(fd)
-
-    real_resolve = target_cli._resolve_dispatch_node
-
-    def resolve(*a, **k):
-        held["during_resolve"] = state["open"]
-        return real_resolve(*a, **k)
-
-    monkeypatch.setattr(gs, "_acquire_flock", acq)
-    monkeypatch.setattr(gs, "_release_flock", rel)
-    monkeypatch.setattr(target_cli, "_resolve_dispatch_node", resolve)
+    assert not hasattr(gs, "_acquire_flock"), "the raw flock helpers are retired"
+    assert not hasattr(gs, "_release_flock")
     monkeypatch.setenv("TARGET_INPUT", "x-261c")
 
     result = runner.invoke(app, ["do", "target", "check-contained"])
     assert result.exit_code == 9, result.output
-    assert held["acquired"] == 1, "the graph lock was never taken"
-    assert held["during_resolve"], "the lock was not held across the graph read"
-    assert not state["open"], "the graph lock was leaked"
 
 
-def test_check_contained_proceeds_when_the_graph_lock_is_unavailable(tmp_path,
-                                                                     monkeypatch):
-    """An unlockable graph must not block every dispatch.
+def test_check_contained_proceeds_when_the_store_is_unavailable(tmp_path,
+                                                                monkeypatch):
+    """An unreachable store must not block every dispatch.
 
-    Fail-open matches the rest of this gate: a broken lock is a broken gate, and
-    the pre-claim check plus decompose's own live-claim refusal still stand.
+    Fail-open matches the rest of this gate: a refused store is a broken gate,
+    and the pre-claim check plus decompose's own live-claim refusal still
+    stand.
     """
     import fno.graph.store as gs
 
     _contained_graph(tmp_path, monkeypatch)
 
-    def boom(p):
-        raise OSError("no lock for you")
+    def boom(*a, **k):
+        raise gs.StoreUnavailable("unreachable", "no store for you")
 
-    monkeypatch.setattr(gs, "_acquire_flock", boom)
+    monkeypatch.setattr(target_cli, "_resolve_dispatch_node", boom)
     monkeypatch.setenv("TARGET_INPUT", "x-261c")
-    # Still resolves and still refuses - the read just was not serialized.
-    assert runner.invoke(app, ["do", "target", "check-contained"]).exit_code == 9
+    # The check did not run; the bootstrap proceeds (exit 0), never exit 9.
+    result = runner.invoke(app, ["do", "target", "check-contained"])
+    assert result.exit_code == 0, result.output
 
 
 def test_redirect_names_a_dead_owner_instead_of_routing_to_it(tmp_path, monkeypatch):
@@ -1525,28 +1499,27 @@ def test_redirect_names_a_dead_owner_instead_of_routing_to_it(tmp_path, monkeypa
     _clear_root_cache()
 
 
-def test_check_contained_says_so_when_the_graph_lock_is_unavailable(tmp_path,
-                                                                    monkeypatch,
-                                                                    capsys):
-    """A lost serialization that still exits 0 reads as "checked, and fine".
+def test_check_contained_says_so_when_the_store_is_unavailable(tmp_path,
+                                                               monkeypatch):
+    """A lost check that still exits 0 reads as "checked, and fine".
 
-    The flock is what makes this check unraceable, so swallowing its failure
-    silently is the same degrade this gate has already been fixed for twice.
-    Still fail-open - it just says what it lost.
+    The keeper gate is what makes this check trustworthy, so swallowing its
+    failure silently is the same degrade this gate has already been fixed for
+    twice. Still fail-open - it says the check DID NOT RUN and names why.
     """
     import fno.graph.store as gs
 
     _contained_graph(tmp_path, monkeypatch)
 
-    def boom(p):
-        raise OSError("no lock for you")
+    def boom(*a, **k):
+        raise gs.StoreUnavailable("unreachable", "no store for you")
 
-    monkeypatch.setattr(gs, "_acquire_flock", boom)
+    monkeypatch.setattr(target_cli, "_resolve_dispatch_node", boom)
     monkeypatch.setenv("TARGET_INPUT", "x-261c")
     result = runner.invoke(app, ["do", "target", "check-contained"])
-    assert result.exit_code == 9, result.output
-    assert "UNSERIALIZED" in result.output
-    assert "no lock for you" in result.output
+    assert result.exit_code == 0, result.output
+    assert "DID NOT RUN" in result.output
+    assert "no store for you" in result.output
 
 
 def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(

@@ -1334,47 +1334,36 @@ def check_contained() -> None:
     proceeds - a stale `fno` without this verb exits 2 as a Click usage error
     and must not hard-refuse every direct bootstrap.
     """
-    # Read UNDER THE GRAPH LOCK (codex P1). `read_graph` explicitly takes no
-    # lock, which left the post-acquire re-check still raceable: decompose holds
-    # the graph flock and sees no claim, the bootstrap acquires the claim, this
-    # read returns the PRE-adoption graph because decompose has not done its
-    # atomic replace yet, and then decompose commits `contained_in` while the
-    # worker proceeds. Taking the same flock totalizes the two orderings, and
-    # both are safe:
+    # Read THROUGH THE STORE KEEPER (formerly: under the graph flock, codex
+    # P1). The flock totalized this read against decompose's write because a
+    # file read could land between decompose's read and its atomic replace.
+    # With the ported store that window no longer exists: decompose's commit
+    # is a keeper transaction and every read is served under the keeper's
+    # gate, so a reader sees either the pre-commit or the post-commit graph,
+    # never a torn one. No lock to take, and both orderings stay safe:
     #
-    #   lock here first  -> we see no containment and proceed; decompose then
-    #                       takes the lock, sees our now-live claim, and refuses.
-    #   decompose first  -> it commits containment and releases; we then read it
-    #                       and refuse, releasing the claim we just took.
-    #
-    # No deadlock: decompose reads claim state as a plain file read and never
-    # holds a claim while waiting on this lock, so there is no cycle.
-    from fno.graph.store import _acquire_flock, _graph_lock_path, _release_flock
-    from fno.paths import graph_json
+    #   read first  -> we see no containment and proceed; decompose's begin
+    #                  then sees our now-live claim, and refuses.
+    #   commit first -> we read the committed containment and refuse.
+    from fno.graph.store import GraphLockTimeout, StoreUnavailable
 
-    try:
-        _fd = _acquire_flock(_graph_lock_path(graph_json()))
-    except Exception as _lock_exc:  # noqa: BLE001 - never block dispatch
-        # Say so. The serialization above is what makes this check unraceable,
-        # so losing it silently while still exiting 0 lets every caller read the
-        # result as "checked, and it is fine" - the same swallow this gate has
-        # already been fixed for twice. Still fail-open: an unlockable graph
-        # must not block every bootstrap, and the pre-claim check plus
-        # decompose's own live-claim refusal both still stand.
-        typer.echo(
-            f"fno do target check-contained: could not take the graph lock "
-            f"({_lock_exc}); the containment read is UNSERIALIZED, so a "
-            "decompose committing right now could be missed. Proceeding.",
-            err=True,
-        )
-        _fd = None
     try:
         node = _resolve_dispatch_node(
             os.environ.get("TARGET_INPUT"), os.environ.get("TARGET_PLAN_PATH")
         )
-    finally:
-        if _fd is not None:
-            _release_flock(_fd)
+    except (StoreUnavailable, GraphLockTimeout, OSError) as _store_exc:
+        # Say so. The keeper gate is what makes this check unraceable, so
+        # losing it silently while still exiting 0 lets every caller read the
+        # result as "checked, and it is fine" - the same swallow this gate has
+        # already been fixed for twice. Still fail-open: an unreachable store
+        # must not block every bootstrap, and the pre-claim check plus
+        # decompose's own live-claim refusal both still stand.
+        typer.echo(
+            f"fno do target check-contained: the graph store is unavailable "
+            f"({_store_exc}); the containment check DID NOT RUN. Proceeding.",
+            err=True,
+        )
+        return
     try:
         _redirect_if_contained(node)
     except typer.Exit as exc:

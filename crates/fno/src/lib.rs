@@ -32,6 +32,7 @@ pub mod sideline_color;
 pub mod sprites;
 pub mod squad;
 pub mod squad_store;
+pub mod store_client;
 pub mod templates;
 pub mod theme;
 pub mod tree;

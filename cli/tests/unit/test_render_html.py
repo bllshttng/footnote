@@ -446,7 +446,10 @@ def test_default_local_path_renders_the_canonical_dashboard(tmp_path: Path, monk
     from fno.graph import render_html as module
 
     default = tmp_path / "graph.html"
-    monkeypatch.setattr(_constants, "GRAPH_HTML", default)
+    # setitem, not setattr: GRAPH_HTML is served by module __getattr__, and a
+    # setattr's undo would bake the resolved path into the module for every
+    # later test in the process.
+    monkeypatch.setitem(vars(_constants), "GRAPH_HTML", default)
 
     module.render_graph_html([_entry("ab-defa0117", project="fno", title="Default path")])
     text = default.read_text()

@@ -400,7 +400,11 @@ fn lane_rank(lane: &str) -> usize {
 /// `claimed` folds the graph `status` and the live-lockfile claim together (a
 /// node another session drives may never write a graph status - x-4845);
 /// `underway` is [`in_progress_epics`] membership.
-fn kanban_column(e: &serde_json::Value, claimed: bool, underway: bool) -> Option<&'static str> {
+pub(crate) fn kanban_column(
+    e: &serde_json::Value,
+    claimed: bool,
+    underway: bool,
+) -> Option<&'static str> {
     if e.get("type").and_then(|v| v.as_str()) == Some("roadmap") {
         return None;
     }

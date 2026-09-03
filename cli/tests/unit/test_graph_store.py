@@ -1,4 +1,4 @@
-"""Unit tests for fno.graph.store - flock helpers, load/write, locked_mutate.
+"""Unit tests for fno.graph.store - the keeper-backed client.
 
 These tests are ported from tests/test_graph.py and target the extracted module.
 They run the module functions directly (no subprocess) for speed.
@@ -7,23 +7,30 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 
 import pytest
 
+from fno.rust_binary import find_dev_binary
 from fno.graph.store import (
     GraphCorruptError,
-    _acquire_flock,
     _apply_graph_defaults,
     append_session_record,
     _read_json,
-    _release_flock,
     _write_json,
     locked_mutate_graph,
     read_graph,
 )
-from fno.graph.statuses import recompute_statuses, is_stale_lock
+
+# Since the store port every test here rides the keeper, so the module needs
+# the compiled runtime and skips whole where the smoke harness deleted the
+# worker binary (the parity-test convention).
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+pytestmark = requires_rust
 
 
 # -- helpers --
@@ -36,6 +43,34 @@ def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
 
 
 # -- tests --
+
+
+def test_the_reaper_reaps_a_keeper_it_can_name(tmp_path):
+    """Positive control for the spawn ledger (the zero-filter rule).
+
+    A filter that reports zero proves nothing unless it can first name a
+    target it DID see. This test makes the ledger name a real keeper pid,
+    asserts that pid is alive before the reap, and asserts the same pid is
+    dead after it - by number, never by absence.
+    """
+    from fno.graph import store as store_mod
+
+    graph = _make_graph(tmp_path, [{"id": "ab-reap", "title": "reap me"}])
+    _client = store_mod._client_for(graph)  # spawns the keeper on demand
+    keeper = _client.request("read", {"strict": False, "keep_malformed": False})
+    assert keeper["entries"], "keeper must answer before the reap control"
+
+    ledger = store_mod._SPAWNED_KEEPERS
+    assert ledger, "a spawned keeper must be addressable in the spawn ledger"
+    pid = next(iter(ledger))
+    proc, _sock = ledger[pid]
+    assert proc.poll() is None, "the named keeper must be alive before the reap"
+
+    survivors = store_mod.reap_spawned_keepers(timeout=15.0)
+    assert survivors == [], f"reaper left {len(survivors)} keeper(s) alive"
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    assert proc.poll() is not None, "the named keeper must be dead after the reap"
 
 
 def test_locked_by_normalized_from_legacy_session_id():
@@ -90,12 +125,14 @@ def test_ac7_edge_mixed_version_round_trip(tmp_path):
     assert saved["status"] == "in_progress"
 
 
-def test_ac1_hp_acquire_release_flock(tmp_path):
-    """AC1-HP: acquire and release flock without error."""
-    lock = tmp_path / "test.lock"
-    fd = _acquire_flock(lock)
-    assert fd >= 0
-    _release_flock(fd)  # should not raise
+def test_the_raw_flock_helpers_are_retired():
+    """The unbounded flock was the port's first named defect: acquisition
+    now happens only inside the keeper's bounded lock, so the client exposes
+    no raw acquire/release pair to call."""
+    import fno.graph.store as store_mod
+
+    assert not hasattr(store_mod, "_acquire_flock")
+    assert not hasattr(store_mod, "_release_flock")
 
 
 def test_ac1_hp_read_json_missing_file(tmp_path):
@@ -382,9 +419,13 @@ def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch):
     custom_dir = tmp_path / "custom"
     custom_dir.mkdir()
     graph_json = custom_dir / "graph.json"  # graph_json outside state_dir
-    monkeypatch.setattr(gc, "GRAPH_JSON", graph_json)
-    monkeypatch.setattr(gc, "GRAPH_HTML", state_dir / "graph.html")
-    monkeypatch.setattr(gc, "GRAPH_MD", state_dir / "graph.md")
+    # Pin the RESOLVER, not the facade: canonicality reads paths.graph_json(),
+    # and a facade setattr's undo bakes the path into the module (see
+    # test_archive_sweep). The render targets are read through the facade, so
+    # they patch by setitem to keep the undo unbaking.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph_json)
+    monkeypatch.setitem(vars(gc), "GRAPH_HTML", state_dir / "graph.html")
+    monkeypatch.setitem(vars(gc), "GRAPH_MD", state_dir / "graph.md")
 
     def mutator(entries):
         entries.append({"id": "ab-canon01", "title": "Canon"})
@@ -462,6 +503,67 @@ def _ready_plan_entry(tmp_path: Path, node_id: str = "ab-open0001") -> tuple[Pat
         "plan_path": plan.name,
         "sessions": [],
     }
+
+
+def test_a_malformed_merge_grant_is_refused_before_any_store_work(tmp_path):
+    """The spawner's merge posture rides the do row, but a grant that cannot
+    name approved/source/recorded_by/recorded_at is a ValueError at the call
+    boundary: nothing reaches the keeper, and no row is written."""
+    _plan, entry = _ready_plan_entry(tmp_path)
+    path = _make_graph(tmp_path, [entry])
+
+    with pytest.raises(ValueError, match="merge_grant.approved must be a boolean"):
+        append_session_record(
+            path,
+            entry["id"],
+            phase="do",
+            harness="codex",
+            session_id="session-open",
+            merge_grant={"approved": "yes", "source": "config",
+                         "recorded_by": "spawner", "recorded_at": "2026-08-20T00:00:00Z"},
+        )
+    assert json.loads(path.read_text())["entries"][0]["sessions"] == []
+
+    with pytest.raises(ValueError, match="unknown keys"):
+        append_session_record(
+            path,
+            entry["id"],
+            phase="do",
+            harness="codex",
+            session_id="session-open",
+            merge_grant={"approved": True, "source": "config",
+                         "recorded_by": "spawner", "recorded_at": "2026-08-20T00:00:00Z",
+                         "extra": 1},
+        )
+
+    grant = {"approved": True, "source": "config",
+             "recorded_by": "spawner", "recorded_at": "2026-08-20T00:00:00Z"}
+    found, added = append_session_record(
+        path,
+        entry["id"],
+        phase="do",
+        harness="codex",
+        session_id="session-open",
+        started_at="2026-08-20T00:00:00Z",
+        merge_grant=grant,
+    )
+    assert (found, added) == (True, True)
+    row = json.loads(path.read_text())["entries"][0]["sessions"][0]
+    assert row["merge_grant"] == grant
+
+    # A re-stamp with a DIFFERENT posture must not rewrite the recorded one.
+    found, added = append_session_record(
+        path,
+        entry["id"],
+        phase="do",
+        harness="codex",
+        session_id="session-open",
+        merge_grant={"approved": False, "source": "none",
+                     "recorded_by": "spawner", "recorded_at": "2026-08-20T01:00:00Z"},
+    )
+    assert (found, added) == (True, False)
+    row = json.loads(path.read_text())["entries"][0]["sessions"][0]
+    assert row["merge_grant"]["approved"] is True
 
 
 def test_open_do_row_persists_in_progress_and_closed_row_demotes(tmp_path):
