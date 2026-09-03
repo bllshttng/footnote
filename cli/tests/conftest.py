@@ -113,6 +113,14 @@ def _reap_store_keepers():
       alive count returns to zero. The assert is the point: a teardown that
       merely runs is decoration, and the positive signal is the count, not
       the pass.
+
+    Two measurement traps this assertion survived, recorded so the next
+    counter does not re-learn them: a sandboxed shell sees a process jail,
+    so its ``ps`` never lists the real pids (count under the same sandbox
+    as the spawner, or the count is fiction); and macOS ``ps`` rejects the
+    space form ``ps -o pid= args=`` with a silent empty output, so a
+    zero-hit probe can be an arg-parse exit, not an absence (use the comma
+    form ``-o pid=,args=`` and prove any filter with one live pid).
     """
     os.environ.setdefault("FNO_STORE_KEEPER_IDLE_SECS", "5")
     yield
