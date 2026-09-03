@@ -331,6 +331,22 @@ set +f
 # MUST match tier 1, or the re-normalize would reclassify as tier 2 forever. The
 # describe-it fuzzy tier (tier 4) is whatever is left - free prose - and lives
 # entirely in the SKILL body behind a confirm.
+# x-8151: the /target-family spelling list is ONE vocabulary
+# (harness_map._TARGET_FAMILY). This file classifies every input, so it
+# carries a generated-checked MIRROR of that list - the same shape as
+# resolve_command_surface's static fallback - and
+# cli/tests/unit/test_normalize_family_mirror.py fails the moment the mirror
+# drifts from the source table (spelling added or renamed there, mirror
+# stale here). The old hand-copied `^/target`-only arm missed /fno:target and
+# $fno:target messages, discarding the deliberate-naming signal for those
+# spellings. Slow paths that can afford a subprocess ask the source directly
+# (`fno agents dispatch family`, the porcelain helper); this hot classifier
+# does not.
+_normalize_family_regex='^(/target|/fno:target|\$fno:target)([[:space:]]|$)'
+_normalize_is_family() {
+  printf '%s' "$1" | grep -qE "$_normalize_family_regex"
+}
+
 NODE=""
 NODE_BARE=0
 NODE_QUERY=""
@@ -351,12 +367,15 @@ elif printf '%s' "$first_tok" | grep -qE '^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$'; t
   # only deliberate-naming signal available without a graph read; VALIDATE uses
   # it to decide refuse-loud vs degrade-to-seed on a resolution miss.
   [[ "$msg" == "$first_tok" ]] && NODE_BARE=1
-elif printf '%s' "$msg" | grep -qE '^/target([[:space:]]|$)'; then
-  # Unanchored, so a hex-shaped prose word can match a `/target <prose>` line.
+elif _normalize_is_family "$msg"; then
+  # Unanchored extraction, so a hex-shaped prose word can match inside the
+  # message. A verb + id message - exactly two tokens and the second IS the
+  # extracted id, so a path like plans/20260711-dark-mode-x-8af8.md does not
+  # read as deliberate - is as deliberate as a bare id: spawning a worker
+  # onto an id that does not exist just burns it.
   NODE="$(printf '%s' "$msg" | grep -oE '[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}' | head -1)"
-  # `/target <id>` and nothing else is as deliberate as a bare id: spawning a
-  # worker onto an id that does not exist just burns it.
-  [[ -n "$NODE" && "$msg" == "/target $NODE" ]] && NODE_BARE=1
+  second_tok="$(printf '%s' "$msg" | awk 'NR==1 {print $2}')"
+  [[ -n "$NODE" && "$second_tok" == "$NODE" && "$(printf '%s' "$msg" | wc -w | tr -d '[:space:]')" -eq 2 ]] && NODE_BARE=1
 elif printf '%s' "$msg" | grep -iqE '^[a-z0-9][a-z0-9-]*$'; then
   # tier 2: slug candidate. Case-insensitive (`-i`) so a mobile-auto-capitalized
   # slug (`Dashless-spawn`) is still classified as a candidate; the resolver
@@ -839,24 +858,17 @@ esac
 # no-merge default for any native `/target`-family message (node-id build OR an
 # explicit /target passthrough): a fire-and-forget worker should land a PR for
 # review, not auto-merge to main from a fat-fingered tap. --allow-merge or an
-# already-present --no-merge opts out. Covers claude `/target`, opencode
-# `/fno:target`, and codex `$fno:target`; a refused provider never reaches here.
-# ONLY build/passthrough get this: a verbatim seed or a handoff continuation seed
-# that happens to contain `/target` is NOT a build command (sigma-review finding
-# 4), so it must never be no-merge'd. The flag (never a free-text token) is the
-# carrier: the fold does not read prose (x-9d11).
+# already-present --no-merge opts out. ONLY build/passthrough get this: a
+# verbatim seed or a handoff continuation seed that happens to contain `/target`
+# is NOT a build command (sigma-review finding 4), so it must never be
+# no-merge'd. The flag (never a free-text token) is the carrier: the fold does
+# not read prose (x-9d11). Family membership is asked of the single source
+# (x-8151); this file carries no hand-copied spelling list to drift.
 case "$payload_mode" in
   build|passthrough)
-    # A native /target-family invocation (claude/agy `/target`, opencode
-    # `/fno:target`, codex `$fno:target`) is no-merge'd. Single-quote the `$fno:`
-    # literal so it is not read as a variable.
-    case "$message" in
-      /target\ *|/target|/fno:target\ *|/fno:target|'$fno:target '*|'$fno:target')
-        if [[ "$ALLOW_MERGE" -eq 0 && " $message " != *" --no-merge "* ]]; then
-          message="$message --no-merge"
-        fi
-        ;;
-    esac
+    if _normalize_is_family "$message" && [[ "$ALLOW_MERGE" -eq 0 && " $message " != *" --no-merge "* ]]; then
+      message="$message --no-merge"
+    fi
     ;;
 esac
 
