@@ -105,7 +105,7 @@ def test_the_warning_never_raises_when_the_registry_is_unreadable(
 
 
 @pytest.mark.parametrize(
-    "held,requested,covers",
+    "held,requested,matches",
     [
         ("x-b76b", "x-b76b", True),
         ("x-4be7", "x-b76b", False),
@@ -114,8 +114,49 @@ def test_the_warning_never_raises_when_the_registry_is_unreadable(
         ("x-b76b", "", False),
     ],
 )
-def test_crown_covers_answers_equality_and_absence(held, requested, covers):
-    """The shared rule the warning asks. Containment has its own suite."""
-    from fno.agents.crown import crown_covers
+def test_crown_scope_matches_answers_equality_and_absence(held, requested, matches):
+    """Territory equality, which is the question the row-keyed readers ask."""
+    from fno.agents.crown import crown_scope_matches
 
-    assert crown_covers(held, requested) is covers
+    assert crown_scope_matches(held, requested) is matches
+
+
+def test_a_containing_crown_does_not_match_a_narrower_manifest(monkeypatch, capsys):
+    """The second defect this gate had, and the opposite of the first.
+
+    A first fix accepted ``scope_contains``, reasoning that the grant path
+    accepts a strict container. The readers do not: ``king_manifest_path``
+    builds ``kings/{crown_scope}.md`` from the stored scope verbatim and
+    ``done_cmd`` refuses on ``own != scope``. So a project-level crown over
+    an epic manifest must still warn, or the warning goes quiet on exactly
+    the state it exists to expose.
+    """
+    from fno.agents.crown import crown_scope_matches
+
+    assert crown_scope_matches("fno", "x-b76b") is False
+
+    row = _Row(crown_level=3, crown_scope="fno")
+    err = _warn(monkeypatch, capsys, row, scope="x-b76b")
+    assert "neither equals nor contains it" in err
+    assert "L3 fno" in err
+
+
+def test_the_readers_agree_with_the_gate_on_a_containing_crown(tmp_path):
+    """The gate's claim, checked against the reader rather than restated.
+
+    Asserting the predicate alone would only prove the predicate. This runs
+    the real manifest resolver: a crown over "fno" with a manifest armed for
+    "x-b76b" resolves to no path, which is what makes the warning correct.
+    """
+    from fno.king.state import king_manifest_path
+
+    armed = king_manifest_path("x-b76b", state_root=tmp_path)
+    held = king_manifest_path("fno", state_root=tmp_path)
+    armed.parent.mkdir(parents=True, exist_ok=True)
+    armed.write_text("# armed manifest\n", encoding="utf-8")
+
+    # The reader keys on the CROWN's scope, so it looks for the wrong file.
+    assert armed.is_file()
+    assert not held.is_file()
+    assert held.name == "fno.md"
+    assert armed.name == "x-b76b.md"

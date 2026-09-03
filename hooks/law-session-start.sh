@@ -84,27 +84,37 @@ def _fail(why):
 
 raw = sys.stdin.read()
 
-# Scan every "{" rather than trusting the first. The verb shares stdout with
-# whatever preamble the deployed fno prints, and a preamble carrying a brace
-# (a `dedup:` line, a config note quoting a dict) makes a first-brace slice
-# start mid-noise. raw_decode from each candidate finds the real object and,
-# when none parses, says so through _fail rather than exiting quiet.
+# Scan every "{" and take the first object that LOOKS LIKE THIS PAYLOAD, not
+# the first that merely parses. The verb shares stdout with whatever preamble
+# the deployed fno prints, and such a preamble can carry a brace (a `dedup:`
+# line, a config note quoting a dict). Taking the first parseable object read
+# a quoted dict in the preamble as the answer and rendered nothing - the same
+# absence-as-success trap, re-entered through a narrower door. "decisions"
+# present is the marker that distinguishes the real payload from noise.
 payload = None
 decoder = json.JSONDecoder()
+saw_object = False
 at = raw.find("{")
 while at >= 0:
     try:
-        payload, _ = decoder.raw_decode(raw[at:])
-        break
+        candidate, _ = decoder.raw_decode(raw[at:])
     except ValueError:
-        at = raw.find("{", at + 1)
+        candidate = None
+    if isinstance(candidate, dict):
+        saw_object = True
+        if "decisions" in candidate:
+            payload = candidate
+            break
+    at = raw.find("{", at + 1)
 
 if payload is None:
-    _fail("no JSON object in the output" if "{" not in raw else "unparseable JSON")
-if not isinstance(payload, dict):
-    _fail("payload is not an object")
+    _fail(
+        "output carried a JSON object with no decisions key"
+        if saw_object
+        else "no JSON object in the output"
+    )
 
-rows = payload.get("decisions") or []
+rows = payload.get("decisions")
 if not isinstance(rows, list):
     _fail("decisions is not a list")
 total = payload.get("total")

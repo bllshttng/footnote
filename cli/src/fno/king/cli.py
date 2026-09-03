@@ -112,8 +112,10 @@ def _warn_uncrowned_row(scope: str) -> None:
     The split is correct and the SILENCE about it is not. Three readers -
     `king done`, `king manifest-path`, and `hooks/king-postcompact-reinject.sh`
     - all key on the row's crown fields, and all three fail CLOSED and QUIETLY
-    when it is absent: done refuses, manifest-path answers empty at exit 0, and
-    the post-compact brief never arrives. A king can hold a valid manifest all
+    when it is absent: done refuses, manifest-path exits non-zero and prints
+    no path, and the post-compact brief never arrives. Absent covers a crown
+    over OTHER territory too - the readers key on an exact crown_scope, so a
+    containing crown is as unusable to them as none at all. A king can hold a valid manifest all
     evening and never learn its authority is invisible to the machine.
 
     So this warns, and never refuses: the manifest is written and the loop arms
@@ -129,7 +131,7 @@ def _warn_uncrowned_row(scope: str) -> None:
         AGENT_UNREGISTERED,
         REGISTRY_UNREADABLE,
         calling_agent_row,
-        crown_covers,
+        crown_scope_matches,
         crown_reading,
     )
 
@@ -148,7 +150,7 @@ def _warn_uncrowned_row(scope: str) -> None:
         return
     handle = getattr(row, "name", "") or "<handle>"
     reading = crown_reading(row)
-    if reading is not None and crown_covers(reading.get("scope"), scope):
+    if reading is not None and crown_scope_matches(reading.get("scope"), scope):
         return
 
     # What the three row-keyed readers do when the crown does not cover the
