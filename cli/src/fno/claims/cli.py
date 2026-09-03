@@ -1547,8 +1547,12 @@ def _claim_worktree_cwd(claim) -> Optional[str]:
     The transcript fallback needs a cwd to find the session's tree; the
     roster row (the usual source) is absent on exactly the paths that need
     the fallback, so the claim itself carries it when its writer could.
+    Accepts a Claim object OR a plain dict row (list_cmd's shape) - a bare
+    `getattr(a_dict, "metadata", None)` silently returns None for every
+    dict, so the two shapes need this one branch to share an implementation.
     """
-    meta = getattr(claim, "metadata", None) or {}
+    meta = claim.get("metadata") if isinstance(claim, dict) else getattr(claim, "metadata", None)
+    meta = meta or {}
     for key in ("worktree", "cwd"):
         value = meta.get(key)
         if isinstance(value, str) and value:
