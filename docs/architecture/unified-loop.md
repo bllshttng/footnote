@@ -207,12 +207,12 @@ A target driver asks whether its one deliverable shipped. A king has no PR, so p
 | `unplanned` | `fno backlog ready --json -A` | yes, by blueprinting it |
 | `stalled_holder` | `fno agents claim list -J` + `fno backlog get <id>` + `fno agents peek <holder>` | yes, by one wake per node |
 | `undriven_pr` | `gh pr list --state open` + the graph | yes, by dispatching one target worker |
-
-`stalled_holder` and `undriven_pr` are two queues over ONE predicate, `_node_driver`, which answers who is driving a node: `active`, `stalled`, or `none`. `stalled_holder` selects `stalled`. `undriven_pr` selects `none`. They cannot disagree, because neither computes its own answer. The reason there are two queues at all is sourcing. `stalled_holder` starts from the claim list, so it can only reach a worker still holding its lock. `undriven_pr` starts from open PRs bound back to their node, so it catches the worker that exited cleanly and released. Measured 2026-09-03: 7 of 12 open PRs sat undriven that way while the board named none of them. `undriven_pr` is report-only toward the node. It never closes or defers anything, and a node the operator already deferred or blocked is skipped, not nagged back up.
 | `mergeable_pr` | `gh pr list` | only under `config.king.autonomous_merge` |
 | `stale_claim` | `fno agents claim list -J --include-stale` | yes, by `fno agents claim reap` |
 | `operator_question` | `fno inbox outstanding --json` | no, a human answers it |
 | `unreachable_worker` | `fno agents needs --json` | not yet |
+
+`stalled_holder` and `undriven_pr` are two queues over ONE predicate, `_node_driver`, which answers who is driving a node: `active`, `stalled`, or `none`. `stalled_holder` selects `stalled`. `undriven_pr` selects `none`. They cannot disagree, because neither computes its own answer. The reason there are two queues at all is sourcing. `stalled_holder` starts from the claim list, so it can only reach a worker still holding its lock. `undriven_pr` starts from open PRs bound back to their node, so it catches the worker that exited cleanly and released. Measured 2026-09-03: 7 of 12 open PRs sat undriven that way while the board named none of them. `undriven_pr` is report-only toward the node. It never closes or defers anything, and a node the operator already deferred or blocked is skipped, not nagged back up.
 
 The split in that last column is what makes the loop converge. A queue only a human can clear holds the loop open forever, so it is reported and never counted toward done. The rule survives a broken verb. An unreadable report-only queue is loud (the board exits non-zero) and still uncounted. A human-gated queue never gates `NoWork`, and a failed reader behind it does not weaken that.
 

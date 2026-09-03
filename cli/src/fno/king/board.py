@@ -746,7 +746,9 @@ def _read_prs(
         # asymmetry is why this degrades one source rather than both.
         pr_nodes: SourceRead = SourceRead(error=f"pr node binding unreadable: {exc}")
     else:
-        node_by_id = {e["id"]: e for e in entries if isinstance(e, dict)}
+        node_by_id = {
+            e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
+        }
         bound: list[dict] = []
         for binding in bindings:
             if binding.verdict == "missing":
