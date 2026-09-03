@@ -489,7 +489,7 @@ def record_hosted_delivery(
     """Append one audit-only record after confirmed hosted delivery.
 
     ``delivered_at`` is the confirmation timestamp. It doubles as the marker
-    that suppresses the durable-first twin: since x-f8e3 the send path writes
+    that suppresses the durable-first twin: the send path writes
     the durable row BEFORE resolution, so a hosted delivery leaves both rows
     on the bus, and the only append-only way to keep the recipient from
     draining the twin is a record on the same msg_id that readers can see.

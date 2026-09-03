@@ -5,7 +5,7 @@ The window that loses messages is RESOLUTION: ``resolve_or_suggest`` measured
 it used to leave no bus row of any kind. These tests assert against the bus
 FILE (the system of record), never an exit code, and pin the four outcomes:
 
-- a kill during resolution or mid-ladder still leaves the row (x-f8e3 AC4-ERR
+- a kill during resolution or mid-ladder still leaves the row (AC4-ERR
   and AC4-ERR2; a write placed after resolution passes the second and proves
   nothing about the first, so both windows are covered here),
 - a confirmed hosted delivery marks the twin `delivered_at` and unread does
@@ -196,6 +196,32 @@ def test_refusal_retracts_the_pre_row(mailbox):
     assert scan_unread("abcd1234") == []
     rows = _rows(mailbox)
     assert any(r.kind == "withdraw" for r in rows)
+
+
+def test_discovery_failure_retracts_the_pre_row(mailbox, monkeypatch):
+    # A store-read failure INSIDE resolution is a refusal, and the refusal
+    # contract follows it: the pre-row must not survive a failed resolve as a
+    # deliverable message. A kill keeps the row - that is durable-first's
+    # whole point - so only the raised-refusal path retracts.
+    from typer.testing import CliRunner
+
+    from fno.agents import discover
+    from fno.cli import app
+
+    def broken_resolution(handle, **kwargs):
+        raise discover.StoreReadError("stores unreadable")
+
+    monkeypatch.setattr(discover, "resolve_or_suggest", broken_resolution)
+
+    result = CliRunner().invoke(
+        app,
+        ["agents", "mail", "send", "abcd1234", "refused mid-resolve", "--from-name", "web"],
+    )
+    assert result.exit_code != 0, result.output
+    assert scan_unread("abcd1234") == [], "a failed resolve must not leak the pre-row"
+    rows = _rows(mailbox)
+    assert any(r.kind == "send" for r in rows), "the pre-row existed"
+    assert any(r.kind == "withdraw" for r in rows), "the refusal retracted it"
 
 
 def test_budget_refusal_leaves_no_row(mailbox):

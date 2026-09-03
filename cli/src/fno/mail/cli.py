@@ -905,7 +905,7 @@ def _reply_to_name_handle(
 
     # Deliberately NO durable-first write on this lane: `target` came
     # off a stored record, and a stored handle may be the retired last-eight
-    # form, which resolution MIGRATES to the bare id . Writing before
+    # form, which resolution MIGRATES to the bare id. Writing before
     # resolution would strand the row at a retired address, so the reply lane
     # keeps the write after resolution and accepts its narrower window.
     # `sender_session` is deliberately NOT consulted here. It is validated
@@ -2419,7 +2419,7 @@ def _name_lane_send(
       sender).
 
     ``pre`` carries the durable row the caller already wrote BEFORE resolution
-    (x-f8e3, via `_durable_first_send`): the floor below is then that row, no
+    (via `_durable_first_send`): the floor below is then that row, no
     second write happens on a live miss, and every refusal path must retract
     the row (`_retract_durable_first`) to keep its queue-nothing contract.
 
@@ -2867,8 +2867,8 @@ def _name_lane_send(
     # receipt that says so instead of reading as a live-miss.
     bus_only = live_reason == BUS_ONLY_POLICY
     if pre is not None:
-        # The durable row already exists - it was written BEFORE resolution
-        #, so a kill in the resolution window or mid-ladder still
+        # The durable row already exists - it was written BEFORE resolution,
+        # so a kill in the resolution window or mid-ladder still
         # leaves it. A live miss lands exactly here: this row IS the durable
         # floor, and writing a second would double-deliver.
         th = pre.thread
@@ -4762,7 +4762,16 @@ def cmd_send(
             style_exception=style_exception,
             origin=mail_origin,
         )
-        forced_resolved, forced_suggestions = discover_mod.resolve_or_suggest(name)
+        try:
+            forced_resolved, forced_suggestions = discover_mod.resolve_or_suggest(name)
+        except Exception:
+            # Discovery itself failing is a refusal: the pre-row must not
+            # outlive it as a deliverable message (the retract contract every
+            # refusal path here keeps). A kill keeps the row - that is the
+            # whole point of durable-first - so BaseException stays uncaught.
+            if pre is not None:
+                _retract_durable_first(pre)
+            raise
         try:
             _name_lane_send(
                 message,
@@ -4857,7 +4866,14 @@ def cmd_send(
             style_exception=style_exception,
             origin=mail_origin,
         )
-        resolved, suggestions = discover_mod.resolve_or_suggest(name)
+        try:
+            resolved, suggestions = discover_mod.resolve_or_suggest(name)
+        except Exception:
+            # Same refusal contract as the force lane above: discovery failing
+            # must not strand the pre-row as a deliverable message.
+            if pre is not None:
+                _retract_durable_first(pre)
+            raise
 
         # x-605c US3: ANY handle-resolved session is delivered TO THAT SESSION,
         # live-inject first with a durable floor addressed to its canonical handle

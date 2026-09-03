@@ -115,7 +115,7 @@ def test_exhausted_budget_names_every_unstarted_source(monkeypatch):
 
 def test_budget_exhaustion_marker_names_the_last_source_started(monkeypatch):
     # The marker names WHAT the budget was exhausted after, so the king's
-    # refusal quotes a source, never an elapsed time a refusal names its condition, never its clock.
+    # refusal quotes a source, never an elapsed time.
     # One millisecond over the reserve: the first source starts (its slice is
     # that millisecond), everything after it is named.
     tiny = board.SERIALIZE_RESERVE_MS + 1

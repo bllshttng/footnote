@@ -176,7 +176,7 @@ def test_cell1_inject_body_is_envelope_wrapped(runner, mailbox, monkeypatch, tmp
 def test_durable_row_is_written_before_the_inject_attempt(
     runner, mailbox, monkeypatch, tmp_path
 ):
-    """x-f8e3 supersedes the old inject-first pin: the durable row is written
+    """Durable-first supersedes the old inject-first pin: the durable row is written
     BEFORE resolution and the live rungs, so a kill in the resolution window
     (resolve_or_suggest measured 70.37s under load) leaves the message on the
     bus instead of destroying it. The row existing first is the point; the
@@ -536,7 +536,7 @@ def test_cell5_no_wake_is_attempted_for_an_unknown_token(
 
 
 # ---------------------------------------------------------------------------
-# Cell 6a / 6b: the retired-handle discriminator .
+# Cell 6a / 6b: the retired-handle discriminator.
 # Caller-error refuses; data-artifact migrates. The two directions never blur.
 # ---------------------------------------------------------------------------
 
