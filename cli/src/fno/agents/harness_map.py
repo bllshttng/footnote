@@ -72,16 +72,15 @@ _AUTONOMOUS_COMMAND_MERGE = "/target {id}"
 def _carrier_vocab() -> tuple[tuple[str, ...], str, str]:
     """The carrier vocabulary from the ONE canonical merge_posture table
     (x-8151/d-450caaeb): authored in the Rust tree, shipped here as generated
-    package data (build.rs byte copy; check-merge-posture-fresh.sh tripwire),
-    the same distribution the harness capability table rides. The Rust engine
-    and these readers answer from the same file and cannot drift."""
+    package data (build.rs byte copy; freshness tripwire in scripts/ci). The
+    Rust engine and these readers answer from the same file and cannot
+    drift."""
     import tomllib
     from importlib.resources import files
 
-    text = files("fno.agents").joinpath("merge_posture.toml").read_text(
-        encoding="utf-8"
+    table = tomllib.loads(
+        files("fno.agents").joinpath("merge_posture.toml").read_text(encoding="utf-8")
     )
-    table = tomllib.loads(text)
     return (
         tuple(table["target_family"]["spellings"]),
         str(table["carrier"]["flag"]),
@@ -89,7 +88,6 @@ def _carrier_vocab() -> tuple[tuple[str, ...], str, str]:
     )
 
 
-# The /target-family first tokens, FROM the table (never a retyped literal).
 _TARGET_FAMILY = _carrier_vocab()[0]
 
 
@@ -1310,8 +1308,7 @@ def resolve_dispatch(
         resolved_command = normalized
         decision.append("command=legacy-no-merge->--no-merge")
     # x-8151: a no-merge posture injects after the legacy rewrite, on EVERY
-    # rung (an explicit template the dispatcher built still gets the carrier).
-    # allow never edits a template: a refusal it carries wins.
+    # rung. allow never edits a template: a refusal it carries wins.
     if posture == "no-merge":
         injected = inject_no_merge_into_command(resolved_command)
         if injected != resolved_command:

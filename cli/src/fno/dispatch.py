@@ -112,7 +112,7 @@ def cmd_resolve(
         help=(
             "no-merge|allow|from-config (x-8151): the resolver owns the "
             "--no-merge carrier. from-config reads config.auto_merge.grant "
-            "from this cwd and degrades to no-merge on any error shape."
+            "from this cwd (errors degrade to no-merge)."
         ),
     ),
     trigger: str = typer.Option(
