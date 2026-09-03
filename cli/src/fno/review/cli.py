@@ -179,6 +179,205 @@ def classify(
     )
 
 
+#: The machine-parseable marker every round comment carries. The head is the
+#: FULL sha the attestation pinned, so idempotency and reader parsing key on
+#: one string.
+_ROUND_MARKER = "<!-- fno-review-round head={head} round={round} reviewer={reviewer} -->"
+
+
+def _render_round_comment(
+    record: dict[str, Any], head: str, round_no: int, reviewer: str
+) -> str:
+    """The classified record into one human- and machine-readable comment.
+
+    The marker line is the idempotency key and the parser contract; the body
+    names each finding's outcome, and a finding with no disposition is listed
+    as such - the law's sentence that an undisposed finding keeps the PR
+    uncovered, rendered where the human reading the PR can see it.
+    """
+    findings = record.get("findings") or []
+    dispositions = {
+        entry.get("finding_key"): entry
+        for entry in (record.get("dispositions") or [])
+        if isinstance(entry, dict)
+    }
+    disposed = sum(1 for f in findings if f.get("finding_key") in dispositions)
+    lines = [
+        _ROUND_MARKER.format(head=head, round=round_no, reviewer=reviewer),
+        f"Review round {round_no} at {head[:7]} ({reviewer}): "
+        f"{len(findings)} findings, {disposed} disposed.",
+    ]
+    for finding in findings:
+        key = finding.get("finding_key") or "(unkeyed)"
+        entry = dispositions.get(key)
+        if entry is None:
+            lines.append(f"- {key}: no disposition")
+        else:
+            lines.append(
+                f"- {key}: {entry.get('disposition')} ({entry.get('reason')})"
+            )
+    return "\n".join(lines)
+
+
+def _gh_api(args: list[str], *, timeout: float = 30.0) -> tuple[int, str, str]:
+    """One bounded `gh api` REST call: `(returncode, stdout, stderr)`."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["gh", "api", *args], capture_output=True, text=True, timeout=timeout
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _pr_for_head_branch(slug: str, branch: str) -> tuple[Optional[int], str]:
+    """The open PR whose head branch is `branch`, over REST. `(None, reason)`
+    on a miss - the caller posts nothing, which is the no-PR posture."""
+    owner = slug.split("/")[0]
+    rc, out, err = _gh_api(
+        [
+            "-X", "GET",
+            f"repos/{slug}/pulls?head={owner}:{branch}&state=open&per_page=10",
+        ]
+    )
+    if rc != 0:
+        return None, (err.strip() or "pull list read failed")
+    try:
+        rows = json.loads(out)
+    except ValueError:
+        return None, "pull list returned output that is not JSON"
+    if not isinstance(rows, list) or not rows:
+        return None, f"no open PR for branch {branch}"
+    number = rows[0].get("number")
+    return (int(number), "") if isinstance(number, int) else (None, "pull list malformed")
+
+
+@review_app.command("post-dispositions", hidden=True)
+def post_dispositions(
+    findings_file: Path = typer.Option(
+        ..., "--findings-file", help="JSON findings payload with dispositions."
+    ),
+    head: str = typer.Option(
+        ..., "--head", help="The full head sha the attestation pinned."
+    ),
+    reviewer: str = typer.Option(
+        "code-review", "--reviewer", help="The reviewer name the round is attributed to."
+    ),
+    pr: Optional[int] = typer.Option(
+        None, "--pr", help="The PR number; resolved from the current branch when omitted."
+    ),
+    branch: Optional[str] = typer.Option(
+        None, "--branch", help="The head branch to resolve the PR from (default: current)."
+    ),
+) -> None:
+    """Post ONE per-round disposition comment on the PR, over REST.
+
+    The comment is the human-visible index of a round's outcomes: one line per
+    finding, each naming its disposition or its absence. Idempotent at
+    (pr, head): the marker line is the key, and a second post at the same head
+    exits 0 having written nothing. A round with no dispositions posts nothing
+    - the comment exists to carry outcomes.
+    """
+    import subprocess
+    from pathlib import Path as _Path
+
+    try:
+        text = findings_file.read_text(encoding="utf-8")
+        payload = json.loads(text)
+    except OSError as exc:
+        typer.secho(f"post-dispositions: cannot read {findings_file}: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    except ValueError as exc:
+        typer.secho(f"post-dispositions: {findings_file} is not valid JSON: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    try:
+        record = build_emit_record(payload)
+    except RecordBuildError as exc:
+        typer.secho(f"post-dispositions: {findings_file}: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    dispositions = record.get("dispositions") or []
+    if not dispositions:
+        typer.echo("post-dispositions: no dispositions in the record; nothing posted")
+        return
+
+    # The round number rides the record when the producer supplied one.
+    round_no = record.get("review_round") or 1
+
+    # The repo identity is LOCAL (a git remote parse), never a network read.
+    from fno.paths import repo_identity_from_remote_url
+
+    try:
+        remote = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        typer.secho(f"post-dispositions: no origin remote to resolve the repo: {exc}", err=True)
+        raise typer.Exit(code=3) from exc
+    identity = repo_identity_from_remote_url(remote)
+    # The REST path wants `owner/repo`; the identity carries the host as its
+    # first segment, and gh's own auth decides whether it is reachable.
+    slug = identity.split("/", 1)[1] if identity and identity.count("/") >= 2 else identity
+    if not slug or slug.count("/") != 1:
+        typer.secho(f"post-dispositions: origin remote does not name a GitHub repo: {remote}", err=True)
+        raise typer.Exit(code=3)
+
+    if pr is None:
+        if not branch:
+            try:
+                branch = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True, timeout=10, check=True,
+                ).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                branch = ""
+        if not branch or branch == "HEAD":
+            typer.secho("post-dispositions: no PR given and no branch to resolve one from", err=True)
+            raise typer.Exit(code=3)
+        pr, reason = _pr_for_head_branch(slug, branch)
+        if pr is None:
+            # No PR yet: the attestation stands alone, the comment waits for
+            # the PR. Not an error - a pre-push emit is a legitimate shape.
+            typer.echo(f"post-dispositions: no PR to post on ({reason}); nothing posted")
+            return
+
+    # Head-pin check, the same rule request-self-review applies: the comment
+    # describes one head and must never attach to another.
+    rc, out, err = _gh_api(["-X", "GET", f"repos/{slug}/pulls/{pr}"])
+    if rc != 0:
+        typer.secho(f"post-dispositions: PR read failed: {err.strip()}", err=True)
+        raise typer.Exit(code=3)
+    try:
+        pr_head = (json.loads(out) or {}).get("head", {}).get("sha")
+    except ValueError:
+        typer.secho("post-dispositions: PR read returned output that is not JSON", err=True)
+        raise typer.Exit(code=3)
+    if pr_head and pr_head != head:
+        typer.secho(
+            f"post-dispositions: refusing: PR {pr} head {str(pr_head)[:9]} is not the "
+            f"attested head {head[:9]}; re-request review at the new head",
+            err=True,
+        )
+        raise typer.Exit(code=3)
+
+    # Idempotent at (pr, head): the marker line is the key.
+    rc, out, _ = _gh_api(
+        ["-X", "GET", f"repos/{slug}/issues/{pr}/comments?per_page=100"]
+    )
+    if rc == 0 and f"<!-- fno-review-round head={head} " in out:
+        typer.echo(f"post-dispositions: round comment for {head[:9]} already posted")
+        return
+
+    body = _render_round_comment(record, head, int(round_no), reviewer)
+    write = subprocess.run(
+        ["gh", "api", "-X", "POST", f"repos/{slug}/issues/{pr}/comments", "-f", f"body={body}"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if write.returncode != 0:
+        typer.secho(f"post-dispositions: comment post failed: {write.stderr.strip()}", err=True)
+        raise typer.Exit(code=3)
+    typer.echo(f"post-dispositions: posted round comment on PR {pr} at {head[:9]}")
+
+
 @review_app.command("invocations", hidden=True)
 def invocations(
     action: str = typer.Argument(
