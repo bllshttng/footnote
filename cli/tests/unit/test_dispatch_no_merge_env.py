@@ -178,25 +178,28 @@ def test_posture_no_merge_leaves_prose_templates_alone():
     assert "--no-merge" not in dispatch["command"]
 
 
-def test_posture_allow_strips_flag_and_legacy_token():
+def test_posture_allow_overrides_the_builtin_and_never_edits_templates():
+    # allow beats a no-merge target config on the builtin rung.
     dispatch = resolve_dispatch(
+        harness="claude",
+        node_id="x-1",
+        merge_posture="allow",
+        dispatch_cfg={"auto_merge": False},
+        trigger="autonomous",
+    )
+    assert dispatch["command"] == "/target x-1"
+    assert "TARGET_NO_MERGE" not in dispatch["env"]
+    # An explicit template is never edited under allow: a refusal it carries
+    # wins (every refusal outranks every grant).
+    explicit = resolve_dispatch(
         harness="claude",
         node_id="x-1",
         command="/target --no-merge {id}",
         merge_posture="allow",
         trigger="autonomous",
     )
-    assert dispatch["command"] == "/target x-1"
-    assert "TARGET_NO_MERGE" not in dispatch["env"]
-    legacy = resolve_dispatch(
-        harness="codex",
-        node_id="x-1",
-        command="$fno:target no-merge {id}",
-        merge_posture="allow",
-        trigger="autonomous",
-    )
-    assert "no-merge" not in f" {legacy['command']} "
-    assert "TARGET_NO_MERGE" not in legacy["env"]
+    assert explicit["command"] == "/target --no-merge x-1"
+    assert explicit["env"]["TARGET_NO_MERGE"] == "1"
 
 
 def test_posture_from_config_reads_grant_and_degrades_to_no_merge():
