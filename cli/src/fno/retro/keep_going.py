@@ -201,7 +201,11 @@ def _spawn_target_worker(node_id: str, cwd: Optional[str]) -> bool:
         cmd += ["--cwd", cwd]
     else:
         cmd += ["--fresh"]
-    cmd += ["--name", name, f"/target --no-merge {node_id}"]
+    # x-8151: the spelling comes from harness_map.AUTONOMOUS_COMMAND, never a
+    # second hardcoded string that drifts when the carrier changes.
+    from fno.agents.harness_map import AUTONOMOUS_COMMAND
+
+    cmd += ["--name", name, AUTONOMOUS_COMMAND.format(id=node_id)]
     # x-9d11: the env carrier backs the hardcoded flag - a worker that drops
     # the flag post-compaction still folds the refusal at init (this lane does
     # not route through resolve_dispatch, so nobody else sets it).

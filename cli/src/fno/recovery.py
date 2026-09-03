@@ -1138,10 +1138,14 @@ def _redispatch(
         # active in settings.yaml, so the kind is what spawn needs. no-merge: an
         # autonomous worker lands a PR for review, never auto-merges.
         axis = list(flags) if flags else ["--harness", "claude", "--substrate", "bg"]
+        # x-8151: the spelling comes from harness_map.AUTONOMOUS_COMMAND, never
+        # a second hardcoded string that drifts when the carrier changes.
+        from fno.agents.harness_map import AUTONOMOUS_COMMAND
+
         proc = subprocess.run(
             [*_subprocess_util.fno_py_cmd(), "agents", "spawn", *axis,
              "--cwd", cwd, "--name", agent,
-             f"/target --no-merge {node}"],
+             AUTONOMOUS_COMMAND.format(id=node)],
             # x-9d11: the env carrier backs the flag - a replacement worker
             # that drops the flag post-compaction still folds the refusal at
             # init (this respawn lane does not route through resolve_dispatch).
