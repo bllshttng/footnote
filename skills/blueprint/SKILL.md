@@ -26,6 +26,7 @@ Each gate loads only when its trigger fires. The bodies (with verbatim scripts) 
 |------|-----------------------|
 | Plan Claims Ingestion | the argument is an existing node id (`x-8af8` / `ab-<hex>`) - runs FIRST, before any classifier |
 | Plan-level dispatch hold | named evidence must exist before this plan dispatches or merges |
+| Answerer Enumeration Gate | the plan changes a read, write, or feed - step 2b-bis |
 | Consolidation Gate | always, between discovery grounding (2b) and the write (3) - step 2d |
 | Schema Citation Gate | the codemap has a `## Database Schema` section AND the plan touches the DB |
 | Executor Lock Transcription | a design doc supplies a Locked Decision (executor) |
@@ -146,6 +147,8 @@ fi
    When creating a fresh plan from raw prose or a node-seeded path with no cited findings, blueprint grounds itself first. Run `fno do think inspect "<seed>" --json` for the receipt. It reports duplicate candidates, schema status, and the active pitfalls.
    Then load `references/discovery-gate.md`. Ask at most 3 questions with `quick`, or 5 otherwise.
    For a plan that needs deeper investigation than the receipt, run `/think` first. Think writes cited findings that blueprint then compiles.
+
+2b-bis. **Answerer enumeration** - every plan that changes a read, write, or feed. Run [references/answerer-enumeration.md](references/answerer-enumeration.md)'s four steps: phrase the question in one line, enumerate every answerer (sites repo-wide, feeds measured at each site the plan changes), state the count as the PR estimate, and dispose of every answerer in principle 9's vocabulary. Record the outcome as a `surface:` frontmatter block (schema: [references/quick-template.md](references/quick-template.md)); `validate-plan.sh` refuses a post-2026-09-03 non-quick plan without one. The step sits here, before the Consolidation Gate (2d), because the order is load-bearing: enumerating answerers finds sibling SITES, consolidation finds sibling NODES, and a question with four answerers often already has two nodes filed against it. Sweeping first is what lets 2d see them.
 
 2d. **Consolidation Gate** - every plan, on the full-context main thread, between grounding (2b) and the write (3). A supplied design doc skips 2b, so no receipt exists on that path. Run `fno do think inspect "<node id or seed>" --json` here to get one, because the gate applies to that path too. Read the receipt's `graph` payload: `duplicates` (ranked top-K, each row carrying `id`, `score`, `reason`, and `superseded_by` when set), `closure` for the resolved node (`status`, `pr_number`, `superseded_by`), and `decisions` (the node's own live rulings, newest first, each row carrying `decision_id`, `ts`, `lane`, `subject`, a truncated `text`; a failed read shows in `decisions_status`/`decisions_detail` rather than reading as "no rulings"). The scores are a reading aid, not a verdict. A real family and pure noise both sit near 0.26. A candidate carrying `superseded_by` is a dead row, never a live fold target; that field settles liveness where the score does not. Make the judgment here, with the node details, the plan seed, and the code in hand. Never delegate this call to a subprocess or a spawned agent. A truncated context reading that list decides confidently and is wrong in both directions.
 
