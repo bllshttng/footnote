@@ -347,7 +347,12 @@ impl Popup {
                     glyph, label, hint, ..
                 } => {
                     // glyph + space + label + gap + hint
-                    chrome::str_cols(glyph) + 1 + chrome::str_cols(label) + 2 + chrome::str_cols(hint) + 2
+                    chrome::str_cols(glyph)
+                        + 1
+                        + chrome::str_cols(label)
+                        + 2
+                        + chrome::str_cols(hint)
+                        + 2
                 }
                 PopupRow::Grid(cells) => grid_cell_w * cells.len(),
             })
@@ -578,7 +583,14 @@ pub fn draw(cells: &mut [Cell], rows: usize, cols: usize, r: &Rendered, theme: &
     let (r0, c0) = r.origin;
     for (i, line) in r.lines.iter().enumerate() {
         chrome::paint_line(
-            cells, rows, cols, r0 + i, c0, &line.text, &line.roles, theme,
+            cells,
+            rows,
+            cols,
+            r0 + i,
+            c0,
+            &line.text,
+            &line.roles,
+            theme,
         );
     }
 }

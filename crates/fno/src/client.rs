@@ -2621,13 +2621,7 @@ fn build_lane_color_rows(
         // Key list: this axis's mappings + the add-key row.
         rows.push(PopupRow::Header(axis.clone()));
         rows.push(PopupRow::Rule);
-        push_lane_axis_rows(
-            &mut rows,
-            &mut actions,
-            pal,
-            axis,
-            Some("add key".into()),
-        );
+        push_lane_axis_rows(&mut rows, &mut actions, pal, axis, Some("add key".into()));
         return (rows, actions);
     }
     // Axis list: every axis's mappings grouped under its header, each group
@@ -26444,9 +26438,8 @@ mod tests {
         ];
         for want in defaults {
             assert!(
-                rows.iter().any(
-                    |r| matches!(r, PopupRow::Entry { label, .. } if label == want)
-                ),
+                rows.iter()
+                    .any(|r| matches!(r, PopupRow::Entry { label, .. } if label == want)),
                 "default row {want:?} rendered"
             );
         }
@@ -26484,16 +26477,16 @@ mod tests {
             "the overridden default row is suppressed"
         );
         assert!(
-            rows.iter().any(
-                |r| matches!(r, PopupRow::Entry { label, .. }
-                    if label == "openrouter = magenta (default)")
-            ),
+            rows.iter()
+                .any(|r| matches!(r, PopupRow::Entry { label, .. }
+                    if label == "openrouter = magenta (default)")),
             "the untouched defaults still render marked"
         );
         // Nothing in this render path writes config.
-        assert!(actions
-            .iter()
-            .all(|a| matches!(a, AuxAction::LaneColorEdit(_, _) | AuxAction::LaneColorAdd(_))));
+        assert!(actions.iter().all(|a| matches!(
+            a,
+            AuxAction::LaneColorEdit(_, _) | AuxAction::LaneColorAdd(_)
+        )));
     }
 
     // (x-1b68) The REAL render path, not the row builder: the Colors tab
@@ -26557,7 +26550,10 @@ mod tests {
         // The 15-row viewport shows harness + route groups (harness lists
         // first); model/row add rows sit below the fold - the scroll that
         // the scrollbar assertion below pins.
-        assert!(add_rows >= 2, "visible axes show their add rows: {add_rows}");
+        assert!(
+            add_rows >= 2,
+            "visible axes show their add rows: {add_rows}"
+        );
         assert_eq!(
             scrollbar_cells, body_rows,
             "the panel scrolled and every body row carries the scrollbar column"

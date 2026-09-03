@@ -411,7 +411,14 @@ pub fn blit(
     let (r0, c0) = origin;
     for (i, line) in framed.lines.iter().enumerate() {
         paint_line(
-            cells, rows, cols, r0 + i, c0, &line.text, &line.roles, theme,
+            cells,
+            rows,
+            cols,
+            r0 + i,
+            c0,
+            &line.text,
+            &line.roles,
+            theme,
         );
     }
 }

@@ -230,10 +230,10 @@ pub fn reload_palette() {
 fn builtin_color_name(axis: Axis, value: &str) -> Option<&'static str> {
     match axis {
         Axis::Route => match value {
-            "zai" => Some("green"),        // the GLM-via-zai bill
+            "zai" => Some("green"),          // the GLM-via-zai bill
             "openrouter" => Some("magenta"), // the open catalog bill
-            "openai" => Some("blue"),      // codex / GPT lanes
-            "anthropic" => Some("cyan"),   // subscription claude
+            "openai" => Some("blue"),        // codex / GPT lanes
+            "anthropic" => Some("cyan"),     // subscription claude
             _ => None,
         },
         Axis::Harness => match value {
@@ -691,12 +691,18 @@ mod tests {
             builtin_color(Axis::Route, "openrouter"),
             Some(Color::Indexed(5))
         );
-        assert_eq!(builtin_color(Axis::Route, "openai"), Some(Color::Indexed(4)));
+        assert_eq!(
+            builtin_color(Axis::Route, "openai"),
+            Some(Color::Indexed(4))
+        );
         assert_eq!(
             builtin_color(Axis::Route, "anthropic"),
             Some(Color::Indexed(6))
         );
-        assert_eq!(builtin_color(Axis::Harness, "codex"), Some(Color::Indexed(4)));
+        assert_eq!(
+            builtin_color(Axis::Harness, "codex"),
+            Some(Color::Indexed(4))
+        );
         assert_eq!(builtin_color(Axis::Harness, "agy"), Some(Color::Indexed(3)));
         assert_eq!(
             builtin_color(Axis::Harness, "opencode"),
@@ -713,10 +719,7 @@ mod tests {
     fn builtin_defaults_mirror_the_cascade_table() {
         for (axis, values) in [
             ("route", &["zai", "openrouter", "openai", "anthropic"][..]),
-            (
-                "harness",
-                &["codex", "agy", "opencode", "cursor", "pi"][..],
-            ),
+            ("harness", &["codex", "agy", "opencode", "cursor", "pi"][..]),
         ] {
             let defaults = builtin_defaults(axis);
             assert_eq!(
