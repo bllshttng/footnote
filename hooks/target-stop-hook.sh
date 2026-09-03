@@ -67,12 +67,73 @@ HOOK_INPUT=$(cat)
 HOOK_TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" | sed -n \
     's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 HOOK_HARNESS_ID=$(basename "$HOOK_TRANSCRIPT_PATH" .jsonl 2>/dev/null || true)
-RESOLVE_HARNESS_ID="$HOOK_HARNESS_ID"
+# Every harness sends its own session id in the payload, and it is the ONLY
+# source that is already the bare id the resolver wants. Codex names its
+# transcript rollout-<utc>-<thread-uuid>, so the basename needs stripping, and
+# `transcript_path` is nullable in codex's own stop.command.input schema, so the
+# basename can be absent entirely. Deriving the id from the path alone worked
+# only when CODEX_THREAD_ID happened to be exported to supply the answer, and
+# the hook runner calls env_clear() and replays the session snapshot plus the
+# hook's declared env (fno declares none), so in production it is not there.
+# Measured 2026-09-02: the resolver got the prefixed basename, missed, and the
+# hook took the silent-allow path below - 1666 claude loop-check events against
+# 2 codex over six days, while other Stop hooks in the same group fired fine.
+HOOK_SESSION_ID=$(printf '%s' "$HOOK_INPUT" | sed -n \
+    's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+# The transcript basename stays the TRANSCRIPT identity that the ownership
+# guards below compare against; only the resolver argument changes here. When
+# the payload carries no path, the session id is the only identity there is.
+[[ -n "$HOOK_HARNESS_ID" ]] || HOOK_HARNESS_ID="$HOOK_SESSION_ID"
+
+# `manifest-for-session` is strict trimmed equality against one of three stamped
+# fields (crates/fno-agents/src/manifest_lookup.rs `matches`): no suffix match,
+# no rollout stripping. So a single guessed id is one shot, and a miss is
+# indistinguishable from "no manifest names this session" - the silent allow.
+# Collect every id this stop could legitimately be known by instead, most
+# authoritative first, and let the resolver say which one the manifest stamped.
+CODEX_UUID=$(printf '%s' "$HOOK_HARNESS_ID" | sed -E \
+    's/^.*-([0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$/\1/' 2>/dev/null || true)
+[[ "$CODEX_UUID" != "$HOOK_HARNESS_ID" ]] || CODEX_UUID=""
+# CODEX_THREAD_ID stays gated on matching this transcript. It is an inherited
+# env marker, so a session spawned under a codex parent carries the PARENT's
+# thread id; trusting it unconditionally would hand the resolver a foreign
+# session and narrow the king lookup onto the wrong harness. The payload id and
+# the shape-stripped uuid are both statements about THIS stop, so they need no
+# such guard.
+CODEX_ENV_ID=""
 if [[ -n "${CODEX_THREAD_ID:-}" ]] \
     && { [[ "$HOOK_HARNESS_ID" == "$CODEX_THREAD_ID" ]] \
         || [[ "$HOOK_HARNESS_ID" == *"-$CODEX_THREAD_ID" ]]; }; then
-    RESOLVE_HARNESS_ID="$CODEX_THREAD_ID"
+    CODEX_ENV_ID="$CODEX_THREAD_ID"
 fi
+RESOLVE_IDS=()
+for candidate in "$HOOK_SESSION_ID" "$CODEX_ENV_ID" "$CODEX_UUID" "$HOOK_HARNESS_ID"; do
+    [[ -n "$candidate" ]] || continue
+    for seen in ${RESOLVE_IDS[@]+"${RESOLVE_IDS[@]}"}; do
+        [[ "$seen" == "$candidate" ]] && continue 2
+    done
+    RESOLVE_IDS+=("$candidate")
+done
+RESOLVE_HARNESS_ID="${RESOLVE_IDS[0]:-}"
+
+# Try each candidate; echo the manifest path and return 0 on the first hit.
+# Returns 1 only when EVERY candidate cleanly missed (a real stranger), and 2
+# when the resolver could not answer - the caller keeps those apart because a
+# clean miss lets the session go while a broken resolver must block.
+resolve_manifest_state() {
+    local bin="$1" id state rc worst=1
+    shift
+    for id in "$@"; do
+        rc=0
+        state=$("$bin" manifest-for-session --harness-session-id "$id" 2>/dev/null) || rc=$?
+        if [[ "$rc" -eq 0 && -n "$state" ]]; then
+            printf '%s' "$state"
+            return 0
+        fi
+        [[ "$rc" -eq 1 ]] || worst=2
+    done
+    return "$worst"
+}
 
 # ── 2. State file: the active-session discriminator ───────────────────────────
 # No state file -> no target session here -> nothing to gate. This is the ONLY
@@ -126,10 +187,9 @@ if [[ -f "$LIVE_STATE_FILE" ]]; then
         BIN=$(resolve_agents_bin)
         RESOLVED_STATE=""
         RESOLVE_RC=2
-        if [[ -n "$BIN" ]]; then
+        if [[ -n "$BIN" && ${#RESOLVE_IDS[@]} -gt 0 ]]; then
             RESOLVE_RC=0
-            RESOLVED_STATE=$("$BIN" manifest-for-session \
-                --harness-session-id "$RESOLVE_HARNESS_ID" 2>/dev/null) || RESOLVE_RC=$?
+            RESOLVED_STATE=$(resolve_manifest_state "$BIN" "${RESOLVE_IDS[@]}") || RESOLVE_RC=$?
         fi
         RESOLVED_CWD=""
         if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
@@ -151,8 +211,7 @@ else
     BIN=$(resolve_agents_bin)
     if [[ -n "$BIN" && -n "$RESOLVE_HARNESS_ID" ]]; then
         RESOLVE_RC=0
-        RESOLVED_STATE=$("$BIN" manifest-for-session \
-            --harness-session-id "$RESOLVE_HARNESS_ID" 2>/dev/null) || RESOLVE_RC=$?
+        RESOLVED_STATE=$(resolve_manifest_state "$BIN" "${RESOLVE_IDS[@]}") || RESOLVE_RC=$?
         RESOLVED_CWD=""
         if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
             RESOLVED_CWD=$(cd "$(dirname "$RESOLVED_STATE")/.." 2>/dev/null && pwd -P) || true
@@ -270,7 +329,11 @@ if [[ ! -f "$STATE_FILE" ]]; then
     KING_RESOLVE_BROKEN=0
     if [[ -n "$HOOK_HARNESS_ID" ]] && compgen -G "${KINGS_DIR}/*.md" >/dev/null 2>&1; then
         if command -v fno >/dev/null 2>&1; then
-            MANIFEST_ARGS=(agents king manifest-path --harness-session-id "$HOOK_HARNESS_ID" --state-root "$REPO_ROOT/.fno")
+            # The bare id, for the same reason the target resolver needs it:
+            # `_find_by_session` does exact equality against the stamped
+            # `harness_session_id`, so handing it a codex rollout basename
+            # misses every time and disarms the king gate on codex silently.
+            MANIFEST_ARGS=(agents king manifest-path --harness-session-id "${RESOLVE_HARNESS_ID:-$HOOK_HARNESS_ID}" --state-root "$REPO_ROOT/.fno")
             [[ -n "$HOOK_HARNESS" ]] && MANIFEST_ARGS+=(--harness "$HOOK_HARNESS")
             KING_RC=0
             KING_STATE_FILE=$(fno "${MANIFEST_ARGS[@]}" 2>/dev/null) || KING_RC=$?
@@ -306,7 +369,14 @@ if [[ ! -f "$STATE_FILE" ]]; then
         exit 0
     else
         if [[ "$TARGET_NO_MATCH" -eq 1 ]]; then
-            echo "loop-check: no manifest names session ${RESOLVE_HARNESS_ID}; visitor allowed" >&2
+            # Name every id that was tried, not just the first. This is the one
+            # line a human reads when a session was let go, and this hook let
+            # codex targets go silently for six days; a diagnostic that names
+            # one of four attempts sends the next reader after the wrong id.
+            # The marker itself is a contract (docs/architecture/unified-loop.md,
+            # and hooks/agy-target-stop-hook.sh emits the same string), so the
+            # detail is APPENDED and the matched prefix stays byte-identical.
+            echo "loop-check: no manifest names session ${RESOLVE_HARNESS_ID}; visitor allowed (tried: ${RESOLVE_IDS[*]})" >&2
         fi
         exit 0
     fi
