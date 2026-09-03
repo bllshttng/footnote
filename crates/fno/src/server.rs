@@ -10879,12 +10879,18 @@ impl Core {
     }
 
     /// (x-b186) A registry row's message tail from the off-loop transcript map.
-    /// `None` for a row with no claude session uuid (a bare pane, a tombstone, a
-    /// non-claude worker) or one whose transcript yielded no prose - the
-    /// extended table then renders an EMPTY cell, never an inferred value.
+    /// `None` for a row with no session uuid (a bare pane, a tombstone) or one
+    /// whose transcript yielded no prose - the extended table then renders an
+    /// EMPTY cell, never an inferred value. The key is the row's transcript
+    /// identity: the claude uuid first, else the harness session id (the
+    /// rollout uuid a codex row carries) - the same key the tick builds.
     fn compose_tail(&self, a: &RegistryAgent) -> Option<String> {
         self.tail_by_session
-            .get(a.claude_session_uuid.as_deref()?)
+            .get(
+                a.claude_session_uuid
+                    .as_deref()
+                    .or(a.harness_session_id.as_deref())?,
+            )
             .cloned()
     }
 
@@ -15810,7 +15816,7 @@ async fn serve(
             // (x-b186) Carried across ticks so the tail pass can run even when
             // the row set did not move: the uuid set to look up, and the last
             // map pushed, so an unchanged result stays off the wire.
-            let mut last_uuids: Vec<String> = Vec::new();
+            let mut last_uuids: Vec<(String, Option<String>)> = Vec::new();
             let mut last_tails: HashMap<String, String> = HashMap::new();
             let mut last_truth = Instant::now();
             // (v48) Launch order for AgentTruth probes, so an out-of-order
@@ -15913,9 +15919,19 @@ async fn serve(
                     now,
                 );
                 if let Some(rows) = &changed {
+                    // The tail key is the row's transcript identity: the claude
+                    // uuid where one exists, else the harness session id (the
+                    // rollout uuid a codex row carries). log_path rides beside
+                    // it - a row naming its own transcript is read directly.
                     last_uuids = rows
                         .iter()
-                        .filter_map(|r| r.claude_session_uuid.clone())
+                        .filter_map(|r| {
+                            let uuid = r
+                                .claude_session_uuid
+                                .clone()
+                                .or_else(|| r.harness_session_id.clone())?;
+                            Some((uuid, r.log_path.clone()))
+                        })
                         .collect();
                 }
                 // (x-b186) Message tails are resolved on EVERY tick, not only
@@ -18013,6 +18029,7 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
@@ -18244,6 +18261,7 @@ mod tests {
                 external: false,
                 account: None,
                 claude_session_uuid: None,
+                log_path: None,
                 updated_at: None,
                 crown_level: None,
                 crown_scope: None,
@@ -18272,6 +18290,7 @@ mod tests {
                 external: false,
                 account: None,
                 claude_session_uuid: None,
+                log_path: None,
                 updated_at: None,
                 crown_level: None,
                 crown_scope: None,
@@ -18300,6 +18319,7 @@ mod tests {
                 external: false,
                 account: None,
                 claude_session_uuid: None,
+                log_path: None,
                 updated_at: None,
                 crown_level: None,
                 crown_scope: None,
@@ -18439,6 +18459,7 @@ mod tests {
                 external: false,
                 account: None,
                 claude_session_uuid: None,
+                log_path: None,
                 updated_at: None,
                 crown_level: None,
                 crown_scope: None,
@@ -18521,6 +18542,7 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
@@ -18575,6 +18597,7 @@ mod tests {
                 external: true,
                 account: None,
                 claude_session_uuid: None,
+                log_path: None,
                 updated_at: None,
                 crown_level: None,
                 crown_scope: None,
@@ -18602,6 +18625,7 @@ mod tests {
                 external: true,
                 account: None,
                 claude_session_uuid: None,
+                log_path: None,
                 updated_at: None,
                 crown_level: None,
                 crown_scope: None,
@@ -18664,6 +18688,7 @@ mod tests {
             external: true,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
@@ -21501,6 +21526,7 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: uuid.map(str::to_owned),
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
@@ -22659,6 +22685,7 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
@@ -22742,6 +22769,7 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
@@ -22829,6 +22857,7 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
@@ -22956,6 +22985,7 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
@@ -23092,6 +23122,7 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
@@ -23250,6 +23281,7 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
@@ -25837,6 +25869,7 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
@@ -27035,6 +27068,7 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
@@ -27149,6 +27183,7 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
@@ -27224,6 +27259,7 @@ mod tests {
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,

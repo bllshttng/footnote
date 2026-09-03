@@ -101,6 +101,16 @@ pub struct RegistryAgent {
     /// `provider == "claude"` (the registry writes it null on codex), so its
     /// presence alone is the respawn-eligibility signal the server arm checks.
     pub claude_session_uuid: Option<String>,
+    /// The transcript file the row's own spawn recorded (`log_path` on the
+    /// registry row), carried ONLY for non-claude rows - a codex rollout or a
+    /// tee'd JSONL lives outside every claude projects dir, so the tail reader
+    /// reads this path first and glob-falls-back only when it is absent or
+    /// unparseable. A claude row's `log_path` is its tee, not its transcript,
+    /// so carrying it here would silently swap the claude tail's source and
+    /// mirror the `claude_session_uuid` claude-only gate above. Untrusted
+    /// registry content that lands in a file read, so shape-guarded at parse
+    /// (absolute, `.jsonl`-suffixed) the same way the uuid is.
+    pub log_path: Option<String>,
     /// (x-9c5f) The freshest parseable activity stamp on the row (epoch secs):
     /// the max of `last_message_at`, `inside_leg.received_at`, `screen_state.at`,
     /// and `exited_at`. `None` when none parsed. Feeds the peek `changed Ns ago`
@@ -1595,6 +1605,38 @@ fn claude_projects_dir() -> PathBuf {
         .join("projects")
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_SESSIONS_DIR: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Point this thread's sessions-tree lookup at a scratch dir (test-only),
+/// mirroring `set_test_projects_dir`.
+#[cfg(test)]
+fn set_test_sessions_dir(dir: Option<&Path>) {
+    TEST_SESSIONS_DIR.with(|c| *c.borrow_mut() = dir.map(Path::to_path_buf));
+}
+
+/// The codex sessions tree (`CODEX_HOME`, default `~/.codex`), whose
+/// year/month/day layout holds rollout transcripts. Mirrored, not imported:
+/// same rule as `claude_projects_dir` above.
+fn codex_sessions_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(p) = TEST_SESSIONS_DIR.with(|c| c.borrow().clone()) {
+        return p;
+    }
+    std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".codex")
+        })
+        .join("sessions")
+}
+
 /// A uuid safe to use as a path component. Registry content is untrusted and
 /// lands in a path join, so anything but the transcript filename shape is
 /// refused before it can escape the projects dir.
@@ -1602,45 +1644,92 @@ fn transcript_uuid_shaped(uuid: &str) -> bool {
     !uuid.is_empty() && uuid.len() <= 64 && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
 }
 
-/// Locate the transcripts for `uuids` in ONE pass over the project dirs.
+/// Locate the transcripts for `uuids` in ONE pass over the transcript roots.
 ///
 /// The cwd-derived directory name is not a usable key: a worktree session's
 /// registry `cwd` and the dir claude encoded from its own launch cwd disagree
 /// for most live rows, so deriving the path would silently blank the column. The
-/// filename IS the uuid, so scan for it - but scan ONCE for the whole batch. A
+/// filename carries the uuid, so scan for it - but scan ONCE for the whole batch. A
 /// per-uuid scan re-walks every project dir (hundreds of them) per row, which
 /// turns a fixed ~60ms tick cost into a per-row one.
-fn find_transcripts(uuids: &[String]) -> HashMap<String, PathBuf> {
-    let wanted: HashMap<String, &str> = uuids
+///
+/// The match is filename-shape tolerant up to `TRANSCRIPT_SCAN_DEPTH` directory
+/// levels: claude lands exactly at `{uuid}.jsonl` one level down, while a codex
+/// rollout sits three levels down as `rollout-<timestamp>-{uuid}.jsonl`. Both
+/// are matched without naming either harness: a file whose `.jsonl` stem IS a
+/// wanted uuid, or whose stem ENDS in one, matches. The uuid's fixed 36-char
+/// width makes the suffix window exact, so a longer hex tail cannot read as a
+/// uuid match.
+fn find_transcripts(uuids: &[&str]) -> HashMap<String, PathBuf> {
+    let wanted: std::collections::HashSet<&str> = uuids
         .iter()
         .filter(|u| transcript_uuid_shaped(u))
-        .map(|u| (format!("{u}.jsonl"), u.as_str()))
+        .copied()
         .collect();
     let mut out = HashMap::new();
     if wanted.is_empty() {
         return out;
     }
     for root in transcript_roots() {
-        let Ok(dirs) = std::fs::read_dir(root) else {
-            continue; // an absent/unreadable root degrades to no tails, never fatal
-        };
-        for dir in dirs.flatten() {
-            let Ok(files) = std::fs::read_dir(dir.path()) else {
-                continue; // an unreadable project dir degrades the same way
-            };
-            for f in files.flatten() {
-                let name = f.file_name();
-                let Some(name) = name.to_str() else { continue };
-                if let Some(uuid) = wanted.get(name) {
-                    out.insert((*uuid).to_string(), f.path());
-                }
-            }
-            if out.len() == wanted.len() {
-                return out; // every wanted transcript found; skip the rest
-            }
+        scan_transcript_dir(&root, 0, &wanted, &mut out);
+        if out.len() == wanted.len() {
+            break; // every wanted transcript found; skip the rest
         }
     }
     out
+}
+
+/// The uuid suffix window: standard claude/codex session ids are 36 chars
+/// (8-4-4-4-12). Any future harness rolling its transcripts under a prefix
+/// with the same uuid shape matches; one with a different id shape is
+/// expected to name its own `log_path` instead (the direct read above).
+const UUID_LEN: usize = 36;
+
+/// Deepest directory level (below a root) a transcript may sit at: claude's
+/// `projects/<proj>/` is one, codex's `sessions/<year>/<month>/<day>/` is
+/// three. Both covered without naming either harness.
+const TRANSCRIPT_SCAN_DEPTH: usize = 3;
+
+fn scan_transcript_dir(
+    dir: &Path,
+    depth: usize,
+    wanted: &std::collections::HashSet<&str>,
+    out: &mut HashMap<String, PathBuf>,
+) {
+    if depth > TRANSCRIPT_SCAN_DEPTH || out.len() == wanted.len() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return; // an absent/unreadable dir degrades to no tails, never fatal
+    };
+    for e in entries.flatten() {
+        match e.file_type() {
+            Ok(ft) if ft.is_dir() => {
+                scan_transcript_dir(&e.path(), depth + 1, wanted, out);
+            }
+            Ok(_) => {
+                let name = e.file_name();
+                let Some(name) = name.to_str() else { continue };
+                let Some(stem) = name.strip_suffix(".jsonl") else {
+                    continue;
+                };
+                let uuid = if wanted.contains(stem) {
+                    stem
+                } else if stem.len() > UUID_LEN {
+                    &stem[stem.len() - UUID_LEN..]
+                } else {
+                    continue;
+                };
+                if wanted.contains(uuid) {
+                    out.insert(uuid.to_string(), e.path());
+                }
+            }
+            Err(_) => continue,
+        }
+        if out.len() == wanted.len() {
+            return; // every wanted transcript found; skip the rest
+        }
+    }
 }
 
 /// Every directory that can hold a session transcript.
@@ -1652,11 +1741,20 @@ fn find_transcripts(uuids: &[String]) -> HashMap<String, PathBuf> {
 /// column permanently empty for every such worker. Same account set the roster
 /// union already reads, so the two agree on which accounts exist.
 ///
+/// The codex sessions tree rides behind them: a codex rollout is findable by
+/// uuid there and nowhere else. An absent tree degrades to no scan (the reader
+/// below checks readability per root).
+///
 /// A test override replaces the whole list: a scratch dir is the only root.
 fn transcript_roots() -> Vec<PathBuf> {
     #[cfg(test)]
-    if let Some(p) = TEST_PROJECTS_DIR.with(|c| c.borrow().clone()) {
-        return vec![p];
+    {
+        if let Some(p) = TEST_PROJECTS_DIR.with(|c| c.borrow().clone()) {
+            return vec![p];
+        }
+        if let Some(p) = TEST_SESSIONS_DIR.with(|c| c.borrow().clone()) {
+            return vec![p];
+        }
     }
     let mut roots = vec![claude_projects_dir()];
     roots.extend(
@@ -1664,6 +1762,7 @@ fn transcript_roots() -> Vec<PathBuf> {
             .into_iter()
             .map(|(_, dir)| dir.join("projects")),
     );
+    roots.push(codex_sessions_dir());
     roots
 }
 
@@ -1717,8 +1816,14 @@ fn compose_tail(text: &str) -> Option<String> {
     None
 }
 
-/// The most recent assistant line per claude session, for the extended table's
+/// The most recent assistant line per session, for the extended table's
 /// tail column: `{session_uuid: tail}`.
+///
+/// Each key is `(uuid, log_path)`: a row that names its own transcript is read
+/// DIRECTLY (a rollout lives outside every claude projects dir, and a third
+/// harness will name a third layout), and only the rest go to the one
+/// filename-shape glob. A row whose log_path read yields no prose still joins
+/// the glob, so a missing or tee-shaped file degrades instead of blanking.
 ///
 /// A uuid with no transcript, or a transcript with no assistant prose, is simply
 /// ABSENT from the map - the row then renders an empty cell (data honesty: never
@@ -1726,14 +1831,29 @@ fn compose_tail(text: &str) -> Option<String> {
 /// recovers on the next tick (AC6-FR); nothing here can fail the batch.
 ///
 /// Blocking I/O. Callers run it off the UI loop, gated on the row set moving.
-pub fn session_tails(uuids: &[String]) -> HashMap<String, String> {
-    find_transcripts(uuids)
-        .into_iter()
-        .filter_map(|(uuid, path)| {
-            let tail = compose_tail(&read_tail(&path, TRANSCRIPT_TAIL_BYTES)?)?;
-            Some((uuid, tail))
-        })
-        .collect()
+pub fn session_tails(keys: &[(String, Option<String>)]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let mut fallback: Vec<&str> = Vec::new();
+    for (uuid, log_path) in keys {
+        let direct = log_path
+            .as_deref()
+            .and_then(|p| compose_tail(&read_tail(Path::new(p), TRANSCRIPT_TAIL_BYTES)?));
+        match direct {
+            Some(tail) => {
+                out.insert(uuid.clone(), tail);
+            }
+            None => fallback.push(uuid.as_str()),
+        }
+    }
+    for (uuid, path) in find_transcripts(&fallback) {
+        let Some(text) = read_tail(&path, TRANSCRIPT_TAIL_BYTES) else {
+            continue;
+        };
+        if let Some(tail) = compose_tail(&text) {
+            out.insert(uuid, tail);
+        }
+    }
+    out
 }
 
 /// One tail pass over events.jsonl -> `{session_id: age_seconds}` for the newest
@@ -2134,6 +2254,17 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             })
             .flatten()
             .map(str::to_string);
+        // The row's own transcript pointer, for the tail reader. Non-claude
+        // rows only (see the field doc): claude keeps the projects glob.
+        // Shape-guarded before it can land in a read, like the uuid above.
+        let log_path = (!is_claude)
+            .then(|| {
+                row.get("log_path")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| std::path::Path::new(s).is_absolute() && s.ends_with(".jsonl"))
+            })
+            .flatten()
+            .map(str::to_string);
         // (x-9c5f) The freshest activity stamp: the max of the row's parseable
         // UTC stamps (same fixed-format parser the badge TTL uses). Any
         // unparseable/missing stamp is skipped; all absent -> None (no line).
@@ -2337,6 +2468,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             external: false,
             account: None,
             claude_session_uuid,
+            log_path,
             updated_at,
             crown_level,
             crown_scope,
@@ -2439,6 +2571,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             // A synthesized foreign roster row is external (respawn refuses it)
             // and carries no registry stamps.
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             // A roster worker carries no crown (crown is an fno-registry fact).
             crown_level: None,
@@ -3177,12 +3310,106 @@ mod tests {
         .unwrap();
         set_test_projects_dir(Some(&dir));
         let absent = "ffffffff-0000-0000-0000-000000000000";
-        let got = session_tails(&[live.to_string(), absent.to_string()]);
+        let got = session_tails(&[(live.to_string(), None), (absent.to_string(), None)]);
         set_test_projects_dir(None);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(got.get(live).map(String::as_str), Some("latest line"));
         // Absent, not empty-string: the row renders no cell, never a placeholder.
         assert!(!got.contains_key(absent));
+    }
+
+    #[test]
+    fn session_tails_reads_the_row_log_path_directly() {
+        // A row that names its own transcript needs no glob: the rollout lives
+        // outside every claude projects dir, and the direct read is what makes
+        // its tail land.
+        let dir = std::env::temp_dir().join(format!("fno-logtail-{}-direct", std::process::id()));
+        let rollout = dir.join("2026").join("09").join("01");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&rollout).unwrap();
+        let live = "01a0608a-1234-1234-1234-000000000001";
+        let path = rollout.join(format!("rollout-2026-09-01T22-14-58-{live}.jsonl"));
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                turn(r#"{"type":"text","text":"stale"}"#),
+                turn(r#"{"type":"text","text":"wake lane text"}"#)
+            ),
+        )
+        .unwrap();
+        // A claude projects dir that contains NOTHING for this uuid: the
+        // direct read must win without the glob finding anything.
+        let empty_projects = dir.join("projects");
+        std::fs::create_dir_all(&empty_projects).unwrap();
+        set_test_projects_dir(Some(&empty_projects));
+        let got = session_tails(&[(live.to_string(), Some(path.to_string_lossy().into_owned()))]);
+        set_test_projects_dir(None);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got.get(live).map(String::as_str), Some("wake lane text"));
+    }
+
+    #[test]
+    fn session_tails_glob_finds_a_codex_rollout_by_uuid() {
+        // No log_path on the row: the widened scan must still land the rollout
+        // - three directory levels down, with the timestamp prefix before the
+        // uuid - or the column stays blank for every row that lost its path.
+        let dir = std::env::temp_dir().join(format!("fno-logtail-{}-glob", std::process::id()));
+        let day = dir.join("2026").join("09").join("02");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&day).unwrap();
+        let live = "01a0608a-1234-1234-1234-000000000002";
+        std::fs::write(
+            day.join(format!("rollout-2026-09-02T08-00-00-{live}.jsonl")),
+            format!("{}\n", turn(r#"{"type":"text","text":"globbed rollout"}"#)),
+        )
+        .unwrap();
+        set_test_sessions_dir(Some(&dir));
+        let got = session_tails(&[(live.to_string(), None)]);
+        set_test_sessions_dir(None);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got.get(live).map(String::as_str), Some("globbed rollout"));
+    }
+
+    #[test]
+    fn session_tails_prefixed_match_refuses_a_partial_uuid_suffix() {
+        // The `-` separator in the prefixed match keeps a LONGER hex tail from
+        // reading as the wanted uuid: a file whose suffix merely extends the
+        // uuid must not satisfy it.
+        let dir = std::env::temp_dir().join(format!("fno-logtail-{}-suffix", std::process::id()));
+        let day = dir.join("2026").join("09").join("02");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&day).unwrap();
+        let wanted = "01a0608a-1234-1234-1234-000000000003";
+        std::fs::write(
+            day.join(format!("rollout-2026-09-02T08-00-00-{wanted}aaaa.jsonl")),
+            format!("{}\n", turn(r#"{"type":"text","text":"wrong row"}"#)),
+        )
+        .unwrap();
+        set_test_sessions_dir(Some(&dir));
+        let got = session_tails(&[(wanted.to_string(), None)]);
+        set_test_sessions_dir(None);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!got.contains_key(wanted));
+    }
+
+    #[test]
+    fn parse_carries_log_path_for_non_claude_rows_only() {
+        // The registry's log_path pointer feeds the tail reader - but a
+        // claude row's log_path is its tee, not its transcript, so carrying
+        // it would silently swap the claude tail's source.
+        let codex = r#"{"name":"cx","harness":"codex","cwd":"/w",
+            "log_path":"/Users/someone/.codex/sessions/2026/09/01/rollout-x.jsonl"}"#;
+        let rows = derive_rows(&reg(codex), NOW).unwrap();
+        assert!(rows[0].log_path.is_some());
+        let claude = r#"{"name":"cc","harness":"claude","cwd":"/w","log_path":"/tee/x.jsonl"}"#;
+        let rows = derive_rows(&reg(claude), NOW).unwrap();
+        assert_eq!(rows[0].log_path, None);
+        // Untrusted registry content lands in a file read: a relative or
+        // non-jsonl pointer is refused at parse, never dereferenced.
+        let sketchy = r#"{"name":"cs","harness":"codex","cwd":"/w","log_path":"../etc/hooks"}"#;
+        let rows = derive_rows(&reg(sketchy), NOW).unwrap();
+        assert_eq!(rows[0].log_path, None);
     }
 
     #[test]
@@ -4662,6 +4889,7 @@ config_dir = "~/.claude-alt"
             external: false,
             account: None,
             claude_session_uuid: None,
+            log_path: None,
             updated_at: None,
             crown_level: None,
             crown_scope: None,
