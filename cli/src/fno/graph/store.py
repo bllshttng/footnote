@@ -777,9 +777,10 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
     # Renders. The canonical board moved from under-the-lock to after-the-
     # publish with the port: the keeper serializes publishes, and these
     # projections are operator-chosen paths that must never hold (or wait
-    # on) the graph lock. Bytes are never partial (atomic replaces).
-    entries = outcome["entries"]
-    _render_published_views(entries, is_canonical, path)
+    # on) the graph lock. Bytes are never partial (atomic replaces). The
+    # returned entries carry the overlaid statuses: what a caller receives
+    # must match what the render drew.
+    entries = _render_published_views(outcome["entries"], is_canonical, path)
     # Wake the active-backlog drain daemon (x-c070): best-effort, never
     # wedges the mutation.
     try:
@@ -811,10 +812,11 @@ def render_canonical_views() -> None:
     _render_published_views(entries, True, Path(graph))
 
 
-def _render_published_views(entries: list[dict], is_canonical: bool, path: Path) -> None:
+def _render_published_views(entries: list[dict], is_canonical: bool, path: Path) -> list[dict]:
     """The view projections a landed publish owes: the readiness overlay,
     graph.md, and the canonical/configured board targets (or a sibling
-    graph.html for test graphs)."""
+    graph.html for test graphs). Returns the overlay-applied entries, so the
+    caller's list matches what the render drew."""
     from fno.graph.render import render_graph_md
     from fno.graph import _constants as _gc
     from fno.paths import vault_root
@@ -861,6 +863,7 @@ def _render_published_views(entries: list[dict], is_canonical: bool, path: Path)
             render_graph_html(_archived, path.with_name("graph.html"))
         except OSError as e:
             print(f"Warning: graph.html render failed: {e}", file=sys.stderr)
+    return entries
 
 
 def locked_mutate_graph(path: Path, mutator) -> list[dict]:

@@ -15,7 +15,19 @@ from pathlib import Path
 
 import pytest
 
+from fno.rust_binary import find_dev_binary
 from fno.graph.load import GraphCorruptionError, _is_sha256, load_graph
+
+# Since the store port the sidecar validation reads its bytes through the
+# keeper's gated read, so the module needs the compiled runtime and skips
+# whole where the smoke harness deleted the worker binary (the parity-test
+# convention).
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+pytestmark = requires_rust
 
 
 def _write(tmp_path: Path, entries: list[dict]) -> Path:

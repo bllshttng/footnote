@@ -16,7 +16,18 @@ from typing import Generator
 
 import pytest
 
+from fno.rust_binary import find_dev_binary
 from fno.graph.store import locked_mutate_graph
+
+# Since the store port every mutation here rides the keeper, so the module
+# needs the compiled runtime and skips whole where the smoke harness deleted
+# the worker binary (the parity-test convention).
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+pytestmark = requires_rust
 
 
 def _write_graph(path: Path, entries: list[dict]) -> None:
@@ -449,17 +460,19 @@ def test_unwritable_target_warns_and_completes(_isolate, tmp_path, monkeypatch, 
 
 
 def test_non_canonical_graph_skips_targets(_isolate, tmp_path, monkeypatch):
-    import fno.graph._constants as gc
-
     target = tmp_path / "out" / "board.html"
     _write_config(
         f'[[backlog.render_targets]]\npath = "{target}"\nproject = "fno"',
         tmp_path,
         monkeypatch,
     )
-    # Point the canonical constant AWAY from the mutated graph: a tmp graph
-    # must never write the operator's configured public targets.
-    monkeypatch.setattr(gc, "GRAPH_JSON", tmp_path / "elsewhere" / "graph.json")
+    # Point canonicality AWAY from the mutated graph through the seam the
+    # store reads (_is_canonical resolves fno.paths.graph_json at call time;
+    # patching the facade constant would not land). A tmp graph must never
+    # write the operator's configured public targets.
+    monkeypatch.setattr(
+        "fno.paths.graph_json", lambda: tmp_path / "elsewhere" / "graph.json"
+    )
     _mutate(
         _isolate["graph"],
         [_entry("ab-tmpgraph", title="first title")],

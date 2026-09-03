@@ -13,8 +13,21 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from fno.rust_binary import find_dev_binary
 from fno.graph.statuses import recompute_statuses
 from fno.graph.store import _apply_graph_defaults, locked_mutate_graph, read_graph
+
+# Since the store port every test here rides the keeper, so the module needs
+# the compiled runtime and skips whole where the smoke harness deleted the
+# worker binary (the parity-test convention).
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+pytestmark = requires_rust
 
 
 def _overlay(entry: dict, by_id: dict[str, dict] | None = None):
