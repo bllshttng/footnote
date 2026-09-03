@@ -30049,6 +30049,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selector_shift_p_asks_the_server_for_a_new_portal() {
+        // (x-8f9d) `P` opens ANOTHER portal beside the one Enter uses, so two
+        // threads sit side by side. It names no index: the client must not
+        // choose one, or two clients pick the same number and the second
+        // reach repoints the first one's new portal.
+        let mut v = unified_rows_view();
+        v.selector = Some(8); // bg-claude
+        let mut buf: Vec<u8> = Vec::new();
+        selector_keys(&mut v, b"P", &mut buf).await.unwrap();
+        assert_eq!(v.selector, None, "the reach closes the selector");
+        assert!(v.attach_place.is_none(), "no placement dialog on a reach");
+        let mut cur = std::io::Cursor::new(&buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::AttachAgent { id, placement }) => {
+                assert_eq!(id, "c19cd2c3");
+                assert!(placement.portal_new, "asks the server to allocate");
+                assert_eq!(
+                    placement.portal, None,
+                    "and names no index of its own - that is the whole point"
+                );
+                assert!(placement.wants_portal(), "still routes as a portal reach");
+                assert!(placement.split.is_none() && !placement.here && placement.at.is_none());
+            }
+            other => panic!("expected AttachAgent, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn selector_p_opens_attach_placement_without_sending() {
         let mut v = unified_rows_view();
         v.selector = Some(8); // bg-claude
