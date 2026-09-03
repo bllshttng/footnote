@@ -1,4 +1,4 @@
-"""CI runs each full smoke lane as four shards. They must cover the whole registry.
+"""CI runs the full smoke lanes in bounded shard counts. They must cover the whole registry.
 
 The workflow splits `smoke` into shard jobs that run in parallel on separate
 runners. That halves wall clock only if nothing is lost in the split, so this
@@ -85,7 +85,11 @@ def test_the_workflow_actually_shards_the_gate() -> None:
     """
     selectors = _shard_selectors()
     assert selectors, "the smoke gate needs no shard jobs carrying --only/--skip"
-    assert len(selectors) == 8, f"expected four legs per full lane, found {selectors}"
+    counts = {job: sum(1 for candidate, *_rest in selectors if candidate == job)
+              for job, *_rest in selectors}
+    assert counts == {"smoke-pytest": 8, "smoke-rest": 4}, (
+        f"expected eight pytest legs and four rest legs, found {counts}"
+    )
 
 
 def test_matrix_legs_enumerate_the_denominator_in_each_command() -> None:
@@ -141,7 +145,7 @@ def test_the_shards_cover_every_step() -> None:
 
 
 def test_pytest_runs_in_every_pytest_shard() -> None:
-    """The expensive half runs once in each of the four pytest legs."""
+    """The expensive half runs once in each of the eight pytest legs."""
     names = _names()
     step = "Pytest (unit + integration)"
     assert step in names, "the pytest step was renamed; re-check the shard seam"
@@ -150,10 +154,7 @@ def test_pytest_runs_in_every_pytest_shard() -> None:
         for job, shard, total, flag, globs in _shard_selectors()
         if step in _selected(names, flag, globs, shard, total)
     ]
-    assert carriers == [
-        ("smoke-pytest", 1), ("smoke-pytest", 2),
-        ("smoke-pytest", 3), ("smoke-pytest", 4),
-    ]
+    assert carriers == [("smoke-pytest", shard) for shard in range(1, 9)]
 
 
 def test_the_rust_binary_is_built_in_the_shard_that_needs_it() -> None:

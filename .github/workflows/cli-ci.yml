@@ -159,8 +159,8 @@ jobs:
           fi
           exit $rc
 
-  # The suite outgrew two runners, so each full-gate lane now runs as four
-  # matrix shards. Read this before
+  # The suite outgrew two runners, so the pytest full-gate lane now runs as
+  # eight matrix shards and the rest lane as four. Read this before
   # raising a ceiling again.
   #
   # History: 20 left no margin and cancelled green runs. Measured 2026-08-06,
@@ -169,8 +169,9 @@ jobs:
   # with every test passing. Raised to 30. On 2026-08-21 it hit 30 too, and the
   # comment then standing said that at 30 the suite is the thing to fix. It was
   # raised to 45 anyway, as an unblock for a stalled fleet, on the condition
-  # that the suite got fixed. This is that fix. Four legs per lane bring each
-  # measured leg below the 15-minute cap instead of raising the ceiling again.
+  # that the suite got fixed. This is that fix. Eight pytest legs and four rest
+  # legs bring the measured work below the 15-minute cap instead of raising the
+  # ceiling again.
   #
   # What was measured, so the next reader can re-measure rather than guess. One
   # main-push job ran 2095 seconds: 64s of runner setup, 1036s in the single
@@ -192,12 +193,15 @@ jobs:
   # true. `Sync + build` deliberately runs in every leg: it costs about 3s and
   # removes any question of whether pytest can rely on `uv build`.
   #
+  # The last four-way pytest run reached only 38%, 42%, 39% and 54% before its
+  # 15-minute cap. The pytest lane therefore doubles; the rest lane stays at
+  # four because its measured legs already finish below the cap.
   # If a shard approaches 15, split again or cut work. Do not raise this.
   smoke-pytest:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     runs-on: ubuntu-latest
     # The latest two-leg main run measured 27m35s for pytest. Four matrix legs
     # are the planned remedy, and each leg remains capped at 15 minutes.
@@ -209,7 +213,7 @@ jobs:
       - name: Provision the smoke runner
         uses: ./.github/actions/smoke-setup
 
-      - name: "Smoke shard: pytest (${{ matrix.shard }}/4)"
+      - name: "Smoke shard: pytest (${{ matrix.shard }}/8)"
         # This shard throws away the fno-agents binary smoke-setup
         # just built (the runner clears it so @requires_rust tests skip) and
         # never rebuilds it, because the build step lives in the other shard.
@@ -243,7 +247,7 @@ jobs:
         run: |
           start=$SECONDS
           trap 'bash scripts/ci/smoke-duration-report.sh smoke-pytest-${{ matrix.shard }} "$(( SECONDS - start ))" 15 || true' EXIT
-          uv run --project cli fno-py doctor test smoke --only 'Sync + build,Pytest*' --shard ${{ matrix.shard }}/4
+          uv run --project cli fno-py doctor test smoke --only 'Sync + build,Pytest*' --shard ${{ matrix.shard }}/8
 
   smoke-rest:
     strategy:
