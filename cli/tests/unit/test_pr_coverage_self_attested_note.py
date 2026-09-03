@@ -51,7 +51,14 @@ def _prepare_gate(monkeypatch, tmp_path, row: dict, *, require_corroboration: bo
     monkeypatch.setattr(
         "fno.config.load_settings_for_repo",
         lambda root: SimpleNamespace(
-            review=SimpleNamespace(require_corroboration=require_corroboration)
+            review=SimpleNamespace(
+                require_corroboration=require_corroboration,
+                posture=None,
+                github_apps=None,
+                peers=False,
+                self_review_required=True,
+                reviewers=[],
+            )
         ),
     )
 
