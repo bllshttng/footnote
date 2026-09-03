@@ -1,7 +1,14 @@
 use std::collections::BTreeMap;
 
 use crate::agents_view::RegistryAgent;
-use crate::server::Portal;
+use crate::tree::TabId;
+
+#[derive(Clone)]
+pub(crate) struct Portal {
+    pub(crate) row_key: String,
+    pub(crate) seat: u64,
+    pub(crate) tab: TabId,
+}
 
 pub(crate) fn row_for_pane<'a>(
     portals: &BTreeMap<u8, Portal>,

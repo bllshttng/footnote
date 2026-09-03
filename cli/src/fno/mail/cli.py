@@ -70,6 +70,7 @@ from fno.inbox.store import (
     write_new_thread,
 )
 from fno import paths
+from fno.mail.thread_force import resolve_pane_entry as _resolve_pane_entry
 
 
 class DaemonState(str, Enum):
@@ -1999,30 +2000,6 @@ def _codex_daemon_socket_absent() -> bool:
     return not _codex_app_server_report().get("present", False)
 
 
-def _resolve_pane_entry(resolved, recipient: Optional[str], token: Optional[str]):
-    """The registry row behind a name-lane address, or None.
-
-    Tries the resolved session id first (the strongest address), then the token
-    the caller typed, then the canonical recipient handle. None means no row
-    claims this address, which for ``--force`` is a refusal, not a fallback.
-    """
-    from fno.agents.registry import AgentResolutionError, resolve_agent
-
-    candidates = [
-        getattr(resolved, "session_id", None) if resolved is not None else None,
-        token,
-        recipient,
-    ]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            return resolve_agent(candidate).entry
-        except (AgentResolutionError, OSError):
-            continue
-    return None
-
-
 def _forced_pane_send(
     wrapped: str,
     *,
@@ -2059,10 +2036,11 @@ def _forced_pane_send(
     from fno.agents.dispatch import _mux_pane_send
     from fno.bus.log import record_typed_delivery
 
-    mux = getattr(entry, "mux", None) or {}
-    pane_id = mux.get("pane_id")
-    mux_session = mux.get("session")
-    thread_viewport = False
+    from fno.mail.thread_force import prepare_forced_entry
+
+    entry, mux_session, pane_id, thread_viewport = prepare_forced_entry(
+        entry, recipient=recipient, reservation=reservation
+    )
     # Liveness, on the same rule the resolved lane states: an exited row keeps
     # its mux ref, and pane ids are reused across a mux restart, so a stale ref
     # types into whatever pane now holds that number. --force needs this MORE
@@ -2113,35 +2091,8 @@ def _forced_pane_send(
             file=sys.stderr,
         )
         raise typer.Exit(code=1)
-    if getattr(entry, "substrate", None) == "thread":
-        from fno.agents.retask import RetaskTransportError, resolve_thread_viewport
-
-        try:
-            mux_session, pane_id = resolve_thread_viewport(entry)
-        except RetaskTransportError as exc:
-            _release_budget(reservation)
-            print(
-                f"error: --force cannot open the thread viewport for {recipient}: "
-                f"{exc}. The row needs a logical thread reference from spawn.",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=1) from exc
-        import copy
-
-        transport_entry = copy.copy(entry)
-        transport_entry.mux = {"session": mux_session, "pane_id": pane_id}
-        entry = transport_entry
-        thread_viewport = True
     if pane_id is None:
         _release_budget(reservation)
-        if getattr(entry, "substrate", None) == "thread":
-            print(
-                f"error: --force cannot open the thread viewport for {recipient}: "
-                "the row has no logical thread reference. Restamp it through a "
-                "new thread spawn before forcing a live send.",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=1)
         print(
             f"error: --force types into a mux pane and {recipient} has none. "
             f"Send without --force (it queues durable), or spawn the recipient "
@@ -4588,32 +4539,17 @@ def cmd_send(
         from fno.agents import discover as discover_mod
         from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
 
-        forced_entry = _resolve_pane_entry(None, None, name)
-        if forced_entry is not None:
-            from fno.harness_identity import canonical_handle
+        from fno.mail.thread_force import send_by_thread_identity
 
-            forced_session = (
-                getattr(forced_entry, "harness_session_id", None)
-                or getattr(forced_entry, "fno_id", None)
-                or getattr(forced_entry, "session_id", None)
-            )
-            is_self = (
-                forced_session is not None
-                and _self_recipient(name, resolved_session_id=forced_session) is not None
-            )
-            if forced_session and not is_self:
-                _name_lane_send(
-                    message,
-                    from_name=from_name,
-                    resolved=None,
-                    token=None,
-                    recipient=canonical_handle(forced_session),
-                    provider=getattr(forced_entry, "harness", None) or harness,
-                    style_exception=style_exception,
-                    force=True,
-                    origin=mail_origin,
-                )
-                return
+        if send_by_thread_identity(
+            name,
+            message=message,
+            from_name=from_name,
+            harness=harness,
+            style_exception=style_exception,
+            origin=mail_origin,
+        ):
+            return
         forced_resolved, forced_suggestions = discover_mod.resolve_or_suggest(name)
         try:
             _name_lane_send(
