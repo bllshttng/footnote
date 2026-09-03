@@ -44,6 +44,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "manifest-for-session",
     "needs",
     "ping",
+    "pr-heal",
     "probe-run",
     "promote",
     "reap",
@@ -304,6 +305,15 @@ async fn run(args: Vec<String>) -> i32 {
     // daemon and dispatches here before build_request.
     if verb == "wait" {
         return fno_agents::wait::run_wait(&args[1..], &AgentsHome::from_env()).await;
+    }
+
+    // `pr-heal` classifies a red check and applies the mechanical fix. Binary-
+    // direct behind `fno do pr heal`, like `kill-check`: it is NOT a routable
+    // `fno agents` verb, so it stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS
+    // (whose lengths the --help parity test asserts equal). Daemon-free, so it
+    // dispatches here before build_request.
+    if verb == "pr-heal" {
+        return fno_agents::heal::run_heal(&args[1..]);
     }
     // `subscribe`: follow the daemon's own `events.jsonl` and stream registry
     // state transitions + pane exits as NDJSON. File-follow, no daemon RPC, so it

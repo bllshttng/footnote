@@ -457,10 +457,550 @@ pub(crate) fn job_id(link: &str) -> Option<String> {
     re.captures(link).map(|c| c[1].to_string())
 }
 
+// ── the verb ────────────────────────────────────────────────────────────────
+
+/// Exit codes. Zero means the PR has nothing red of its own; an `inherited`
+/// row is red but is main's, so it never decides this.
+pub(crate) const EXIT_CLEAN: i32 = 0;
+pub(crate) const EXIT_ESCALATIONS: i32 = 1;
+pub(crate) const EXIT_IN_FLIGHT: i32 = 2;
+pub(crate) const EXIT_CWD_REFUSAL: i32 = 3;
+pub(crate) const EXIT_READ_ERROR: i32 = 4;
+pub(crate) const EXIT_NO_GH: i32 = 127;
+
+/// A `gh` read. Generous next to the stop gate's 30s because a paginated
+/// check-runs read on a busy PR is slower than a single rollup read.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// A remedy. `cargo fmt` over a large crate is the long pole.
+const REMEDY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Parsed `pr-heal` arguments. `gh_bin` / `git_bin` / `cwd` are the same test
+/// seams `loop-check` carries, so push discipline is provable against stub
+/// executables instead of a real remote.
+struct Args {
+    pr: Option<String>,
+    apply: bool,
+    all: bool,
+    playbook: bool,
+    gh_bin: String,
+    git_bin: String,
+    cwd: std::path::PathBuf,
+}
+
+fn parse_args(argv: &[String]) -> Result<Args, String> {
+    let mut a = Args {
+        pr: None,
+        apply: false,
+        all: false,
+        playbook: false,
+        gh_bin: "gh".to_string(),
+        git_bin: "git".to_string(),
+        cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    };
+    let mut i = 0;
+    while i < argv.len() {
+        let arg = argv[i].as_str();
+        let mut take = |name: &str| -> Result<String, String> {
+            argv.get(i + 1)
+                .cloned()
+                .ok_or_else(|| format!("{name} needs a value"))
+        };
+        match arg {
+            "--apply" => a.apply = true,
+            "--all" => a.all = true,
+            "--playbook" => a.playbook = true,
+            "--gh-bin" => {
+                a.gh_bin = take("--gh-bin")?;
+                i += 1;
+            }
+            "--git-bin" => {
+                a.git_bin = take("--git-bin")?;
+                i += 1;
+            }
+            "--cwd" => {
+                a.cwd = std::path::PathBuf::from(take("--cwd")?);
+                i += 1;
+            }
+            other if other.starts_with('-') => return Err(format!("unknown flag: {other}")),
+            other => a.pr = Some(other.to_string()),
+        }
+        i += 1;
+    }
+    Ok(a)
+}
+
+/// Run a command, returning (exit ok, stdout). A spawn failure and a non-zero
+/// exit are both "did not succeed" here; the caller only ever branches on
+/// success, and the distinction that matters (gh absent) is probed once.
+fn run(
+    bin: &str,
+    args: &[&str],
+    cwd: &std::path::Path,
+    timeout: std::time::Duration,
+) -> Result<(bool, String), String> {
+    match crate::loopcheck::bounded_read(bin.as_ref(), args, cwd, "heal", timeout) {
+        Ok(out) => Ok((
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )),
+        Err(err) => Err(crate::loopcheck::bounded_read_diagnostic(bin, &err)),
+    }
+}
+
+/// `gh api` against the current repo. `{owner}`/`{repo}` are gh's own
+/// placeholders, resolved from the checkout, so heal never reads the remote
+/// just to learn its own name.
+fn gh_api(a: &Args, path: &str, extra: &[&str]) -> Result<String, String> {
+    let mut args: Vec<&str> = vec!["api", "--allow-escape-sequences", path];
+    args.extend_from_slice(extra);
+    let (ok, out) = run(&a.gh_bin, &args, &a.cwd, READ_TIMEOUT)?;
+    if ok {
+        Ok(out)
+    } else {
+        Err(format!("gh api {path} failed"))
+    }
+}
+
+/// The PR's head sha, head ref, and body.
+fn read_pr(a: &Args, pr: &str) -> Result<(String, String, String), String> {
+    let raw = gh_api(a, &format!("repos/{{owner}}/{{repo}}/pulls/{pr}"), &[])?;
+    let v: Value = serde_json::from_str(&raw).map_err(|e| format!("pr json: {e}"))?;
+    let head = v
+        .pointer("/head/sha")
+        .and_then(|s| s.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let head_ref = v
+        .pointer("/head/ref")
+        .and_then(|s| s.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let body = v
+        .get("body")
+        .and_then(|s| s.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if head.is_empty() {
+        return Err("pr json carried no head sha".to_string());
+    }
+    Ok((head, head_ref, body))
+}
+
+/// The PR head's check runs, in the `bucket`/`link` shape the classifier and
+/// [`crate::check_supersession::latest_per_name`] already speak.
+///
+/// The read is REST. `gh pr checks` is GraphQL, and this repo's quota broker
+/// routes it away unconditionally, so a heal built on it could never run. The
+/// translation below is the whole cost of reading the cheap endpoint.
+fn read_checks(a: &Args, head: &str) -> Result<Value, String> {
+    let raw = gh_api(
+        a,
+        &format!("repos/{{owner}}/{{repo}}/commits/{head}/check-runs"),
+        &["--paginate"],
+    )?;
+    let mut rows: Vec<Value> = Vec::new();
+    // --paginate concatenates one JSON object per page.
+    for page in raw
+        .split_inclusive('}')
+        .collect::<Vec<_>>()
+        .join("")
+        .split("\n{")
+    {
+        let text = if page.starts_with('{') {
+            page.to_string()
+        } else {
+            format!("{{{page}")
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let Some(runs) = v.get("check_runs").and_then(|r| r.as_array()) else {
+            continue;
+        };
+        for run in runs {
+            rows.push(serde_json::json!({
+                "name": run.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                "bucket": rest_bucket(run),
+                "link": run.get("html_url").and_then(|v| v.as_str()).unwrap_or(""),
+                "workflow": run.pointer("/check_suite/id").map(|v| v.to_string()).unwrap_or_default(),
+                "startedAt": run.get("started_at").and_then(|v| v.as_str()).unwrap_or(""),
+                "completedAt": run.get("completed_at").and_then(|v| v.as_str()).unwrap_or(""),
+            }));
+        }
+    }
+    if rows.is_empty() {
+        return Err("check-runs read named no checks".to_string());
+    }
+    Ok(Value::Array(rows))
+}
+
+/// A REST check-run's `status`/`conclusion` folded to the `gh pr checks`
+/// bucket vocabulary. An unrecognized conclusion buckets `fail` rather than
+/// `pass`: a bucket heal does not understand must never read green.
+fn rest_bucket(run: &Value) -> &'static str {
+    let status = run
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if status != "completed" {
+        return "pending";
+    }
+    match run
+        .get("conclusion")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
+        "success" => "pass",
+        "skipped" | "neutral" => "skipping",
+        "cancelled" => "cancel",
+        _ => "fail",
+    }
+}
+
+/// Classify every failing row of one PR.
+fn findings_for(a: &Args, pr: &str, head: &str) -> Result<Vec<Finding>, String> {
+    let checks = read_checks(a, head)?;
+    let inherited =
+        crate::loopcheck::main_head_failing_checks(&a.gh_bin, &a.cwd, 20).unwrap_or_default();
+    let mut out = Vec::new();
+    for row in failing_rows(&checks) {
+        let check = row["name"].as_str().unwrap_or("").to_string();
+        let workflow = row["workflow"].as_str().unwrap_or("").to_string();
+        let log = match job_id(row["link"].as_str().unwrap_or("")) {
+            Some(id) => gh_api(
+                a,
+                &format!("repos/{{owner}}/{{repo}}/actions/jobs/{id}/logs"),
+                &[],
+            )
+            // A log the API cannot serve (expired retention, a commit status
+            // with no job) is REPORTED as unreadable, never dropped: a check
+            // heal cannot read is still red.
+            .unwrap_or_else(|e| format!("log unavailable: {e}")),
+            None => "log unavailable: not an Actions job".to_string(),
+        };
+        let stripped = strip_timestamps(&log);
+        out.push(classify(
+            &Ctx {
+                check: &check,
+                workflow: &workflow,
+                log: &stripped,
+            },
+            inherited.iter().any(|n| n == &check),
+        ));
+    }
+    let _ = pr;
+    Ok(out)
+}
+
+/// Refuse unless this checkout is the PR's branch and its tree is clean.
+/// Both are named in one message: a caller who is on the wrong branch AND
+/// dirty should learn that in one run, not two.
+fn refuse_wrong_worktree(a: &Args, head_ref: &str) -> Option<String> {
+    let branch = run(
+        &a.git_bin,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        &a.cwd,
+        READ_TIMEOUT,
+    )
+    .map(|(_, out)| out.trim().to_string())
+    .unwrap_or_default();
+    let dirty = run(&a.git_bin, &["status", "--porcelain"], &a.cwd, READ_TIMEOUT)
+        .map(|(_, out)| !out.trim().is_empty())
+        .unwrap_or(true);
+    let mut reasons = Vec::new();
+    if branch != head_ref {
+        reasons.push(format!("on branch {branch}, the PR's head is {head_ref}"));
+    }
+    if dirty {
+        reasons.push("the worktree has uncommitted changes".to_string());
+    }
+    if reasons.is_empty() {
+        None
+    } else {
+        Some(reasons.join("; "))
+    }
+}
+
+/// Apply the auto remedies. Returns the signatures that were fixed and
+/// verified. A remedy whose verify stays red is demoted in place, so the run
+/// never commits a fix that did not work.
+fn apply_auto(a: &Args, findings: &mut [Finding]) -> Vec<String> {
+    let mut healed = Vec::new();
+    for f in findings.iter_mut() {
+        let Remedy::Auto { run: cmds, verify } = f.remedy.clone() else {
+            continue;
+        };
+        let mut failure: Option<String> = None;
+        for cmd in cmds.iter().chain(verify.iter()) {
+            let dir = a.cwd.join(&cmd.cwd);
+            let argv: Vec<&str> = cmd.argv.iter().map(|s| s.as_str()).collect();
+            let ok = run(argv[0], &argv[1..], &dir, REMEDY_TIMEOUT)
+                .map(|(ok, _)| ok)
+                .unwrap_or(false);
+            if !ok {
+                failure = Some(cmd.render());
+                break;
+            }
+        }
+        match failure {
+            None => healed.push(f.signature.to_string()),
+            Some(cmd) => {
+                f.remedy = Remedy::Escalate {
+                    repro: format!("the automatic fix did not succeed; run it by hand: {cmd}"),
+                }
+            }
+        }
+    }
+    healed
+}
+
+/// Append the missing closure trailers to the PR body. No commit and no push:
+/// the closure workflow re-fires on an `edited` event.
+fn apply_edit_body(a: &Args, pr: &str, body: &str, findings: &[Finding]) -> Result<bool, String> {
+    let mut lines: Vec<String> = Vec::new();
+    for f in findings {
+        let Remedy::EditBody { nodes } = &f.remedy else {
+            continue;
+        };
+        for node in nodes {
+            // The trailer is generated by the verb that checks the id against
+            // the graph. Pasting a candidate out of the refusal is the exact
+            // move that refusal warns against: a branch segment can match the
+            // id grammar without naming a real node.
+            let (ok, out) = run(
+                "fno",
+                &["do", "pr", "closure-trailer", node],
+                &a.cwd,
+                READ_TIMEOUT,
+            )?;
+            if !ok || out.trim().is_empty() {
+                return Err(format!("could not generate a closure trailer for {node}"));
+            }
+            lines.push(out.trim().to_string());
+        }
+    }
+    if lines.is_empty() {
+        return Ok(false);
+    }
+    let new_body = format!("{}\n\n{}\n", body.trim_end(), lines.join("\n"));
+    let path = a.cwd.join(".fno").join("heal-pr-body.md");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, &new_body).map_err(|e| format!("write body file: {e}"))?;
+    let (ok, _) = run(
+        &a.gh_bin,
+        &["pr", "edit", pr, "--body-file", &path.to_string_lossy()],
+        &a.cwd,
+        READ_TIMEOUT,
+    )?;
+    let _ = std::fs::remove_file(&path);
+    if ok {
+        Ok(true)
+    } else {
+        Err("gh pr edit refused the body".to_string())
+    }
+}
+
+/// Print the report and return the exit code the findings imply.
+fn report(findings: &[Finding], dry_run: bool) -> i32 {
+    if dry_run {
+        println!("dry run: nothing was changed, nothing was pushed");
+    }
+    for f in findings {
+        println!(
+            "{}  {}  {}  {}",
+            f.check,
+            f.signature,
+            f.action(),
+            f.detail()
+        );
+    }
+    let own: Vec<&Finding> = findings.iter().filter(|f| f.counts_against_pr()).collect();
+    if own.is_empty() {
+        return EXIT_CLEAN;
+    }
+    if own.iter().all(|f| matches!(f.remedy, Remedy::Auto { .. })) && !dry_run {
+        return EXIT_CLEAN;
+    }
+    if own
+        .iter()
+        .any(|f| matches!(f.remedy, Remedy::Escalate { .. }))
+    {
+        return EXIT_ESCALATIONS;
+    }
+    EXIT_ESCALATIONS
+}
+
+/// `fno-agents pr-heal <n> [--apply] [--all] [--playbook]`.
+pub fn run_heal(argv: &[String]) -> i32 {
+    let a = match parse_args(argv) {
+        Ok(a) => a,
+        Err(msg) => {
+            eprintln!("pr-heal: {msg}");
+            eprintln!("usage: pr-heal <pr> [--apply] [--all] [--playbook]");
+            return EXIT_READ_ERROR;
+        }
+    };
+    if a.playbook {
+        print!("{}", playbook());
+        return EXIT_CLEAN;
+    }
+    if a.all && a.apply {
+        eprintln!(
+            "pr-heal: --all is report-only. Applying needs the PR's own worktree, \
+             which is this process's cwd; run --apply from each PR's checkout."
+        );
+        return EXIT_READ_ERROR;
+    }
+    if a.all {
+        return run_all(&a);
+    }
+    let Some(pr) = a.pr.clone() else {
+        eprintln!("pr-heal: needs a PR number (or --all, or --playbook)");
+        return EXIT_READ_ERROR;
+    };
+    run_one(&a, &pr)
+}
+
+/// One heal per red open PR, report-only. Uses the REST listing for the same
+/// reason [`read_checks`] does: `gh pr list` is GraphQL and gets routed away.
+fn run_all(a: &Args) -> i32 {
+    let raw = match gh_api(
+        a,
+        "repos/{owner}/{repo}/pulls?state=open&per_page=50",
+        &["--paginate"],
+    ) {
+        Ok(raw) => raw,
+        Err(msg) => {
+            eprintln!("pr-heal: {msg}");
+            return EXIT_READ_ERROR;
+        }
+    };
+    let mut worst = EXIT_CLEAN;
+    for num in open_pr_numbers(&raw) {
+        println!("── PR {num}");
+        let code = run_one(a, &num);
+        if code != EXIT_CLEAN {
+            worst = code;
+        }
+    }
+    worst
+}
+
+/// The PR numbers in a (possibly paginated) REST pulls listing.
+pub(crate) fn open_pr_numbers(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for chunk in raw.split("][").collect::<Vec<_>>() {
+        let text = format!(
+            "{}{}{}",
+            if chunk.starts_with('[') { "" } else { "[" },
+            chunk,
+            if chunk.ends_with(']') { "" } else { "]" }
+        );
+        if let Ok(Value::Array(rows)) = serde_json::from_str::<Value>(&text) {
+            for row in rows {
+                if let Some(n) = row.get("number").and_then(|v| v.as_u64()) {
+                    out.push(n.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+fn run_one(a: &Args, pr: &str) -> i32 {
+    let (head, head_ref, body) = match read_pr(a, pr) {
+        Ok(v) => v,
+        Err(msg) => {
+            eprintln!("pr-heal: {msg}");
+            return if msg.contains("No such file") || msg.contains("NotFound") {
+                EXIT_NO_GH
+            } else {
+                EXIT_READ_ERROR
+            };
+        }
+    };
+    if a.apply {
+        if let Some(why) = refuse_wrong_worktree(a, &head_ref) {
+            eprintln!("pr-heal: refusing to apply: {why}");
+            return EXIT_CWD_REFUSAL;
+        }
+    }
+    let mut findings = match findings_for(a, pr, &head) {
+        Ok(f) => f,
+        Err(msg) => {
+            eprintln!("pr-heal: {msg}");
+            return EXIT_READ_ERROR;
+        }
+    };
+    if !a.apply {
+        return report(&findings, true);
+    }
+
+    let healed = apply_auto(a, &mut findings);
+    match apply_edit_body(a, pr, &body, &findings) {
+        Ok(_) => {}
+        Err(msg) => eprintln!("pr-heal: body edit skipped: {msg}"),
+    }
+
+    let mut committed = false;
+    if !healed.is_empty() {
+        let dirty = run(&a.git_bin, &["status", "--porcelain"], &a.cwd, READ_TIMEOUT)
+            .map(|(_, out)| !out.trim().is_empty())
+            .unwrap_or(false);
+        if dirty {
+            let msg = format!("style: heal {}", healed.join(", "));
+            let _ = run(&a.git_bin, &["add", "-u"], &a.cwd, READ_TIMEOUT);
+            let (ok, _) = run(&a.git_bin, &["commit", "-m", &msg], &a.cwd, READ_TIMEOUT)
+                .unwrap_or((false, String::new()));
+            committed = ok;
+        }
+    }
+
+    let code = report(&findings, false);
+    if !committed {
+        return code;
+    }
+    // Re-read BEFORE pushing. A push over a run in flight cancels it, and
+    // that is the harm this verb exists to stop repeating.
+    match read_checks(a, &head) {
+        Ok(checks) if any_pending(&checks) => {
+            println!(
+                "run in flight; commit kept local, not pushing; \
+                 rerun after fno do pr wait {pr}"
+            );
+            EXIT_IN_FLIGHT
+        }
+        Ok(_) => {
+            let (ok, _) =
+                run(&a.git_bin, &["push"], &a.cwd, READ_TIMEOUT).unwrap_or((false, String::new()));
+            if ok {
+                println!("pushed once");
+                code
+            } else {
+                eprintln!("pr-heal: the fix is committed but the push failed");
+                EXIT_READ_ERROR
+            }
+        }
+        Err(msg) => {
+            // Unreadable is not "settled". Holding the commit local is the
+            // safe half of the fork; pushing on an unanswered read is the one
+            // that cancels somebody's run.
+            println!("could not re-read checks ({msg}); commit kept local, not pushing");
+            EXIT_IN_FLIGHT
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::Path;
 
     /// A real `cargo fmt --check (pinned)` failure, timestamps and all.
     const FMT_LOG: &str = concat!(
@@ -712,5 +1252,247 @@ mod tests {
             Some("456".to_string())
         );
         assert_eq!(job_id("https://example.test/build/7"), None);
+    }
+
+    // ── the verb: push discipline ───────────────────────────────────────────
+    //
+    // Driven through stub `gh` and `git` executables rather than a real
+    // remote, so the two properties that matter (exactly one push, and never
+    // a push over a run in flight) are provable rather than argued.
+
+    fn write_exec(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p
+    }
+
+    /// A stub `gh` answering the four reads heal makes. `pending` decides
+    /// whether the SECOND check-runs read (the pre-push one) reports a run in
+    /// flight, which is how the in-flight guard is exercised.
+    fn stub_gh(dir: &Path, pending_on_second_read: bool) -> std::path::PathBuf {
+        let flip = if pending_on_second_read {
+            r#"if [ -f "$D/seen" ]; then B=in_progress; else touch "$D/seen"; fi"#
+        } else {
+            ""
+        };
+        write_exec(
+            dir,
+            "gh",
+            &format!(
+                r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "gh $*" >> "$D/gh.log"
+for a in "$@"; do case "$a" in
+  */pulls/*) echo '{{"head":{{"sha":"deadbeef","ref":"feature/x"}},"body":"b"}}'; exit 0 ;;
+  */check-runs) B=completed; {flip}
+     if [ "$B" = in_progress ]; then
+       echo '{{"check_runs":[{{"name":"cargo fmt --check (pinned)","status":"in_progress","conclusion":null,"html_url":"https://github.com/o/r/actions/runs/1/job/9"}}]}}'
+     else
+       echo '{{"check_runs":[{{"name":"cargo fmt --check (pinned)","status":"completed","conclusion":"failure","html_url":"https://github.com/o/r/actions/runs/1/job/9"}}]}}'
+     fi
+     exit 0 ;;
+  */logs) echo "Diff in /w/w/crates/fno-agents/src/x.rs:1:"; exit 0 ;;
+esac; done
+echo '[]'
+"#
+            ),
+        )
+    }
+
+    /// A stub `git` recording every invocation. `dirty` decides what
+    /// `status --porcelain` answers.
+    fn stub_git(dir: &Path, branch: &str, dirty: bool) -> std::path::PathBuf {
+        let porcelain = if dirty { "echo ' M src/x.rs'" } else { ":" };
+        write_exec(
+            dir,
+            "git",
+            &format!(
+                r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "git $*" >> "$D/git.log"
+case "$1 $2" in
+  "rev-parse --abbrev-ref") echo {branch}; exit 0 ;;
+  "status --porcelain") if [ -f "$D/fixed" ]; then echo ' M src/x.rs'; else {porcelain}; fi; exit 0 ;;
+esac
+exit 0
+"#
+            ),
+        )
+    }
+
+    /// A stub `cargo` on PATH that "fixes" the drift: the first run dirties
+    /// the tree, and the verify then passes. The crate directory is created
+    /// because a remedy runs IN it, and a missing cwd fails the spawn -- which
+    /// heal correctly reads as "the fix did not succeed".
+    fn stub_cargo(dir: &Path) {
+        std::fs::create_dir_all(dir.join("crates/fno-agents")).unwrap();
+        write_exec(
+            dir,
+            "cargo",
+            r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "cargo $*" >> "$D/cargo.log"
+for a in "$@"; do [ "$a" = "--check" ] && exit 0; done
+touch "$D/fixed"
+exit 0
+"#,
+        );
+    }
+
+    fn log_of(dir: &Path, name: &str) -> String {
+        std::fs::read_to_string(dir.join(name)).unwrap_or_default()
+    }
+
+    /// Remedies resolve their binary off PATH (`cargo`, `uv`), so a test that
+    /// exercises one has to put its stub there. PATH is process-wide, so the
+    /// tests that touch it hold this lock and restore what they found -- the
+    /// same shape the claims-root tests in `loopcheck` use.
+    static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `f` with `dir` first on PATH.
+    fn with_stub_path<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{previous}", dir.display()));
+        let out = f();
+        std::env::set_var("PATH", previous);
+        out
+    }
+
+    fn args_for(dir: &Path, extra: &[&str]) -> Vec<String> {
+        let mut v = vec![
+            "1".to_string(),
+            "--gh-bin".to_string(),
+            dir.join("gh").to_string_lossy().into_owned(),
+            "--git-bin".to_string(),
+            dir.join("git").to_string_lossy().into_owned(),
+            "--cwd".to_string(),
+            dir.to_string_lossy().into_owned(),
+        ];
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    }
+
+    #[test]
+    fn a_dry_run_touches_nothing_and_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh(d, false);
+        stub_git(d, "feature/x", false);
+        stub_cargo(d);
+        let code = run_heal(&args_for(d, &[]));
+        assert_eq!(code, EXIT_ESCALATIONS.max(EXIT_CLEAN), "dry run reports");
+        assert_eq!(log_of(d, "cargo.log"), "", "no remedy ran");
+        assert!(!log_of(d, "git.log").contains("push"), "no push");
+    }
+
+    #[test]
+    fn a_dirty_worktree_refuses_before_any_remedy_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh(d, false);
+        stub_git(d, "feature/x", true);
+        stub_cargo(d);
+        let code = run_heal(&args_for(d, &["--apply"]));
+        assert_eq!(code, EXIT_CWD_REFUSAL);
+        assert_eq!(log_of(d, "cargo.log"), "", "no remedy ran");
+        assert!(!log_of(d, "git.log").contains("push"));
+    }
+
+    #[test]
+    fn the_wrong_branch_refuses_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh(d, false);
+        stub_git(d, "main", false);
+        stub_cargo(d);
+        assert_eq!(run_heal(&args_for(d, &["--apply"])), EXIT_CWD_REFUSAL);
+        assert_eq!(log_of(d, "cargo.log"), "");
+    }
+
+    #[test]
+    fn apply_commits_once_and_pushes_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh(d, false);
+        stub_git(d, "feature/x", false);
+        stub_cargo(d);
+        with_stub_path(d, || run_heal(&args_for(d, &["--apply"])));
+        let git = log_of(d, "git.log");
+        assert_eq!(git.matches("git commit").count(), 1, "{git}");
+        assert_eq!(git.matches("git push").count(), 1, "{git}");
+    }
+
+    #[test]
+    fn a_run_in_flight_keeps_the_commit_local_and_never_pushes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        // The pre-push re-read reports a check still running.
+        stub_gh(d, true);
+        stub_git(d, "feature/x", false);
+        stub_cargo(d);
+        let code = with_stub_path(d, || run_heal(&args_for(d, &["--apply"])));
+        assert_eq!(code, EXIT_IN_FLIGHT);
+        let git = log_of(d, "git.log");
+        assert_eq!(git.matches("git commit").count(), 1, "the fix is kept");
+        assert!(!git.contains("git push"), "but never pushed: {git}");
+    }
+
+    #[test]
+    fn all_refuses_to_apply_because_applying_needs_the_prs_own_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh(d, false);
+        stub_git(d, "feature/x", false);
+        stub_cargo(d);
+        let code = run_heal(&args_for(d, &["--all", "--apply"]));
+        assert_eq!(code, EXIT_READ_ERROR);
+        assert_eq!(log_of(d, "cargo.log"), "");
+    }
+
+    #[test]
+    fn playbook_exits_clean_without_reading_anything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh(d, false);
+        stub_git(d, "feature/x", false);
+        assert_eq!(run_heal(&args_for(d, &["--playbook"])), EXIT_CLEAN);
+        assert_eq!(log_of(d, "gh.log"), "", "no read");
+    }
+
+    #[test]
+    fn an_unknown_flag_is_refused_rather_than_ignored() {
+        assert_eq!(run_heal(&["--nope".to_string()]), EXIT_READ_ERROR);
+    }
+
+    #[test]
+    fn open_pr_numbers_reads_one_page_and_several() {
+        assert_eq!(
+            open_pr_numbers(r#"[{"number":7},{"number":9}]"#),
+            vec!["7", "9"]
+        );
+        assert_eq!(
+            open_pr_numbers(r#"[{"number":7}][{"number":9}]"#),
+            vec!["7", "9"]
+        );
+    }
+
+    #[test]
+    fn a_rest_conclusion_heal_does_not_know_buckets_fail_never_pass() {
+        let unknown = json!({"status": "completed", "conclusion": "action_required"});
+        assert_eq!(rest_bucket(&unknown), "fail");
+        assert_eq!(
+            rest_bucket(&json!({"status": "completed", "conclusion": "success"})),
+            "pass"
+        );
+        assert_eq!(
+            rest_bucket(&json!({"status": "queued", "conclusion": null})),
+            "pending"
+        );
     }
 }
