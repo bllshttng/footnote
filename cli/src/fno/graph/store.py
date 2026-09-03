@@ -580,9 +580,8 @@ def apply_readiness_overlay_via_store(entries: list[dict]) -> list[dict]:
 
 def settle_blocked_by_edges_via_store(entries: list[dict]) -> dict:
     """The blocked_by edge settlement (graph_store.rs
-    ``settle_blocked_by_edges``), answered by the ported store. Returns the
-    rewritten entries, one receipt per settled edge, and the per-node new
-    ``blocked_by`` lists; the caller persists under the graph lock."""
+    ``settle_blocked_by_edges``): rewritten entries, one receipt per settled
+    edge, and the per-node new ``blocked_by`` lists."""
     result = _client_for(GRAPH_JSON).request("settle_edges", {"entries": entries})
     return {
         "entries": result["entries"],

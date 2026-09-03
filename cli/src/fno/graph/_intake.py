@@ -429,9 +429,8 @@ def make_selection_sort_key(
     # times and this answer does not change while it does.
     child_progress_epics = _epics_with_child_progress(id_to_entry)
     # Fan-out: how many OPEN nodes wait on each id (x-e451). Within a band the
-    # node more work hangs on goes first; it sits AFTER the priority terms
-    # because priority is a decision and fan-out is a measurement - a p2 that
-    # blocks three nodes must not jump a p1 that blocks none.
+    # node more work hangs on goes first, AFTER the priority terms: a decision
+    # outranks a measurement (a p2 blocking three must not jump a p1 blocking none).
     dependents: dict[str, int] = {}
     for e in entries:
         if not isinstance(e, dict) or not node_is_open(e):
@@ -441,7 +440,6 @@ def make_selection_sort_key(
                 dependents[bid] = dependents.get(bid, 0) + 1
 
     def _fanout(node_id: object) -> int:
-        # Negated: more dependents sorts EARLIER. Junk ids fan out as zero.
         return -dependents.get(node_id, 0) if isinstance(node_id, str) else 0
     # Board == work order: `next` must demote orphans exactly where the board
     # does, or the board shows one order and the walker works another. Computed

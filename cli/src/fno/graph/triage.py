@@ -1698,8 +1698,10 @@ def cmd_health(
         dnm = {"violations": [], "unknown": [], "checked": 0, "window_days": 0}
 
     # Supersessions nothing can ever settle (x-e451): the successor merged but
-    # the declared surfaces were not all in its PR, so the sweep re-reports
-    # the row every run and the only moves are unsupersede or done.
+    # the declared surfaces were not all in its PR, so the sweep re-reports the
+    # row every run and the only moves are unsupersede or done. A done
+    # predecessor reads as accepted: `fno backlog done` never stamps the
+    # record, so without the completed_at skip the row outlives its remedy.
     _health_idx = {
         e.get("id"): e for e in all_entries
         if isinstance(e, dict) and isinstance(e.get("id"), str)
@@ -1707,12 +1709,7 @@ def cmd_health(
     supersession_unverified: list[dict] = []
     for e in entries:
         record = e.get("supersession")
-        if not isinstance(record, dict) or record.get("verified_at"):
-            continue
-        if e.get("completed_at"):
-            # The predecessor is done: the operator accepted the successor's
-            # coverage by closing it (`fno backlog done <id>`), which never
-            # stamps the record. Accepted is settled; the row is noise.
+        if not isinstance(record, dict) or record.get("verified_at") or e.get("completed_at"):
             continue
         successor = _health_idx.get(e.get("superseded_by"))
         if (
@@ -1721,34 +1718,32 @@ def cmd_health(
             or not isinstance(successor.get("pr_number"), int)
         ):
             continue
-        matched = record.get("matched_surfaces") or []
         supersession_unverified.append({
             "predecessor": e.get("id"),
             "successor": e.get("superseded_by"),
             "evidence_pr": successor.get("pr_number"),
             "uncovered_surfaces": [
-                s for s in (record.get("surfaces") or []) if s not in matched
+                s for s in (record.get("surfaces") or [])
+                if s not in (record.get("matched_surfaces") or [])
             ],
         })
 
     # Edges the sweep holds open (x-e451): a deferred blocker is a human
-    # decision, a missing one is data loss - both named, neither erased.
+    # decision, a missing one is data loss - both named, neither erased. The
+    # readiness kind comes from the read overlay, the one Rust answers.
     blocked_by_held: list[dict] = []
     for e in entries:
         kind, _, blocker_id = (e.get("blocked_reason") or "").partition(":")
         if kind not in ("blocked-by-deferred", "unknown-dep") or not blocker_id:
             continue
         blocker = _health_idx.get(blocker_id) or {}
-        if blocker:
-            blocker_status = blocker.get("status") or (
-                "done" if blocker.get("completed_at") else "open"
-            )
-        else:
-            blocker_status = "missing"
         blocked_by_held.append({
             "node": e.get("id"),
             "blocker": blocker_id,
-            "blocker_status": blocker_status,
+            "blocker_status": (
+                blocker.get("status") or ("done" if blocker.get("completed_at") else "open")
+                if blocker else "missing"
+            ),
         })
 
     report = {
