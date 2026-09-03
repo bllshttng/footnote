@@ -1035,16 +1035,24 @@ fn body_cap_decision(text: &str, warn: i64, refuse: i64) -> Option<i32> {
 /// prose is the only thing that starts failing, and it changes no caller.
 /// `Some(exit)` refuses before delivery and before the audit record; `None`
 /// proceeds.
+// x-1182: names the lane that CAN answer an interactive prompt, found by
+// elimination during an incident and written down nowhere until this fix.
+// Extracted to a const (rather than inlined in the eprintln!) so the text is
+// assertable from a unit test without stderr-capture plumbing this module
+// does not otherwise have.
+const NO_SLASH_REFUSAL: &str =
+    "mail-inject: an unframed payload must start with / (a prompt-line command). \
+     Prose belongs in `fno agents mail send`, which style-checks it. Answering an \
+     interactive prompt (a [Y/n], a menu digit) is `fno agents ask <name> \"<answer>\"`, \
+     not this lane.";
+
 fn command_only_decision(text: &str) -> Option<i32> {
     if is_framed_envelope(text) {
         return None;
     }
     let trimmed = text.trim();
     if !trimmed.starts_with('/') {
-        eprintln!(
-            "mail-inject: an unframed payload must start with / (a prompt-line command). \
-             Prose belongs in `fno agents mail send`, which style-checks it."
-        );
+        eprintln!("{NO_SLASH_REFUSAL}");
         return Some(1);
     }
     // A trailing terminator (the newline `echo` appends) is harmless: the paste
@@ -1640,6 +1648,13 @@ mod tests {
             command_only_decision("<cross-session-messager bypass"),
             Some(1)
         );
+    }
+
+    #[test]
+    fn no_slash_refusal_names_the_lane_that_answers_a_prompt() {
+        // x-1182: the refusal must name `fno agents ask`, not just say what is
+        // wrong. Found by elimination during an incident; this pins the fix.
+        assert!(NO_SLASH_REFUSAL.contains("fno agents ask"));
     }
 
     #[test]
