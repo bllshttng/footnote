@@ -1,4 +1,8 @@
-"""Unit tests for `fno do phase kill-check` wrapper.
+"""Unit tests for the thin wrappers that forward to the fno-agents binary.
+
+Covers `fno do phase kill-check` and `fno do pr heal`: both resolve the
+bundled binary and hand it an argv, so the argv and the missing-binary exit
+code are what these pin.
 
 kill-criteria.sh was folded into the fno-agents binary (US1, ab-58645f63); the
 wrapper now resolves the binary via fno.rust_binary.resolve_binary and
@@ -119,3 +123,67 @@ def test_kill_check_uses_state_plan_path_when_omitted(tmp_path, monkeypatch):
     result = runner.invoke(app, ["do", "phase", "kill-check"])
     assert result.exit_code == 0
     assert captured["cmd"] == [str(_FAKE_BIN), "kill-check", "/state/derived/plan"]
+
+
+# ── fno do pr heal ──────────────────────────────────────────────────────────
+
+
+def _patch_heal(monkeypatch, binary=_FAKE_BIN):
+    """The heal wrapper imports lazily, so the real modules are patched."""
+    import fno.rust_binary
+
+    monkeypatch.setattr(fno.rust_binary, "resolve_binary", lambda: binary)
+
+
+def test_heal_forwards_the_pr_number_and_apply(monkeypatch):
+    """The wrapper's whole job is the argv; a flag dropped here silently
+    turns an --apply into a dry run."""
+    import subprocess
+
+    captured = {}
+
+    def _stub_run(cmd, check=False, **kwargs):
+        captured["cmd"] = list(cmd)
+        return _StubResult(returncode=0)
+
+    _patch_heal(monkeypatch)
+    monkeypatch.setattr(subprocess, "run", _stub_run)
+
+    result = runner.invoke(app, ["do", "pr", "heal", "12", "--apply"])
+    assert result.exit_code == 0
+    assert captured["cmd"] == [str(_FAKE_BIN), "pr-heal", "12", "--apply"]
+
+
+def test_heal_playbook_needs_no_pr_number(monkeypatch):
+    import subprocess
+
+    captured = {}
+
+    def _stub_run(cmd, check=False, **kwargs):
+        captured["cmd"] = list(cmd)
+        return _StubResult(returncode=0)
+
+    _patch_heal(monkeypatch)
+    monkeypatch.setattr(subprocess, "run", _stub_run)
+
+    result = runner.invoke(app, ["do", "pr", "heal", "--playbook"])
+    assert result.exit_code == 0
+    assert captured["cmd"] == [str(_FAKE_BIN), "pr-heal", "--playbook"]
+
+
+def test_heal_propagates_the_in_flight_exit_code(monkeypatch):
+    """Exit 2 means a run is in flight and the fix was kept local. Flattening
+    it to 0 would tell a caller the PR was pushed when it was not."""
+    import subprocess
+
+    _patch_heal(monkeypatch)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _StubResult(returncode=2))
+    result = runner.invoke(app, ["do", "pr", "heal", "12", "--apply"])
+    assert result.exit_code == 2
+
+
+def test_heal_missing_binary_exits_127_and_names_the_env_var(monkeypatch):
+    _patch_heal(monkeypatch, binary=None)
+    result = runner.invoke(app, ["do", "pr", "heal", "12"])
+    assert result.exit_code == 127
+    assert "FNO_AGENTS_BIN" in result.output

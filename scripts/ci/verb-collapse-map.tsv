@@ -285,6 +285,7 @@ do pr evidence-check	T1	do pr evidence-check	1
 do pr evidence-required	T1	do pr evidence-required	1
 do pr global-receipt-events-path	T1	do pr global-receipt-events-path	0
 do pr graphql-exec	T1	do pr graphql-exec	1
+do pr heal	T1	do pr heal	2	
 do pr hold-check	T1	do pr hold-check	0
 do pr info	T1	do pr info	10
 do pr list	T1	do pr list	3
@@ -461,6 +462,7 @@ pr evidence-check	T1	pr evidence-check	1
 pr evidence-required	T1	pr evidence-required	1
 pr global-receipt-events-path	T1	pr global-receipt-events-path	0
 pr graphql-exec	T1	pr graphql-exec	1
+pr heal	T1	pr heal	2	
 pr hold-check	T1	pr hold-check	0
 pr info	T1	pr info	10
 pr list	T1	pr list	3

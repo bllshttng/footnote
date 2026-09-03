@@ -84,7 +84,7 @@ def test_map_covers_current_surface_once():
     # The store-port branch adds `backlog render-views`, the hidden verb a
     # landed native store write detaches to replay the Python-owned views:
     # 554 -> 555.
-    assert len(mapped) == 555, (
+    assert len(mapped) == 557, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

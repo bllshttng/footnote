@@ -3864,7 +3864,7 @@ fn is_pre_existing_main_red(pr_failing: &[String], main_failing: &[String]) -> b
 /// headSha returns `None` (unknown -> the caller holds as today). A clean read
 /// with no failures on HEAD returns `Some(empty)` -> the subset rule then fails
 /// and the caller holds; only positive proof fires the terminal.
-fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<String>> {
+pub(crate) fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<String>> {
     let limit = n.to_string();
     let list_out = match bounded_read(
         gh_bin.as_ref(),
@@ -11626,10 +11626,10 @@ const BOUNDED_STDERR_TAIL_CAP: usize = 2000;
 /// and a capped stderr tail. Parsers read `stdout`; the status and tail exist
 /// so a non-zero exit or a failing child can be NAMED at the call site rather
 /// than collapsed into "the read failed".
-struct BoundedOutput {
-    status: std::process::ExitStatus,
-    stdout: Vec<u8>,
-    stderr_tail: Vec<u8>,
+pub(crate) struct BoundedOutput {
+    pub(crate) status: std::process::ExitStatus,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr_tail: Vec<u8>,
 }
 
 /// Outcome of a bounded, killable child run: the whole point is that a hang
@@ -11868,7 +11868,7 @@ enum ReadErrorKind {
 /// through every stop-gate reader so the render sites classify instead of
 /// guessing from a detail string.
 #[derive(Clone)]
-struct GhReadError {
+pub(crate) struct GhReadError {
     read: String,
     kind: ReadErrorKind,
     stderr_tail: String,
@@ -11954,7 +11954,7 @@ impl GhReadError {
     }
 }
 
-fn bounded_read_diagnostic(context: &str, error: &GhReadError) -> String {
+pub(crate) fn bounded_read_diagnostic(context: &str, error: &GhReadError) -> String {
     let elapsed = error
         .elapsed
         .map(|duration| format!("{:.1}", duration.as_secs_f64()))
@@ -11978,7 +11978,7 @@ fn log_bounded_read_error(context: &str, error: &GhReadError) {
 /// failure. The completed payload carries the exit status, stdout, and the
 /// pre-capped stderr tail; policy (fail-closed, fail-open, degrade) stays at
 /// the typed call site.
-fn bounded_read(
+pub(crate) fn bounded_read(
     bin: &OsStr,
     args: &[&str],
     cwd: &Path,
