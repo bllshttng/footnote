@@ -242,7 +242,7 @@ All events land in BOTH `<cwd>/.fno/events.jsonl` AND `~/.fno/events.jsonl` with
 
 Legacy manifests (those with a `status:` key written by the pre-wedge init) are recognized and handled in allow-exit mode. The `loop_check_legacy_manifest` event is emitted for observability. No automatic migration occurs.
 
-## The king board's budget, and the dispatch census (x-f8e3)
+## The king board's budget, and the dispatch census
 
 Two measured facts shaped this, both from 2026-09-02 on the reference machine. First, the board was unreadable. `read_king_board` wrapped the whole board in a 30s kill. The Python board handed each of its 13 subprocess reads a 60s budget of its own. That is twice the outer bound, so no inner timeout ever fired. Thirteen interpreter startups cost about 41s against a 30s ceiling, and ~0.25s of that was query time. Second, the same load killed the dispatch channel. A `fno agents mail send` killed at 180s wrote nothing. Its durable bus row came only after a 70.37s `resolve_or_suggest` and a missed inject ladder.
 

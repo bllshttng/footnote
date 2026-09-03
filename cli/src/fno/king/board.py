@@ -38,7 +38,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fno import paths
 from fno.agents.reachability import _ACTIVE_STATES as ACTIVE_STATES
@@ -906,18 +906,21 @@ def collect_inputs(*, budget_ms: int, max_pr_reads: int = 20) -> BoardInputs:
     s = start("agents claim list")
     claims = safe(_read_claims) if s is not None else SourceRead(error=spent_error())
 
+    warnings: list[str] = []
     s = start(SRC_PRS)
     if s is None:
-        prs, warnings = SourceRead(error=spent_error()), []
+        prs = SourceRead(error=spent_error())
     else:
         try:
             prs, warnings = _read_prs(s, max_pr_reads)
         except Exception as exc:  # noqa: BLE001 - one unreadable queue, not a dead board
             prs, warnings = SourceRead(error=f"{type(exc).__name__}: {exc}"), []
 
+    holders: set[str] = set()
+    claimed_warnings: list[str] = []
     s = start("stalled_holder lookups")
     if s is None:
-        claimed_nodes, holders, claimed_warnings = SourceRead(error=spent_error()), set(), []
+        claimed_nodes = SourceRead(error=spent_error())
     else:
         try:
             claimed_nodes, holders, claimed_warnings = _read_claimed_nodes(claims)

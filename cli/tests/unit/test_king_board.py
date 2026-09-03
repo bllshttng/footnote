@@ -345,7 +345,7 @@ def test_collect_observer_unwraps_receipt_rows(monkeypatch):
     from fno.king import board as board_mod
 
     node = _node("x-receipt")
-    # The read is in process now (x-f8e3): patch the function the verb wraps,
+    # The read is in process now: patch the function the verb wraps,
     # not a subprocess boundary.
     monkeypatch.setattr(
         "fno.backlog.undispatched.read_planned_unclaimed",

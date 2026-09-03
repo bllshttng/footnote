@@ -1,4 +1,4 @@
-//! The telemetry trap the dispatch census exists to close (x-f8e3 change 5).
+//! The telemetry trap the dispatch census exists to close.
 //!
 //! A green board read is not evidence the loop works: the 70-second board run
 //! also returned a valid 48KB payload and was still killed. And iteration 1

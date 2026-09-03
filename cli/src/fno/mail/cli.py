@@ -50,7 +50,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import TYPE_CHECKING, Optional, TypedDict
 
 import typer
 
@@ -903,9 +903,9 @@ def _reply_to_name_handle(
     replies back to and that drain-self scans, NOT a project name."""
     from fno.agents import discover as discover_mod
 
-    # Deliberately NO durable-first write on this lane (x-f8e3): `target` came
+    # Deliberately NO durable-first write on this lane: `target` came
     # off a stored record, and a stored handle may be the retired last-eight
-    # form, which resolution MIGRATES to the bare id (PR #491). Writing before
+    # form, which resolution MIGRATES to the bare id . Writing before
     # resolution would strand the row at a retired address, so the reply lane
     # keeps the write after resolution and accepts its narrower window.
     # `sender_session` is deliberately NOT consulted here. It is validated
@@ -2226,10 +2226,14 @@ def _row_hosts_keeper_thread(session_id: str) -> bool:
     return "mux/threads/" in sock
 
 
+if TYPE_CHECKING:
+    from fno.inbox.store import ThreadHandle
+
+
 @dataclasses.dataclass
 class _DurableFirst:
     """Everything a name-lane send mints before its live ladder, plus the
-    durable row written BEFORE resolution (x-f8e3).
+    durable row written BEFORE resolution.
 
     Resolution (`resolve_or_suggest`) measured 70.37s at load 7.08 on this
     machine, and it runs before `_name_lane_send` is even entered - so every
@@ -2246,11 +2250,11 @@ class _DurableFirst:
     sender: str
     sender_session: Optional[str]
     sender_harness: Optional[str]
-    sender_model: Optional[str]
+    sender_model: str
     wrapped: str
     reservation: object
     authored_words: int
-    thread: object  # fno.inbox.store.ThreadHandle
+    thread: "ThreadHandle"
 
 
 def _durable_first_send(
@@ -2308,7 +2312,7 @@ def _durable_first_send(
     sender_session = _reply_session_for(from_name)
     # The wire `to` carries the normalized address - the same string the
     # durable row is addressed by, so row and envelope agree without waiting
-    # on resolution (x-f8e3).
+    # on resolution.
     wrapped = wrap_fno_mail(
         message,
         from_=sender,
@@ -2572,6 +2576,7 @@ def _name_lane_send(
             from_session=sender_session,
             origin=origin,
         )
+    assert recipient is not None  # every routing branch above resolves the address
 
     # --force (node x-3a64): change the TRANSPORT, keep every mail semantic. The
     # branch sits here, after the envelope and the msg-id, and before the live
@@ -2863,7 +2868,7 @@ def _name_lane_send(
     bus_only = live_reason == BUS_ONLY_POLICY
     if pre is not None:
         # The durable row already exists - it was written BEFORE resolution
-        # (x-f8e3), so a kill in the resolution window or mid-ladder still
+        #, so a kill in the resolution window or mid-ladder still
         # leaves it. A live miss lands exactly here: this row IS the durable
         # floor, and writing a second would double-deliver.
         th = pre.thread

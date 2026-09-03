@@ -536,7 +536,7 @@ def test_cell5_no_wake_is_attempted_for_an_unknown_token(
 
 
 # ---------------------------------------------------------------------------
-# Cell 6a / 6b: the retired-handle discriminator (PR #491).
+# Cell 6a / 6b: the retired-handle discriminator .
 # Caller-error refuses; data-artifact migrates. The two directions never blur.
 # ---------------------------------------------------------------------------
 
@@ -1019,7 +1019,7 @@ def test_exactly_one_receipt_line_per_send(
 
     rows = [m for m in iter_messages() if m.from_ == "web"]
     if expected == "queued (durable)":
-        # One durable row, written before the rungs (x-f8e3); the miss reuses
+        # One durable row, written before the rungs; the miss reuses
         # it, so there is still exactly one row per send.
         assert len(rows) == 1
         assert rows[0].delivery is None

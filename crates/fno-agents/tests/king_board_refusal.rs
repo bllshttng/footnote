@@ -1,4 +1,4 @@
-//! The king board's budget flows inward, and every refusal names a source (x-f8e3).
+//! The king board's budget flows inward, and every refusal names a source.
 //!
 //! The caller hands the board its own whole-board budget (`--budget-ms`), the
 //! board self-enforces and returns a payload naming what it could not read,

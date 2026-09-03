@@ -122,7 +122,7 @@ class Envelope:
     # through the legacy meta fallback and renders with the peer trailer.
     origin: Optional[str] = None
     # Confirmed-delivery timestamp, set on the audit record a send appends
-    # AFTER a live lane confirmed (x-f8e3). Additive: pre-existing lines parse
+    # AFTER a live lane confirmed. Additive: pre-existing lines parse
     # with it None. It is what lets the durable-first row and its later
     # delivery record share one msg_id while readers suppress the deliverable
     # twin - a confirmed hosted delivery must not also surface as an unread
@@ -542,7 +542,7 @@ def record_typed_delivery(
     the mapping, ``fno agents mail sent`` shows the message and names the transport, and
     a payload that lands in a pane and is never consumed becomes traceable to a
     pane a reader can go read. ``delivered_at`` suppresses the durable-first
-    twin row the same way a hosted record does (x-f8e3).
+    twin row the same way a hosted record does.
     """
     env = Envelope.new(
         id=msg_id,

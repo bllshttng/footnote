@@ -59,7 +59,7 @@ const JOURNAL_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct ProjectJournalPath(pub PathBuf);
 
 /// One health read of `loop_unit_dispatched`: how many rows carry a fixture
-/// title and how many name a real crown scope (x-f8e3).
+/// title and how many name a real crown scope.
 ///
 /// Measured 2026-09-02 across both journals on the reference machine: 757
 /// rows, 756 of them fixture-titled, exactly one real (`king reign over fno`,

@@ -166,7 +166,7 @@ def scan_unread(
     retracted = withdrawn_ids(msgs)
     # A durable-first row whose msg_id also carries a confirmed-delivery record
     # (delivered_at) was already handed to a live lane: surfacing the durable
-    # twin would deliver the message a second time (x-f8e3). The log is
+    # twin would deliver the message a second time. The log is
     # append-only, so the suppression can only ride the later record's id. The
     # cursor is never advanced on the recipient's behalf - it is positional,
     # and moving it would silently skip anything queued behind this message.
