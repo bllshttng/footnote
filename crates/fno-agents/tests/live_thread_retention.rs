@@ -54,6 +54,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
     evidence.add_live_pair(harness, session_id);
     assert_eq!(evidence.verdict(&member), MemberLiveness::Live);
     let sideline = AgentRow {
+        portal: None,
         harness: None,
         model: None,
         route: None,
