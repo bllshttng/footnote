@@ -1924,46 +1924,6 @@ def _run_mux(
         ) from exc
 
 
-def place_thread_portal(
-    name: str,
-    portal: int,
-    *,
-    workspace: Optional[str] = None,
-    split: Optional[str] = None,
-    at: Optional[str] = None,
-    tab: Optional[str] = None,
-    runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
-) -> str:
-    """Open portal ``portal`` showing ``name`` through the one door that
-    creates a portal - the ``fno mux thread`` reach - carrying the placement
-    the caller named (x-9b60). One call, one door: this sends the same
-    ThreadPane verb a second manual command would, so no parallel portal
-    path exists to drift.
-
-    Returns the landing notice. Raises DispatchAskError on any refusal; the
-    worker itself is already live, so the caller reports this failure AFTER
-    its spawn receipt, never instead of it.
-    """
-    args = ["mux", "thread", name, "--portal", str(int(portal))]
-    if workspace:
-        args += ["--workspace", workspace]
-    if split:
-        args += ["--split", split]
-    if at:
-        args += ["--at", at]
-    if tab:
-        args += ["--tab", tab]
-    proc = _run_mux(args, runner)
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "no output").strip()
-        raise DispatchAskError(
-            f"portal {portal} placement failed: {detail} (the worker is "
-            f"live; place it with 'fno mux thread {name} --portal {portal}')",
-            exit_code=1,
-        )
-    return (proc.stdout or "").strip()
-
-
 def _pane_group_max() -> int:
     try:
         from fno.config import load_settings

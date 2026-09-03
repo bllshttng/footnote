@@ -1858,85 +1858,24 @@ def cmd_spawn(
             )
             raise typer.Exit(code=2)
 
-    # x-3e38 pane placement: squad/split name mux geometry, which only the
-    # pane substrate has. bg/headless have no pane tree, so the controls are
-    # refused fail-closed before any spawn (mirrors the tier-3 guard shape above).
-    placement_requested = (
-        bounded_placement
-        or squad is not None
-        or split is not None
-        or at is not None
-        or tab is not None
+    # x-3e38 pane placement, portal lane x-9b60: the contract lives beside the
+    # placement vocabulary it judges (spawn_defaults.placement_refusal); this
+    # seam only prints the named refusal and exits.
+    from fno.agents.spawn_defaults import placement_refusal
+
+    refusal = placement_refusal(
+        substrate=substrate,
+        once=once,
+        squad=squad,
+        split=split,
+        at=at,
+        tab=tab,
+        portal=portal,
+        bounded_placement=bounded_placement,
     )
-    if squad is not None and not squad.strip():
-        print("--workspace/-s needs a nonblank workspace name", file=sys.stderr)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
         raise typer.Exit(code=2)
-    # x-9b60 portal placement: a portal is the pane a thread hosts, so the
-    # placement flags become legal for a thread WHEN --portal names it, and
-    # stay refused for a bare thread where they would still mean nothing.
-    if portal is not None and not 0 <= portal <= 255:
-        print("--portal takes an index 0-255", file=sys.stderr)
-        raise typer.Exit(code=2)
-    if portal is not None and (substrate != "bg" or once):
-        print(
-            "--portal applies only to --substrate thread; a pane hosts its "
-            "own geometry and headless hosts no session at all",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if bounded_placement and portal is not None:
-        print(
-            "--bounded-placement selects its own tab for a pane and cannot "
-            "combine with --portal",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if placement_requested and substrate == "bg" and portal is None:
-        # AC8-EDGE: a placement with nothing to place. Name the missing
-        # piece; never silently ignore the flag.
-        print(
-            "--workspace/-s, --split/-x, --at, and --tab on --substrate "
-            "thread need --portal N: a thread hosts no pane until a portal "
-            "opens one, so the placement has nothing to place",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if placement_requested and portal is None and (substrate != "pane" or once):
-        print(
-            "--workspace/-s, --split/-x, --at, and --tab apply only to --substrate pane "
-            "(bg/headless have no pane geometry)",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if split is not None and split not in ("left", "right", "up", "down"):
-        print(
-            f"--split/-x must be left, right, up, or down (got {split!r})",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if tab is not None and not tab.strip():
-        print("--tab needs a nonblank selector or pane-group name", file=sys.stderr)
-        raise typer.Exit(code=2)
-    if bounded_placement and any(value is not None for value in (split, at, tab)):
-        print(
-            "--bounded-placement selects its own stable tab and cannot be combined "
-            "with --split, --at, or --tab",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if at is not None:
-        # `--at current` is the exact-anchor spelling: the mux CLI resolves the
-        # calling pane from FNO_PANE and sets the strict (Refuse) policy, so the
-        # spawn always carries the placement receipt and the readiness gate. A
-        # numeric anchor is a low-level `mux pane run` concern (it keeps the
-        # legacy new-tab fallback) and is intentionally not exposed here, where
-        # every `--at` value implies the exact-placement contract.
-        if at != "current":
-            print("--at must be `current` (the exact-anchor spelling)", file=sys.stderr)
-            raise typer.Exit(code=2)
-        if split is None:
-            print("--at requires --split (the side to place on)", file=sys.stderr)
-            raise typer.Exit(code=2)
 
     # --crown/-k <scope>... : the operator names the TERRITORY and the ladder
     # altitude is derived from it (crown.derive_crown_level). The grantor is
@@ -2930,7 +2869,7 @@ def cmd_spawn(
         # `fno mux thread` reach), carrying the placement flags. After the
         # receipt flush so line-parsing consumers never wait on it.
         if substrate == "bg" and portal is not None:
-            from fno.agents.mux_spawn import place_thread_portal
+            from fno.agents.thread_portal import place_thread_portal
 
             try:
                 landing = place_thread_portal(

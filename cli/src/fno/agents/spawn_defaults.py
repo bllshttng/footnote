@@ -161,6 +161,82 @@ _SLUG_NOUN = (
 )
 
 
+def placement_refusal(
+    *,
+    substrate: str,
+    once: bool,
+    squad: Optional[str],
+    split: Optional[str],
+    at: Optional[str],
+    tab: Optional[str],
+    portal: Optional[int],
+    bounded_placement: bool,
+) -> Optional[str]:
+    """The pane/portal placement contract (x-3e38; portal lane x-9b60) as one
+    named refusal, or None when the combination is legal. Lives beside the
+    placement vocabulary it judges; cmd_spawn only prints and exits.
+
+    squad/split name mux geometry, which the pane substrate owns. A portal
+    is the pane a thread hosts, so the placement flags become legal for a
+    thread WHEN --portal names it, and stay refused for a bare thread where
+    they would still mean nothing."""
+    placement_requested = (
+        bounded_placement
+        or squad is not None
+        or split is not None
+        or at is not None
+        or tab is not None
+    )
+    if squad is not None and not squad.strip():
+        return "--workspace/-s needs a nonblank workspace name"
+    if portal is not None and not 0 <= portal <= 255:
+        return "--portal takes an index 0-255"
+    if portal is not None and (substrate != "bg" or once):
+        return (
+            "--portal applies only to --substrate thread; a pane hosts its "
+            "own geometry and headless hosts no session at all"
+        )
+    if bounded_placement and portal is not None:
+        return (
+            "--bounded-placement selects its own tab for a pane and cannot "
+            "combine with --portal"
+        )
+    if placement_requested and substrate == "bg" and portal is None:
+        # AC8-EDGE: a placement with nothing to place. Name the missing
+        # piece; never silently ignore the flag.
+        return (
+            "--workspace/-s, --split/-x, --at, and --tab on --substrate "
+            "thread need --portal N: a thread hosts no pane until a portal "
+            "opens one, so the placement has nothing to place"
+        )
+    if placement_requested and portal is None and (substrate != "pane" or once):
+        return (
+            "--workspace/-s, --split/-x, --at, and --tab apply only to --substrate pane "
+            "(bg/headless have no pane geometry)"
+        )
+    if split is not None and split not in ("left", "right", "up", "down"):
+        return f"--split/-x must be left, right, up, or down (got {split!r})"
+    if tab is not None and not tab.strip():
+        return "--tab needs a nonblank selector or pane-group name"
+    if bounded_placement and any(value is not None for value in (split, at, tab)):
+        return (
+            "--bounded-placement selects its own stable tab and cannot be combined "
+            "with --split, --at, or --tab"
+        )
+    if at is not None:
+        # `--at current` is the exact-anchor spelling: the mux CLI resolves the
+        # calling pane from FNO_PANE and sets the strict (Refuse) policy, so the
+        # spawn always carries the placement receipt and the readiness gate. A
+        # numeric anchor is a low-level `mux pane run` concern (it keeps the
+        # legacy new-tab fallback) and is intentionally not exposed here, where
+        # every `--at` value implies the exact-placement contract.
+        if at != "current":
+            return "--at must be `current` (the exact-anchor spelling)"
+        if split is None:
+            return "--at requires --split (the side to place on)"
+    return None
+
+
 def _has_explicit_substrate(toks: Sequence[str]) -> Optional[str]:
     """Return the substrate value if pinned by an explicit flag, else None.
 
