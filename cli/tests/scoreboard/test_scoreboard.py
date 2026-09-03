@@ -259,6 +259,7 @@ def test_merged_node_with_backstop_row_counts_shipped():
     graph = [
         {"id": "x-m", "merge_status": "merged", "completed_at": _RECENT, "reverted": False},
         {"id": "x-orphan", "merge_status": "merged", "completed_at": _RECENT},
+        {"merge_status": "merged", "completed_at": _RECENT},  # junk row: no id, never a crash
     ]
     sb = build_scoreboard(rows, [], graph, since_days=28, now=datetime.now())
     assert sb["shipped_nodes"] == 2
@@ -318,6 +319,9 @@ def test_register_stamps_utc_suffix(monkeypatch, tmp_path):
     assert entry["started"].endswith("+00:00")
     assert entry["completed"].endswith("+00:00")
     assert datetime.fromisoformat(entry["completed"]) >= datetime.fromisoformat(entry["started"])
+    # A malformed stamp is stored verbatim, never a lost row (round-1 finding).
+    assert _register._utc_iso("ts") == "ts"
+    assert _register._utc_iso("2026-09-02T22:43:24Z") == "2026-09-02T22:43:24+00:00"
 
 
 def test_render_shipped_caveat_shows_and_hides(tmp_path, monkeypatch):

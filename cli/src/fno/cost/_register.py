@@ -34,12 +34,17 @@ def _utc_iso(value: datetime | str | None) -> str | None:
     aware UTC with a `+00:00` suffix. The old writer mixed a naive-local
     `completed` with a `Z` `started`, so any reader subtracting the two was off
     by the UTC offset. Accepts a datetime or an ISO string (GitHub `merged_at`,
-    a `Z` target-state `created_at`); a naive input is read as UTC. Rows before
-    2026-09-03 keep their old shapes - readers normalize, no backfill."""
+    a `Z` target-state `created_at`); a naive input is read as UTC and an
+    unparseable string is stored verbatim rather than losing the row to a
+    crash. Rows before 2026-09-03 keep their old shapes - readers normalize,
+    no backfill."""
     if value is None:
         return None
     if isinstance(value, str):
-        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value  # junk in, junk out: the old writer stored it verbatim
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat(timespec="seconds")

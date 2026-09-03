@@ -315,7 +315,7 @@ def build_scoreboard(
     merged_nodes = {
         n["id"]
         for n in graph_nodes
-        if n.get("merge_status") == "merged" and _in_window(n.get("completed_at"))
+        if n.get("id") and n.get("merge_status") == "merged" and _in_window(n.get("completed_at"))
     }
     ship_rows = [r for r in windowed if _is_shipped_reason(r.get("termination_reason"))]
     terminal_shipped = {r["graph_node_id"] for r in ship_rows if r.get("graph_node_id")}
