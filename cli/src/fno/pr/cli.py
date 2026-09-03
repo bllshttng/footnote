@@ -377,6 +377,51 @@ def logs(
 
 
 @pr_app.command(
+    "heal",
+    hidden=True,
+    help=(
+        "Classify a red check by signature, apply the mechanical fix, push "
+        "once. Dry run unless --apply. --playbook prints the signature table; "
+        "--all reports every red open PR (report-only). Exit 0 nothing red, "
+        "1 escalations remain, 2 a run is in flight, 3 wrong branch or dirty "
+        "tree, 4 read error, 127 binary missing."
+    ),
+)
+def heal(
+    pr_number: Optional[int] = typer.Argument(None, help="GitHub PR number."),
+    apply: bool = typer.Option(False, "--apply", help="Fix, commit, push once."),
+    all_prs: bool = typer.Option(False, "--all", help="Report every red open PR."),
+    playbook: bool = typer.Option(False, "--playbook", help="Print the signature table."),
+) -> None:
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno do pr heal: the fno-agents binary was not found. It ships in "
+            "the `pip install fno` wheel and with the plugin; reinstall fno or "
+            "run `fno doctor update --rust`, or set FNO_AGENTS_BIN to its path.",
+            err=True,
+        )
+        raise typer.Exit(code=127)
+
+    argv = [str(binary), "pr-heal"]
+    if pr_number is not None:
+        argv.append(str(pr_number))
+    if apply:
+        argv.append("--apply")
+    if all_prs:
+        argv.append("--all")
+    if playbook:
+        argv.append("--playbook")
+    result = subprocess.run(argv, check=False)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
+@pr_app.command(
     "base-check",
     help=(
         "Refuse a PR whose branch base is > 24h of main history behind "

@@ -166,19 +166,37 @@ const SIGNATURES: &[Signature] = &[
     },
     Signature {
         name: "ruff-lint",
-        plan: "auto: ruff check --fix + ruff format over cli/src and cli/tests",
+        plan: "auto: ruff check --fix over cli/src, exactly the gate's scope",
         matches: |c| ruff_re().is_match(c.log),
+        // The remedy mirrors the GATE, not ruff's fuller surface. The gate is
+        // `uv run ruff check --no-respect-gitignore src/`; it runs no
+        // `ruff format` and never looks at `tests/`. A remedy that reached
+        // wider would rewrite files the gate does not read -- `ruff format`
+        // over this tree touches more than a thousand of them -- which is a
+        // heal nobody asked for wearing a red check as its excuse.
         resolve: |_| Remedy::Auto {
-            run: vec![
-                Cmd::new(
-                    "cli",
-                    &["uv", "run", "ruff", "check", "--fix", "src", "tests"],
-                ),
-                Cmd::new("cli", &["uv", "run", "ruff", "format", "src", "tests"]),
-            ],
+            run: vec![Cmd::new(
+                "cli",
+                &[
+                    "uv",
+                    "run",
+                    "ruff",
+                    "check",
+                    "--fix",
+                    "--no-respect-gitignore",
+                    "src/",
+                ],
+            )],
             verify: vec![Cmd::new(
                 "cli",
-                &["uv", "run", "ruff", "check", "src", "tests"],
+                &[
+                    "uv",
+                    "run",
+                    "ruff",
+                    "check",
+                    "--no-respect-gitignore",
+                    "src/",
+                ],
             )],
         },
     },
@@ -1086,9 +1104,15 @@ mod tests {
         );
         assert_eq!(f.signature, "ruff-lint");
         match f.remedy {
-            Remedy::Auto { run, .. } => {
+            Remedy::Auto { run, verify } => {
+                assert_eq!(run.len(), 1, "one command, the gate's own: {run:?}");
                 assert_eq!(run[0].cwd, "cli");
                 assert!(run[0].argv.contains(&"--fix".to_string()), "{run:?}");
+                // The gate reads src/ only and runs no formatter; a remedy
+                // that reached wider would rewrite files nothing checks.
+                assert!(!run[0].argv.iter().any(|a| a == "tests"), "{run:?}");
+                assert!(!run[0].argv.iter().any(|a| a == "format"), "{run:?}");
+                assert_eq!(verify[0].argv.last().unwrap(), "src/");
             }
             other => panic!("expected Auto, got {other:?}"),
         }
