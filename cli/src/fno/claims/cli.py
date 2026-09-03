@@ -1161,7 +1161,7 @@ def _claim_silence_report(
         scanned += 1
         key, holder = row.get("key", ""), row.get("holder") or ""
         session_id = _holder_session_id(holder)
-        cwd = (row.get("metadata") or {}).get("worktree") or (row.get("metadata") or {}).get("cwd")
+        cwd = _claim_worktree_cwd(row)
         age_s = age_lookup(session_id, cwd) if session_id and cwd else None
         if age_s is None:
             unreadable.append(ClaimSilenceRow(key, holder, None))
