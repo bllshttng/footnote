@@ -67,7 +67,7 @@ def test_a_crown_over_other_territory_still_warns(monkeypatch, capsys):
     """The reviewed defect: this row IS crowned, just not for this scope."""
     row = _Row(crown_level=2, crown_scope="x-4be7")
     err = _warn(monkeypatch, capsys, row)
-    assert "neither equals nor contains it" in err
+    assert "is not that scope" in err
     assert "L2 x-4be7" in err
     assert "--scope x-b76b" in err
 
@@ -76,7 +76,7 @@ def test_a_crown_with_no_scope_warns_rather_than_passing(monkeypatch, capsys):
     """``crown_label`` renders "L2 ?" here, so an any-crown gate let it pass."""
     row = _Row(crown_level=2, crown_scope=None)
     err = _warn(monkeypatch, capsys, row)
-    assert "neither equals nor contains it" in err
+    assert "is not that scope" in err
     assert "L2 ?" in err
 
 
@@ -137,26 +137,54 @@ def test_a_containing_crown_does_not_match_a_narrower_manifest(monkeypatch, caps
 
     row = _Row(crown_level=3, crown_scope="fno")
     err = _warn(monkeypatch, capsys, row, scope="x-b76b")
-    assert "neither equals nor contains it" in err
+    assert "is not that scope" in err
     assert "L3 fno" in err
+    # The message must not DENY the containment, because it is real here.
+    # Saying "neither equals nor contains it" to a crown that does contain it
+    # is runtime text drifting from behavior.
+    assert "neither equals nor contains" not in err
+    assert "EXACT crown_scope" in err
 
 
-def test_the_readers_agree_with_the_gate_on_a_containing_crown(tmp_path):
-    """The gate's claim, checked against the reader rather than restated.
+def test_the_reader_agrees_with_the_gate_on_a_containing_crown(monkeypatch, tmp_path):
+    """The gate's claim, driven through the real reader rather than restated.
 
-    Asserting the predicate alone would only prove the predicate. This runs
-    the real manifest resolver: a crown over "fno" with a manifest armed for
-    "x-b76b" resolves to no path, which is what makes the warning correct.
+    Asserting the predicate alone would only prove the predicate, and the
+    warning's whole justification is a claim about what a DIFFERENT function
+    does. So this runs ``resolve_king_manifest_path`` against a row whose
+    crown contains the armed scope, with the armed manifest really on disk,
+    and asserts it still answers None. That None is what makes
+    ``manifest-path`` exit 1 and the warning correct.
     """
-    from fno.king.state import king_manifest_path
+    from fno.king import state as king_state
 
-    armed = king_manifest_path("x-b76b", state_root=tmp_path)
-    held = king_manifest_path("fno", state_root=tmp_path)
+    armed = king_state.king_manifest_path("x-b76b", state_root=tmp_path)
     armed.parent.mkdir(parents=True, exist_ok=True)
     armed.write_text("# armed manifest\n", encoding="utf-8")
 
-    # The reader keys on the CROWN's scope, so it looks for the wrong file.
-    assert armed.is_file()
-    assert not held.is_file()
-    assert held.name == "fno.md"
-    assert armed.name == "x-b76b.md"
+    # resolve_king_manifest_path takes the registry as a parameter and looks
+    # the row up through fno.agents.whoami._find_by_session, so the seam is
+    # there rather than on this module.
+    def _resolve(row):
+        monkeypatch.setattr(
+            "fno.agents.whoami._find_by_session", lambda rows, *a, **k: rows[0]
+        )
+        return king_state.resolve_king_manifest_path(
+            "some-session-id",
+            "claude",
+            state_root=tmp_path,
+            registry=[row],
+        )
+
+    containing = _Row(crown_level=3, crown_scope="fno")
+    containing.status = "live"  # type: ignore[attr-defined]
+    assert _resolve(containing) is None, (
+        "a containing crown resolved a manifest it does not name; the warning's "
+        "premise would then be wrong"
+    )
+
+    # Positive control: the SAME call with an exactly-matching crown resolves
+    # the manifest, so the None above is the containment and not a dead stub.
+    exact = _Row(crown_level=3, crown_scope="x-b76b")
+    exact.status = "live"  # type: ignore[attr-defined]
+    assert _resolve(exact) == armed

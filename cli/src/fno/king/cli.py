@@ -173,7 +173,9 @@ def _warn_uncrowned_row(scope: str) -> None:
         return
     typer.echo(
         f"king: warning: manifest armed for {scope!r}, but this row's crown is "
-        f"{reading['label']!r}, which neither equals nor contains it, so "
+        f"{reading['label']!r}, which is not that scope. These readers key on "
+        f"an EXACT crown_scope, so a crown over wider territory does not "
+        f"satisfy them any more than a crown over unrelated territory: "
         f"{consequence} Ask an attended shell to re-scope it with "
         f"`fno agents crown {handle} --scope {scope}`.",
         err=True,
