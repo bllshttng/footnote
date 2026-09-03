@@ -18225,13 +18225,7 @@ mod tests {
         thread.session_id = Some("thread-id".into());
 
         assert!(matches!(
-            core.pane_send(
-                pane,
-                b"payload",
-                false,
-                Some("thread-id"),
-                Ok(vec![thread]),
-            ),
+            core.pane_send(pane, b"payload", false, Some("thread-id"), Ok(vec![thread]),),
             ServerMsg::Ok
         ));
     }
