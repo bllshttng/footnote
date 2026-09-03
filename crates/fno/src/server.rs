@@ -4519,16 +4519,14 @@ impl Core {
         pid: u64,
         agents: &'a [RegistryAgent],
     ) -> Option<&'a RegistryAgent> {
-        let (key, viewer_pid, _) = self.thread_pane.as_ref()?;
-        if *viewer_pid != pid {
-            return None;
-        }
+        let portal = self.portals.values().find(|portal| portal.seat == pid)?;
+        let key = portal.row_key.as_str();
         let mut matches = agents.iter().filter(|row| {
             row.mux.is_none()
                 && !row.exited
-                && (row.name == *key
-                    || row.effective_identity() == Some(key.as_str())
-                    || row.attach_id.as_deref() == Some(key.as_str()))
+                && (row.name == key
+                    || row.effective_identity() == Some(key)
+                    || row.attach_id.as_deref() == Some(key))
         });
         let row = matches.next()?;
         matches.next().is_none().then_some(row)
@@ -18218,7 +18216,14 @@ mod tests {
         let (mut core, pane) = template_core();
         core.session_name = "sess".into();
         core.panes.get_mut(&pane).unwrap().name = Some("thread".into());
-        core.thread_pane = Some(("thread-id".into(), pane, 5));
+        core.portals.insert(
+            0,
+            Portal {
+                row_key: "thread-id".into(),
+                seat: pane,
+                tab: 5,
+            },
+        );
         let mut thread = agent_in("other", 99, None, false);
         thread.name = "thread".into();
         thread.mux = None;
@@ -19767,7 +19772,14 @@ mod tests {
         );
         core.agents[0].mux = None;
         core.agents[0].name = "thread".into();
-        core.thread_pane = Some(("CODEX-THREAD".into(), 1, 5));
+        core.portals.insert(
+            0,
+            Portal {
+                row_key: "CODEX-THREAD".into(),
+                seat: 1,
+                tab: 5,
+            },
+        );
         assert_eq!(core.fno_id_for_pane(1), Some("CODEX-THREAD".into()));
     }
 
@@ -20726,7 +20738,14 @@ mod tests {
         let (mut core, pane_id) = template_core();
         core.session_name = "sess".into();
         core.panes.get_mut(&pane_id).unwrap().name = Some("thread".into());
-        core.thread_pane = Some(("thread-id".into(), pane_id, 5));
+        core.portals.insert(
+            0,
+            Portal {
+                row_key: "thread-id".into(),
+                seat: pane_id,
+                tab: 5,
+            },
+        );
         let mut thread = agent_in("other", 99, None, false);
         thread.name = "thread".into();
         thread.mux = None;
