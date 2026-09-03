@@ -28,6 +28,7 @@ pub mod popup;
 pub mod process_admission;
 pub mod proto;
 pub mod pty;
+pub mod registry_label;
 pub mod server;
 pub mod sideline_color;
 pub mod sprites;

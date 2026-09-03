@@ -51,6 +51,10 @@ use crate::tree::{self, Axis, Dir, Node, Rect, Tab, TabId};
 use crate::vt::BlockJumpOutcome;
 use crate::vt::{self, frame_text, Modes};
 
+mod agent_actions;
+
+use self::agent_actions::{run_agent_action, run_agent_rename, run_mail_send, run_reentry_plan};
+
 /// A control connection's reply channel: exactly one [`ServerMsg`], then close.
 type ControlReply = oneshot::Sender<ServerMsg>;
 
@@ -3482,60 +3486,6 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
         }
     }
 }
-
-/// Shell `fno-agents <verb> <name>` for a sideline lifecycle gesture (x-76ea),
-/// bounded + fail-open (the `run_dispatch_one` idiom): a short outcome notice,
-/// never a wedge. The registry poll owns the row's truth, so a lost/failed
-/// notice degrades to "the row updates a beat later or stays put", not a silent
-/// mutation. `verb` is always a fixed literal; the argv is never a shell string.
-async fn run_agent_action(verb: &str, name: &str) -> String {
-    const AGENT_ACTION_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut command =
-        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
-    command
-        .args([verb, name])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let fut = crate::process_admission::tokio_status(&mut command);
-    let past = if verb == "stop" { "stopped" } else { "removed" };
-    match tokio::time::timeout(AGENT_ACTION_TIMEOUT, fut).await {
-        Err(_) => format!("{verb} {name}: timed out"),
-        Ok(Err(_)) => format!("{verb} {name}: unavailable"),
-        Ok(Ok(status)) if status.success() => format!("{past} {name}"),
-        Ok(Ok(_)) => format!("{verb} {name}: failed"),
-    }
-}
-
-/// (x-d285) Resolve one row's re-entry plan through the canonical resolver
-/// (`fno-agents reentry-plan <name> --transition <t>`), OFF the core loop and
-/// bounded. The account/route verdict is the one implementation every gesture
-/// consumes - this server never rebuilds it. Every failure shape (timeout,
-/// missing binary, non-zero refusal, malformed JSON, `resolved != true`) is a
-/// typed `Err` the caller surfaces as a notice; no pane starts on it.
-async fn run_reentry_plan(name: &str, transition: &str) -> Result<ReentryVerdict, String> {
-    const PLAN_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut command =
-        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
-    command
-        .args(["reentry-plan", name, "--transition", transition])
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let fut = crate::process_admission::tokio_output(&mut command);
-    match tokio::time::timeout(PLAN_TIMEOUT, fut).await {
-        Err(_) => Err(format!("re-entry plan for {name}: timed out")),
-        Ok(Err(_)) => Err(format!("re-entry plan for {name}: fno-agents unavailable")),
-        Ok(Ok(o)) if o.status.success() => {
-            ReentryVerdict::from_plan_json(&o.stdout).map_err(|e| format!("{name}: {e}"))
-        }
-        Ok(Ok(o)) => Err(first_line_or(
-            &String::from_utf8_lossy(&o.stderr),
-            &format!("re-entry plan for {name}: refused"),
-        )),
-    }
-}
-
 /// (x-9c5f) Sanitize peek-overlay free-text mail: strip control chars, trim,
 /// refuse blank-after-sanitize and over-`MAX_MAIL_TEXT` (never truncate - a
 /// silently cut instruction to a worker is worse than a visible refusal, Locked
@@ -3576,34 +3526,6 @@ fn first_line_or(s: &str, fallback: &str) -> String {
         .map(|l| l.trim().to_string())
         .find(|l| !l.is_empty())
         .unwrap_or_else(|| fallback.to_string())
-}
-
-/// (x-9c5f) Shell `fno agents mail send <name> <text>` off-loop, bounded + capturing:
-/// the CLI's one-line stdout verdict (`msg-<id> delivered|queued`) becomes the
-/// notice verbatim; a nonzero exit surfaces the first stderr line. Never silent
-/// (Locked Decision 6). Uses the `fno` porcelain; argv array only.
-async fn run_mail_send(name: &str, text: &str) -> String {
-    const MAIL_TIMEOUT: Duration = Duration::from_secs(20);
-    // `--` ends option parsing so operator text starting with `-` (e.g. a reply
-    // of `--help`) is delivered as the message, not consumed as a CLI flag.
-    let mut command = crate::process_admission::tokio_command(fno_bin());
-    command
-        .args(["agents", "mail", "send", "--", name, text])
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let fut = crate::process_admission::tokio_output(&mut command);
-    match tokio::time::timeout(MAIL_TIMEOUT, fut).await {
-        Err(_) => format!("mail {name}: timed out"),
-        Ok(Err(_)) => format!("mail {name}: unavailable"),
-        Ok(Ok(o)) if o.status.success() => first_line_or(
-            &String::from_utf8_lossy(&o.stdout),
-            &format!("mailed {name}"),
-        ),
-        Ok(Ok(o)) => first_line_or(
-            &String::from_utf8_lossy(&o.stderr),
-            &format!("mail {name}: failed"),
-        ),
-    }
 }
 
 /// (x-1d91, native since the store port) Drive one reorder verb into the ported
@@ -3760,7 +3682,7 @@ async fn run_agent_peek(name: &str) -> Vec<String> {
 }
 
 /// Shell `fno-agents reap --json` once for the bulk-reap gesture (x-7561),
-/// bounded + fail-open like [`run_agent_action`]: on success parse the `reaped`
+/// bounded + fail-open like `run_agent_action`: on success parse the `reaped`
 /// array length into a visible `reaped N` count (zero is a successful `reaped
 /// 0`), else a bounded failure notice. The argv is a fixed literal.
 async fn run_reap() -> String {
@@ -9737,6 +9659,18 @@ impl Core {
         });
     }
 
+    /// Rename a row's label off-loop: the `agent_action` mirror with the new
+    /// label as a second argv token. The notice is the verb's own report.
+    fn agent_rename_action(&self, id: u64, token: String, new_name: String) {
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let notice = run_agent_rename(&token, &new_name)
+                .await
+                .unwrap_or_else(|e| e);
+            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
+        });
+    }
+
     /// (x-d285) Resolve a gesture's re-entry plan OFF the core loop and
     /// re-dispatch the gesture when the verdict lands. `request` names the
     /// gesture to re-enter (the attach id + its placement, or the resume
@@ -14420,6 +14354,23 @@ impl Core {
                 }
                 Flow::Continue
             }
+            Command::RenameAgent { name, new_name } => {
+                // Grammar first: a hostile token never reaches a subprocess
+                // argv. The resolver then refuses unknown/external/ambiguous
+                // rows like StopAgent; live AND exited rows are renamable.
+                if !crate::registry_label::valid_agent_label(&new_name) {
+                    self.notice(
+                        client_id,
+                        "label must be 1-64 letters, numbers, underscores, or hyphens",
+                    );
+                    return Flow::Continue;
+                }
+                match self.resolve_lifecycle_target(&name) {
+                    Err(msg) => self.notice(client_id, msg),
+                    Ok(_row) => self.agent_rename_action(client_id, name, new_name),
+                }
+                Flow::Continue
+            }
             Command::PeekAgent { name, seq } => {
                 // Read-only transcript fetch (x-c376): shell `fno agents peek`
                 // off-loop and reply to this client only. No catalog validation -
@@ -17458,6 +17409,9 @@ mod tests {
     // (x-0719) The portal test family lives in its own module; this file
     // is shrink-only under the file-budget gate.
     mod portal_tests;
+
+    // The sideline rename test family, same treatment.
+    mod rename_tests;
 
     #[test]
     fn node_from_argv_reads_the_wrapper_token() {
