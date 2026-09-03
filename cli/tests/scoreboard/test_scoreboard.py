@@ -56,11 +56,20 @@ _RECENT = _days_ago(1)
 _OLDER = _days_ago(2)
 
 
-def _wire(monkeypatch, tmp_path, ledger_path):
+def _wire(monkeypatch, tmp_path, ledger_path, *, hermetic_graph=True):
     import fno.paths as paths
 
     monkeypatch.setattr(paths, "ledger_json", lambda: ledger_path)
     monkeypatch.setattr(paths, "graph_json", lambda: tmp_path / "graph.json")
+    if hermetic_graph:
+        # A graph fixture that parses sends read_graph_nodes down the
+        # _apply_graph_defaults seam, which needs the fno-agents-worker
+        # runtime (absent on CI's changed-smoke and pip-only boxes). These
+        # tests judge the fold and the render, not the migration pass, so
+        # identity keeps them hermetic.
+        import fno.graph.store as graph_store
+
+        monkeypatch.setattr(graph_store, "_apply_graph_defaults", lambda entries, **k: entries)
 
 
 # --- AC5-HP -----------------------------------------------------------------
