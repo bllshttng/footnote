@@ -111,9 +111,8 @@ def cmd_resolve(
         "--merge-posture",
         help=(
             "no-merge|allow|from-config (x-8151): the resolver owns the "
-            "--no-merge carrier for the whole command. from-config reads "
-            "config.auto_merge.grant from this cwd and degrades to no-merge "
-            "on any error shape."
+            "--no-merge carrier. from-config reads config.auto_merge.grant "
+            "from this cwd and degrades to no-merge on any error shape."
         ),
     ),
     trigger: str = typer.Option(
@@ -271,9 +270,8 @@ def cmd_family(
     """Is this message a /target-family command? Prints ``family`` or
     ``other``, exit 0 either way - the same nothing-at-runtime contract as
     ``dispatch resolve``. The vocabulary is the canonical merge_posture table;
-    this verb is its only shell-readable surface, so the dispatch and
-    normalize scripts ask instead of carrying hand-copied pattern lists (the
-    copies drifted)."""
+    this verb is its only shell-readable surface, so the shell scripts ask
+    instead of carrying hand-copied pattern lists (the copies drifted)."""
     from fno.agents.harness_map import is_target_family
 
     typer.echo("family" if is_target_family(message) else "other")

@@ -161,9 +161,7 @@ def inject_no_merge_into_command(command: str) -> str:
     """Insert the ``--no-merge`` flag into a /target-family command, right
     after the verb token. Skipped when a standalone flag is already present
     (word-padded, so ``--no-merge-guard`` never counts). Non-family commands
-    pass through untouched: a prose brief carries its posture in prose (x-9d11).
-    Replaces the dispatch shell's two-spelling prefix match, which missed
-    ``/fno:target`` and dropped opencode refusals."""
+    pass through untouched: a prose brief carries its posture in prose (x-9d11)."""
     _spellings, flag, _legacy = _carrier_vocab()
     if not is_target_family(command):
         return command
@@ -171,23 +169,6 @@ def inject_no_merge_into_command(command: str) -> str:
         return command
     parts = command.split()
     return " ".join([parts[0], flag, *parts[1:]])
-
-
-def strip_no_merge_from_command(command: str) -> str:
-    """Remove the carrier from a /target-family command: the first standalone
-    flag and the first standalone legacy token. A pathological id like
-    ``no-merger-x`` is never touched, and non-family commands pass through so
-    a prose brief's text is never mangled. Under an allow posture the resolver
-    strips; the flag's absence is what makes ``auto_merge.grant=dispatch``
-    live."""
-    _spellings, flag, legacy = _carrier_vocab()
-    if not is_target_family(command):
-        return command
-    parts = command.split()
-    for token in (flag, legacy):
-        if token in parts[1:]:
-            parts.remove(token)
-    return " ".join(parts)
 
 
 def message_carries_no_merge(message: str) -> bool:
@@ -204,12 +185,11 @@ def message_carries_no_merge(message: str) -> bool:
 def apply_merge_posture_env(message: str, *, note_stream=None) -> str | None:
     """Set or clear ``TARGET_NO_MERGE`` in ``os.environ`` from the message,
     and return the prior value (so a caller restoring the process env captured
-    it BEFORE the mutation). Semantics: flag arms; a family bare token outside
-    flag position neither arms nor clears (round 11); a family message with no
-    token clears an inherited carrier loudly (round 8); non-family clears
-    NOTHING (an operator's exported carrier is a documented control input, and
-    a leak errs toward refusing merges, the safe side). The same verdict runs
-    inside the binary's spawn lane, from the same table."""
+    it BEFORE the mutation). Flag arms; a family bare token outside flag
+    position neither arms nor clears (round 11); a family message with no token
+    clears an inherited carrier loudly (round 8); non-family clears NOTHING (a
+    leak errs toward refusing merges, the safe side). The binary's spawn lane
+    answers from the same table."""
     import os
     import sys
 
@@ -1121,11 +1101,11 @@ def resolve_dispatch(
     once, else an error); when absent the template is returned literally (a bare
     ``--harness`` resolution just wants the harness/substrate decision).
 
-    ``merge_posture`` (x-8151) makes the resolver own the refusal carrier for
-    the whole command: ``no-merge`` injects, ``allow`` strips, ``from-config``
-    resolves ``config.auto_merge.grant`` (grant == "dispatch" grants; every
-    error shape degrades to no-merge). ``None`` keeps the historical behavior.
-    Unknown values raise.
+    ``merge_posture`` (x-8151): ``no-merge`` injects the flag into a
+    /target-family command missing it; ``allow`` overrides the builtin rung's
+    config read (an explicit template is never edited - a refusal it carries
+    wins, every refusal outranks every grant); ``from-config`` resolves
+    ``config.auto_merge.grant`` and degrades to no-merge on any error shape.
 
     Raises :class:`DispatchResolveError` on: an unknown harness (naming the map),
     an explicit ``thread`` on a harness without that lane (pointing at ``headless``), an
@@ -1150,8 +1130,7 @@ def resolve_dispatch(
             decision.append(f"merge-posture=from-config({posture})")
         elif posture not in ("no-merge", "allow"):
             raise DispatchResolveError(
-                f"unknown merge posture {merge_posture!r}; "
-                "valid: no-merge, allow, from-config"
+                f"unknown merge posture {merge_posture!r}; valid: no-merge, allow"
             )
 
     # 1. harness. An explicit flag is distinguished by ``is not None`` (present
@@ -1267,7 +1246,7 @@ def resolve_dispatch(
         # `dispatch_verb` already spells out what to run, and silently editing
         # a caller's own template would be the surprising read.
         _cmd = cfg.get("command")
-        _allow_merge = cfg.get("auto_merge") is True
+        _allow_merge = cfg.get("auto_merge") is True or posture == "allow"
         template = (
             _cmd if isinstance(_cmd, str) and _cmd
             else dispatch_command(chosen_harness, allow_merge=_allow_merge)
@@ -1330,19 +1309,14 @@ def resolve_dispatch(
     if normalized != resolved_command:
         resolved_command = normalized
         decision.append("command=legacy-no-merge->--no-merge")
-    # x-8151: an explicit posture owns the carrier on EVERY rung. Inject after
-    # the legacy rewrite; strip under allow so a resolver-baked refusal cannot
-    # silently kill config-granted merge authority.
+    # x-8151: a no-merge posture injects after the legacy rewrite, on EVERY
+    # rung (an explicit template the dispatcher built still gets the carrier).
+    # allow never edits a template: a refusal it carries wins.
     if posture == "no-merge":
         injected = inject_no_merge_into_command(resolved_command)
         if injected != resolved_command:
             resolved_command = injected
             decision.append("merge-posture=no-merge(injected)")
-    elif posture == "allow":
-        stripped = strip_no_merge_from_command(resolved_command)
-        if stripped != resolved_command:
-            resolved_command = stripped
-            decision.append("merge-posture=allow(stripped)")
     env: dict[str, str] = {}
     if message_carries_no_merge(resolved_command):
         env["TARGET_NO_MERGE"] = "1"
