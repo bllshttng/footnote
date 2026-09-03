@@ -125,11 +125,8 @@ class BoardInputs:
     #: Independent planned-unclaimed inventory. Production collection always
     #: supplies it; None keeps pure test fixtures source-compatible.
     undispatched: SourceRead | None = None
-    #: Graph rows for nodes bound to an OPEN PR, each annotated with the
-    #: `pr_number` actually open. Sourced from the PR listing and the graph,
-    #: never from a selector: `fno backlog ready` filters through
-    #: `live_claimed_node_ids` AND never returns `in_review`, so it removes
-    #: exactly these rows twice over.
+    #: Graph rows for nodes bound to an OPEN PR, annotated with the
+    #: `pr_number` actually open; never from a selector (see `undriven_pr`).
     pr_nodes: SourceRead | None = None
 
 
@@ -176,24 +173,11 @@ def _node_driver(
 ) -> tuple[str, Optional[dict]]:
     """Who is driving this node: ``active``, ``stalled``, or ``none``.
 
-    One answer, two queues. ``stalled_holder`` selects ``stalled`` and
-    ``undriven_pr`` selects ``none``, so the two partition by construction. A
-    parity harness between two copies of this test would be the trigger to
-    merge them (AGENTS.md principle 9); naming the predicate once IS that
-    merge, applied to the predicate rather than to the queue.
-
-    ``none`` covers both an absent claim (the worker exited cleanly and
-    released) and a dead one (the lock outlived its holder). The dead half also
-    belongs to ``stale_claim``, whose remedy is a reap; a queue that wants
-    dispatchable work must not confuse the two, so callers filter further.
-
-    ``suspect`` is NOT one of them and must never become one. A suspect claim
-    is TTL-unexpired with an unproven holder pid, and claims.rs treats it like
-    ``Live`` for acquire and dispatch precisely so it is never stolen. Under
-    load every claim on a machine can read suspect while its holder's
-    transcript was written seconds ago (measured 2026-09-03: 5 of 15 node
-    claims suspect, 0 stale). Adding it to ``_DEAD_CLAIM_STATES`` would hand
-    every one of those nodes to a second worker.
+    One answer, two queues: ``stalled_holder`` selects ``stalled`` and
+    ``undriven_pr`` selects ``none``, so they partition by construction. A
+    suspect claim must NEVER read ``none`` - claims.rs treats Suspect like
+    Live for dispatch, never stolen. The dead half of ``none`` is also
+    `stale_claim`'s; its remedy is a reap, so callers filter further.
     """
     claim = claim_by_node.get(str(node_id))
     if claim is None or claim.get("state") in _DEAD_CLAIM_STATES:
@@ -383,7 +367,7 @@ def build_board(
         state, claim = _node_driver(
             node.get("id"), claim_by_node, inputs.holder_activity
         )
-        if state != "stalled":
+        if state != "stalled" or claim is None:
             continue
         holder = str(claim.get("holder") or "")
         if not in_scope("stalled_holder", node.get("id"), node):
@@ -428,45 +412,22 @@ def build_board(
         {"number": r.get("number"), "title": r.get("title")} for r in inputs.prs.rows()
     ]
 
-    # `stalled_holder`'s complement, and the second half of ONE predicate.
-    # That queue starts from a CLAIM, so a worker that exited cleanly and
-    # RELEASED its claim leaves a node with no claim row and is skipped at its
-    # `claim is None` guard. It catches the worker that died mid-grip and
-    # misses the worker that let go. Measured 2026-09-03: 7 of 12 open PRs in
-    # the second state, 0 in the first, while the board reported 123 actionable
-    # rows and named none of the seven.
-    #
-    # It is NOT sourced from `fno backlog ready`, for the reason recorded above
-    # `stalled_holder` and for one of its own: `ready` never returns
-    # `in_review`. Candidates are open PRs bound back to their node.
-    #
-    # Reports only. Deciding a PR is dead is the operator's judgment, so
-    # nothing here closes, defers or touches a node; a node the operator
-    # ALREADY deferred or blocked is skipped rather than nagged back up.
+    # `stalled_holder`'s complement, the second half of ONE predicate. That
+    # queue starts from a CLAIM, so a worker that exited cleanly and released
+    # its claim leaves it no row to see. Measured 2026-09-03: 7 of 12 open PRs
+    # in this state. NOT sourced from `fno backlog ready`; reports only.
     from fno.graph.statuses import derived_status, is_terminal_entry
 
-    mergeable_numbers = (
-        {r.get("number") for r in pr_rows} if autonomous_merge else set()
-    )
+    mergeable_numbers = {r.get("number") for r in pr_rows} if autonomous_merge else set()
     undriven: list[dict] = []
-    # Fail CLOSED on an unreadable claim list, in the LOOP rather than at the
-    # render. `claim_by_node` is built from `inputs.claims.rows()`, which
-    # answers [] for an errored source, so every node here would read `claim is
-    # None`, resolve to `none`, and hand the king a dispatch over every live
-    # worker at once. A timed-out probe read as absent is the one failure this
-    # queue can cause that is worse than the gap it closes. `_queue` discards
-    # these rows too, and both layers stay: this one so no row is ever built,
-    # that one so the queue reads `unreadable` rather than empty.
-    claims_readable = inputs.claims.ok
-    for node in (
-        inputs.pr_nodes.rows() if (inputs.pr_nodes and claims_readable) else []
-    ):
+    # Fail CLOSED on an unreadable claim list, in the LOOP: `claim_by_node`
+    # answers {} for an errored source, so every node would read `none` and
+    # the king would dispatch over every live worker at once. `_queue` too.
+    for node in (inputs.pr_nodes.rows() if (inputs.pr_nodes and inputs.claims.ok) else []):
         if node.get("priority") not in KING_PRIORITIES:
             continue
-        # A raw graph entry, not a `fno backlog get` payload, so closure is
-        # asked of the helper. `read_graph` does not run the recompute
-        # migration, and a legacy row carries a stale open `status` beside a
-        # real `completed_at`.
+        # A raw graph entry: closure is asked of the helper, never a bare
+        # status read (see is_terminal_entry).
         if is_terminal_entry(node):
             continue
         if derived_status(node) in {"deferred", "blocked"}:
@@ -475,10 +436,8 @@ def build_board(
         if state != "none":
             continue
         # When the king can merge, a green mergeable PR's remedy is the merge
-        # `mergeable_pr` already names, not a second worker. When it cannot,
-        # that queue is report-only and nobody acts, so the PR still needs a
-        # driver and belongs here. The queues stay disjoint on the row the king
-        # would actually act on.
+        # mergeable_pr already names. When it cannot, the PR still needs a
+        # driver; the queues stay disjoint on the row the king would act on.
         if node.get("pr_number") in mergeable_numbers:
             continue
         if not in_scope("undriven_pr", node.get("id"), node):
@@ -591,8 +550,7 @@ def build_board(
             "undriven_pr",
             SRC_PR_NODES,
             SourceRead(
-                error=(inputs.pr_nodes.error if inputs.pr_nodes else "")
-                or inputs.claims.error
+                error=(inputs.pr_nodes.error if inputs.pr_nodes else "") or inputs.claims.error
             ),
             undriven,
             actionable=True,
@@ -735,10 +693,8 @@ def _read_prs(
 ) -> tuple[SourceRead, SourceRead, list[str]]:
     """Open PRs that are green, mergeable and unmerged, plus their nodes.
 
-    The second source is the graph row of every node an open PR binds back to,
-    each annotated with the ``pr_number`` actually open: ``undriven_pr``'s
-    candidate universe. Sourced here because the listing and the graph read are
-    already paid for - a second read would buy nothing.
+    The second source is every bound node's graph row, annotated with the
+    ``pr_number`` actually open; both reads are already paid for here.
 
     Costs exactly ONE call: the rollup arrives inside the listing, so there is
     no per-PR status read to cap. The bound therefore sits on the CALL, via
@@ -785,18 +741,12 @@ def _read_prs(
         bindings = classify_open_pr_bindings(rows, entries)
     except Exception as exc:  # noqa: BLE001 - mergeability remains readable
         warnings.append(f"pr_node_binding_unreadable: {exc}")
-        # An unreadable binding is an unreadable QUEUE, never an empty one.
-        # `mergeable_pr` survives a broken graph read because it needs no node;
-        # `undriven_pr` is nothing but nodes, so it must go dark loudly. That
-        # asymmetry is the module docstring's one-unreadable-queue promise, and
-        # it is why this degrades one source rather than both.
+        # An unreadable binding is an unreadable QUEUE, never an empty one:
+        # mergeable_pr needs no node, undriven_pr is nothing but nodes. That
+        # asymmetry is why this degrades one source rather than both.
         pr_nodes: SourceRead = SourceRead(error=f"pr node binding unreadable: {exc}")
     else:
-        node_by_id = {
-            e["id"]: e
-            for e in entries
-            if isinstance(e, dict) and isinstance(e.get("id"), str)
-        }
+        node_by_id = {e["id"]: e for e in entries if isinstance(e, dict)}
         bound: list[dict] = []
         for binding in bindings:
             if binding.verdict == "missing":
@@ -804,20 +754,15 @@ def _read_prs(
                     f"pr_node_binding_missing: #{binding.pr_number} "
                     f"{binding.head_ref} -> {binding.node_id}"
                 )
-            # `bound` is the only verdict that carries a node which points BACK
-            # at this PR. `missing` names a real node with no back-reference and
-            # is already warned above (its fix is the reconcile heal, not a
-            # dispatch); `untracked` and `ambiguous` carry no single candidate
-            # at all, and a guess picked from list order is the wrong-node bind
-            # that classifier exists to prevent.
+            # `bound` is the only verdict whose node points BACK at this PR.
+            # `missing` is already warned above; `untracked`/`ambiguous` carry
+            # no single candidate, and a list-order guess is the wrong-node bind.
             if binding.verdict != "bound" or not binding.node_id:
                 continue
             entry = node_by_id.get(binding.node_id)
             if entry is None:
                 continue
-            bound.append(
-                {**entry, "pr_number": binding.pr_number, "pr_url": binding.pr_url}
-            )
+            bound.append({**entry, "pr_number": binding.pr_number, "pr_url": binding.pr_url})
         pr_nodes = SourceRead(payload=bound)
     # Every fetched row is judged. They cost the same one call whether read or
     # discarded, so dropping any of them buys nothing and loses real work.
