@@ -5,6 +5,14 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _reset_once_per_process_notice(monkeypatch):
+    """Keep one-shot rm notices isolated when xdist changes test grouping."""
+    from fno.agents import rm_notice
+
+    monkeypatch.delenv(rm_notice.NOTICE_SHOWN_ENV, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _collapse_pane_binding_window(monkeypatch):
     """Collapse the pane binding window so no test pays its wall-clock.
 

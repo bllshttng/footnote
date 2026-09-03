@@ -132,6 +132,10 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             for item in items
             if item.nodeid == nodeid
         ]
+        # The selector belongs to this collection only. Nested pytest probes
+        # launched by a selected test must collect their explicit target, not
+        # inherit a parent matrix slice that can contain no matching item.
+        os.environ.pop("FNO_PYTEST_SHARD", None)
 
 
 @pytest.fixture(autouse=True, scope="session")

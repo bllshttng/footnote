@@ -32,6 +32,17 @@ def test_AC2_HP_shard_selects_one_disjoint_slice(monkeypatch) -> None:
     assert [item.nodeid for item in items] == [nodeids[1], nodeids[5]]
 
 
+def test_AC2_INV_shard_selector_is_consumed_before_test_bodies(monkeypatch) -> None:
+    """Nested pytest probes must not inherit the parent collection slice."""
+    items = [_Item("tests/unit/test_real.py::test_case")]
+    monkeypatch.setenv("FNO_PYTEST_SHARD", "1/1")
+
+    pytest_collection_modifyitems(items)
+
+    assert [item.nodeid for item in items] == ["tests/unit/test_real.py::test_case"]
+    assert "FNO_PYTEST_SHARD" not in os.environ
+
+
 def _real_collected_nodeids(monkeypatch) -> list[str]:
     env = os.environ.copy()
     env.pop("FNO_PYTEST_SHARD", None)
