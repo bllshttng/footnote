@@ -326,6 +326,12 @@ pub(crate) struct Settings {
     /// CI failures, lint failures and rebases are not rounds, and a pass
     /// refunds nothing: it is one round like any other verdict.
     max_rounds: Option<i64>,
+    /// config.review.carry_interdiff_lines (law d-608344c1, default 100):
+    /// how many interdiff lines (multiset symmetric difference of the two
+    /// PR-code patches against base) a rebase or fix may add while a verdict
+    /// from the older head still carries. `0` disables the arm. Parsed in the
+    /// same block as `max_rounds`; resolved by `carry_interdiff_lines_resolved`.
+    carry_interdiff_lines: Option<i64>,
     /// config.review.nudge (x-b167): per-login overrides for the bot-review
     /// nudge, resolved against BOT_PROFILES by `resolved_nudge_configs`. Empty =
     /// no overrides (the built-in profiles alone decide nudgeability). A
@@ -795,6 +801,17 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
                 .or_else(|| v.as_str().and_then(|raw| raw.trim().parse::<i64>().ok()));
             if parsed.is_some_and(|n| n >= 1) {
                 s.max_rounds = parsed;
+            }
+        }
+        if let Some(v) = review.get("carry_interdiff_lines") {
+            // Same lax contract: an integer (>= 0, where 0 disables the arm)
+            // or its string form; anything else stays None -> the law's
+            // default 100, so a typo cannot silently widen or close the carry.
+            let parsed = v
+                .as_integer()
+                .or_else(|| v.as_str().and_then(|raw| raw.trim().parse::<i64>().ok()));
+            if parsed.is_some_and(|n| n >= 0) {
+                s.carry_interdiff_lines = parsed;
             }
         }
         if let Some(v) = review.get("self_review_required") {
@@ -1506,7 +1523,7 @@ fn reviewer_invocation_for(name: &str, harness: Option<&str>) -> Option<(&'stati
 /// markdown, so the `.md` rule covers them; the `internal/` vault is gitignored
 /// and never appears in a diff. A config file, a lockfile, and a shell script
 /// all count as code.
-fn is_documentation_path(path: &str) -> bool {
+pub(crate) fn is_documentation_path(path: &str) -> bool {
     // A single leading "./" is stripped once; trim_start_matches would also strip
     // a char set and lstrip a literal-repeated run, diverging from the Python
     // mirror (and mangling ".github"). The two classifiers must agree exactly.
@@ -1720,130 +1737,18 @@ fn classify_payload_for_floor(
 
 // ── review freshness: one predicate, both producers (x-5b99 / x-62a1) ─────────
 //
-// Freshness used to be decided TWICE with two different rules: a `github_app`
-// verdict got none at all (a bot opinion was inherited across commits it never
-// read), while a `local_attestation` got a bare sha equality so strict that
-// addressing a review destroyed the proof the review happened. One design,
-// failing opposite ways on its two producers. `review_freshness` is the single
-// rule both now go through.
+// The predicate, its git reads, and the resolver live in
+// `review_freshness.rs`, a module named by their question: `loopcheck.rs` is
+// over the file budget and shrink-only, so the freshness machinery moved there
+// rather than growing here. The x-82ac interdiff-carry arm (law d-608344c1)
+// rode the same move.
 
-/// Whether a review verdict still describes the code at HEAD.
-///
-/// The `Carried` variants are the reason a carry was granted, recorded on
-/// the event so a carry is auditable and can never be mistaken for a fresh
-/// read. Only `Stale` stops a verdict counting toward coverage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Freshness {
-    /// The reviewer read this exact commit.
-    Fresh,
-    /// The PR's own code delta is byte-identical; any tree difference came from
-    /// the base moving under it. A rebase is this shape, which is what makes
-    /// the mandatory pre-merge rebase stop destroying attestations.
-    CarriedBaseSync,
-    /// Only documentation paths changed between the reviewed commit and HEAD.
-    CarriedDocsOnly,
-    /// The PR's own code delta only SHRANK since the review: every raw diff
-    /// line still shipping is byte-identical to one the reviewer read, and the
-    /// vanished lines are paths the base absorbed on the rebase. A strict
-    /// subset of the reviewed diff; the partly-docs partly-shrink rebase that used to fall
-    /// through to `Stale` because the grades were whole-diff and mutually
-    /// exclusive.
-    CarriedSubset,
-    /// Everything else, including every failure path.
-    Stale,
-}
-
-impl Freshness {
-    /// Whether a verdict at this freshness counts toward coverage.
-    pub fn counts(&self) -> bool {
-        !matches!(self, Freshness::Stale)
-    }
-}
-
-/// One side's code-diff identity: the blake3 hash plus the sorted raw diff
-/// lines it was computed over. The hash answers "identical or not"; the line
-/// set also answers "is HEAD a subset of what was reviewed", which is the
-/// [`Freshness::CarriedSubset`] question and cannot be asked of a hash.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CodeDiffIdentity {
-    pub hash: String,
-    pub lines: Vec<String>,
-}
-
-/// Pre-computed git facts for one `(reviewed_sha, head_sha)` pair, so
-/// [`review_freshness`] is pure and unit-tests with no git and no repository.
-#[derive(Debug, Clone, Default)]
-pub struct FreshnessFacts {
-    /// PR code-diff identity at the reviewed commit (see
-    /// [`pr_code_diff_identity`]).
-    pub reviewed_identity: Option<CodeDiffIdentity>,
-    /// The same identity at HEAD.
-    pub head_identity: Option<CodeDiffIdentity>,
-    /// Paths differing between the two TREES (two-dot). `None` on git failure.
-    pub tree_paths: Option<Vec<String>>,
-}
-
-/// The one freshness rule. Pure over pre-computed facts.
-///
-/// `Carried` requires a POSITIVE identity match between two successfully
-/// computed identities. Two `None`s never match, and neither does an empty
-/// result: matching an absence against an absence is what produced this plan's
-/// first (wrong) 63% carry-forward measurement, where every merged PR's
-/// three-dot diff against current `origin/main` was empty and `e3b0c442` - the
-/// hash of the empty string - compared equal to itself twelve times. The real
-/// figure was 2 of 22. Every failure path lands on `Stale`; there is no input
-/// on which a failure produces a carry.
-pub fn review_freshness(reviewed_sha: &str, head_sha: &str, facts: &FreshnessFacts) -> Freshness {
-    // No pinned commit is not evidence of freshness. An absent `commit.oid`, an
-    // attestation with no `head_sha`, and an unresolvable HEAD all land here.
-    if reviewed_sha.is_empty() || head_sha.is_empty() {
-        return Freshness::Stale;
-    }
-    if reviewed_sha == head_sha {
-        return Freshness::Fresh;
-    }
-    let (Some(reviewed), Some(head)) = (
-        facts.reviewed_identity.as_ref(),
-        facts.head_identity.as_ref(),
-    ) else {
-        return Freshness::Stale;
-    };
-    if reviewed.hash != head.hash {
-        // The code delta changed, but it can still have only SHRUNK: every raw
-        // line still shipping was read, and the lines that vanished are paths
-        // the base absorbed on the rebase. Each raw line carries both blob
-        // shas for one path, so a line present in both sets means that path's
-        // change is byte-identical to what the reviewer read. A strict subset
-        // carries; a superset (new unreviewed code) and a rewrite do not.
-        return if is_strict_subset(&head.lines, &reviewed.lines) {
-            Freshness::CarriedSubset
-        } else {
-            Freshness::Stale
-        };
-    }
-    // The identities match, so the code under review is unchanged. The tree
-    // diff only names WHY, and a carry that cannot name its reason is not
-    // auditable - so an unreadable tree diff is Stale like any other failure.
-    let Some(paths) = facts.tree_paths.as_deref() else {
-        return Freshness::Stale;
-    };
-    if !paths.is_empty() && paths.iter().all(|p| is_documentation_path(p)) {
-        Freshness::CarriedDocsOnly
-    } else {
-        Freshness::CarriedBaseSync
-    }
-}
-
-/// Strict subset over two SORTED raw-diff line sets: non-empty (an empty HEAD
-/// identity is `None`, never an empty set, per the absence-matching rule
-/// above), strictly smaller, and every HEAD line present in the reviewed set.
-fn is_strict_subset(head: &[String], reviewed: &[String]) -> bool {
-    head.len() < reviewed.len() && {
-        let have: std::collections::HashSet<&str> = reviewed.iter().map(|s| s.as_str()).collect();
-        head.iter().all(|l| have.contains(l.as_str()))
-    }
-}
+#[cfg(test)]
+pub(crate) use crate::review_freshness::raw_diff_line_path;
+pub use crate::review_freshness::{
+    freshness_rank, review_freshness, CodeDiffIdentity, Freshness, FreshnessFacts,
+    FreshnessResolver,
+};
 
 /// Whether a `review_attestation` line is about the PR under evaluation.
 ///
@@ -1886,162 +1791,6 @@ fn attestation_in_scope(
         return true;
     }
     !attested_branch.is_empty() && !head_branch.is_empty() && attested_branch == head_branch
-}
-
-/// The path from a `git diff --raw` line (`:<meta>\t<path>`), or `""`.
-/// `--no-renames` guarantees one path per line, so there is no second field.
-fn raw_diff_line_path(line: &str) -> &str {
-    line.split('\t').nth(1).unwrap_or("").trim()
-}
-
-/// Content identity of the PR's own CODE changes at `sha`: the three-dot diff
-/// from `merge-base(base, sha)`, documentation paths dropped, hashed.
-///
-/// `--raw --no-abbrev` emits one line per changed path carrying both blob
-/// SHAs, so the identity is content-exact without materializing a patch.
-/// `--no-renames` pins it against a per-user `diff.renames` config that would
-/// otherwise make two runs of the same comparison disagree.
-///
-/// `None` on any git failure AND when nothing outside documentation changed.
-/// An empty code diff is not positive evidence of anything, and letting two of
-/// them compare equal is the absence-matched-against-absence trap above. The
-/// cost is that a documentation-only PR never carries an attestation, which is
-/// the fail-closed direction and matches today's behavior exactly.
-fn pr_code_diff_identity(
-    git_bin: &str,
-    cwd: &Path,
-    base: &str,
-    sha: &str,
-) -> Option<CodeDiffIdentity> {
-    let out = git_bounded(
-        git_bin,
-        &[
-            "diff",
-            "--raw",
-            "--no-abbrev",
-            "--no-renames",
-            &format!("{base}...{sha}"),
-        ],
-        cwd,
-    )?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    let mut lines: Vec<String> = text
-        .lines()
-        .map(|l| l.trim_end().to_string())
-        .filter(|l| !l.is_empty() && !is_documentation_path(raw_diff_line_path(l)))
-        .collect();
-    if lines.is_empty() {
-        return None;
-    }
-    lines.sort_unstable();
-    let mut hasher = blake3::Hasher::new();
-    for line in &lines {
-        hasher.update(line.as_bytes());
-        hasher.update(b"\n");
-    }
-    Some(CodeDiffIdentity {
-        hash: hasher.finalize().to_hex().to_string(),
-        lines,
-    })
-}
-
-/// Paths differing between two TREES (two-dot), or `None` on git failure.
-fn git_tree_paths(git_bin: &str, cwd: &Path, a: &str, b: &str) -> Option<Vec<String>> {
-    let out = git_bounded(git_bin, &["diff", "--name-only", "--no-renames", a, b], cwd)?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect(),
-    )
-}
-
-/// Resolves `reviewed_sha -> Freshness` against one HEAD, memoized so N
-/// verdicts at one commit cost one pair of git calls rather than N.
-///
-/// The HEAD identity is computed once, on first use: a session whose reviewers
-/// are all fresh (the common case) pays no git at all.
-pub struct FreshnessResolver<'a> {
-    git_bin: &'a str,
-    cwd: &'a Path,
-    /// The ref the PR merges into, already qualified (`origin/main`). An
-    /// unresolvable base yields no identity, hence `Stale` - fail closed.
-    base_ref: String,
-    head_sha: String,
-    head_identity: std::cell::RefCell<Option<Option<CodeDiffIdentity>>>,
-    cache: std::cell::RefCell<std::collections::HashMap<String, Freshness>>,
-}
-
-impl<'a> FreshnessResolver<'a> {
-    pub fn new(git_bin: &'a str, cwd: &'a Path, base_ref: &str, head_sha: &str) -> Self {
-        let base = base_ref.trim();
-        Self {
-            git_bin,
-            cwd,
-            // `gh pr view` returns a BARE branch name, and a branch name may
-            // itself contain a slash (`release/2.0`), so "has a slash" does not
-            // mean "already remote-qualified" - it only means the caller may
-            // have passed one of ours. Test the `origin/` prefix instead: a
-            // bare `release/2.0` resolves to a local ref that a fresh worktree
-            // usually does not have, and the identity then fails to compute for
-            // every commit, silently taking the carry away on exactly the
-            // long-lived release branches that rebase most.
-            base_ref: if base.is_empty() {
-                "origin/main".to_string()
-            } else if base.starts_with("origin/") {
-                base.to_string()
-            } else {
-                format!("origin/{base}")
-            },
-            head_sha: head_sha.to_string(),
-            head_identity: std::cell::RefCell::new(None),
-            cache: std::cell::RefCell::new(std::collections::HashMap::new()),
-        }
-    }
-
-    fn head_identity(&self) -> Option<CodeDiffIdentity> {
-        let mut slot = self.head_identity.borrow_mut();
-        slot.get_or_insert_with(|| {
-            pr_code_diff_identity(self.git_bin, self.cwd, &self.base_ref, &self.head_sha)
-        })
-        .clone()
-    }
-
-    /// Freshness of a verdict recorded at `reviewed_sha`. Never panics, never
-    /// fails: every unreadable input resolves to `Stale`.
-    pub fn freshness(&self, reviewed_sha: &str) -> Freshness {
-        if reviewed_sha.is_empty() {
-            return Freshness::Stale;
-        }
-        if reviewed_sha == self.head_sha {
-            return Freshness::Fresh;
-        }
-        if let Some(hit) = self.cache.borrow().get(reviewed_sha) {
-            return *hit;
-        }
-        let facts = FreshnessFacts {
-            reviewed_identity: pr_code_diff_identity(
-                self.git_bin,
-                self.cwd,
-                &self.base_ref,
-                reviewed_sha,
-            ),
-            head_identity: self.head_identity(),
-            tree_paths: git_tree_paths(self.git_bin, self.cwd, reviewed_sha, &self.head_sha),
-        };
-        let verdict = review_freshness(reviewed_sha, &self.head_sha, &facts);
-        self.cache
-            .borrow_mut()
-            .insert(reviewed_sha.to_string(), verdict);
-        verdict
-    }
 }
 
 fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
@@ -2899,6 +2648,10 @@ fn read_pr_info(
     require_corroboration: bool,
     github_approval_satisfies: bool,
     max_rounds: i64,
+    // The resolved `review.carry_interdiff_lines` (law d-608344c1): how many
+    // interdiff lines a rebase or fix may add and still carry an attestation.
+    // `0` disables the arm. Resolved by the caller from settings, default 100.
+    carry_interdiff_lines: usize,
     // The resolved `review.posture` , computed by the caller from the
     // parsed settings. None on callers that have no settings context.
     posture: Option<&PostureConfig>,
@@ -3005,7 +2758,7 @@ fn read_pr_info(
         .get("baseRefName")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let resolver = FreshnessResolver::new(git_bin, cwd, base_ref, head_sha);
+    let resolver = FreshnessResolver::new(git_bin, cwd, base_ref, head_sha, carry_interdiff_lines);
     let freshness = |sha: &str| resolver.freshness(sha);
 
     // The range-tiling answer for this PR's attestation chain, computed ONCE
@@ -5003,6 +4756,16 @@ pub struct PostureVerdict {
 /// `floor_off` reads the EFFECTIVE value. A config carrying an unclaimed
 /// false reads floor-on here, which errs toward holding the gate - never
 /// toward clearing it.
+/// The resolved `review.carry_interdiff_lines` (law d-608344c1): the law's
+/// default is 100; `0` disables the arm; a negative config value is a typo and
+/// reads as the default rather than as a refusal nobody asked for.
+fn carry_interdiff_lines_resolved(settings: &Settings) -> usize {
+    match settings.carry_interdiff_lines {
+        Some(n) if n >= 0 => n as usize,
+        _ => 100,
+    }
+}
+
 fn resolve_posture_config(settings: &Settings) -> PostureConfig {
     if let Some(p) = settings.posture.as_deref() {
         if let Some((components, rank, cost, freshness, diversity)) = posture_rung(p) {
@@ -6280,18 +6043,6 @@ fn is_false(b: &bool) -> bool {
 
 fn is_attestation_origin_unknown(o: &AttestationOrigin) -> bool {
     matches!(o, AttestationOrigin::Unknown)
-}
-
-/// Order for "which of this reviewer's reviews is the best evidence". Fresh
-/// beats a carry beats stale; the carry reasons are equally good, since
-/// all three mean the code under review is unchanged or a subset of what was
-/// read.
-fn freshness_rank(f: Freshness) -> u8 {
-    match f {
-        Freshness::Fresh => 2,
-        Freshness::CarriedBaseSync | Freshness::CarriedDocsOnly | Freshness::CarriedSubset => 1,
-        Freshness::Stale => 0,
-    }
 }
 
 /// Label a local attestation's authorship from its emitting session vs the
@@ -10359,6 +10110,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             settings.require_corroboration.unwrap_or(false),
             settings.github_approval_satisfies.unwrap_or(true),
             settings.max_rounds.unwrap_or(2).max(1),
+            carry_interdiff_lines_resolved(&settings),
             Some(&resolve_posture_config(&settings)),
             &resolved_local_peer_reviewers_for_author(&settings, author_harness.as_deref()),
         );
@@ -11297,6 +11049,7 @@ fn run_done(
     require_corroboration: bool,
     github_approval_satisfies: bool,
     max_rounds: i64,
+    carry_interdiff_lines: usize,
     posture: Option<&PostureConfig>,
     peer_reviewers: &[String],
 ) -> Result<PrInfo, GhReadError> {
@@ -11322,6 +11075,7 @@ fn run_done(
         require_corroboration,
         github_approval_satisfies,
         max_rounds,
+        carry_interdiff_lines,
         posture,
         peer_reviewers,
     )?;
@@ -12112,7 +11866,7 @@ fn path_lookup(bin: &OsStr) -> Option<std::path::PathBuf> {
 /// every caller already treats no-answer as its conservative outcome
 /// (unshipped, dirty, unknown branch), so the degrade direction is the same
 /// one each caller documented for a failing git.
-fn git_bounded(git_bin: &str, args: &[&str], cwd: &Path) -> Option<BoundedOutput> {
+pub(crate) fn git_bounded(git_bin: &str, args: &[&str], cwd: &Path) -> Option<BoundedOutput> {
     let read_name = format!("git {}", args.first().unwrap_or(&"?"));
     match run_bounded(OsStr::new(git_bin), args, cwd, stopgate_read_timeout()) {
         BoundedRun::Completed(out) => Some(out),
@@ -14209,6 +13963,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         inputs.settings.require_corroboration.unwrap_or(false),
         inputs.settings.github_approval_satisfies.unwrap_or(true),
         inputs.settings.max_rounds.unwrap_or(2).max(1),
+        carry_interdiff_lines_resolved(&inputs.settings),
         Some(&resolve_posture_config(&inputs.settings)),
         &resolved_local_peer_reviewers_for_author(
             &inputs.settings,
@@ -14868,6 +14623,9 @@ mod tests {
             reviewed_identity: reviewed.map(|h| ident_of(&[h])),
             head_identity: head.map(|h| ident_of(&[h])),
             tree_paths: tree.map(|p| p.iter().map(|s| s.to_string()).collect()),
+            // Default facts carry no interdiff and a cap of 0, which disables
+            // the x-82ac arm: these tests pin the pre-existing arms exactly.
+            ..Default::default()
         }
     }
 
@@ -14876,6 +14634,7 @@ mod tests {
             reviewed_identity: Some(ident_of(reviewed)),
             head_identity: Some(ident_of(head)),
             tree_paths: tree.map(|p| p.iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
         }
     }
 
@@ -15043,13 +14802,13 @@ mod tests {
         // either can never leave the other green-looking.
         let (tmp, reviewed, head) = rebased_repo(false);
         let repo = tmp.path().join("r");
-        let resolver = FreshnessResolver::new("git", &repo, "main", &head);
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
         let verdict = resolver.freshness(&reviewed);
         assert!(verdict.counts(), "identical rebase must carry: {verdict:?}");
 
         let (tmp, reviewed, head) = rebased_repo(true);
         let repo = tmp.path().join("r");
-        let resolver = FreshnessResolver::new("git", &repo, "main", &head);
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
         let verdict = resolver.freshness(&reviewed);
         assert_eq!(verdict, Freshness::Stale, "conflict resolution must expire");
     }
@@ -15188,22 +14947,22 @@ mod tests {
         // resolves to the local ref, which in a stale worktree is not the base.
         let cwd = std::env::temp_dir();
         assert_eq!(
-            FreshnessResolver::new("git", &cwd, "main", "abc").base_ref,
+            FreshnessResolver::new("git", &cwd, "main", "abc", 100).base_ref,
             "origin/main"
         );
         assert_eq!(
-            FreshnessResolver::new("git", &cwd, "origin/release", "abc").base_ref,
+            FreshnessResolver::new("git", &cwd, "origin/release", "abc", 100).base_ref,
             "origin/release"
         );
         // A slash in the name is not remote-qualification: `release/2.0` is a
         // bare branch and must still be qualified, or the identity resolves
         // against a local ref the worktree may not have.
         assert_eq!(
-            FreshnessResolver::new("git", &cwd, "release/2.0", "abc").base_ref,
+            FreshnessResolver::new("git", &cwd, "release/2.0", "abc", 100).base_ref,
             "origin/release/2.0"
         );
         assert_eq!(
-            FreshnessResolver::new("git", &cwd, "", "abc").base_ref,
+            FreshnessResolver::new("git", &cwd, "", "abc", 100).base_ref,
             "origin/main"
         );
     }

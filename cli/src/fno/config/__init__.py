@@ -1401,6 +1401,15 @@ class ReviewBlock(BaseModel):
     # rebases are not rounds, and a pass refunds nothing: it is one round
     # like any other verdict. Validated at parse: at least 1.
     max_rounds: int = Field(default=2, ge=1)
+    # How many interdiff lines a rebase or fix commit may add while a verdict
+    # from the older head still counts as a review of the new one (law
+    # d-608344c1). The interdiff is the multiset symmetric difference of the
+    # two PR-code patches against the base, never a direct head-to-head diff,
+    # so base movement contributes nothing. The law's threshold: UNDER 100
+    # lines carries; 100 or more, or an unreadable patch on either side, costs
+    # a re-read. `0` disables the arm, keeping the identity-equality rule
+    # alone.
+    carry_interdiff_lines: int = Field(default=100, ge=0)
     # Categories a CONFIRMED-free finding may carry and still be non-blocking.
     # A configured list EXTENDS the shipped default rather than replacing it,
     # so a project cannot silently narrow the gate by naming one category. The
