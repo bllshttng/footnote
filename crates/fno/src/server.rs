@@ -3486,6 +3486,7 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
         }
     }
 }
+
 /// (x-9c5f) Sanitize peek-overlay free-text mail: strip control chars, trim,
 /// refuse blank-after-sanitize and over-`MAX_MAIL_TEXT` (never truncate - a
 /// silently cut instruction to a worker is worse than a visible refusal, Locked
@@ -3692,15 +3693,83 @@ async fn run_reap() -> String {
     command
         .args(["reap", "--json"])
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let fut = crate::process_admission::tokio_output(&mut command);
-    match tokio::time::timeout(REAP_TIMEOUT, fut).await {
-        Err(_) => "reap: timed out".to_string(),
+    let mut child = match crate::process_admission::tokio_spawn(&mut command) {
+        Ok(c) => c,
+        Err(_) => return "reap: unavailable".to_string(),
+    };
+    // (x-f191) Drain both pipes concurrently so a timeout can still read how
+    // far the sweep got: the child's partial stderr progress names rows
+    // scanned / removed / the row in flight (gc_sweep's stderr lines).
+    let stdout_task = child.stdout.take().map(|mut pipe| {
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut pipe, &mut buf).await;
+            buf
+        })
+    });
+    let stderr_task = child.stderr.take().map(|mut pipe| {
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut pipe, &mut buf).await;
+            buf
+        })
+    });
+    let stdout_str = |t: Option<tokio::task::JoinHandle<Vec<u8>>>| async move {
+        match t {
+            Some(task) => String::from_utf8_lossy(&task.await.unwrap_or_default()).to_string(),
+            None => String::new(),
+        }
+    };
+    match tokio::time::timeout(REAP_TIMEOUT, child.wait()).await {
+        Err(_) => {
+            let _ = child.kill().await;
+            let stderr = stdout_str(stderr_task).await;
+            format!(
+                "reap: timed out at 20s; {}. Retrying is safe: the sweep is per-row and a removed row stays gone.",
+                reap_progress_note(&stderr)
+            )
+        }
         Ok(Err(_)) => "reap: unavailable".to_string(),
-        Ok(Ok(out)) if out.status.success() => reap_notice(&String::from_utf8_lossy(&out.stdout)),
+        Ok(Ok(status)) if status.success() => {
+            let out = stdout_str(stdout_task).await;
+            reap_notice(&out)
+        }
         Ok(Ok(_)) => "reap: failed".to_string(),
     }
+}
+
+/// (x-f191) Compress the sweep's partial stderr progress into one clause:
+/// rows scanned, rows removed before the deadline, and the row in flight.
+/// One line prefix (`reap: `) with a word per phase; anything unparseable
+/// degrades to "no rows scanned" in the notice rather than a guessed count.
+fn reap_progress_note(stderr: &str) -> String {
+    let mut scanned = 0usize;
+    let mut removed = 0usize;
+    let mut removed_seen = false;
+    let mut in_flight: Option<&str> = None;
+    for line in stderr.lines() {
+        if let Some(name) = line.strip_prefix("reap: scan ") {
+            scanned += 1;
+            in_flight = Some(name);
+        } else if let Some(rest) = line.strip_prefix("reap: removed ") {
+            if let Ok(n) = rest.trim().parse::<usize>() {
+                removed = n;
+                removed_seen = true;
+            }
+        } else if let Some(name) = line.strip_prefix("reap: cascade ") {
+            in_flight = Some(name);
+        }
+    }
+    if scanned == 0 && !removed_seen {
+        return "no rows scanned before the deadline".to_string();
+    }
+    format!(
+        "scanned {scanned} row(s), removed {removed} before the deadline, in flight: {}",
+        in_flight.unwrap_or("none")
+    )
 }
 
 /// Shell `claude <verb> <attach_id>` for an external lifecycle action (x-7561):
@@ -9669,6 +9738,17 @@ impl Core {
                 .unwrap_or_else(|e| e);
             let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
         });
+
+    /// (x-f191) The corpse-safe stop: off-loop like [`Self::agent_action`],
+    /// but the verb pair (stop, then rm while the row still reads live) so a
+    /// stored-live row the harness no longer lists reaches the CLI's
+    /// already-absent removal instead of looping on a no-op stop. One press.
+    fn stop_agent_action(&self, id: u64, name: String) {
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let notice = run_stop_or_remove(&name).await;
+            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
+        });
     }
 
     /// (x-d285) Resolve a gesture's re-entry plan OFF the core loop and
@@ -14328,12 +14408,14 @@ impl Core {
             }
             Command::StopAgent { name } => {
                 // Stop a live sideline row (x-76ea). `resolve_lifecycle_target`
-                // validates the name against THIS server's catalog fail-closed;
-                // the shell is idempotent (already-exited is a clean no-op), so
-                // the exited flag is unused here.
+                // validates the name against THIS server's catalog fail-closed.
+                // (x-f191) The verb itself is corpse-safe: a stop that leaves
+                // the row stored-live falls through to `rm`, whose daemon-side
+                // live gate removes a provably-absent row instead of letting
+                // `x` loop on a no-op stop forever.
                 match self.resolve_lifecycle_target(&name) {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(_row) => self.agent_action(client_id, "stop", name),
+                    Ok(_row) => self.stop_agent_action(client_id, name),
                 }
                 Flow::Continue
             }
@@ -21320,6 +21402,199 @@ mod tests {
             },
         );
         assert!(drain_notice(&mut rx).unwrap().contains("still live"));
+    }
+
+    // -- x-f191 corpse-safe stop + honest reap timeout -----------------------
+
+    fn verb_result(ok: bool, stdout: &str, stderr: &str) -> super::AgentVerbResult {
+        super::AgentVerbResult {
+            ok,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            timed_out: false,
+            unavailable: false,
+        }
+    }
+
+    #[test]
+    fn render_agent_verb_quotes_daemon_reason_on_failure() {
+        // x-f191: a bare "stop X: failed" is the same silence the reap timeout
+        // used to end with; the daemon's reason is the operator's next action.
+        let r = verb_result(false, "", "agent corpse is a pane worker; kill the pane");
+        assert_eq!(
+            super::render_agent_verb("stop", "corpse", &r),
+            "stop corpse: failed: agent corpse is a pane worker; kill the pane"
+        );
+        let ok = verb_result(true, "", "");
+        assert_eq!(
+            super::render_agent_verb("stop", "corpse", &ok),
+            "stopped corpse"
+        );
+    }
+
+    #[test]
+    fn row_live_in_rows_reads_the_snapshot_not_the_world() {
+        // x-f191: the stored field is exactly a snapshot. A status-live row
+        // (the corpse shape: pid null, exited_at null) reads live HERE; the
+        // live-vs-dead decision is rm's gate, never this fn.
+        let raw = r#"{"entries":[
+            {"name":"corpse","cwd":"/w","status":"live"},
+            {"name":"done","cwd":"/w","status":"exited"}
+        ]}"#;
+        let rows = agents_view::derive_rows(raw, 0).expect("fixture parses");
+        assert!(super::row_live_in_rows(&rows, "corpse"));
+        assert!(!super::row_live_in_rows(&rows, "done"));
+        assert!(!super::row_live_in_rows(&rows, "vanished"));
+    }
+
+    #[test]
+    fn compose_stop_remove_reaches_the_already_absent_branch() {
+        // The operator's measured case: stop no-ops on the corpse, the rm leg
+        // removes it, and the notice quotes the daemon's own verdict.
+        let rm = verb_result(
+            true,
+            "removed: corpse (fno; claude row already absent)\n",
+            "",
+        );
+        let notice =
+            super::compose_stop_remove("stop corpse: failed: no such session", "corpse", &rm);
+        assert!(
+            notice.contains("already absent"),
+            "quotes the verdict: {notice}"
+        );
+        assert!(
+            notice.starts_with("stop corpse: failed"),
+            "stop outcome leads: {notice}"
+        );
+        // A refusal is named, not swallowed: the row reads live and stays.
+        let refused = verb_result(false, "", "agent corpse is still live - stop it first");
+        let notice = super::compose_stop_remove("stopped corpse", "corpse", &refused);
+        assert!(notice.contains("; rm corpse: failed: agent corpse is still live"));
+    }
+
+    #[test]
+    fn reap_progress_note_names_scanned_removed_and_in_flight() {
+        // x-f191: the timeout notice must say how far the sweep got.
+        let stderr = "reap: scan alpha\nreap: scan beta\nreap: removed 1\nreap: cascade beta\n";
+        assert_eq!(
+            super::reap_progress_note(stderr),
+            "scanned 2 row(s), removed 1 before the deadline, in flight: beta"
+        );
+        // A deadline hit before the first row classifies says so, not "0".
+        assert_eq!(
+            super::reap_progress_note(""),
+            "no rows scanned before the deadline"
+        );
+    }
+
+    /// Serialized process env for the tests that pin FNO_AGENTS_BIN /
+    /// FNO_AGENTS_HOME; every other test in this binary reads the same env.
+    fn fno_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Pins the env pair for one test and restores whatever was there on
+    /// drop, assert failures included.
+    struct PinnedAgentEnv {
+        prev_bin: Option<std::ffi::OsString>,
+        prev_home: Option<std::ffi::OsString>,
+    }
+    impl PinnedAgentEnv {
+        fn set(bin: &std::path::Path, home: &std::path::Path) -> Self {
+            let prev_bin = std::env::var_os("FNO_AGENTS_BIN");
+            let prev_home = std::env::var_os("FNO_AGENTS_HOME");
+            std::env::set_var("FNO_AGENTS_BIN", bin);
+            std::env::set_var("FNO_AGENTS_HOME", home);
+            Self {
+                prev_bin,
+                prev_home,
+            }
+        }
+    }
+    impl Drop for PinnedAgentEnv {
+        fn drop(&mut self) {
+            match self.prev_bin.take() {
+                Some(v) => std::env::set_var("FNO_AGENTS_BIN", v),
+                None => std::env::remove_var("FNO_AGENTS_BIN"),
+            }
+            match self.prev_home.take() {
+                Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+                None => std::env::remove_var("FNO_AGENTS_HOME"),
+            }
+        }
+    }
+
+    fn corpse_fixture(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("registry.json"),
+            r#"{"entries":[{"name":"corpse","cwd":"/w","status":"live","harness":"claude"}]}"#,
+        )
+        .unwrap();
+    }
+
+    fn write_fake_bin(path: &std::path::Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_falls_through_to_rm_on_a_stored_live_corpse() {
+        // The operator's measured case, end to end: the registry says live,
+        // the harness says gone. Stop fails honestly; the rm leg reaches the
+        // already-absent branch and the notice quotes its verdict.
+        let _serial = fno_env_lock();
+        let tmp = std::env::temp_dir().join(format!("fno-x-f191-corpse-{}", std::process::id()));
+        corpse_fixture(&tmp);
+        write_fake_bin(
+            &tmp.join("fake-agents.sh"),
+            "#!/bin/bash\n\
+             if [ \"$1\" = \"stop\" ]; then\n\
+             echo \"claude stop corpse failed: agent not found\" >&2\n\
+             exit 1\n\
+             fi\n\
+             echo \"removed: corpse (fno; claude row already absent)\"\n\
+             exit 0\n",
+        );
+        let _env = PinnedAgentEnv::set(&tmp.join("fake-agents.sh"), &tmp);
+        let notice = super::run_stop_or_remove("corpse").await;
+        assert!(
+            notice.starts_with("stop corpse: failed: claude stop corpse failed"),
+            "stop outcome leads: {notice}"
+        );
+        assert!(
+            notice.contains("removed it (removed: corpse (fno; claude row already absent))"),
+            "rm verdict quoted: {notice}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn stop_success_skips_the_rm_leg() {
+        // The designed stop-then-rm protocol stays: a stop that flips the row
+        // exited is done - the second `x` removes. The rm leg never fires.
+        let _serial = fno_env_lock();
+        let tmp = std::env::temp_dir().join(format!("fno-x-f191-live-{}", std::process::id()));
+        corpse_fixture(&tmp);
+        write_fake_bin(
+            &tmp.join("fake-agents.sh"),
+            "#!/bin/bash\n\
+             if [ \"$1\" = \"stop\" ]; then\n\
+             printf '{\"entries\":[{\"name\":\"corpse\",\"cwd\":\"/w\",\"status\":\"exited\"}]}' > \"$FNO_AGENTS_HOME/registry.json\"\n\
+             exit 0\n\
+             fi\n\
+             echo \"rm must not run\" >&2\n\
+             exit 3\n",
+        );
+        let _env = PinnedAgentEnv::set(&tmp.join("fake-agents.sh"), &tmp);
+        let notice = super::run_stop_or_remove("corpse").await;
+        assert_eq!(notice, "stopped corpse", "no rm leg on a settled stop");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// A helper for the respawn refusal tests: an EXITED registry row with an

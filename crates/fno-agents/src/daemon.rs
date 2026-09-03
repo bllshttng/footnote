@@ -2665,6 +2665,11 @@ fn gc_sweep_impl_with_node_cascade(
     let mut pending: Vec<PendingRow> = Vec::with_capacity(registry.entries.len());
 
     for e in &registry.entries {
+        // (x-f191) Progress on stderr, one line per row: a sweep that outlives
+        // its 20s caller bound can still say how far it got. stdout stays the
+        // --json contract; stderr lines are free-form and every consumer of
+        // this sweep already treats stderr as log.
+        eprintln!("reap: scan {}", e.name);
         let grace_secs = grace_for_harness(e.harness_name()).as_secs() as i64;
         // x-91f3: the ladder answers for EVERY row, not only the stamped
         // live-ish rows the consult below used to gate it to. `short_id` is
@@ -3071,11 +3076,18 @@ fn gc_sweep_impl_with_node_cascade(
     });
     match write {
         Ok(()) => {
+            // (x-f191) The write is one atomic pass, so the removed count is
+            // known here - before the per-row cascade work below, which is
+            // where a sweep under load spends its time.
+            eprintln!("reap: removed {}", reaped_names.len());
             // Emit only AFTER a successful write so the event log never diverges
             // from disk (AC1-ERR), and only for rows actually removed under the
             // lock (a stale candidate whose identity changed is not a reap).
             for e in &registry.entries {
                 if reaped_names.contains(&e.name) {
+                    // (x-f191) The row whose accounting + cascade is now in
+                    // flight; the next scan/cascade line supersedes it.
+                    eprintln!("reap: cascade {}", e.name);
                     let node_id = dispatch_node_id(&e.name);
                     let mut target_session_id = None;
                     let mut termination_event = false;
