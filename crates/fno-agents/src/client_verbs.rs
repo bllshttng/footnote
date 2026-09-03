@@ -1474,7 +1474,7 @@ fn resolve_entry_with_heal_scoped(
 /// (matches Python's `fno.provenance.resolver._slug`). Not reversible, so the
 /// resume path resolves cwd by trying candidates and slug-checking rather than
 /// decoding a slug back to a path.
-fn claude_cwd_slug(path: &Path) -> String {
+pub(crate) fn claude_cwd_slug(path: &Path) -> String {
     path.to_string_lossy().replace('/', "-").replace('.', "-")
 }
 

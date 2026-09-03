@@ -43,6 +43,7 @@ pub mod active_backlog;
 mod agent_lock;
 pub mod agents_config;
 pub mod agy_ask;
+pub mod bash_census;
 pub mod check_supersession;
 pub mod claims;
 pub mod claude_adopt;

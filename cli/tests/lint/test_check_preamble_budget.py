@@ -394,22 +394,34 @@ def test_doctor_deleted_cwd_degrades_to_silence(
 
 
 @pytest.mark.parametrize(
-    ("preamble_line", "expected_count"),
+    ("preamble_line", "session_start_line", "expected_count"),
     [
-        (f"preamble: 36213 / {CEILING_BYTES} B (~9.1K tok/turn)", 1),
-        (None, 0),
+        (
+            f"preamble: 36213 / {CEILING_BYTES} B (~9.1K tok/turn)",
+            "preamble: fno gate 36213 B + user CLAUDE.md and imports 0 B + "
+            "project memory index 0 B = 36213 B (~9053 tok per session start)",
+            2,
+        ),
+        (None, None, 0),
     ],
 )
 def test_doctor_command_preserves_status_and_optional_line(
     monkeypatch: pytest.MonkeyPatch,
     preamble_line: str | None,
+    session_start_line: str | None,
     expected_count: int,
 ) -> None:
+    """The gate's own summary and the TOTAL session-start bytes line (x-997a)
+    are two independent `preamble:`-prefixed lines, both optional: each is
+    None when its own read failed, and the report never breaks on either."""
     from fno import doctor
     from fno.cli import app
 
     _stub_doctor_command(monkeypatch)
     monkeypatch.setattr(doctor, "_preamble_budget_line", lambda source: preamble_line)
+    monkeypatch.setattr(
+        doctor, "_session_start_bytes_line", lambda line: session_start_line
+    )
 
     result = CliRunner().invoke(app, ["doctor"])
 

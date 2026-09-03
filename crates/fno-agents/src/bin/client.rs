@@ -25,6 +25,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "adopt",
     "ask",
     "attach",
+    "bash-census",
     "claim",
     "codex-loaded-threads",
     "detect",
@@ -202,66 +203,53 @@ async fn run(args: Vec<String>) -> i32 {
         }
     }
 
-    // `loop-check` is the stop-hook decision verb (Task 1.1, ab-d0337fbc).
-    // It reads external state (git, gh, manifest, transcript, events, ledger)
-    // and returns a single JSON decision object. Direct dispatch; no daemon RPC.
+    // `loop-check`: stop-hook decision verb (see loopcheck.rs module doc).
+    // Direct dispatch; no daemon RPC.
     if verb == "loop-check" {
         return fno_agents::loopcheck::run_loop_check(&args[1..]);
     }
 
-    // `probe-run` evaluates one named probe list (done_probes | close_probes)
-    // from a plan doc and exits 0 when every probe passes. The close verbs
-    // shell out to it for close_probes (x-5d34); one runner, shared with
-    // loop-check's done_probes. Direct dispatch; no daemon RPC.
+    // `probe-run`: see its own doc in loopcheck.rs. Direct dispatch.
     if verb == "probe-run" {
         return fno_agents::loopcheck::run_probe_run(&args[1..]);
     }
 
-    // `review-coverage` is the standalone review_coverage producer (x-3a3f):
-    // the same resolver + emitter the stop hook uses, callable from any path
-    // that can reach the merge gate (notably the pr-merge recompute and a
-    // manifest-less session). Read-only against GitHub, append-only against
-    // the event logs. Direct dispatch like loop-check; no daemon RPC.
+    // `review-coverage`: standalone review_coverage producer (see its own doc
+    // in loopcheck.rs). Direct dispatch like loop-check; no daemon RPC.
     if verb == "review-coverage" {
         return fno_agents::loopcheck::run_review_coverage(&args[1..]);
     }
 
-    // `loop run` is the unified driver loop (step 5, ab-781b6d17). Direct
+    // `loop run`: unified driver loop (see loop_target.rs doc). Direct
     // dispatch like loop-check; no daemon RPC.
     if verb == "loop" {
         return fno_agents::loop_target::run_loop_verb(&args[1..]);
     }
 
-    // `finalize` is the terminal-only side-effect WRITER (step 6, ab-f8e5f214).
-    // The stop-hook shim invokes it on a terminal-allow loop-check decision to
-    // re-home the ledger record + plan stamp/graduate + handoff artifact. Direct
-    // dispatch; no daemon RPC. loop-check stays the read-only decision verb.
+    // `finalize`: terminal-only side-effect WRITER (see finalize.rs doc). Direct
+    // dispatch; no daemon RPC.
     if verb == "finalize" {
         return fno_agents::finalize::run_finalize(&args[1..]);
     }
 
-    // `kill-check` is the Rust port of scripts/lib/kill-criteria.sh
-    // (packaging EPIC ab-8bdb4642). It evaluates a plan's kill_criteria
-    // predicates against target-state + git, printing the single
-    // `KILL_CRITERIA_FIRED <name>|<reason>` line (exit 1) when one fires, else
-    // empty stdout (exit 0). Direct dispatch; no daemon RPC.
+    // `kill-check`: Rust port of scripts/lib/kill-criteria.sh (see
+    // kill_criteria.rs doc). Direct dispatch; no daemon RPC.
     if verb == "kill-check" {
         return fno_agents::kill_criteria::run_kill_check(&args[1..]);
     }
 
-    // `graph-get <id>...` is the Rust batch counterpart to `fno backlog get`
-    // (x-997a). `fno backlog get` forwards here only when handed more than one
-    // id; it is not a routable `fno agents` verb (same reasoning as
-    // `kill-check`/`pr-heal`), so it stays out of CLIENT_VERB_USAGE /
-    // RUST_CLIENT_VERBS. Reads graph.json directly; no daemon RPC.
+    // `graph-get`/`bash-census` (x-997a): daemon-free reads, not routable
+    // `fno agents` verbs (same reasoning as kill-check/pr-heal), so both stay
+    // out of CLIENT_VERB_USAGE/RUST_CLIENT_VERBS.
     if verb == "graph-get" {
         return fno_agents::graph_get::run_graph_get(&args[1..]);
     }
+    if verb == "bash-census" {
+        return fno_agents::bash_census::run_bash_census(&args[1..]);
+    }
 
-    // `verify-evidence` is the Rust port of scripts/lib/verify-event-evidence.sh
-    // (packaging EPIC ab-8bdb4642). It dispatches on a leading sub-token
-    // (child-promise | has-nonclaude | receipt) and reproduces the bash exit
-    // codes + stdout diagnostic kinds + stderr warnings. Direct dispatch.
+    // `verify-evidence`: Rust port of scripts/lib/verify-event-evidence.sh
+    // (see verify_evidence.rs doc). Direct dispatch.
     if verb == "verify-evidence" {
         return fno_agents::verify_evidence::run_verify_evidence(&args[1..]);
     }
