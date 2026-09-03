@@ -498,6 +498,24 @@ def _same_territory(a: Optional[str], b: Optional[str]) -> bool:
     return bool(left) and left == right
 
 
+def crown_covers(held: Optional[str], requested: Optional[str]) -> bool:
+    """Does a crown over ``held`` carry authority over ``requested``?
+
+    Same territory or strict containment, which is the rule the grant path
+    already applies inline (equal scope is accepted, then non-containment
+    refuses). Named once here so a reader asking "is this row crowned for
+    THIS scope" cannot answer it with a second normalization: a helper that
+    disagreed with the grant would let a session pass a check the granting
+    verb would have refused.
+
+    A held scope that is blank answers False, because a crown naming no
+    territory carries authority over nothing.
+    """
+    if not held or not requested:
+        return False
+    return _same_territory(held, requested) or scope_contains(held, requested)
+
+
 class CrownPromotionError(RuntimeError):
     """An attended in-place grant that refused without changing the registry."""
 

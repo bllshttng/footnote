@@ -129,6 +129,7 @@ def _warn_uncrowned_row(scope: str) -> None:
         AGENT_UNREGISTERED,
         REGISTRY_UNREADABLE,
         calling_agent_row,
+        crown_covers,
         crown_reading,
     )
 
@@ -145,14 +146,33 @@ def _warn_uncrowned_row(scope: str) -> None:
             err=True,
         )
         return
-    if crown_reading(row) is not None:
-        return
     handle = getattr(row, "name", "") or "<handle>"
-    typer.echo(
-        "king: warning: manifest armed, but this row carries NO crown, so "
+    reading = crown_reading(row)
+    if reading is not None and crown_covers(reading.get("scope"), scope):
+        return
+
+    # What the three row-keyed readers do when the crown does not cover the
+    # scope just armed. Identical for a missing crown and a mismatched one:
+    # each keys on crown_scope, so a crown over other territory is as absent
+    # to them as no crown at all.
+    consequence = (
         "`fno agents king done` will refuse, `fno agents king manifest-path` "
-        "will answer empty, and the post-compact king brief will never arrive. "
-        "Ask an attended shell to run "
+        "will exit non-zero without printing a path so the stop hook leaves "
+        "KING_STATE_FILE unset, and the post-compact king brief will never "
+        "arrive."
+    )
+    if reading is None:
+        typer.echo(
+            f"king: warning: manifest armed for {scope!r}, but this row "
+            f"carries NO crown, so {consequence} Ask an attended shell to run "
+            f"`fno agents crown {handle} --scope {scope}`.",
+            err=True,
+        )
+        return
+    typer.echo(
+        f"king: warning: manifest armed for {scope!r}, but this row's crown is "
+        f"{reading['label']!r}, which neither equals nor contains it, so "
+        f"{consequence} Ask an attended shell to re-scope it with "
         f"`fno agents crown {handle} --scope {scope}`.",
         err=True,
     )

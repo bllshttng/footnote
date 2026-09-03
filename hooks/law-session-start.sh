@@ -63,16 +63,50 @@ import sys
 
 RENDER_CAP = 8
 
-raw = sys.stdin.read()
-start = raw.find("{")
-if start < 0:
-    sys.exit(0)
-try:
-    payload = json.loads(raw[start:])
-except Exception:
+def _fail(why):
+    """An unreadable payload is a REPORT, never silence.
+
+    The shell leg above already refuses to collapse a failed read into an
+    empty string. This leg used to do exactly that: any parse error exited
+    0, so a session start rendered nothing and looked identical to a store
+    holding no law. That is the absence-as-success trap the header refuses,
+    reintroduced eight lines later.
+    """
+    print("## Standing law")
+    print()
+    print(
+        f"could not be read ({why}). The store may hold rulings this "
+        "session has not seen. Run `fno backlog decisions --lane law "
+        "--state live` directly."
+    )
     sys.exit(0)
 
+
+raw = sys.stdin.read()
+
+# Scan every "{" rather than trusting the first. The verb shares stdout with
+# whatever preamble the deployed fno prints, and a preamble carrying a brace
+# (a `dedup:` line, a config note quoting a dict) makes a first-brace slice
+# start mid-noise. raw_decode from each candidate finds the real object and,
+# when none parses, says so through _fail rather than exiting quiet.
+payload = None
+decoder = json.JSONDecoder()
+at = raw.find("{")
+while at >= 0:
+    try:
+        payload, _ = decoder.raw_decode(raw[at:])
+        break
+    except ValueError:
+        at = raw.find("{", at + 1)
+
+if payload is None:
+    _fail("no JSON object in the output" if "{" not in raw else "unparseable JSON")
+if not isinstance(payload, dict):
+    _fail("payload is not an object")
+
 rows = payload.get("decisions") or []
+if not isinstance(rows, list):
+    _fail("decisions is not a list")
 total = payload.get("total")
 if not isinstance(total, int):
     total = len(rows)
@@ -86,12 +120,26 @@ if not total and not damaged:
 
 subjects = []
 for row in rows:
+    if not isinstance(row, dict):
+        continue
     subject = str(row.get("subject") or "").strip()
     if subject and subject not in subjects:
         subjects.append(subject)
 
 print("## Standing law")
 print()
+
+# Damage with nothing live is a damage report, not a law list. The old order
+# printed "0 live ruling(s) the operator already made" and then told the
+# reader to go read one of them.
+if not total:
+    print(
+        f"{damaged} record(s) in the store could not be parsed, so whether "
+        "any law is live here is unknown. Run `fno backlog decisions --lane "
+        "law --state live` directly."
+    )
+    sys.exit(0)
+
 shown = subjects[:RENDER_CAP]
 tail = ""
 if len(subjects) > len(shown):
