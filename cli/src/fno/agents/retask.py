@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import io
+import os
 import re
 import subprocess
 import time
@@ -32,7 +33,7 @@ class RetaskCoordinate:
     provider: Optional[str]
     model: Optional[str]
     effort: Optional[str]
-    substrate: str
+    substrate: Optional[str]
     permission_mode: Optional[str]
     route: Optional[str]
     account: Optional[str]
@@ -170,6 +171,59 @@ def _flag_value(args: Sequence[str], *names: str) -> Optional[str]:
     return None
 
 
+def resolve_thread_viewport(
+    entry: AgentEntry,
+    *,
+    runner: Optional[Callable[..., subprocess.CompletedProcess[str]]] = None,
+) -> tuple[str, int]:
+    """Open a thread's dedicated viewport and return its positive pane id."""
+    runner = runner or subprocess.run
+    thread_id = entry.fno_id
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        raise RetaskTransportError("thread_ref_unreadable")
+    session = (os.environ.get("FNO_SESSION") or "main").strip()
+    if not session:
+        raise RetaskTransportError("thread_view_unavailable")
+    fno_bin = os.environ.get("FNO_BIN") or "fno"
+    try:
+        reached = runner(
+            [fno_bin, "mux", "thread", "--session", session, thread_id],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RetaskTransportError("thread_view_open_timeout") from exc
+    if reached.returncode != 0:
+        raise RetaskTransportError("thread_view_unavailable")
+    try:
+        panes = runner(
+            [fno_bin, "mux", "pane", "ls", "--session", session, "--json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        rows = json.loads(panes.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise RetaskTransportError("thread_ref_unreadable") from exc
+    if panes.returncode != 0 or not isinstance(rows, list):
+        raise RetaskTransportError("thread_ref_unreadable")
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, Mapping)
+        and row.get("name") == entry.name
+        and row.get("fno_id") == thread_id
+        and isinstance(row.get("pane_id"), int)
+        and row["pane_id"] > 0
+    ]
+    if len(matches) != 1:
+        raise RetaskTransportError("thread_ref_unreadable")
+    return session, matches[0]["pane_id"]
+
+
 def resolve_target_coordinate(
     node: str,
     *,
@@ -209,7 +263,7 @@ def resolve_target_coordinate(
         provider=provider,
         model=resolved_model,
         effort=_flag_value(resolved, "--effort"),
-        substrate=_flag_value(resolved, "--substrate") or "pane",
+        substrate=_flag_value(resolved, "--substrate"),
         permission_mode=_flag_value(resolved, "--permission-mode"),
         route=route,
         account=_flag_value(resolved, "--account"),
@@ -224,9 +278,19 @@ def detect_retask(
 ) -> dict:
     if entry.status != "live":
         return {"outcome": "refused", "reason": "worker_not_live"}
+    substrate = entry.substrate
+    if substrate not in {"pane", "thread"}:
+        return {"outcome": "refused", "reason": "worker_substrate_unknown"}
     mux = entry.mux if isinstance(entry.mux, dict) else None
-    if not mux or not mux.get("session") or not mux.get("pane_id"):
-        return {"outcome": "refused", "reason": "worker_has_no_mux_ref"}
+    if substrate == "pane":
+        if not mux or not mux.get("session") or not mux.get("pane_id"):
+            return {"outcome": "refused", "reason": "worker_has_no_mux_ref"}
+        mux_ref = {"session": mux["session"], "pane_id": mux["pane_id"]}
+    else:
+        thread_id = entry.fno_id
+        if mux is not None or not isinstance(thread_id, str) or not thread_id.strip():
+            return {"outcome": "refused", "reason": "worker_has_no_thread_ref"}
+        mux_ref = None
     if not entry.harness_session_id:
         return {"outcome": "refused", "reason": "worker_has_no_session_id"}
 
@@ -237,12 +301,12 @@ def detect_retask(
     current_axes = {
         "harness": entry.harness,
         "provider": entry.provider,
-        "substrate": "pane",
+        "substrate": substrate,
     }
     target_axes = {
         "harness": target.harness,
         "provider": target.provider if target.provider is not None else entry.provider,
-        "substrate": target.substrate,
+        "substrate": target.substrate if target.substrate is not None else substrate,
     }
     for axis in ("harness", "provider", "substrate"):
         if current_axes[axis] != target_axes[axis]:
@@ -263,9 +327,10 @@ def detect_retask(
         "schema_version": 1,
         "worker": entry.name,
         "source_session_id": entry.harness_session_id,
-        "mux": {"session": mux["session"], "pane_id": mux["pane_id"]},
+        "mux": mux_ref,
+        "thread_id": entry.fno_id,
         "node": node,
-        "target": asdict(target),
+        "target": {**asdict(target), "substrate": target_axes["substrate"]},
         "target_command": dispatch_command(target.harness).format(id=node),
         "switch": switch,
         "execution": {"mode": "read_only_plan"},
@@ -591,9 +656,13 @@ def run_retask(
         effort=effort,
         env=env,
     )
-    mux = entry.mux or {}
-    session = str(mux.get("session"))
-    pane = str(mux.get("pane_id"))
+    if entry.substrate == "thread":
+        session, pane_id = resolve_thread_viewport(entry)
+        pane = str(pane_id)
+    else:
+        mux = entry.mux or {}
+        session = str(mux.get("session"))
+        pane = str(mux.get("pane_id"))
     renamed_name = [entry.name]
     restamped_session = [entry.harness_session_id]
     clear_sent = [False]

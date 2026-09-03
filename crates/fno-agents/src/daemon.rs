@@ -5439,7 +5439,7 @@ fn build_codex_thread_entry(
         legacy_claude_short_id: None,
         claude_session_uuid: None,
         messaging_socket_path: None,
-        codex_session_id: Some(session_id),
+        codex_session_id: Some(session_id.clone()),
         gemini_session_id: None,
         mcp_channel_id: None,
         cc_session_id: None,
@@ -5468,7 +5468,7 @@ fn build_codex_thread_entry(
         crown_scope: None,
         crown_grantor: None,
         route_settings_path: None,
-        fno_id: None,
+        fno_id: Some(session_id),
         delivery_policy: None,
         // v19: the launch posture is the resume posture. The doc's old warning
         // that "a registry row records no sandbox posture" died here.
@@ -16493,6 +16493,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                     .expect("yolo thread starts")
             });
         let yolo = build_codex_thread_entry("t", worktree.path(), &start, None, None, true);
+        assert_eq!(yolo.fno_id.as_deref(), Some("thread-p"));
+        assert!(yolo.mux.is_none());
         assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
         assert!(entry_posture_is_full_access(&yolo));
         let bounded = build_codex_thread_entry("t", worktree.path(), &start, None, None, false);

@@ -3118,7 +3118,8 @@ mod tests {
         let uuid = "01a04546-28b2-7a41-ae4c-892bbeb8e295";
         let raw = reg(&format!(
             r#"{{"name":"cx-thread","cwd":"/w","status":"live","harness":"codex",
-                "host_mode":"interactive","short_id":"","harness_session_id":"{uuid}"}},
+                "host_mode":"interactive","short_id":"","harness_session_id":"{uuid}",
+                "fno_id":"thread-id","mux":null}},
                {{"name":"cx-no-id","cwd":"/w","status":"live","harness":"codex",
                 "host_mode":"interactive","short_id":""}},
                {{"name":"cx-pane","cwd":"/w","status":"live","harness":"codex",
@@ -3144,6 +3145,7 @@ mod tests {
         };
 
         // AC11: the live thread row carries its session id and drives.
+        assert_eq!(get("cx-thread").session_id.as_deref(), Some("thread-id"));
         assert_eq!(get("cx-thread").attach_id.as_deref(), Some(uuid));
         assert_eq!(reach("cx-thread"), Reach::Drive);
 

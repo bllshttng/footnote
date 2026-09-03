@@ -4506,7 +4506,38 @@ impl Core {
                 ids.insert(session_id.clone());
             }
         }
+        if ids.is_empty() {
+            if let Some(identity) = self.thread_viewer_fno_id(pid, agents) {
+                ids.insert(identity);
+            }
+        }
         (ids.len() == 1).then(|| ids.into_iter().next()).flatten()
+    }
+
+    fn thread_viewer_row<'a>(
+        &'a self,
+        pid: u64,
+        agents: &'a [RegistryAgent],
+    ) -> Option<&'a RegistryAgent> {
+        let (key, viewer_pid, _) = self.thread_pane.as_ref()?;
+        if *viewer_pid != pid {
+            return None;
+        }
+        let mut matches = agents.iter().filter(|row| {
+            row.mux.is_none()
+                && !row.exited
+                && (row.name == *key
+                    || row.effective_identity() == Some(key.as_str())
+                    || row.attach_id.as_deref() == Some(key.as_str()))
+        });
+        let row = matches.next()?;
+        matches.next().is_none().then_some(row)
+    }
+
+    fn thread_viewer_fno_id(&self, pid: u64, agents: &[RegistryAgent]) -> Option<String> {
+        self.thread_viewer_row(pid, agents)
+            .and_then(|row| row.effective_identity())
+            .map(str::to_string)
     }
 
     fn resolve_placement_target(
@@ -11856,6 +11887,10 @@ impl Core {
                     })
                 })
                 .collect();
+            let viewer_row = matches
+                .is_empty()
+                .then(|| self.thread_viewer_row(pane, rows))
+                .flatten();
             let mut occupants: Vec<&RegistryAgent> = Vec::new();
             for row in matches {
                 let equivalent = occupants.iter().any(|existing| {
@@ -11869,10 +11904,15 @@ impl Core {
             let registry_identity = occupants
                 .first()
                 .and_then(|row| row.effective_identity())
+                .or_else(|| viewer_row.and_then(|row| row.effective_identity()))
                 .unwrap_or("<unknown>");
-            if occupants.len() != 1
+            if (occupants.len() != 1 && viewer_row.is_none())
                 || registry_identity != expected
-                || occupants.first().is_some_and(|row| row.name != host)
+                || occupants
+                    .first()
+                    .copied()
+                    .or(viewer_row)
+                    .is_some_and(|row| row.name != host)
             {
                 let registry = occupants
                     .iter()
@@ -12737,6 +12777,7 @@ impl Core {
                             return Flow::Continue;
                         }
                     };
+                    self.claim_eligible.insert(new_pid);
                     self.name_thread_viewer_pane(new_pid, &row, &tier);
                     let Some(tab) = self.viewed_tab_mut((sid, tid)) else {
                         self.reap_pane(new_pid);
@@ -12852,6 +12893,7 @@ impl Core {
                 return Flow::Continue;
             }
         };
+        self.claim_eligible.insert(pid);
         self.name_thread_viewer_pane(pid, &row, &tier);
         let (sid, tid, fell_back) = match self.place_with(dest, &spawn_cwd, pid, &effective) {
             Ok(landing) => landing,
@@ -18172,6 +18214,29 @@ mod tests {
     }
 
     #[test]
+    fn pane_send_accepts_the_dedicated_thread_viewer_identity() {
+        let (mut core, pane) = template_core();
+        core.session_name = "sess".into();
+        core.panes.get_mut(&pane).unwrap().name = Some("thread".into());
+        core.thread_pane = Some(("thread-id".into(), pane, 5));
+        let mut thread = agent_in("other", 99, None, false);
+        thread.name = "thread".into();
+        thread.mux = None;
+        thread.session_id = Some("thread-id".into());
+
+        assert!(matches!(
+            core.pane_send(
+                pane,
+                b"payload",
+                false,
+                Some("thread-id"),
+                Ok(vec![thread]),
+            ),
+            ServerMsg::Ok
+        ));
+    }
+
+    #[test]
     fn pane_send_refuses_when_the_registry_carries_an_unattributable_row() {
         // AC4-ERR (x-0b40), the guard seam: the registry carries a malformed
         // row for the target pane's session; the classified read refuses, and
@@ -19706,6 +19771,10 @@ mod tests {
             core.backlog_holders.get("x-identity").map(String::as_str),
             "mux identity and node claim holder must be the same peer"
         );
+        core.agents[0].mux = None;
+        core.agents[0].name = "thread".into();
+        core.thread_pane = Some(("CODEX-THREAD".into(), 1, 5));
+        assert_eq!(core.fno_id_for_pane(1), Some("CODEX-THREAD".into()));
     }
 
     #[test]
@@ -20655,6 +20724,26 @@ mod tests {
         match core.pane_where_from_fresh_agents("019fb024-fresh", None) {
             ServerMsg::Err { code, .. } => assert_eq!(code, err_code::REGISTRY_UNAVAILABLE),
             other => panic!("registry failure must surface, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_ls_publishes_thread_identity_on_the_dedicated_viewer() {
+        let (mut core, pane_id) = template_core();
+        core.session_name = "sess".into();
+        core.panes.get_mut(&pane_id).unwrap().name = Some("thread".into());
+        core.thread_pane = Some(("thread-id".into(), pane_id, 5));
+        let mut thread = agent_in("other", 99, None, false);
+        thread.name = "thread".into();
+        thread.mux = None;
+        thread.session_id = Some("thread-id".into());
+
+        match core.pane_ls_from_fresh_agents(Some(&[thread])) {
+            ServerMsg::PaneList { panes } => {
+                let pane = panes.iter().find(|pane| pane.pane_id == pane_id).unwrap();
+                assert_eq!(pane.fno_id.as_deref(), Some("thread-id"));
+            }
+            other => panic!("pane ls should identify the thread viewer, got {other:?}"),
         }
     }
 

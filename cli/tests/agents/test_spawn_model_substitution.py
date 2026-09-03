@@ -170,6 +170,8 @@ def test_fresh_spawn_without_a_sample_labels_the_request_and_says_nothing(
     assert row.requested_model == "glm-5.3[1m]"
     assert row.model == "glm-5.3[1m]"
     assert row.model_basis == "requested"
+    assert row.fno_id
+    assert row.mux is None
 
 
 def test_revive_whose_session_matches_the_request_stays_quiet(

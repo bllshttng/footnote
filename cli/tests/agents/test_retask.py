@@ -19,6 +19,7 @@ def _row(**overrides) -> AgentEntry:
         "model": "gpt-5.6-sol",
         "effort": "high",
         "harness_session_id": "old-session",
+        "substrate": "pane",
         "mux": {"session": "main", "pane_id": 12},
     }
     values.update(overrides)

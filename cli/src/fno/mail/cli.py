@@ -2062,6 +2062,7 @@ def _forced_pane_send(
     mux = getattr(entry, "mux", None) or {}
     pane_id = mux.get("pane_id")
     mux_session = mux.get("session")
+    thread_viewport = False
     # Liveness, on the same rule the resolved lane states: an exited row keeps
     # its mux ref, and pane ids are reused across a mux restart, so a stale ref
     # types into whatever pane now holds that number. --force needs this MORE
@@ -2112,8 +2113,35 @@ def _forced_pane_send(
             file=sys.stderr,
         )
         raise typer.Exit(code=1)
+    if getattr(entry, "substrate", None) == "thread":
+        from fno.agents.retask import RetaskTransportError, resolve_thread_viewport
+
+        try:
+            mux_session, pane_id = resolve_thread_viewport(entry)
+        except RetaskTransportError as exc:
+            _release_budget(reservation)
+            print(
+                f"error: --force cannot open the thread viewport for {recipient}: "
+                f"{exc}. The row needs a logical thread reference from spawn.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=1) from exc
+        import copy
+
+        transport_entry = copy.copy(entry)
+        transport_entry.mux = {"session": mux_session, "pane_id": pane_id}
+        entry = transport_entry
+        thread_viewport = True
     if pane_id is None:
         _release_budget(reservation)
+        if getattr(entry, "substrate", None) == "thread":
+            print(
+                f"error: --force cannot open the thread viewport for {recipient}: "
+                "the row has no logical thread reference. Restamp it through a "
+                "new thread spawn before forcing a live send.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=1)
         print(
             f"error: --force types into a mux pane and {recipient} has none. "
             f"Send without --force (it queues durable), or spawn the recipient "
@@ -2160,7 +2188,12 @@ def _forced_pane_send(
             file=sys.stderr,
         )
     corr = f" re:{reply_to}" if reply_to else ""
-    print(f"typed (pane {pane_id}) to {recipient} id:{msg_id}{corr}")
+    label = (
+        f"thread viewport {mux_session}:{pane_id}"
+        if thread_viewport
+        else f"pane {pane_id}"
+    )
+    print(f"typed ({label}) to {recipient} id:{msg_id}{corr}")
     return True
 
 
@@ -4555,6 +4588,32 @@ def cmd_send(
         from fno.agents import discover as discover_mod
         from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
 
+        forced_entry = _resolve_pane_entry(None, None, name)
+        if forced_entry is not None:
+            from fno.harness_identity import canonical_handle
+
+            forced_session = (
+                getattr(forced_entry, "harness_session_id", None)
+                or getattr(forced_entry, "fno_id", None)
+                or getattr(forced_entry, "session_id", None)
+            )
+            is_self = (
+                forced_session is not None
+                and _self_recipient(name, resolved_session_id=forced_session) is not None
+            )
+            if forced_session and not is_self:
+                _name_lane_send(
+                    message,
+                    from_name=from_name,
+                    resolved=None,
+                    token=None,
+                    recipient=canonical_handle(forced_session),
+                    provider=getattr(forced_entry, "harness", None) or harness,
+                    style_exception=style_exception,
+                    force=True,
+                    origin=mail_origin,
+                )
+                return
         forced_resolved, forced_suggestions = discover_mod.resolve_or_suggest(name)
         try:
             _name_lane_send(

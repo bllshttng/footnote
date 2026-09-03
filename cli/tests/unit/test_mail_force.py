@@ -90,6 +90,44 @@ def test_force_receipt_says_typed_with_the_pane_and_never_delivered(
     assert sent, "the pane write must actually be attempted"
 
 
+def test_force_thread_uses_the_logical_thread_identity(_tmp_state, monkeypatch):
+    entry, sent = _install(monkeypatch)
+    entry.substrate = "thread"
+    entry.fno_id = entry.harness_session_id
+    entry.mux = None
+    monkeypatch.setattr(
+        "fno.agents.retask.resolve_thread_viewport",
+        lambda _entry: ("main", 993),
+    )
+
+    result = runner.invoke(
+        mail_app,
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "typed (thread viewport main:993)" in result.output
+    assert sent[0][0].mux == {"session": "main", "pane_id": 993}
+
+
+def test_force_thread_without_a_reference_names_the_logical_ref(
+    _tmp_state, monkeypatch
+):
+    entry, _sent = _install(monkeypatch)
+    entry.substrate = "thread"
+    entry.fno_id = None
+    entry.mux = None
+
+    result = runner.invoke(
+        mail_app,
+        ["send", "0199aaaa-1111-7000-8000-aaaaaaaaaaaa", "status?", "--force"],
+    )
+
+    assert result.exit_code != 0
+    assert "logical thread reference" in result.output
+    assert "types into a mux pane" not in result.output
+
+
 def test_force_types_the_wrapped_body_not_the_bare_text(_tmp_state, monkeypatch):
     """`--force` keeps the mail semantics: the recipient sees an envelope with a
     sender, a msg-id to reply to, and the authority trailer.
