@@ -53,6 +53,7 @@ crossing	crates/fno/src/server.rs	3290	pub(crate) fn fno_bin() -> PathBuf {
 crossing	crates/fno/src/server.rs	3331	let mut command = crate::process_admission::std_command(fno_bin());
 crossing	crates/fno/src/server.rs	3401	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/server.rs	3530	let mut command = crate::process_admission::tokio_command(fno_bin());
+crossing	crates/fno/src/server.rs	3587	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/server.rs	3618	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/server.rs	3650	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/server.rs	11823	let mut cmd = crate::process_admission::tokio_command(fno_bin());
