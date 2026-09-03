@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
-from fno.graph.store import CANONICAL_FIELD_ORDER
 from fno.graph.types import Entry
 
 
@@ -153,9 +152,21 @@ GROUPED_LEGACY_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-GROUPED_SCHEMA_FIELDS: frozenset[str] = (
-    frozenset(CANONICAL_FIELD_ORDER) | frozenset(Entry.model_fields) | GROUPED_LEGACY_FIELDS
-)
+def _grouped_schema_fields() -> "frozenset[str]":
+    from fno.graph.store import canonical_field_order
+
+    return (
+        frozenset(canonical_field_order()) | frozenset(Entry.model_fields) | GROUPED_LEGACY_FIELDS
+    )
+
+
+def __getattr__(name: str) -> "frozenset[str]":
+    # Lazy so importing this module never spawns a store keeper: the schema
+    # union needs the store's canonical field order, and importing grouped is
+    # a display concern that must stay free of store I/O.
+    if name == "GROUPED_SCHEMA_FIELDS":
+        return _grouped_schema_fields()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 GROUPED_FIELD_NAMES = frozenset(field for _, fields in GROUPED_FIELD_GROUPS for field in fields)
 GROUPED_ASSIGNED_FIELDS = GROUPED_FIELD_NAMES | GROUPED_RESIDUAL_FIELDS
 GROUPED_FIELD_LABELS = {"source": "source (origin)"}

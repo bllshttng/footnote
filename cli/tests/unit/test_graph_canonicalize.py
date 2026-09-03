@@ -12,12 +12,32 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from fno.rust_binary import find_dev_binary
 from fno.graph.store import (
-    CANONICAL_FIELD_ORDER,
+    canonical_field_order,
     canonicalize_entries,
     locked_mutate_graph,
     _read_json,
 )
+
+# Since the store port every test here rides the keeper, so the module needs
+# the compiled runtime and skips whole where the smoke harness deleted the
+# worker binary (the parity-test convention). The skip keeps the import-time
+# canonical_field_order() read below from ever running without a worker.
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+pytestmark = requires_rust
+
+# The canonical key order, read from the ported store: one source of truth,
+# never a re-typed copy that drifts from the on-disk shape. Guarded so a
+# worker-less import (the smoke shard) stays a clean module skip instead of
+# a collection error.
+CANONICAL_FIELD_ORDER = canonical_field_order() if find_dev_binary() else []
 
 
 def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:

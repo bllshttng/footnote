@@ -10,19 +10,21 @@ The measured evidence: the tree contains zero FFI. No `pyo3`, no `maturin`, no `
 
 The reasoning. A `maturin` build step couples the Python wheel to a compiled artifact on every platform. The install contract of a pure-Python package becomes a build matrix. The repo already ships one generated cross-language artifact, `harness_capabilities.toml`, and its freshness needs its own CI tripwire. Adding an ABI to that surface buys fine-grained ownership at the price of a per-platform build. The seam's traffic does not pay for it: the crossing sites are low-frequency verb shells and bounded reads, not hot in-process calls.
 
+The socket of the store keeper does not weaken this ruling. It is a process boundary. A separate `fno-agents-worker` process serves one graph file over a local AF_UNIX socket. This is the pane-keeper model applied to the graph store. No library link, no shared address space, and no ABI exist between the sides. The socket is the one transport that does not spawn a command. The dependency direction requires it: `fno-agents` depends on `fno`, never the reverse. A consumer that lives in `fno` cannot link the store, so it must speak the socket protocol.
+
 The consequence, and it is arithmetic, not preference. A subprocess has no cheap call, so a port must carry a decision's whole fact set or it adds a spawn. Moving half a decision across a process boundary trades one crossing for another and splits the fact set in two. Every later port proposal that splits a decision from its facts is refused by this paragraph, without re-arguing the build matrix.
 
 ## The measurement
 
 Reproduce every number below on a clean checkout with `cd cli && uv run fno-py doctor lint seam-crossings`. It prints, for each baselined set, the measured count beside the baseline count.
 
-Rust reaches the `fno` porcelain through **56 crossing sites across 18 files in both crates**. The lint also ratchets **16 resolver functions**, every function whose body resolves the porcelain path. The Python direction runs through one door. `cli/src/fno/rust_binary.py` is the only production Python file allowed to exec the literal `fno-agents` binary. 15 production files import it.
+Rust reaches the `fno` porcelain through **58 baselined crossing sites in both crates**. The lint also ratchets **16 resolver functions**, every function whose body resolves the porcelain path. The Python direction runs through one door. `cli/src/fno/rust_binary.py` is the only production Python file allowed to exec the literal `fno-agents` binary. 15 production files import it.
 
 The counting rule, in words, so a reader can audit it without reading the lint. A crossing site is a production Rust line that launches `Command::new("fno")` or calls a baselined resolver helper name. A resolver function is a production Rust function with a line reading the `FNO_BIN` or `FNO_LOOPCHECK_FNO_BIN` env key, or constructing the porcelain path with `join("fno")`. Inline test modules, `crates/*/tests/`, and comment lines are out of scope. The baseline keys on `(rule, path, line content)` as a multiset, never on the line number. A moved line does not churn it. A removed site still fails.
 
 A resolver is detected by shape, never by name. Four helpers carry obvious spellings: `fno_bin` in `crates/fno/src/server.rs:2843`, `fno_bin` in `crates/fno/src/yard_overlay.rs:49`, `fno_bin` in `crates/fno-agents/src/scrape.rs:174`, and `loopcheck_fno_bin` in `crates/fno-agents/src/loopcheck.rs:3934`. Twelve more functions resolve the porcelain inline, among them `fno_cmd` in `loop_dispatch.rs:136`, `durable_session_pid` in `claims.rs:2138`, and `best_effort_notify` in `loopcheck.rs:3942`. A first count that grepped one literal and four helper names reported 29 sites across 10 files. The real number is 56 across 18. That 48 percent shortfall is the worked example of a single-literal grep. It is why the resolver rule matches the env-key shape instead of a name list.
 
-The write path is the asymmetry that matters. `server.rs:3104` states it: the `fno` porcelain is the ONLY writer of `graph.json`, and the mux shells it and reads the verdict. Reads are duplicated across `cli/src/fno/graph/` and, since `backlog_view.rs`, in Rust too. The seam is not reader versus caller. It is reads duplicated in both languages and writes monopolised by Python behind a subprocess.
+The write path is the asymmetry that matters, and the store port moved where it lives. The bytes of `graph.json` have one writer: the store publish pipeline in `crates/fno-agents/src/graph_store.rs`. The pipeline runs inside the keeper process and serializes every publish under the store's bounded lock. It writes the backup file and the hash sidecar together with the bytes. The Python porcelain verbs stay the only mutation surface on the CLI side. They reach the pipeline over the keeper socket (`cli/src/fno/graph/store.py` is the client). The mux used to shell the porcelain for its reorder verbs and read the verdict. Now the native store client (`crates/fno/src/store_client.rs`) speaks the same socket protocol, and the write itself adds no seam crossing. The one crossing a native write pays is the detached `fno backlog render-views` replay it fires after landing: the views are Python-owned, so the write crosses back once for the renderer. It is baselined with the rest. Reads keep one deliberately duplicated leg. `crates/fno/src/backlog_view.rs` parses the file itself for its read-only snapshots. The direction law forbids linking the store, and a socket round-trip per snapshot read costs more than the duplicate. The seam is no longer duplicated reads on both sides with writes held by Python. It is one store, two socket clients, and one native read mirror.
 
 ## The ownership rule
 
@@ -32,7 +34,7 @@ When the caller does not own the decision the answer feeds, the crossing is legi
 
 ## The classification
 
-All 56 crossing sites, one line of reason each. This is the hypothesis test for the rule above. Two sites come back violating and five are infrastructure, the resolver definitions and their delegation line. That is under a third unclassifiable or violating, so the rule stands as law.
+The table classifies the crossing sites, one line of reason each. The pass that produced it validated the rule. Line numbers drift with every edit. The baseline keys on content, never on them. One conforming row is now retired: the graph reorder crossing. Its verb rides the store socket as a native client today. The row stays to say so. Two sites came back violating and five are infrastructure, the resolver definitions and their delegation line. That count is under a third unclassifiable or violating, so the rule stands as law.
 
 | Site | Verdict | Reason |
 |---|---|---|
@@ -84,7 +86,7 @@ All 56 crossing sites, one line of reason each. This is the hypothesis test for 
 | `server.rs:2884` | conforming | config read bounded through the config owner |
 | `server.rs:2954` | conforming | spawn dispatched through the surface that owns provider resolution |
 | `server.rs:3083` | conforming | mail sent through the bus owner |
-| `server.rs:3111` | conforming | graph reorder written through the only writer |
+| `server.rs:3111` | retired | graph reorder used to shell the porcelain. `store_client.rs` speaks the keeper socket now; the landed write detaches one `render-views` replay for the Python-owned views |
 | `server.rs:3170` | conforming | respawn through the spawn surface owner |
 | `server.rs:3202` | conforming | transcript peek read through the transcript reader owner |
 | `server.rs:10818` | conforming | touch telemetry through the event emit path |
@@ -109,6 +111,8 @@ A port must raise neither axis:
 2. the dual-implementation count that the inventory page hand-maintains until the duplicate-discovery sweep lands.
 
 The gaming path is real, and the tree already holds the specimen. `crates/fno/src/backlog_view.rs` is 2140 lines of native graph parsing whose docstrings name their Python oracles. It holds exactly one crossing. Replacing a shell-out with more of that file lowers axis one and raises axis two, and a one-axis budget scores the trade as an improvement. It is a worsening: the tree gained a second implementation of read logic and lost nothing. The budget reads both numbers, and a port that raises either is refused.
+
+The store port is the counter-example, and it names its own costs. It removed the reorder crossing and deleted the Python store leg. Both axes fell. Two prices remain. First, the frame codec is hand-written three times: the Python client, the keeper, and the mux client. The codec is small: five frame tags and one request grammar. The direction law allows no shared crate. The unit tree exercises the Python spelling against the real keeper on every run. Second, the views stay Python-owned, so a landed mux write detaches one `fno backlog render-views` subprocess to replay the post-publish pass; the write itself is native and atomic, but a native writer cannot refresh graph.md without crossing back for the renderer. A budget that reads only counts scores this port as free. The port is not free.
 
 ## Sequencing
 

@@ -567,6 +567,7 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     # locally and red on push - which is how the preamble reached 55 bytes of
     # headroom with nobody watching the slope.
     ("SessionStart preamble byte budget", ".", "bash scripts/ci/check-preamble-budget.sh"),
+    ("Oversized files are shrink-only", ".", "bash scripts/ci/check-file-budget.sh"),
     ("Pitfalls corpus cap", ".", "bash scripts/ci/check-pitfalls.sh"),
     ("No stale /spec refs (blueprint rename audit)", ".", "bash scripts/ci/check-no-stale-spec-refs.sh"),
     ("Config schema docs freshness", ".", "bash scripts/ci/check-config-schema-drift.sh"),

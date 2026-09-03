@@ -892,17 +892,41 @@ def _pr_expiry_ref(subject: str | None) -> dict[str, Any] | None:
 
 
 def _derive_coord_expiry_ref(
-    subject: str | None, expiry_ref: dict[str, Any] | None
+    subject: str | None,
+    expiry_ref: dict[str, Any] | None,
+    entries: "list[dict] | None" = None,
 ) -> dict[str, Any] | None:
-    """Stamp an exact node/PR closure key when the subject proves one."""
+    """Stamp an exact node/PR closure key when the subject proves one.
+
+    ``entries`` lets a caller that ALREADY holds the graph pass it in. Without
+    it this re-read the whole graph once per row: `list_decisions` reads it
+    once, hands it to `_coord_lifecycle`, and this ignored it and read again.
+    Measured on a 1098-row store with 540 coord rows, that was 540 strict reads
+    of a 2400-node graph and 32s for a query that now answers in about one.
+    A SessionStart nag cannot afford the former.
+
+    Both consumers below are pure, so a supplied graph gives the same answer as
+    a self-read one: `_resolved_node` takes entries and answers None on an
+    empty list, and `_pr_expiry_ref` is a regex over the subject.
+
+    One case differs HERE and converges one frame up, which is worth stating
+    rather than glossing. On an unreadable graph the old self-read raised and
+    returned None; a caller that degraded to `[]` now passes it, so control
+    falls through to `_pr_expiry_ref` and a repository-scoped PR subject
+    returns a pr ref instead. `_coord_lifecycle` then resolves that ref against
+    the same empty entries, finds no node, and answers `unscoped` - which is
+    what the None returned too. The verdict is unchanged; only this function's
+    intermediate value is.
+    """
     if isinstance(expiry_ref, dict):
         return dict(expiry_ref)
     if not subject:
         return None
-    try:
-        entries = _graph_entries(required=True)
-    except Exception:  # noqa: BLE001 - an unproven closure key stays unscoped
-        return None
+    if entries is None:
+        try:
+            entries = _graph_entries(required=True)
+        except Exception:  # noqa: BLE001 - an unproven closure key stays unscoped
+            return None
     node_id = _resolved_node(subject, entries)
     if node_id:
         return {"kind": "node", "node_id": node_id}
@@ -935,7 +959,7 @@ def _coord_lifecycle(row: dict, entries: list[dict]) -> tuple[str, str | None]:
     raw_ref = row.get("expiry_ref")
     ref: dict[str, Any] | None = raw_ref if isinstance(raw_ref, dict) else None
     if ref is None:
-        ref = _derive_coord_expiry_ref(row.get("subject"), None)
+        ref = _derive_coord_expiry_ref(row.get("subject"), None, entries)
     if not isinstance(ref, dict):
         return "unscoped", None
     kind = ref.get("kind")

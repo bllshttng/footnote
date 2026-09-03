@@ -186,6 +186,7 @@ backlog rehash	T1	backlog rehash	4
 backlog relatedness build	T1	backlog relatedness build	0
 backlog relatedness get	T1	backlog relatedness get	0
 backlog remove	T1	backlog remove	7
+backlog render-views	T1	backlog render-views	5
 backlog reopen	T1	backlog reopen	3
 backlog reprioritize	T1	backlog reprioritize	1
 backlog retro drain-postmortems	T1	backlog retro drain-postmortems	1	

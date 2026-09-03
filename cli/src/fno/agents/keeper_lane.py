@@ -43,7 +43,7 @@ KEEPER_BIN_NAME = "fno-agents-worker"
 
 #: The argv flag each lane is launched with (``dispatch.py`` pane spawns write
 #: ``--pane``, lane-B thread spawns write ``--keeper``).
-LANE_FLAGS = {"--pane": "pane", "--keeper": "thread"}
+LANE_FLAGS = {"--pane": "pane", "--keeper": "thread", "--store-keeper": "store"}
 
 #: Per-probe reply budget, mirroring ``KEEPER_SWEEP_REPLY_TIMEOUT``
 #: (daemon.rs:8804): a wedged keeper must be NAMED inside this bound and never

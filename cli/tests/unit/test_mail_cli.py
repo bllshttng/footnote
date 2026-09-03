@@ -77,7 +77,10 @@ def ruling_graph(mailbox, monkeypatch):
     import fno.graph._constants as graph_constants
     import fno.graph.store as graph_store
 
-    monkeypatch.setattr(graph_constants, "GRAPH_JSON", graph_path)
+    # setitem, not setattr: GRAPH_JSON is served by module __getattr__, and a
+    # setattr's undo would bake the resolved path into the module for every
+    # later test in the process.
+    monkeypatch.setitem(vars(graph_constants), "GRAPH_JSON", graph_path)
     monkeypatch.setattr(graph_store, "GRAPH_JSON", graph_path)
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
     return graph_path

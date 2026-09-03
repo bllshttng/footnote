@@ -81,7 +81,10 @@ def test_map_covers_current_surface_once():
     # main's event-query allocation (+2) landed on the sigma-trimmed tree,
     # so the merged TSV holds 554 data rows (552 before, 554 after).
     # The pin is the counted number, never either side's stale one.
-    assert len(mapped) == 554, (
+    # The store-port branch adds `backlog render-views`, the hidden verb a
+    # landed native store write detaches to replay the Python-owned views:
+    # 554 -> 555.
+    assert len(mapped) == 555, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

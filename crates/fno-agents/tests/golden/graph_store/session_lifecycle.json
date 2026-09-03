@@ -1,0 +1,49 @@
+{
+  "steps": [
+    {
+      "session_append": [
+        true,
+        true
+      ]
+    },
+    {
+      "session_append": [
+        true,
+        false
+      ]
+    },
+    {
+      "session_append": [
+        true,
+        true
+      ]
+    },
+    {
+      "session_remove_open": [
+        true,
+        true
+      ]
+    },
+    {
+      "session_append": [
+        true,
+        true
+      ]
+    },
+    {
+      "session_reap_open": {
+        "found": true,
+        "settled": true,
+        "row_removed": false,
+        "row_closed": true,
+        "status_before": "idea"
+      }
+    },
+    {
+      "read_after": "[\n  {\n    \"id\": \"ab-00aa\",\n    \"status\": \"idea\",\n    \"slug\": \"session-host\",\n    \"title\": \"Session host\",\n    \"priority\": \"p2\",\n    \"rank\": null,\n    \"type\": \"feature\",\n    \"parent\": null,\n    \"children\": [],\n    \"project\": null,\n    \"cwd\": null,\n    \"domain\": \"code\",\n    \"blocked_by\": [],\n    \"related\": [],\n    \"locked_by\": null,\n    \"locked_by_harness\": null,\n    \"locked_by_harness_session\": null,\n    \"session_id\": null,\n    \"locked_at\": null,\n    \"completed_at\": null,\n    \"touched_at\": \"2026-09-02T17:23:30.562403+00:00\",\n    \"has_brief\": false,\n    \"roadmap_id\": null,\n    \"vision_path\": null,\n    \"details\": null,\n    \"size\": null,\n    \"batch\": null,\n    \"cost_usd\": null,\n    \"cost_sessions\": [],\n    \"plan_path\": null,\n    \"pr_number\": null,\n    \"pr_url\": null,\n    \"additional_prs\": [],\n    \"merge_status\": null,\n    \"artifact_url\": null,\n    \"completion_note\": null,\n    \"progress_notes\": [],\n    \"supersedes\": [],\n    \"superseded_by\": null,\n    \"supersession\": null,\n    \"collisions_acknowledged\": [],\n    \"source_kind\": \"organic\",\n    \"source_project\": null,\n    \"source_session_id\": null,\n    \"source_harness\": null,\n    \"source_cwd\": null,\n    \"source_node_id\": null,\n    \"source_plan_path\": null,\n    \"source_inbox_msg\": null,\n    \"spawned_by_session\": null,\n    \"spawned_by_harness\": null,\n    \"spawned_by_cwd\": null,\n    \"sessions\": [\n      {\n        \"phase\": \"do\",\n        \"harness\": \"claude\",\n        \"session_id\": \"0123abcd-0000-0000-0000-00000000aaaa\",\n        \"started_at\": \"2026-08-02T04:00:00Z\",\n        \"observed_model\": {\n          \"kind\": \"observed\",\n          \"model\": \"later-model\",\n          \"samples\": 9\n        },\n        \"ended_at\": \"2026-08-02T05:30:00Z\"\n      },\n      {\n        \"phase\": \"review\",\n        \"harness\": \"codex\",\n        \"session_id\": \"0123abcd-0000-0000-0000-00000000bbbb\",\n        \"started_at\": \"2026-08-02T06:00:00Z\",\n        \"observed_model\": {\n          \"kind\": \"not-file-backed\"\n        },\n        \"ended_at\": \"2026-08-02T07:00:00Z\"\n      }\n    ],\n    \"queued_at\": null,\n    \"queued_reason\": null,\n    \"tags\": [],\n    \"decisions\": [],\n    \"blocked_reason\": null\n  }\n]"
+    }
+  ],
+  "read": "[\n  {\n    \"id\": \"ab-00aa\",\n    \"title\": \"Session host\",\n    \"parent\": null,\n    \"tags\": [],\n    \"type\": \"feature\",\n    \"project\": null,\n    \"cwd\": null,\n    \"priority\": \"p2\",\n    \"rank\": null,\n    \"domain\": \"code\",\n    \"blocked_by\": [],\n    \"session_id\": null,\n    \"locked_by_harness\": null,\n    \"locked_by_harness_session\": null,\n    \"locked_at\": null,\n    \"completed_at\": null,\n    \"status\": \"ready\",\n    \"slug\": null,\n    \"children\": [],\n    \"has_brief\": false,\n    \"roadmap_id\": null,\n    \"vision_path\": null,\n    \"details\": null,\n    \"cost_usd\": null,\n    \"cost_sessions\": [],\n    \"size\": null,\n    \"batch\": null,\n    \"plan_path\": null,\n    \"pr_number\": null,\n    \"pr_url\": null,\n    \"additional_prs\": [],\n    \"merge_status\": null,\n    \"artifact_url\": null,\n    \"completion_note\": null,\n    \"progress_notes\": [],\n    \"collisions_acknowledged\": [],\n    \"related\": [],\n    \"supersedes\": [],\n    \"superseded_by\": null,\n    \"supersession\": null,\n    \"source_kind\": \"organic\",\n    \"source_project\": null,\n    \"source_session_id\": null,\n    \"source_harness\": null,\n    \"source_cwd\": null,\n    \"source_node_id\": null,\n    \"source_plan_path\": null,\n    \"source_inbox_msg\": null,\n    \"spawned_by_session\": null,\n    \"spawned_by_harness\": null,\n    \"spawned_by_cwd\": null,\n    \"sessions\": [],\n    \"decisions\": [],\n    \"queued_at\": null,\n    \"queued_reason\": null,\n    \"locked_by\": null,\n    \"blocked_reason\": null\n  }\n]",
+  "strict": "[\n  {\n    \"id\": \"ab-00aa\",\n    \"title\": \"Session host\",\n    \"parent\": null,\n    \"tags\": [],\n    \"type\": \"feature\",\n    \"project\": null,\n    \"cwd\": null,\n    \"priority\": \"p2\",\n    \"rank\": null,\n    \"domain\": \"code\",\n    \"blocked_by\": [],\n    \"session_id\": null,\n    \"locked_by_harness\": null,\n    \"locked_by_harness_session\": null,\n    \"locked_at\": null,\n    \"completed_at\": null,\n    \"status\": \"ready\",\n    \"slug\": null,\n    \"children\": [],\n    \"has_brief\": false,\n    \"roadmap_id\": null,\n    \"vision_path\": null,\n    \"details\": null,\n    \"cost_usd\": null,\n    \"cost_sessions\": [],\n    \"size\": null,\n    \"batch\": null,\n    \"plan_path\": null,\n    \"pr_number\": null,\n    \"pr_url\": null,\n    \"additional_prs\": [],\n    \"merge_status\": null,\n    \"artifact_url\": null,\n    \"completion_note\": null,\n    \"progress_notes\": [],\n    \"collisions_acknowledged\": [],\n    \"related\": [],\n    \"supersedes\": [],\n    \"superseded_by\": null,\n    \"supersession\": null,\n    \"source_kind\": \"organic\",\n    \"source_project\": null,\n    \"source_session_id\": null,\n    \"source_harness\": null,\n    \"source_cwd\": null,\n    \"source_node_id\": null,\n    \"source_plan_path\": null,\n    \"source_inbox_msg\": null,\n    \"spawned_by_session\": null,\n    \"spawned_by_harness\": null,\n    \"spawned_by_cwd\": null,\n    \"sessions\": [],\n    \"decisions\": [],\n    \"queued_at\": null,\n    \"queued_reason\": null,\n    \"locked_by\": null,\n    \"blocked_reason\": null\n  }\n]",
+  "file": "ewogICJlbnRyaWVzIjogWwogICAgewogICAgICAiaWQiOiAiYWItMDBhYSIsCiAgICAgICJzdGF0dXMiOiAiaWRlYSIsCiAgICAgICJzbHVnIjogInNlc3Npb24taG9zdCIsCiAgICAgICJ0aXRsZSI6ICJTZXNzaW9uIGhvc3QiLAogICAgICAicHJpb3JpdHkiOiAicDIiLAogICAgICAicmFuayI6IG51bGwsCiAgICAgICJ0eXBlIjogImZlYXR1cmUiLAogICAgICAicGFyZW50IjogbnVsbCwKICAgICAgImNoaWxkcmVuIjogW10sCiAgICAgICJwcm9qZWN0IjogbnVsbCwKICAgICAgImN3ZCI6IG51bGwsCiAgICAgICJkb21haW4iOiAiY29kZSIsCiAgICAgICJibG9ja2VkX2J5IjogW10sCiAgICAgICJyZWxhdGVkIjogW10sCiAgICAgICJsb2NrZWRfYnkiOiBudWxsLAogICAgICAibG9ja2VkX2J5X2hhcm5lc3MiOiBudWxsLAogICAgICAibG9ja2VkX2J5X2hhcm5lc3Nfc2Vzc2lvbiI6IG51bGwsCiAgICAgICJzZXNzaW9uX2lkIjogbnVsbCwKICAgICAgImxvY2tlZF9hdCI6IG51bGwsCiAgICAgICJjb21wbGV0ZWRfYXQiOiBudWxsLAogICAgICAidG91Y2hlZF9hdCI6ICIyMDI2LTA5LTAyVDE3OjIzOjMwLjU2MjQwMyswMDowMCIsCiAgICAgICJoYXNfYnJpZWYiOiBmYWxzZSwKICAgICAgInJvYWRtYXBfaWQiOiBudWxsLAogICAgICAidmlzaW9uX3BhdGgiOiBudWxsLAogICAgICAiZGV0YWlscyI6IG51bGwsCiAgICAgICJzaXplIjogbnVsbCwKICAgICAgImJhdGNoIjogbnVsbCwKICAgICAgImNvc3RfdXNkIjogbnVsbCwKICAgICAgImNvc3Rfc2Vzc2lvbnMiOiBbXSwKICAgICAgInBsYW5fcGF0aCI6IG51bGwsCiAgICAgICJwcl9udW1iZXIiOiBudWxsLAogICAgICAicHJfdXJsIjogbnVsbCwKICAgICAgImFkZGl0aW9uYWxfcHJzIjogW10sCiAgICAgICJtZXJnZV9zdGF0dXMiOiBudWxsLAogICAgICAiYXJ0aWZhY3RfdXJsIjogbnVsbCwKICAgICAgImNvbXBsZXRpb25fbm90ZSI6IG51bGwsCiAgICAgICJwcm9ncmVzc19ub3RlcyI6IFtdLAogICAgICAic3VwZXJzZWRlcyI6IFtdLAogICAgICAic3VwZXJzZWRlZF9ieSI6IG51bGwsCiAgICAgICJzdXBlcnNlc3Npb24iOiBudWxsLAogICAgICAiY29sbGlzaW9uc19hY2tub3dsZWRnZWQiOiBbXSwKICAgICAgInNvdXJjZV9raW5kIjogIm9yZ2FuaWMiLAogICAgICAic291cmNlX3Byb2plY3QiOiBudWxsLAogICAgICAic291cmNlX3Nlc3Npb25faWQiOiBudWxsLAogICAgICAic291cmNlX2hhcm5lc3MiOiBudWxsLAogICAgICAic291cmNlX2N3ZCI6IG51bGwsCiAgICAgICJzb3VyY2Vfbm9kZV9pZCI6IG51bGwsCiAgICAgICJzb3VyY2VfcGxhbl9wYXRoIjogbnVsbCwKICAgICAgInNvdXJjZV9pbmJveF9tc2ciOiBudWxsLAogICAgICAic3Bhd25lZF9ieV9zZXNzaW9uIjogbnVsbCwKICAgICAgInNwYXduZWRfYnlfaGFybmVzcyI6IG51bGwsCiAgICAgICJzcGF3bmVkX2J5X2N3ZCI6IG51bGwsCiAgICAgICJzZXNzaW9ucyI6IFsKICAgICAgICB7CiAgICAgICAgICAicGhhc2UiOiAiZG8iLAogICAgICAgICAgImhhcm5lc3MiOiAiY2xhdWRlIiwKICAgICAgICAgICJzZXNzaW9uX2lkIjogIjAxMjNhYmNkLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwYWFhYSIsCiAgICAgICAgICAic3RhcnRlZF9hdCI6ICIyMDI2LTA4LTAyVDA0OjAwOjAwWiIsCiAgICAgICAgICAib2JzZXJ2ZWRfbW9kZWwiOiB7CiAgICAgICAgICAgICJraW5kIjogIm9ic2VydmVkIiwKICAgICAgICAgICAgIm1vZGVsIjogImxhdGVyLW1vZGVsIiwKICAgICAgICAgICAgInNhbXBsZXMiOiA5CiAgICAgICAgICB9LAogICAgICAgICAgImVuZGVkX2F0IjogIjIwMjYtMDgtMDJUMDU6MzA6MDBaIgogICAgICAgIH0sCiAgICAgICAgewogICAgICAgICAgInBoYXNlIjogInJldmlldyIsCiAgICAgICAgICAiaGFybmVzcyI6ICJjb2RleCIsCiAgICAgICAgICAic2Vzc2lvbl9pZCI6ICIwMTIzYWJjZC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMGJiYmIiLAogICAgICAgICAgInN0YXJ0ZWRfYXQiOiAiMjAyNi0wOC0wMlQwNjowMDowMFoiLAogICAgICAgICAgIm9ic2VydmVkX21vZGVsIjogewogICAgICAgICAgICAia2luZCI6ICJub3QtZmlsZS1iYWNrZWQiCiAgICAgICAgICB9LAogICAgICAgICAgImVuZGVkX2F0IjogIjIwMjYtMDgtMDJUMDc6MDA6MDBaIgogICAgICAgIH0KICAgICAgXSwKICAgICAgInF1ZXVlZF9hdCI6IG51bGwsCiAgICAgICJxdWV1ZWRfcmVhc29uIjogbnVsbCwKICAgICAgInRhZ3MiOiBbXSwKICAgICAgImRlY2lzaW9ucyI6IFtdLAogICAgICAiYmxvY2tlZF9yZWFzb24iOiBudWxsCiAgICB9CiAgXQp9Cg=="
+}

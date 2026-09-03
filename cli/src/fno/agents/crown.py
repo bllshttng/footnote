@@ -498,6 +498,33 @@ def _same_territory(a: Optional[str], b: Optional[str]) -> bool:
     return bool(left) and left == right
 
 
+def crown_scope_matches(held: Optional[str], requested: Optional[str]) -> bool:
+    """Will the row-keyed king readers accept a crown over ``held`` for
+    ``requested``? Territory equality, aliases normalized.
+
+    NOT a containment check, and the difference is the whole point. Grant
+    asks "may this crown bestow that scope", and answers yes for a strict
+    container. The readers ask something narrower and answer it with a
+    string: ``king_manifest_path`` builds ``kings/{crown_scope}.md`` from
+    the stored scope verbatim, and ``king done`` refuses on ``own != scope``.
+    Neither walks the ladder. So a project-level crown does NOT satisfy an
+    epic manifest, however cleanly it contains it.
+
+    A first cut of this helper accepted ``scope_contains`` on the reasoning
+    that grant already applies that rule. That silenced precisely the state
+    the warning exists to make loud: a king crowned over a project arms an
+    epic manifest, hears nothing, and then finds ``manifest-path`` exiting 1
+    and ``done`` refusing. Reuse the rule that matches the QUESTION, not the
+    rule that happens to live nearby.
+
+    A blank scope on either side answers False: a crown naming no territory
+    matches nothing, and neither does a manifest armed for nothing.
+    """
+    if not held or not requested:
+        return False
+    return _same_territory(held, requested)
+
+
 class CrownPromotionError(RuntimeError):
     """An attended in-place grant that refused without changing the registry."""
 
