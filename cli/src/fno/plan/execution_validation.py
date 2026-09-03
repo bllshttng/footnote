@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 import posixpath
 import re
 import shlex
@@ -14,7 +14,7 @@ from fno.plan.brief import (
     validate_task_edges,
 )
 from fno.plan.criteria import CriteriaParseError, compile_criteria
-from fno.plan.schema import created_after_gate
+from fno.plan.schema import created_after_gate, waves_gate_error
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,21 @@ class ExecutionViolation:
 
 @dataclass(frozen=True)
 class ExecutionValidationResult:
+    """Violations refuse the plan; warnings name a smell and let it through.
+
+    ``warnings`` defaults to empty, so every existing construction site and
+    every caller reading only ``.violations`` is unchanged. The channel exists
+    because a signal worth emitting is not always worth refusing on: the
+    total-chain check below fires on 4 plans in a fortnight, where a refusal
+    on any multi-file plan without waves would fire on 172 and teach authors
+    to route around the validator.
+    """
+
     violations: list[ExecutionViolation]
+    # Imported under an alias: `_violation` below takes a parameter named
+    # `field`, so the bare dataclasses name would read as two different things
+    # in one module.
+    warnings: list[ExecutionViolation] = dataclass_field(default_factory=list)
 
 
 _QUICK_REQUIRED_SECTIONS = ("Context", "Changes", "Files to Modify", "Verification")
@@ -78,6 +92,100 @@ _SHELL_SEGMENT_RE = re.compile(r"(?:&&|\|\||[;|])")
 
 def _violation(field: str, message: str) -> ExecutionViolation:
     return ExecutionViolation(field=field, message=message)
+
+
+def _total_chain_warning(tasks: list) -> ExecutionViolation | None:
+    """Warn when every task declares one blocker and the graph is a total order.
+
+    Per-task ``blocked_by`` shipped as a precision tool and became an authoring
+    reflex. Twenty plans have used it and twelve lose parallelism to it: four
+    measure width 1 where they would measure 2 or 3 with the declarations
+    removed, and eight are narrowed, costing 13 joiner slots in a fortnight.
+    The specimen chains 1.1 -> 1.2 -> 1.3 -> 2.1 -> 3.1 -> 3.2 across all six
+    tasks and every wave boundary; strip the six lines and nothing else and it
+    measures width 3, while the second task's own notes describe an
+    independent measurement and name no artifact of the first that it consumes.
+
+    A declared blocker wins outright over wave inheritance, so a reflex chain
+    is not merely redundant with the waves - it overrides them.
+
+    WARN, never refuse. This shape fires on 4 plans in a fortnight. A refusal
+    on any multi-file plan without waves would fire on 172 and teach authors to
+    skip the validator, which costs more than the chains do. The message asks
+    for the artifact each edge consumes, because that is the question whose
+    answer either justifies the edge or deletes it.
+    """
+    edges: dict[str, str] = {}
+    ids: list[str] = []
+    unblocked: list[str] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            return None
+        tid = str(task.get("id", "")).strip()
+        if not tid:
+            return None
+        ids.append(tid)
+        # An absent key inherits the previous wave and is the shape this check
+        # exists to preserve, so only an EXPLICIT declaration counts.
+        # `parse_execution_strategy` normalizes `blocked_by` to a list either
+        # way and records the presence of the key separately, so testing the
+        # value's type reads an undeclared task as an empty list and counts it
+        # as the chain head - a "total order" whose first edge nobody authored.
+        # `blocked_by_declared` is the only honest absence marker.
+        if not task.get("blocked_by_declared", "blocked_by" in task):
+            return None
+        declared = task.get("blocked_by")
+        if not isinstance(declared, list):
+            return None
+        # The head of a real chain declares `blocked_by: []` (the live specimen
+        # does exactly that), so an empty list is the chain's start, not a
+        # disqualifier - demanding one blocker from every task rejects the very
+        # head that makes the order total.
+        if not declared:
+            unblocked.append(tid)
+            continue
+        if len(declared) != 1:
+            return None
+        blocker = str(declared[0]).strip()
+        if not blocker:
+            return None
+        edges[tid] = blocker
+    # Two tasks and one edge is a pair, not a reflex; the signal starts where a
+    # chain spans a wave boundary it could not have inherited.
+    if len(ids) < 3 or len(set(ids)) != len(ids):
+        return None
+    # Exactly one head, and every other task on a single-blocker edge.
+    if len(unblocked) != 1 or len(edges) != len(ids) - 1:
+        return None
+    known = set(ids)
+    if any(blocker not in known for blocker in edges.values()):
+        return None
+    # A total order starts at the one head and, following the edges, visits
+    # every task exactly once.
+    heads = unblocked
+    reverse: dict[str, str] = {}
+    for tid, blocker in edges.items():
+        if blocker in reverse:
+            return None  # a fan-out: two tasks share one blocker, not a chain
+        reverse[blocker] = tid
+    order = [heads[0]]
+    while order[-1] in reverse:
+        nxt = reverse[order[-1]]
+        if nxt in order:
+            return None  # a cycle; validate_task_edges already refuses it
+        order.append(nxt)
+    if len(order) != len(ids):
+        return None
+    return _violation(
+        "tasks.blocked_by",
+        "every task declares exactly one blocker and the chain is total ("
+        + " -> ".join(order)
+        + "), so this plan measures width 1 and `fno backlog join` has nothing "
+        "to hand a second worker. A declared blocker wins outright over wave "
+        "inheritance, so these lines override the waves rather than restate "
+        "them. Name the artifact each edge consumes; delete the edges whose "
+        "artifact you cannot name.",
+    )
 
 
 def _is_placeholder_verify(value: str) -> bool:
@@ -300,7 +408,33 @@ def validate_execution(
     strategy_text = doc.get_section("Execution Strategy")
     if strategy_text is None:
         if doc.frontmatter.get("kind") == "quick-plan":
-            return _validate_quick(doc)
+            # The one escape hatch, now date-keyed. `quick` was told to skip
+            # the section on the assertion that a quick plan is single-task,
+            # and nothing checked it: 200 of 232 flat quick-plans in a
+            # fortnight carried more than one numbered change, so every one of
+            # them measured width 0 and `fno backlog join` could not tell a
+            # genuinely single-task plan from one that never declared its
+            # parallelism. Pre-gate plans keep the hatch; backfilling their
+            # topology would fabricate waves nobody authored.
+            quick = _validate_quick(doc)
+            # AUTHORING scope, so undatable frontmatter DEFERS rather than
+            # refusing - the same split `plan/cli.py` applies one line above
+            # when it calls `difficulty_gate_error(..., undatable_refuses=False)`
+            # in this very branch's caller. validate-plan.sh dates those plans
+            # itself from the filename, and refusing here would preempt its
+            # dating: a `status: ready` quick-plan with no `created:` key would
+            # be refused for a date the validator was about to supply.
+            gate_error = waves_gate_error(
+                doc.frontmatter,
+                has_execution_strategy=False,
+                undatable_refuses=False,
+            )
+            if gate_error:
+                return ExecutionValidationResult(
+                    [*quick.violations, _violation("Execution Strategy", gate_error)],
+                    warnings=list(quick.warnings),
+                )
+            return quick
         return ExecutionValidationResult(
             [_violation("Execution Strategy", "missing ## Execution Strategy section")]
         )
@@ -373,6 +507,11 @@ def validate_execution(
     for edge_error in validate_task_edges(strategy):
         violations.append(_violation("tasks.blocked_by", edge_error))
 
+    warnings: list[ExecutionViolation] = []
+    chain_warning = _total_chain_warning(tasks)
+    if chain_warning is not None:
+        warnings.append(chain_warning)
+
     # compiled-v1: every task acceptance reference must resolve to exactly one
     # compiled criterion (AC5-ERR). Unstamped plans skip this (AC3-COMPAT).
     contract = acceptance_contract
@@ -385,7 +524,7 @@ def validate_execution(
     waves = strategy.get("waves", [])
     if not isinstance(waves, list) or not waves:
         violations.append(_violation("waves", "Execution Strategy must declare at least one wave"))
-        return ExecutionValidationResult(violations)
+        return ExecutionValidationResult(violations, warnings=warnings)
 
     wave_ids = [
         str(wave.get("wave"))
@@ -536,4 +675,4 @@ def validate_execution(
     if any(_has_cycle(wave_id) for wave_id in sorted(dependency_graph)):
         violations.append(_violation("waves.depends_on", "wave dependency cycle detected"))
 
-    return ExecutionValidationResult(violations)
+    return ExecutionValidationResult(violations, warnings=warnings)

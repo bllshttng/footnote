@@ -4,6 +4,8 @@ Read a gate only when its trigger fires. The dispatch table in SKILL.md ("## Gat
 
 ## Plan-level dispatch hold
 
+Trigger: named evidence must exist before this plan dispatches or merges. The Gates table in SKILL.md routes here. This gate carried a body and no table row until 2026-09-02. Nothing routed to it and no plan ever set the key. Meanwhile `finalize.rs`, `ladder.py`, `target_cli.py`, `git-protection.py` and `validate-plan.sh` all read it. A gate body with no trigger row is unreachable, whatever it says.
+
 When named evidence must exist before work starts or merges, author one `dispatch_hold` mapping in frontmatter. Add non-blank `reason`, `release_when`, and `set_by` strings. Add an ISO `review_on` date. The mapping's presence is the hold. The review date prompts review and never releases work. Every dispatcher and merger reads the same declaration. If the declaration is malformed or unreadable, the action fails closed. After an authorized operator confirms `release_when`, remove the mapping to lift the hold. Never copy the hold into graph status or a private dispatcher file.
 
 ## Plan Claims Ingestion (MANDATORY when input is a node id)
@@ -461,6 +463,36 @@ class.
 The same shape and fail-closed rules as `done_probes`: block form or
 single-line inline list, at most 3, a 60s native timeout, 127/non-zero/timeout
 all fail closed with the command and code named.
+
+## Join posture (step 3, every plan carrying an `## Execution Strategy`)
+
+Ask the author who hands out the plan's remaining waves. Record the answer as one frontmatter key:
+
+```yaml
+join: manual | auto   # default manual
+```
+
+`manual` waits for a person or a `/king-for-a-day` session to hand the remaining waves out with `fno backlog join <node>`. That is today's behavior for every plan, so an author who does not answer changes nothing. `auto` means `fno do target init` hands the remainder to `fno backlog join`, at init, in the holder's worktree.
+
+The gate runs after the Execution Strategy is enriched and before `validate-plan.sh`. The key therefore lands in the same save the validator then reads. `join` sits in `BLUEPRINT_WRITE_ALLOWLIST`, so the write is permitted. Its reader is `hooks/helpers/init-target-state.sh` at target init.
+
+**Print the measured width beside the question.** The answer is only meaningful with it. `auto` on a width-1 plan hands out nothing, and `manual` on a width-6 plan parks five lanes.
+
+```bash
+WIDTH=$(python3 -m fno.backlog.join_trigger width "$PLAN_PATH" 2>/dev/null); WIDTH_RC=$?
+```
+
+That is the same canonical probe `init-target-state.sh` shells out to. When the plan cannot be measured, it exits 1 and prints nothing. Otherwise it prints the measured int and exits 0. Branch on the exit code, never on the empty string:
+
+| Probe result | What the gate does |
+|---|---|
+| exit 0, width 2 or more | ask the author, printing the width, and write the chosen value |
+| exit 0, width 1 | write `join: manual` without asking, because there is nothing to hand out |
+| exit 1 (unmeasured) | write `join: manual` and say the width is unmeasured, naming the plan path |
+
+**An absent answer is never a width of one.** The probe exits 1 rather than printing a number. That is precisely so a caller can tell an unmeasured plan from a narrow one. A gate that collapsed the two records `manual` while reporting a measurement it never made. Name the unmeasured width in the receipt.
+
+**Do NOT add a config key for a global default.** Adoption follows the step. A plan key that no `/blueprint` step asks for stays unadopted. `consolidation` reached 428 plans and `executor` reached 421, both with a step. The posture key reached 1 with no step. The step is the mechanism. A config default only moves the same decision to a file no plan author reads.
 
 ## Collision check (step 3a; skip with `no-collision-check`)
 

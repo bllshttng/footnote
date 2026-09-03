@@ -11,6 +11,7 @@ internal/fno/plans/2026-05-24-epic-scoped-execution.md.
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -3184,3 +3185,165 @@ def test_sort_key_orders_live_epic_children_before_their_epic():
     ]
     ordered = [e["id"] for e in sorted(entries, key=make_selection_sort_key(entries))]
     assert ordered.index("x-3c4d") < ordered.index("x-1a2b")
+
+
+# epic wave slice carried into the child scaffold (AC7) -----------------------
+
+_EPIC_STRATEGY_DOC = """# Big epic
+
+## Context
+
+```yaml
+decoy: this fence is not the strategy
+```
+
+## Execution Strategy
+
+```yaml
+execution_mode: sequential
+waves:
+  - wave: 1
+    mode: parallel
+    name: foundations
+    difficulty: low
+    tasks: ['1.1']
+  - wave: 3
+    mode: parallel
+    name: the third wave
+    difficulty: high
+    tasks: ['3.1', '3.2']
+  - wave: 4
+    mode: sequential
+    name: last
+    difficulty: medium
+    tasks: ['4.1']
+tasks:
+  - id: '1.1'
+    title: one
+    surface: ['a.py']
+    verify: pytest a
+    acceptance: ['AC1']
+  - id: '3.1'
+    title: three point one
+    surface: ['c.py', 'c_test.py']
+    verify: pytest c
+    acceptance: ['AC3']
+    blocked_by: ['1.1']
+  - id: '3.2'
+    title: three point two
+    surface: ['d.py']
+    verify: pytest d
+    blocked_by: ['3.1']
+  - id: '4.1'
+    title: four
+    surface: ['e.py']
+    verify: pytest e
+```
+
+## Verification
+
+1. it works
+"""
+
+
+def _slice_text(waves="3-4"):
+    from fno.graph._decompose import epic_strategy_from_doc
+
+    return scaffold_separate_plan(
+        _grp(waves=waves),
+        "ab-epic0001",
+        "big.md",
+        why_digest="w",
+        created="2026-09-02",
+        epic_strategy=epic_strategy_from_doc(_EPIC_STRATEGY_DOC),
+    )
+
+
+def test_epic_strategy_from_doc_skips_an_earlier_decoy_fence():
+    """The section is scoped, so the Context fence never parses as the strategy."""
+    from fno.graph._decompose import epic_strategy_from_doc
+
+    parsed = epic_strategy_from_doc(_EPIC_STRATEGY_DOC)
+    assert parsed is not None
+    assert [w["wave"] for w in parsed["waves"]] == [1, 3, 4]
+
+
+def test_epic_strategy_from_doc_returns_none_without_the_section():
+    from fno.graph._decompose import epic_strategy_from_doc
+
+    assert epic_strategy_from_doc("# no strategy here\n") is None
+
+
+def test_wave_numbers_parses_every_range_shape():
+    from fno.graph._decompose import wave_numbers
+
+    assert wave_numbers("4") == [4]
+    assert wave_numbers("1-2") == [1, 2]
+    assert wave_numbers("1, 3") == [1, 3]
+    assert wave_numbers("1-2,4") == [1, 2, 4]
+    # Unparseable ranges name no wave rather than defaulting to wave zero.
+    assert wave_numbers("") == []
+    assert wave_numbers("all") == []
+    assert wave_numbers("3-1") == []
+
+
+def test_child_carries_only_its_parents_wave_slice():
+    """AC7-HP: the child holds exactly the group's waves, with surfaces + bands."""
+    text = _slice_text("3-4")
+    assert "## Execution Strategy" in text
+    body = text.split("## Execution Strategy", 1)[1]
+    assert "- wave: 3" in body and "- wave: 4" in body
+    assert "- wave: 1" not in body  # out of range, never carried
+    # Each wave keeps its own band, not the scaffold's floor.
+    assert "difficulty: high" in body and "difficulty: medium" in body
+    # Each task keeps its surface verbatim.
+    assert '"c.py", "c_test.py"' in body
+    assert '"d.py"' in body and '"e.py"' in body
+    assert '"a.py"' not in body
+
+
+def test_sliced_task_drops_a_blocker_outside_the_slice():
+    """A blocker shipping in a sibling child's PR is not a blocker here.
+
+    Keeping the dangling id makes the task graph unsolvable, so the width probe
+    raises instead of measuring.
+    """
+    body = _slice_text("3-4").split("## Execution Strategy", 1)[1]
+    assert "blocked_by: []" in body  # 3.1 declared ['1.1'], which is out of slice
+    assert "blocked_by: ['3.1']" in body  # 3.2 -> 3.1 is in slice, so it survives
+
+
+def test_sliced_child_measures_a_width():
+    """The emitted block is real input to the width probe, not decoration."""
+    from fno.backlog.advance import _plan_parallel_width
+
+    with tempfile.TemporaryDirectory() as d:
+        plan = Path(d) / "child.md"
+        plan.write_text(_slice_text("3-4"), encoding="utf-8")
+        assert _plan_parallel_width(plan) >= 1
+
+
+def test_scaffold_without_an_epic_strategy_names_why():
+    """AC7-ERR: the pre-change scaffold plus a reason, never an empty block."""
+    text = scaffold_separate_plan(
+        _grp(waves="3-4"), "ab-epic0001", "big.md", why_digest="w", created="2026-09-02"
+    )
+    # No heading at all - an empty strategy block measures width 0 and reads as
+    # a narrow plan rather than a missing one.
+    assert not any(line.strip() == "## Execution Strategy" for line in text.splitlines())
+    assert "## Execution Strategy" not in text
+    assert "no parsable execution strategy section" in text
+    # The pre-change section list survives untouched.
+    assert [l for l in text.splitlines() if l.startswith("## ")] == [
+        "## Why (from epic)",
+        "## Context",
+        "## Changes",
+        "## Files to Modify",
+        "## Verification",
+    ]
+
+
+def test_scaffold_names_why_when_the_range_matches_no_wave():
+    text = _slice_text("7-9")
+    assert "## Execution Strategy" not in text
+    assert "declares no wave in range 7-9" in text

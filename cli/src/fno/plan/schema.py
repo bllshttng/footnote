@@ -168,6 +168,90 @@ def difficulty_gate_error(
     )
 
 
+#: The date the Execution Strategy requirement shipped (x-a804). 268 of the
+#: 422 plans created in the fortnight before it carry no ``## Execution
+#: Strategy``, and 200 of the 232 flat quick-plans among them describe more
+#: than one numbered change, so backfilling would fabricate a wave topology
+#: nobody authored; plans created on or before this date pass without one.
+#: The boundary is strictly-after for the same reason
+#: :data:`DIFFICULTY_REQUIRED_AFTER` is: a plan created ON the gate date
+#: predates the gate reaching its author.
+#:
+#: Heed that constant's recorded trap here too. A strictly-after boundary
+#: makes every test fixture that stamps ``created`` at RUNTIME cross this gate
+#: the moment the clock does, on a commit nobody touched; the difficulty
+#: version of that fired at 2026-08-27T00:00Z and took smoke-rest red on every
+#: open PR, and a date computed at runtime leaves no literal to grep. Give a
+#: new fixture an Execution Strategy rather than back-dating ``created``,
+#: which exempts it forever and quietly stops exercising the post-gate read.
+WAVES_REQUIRED_AFTER = date(2026, 9, 2)
+
+#: The rungs at which a plan is meant to be executable, so the waves gate
+#: applies. ``idea`` and ``design`` sit below them on purpose: a /think doc is
+#: ``design`` until /blueprint appends the strategy, and
+#: ``scaffold_separate_plan`` mints an epic child ``idea`` with the section
+#: still to be filled. Firing on either would refuse the very documents whose
+#: job is to not have a strategy yet.
+_WAVES_GATED_STATUSES = frozenset({"ready", "in_progress", "in_review"})
+
+
+def waves_gate_error(
+    frontmatter: dict,
+    *,
+    has_execution_strategy: bool,
+    undatable_refuses: bool = True,
+) -> str | None:
+    """The date-keyed Execution Strategy refusal for raw frontmatter, or None.
+
+    Deliberately the same shape as :func:`difficulty_gate_error`, including
+    the ``undatable_refuses`` split: the MINTING lanes have no fallback dater
+    and refuse an undatable plan, while the AUTHORING scope passes False
+    because validate-plan.sh dates those plans itself from the filename.
+
+    ``has_execution_strategy`` is a body fact, so the caller reads it and
+    passes it in; this keeps one date parse and one refusal message without
+    the schema module learning to parse markdown.
+
+    A plan below ``ready`` is exempt whatever its date. The width the gate
+    exists to protect is only meaningful once a plan is executable, and the
+    two pre-execution rungs are precisely the documents that carry no strategy
+    by design.
+    """
+    status = frontmatter.get("status")
+    status = STATUS_ALIASES.get(status, status) if isinstance(status, str) else status
+    if not isinstance(status, str) or status.strip().lower() not in _WAVES_GATED_STATUSES:
+        return None
+    if has_execution_strategy:
+        return None
+    created = _parse_created(frontmatter.get("created"))
+    if "created" not in frontmatter and frontmatter:
+        if undatable_refuses:
+            return (
+                "cannot read created: absent from frontmatter; the Execution "
+                "Strategy gate needs a date. Set created: <YYYY-MM-DD> and, "
+                "for post-gate plans, an ## Execution Strategy section."
+            )
+        return None
+    if created is None:
+        if not frontmatter or not undatable_refuses:
+            return None
+        return (
+            f"cannot read created: {frontmatter.get('created')!r}; the Execution "
+            "Strategy gate needs a date. Set created: <YYYY-MM-DD> and, for "
+            "post-gate plans, an ## Execution Strategy section."
+        )
+    if created <= WAVES_REQUIRED_AFTER:
+        return None
+    return (
+        "## Execution Strategy is required for plans created after "
+        f"{WAVES_REQUIRED_AFTER.isoformat()}: a plan with no waves block "
+        "measures width 0, so `fno backlog join` cannot tell a genuinely "
+        "single-task plan from one that never declared its parallelism. "
+        "One numbered change becomes one task, its **Files:** line becomes "
+        "the task surface, and the tasks go in one wave with mode: parallel"
+    )
+
+
 class ConsolidationEntry(BaseModel):
     """One candidate id judged by blueprint's step 2d gate, with its reason."""
 
@@ -298,11 +382,13 @@ class PlanFrontmatter(BaseModel):
     priority: str | None = None
     blocks_everything: bool = False
     difficulty: str | None = None
-    # Who orchestrates the plan's remaining waves: a king reviews each
-    # dispatch (default), or target init fires join itself. Opt-in - king
-    # changes nothing, so every plan written before the key keeps its
-    # behavior.
-    orchestration: str = "king"
+    # Who hands out the plan's remaining waves: `manual` waits for a person or
+    # a /king-for-a-day session to run `fno backlog join` (default), or `auto`
+    # fires join at target init. Opt-in - `manual` changes nothing, so every
+    # plan written before the key keeps its behavior. Named for the verb it
+    # gates: `orchestration` already does four unrelated jobs in this repo, so
+    # a grep for the key returned mostly noise.
+    join: str = "manual"
     blocked_by: list[str] = []
     project: str | None = None
     executor: str | None = None
@@ -382,16 +468,16 @@ class PlanFrontmatter(BaseModel):
             raise ValueError("difficulty must be one of: low, medium, high")
         return band
 
-    @field_validator("orchestration", mode="before")
+    @field_validator("join", mode="before")
     @classmethod
-    def _validate_orchestration(cls, v: Any) -> Any:
+    def _validate_join(cls, v: Any) -> Any:
         # Same shape as the band enum above: normalize, then refuse with a
         # message that names the field and its legal values.
         if v is None:
-            return "king"
+            return "manual"
         mode = str(v).strip().lower()
-        if mode not in {"king", "mechanical"}:
-            raise ValueError("orchestration must be one of: king, mechanical")
+        if mode not in {"manual", "auto"}:
+            raise ValueError("join must be one of: manual, auto")
         return mode
 
     @model_validator(mode="after")

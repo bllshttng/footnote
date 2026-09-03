@@ -112,7 +112,7 @@ Positional canonical form. Flag aliases (`--quick`, `--greenfield`, etc.) are ac
 
 | Modifier | Effect |
 |----------|--------|
-| `quick` | Skip Execution Strategy; stamp status and kill_criteria only (single-task plans) |
+| `quick` | Emit Execution Strategy as one parallel wave, one task per numbered change, and stamp status and kill_criteria |
 | `greenfield` | Force greenfield mode regardless of file-existence probe |
 | `brownfield` | Force brownfield mode regardless of file-existence probe |
 | `rewrite` | Allow re-running on `status: ready` docs; replaces /blueprint-owned sections in place, never touches /think or downstream sections |

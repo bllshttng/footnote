@@ -978,3 +978,142 @@ def test_undatable_frontmatter_skips_the_wave_band_requirement(tmp_path: Path) -
     result = validate_execution(load_plan(plan))
 
     assert [v for v in result.violations if v.field.endswith(".difficulty")] == []
+
+
+# ---------------------------------------------------------------------------
+# The total-blocked_by-chain warning (x-a804 task 3.2).
+#
+# Per-task `blocked_by` shipped as a precision tool and became an authoring
+# reflex: 20 plans used it, 12 lose parallelism to it, 4 are fully foreclosed.
+# A declared blocker wins outright over wave inheritance, so a reflex chain
+# overrides the waves rather than restating them.
+#
+# WARNS, never refuses. The shape fires on 4 plans in a fortnight; refusing on
+# any multi-file plan without waves would fire on 172 and teach authors to
+# route around the validator.
+# ---------------------------------------------------------------------------
+
+_CHAIN_STRATEGY = """execution_mode: sequential
+waves:
+  - wave: 1
+    mode: sequential
+    name: Build
+    difficulty: medium
+    tasks: ["1.1", "1.2", "1.3"]
+tasks:
+  - id: "1.1"
+    title: First
+    surface: [cli/src/fno/plan/cli.py]
+    verify: fno doctor test cli/tests/unit/test_plan_execution_validation.py
+    acceptance: [AC1-HP]
+    blocked_by: []
+  - id: "1.2"
+    title: Second
+    surface: [cli/src/fno/plan/schema.py]
+    verify: fno doctor test cli/tests/unit/test_plan_execution_validation.py
+    acceptance: [AC1-HP]
+    blocked_by: ["1.1"]
+  - id: "1.3"
+    title: Third
+    surface: [cli/src/fno/plan/brief.py]
+    verify: fno doctor test cli/tests/unit/test_plan_execution_validation.py
+    acceptance: [AC1-HP]
+    blocked_by: ["1.2"]
+"""
+
+
+def test_total_single_blocker_chain_warns_and_still_validates(tmp_path: Path) -> None:
+    """AC6-HP: the warning names the chain and the plan still validates."""
+    plan = _write_plan(tmp_path, _full_plan(_CHAIN_STRATEGY))
+
+    result = validate_execution(load_plan(plan))
+
+    assert result.violations == [], result.violations
+    assert len(result.warnings) == 1, result.warnings
+    message = result.warnings[0].message
+    assert "1.1 -> 1.2 -> 1.3" in message, message
+    assert result.warnings[0].field == "tasks.blocked_by"
+
+
+def test_chain_warning_asks_for_the_artifact_each_edge_consumes(
+    tmp_path: Path,
+) -> None:
+    """The message has to ask the question whose answer justifies or deletes
+    the edge; a warning that only says 'this is a chain' teaches nothing."""
+    plan = _write_plan(tmp_path, _full_plan(_CHAIN_STRATEGY))
+
+    result = validate_execution(load_plan(plan))
+
+    assert "artifact" in result.warnings[0].message
+
+
+def test_branching_blocked_by_graph_emits_no_chain_warning(tmp_path: Path) -> None:
+    """AC6-ERR: two tasks sharing one blocker is a fan-out, which is real
+    parallelism, so it must not be reported as a foreclosed chain."""
+    strategy = _CHAIN_STRATEGY.replace(
+        'blocked_by: ["1.2"]', 'blocked_by: ["1.1"]'
+    )
+    plan = _write_plan(tmp_path, _full_plan(strategy))
+
+    result = validate_execution(load_plan(plan))
+
+    assert result.violations == [], result.violations
+    assert result.warnings == [], result.warnings
+
+
+def test_plan_without_declared_blockers_emits_no_chain_warning(
+    tmp_path: Path,
+) -> None:
+    """An absent key inherits the previous wave, which is the shape the check
+    exists to PRESERVE. Warning there would fire on 172 plans."""
+    plan = _write_plan(tmp_path, _full_plan(VALID_STRATEGY))
+
+    result = validate_execution(load_plan(plan))
+
+    assert result.warnings == [], result.warnings
+
+
+def test_two_task_chain_is_below_the_signal_floor(tmp_path: Path) -> None:
+    """A pair with one edge is an ordinary dependency, not a reflex. The
+    signal starts at three, where a chain spans a boundary it could have
+    inherited instead."""
+    strategy = """execution_mode: sequential
+waves:
+  - wave: 1
+    mode: sequential
+    name: Build
+    difficulty: medium
+    tasks: ["1.1", "1.2"]
+tasks:
+  - id: "1.1"
+    title: First
+    surface: [cli/src/fno/plan/cli.py]
+    verify: fno doctor test cli/tests/unit/test_plan_execution_validation.py
+    acceptance: [AC1-HP]
+    blocked_by: []
+  - id: "1.2"
+    title: Second
+    surface: [cli/src/fno/plan/schema.py]
+    verify: fno doctor test cli/tests/unit/test_plan_execution_validation.py
+    acceptance: [AC1-HP]
+    blocked_by: ["1.1"]
+"""
+    plan = _write_plan(tmp_path, _full_plan(strategy))
+
+    result = validate_execution(load_plan(plan))
+
+    assert result.warnings == [], result.warnings
+
+
+def test_chain_warning_survives_the_head_declaring_an_empty_list(
+    tmp_path: Path,
+) -> None:
+    """REGRESSION. The first cut required exactly one blocker from EVERY task,
+    which rejected the head - and the head of a real chain declares
+    `blocked_by: []`. The live specimen does exactly that, so the check
+    silently found nothing on the one plan it was written for."""
+    plan = _write_plan(tmp_path, _full_plan(_CHAIN_STRATEGY))
+
+    result = validate_execution(load_plan(plan))
+
+    assert result.warnings, "the empty-list head must not disqualify the chain"

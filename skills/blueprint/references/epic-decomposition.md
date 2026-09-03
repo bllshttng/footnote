@@ -202,6 +202,8 @@ is known):
    Leave it off (the default) for a group whose scope is already clear from the
    epic; that child takes the inline-fill path.
 
+   `needs_think` is a field of the GROUP SPEC you pass to `fno backlog decompose`, never a plan frontmatter key. It is validated on the group (`_decompose.py` `NormalizedGroup`) and read as the sole consent for the fan-out spawn (`graph/cli.py`). A census of plan frontmatter therefore finds zero uses of it by construction, and that zero says nothing about whether the flag is used. This step above is its step.
+
 7. **Inline-fill every child you own BEFORE linking (MANDATORY).** Decompose
    births each child UNLINKED (`status: idea`, no `plan_path`), so nothing
    dispatches against an empty scaffold. You hold the epic in context right now -
@@ -258,16 +260,13 @@ is known):
 holds. Numeric (`1`, `2`, ...) is the simple default; named slugs
 (`auth-flow`) are fine as long as they do not change between runs.
 
-**Packaging: `separate` only.** Every child gets its own self-contained
-quick-plan file - `plan == PR == node` for children too. Decompose scaffolds a
-stub per child (`## Why (from epic)` + Context / Changes / Files to Modify /
-Verification, born `status: idea`) at the canonical `fno do plan path` name in the
-child's own project plans dir (reported as `scaffolded plan:`; existing legacy
-`<stem>.group-<slug>.md` stubs are grandfathered in place), and births the
-child WITHOUT a `plan_path` - identity is the durable `group_slug` field, so the
-unlinked child is still found on re-decompose. Linking the filled plan (inline
-step 2, or the fan-out pass) is what makes it `ready`. It is the default (and
-only) packaging - `--plans` need not be passed; `--plans fragment` errors.
+**Packaging: `separate` only.** Every child gets its own self-contained quick-plan file. `plan == PR == node` for children too. Decompose scaffolds one stub per child, born `status: idea`. The stub carries `## Why (from epic)` plus Context, Changes, Files to Modify, Verification and Execution Strategy. It lands at the canonical `fno do plan path` name in the child's own project plans dir, reported as `scaffolded plan:`. Legacy `<stem>.group-<slug>.md` stubs are grandfathered in place. The child is born WITHOUT a `plan_path`. Identity is the durable `group_slug` field, so the unlinked child is still found on re-decompose. Linking the filled plan makes it `ready`, from inline step 2 or the fan-out pass. This is the default and only packaging. You need not pass `--plans`, and `--plans fragment` errors.
+
+**The child is born carrying its parent's wave slice.** `group N` reads the epic's Execution Strategy to partition the children. The partition already exists by the time each child is minted. The scaffold emits the slice for that child's wave range. It preserves each task's `surface` and each wave's `difficulty` band, rather than minting a child unable to hold the answer the epic computed.
+
+Wave numbers and task ids keep the epic's numbering, so a child task traces back to the wave it came from. A `blocked_by` naming a task outside the slice is dropped, because that blocker ships in a sibling child's PR. Keeping the dangling id makes the task graph unsolvable and refuses a width measurement outright.
+
+When no slice resolves, the child gets the pre-change section list plus a comment naming why. It never gets an empty Execution Strategy block, which measures width 0 and reads as a narrow plan rather than a missing one.
 
 Scaffolding is idempotent on the slug: re-running upserts the same children, an
 existing scaffolded file is never clobbered (a builder's edits survive a

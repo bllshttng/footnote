@@ -25,6 +25,7 @@ Each gate loads only when its trigger fires. The bodies (with verbatim scripts) 
 | Gate | Read its section when |
 |------|-----------------------|
 | Plan Claims Ingestion | the argument is an existing node id (`x-8af8` / `ab-<hex>`) - runs FIRST, before any classifier |
+| Plan-level dispatch hold | named evidence must exist before this plan dispatches or merges |
 | Consolidation Gate | always, between discovery grounding (2b) and the write (3) - step 2d |
 | Schema Citation Gate | the codemap has a `## Database Schema` section AND the plan touches the DB |
 | Executor Lock Transcription | a design doc supplies a Locked Decision (executor) |
@@ -33,6 +34,7 @@ Each gate loads only when its trigger fires. The bodies (with verbatim scripts) 
 | PRODUCT.md Prereq Check | the plan locks `executor: impeccable` (plan-level or per-task) |
 | impeccable_stages Pin Syntax | a task pins specific `/impeccable` stages |
 | done_probes | the deliverable is recurring / operational (a scheduler, watcher, daemon, cadence) - MANDATORY then, omit otherwise |
+| Join posture | the plan carries an `## Execution Strategy` - step 3, after enrichment, before validation |
 | Collision check | always, unless `no-collision-check` (step 3a) |
 | Cross-project peer heads-up | a `peers` block exists and a Files-to-Modify row matches a peer surface (step 3a-bis) |
 | Epic decomposition (`group N`) | see [references/epic-decomposition.md](references/epic-decomposition.md) - `group`/`max_prs:`/`scope: epic` |
@@ -195,6 +197,15 @@ fi
    **Enrich the Execution Strategy before it becomes executable.**
    Run `mutate_doc.py` with `--draft`; it produces the deterministic wave/task skeleton while keeping a design-status document in `design`.
    On the full-context main thread, replace every placeholder and populate each task's `surface`, concrete `verify` command, and `acceptance` list from the design and inspected codebase.
+
+   **Then ask the join posture.** The trigger is every plan that carries an `## Execution Strategy`. One question, one key: `join: manual | auto   # default manual`.
+
+   `manual` waits for a person or a `/king-for-a-day` session to hand the remaining waves out with `fno backlog join <node>`. That is today's behavior for every plan. `auto` fires join at `fno do target init`.
+
+   Print the plan's measured width beside the question. Run `python3 -m fno.backlog.join_trigger width "$PLAN_PATH"`, the same probe `init-target-state.sh` uses. Branch on its exit code, never on empty output. When the width is 1, record `manual` without asking. When the probe exits 1, record `manual` and name the width as unmeasured.
+
+   Full body: [references/blueprint-gates.md](references/blueprint-gates.md#join-posture-step-3-every-plan-carrying-an-execution-strategy).
+
    Then validate the exact saved file before collision checking or intake:
 
    ```bash
@@ -311,6 +322,7 @@ status: ready
 kind: quick-plan
 created: <YYYY-MM-DD>      # required; the consolidation gate reads it
 difficulty: <low|medium|high> # required for plans created after 2026-08-26
+join: <manual|auto>        # who hands out the remaining waves; the join-posture gate asks
 # claims: ab-XXXXXXXX      # only when the input was an ab-id
 # executor: tdd            # transcribed from a Locked Decision, if any
 consolidation:             # step 2d, exactly one outcome (see 2d above)
@@ -447,7 +459,7 @@ When the input to `/blueprint` is a path to an existing design doc (produced by 
 
 | Modifier | Effect |
 |---|---|
-| `quick` | Skip ## Execution Strategy (single-task; stamp status + kill_criteria) |
+| `quick` | Emit ## Execution Strategy as one parallel wave, one task per numbered change (stamp status + kill_criteria) |
 | `group N` | Bounded epic decomposition: after intake, partition the waves into at most `N` cohesive delivery groups (one child node + PR each). See [references/epic-decomposition.md](references/epic-decomposition.md). Omit `N` to fall back to the epic's `max_children`, else `config.blueprint.max_prs_per_epic`. Auto-enabled for `scope: epic` docs. |
 | `no-group` | Opt OUT of auto-decomposition on a `scope: epic` doc: run the single-doc lean mutation (one epic node, one PR), the pre-auto-group behavior. |
 | `greenfield` | Skip File Ownership Map + Patterns to Reuse regardless of codebase state |

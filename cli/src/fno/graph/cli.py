@@ -2028,6 +2028,7 @@ def cmd_decompose(
         is_shipped,
         plan_base,
         resolve_effective_cap,
+        epic_strategy_from_doc,
         scaffold_separate_plan,
         separate_plan_path,
         validate_groups,
@@ -2687,11 +2688,18 @@ def cmd_decompose(
     # Locked-Decisions block degrades to intent-only + a warning; an unreadable doc
     # yields an empty digest (the scaffold then seeds the validator-rejected stub).
     why_digest = ""
+    # The epic's own Execution Strategy, read from the SAME doc text as the why
+    # digest. `group N` already used these waves to partition the children, so
+    # handing each child its slice hands back a partition the epic computed
+    # rather than asking a builder to recompute one.
+    epic_strategy: dict | None = None
     if separate and base_box[0]:
         try:
-            why_digest, why_warn = extract_why_digest(Path(base_box[0]).read_text(encoding="utf-8"))
+            epic_text = Path(base_box[0]).read_text(encoding="utf-8")
+            why_digest, why_warn = extract_why_digest(epic_text)
             if why_warn:
                 typer.echo(f"warning: {why_warn}", err=True)
+            epic_strategy = epic_strategy_from_doc(epic_text)
         except (OSError, UnicodeDecodeError):
             pass
 
@@ -2751,6 +2759,7 @@ def cmd_decompose(
                         source_doc,
                         why_digest=why_digest,
                         adopted=adopted_nodes,
+                        epic_strategy=epic_strategy,
                     ),
                     encoding="utf-8",
                 )

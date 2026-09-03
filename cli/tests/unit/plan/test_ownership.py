@@ -39,6 +39,12 @@ class TestBlueprintWriteAllowlist:
         # model must permit the write that satisfies it.
         assert "consolidation" in BLUEPRINT_WRITE_ALLOWLIST
 
+    def test_AC1_HP_allowlist_contains_join(self):
+        # The posture key's only reader is init-target-state.sh at target init.
+        # Outside the set /blueprint could not stamp it, which is why one plan
+        # in 1385 carried the key it added.
+        assert "join" in BLUEPRINT_WRITE_ALLOWLIST
+
     def test_AC1_HP_allowlist_is_exactly_this_set(self):
         # Pins membership, not just size: a count passes when someone swaps one
         # entry for another, which is the silent widening this guards against.
@@ -53,8 +59,14 @@ class TestBlueprintWriteAllowlist:
                 "acceptance_contract",
                 "consolidation",
                 "difficulty",
+                "join",
             }
         )
+
+    def test_AC1_HP_retired_orchestration_spelling_is_not_in_the_set(self):
+        # The rename is the whole point of adding the key now: leaving the old
+        # spelling writable would let /blueprint stamp a key nothing reads.
+        assert "orchestration" not in BLUEPRINT_WRITE_ALLOWLIST
 
 
 class TestAssertBlueprintCanWrite:
@@ -79,6 +91,16 @@ class TestAssertBlueprintCanWrite:
 
     def test_AC2_HP_acceptance_contract_allowed(self):
         assert_blueprint_can_write("acceptance_contract")
+
+    def test_AC1_HP_join_allowed(self):
+        assert_blueprint_can_write("join")  # no exception
+
+    def test_AC1_ERR_retired_orchestration_spelling_rejected(self):
+        with pytest.raises(OwnershipViolation) as exc_info:
+            assert_blueprint_can_write("orchestration")
+        msg = str(exc_info.value)
+        assert "orchestration" in msg
+        assert "join" in msg
 
     # Non-allowlist entries - must raise OwnershipViolation
     def test_AC3_ERR_architecture_rejected(self):

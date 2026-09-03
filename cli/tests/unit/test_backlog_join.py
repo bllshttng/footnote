@@ -78,9 +78,48 @@ tasks:
 """
 
 
+# One distinct band, six independent tasks. The width is what should size the
+# lane count; `len(bands)` is 1 and used to cap it at a single joiner.
+SINGLE_BAND_WIDE_PLAN = """---
+title: single band wide
+status: ready
+---
+
+## Execution Strategy
+
+```yaml
+execution_mode: parallel
+waves:
+  - wave: 1
+    mode: parallel
+    difficulty: medium
+    tasks: ['1.1', '1.2', '1.3', '1.4', '1.5', '1.6']
+tasks:
+  - id: '1.1'
+    title: a
+    surface: ['a.py']
+  - id: '1.2'
+    title: b
+    surface: ['b.py']
+  - id: '1.3'
+    title: c
+    surface: ['c.py']
+  - id: '1.4'
+    title: d
+    surface: ['d.py']
+  - id: '1.5'
+    title: e
+    surface: ['e.py']
+  - id: '1.6'
+    title: f
+    surface: ['f.py']
+```
+"""
+
+
 # Four single-task waves banded high / medium / medium / low; the later
 # waves declare explicit empty blockers so the whole graph is ready at once
-# (width 4). Distinct bands: three lanes.
+# (width 4). Distinct bands: three, and the lane count is now the width.
 BANDED_PLAN = """---
 title: banded
 status: ready
@@ -446,8 +485,9 @@ def test_join_spawns_one_worker_per_distinct_band(tmp_path, monkeypatch):
     def _grid(node, *, model, provider):
         band = node["difficulty"]
         picked.append(band)
-        return {"high": ("claude", "glm-x"), "medium": ("codex", "gpt-x"),
-                "low": ("claude", "glm-sm")}[band]
+        return {"high": ("claude", "glm-x", None),
+                "medium": ("codex", "gpt-x", None),
+                "low": ("claude", "glm-sm", None)}[band]
 
     monkeypatch.setattr(advance, "_grid_lane_for", _grid)
     receipt = join_node("x-8d1d", 5)
@@ -458,9 +498,14 @@ def test_join_spawns_one_worker_per_distinct_band(tmp_path, monkeypatch):
     assert receipt["lanes"] == {
         "j-x-8d1d-1": {"band": "high", "harness": "claude", "model": "glm-x",
                        "sandbox": "off"},
+        # The grid PICKED codex here, and the thread substrate is claude-only,
+        # so the pick is unusable and reads as declined. That decline now
+        # carries its reason too: it is the one most likely to puzzle a reader,
+        # because the grid had no complaint of its own.
         "j-x-8d1d-2": {"band": "medium", "harness": None, "model": None,
                        "sandbox": "off",
-                       "grid": "declined"},
+                       "grid": "declined",
+                       "grid_reason": "grid=harness-not-claude (codex)"},
         "j-x-8d1d-3": {"band": "low", "harness": "claude", "model": "glm-sm",
                        "sandbox": "off"},
     }
@@ -484,7 +529,7 @@ def test_band_count_capped_by_width_rule(tmp_path, monkeypatch):
         "title: d\n    blocked_by: []", "title: d\n    blocked_by: ['1.1']",
     ))
     monkeypatch.setattr(
-        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x")
+        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None)
     )
     receipt = join_node("x-8d1d", 3)
     assert receipt["width"] == 3
@@ -494,26 +539,73 @@ def test_band_count_capped_by_width_rule(tmp_path, monkeypatch):
 
 
 def test_grid_declined_spawns_default_lane_and_records_it(tmp_path, monkeypatch):
-    """AC2-ERR: a (None, None) grid answer is a decline, not a failure: the
-    worker rides the caller's default lane and the receipt says so."""
+    """AC2-ERR: a declined grid answer is a decline, not a failure: the worker
+    rides the caller's default lane and the receipt says so.
+
+    AC12-HP: and it says WHY. A decline spawns on the ambient default, which
+    is the most expensive thing the fleet can buy, so `declined` alone left an
+    empty `config.routing.models` reading exactly like a momentarily busy one.
+    """
     calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
-    monkeypatch.setattr(advance, "_grid_lane_for", lambda *_a, **_k: (None, None))
+    monkeypatch.setattr(
+        advance,
+        "_grid_lane_for",
+        lambda *_a, **_k: (None, None, "grid=no-inventory-declared"),
+    )
     receipt = join_node("x-8d1d", 5)
     assert len(calls) == 3
     for call in calls:
         assert call["cmd"][call["cmd"].index("--harness") + 1] == "claude"
         assert "--model" not in call["cmd"]
+    declined = {"grid": "declined", "grid_reason": "grid=no-inventory-declared"}
     assert receipt["lanes"] == {
         "j-x-8d1d-1": {"band": "high", "harness": None, "model": None,
-                       "sandbox": "off",
-                       "grid": "declined"},
+                       "sandbox": "off", **declined},
         "j-x-8d1d-2": {"band": "medium", "harness": None, "model": None,
-                       "sandbox": "off",
-                       "grid": "declined"},
+                       "sandbox": "off", **declined},
         "j-x-8d1d-3": {"band": "low", "harness": None, "model": None,
-                       "sandbox": "off",
-                       "grid": "declined"},
+                       "sandbox": "off", **declined},
     }
+
+
+def test_grid_pick_records_no_decline_reason(tmp_path, monkeypatch):
+    """AC12-ERR: the receipt is unchanged when the grid resolves a lane. A
+    reason key on a successful pick would make every receipt look like a
+    problem."""
+    _wire(monkeypatch, tmp_path, BANDED_PLAN)
+    monkeypatch.setattr(
+        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None)
+    )
+    receipt = join_node("x-8d1d", 5)
+    for lane in receipt["lanes"].values():
+        assert "grid" not in lane, lane
+        assert "grid_reason" not in lane, lane
+
+
+def test_lane_count_is_not_capped_by_the_number_of_distinct_bands(
+    tmp_path, monkeypatch
+):
+    """AC8-HP: `len(bands)` used to sit inside the lane-count `min`, so the
+    number of DISTINCT bands capped the joiner count and `--workers` could not
+    override it - a single-band plan of width 6 got one joiner. Bands route
+    difficulty; their cardinality was never a capacity.
+
+    The band assignment CYCLES rather than truncating, so every lane still
+    carries a band and the lead still carries the highest.
+    """
+    calls = _wire(monkeypatch, tmp_path, SINGLE_BAND_WIDE_PLAN)
+    monkeypatch.setattr(
+        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None)
+    )
+    receipt = join_node("x-8d1d", 4)
+
+    assert len(calls) == 4, "one distinct band must not cap the lane count at 1"
+    assert receipt["spawned"] == [
+        "j-x-8d1d-1", "j-x-8d1d-2", "j-x-8d1d-3", "j-x-8d1d-4",
+    ]
+    assert [lane["band"] for lane in receipt["lanes"].values()] == [
+        "medium", "medium", "medium", "medium",
+    ]
 
 
 def test_banded_brief_carries_the_band_table(tmp_path, monkeypatch):
@@ -682,7 +774,7 @@ def _settings(monkeypatch, sandbox: bool) -> None:
 
     model = SettingsModel(join={"sandbox": sandbox})
     monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: model)
-    monkeypatch.setattr(advance, "_grid_lane_for", lambda *_a, **_k: (None, None))
+    monkeypatch.setattr(advance, "_grid_lane_for", lambda *_a, **_k: (None, None, "grid=no-inventory-declared"))
 
 
 def test_flag_off_is_byte_identical(tmp_path, monkeypatch):
@@ -940,3 +1032,136 @@ def test_derivation_defaults_to_p2_without_a_node_priority(tmp_path, monkeypatch
     receipt = join_node("x-8d1d", None)
     assert receipt["priority"] == "p2"
     assert receipt["workers"] == 2
+
+
+# ---------------------------------------------------------------------------
+# The collision partition runs for EVERY wave (x-a804 task 5.1).
+#
+# It used to be gated on `mode == "parallel"`, so two tasks in one sequential
+# wave editing the same file read as simultaneously ready. 396 of 430 waves in
+# a fortnight are sequential, so the partition ran on roughly 8% of waves and
+# the label named `sequential` scheduled MORE in parallel than the one named
+# `parallel`. join could hand a joiner a task colliding with the holder's.
+#
+# Corpus re-measure over 532 plans carrying an Execution Strategy: 193 change,
+# every one downward, zero raised. The partition can only narrow.
+# ---------------------------------------------------------------------------
+
+SEQUENTIAL_SAME_FILE_PLAN = """---
+title: sequential same file
+status: ready
+---
+
+## Execution Strategy
+
+```yaml
+execution_mode: sequential
+waves:
+  - wave: 1
+    mode: sequential
+    tasks: ['1.1', '1.2', '1.3']
+tasks:
+  - id: '1.1'
+    title: a
+    surface: ['src/one.py']
+  - id: '1.2'
+    title: b
+    surface: ['src/one.py']
+  - id: '1.3'
+    title: c
+    surface: ['src/one.py']
+```
+"""
+
+SEQUENTIAL_DISJOINT_PLAN = SEQUENTIAL_SAME_FILE_PLAN.replace(
+    """  - id: '1.2'
+    title: b
+    surface: ['src/one.py']
+  - id: '1.3'
+    title: c
+    surface: ['src/one.py']""",
+    """  - id: '1.2'
+    title: b
+    surface: ['src/two.py']
+  - id: '1.3'
+    title: c
+    surface: ['src/three.py']""",
+)
+
+
+def test_sequential_wave_same_file_measures_one(tmp_path):
+    """AC10-ERR: three tasks in a sequential wave all naming one file are NOT
+    simultaneously ready. Before this, they measured 3 and join would spawn
+    two joiners onto the file the holder is editing."""
+    plan = tmp_path / "plan.md"
+    plan.write_text(SEQUENTIAL_SAME_FILE_PLAN)
+
+    assert _plan_parallel_width(plan) == 1
+
+
+def test_sequential_wave_disjoint_files_is_unchanged(tmp_path):
+    """AC10-HP: the partition only narrows where surfaces genuinely collide.
+    A sequential wave over disjoint files still measures its full width, so
+    this change costs no real parallelism anywhere."""
+    plan = tmp_path / "plan.md"
+    plan.write_text(SEQUENTIAL_DISJOINT_PLAN)
+
+    assert _plan_parallel_width(plan) == 3
+
+
+def test_parallel_wave_same_file_still_measures_one(tmp_path):
+    """The parallel case is unchanged: it was already the only one of the four
+    measured cells that read the same-file case correctly."""
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        SEQUENTIAL_SAME_FILE_PLAN.replace("mode: sequential", "mode: parallel")
+    )
+
+    assert _plan_parallel_width(plan) == 1
+
+
+def test_sandbox_on_caps_lanes_at_the_band_count(tmp_path, monkeypatch):
+    """REGRESSION, caught in review. `render_join_write_policy` is keyed by
+    BAND, so two lanes sharing a band share one `allow_write` set and get an
+    EMPTY `deny_edit` (the deny list is the peer bands' surfaces, and a reused
+    band has no peer). Uncapping the lane count under enforcement therefore
+    hands several sessions byte-identical, mutually unrestricted policies -
+    the isolation the partition exists to provide, silently gone.
+
+    With enforcement ON the band cardinality legitimately caps the count. The
+    uncap that this PR ships is for the enforcement-OFF default, which is
+    where the 34 lost joiner slots were.
+    """
+    from fno.config import SettingsModel
+
+    settings = SettingsModel()
+    settings.join.sandbox = True
+    calls = _wire(monkeypatch, tmp_path, SINGLE_BAND_WIDE_PLAN)
+    monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: settings)
+    monkeypatch.setattr(
+        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None)
+    )
+
+    receipt = join_node("x-8d1d", 4)
+
+    assert len(calls) == 1, (
+        "one distinct band under enforcement must yield one lane; more lanes "
+        "would share a write policy and an empty deny_edit"
+    )
+    assert receipt["spawned"] == ["j-x-8d1d-1"]
+
+
+def test_sandbox_off_leaves_the_lane_count_uncapped(tmp_path, monkeypatch):
+    """The other half of the pair: with enforcement off (the default) the band
+    cardinality caps nothing, which is the whole point of the fix."""
+    calls = _wire(monkeypatch, tmp_path, SINGLE_BAND_WIDE_PLAN)
+    monkeypatch.setattr(
+        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x", None)
+    )
+
+    receipt = join_node("x-8d1d", 4)
+
+    assert len(calls) == 4
+    assert receipt["spawned"] == [
+        "j-x-8d1d-1", "j-x-8d1d-2", "j-x-8d1d-3", "j-x-8d1d-4",
+    ]

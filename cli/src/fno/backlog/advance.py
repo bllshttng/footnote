@@ -1346,7 +1346,7 @@ def _spawn_worker(
     # placement harness. An explicit harness therefore skips this consult: under
     # it the grid could pick a harness the caller's placement did not key for.
     if harness is None:
-        grid_harness, grid_model = _grid_lane_for(node, model=model, provider=provider)
+        grid_harness, grid_model, _grid_why = _grid_lane_for(node, model=model, provider=provider)
         if grid_harness is not None:
             prov = grid_harness
             model = grid_model
@@ -1614,8 +1614,34 @@ _NON_CLAUDE_HARNESSES = frozenset({"codex", "gemini", "agy", "opencode"})
 
 def _grid_lane_for(
     node: Optional[dict], *, model: Optional[str], provider: Optional[str]
-) -> tuple[Optional[str], Optional[str]]:
-    """``(harness, model)`` the capacity grid picks for an UNPINNED spawn, else ``(None, None)``.
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """``(harness, model, decline_reason)`` the capacity grid picks for an UNPINNED spawn.
+
+    On a pick the reason is ``None``; on a decline the harness and model are
+    ``None`` and the reason names WHY.
+
+    ``resolve_grid`` already returns ``(candidate, chain)`` whose last element
+    is its terminal reason, and this function used to throw that away as
+    ``_chain``. A bare ``(None, None)`` collapsed three different outcomes into
+    one value - the caller pinned a model, capacity is unknown, or the
+    inventory is empty - so a spawn site could not tell a deliberate pin from a
+    config gap and fell through to the ambient default in silence.
+
+    That is not hypothetical. With ``config.routing.models`` empty no band can
+    ever match: ``resolve_grid`` appends ``grid=no-inventory-declared`` and
+    returns no candidate, so EVERY banded plan buys the ambient fleet forever
+    rather than momentarily. Observed on this node's own joiners, which both
+    spawned on the most expensive lane while the receipt said only "grid
+    declined, harness null, model null".
+
+    The reason is for RECEIPTS, never for refusing. Routing degrades and never
+    blocks a spawn (Locked 10), and an empty inventory is a config gap, not a
+    capacity failure. Naming it is what makes it fixable.
+
+    Deliberately ONE function rather than a two-tuple wrapper around a
+    three-tuple worker. Tests monkeypatch this name, and an internal caller
+    that reached past the wrapper would silently bypass every such patch - the
+    first cut of this change did exactly that and two tests caught it.
 
     The receiving end of the difficulty deferral: dispatch callers resolve
     difficulty to nothing precisely so it picks the lane HERE, where live
@@ -1628,7 +1654,7 @@ def _grid_lane_for(
     both decisions, so placement and spawn always agree.
     """
     if model is not None or (provider or "").strip() or node is None:
-        return None, None
+        return None, None, None
     try:
         from fno import route_resolve
 
@@ -1642,17 +1668,21 @@ def _grid_lane_for(
         role: Optional[str] = None
         if not (node.get("plan_path") or "").strip():
             role = "planning"
-        candidate, _chain = route_resolve.resolve_grid(
+        candidate, chain = route_resolve.resolve_grid(
             node.get("difficulty"),
             node.get("priority"),
             capacity,
             role=role,
             inventory=inventory,
         )
-    except Exception:  # noqa: BLE001 - unknown capacity spawns on defaults
-        return None, None
+    except Exception as exc:  # noqa: BLE001 - unknown capacity spawns on defaults
+        return None, None, f"grid=unreadable ({str(exc)[:80]})"
+    # The chain's last element is the terminal reason on every path, so it is
+    # surfaced verbatim rather than reformatted - the strings are the existing
+    # receipt vocabulary and rewording them here would fork it.
+    terminal = str(chain[-1]) if chain else "grid=no-reason-recorded"
     if candidate is None:
-        return None, None
+        return None, None, terminal
     # Placement commits a harness-keyed worktree, which unknown capacity must
     # not buy: the grid's unknown-permitted posture is right for injection
     # (defaults still compose the argv), wrong for a lane decision with no
@@ -1660,8 +1690,8 @@ def _grid_lane_for(
     state = capacity.get(candidate["harness"])
     verdict = state.get("state", "unknown") if isinstance(state, dict) else state
     if str(verdict).lower() not in ("ok", "low", "available"):
-        return None, None
-    return candidate["harness"], candidate["model"]
+        return None, None, f"grid=capacity-{str(verdict).lower()}"
+    return candidate["harness"], candidate["model"], None
 
 
 def _lane_harness(eff_provider: Optional[str]) -> str:
@@ -1933,7 +1963,7 @@ def dispatch_lanes(
             # DECLINE pins too: an unpinned spawn re-consults the grid at the
             # spawn seam, and a capacity change in between could land the worker
             # on a harness the worktree was not keyed for.
-            lane_grid_harness, lane_grid_model = _grid_lane_for(
+            lane_grid_harness, lane_grid_model, _lane_grid_why = _grid_lane_for(
                 node, model=resolved_model, provider=eff_harness
             )
             lane_placement_harness = _lane_harness(lane_grid_harness or eff_harness)
@@ -2106,7 +2136,7 @@ def _width_from_graph(graph: _PlanTaskGraph) -> int:
     ``apply_partition_edges`` + ``ready_tasks``) so join's width can never
     disagree with what a joined worker's ``--ready`` query actually returns:
     a declared ``blocked_by`` wins outright, an undeclared task inherits the
-    previous wave's whole task list, and parallel waves serialize collision
+    previous wave's whole task list, and every wave serializes collision
     groups (the derived partition edges). A plan with no Execution Strategy
     yields 0; the caller refuses anything below 2.
     """
@@ -2127,12 +2157,17 @@ def _width_from_graph(graph: _PlanTaskGraph) -> int:
             if tid not in blockers:
                 blockers[tid] = set(waves[pos - 1][1]) if pos else set()
 
-    # Derived within-wave edges for parallel waves (the orchestrator's
-    # partition_edges): group order serializes, unevaluated tasks wait out
-    # the evaluated ones.
+    # Derived within-wave edges (the orchestrator's partition_edges): group
+    # order serializes, unevaluated tasks wait out the evaluated ones.
+    #
+    # Runs for EVERY wave, mirroring `apply_partition_edges`. Both used to skip
+    # non-parallel waves, so two tasks in one `sequential` wave editing the
+    # same file read as simultaneously ready and the label named `sequential`
+    # scheduled MORE in parallel than the one named `parallel`. These two
+    # implementations of one scheduling rule must change together or join's
+    # width stops matching what a joined worker's --ready query returns, which
+    # is the invariant this function's docstring promises.
     for pos, (mode, tasks) in enumerate(waves):
-        if mode != "parallel":
-            continue
         items = [(tid, set(surfaces.get(tid, []))) for tid in tasks]
         groups, unevaluated = partition(items, shared_roots=HIDDEN_SHARED_OUTPUT_ROOTS)
         edges: dict[str, list[str]] = {}
@@ -2587,15 +2622,17 @@ def _join_node(
         workers_source = "explicit"
     if priority not in _JOIN_WORKER_TABLE:
         priority = "p2"
-    # One worker per band present, highest first (x-dadc); an unbanded plan
-    # keeps joiner 2's shapeless count. The width rule still caps: the node
-    # holder is one of the width workers, so joiners stay under it.
-    if bands:
-        count = min(max(1, workers), len(bands), width - 1)
-        worker_bands = bands[:count]
-    else:
-        count = min(max(1, workers), width - 1)
-        worker_bands = [""] * count
+    # Lane count and band assignment are two questions, and one number used to
+    # answer both. `len(bands)` sat inside this min, so the number of DISTINCT
+    # difficulty bands capped the joiner count and `--workers` could not
+    # override it: a single-band plan of width 6 got one joiner. Bands ROUTE
+    # difficulty (a pulling worker takes only tasks at or below its own band);
+    # their cardinality was never a capacity. Measured over the 45 joinable
+    # banded plans since bands existed, 14 were capped below width - 1, losing
+    # 34 of 197 joiner slots in a fortnight.
+    #
+    # The width rule still caps, and it is the real one: the node holder is one
+    # of the width workers, so joiners stay under it.
     # One switch covers BOTH enforcement layers (the OS allowlist and the
     # Edit/Write guard): partial enforcement that reads as enforcement is the
     # failure mode this feature exists to prevent, so they are not separately
@@ -2603,6 +2640,34 @@ def _join_node(
     from fno.config import load_settings
 
     sandbox_on = bool(load_settings().join.sandbox)
+
+    count = min(max(1, workers), width - 1)
+    if bands:
+        # THE BAND IS THE ISOLATION UNIT WHEN ENFORCEMENT IS ON.
+        # `render_join_write_policy` is keyed by BAND, so two lanes sharing a
+        # band share one `allow_write` set and get an EMPTY `deny_edit` (the
+        # deny list is the peer bands' surfaces, and a reused band has no
+        # peer). Cycling under enforcement would hand several sessions
+        # byte-identical, mutually unrestricted policies - the isolation the
+        # partition exists to provide, silently gone. So the band cardinality
+        # legitimately caps the lane count HERE, and only here.
+        #
+        # With enforcement off (the default) it does not, and that is the
+        # whole point of the fix: `len(bands)` used to sit in this min
+        # unconditionally, so a single-band plan of width 6 got one joiner and
+        # `--workers` could not override it. Bands ROUTE difficulty - a pulling
+        # worker takes only tasks at or below its own band - and their
+        # cardinality was never a capacity. Measured over the 45 joinable
+        # banded plans since bands existed, 14 were capped below width - 1,
+        # losing 34 of 197 joiner slots in a fortnight.
+        if sandbox_on:
+            count = min(count, len(bands))
+        # Cycle rather than truncate, so lane count and band assignment stop
+        # being the same number. `bands` is highest-first, so the lead keeps
+        # the highest band and extra lanes reuse the available ones in order.
+        worker_bands = [bands[k % len(bands)] for k in range(count)]
+    else:
+        worker_bands = [""] * count
     policies = render_join_write_policy(graph, worker_bands) if sandbox_on else {}
 
     lead = f"j-{node_id}-1"
@@ -2633,9 +2698,22 @@ def _join_node(
                 "set; a joined worker that races the whole set undoes the "
                 "partition this table encodes.\n"
             )
+        # The brief NAMES the hub and used to leave the rule implicit. The
+        # spawn brief carries "you are the mail hub" / "mail hub is <lead>"
+        # per worker, but the FILE every joiner reads carried neither line, so
+        # a joiner learned who the lead was and not what that meant. Observed
+        # cost on this node's own run: two joiners independently mailed the
+        # node holder the same finding, one of them duplicating the other.
         brief_text = (
             f"# Joiner brief: {node_id}\n\n"
-            f"lead and mail hub: {lead}\n"
+            f"lead and mail hub: {lead}\n\n"
+            f"Route findings and questions through {lead}, not to the node "
+            f"holder or a king. The lead talks up; everyone else talks to the "
+            f"lead. That is what keeps one session from being addressed by "
+            f"every joiner at once, and it is why two joiners relaying the "
+            f"same finding separately is a defect rather than diligence. If "
+            f"you ARE {lead}, you are the hub: collect, dedupe, and send one "
+            f"message up.\n"
             f"{band_table}\n"
         )
         sandbox_section = _sandbox_brief_section(
@@ -2704,10 +2782,11 @@ def _join_node(
         # mismatch the spawn refuses.
         lane_h: Optional[str] = None
         lane_m: Optional[str] = None
+        grid_why: Optional[str] = None
         pol = policies.get(band) if sandbox_on else None
         enforced = pol is not None and pol.verdict == "enforced"
         if band:
-            grid_h, grid_m = _grid_lane_for(
+            grid_h, grid_m, grid_why = _grid_lane_for(
                 {
                     "difficulty": band,
                     "plan_path": str(plan_path),
@@ -2718,8 +2797,33 @@ def _join_node(
             )
             if grid_h in (None, "claude"):
                 lane_h, lane_m = grid_h, grid_m
+            else:
+                # The grid PICKED, and the pick is unusable here: the thread
+                # substrate is claude-only, so a foreign harness reads as
+                # declined. That path left `grid_why` None (the grid had no
+                # complaint), so the receipt said `declined` with no reason -
+                # the exact ambiguity this field exists to remove, on the
+                # decline most likely to puzzle a reader.
+                grid_why = f"grid=harness-not-claude ({grid_h})"
         cmd = [
             *_subprocess_util.fno_py_cmd(),
+            # `thread`, deliberately, overriding spawn's own `pane` default.
+            # A thread hosts no pane, so the team runs invisibly and the mail
+            # hub has no watchable surface - a real cost, and flipping this one
+            # word plus the shipped `--split`/`--tab` flags would buy a visible
+            # squad. It stays a thread because the flip REVERSES the 2026-08-24
+            # operator ruling that sent spawns to threads after a closable pane
+            # was ended mid-flight, and that reversal is gated on pane-keeper
+            # durability being confirmed end to end: a keeper must survive
+            # `fno mux kill-server` and re-adopt the SAME pid.
+            #
+            # Not confirmed as of 2026-09-02. `fno mux pane keeper list` shows
+            # only the operator's own main pane, no joiner survivor to read
+            # durability off, and the one machine that could run the kill-server
+            # test was hosting live joiners at the time. Untested, not false.
+            # Do not flip this word on the strength of pane-keeper EXISTING;
+            # run the restart test first. An invisible team that survives beats
+            # a visible one that dies.
             "agents", "spawn", "--substrate", "thread",
             # Explicit harness, like _spawn_worker's `prov` default: an
             # untagged spawn leaves the lane unresolved, and this machine's
@@ -2772,6 +2876,14 @@ def _join_node(
         }
         if band and lane_h is None:
             lanes[name]["grid"] = "declined"
+            # WHY it declined, not just that it did. A declined lane spawns on
+            # the ambient default, which is the most expensive thing the fleet
+            # can buy, and `grid=no-inventory-declared` (an empty
+            # `config.routing.models`) reads identically to a momentarily busy
+            # one without this. Verbatim from resolve_grid's chain, so the
+            # receipt vocabulary stays single-sourced.
+            if grid_why:
+                lanes[name]["grid_reason"] = grid_why
     return {
         "node": node_id,
         "worktree": worktree,

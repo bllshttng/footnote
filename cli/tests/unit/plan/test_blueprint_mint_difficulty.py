@@ -22,7 +22,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from fno.plan.schema import difficulty_gate_error
+from fno.plan.schema import (
+    WAVES_REQUIRED_AFTER,
+    difficulty_gate_error,
+    waves_gate_error,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _SCRIPT_PATH = _REPO_ROOT / "skills" / "blueprint" / "scripts" / "mutate_doc.py"
@@ -312,3 +316,123 @@ def test_plan_mode_skeleton_is_born_passing_the_gate(tmp_path: Path) -> None:
         f"skeleton carries no difficulty band: {fm.get('difficulty')!r}"
     )
     assert difficulty_gate_error(fm) is None
+
+
+# ---------------------------------------------------------------------------
+# The Execution Strategy gate (x-a804), the same date-keyed shape one rung up.
+#
+# `quick` was told to skip `## Execution Strategy` on the assertion that a
+# quick plan is single-task, and nothing checked the assertion: 200 of the 232
+# flat quick-plans in a fortnight carried more than one numbered change. Each
+# measured width 0, so `fno backlog join` could not tell a genuinely
+# single-task plan from one that never declared its parallelism.
+#
+# The pair below mirrors the difficulty proof above: a post-gate plan with no
+# strategy must be REFUSED, and the identical plan dated on or before the gate
+# must still PASS (so the fix cannot silently become a retroactive gate that
+# refuses 1385 plans nobody is going to rewrite).
+# ---------------------------------------------------------------------------
+
+_ONE_DAY = datetime.timedelta(days=1)
+
+
+def _quick_fm(created: datetime.date, *, status: str = "ready") -> dict:
+    return {
+        "status": status,
+        "kind": "quick-plan",
+        "created": created.isoformat(),
+        "difficulty": "medium",
+    }
+
+
+def test_waves_gate_refuses_a_post_gate_plan_with_no_strategy() -> None:
+    """AC5-ERR: strictly after the boundary, the section is required and the
+    refusal names the gate date so an author can date their own plan."""
+    fm = _quick_fm(WAVES_REQUIRED_AFTER + _ONE_DAY)
+    err = waves_gate_error(fm, has_execution_strategy=False)
+    assert err is not None
+    assert WAVES_REQUIRED_AFTER.isoformat() in err, err
+    assert "Execution Strategy" in err, err
+
+
+def test_waves_gate_passes_a_pre_gate_plan_with_no_strategy() -> None:
+    """AC5-HP: on or before the boundary, unchanged. Backfilling a wave
+    topology onto those plans would fabricate structure nobody authored."""
+    assert waves_gate_error(
+        _quick_fm(WAVES_REQUIRED_AFTER), has_execution_strategy=False
+    ) is None
+
+
+def test_waves_gate_boundary_is_strictly_after_not_on_or_after() -> None:
+    """A plan created ON the gate date predates the gate reaching its author,
+    the same boundary the difficulty gate uses. Pinned because an off-by-one
+    here silently refuses a day's worth of plans."""
+    assert waves_gate_error(
+        _quick_fm(WAVES_REQUIRED_AFTER), has_execution_strategy=False
+    ) is None
+    assert waves_gate_error(
+        _quick_fm(WAVES_REQUIRED_AFTER + _ONE_DAY), has_execution_strategy=False
+    ) is not None
+
+
+def test_waves_gate_passes_when_the_strategy_is_present() -> None:
+    fm = _quick_fm(WAVES_REQUIRED_AFTER + _ONE_DAY)
+    assert waves_gate_error(fm, has_execution_strategy=True) is None
+
+
+@pytest.mark.parametrize("status", ["idea", "design", "stub"])
+def test_waves_gate_exempts_the_pre_execution_rungs(status: str) -> None:
+    """THE MIDNIGHT TRAP, closed by construction.
+
+    `scaffold_separate_plan` mints an epic child with `created` stamped at
+    RUNTIME and no Execution Strategy, and a /think doc sits at `design` until
+    /blueprint appends one. A gate that fired on either would go red at
+    00:00Z on a commit nobody touched - exactly what the difficulty gate did
+    at 2026-08-27T00:00Z, which took smoke-rest red on every open PR.
+
+    `stub` is included because it is the retired spelling of `idea` and is
+    still accepted on read; a scaffold already on disk carries it.
+    """
+    fm = _quick_fm(WAVES_REQUIRED_AFTER + _ONE_DAY, status=status)
+    assert waves_gate_error(fm, has_execution_strategy=False) is None
+
+
+def test_waves_gate_applies_to_every_executable_rung() -> None:
+    """A plan does not escape the gate by advancing past ready."""
+    for status in ("ready", "in_progress", "in_review"):
+        fm = _quick_fm(WAVES_REQUIRED_AFTER + _ONE_DAY, status=status)
+        assert waves_gate_error(fm, has_execution_strategy=False) is not None, status
+
+
+def test_waves_gate_undatable_refuses_on_the_minting_lanes() -> None:
+    """Same split as the difficulty gate: a lane with no fallback dater
+    refuses rather than minting a strategy-less plan it cannot date."""
+    fm = {"status": "ready", "kind": "quick-plan", "difficulty": "medium"}
+    err = waves_gate_error(fm, has_execution_strategy=False)
+    assert err is not None
+    assert "cannot read created" in err, err
+
+
+def test_waves_gate_undatable_defers_on_the_authoring_lane() -> None:
+    """validate-plan.sh dates those plans itself, so refusing here would
+    preempt the validator's own dating."""
+    fm = {"status": "ready", "kind": "quick-plan", "difficulty": "medium"}
+    assert waves_gate_error(
+        fm, has_execution_strategy=False, undatable_refuses=False
+    ) is None
+
+
+def test_waves_gate_reads_an_unquoted_yaml_int_as_undatable() -> None:
+    """`created: 20260903` coerces to an epoch date under a naive parse,
+    reading a post-gate plan as pre-gate. The shared `_parse_created` refuses
+    the type instead of guessing, and this pins that the waves gate inherits
+    it rather than growing a second, looser parser."""
+    fm = {
+        "status": "ready",
+        "kind": "quick-plan",
+        "created": 20260903,
+        "difficulty": "medium",
+    }
+    err = waves_gate_error(fm, has_execution_strategy=False)
+    assert err is not None
+    assert "cannot read created" in err, err

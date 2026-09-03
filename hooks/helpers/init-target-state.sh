@@ -1666,22 +1666,36 @@ PYEOF
     # null arm that used to sit here could never run.
     echo "graph_node_id: $_NODE_ID" >> "$STATE_FILE"
 
-    # ── Mechanical orchestration: fire join or park ──────────────────────
-    # `orchestration: mechanical` in the plan frontmatter hands the plan's
-    # remaining waves to `fno backlog join` here, at init: this session is
-    # the holder (one worker) and join spawns the remainder into this
-    # worktree. The key is opt-in - absent or `king` is the
-    # operator-reviewed path and does nothing, so plans written before the
-    # key keep their behavior. Both facts come from the canonical probes in
-    # fno.backlog.join_trigger: bash re-implementing the auto-continue
+    # ── join: auto - fire join or park ───────────────────────────────────
+    # `join: auto` in the plan frontmatter hands the plan's remaining waves
+    # to `fno backlog join` here, at init: this session is the holder (one
+    # worker) and join spawns the remainder into this worktree. The key is
+    # opt-in - absent or `manual` waits for a person or a /king-for-a-day
+    # session to run the verb and does nothing here, so plans written before
+    # the key keep their behavior. Both facts come from the canonical probes
+    # in fno.backlog.join_trigger: bash re-implementing the auto-continue
     # precedence chain (autonomy master, env, config, default) is how the
     # two drift. Every failure mode is non-fatal and named: an unmeasured
     # width never fires join, and a parked trigger names the measured width
     # so a narrow plan stays distinguishable from a switched-off feature.
     if [[ "$_NODE_OWNED" -eq 1 && -n "${INITIAL_PLAN_PATH:-}" && -f "${INITIAL_PLAN_PATH%%#*}" ]]; then
       _jt_plan="${INITIAL_PLAN_PATH%%#*}"
-      _jt_fm="$(sed -n 's/^orchestration:[[:space:]]*//p' "$_jt_plan" 2>/dev/null | head -1 | tr -d '"' | tr -d "'" | xargs)"
-      if [[ "${_jt_fm:-king}" == "mechanical" ]]; then
+      # FRONTMATTER ONLY. A whole-file scan reads a `join: auto` line quoted at
+      # column 0 inside a fenced block as the key itself, and this very
+      # feature's own docs print that shape - so the documentation would arm
+      # the trigger it documents. awk stops at the closing `---`.
+      _jt_fm="$(awk '/^---[[:space:]]*$/{c++; if(c==2) exit; next} c==1' "$_jt_plan" 2>/dev/null | sed -n 's/^join:[[:space:]]*//p' | head -1 | tr -d '"' | tr -d "'" | xargs)"
+      # The retired spelling is NOT an alias - reviving it would keep a key
+      # nothing else reads alive forever. But a plan carrying it would
+      # otherwise stop auto-joining in silence, and a silent behavior change is
+      # worse than either outcome, so say so once and let the author choose.
+      if [[ -z "$_jt_fm" ]]; then
+        _jt_old="$(awk '/^---[[:space:]]*$/{c++; if(c==2) exit; next} c==1' "$_jt_plan" 2>/dev/null | sed -n 's/^orchestration:[[:space:]]*//p' | head -1 | tr -d '"' | tr -d "'" | xargs)"
+        if [[ -n "$_jt_old" ]]; then
+          echo "target: plan carries the retired key 'orchestration: $_jt_old'; it is now 'join: manual|auto' (mechanical -> auto, king -> manual) and join did NOT fire. Update the plan's frontmatter." >&2
+        fi
+      fi
+      if [[ "${_jt_fm:-manual}" == "auto" ]]; then
         _jt_root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
         if [[ -z "${FNO_PYTHON:-}" && -f "$_jt_root/scripts/lib/fno-python.sh" ]]; then
           # shellcheck source=/dev/null
@@ -1698,18 +1712,18 @@ PYEOF
           *) _jt_armed="" ;;
         esac
         if [[ -z "$_jt_width" ]] || [[ ! "$_jt_width" =~ ^[1-9][0-9]*$ ]]; then
-          echo "target: orchestration mechanical: plan width unreadable; join not fired" >&2
+          echo "target: join auto: plan width unreadable; join not fired" >&2
         elif [[ -z "$_jt_armed" ]]; then
-          echo "target: orchestration mechanical: PARKED, auto_continue off (width $_jt_width)" >&2
+          echo "target: join auto: PARKED, auto_continue off (width $_jt_width)" >&2
         elif [[ "$_jt_width" -lt 2 ]]; then
-          echo "target: orchestration mechanical: nothing to join (width $_jt_width)" >&2
+          echo "target: join auto: nothing to join (width $_jt_width)" >&2
         else
-          echo "target: orchestration mechanical: firing join for the remainder (width $_jt_width)" >&2
+          echo "target: join auto: firing join for the remainder (width $_jt_width)" >&2
           _jt_log="$STATE_DIR/.init-join.log"
           if fno backlog join "$_NODE_ID" >"$_jt_log" 2>&1; then
-            echo "target: orchestration mechanical: join dispatched (receipt in $_jt_log)" >&2
+            echo "target: join auto: join dispatched (receipt in $_jt_log)" >&2
           else
-            echo "target: orchestration mechanical: join refused, non-fatal (see $_jt_log)" >&2
+            echo "target: join auto: join refused, non-fatal (see $_jt_log)" >&2
           fi
         fi
       fi
