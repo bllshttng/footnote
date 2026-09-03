@@ -1453,14 +1453,26 @@ fn set_related(entries: &mut [Value], node_id: &str, desired: &[String]) -> Resu
 /// The write_gate serializes this against every other keeper-side cycle, and
 /// the base-version check still guards against a FOREIGN writer (an old
 /// Python leg, a hand edit) that touched the file after the read.
+///
+/// A caller that computed its op input from an earlier snapshot (rank_top
+/// reads peer ranks with `begin`, then writes) passes `base_version` with
+/// that snapshot's digest: the keeper refuses with `conflict` when the file
+/// moved between the caller's read and this cycle, so the computation is
+/// provably fresh instead of hopefully fresh. The caller retries.
 fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| StoreError::Invalid("op needs a name".into()))?;
     let p = params.get("params").cloned().unwrap_or(Value::Null);
+    let client_base = params.get("base_version").and_then(Value::as_str);
     let _gate = state.write_gate.lock().unwrap_or_else(|e| e.into_inner());
     let base = graph_store::file_content_version(&state.graph);
+    if let Some(expected) = client_base {
+        if base != expected {
+            return Err(StoreError::Conflict);
+        }
+    }
     let mut entries = graph_store::read_defaulted(&state.graph, false)?;
     let op_result = apply_op(&mut entries, name, &p)?;
     let outcome = graph_store::locked_mutate(
@@ -1567,6 +1579,56 @@ mod tests {
         let result = handle.join().unwrap();
         assert!(result.is_ok(), "{result:?}");
         assert!(!sock.exists(), "idle exit must unlink the socket");
+    }
+
+    #[test]
+    fn an_op_with_a_stale_base_version_conflicts_instead_of_writing() {
+        // rank_top computes its rank from a begin snapshot; the base_version
+        // it carries must make the keeper refuse when the file moved between
+        // that read and the op, so the float is provably computed from fresh
+        // peer ranks.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            "{\"entries\": [{\"id\": \"ab-a\", \"title\": \"a\", \"rank\": 5.0}]}",
+        )
+        .unwrap();
+        let state = StoreState {
+            graph: graph.clone(),
+            canonical: false,
+            lock_timeout: Duration::from_secs(2),
+            write_gate: Mutex::new(()),
+        };
+        let stale = json!({
+            "name": "update_fields",
+            "params": {"node_id": "ab-a", "fields": {"rank": 1.0}},
+            "base_version": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        });
+        let err = handle_op(&state, &stale).unwrap_err();
+        assert!(matches!(err, StoreError::Conflict), "{err}");
+        // Nothing was written under the stale base.
+        let body = std::fs::read_to_string(&graph).unwrap();
+        assert!(body.contains("\"rank\": 5.0"), "{body}");
+
+        // A matching base_version goes through.
+        let fresh = json!({
+            "name": "update_fields",
+            "params": {"node_id": "ab-a", "fields": {"rank": 1.0}},
+            "base_version": graph_store::file_content_version(&graph),
+        });
+        handle_op(&state, &fresh).unwrap();
+        let body = std::fs::read_to_string(&graph).unwrap();
+        assert!(body.contains("\"rank\": 1.0"), "{body}");
+
+        // No base_version at all: the pre-existing op contract, unchanged.
+        let plain = json!({
+            "name": "update_fields",
+            "params": {"node_id": "ab-a", "fields": {"rank": 2.0}},
+        });
+        handle_op(&state, &plain).unwrap();
+        let body = std::fs::read_to_string(&graph).unwrap();
+        assert!(body.contains("\"rank\": 2.0"), "{body}");
     }
 
     #[test]

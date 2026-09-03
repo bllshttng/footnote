@@ -239,48 +239,71 @@ fn ranked_rank(e: &Value) -> Option<f64> {
 /// Lanes come from this crate's own `kanban_column` mirror, computed
 /// claim-blind: rank never changes a column, and a claimed peer's extra rank
 /// only pushes the float slightly lower, never into another lane's band.
+///
+/// The min is computed from a `begin` snapshot, so the write carries that
+/// snapshot's digest as `base_version`: the keeper refuses with a conflict
+/// when a concurrent reorder moved the file in between, and this retries the
+/// read-compute-write as one provably fresh step instead of floating a card
+/// below a rank it never saw.
 pub fn rank_top(graph: &Path, node_id: &str) -> Result<String, String> {
-    let snap = call(graph, "begin", json!({}))?;
-    let entries = snap
-        .get("entries")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "the store returned no entries".to_string())?;
-    let target = entries
-        .iter()
-        .find(|e| e.get("id").and_then(Value::as_str) == Some(node_id))
-        .ok_or_else(|| format!("no node resolves to '{node_id}'"))?;
-    let project = target
-        .get("project")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let lane = backlog_column(target);
-    let head = entries
-        .iter()
-        .filter(|e| e.get("id").and_then(Value::as_str) != Some(node_id))
-        .filter(|e| {
-            backlog_column(e) == lane
-                && e.get("project").and_then(Value::as_str).unwrap_or_default() == project
-        })
-        .filter_map(ranked_rank)
-        .fold(None, |acc: Option<f64>, v| {
-            Some(acc.map_or(v, |a: f64| a.min(v)))
-        });
-    let new_rank = head.map_or(0.0, |h| h - 1.0);
-    call(
-        graph,
-        "op",
-        json!({
-            "name": "update_fields",
-            "params": {
-                "node_id": node_id,
-                "fields": {"rank": new_rank}
+    const ATTEMPTS: usize = 3;
+    for attempt in 0..ATTEMPTS {
+        let snap = call(graph, "begin", json!({}))?;
+        let version = snap
+            .get("version")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "the store returned no snapshot version".to_string())?;
+        let entries = snap
+            .get("entries")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "the store returned no entries".to_string())?;
+        let target = entries
+            .iter()
+            .find(|e| e.get("id").and_then(Value::as_str) == Some(node_id))
+            .ok_or_else(|| format!("no node resolves to '{node_id}'"))?;
+        let project = target
+            .get("project")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let lane = backlog_column(target);
+        let head = entries
+            .iter()
+            .filter(|e| e.get("id").and_then(Value::as_str) != Some(node_id))
+            .filter(|e| {
+                backlog_column(e) == lane
+                    && e.get("project").and_then(Value::as_str).unwrap_or_default() == project
+            })
+            .filter_map(ranked_rank)
+            .fold(None, |acc: Option<f64>, v| {
+                Some(acc.map_or(v, |a: f64| a.min(v)))
+            });
+        let new_rank = head.map_or(0.0, |h| h - 1.0);
+        let sent = call(
+            graph,
+            "op",
+            json!({
+                "name": "update_fields",
+                "params": {
+                    "node_id": node_id,
+                    "fields": {"rank": new_rank}
+                },
+                "base_version": version,
+            }),
+        );
+        match sent {
+            Ok(_reply) => {
+                return Ok(format!(
+                    "float to top: {node_id} (rank {new_rank})",
+                    new_rank = format_rank(new_rank)
+                ))
             }
-        }),
-    )?;
-    Ok(format!(
-        "float to top: {node_id} (rank {new_rank})",
-        new_rank = format_rank(new_rank)
-    ))
+            // The keeper's Conflict message; a stable prefix from
+            // graph_store::StoreError. Anything else is a real failure.
+            Err(e) if e.starts_with("version conflict") && attempt + 1 < ATTEMPTS => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("the retry loop returns on every branch")
 }
 
 fn format_rank(v: f64) -> String {
