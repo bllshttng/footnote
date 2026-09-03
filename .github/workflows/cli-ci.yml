@@ -303,7 +303,20 @@ jobs:
     steps:
       - name: Both shards passed
         run: |
+          # A lone `cancelled` here is that shard's OWN cap, never a superseding
+          # push: a cancelled run skips this gate entirely (`!cancelled()`
+          # above). Say so, because the cap kills the shard before its EXIT trap
+          # runs, so the missing smoke-duration line is an ABSENCE - and that
+          # absence was read as three failing assertions, which filed a green
+          # suite as three broken registries.
+          capped() {
+            [ "$2" = "cancelled" ] || return 0
+            echo "$1 outran its own timeout-minutes cap; the run was never cancelled."
+            echo "Its shard step prints no smoke-duration line when the cap kills it."
+          }
           echo "smoke-pytest=${{ needs.smoke-pytest.result }} smoke-rest=${{ needs.smoke-rest.result }}"
+          capped smoke-pytest "${{ needs.smoke-pytest.result }}"
+          capped smoke-rest "${{ needs.smoke-rest.result }}"
           [ "${{ needs.smoke-pytest.result }}" = "success" ] || exit 1
           [ "${{ needs.smoke-rest.result }}" = "success" ] || exit 1
 
