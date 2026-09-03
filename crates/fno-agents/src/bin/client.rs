@@ -247,6 +247,9 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
     }
+    if verb == "session-start-bytes" {
+        return fno_agents::session_start_bytes::run_session_start_bytes(&args[1..]);
+    }
 
     // `verify-evidence`: Rust port of scripts/lib/verify-event-evidence.sh
     // (see verify_evidence.rs doc). Direct dispatch.

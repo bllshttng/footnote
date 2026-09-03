@@ -1791,61 +1791,26 @@ def _preamble_budget_line(
 
 
 def _session_start_bytes_line(preamble_line: Optional[str]) -> Optional[str]:
-    """Advisory: the operator's TOTAL session-start byte count, so preamble
-    overload is a number, not a feeling (x-997a census deliverable 7).
-
-    Sums three pieces that all load before the first token: the fno gate (A,
-    read off ``preamble_line``), the user's global ``~/.claude/CLAUDE.md`` plus
-    every file its top-level ``@`` lines import (B), and the current project's
-    memory index (C, ``~/.claude/projects/<slug>/memory/MEMORY.md`` - the same
-    slug the Claude transcript store keys on). Best-effort throughout: a
-    missing piece counts as zero bytes rather than aborting, and any failure
-    returns None so this line never touches the report's exit code.
-    """
-    if not preamble_line:
-        return None
-    match = re.match(r"preamble:\s*(\d+)\s*/", preamble_line)
+    """Advisory TOTAL session-start byte count (x-997a): A from
+    ``preamble_line``, the rest from `fno-agents session-start-bytes` (Rust
+    owns the file reads). Best-effort: any failure returns None."""
+    match = re.match(r"preamble:\s*(\d+)\s*/", preamble_line or "")
     if not match:
         return None
-    gate_bytes = int(match.group(1))
-
-    home = Path.home()
-    claude_md = home / ".claude" / "CLAUDE.md"
-    user_bytes = 0
-    if claude_md.is_file():
-        try:
-            text = claude_md.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            text = ""
-        user_bytes += len(text.encode("utf-8"))
-        for line in text.splitlines():
-            imp = re.match(r"@(\S+)", line)
-            if not imp:
-                continue
-            imported = home / ".claude" / imp.group(1)
-            try:
-                if imported.is_file():
-                    user_bytes += imported.stat().st_size
-            except OSError:
-                pass
-
-    memory_bytes = 0
     try:
-        from fno.provenance.resolver import _slug
+        from fno import rust_binary
 
-        slug = _slug(str(Path.cwd()))
-        memory_index = home / ".claude" / "projects" / slug / "memory" / "MEMORY.md"
-        if memory_index.is_file():
-            memory_bytes = memory_index.stat().st_size
-    except Exception:
-        pass
-
-    total = gate_bytes + user_bytes + memory_bytes
-    return (
-        f"preamble: fno gate {gate_bytes} B + user CLAUDE.md and imports "
-        f"{user_bytes} B + project memory index {memory_bytes} B = {total} B "
-        f"(~{total // 4} tok per session start)"
-    )
+        binary = rust_binary.resolve_binary()
+        if binary is None:
+            return None
+        result = subprocess.run(
+            [str(binary), "session-start-bytes", "--gate-bytes", match.group(1)],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    line = result.stdout.strip()
+    return line if line.startswith("preamble:") else None
 
 
 # ---------------------------------------------------------------------------
@@ -4365,9 +4330,8 @@ def doctor_command(
             preamble_line = _preamble_budget_line(src)
             if preamble_line is not None:
                 typer.echo(preamble_line)
-            session_start_line = _session_start_bytes_line(preamble_line)
-            if session_start_line is not None:
-                typer.echo(session_start_line)
+            if (line := _session_start_bytes_line(preamble_line)) is not None:
+                typer.echo(line)
 
     # A repair from stale source can reinstall the same pre-merge snapshot and
     # then exec away before the final blocker check. Refuse every repair path
