@@ -766,6 +766,13 @@ enum CoreMsg {
         name: String,
         reply: ControlReply,
     },
+    /// (v65, x-cf97) The `fno mux tab move` door onto the reorder trunk.
+    TabReorder {
+        squad: PaneTarget,
+        tab: TabSel,
+        to: TabSel,
+        reply: ControlReply,
+    },
     TabClose {
         squad: PaneTarget,
         tab: TabSel,
@@ -4429,6 +4436,12 @@ impl Core {
                     child_pid: entry.pty.child_pid(),
                     title: entry.vt.osc_title().map(str::to_string),
                     pristine_idle_shell: entry.cmd.is_none() && entry.vt.is_pristine_idle_shell(),
+                    // (v65, x-cf97) The spent-shell reading: shell integration
+                    // measured, nothing running now. `cmd.is_none()` keeps an
+                    // agent or `pane run` pane out of the category even when
+                    // its shell layer reads idle.
+                    shell_idle: entry.cmd.is_none()
+                        && matches!(entry.vt.shell_activity(), vt::ShellActivity::Idle),
                     name: entry.name.clone(),
                     tab_name,
                     tab_ordinal,
@@ -5131,6 +5144,61 @@ impl Core {
             self.persist_template_specs(sid);
         }
         self.push_layout(true);
+        Ok(())
+    }
+
+    /// (x-cf97) The ONE reorder trunk: move `tab_id` `delta` slots within
+    /// `squad_id`, holding the squad's active tab across the move. Returns
+    /// whether anything changed; the caller pushes the layout. `find_tab` and
+    /// the cross-squad guard stay with the callers - the interactive path
+    /// resolves by id anywhere in the session, the control path resolves both
+    /// selectors inside one squad.
+    fn reorder_tab(&mut self, squad_id: u64, tab_id: TabId, delta: i32) -> bool {
+        let Some(sq) = self.session.squad_mut(squad_id) else {
+            return false;
+        };
+        let Some(idx) = sq.tabs.iter().position(|t| t.id == tab_id) else {
+            return false;
+        };
+        let new = (idx as i64 + delta as i64).clamp(0, sq.tabs.len() as i64 - 1) as usize;
+        if new == idx {
+            return false;
+        }
+        let active = sq.tabs.get(sq.active_tab).map(|tab| tab.id);
+        let moved = sq.tabs.remove(idx);
+        sq.tabs.insert(new, moved);
+        sq.active_tab = active
+            .and_then(|id| sq.tabs.iter().position(|candidate| candidate.id == id))
+            .unwrap_or_else(|| sq.active_tab.min(sq.tabs.len().saturating_sub(1)));
+        true
+    }
+
+    /// (v65, x-cf97) `ControlVerb::TabReorder`: the `fno mux tab move` door
+    /// onto the trunk the tab bar uses. Both selectors resolve through the
+    /// shared grammar; the destination names a POSITION, so the delta is
+    /// computed here and never shipped over the wire.
+    fn tab_reorder(
+        &mut self,
+        squad: &PaneTarget,
+        tab: &TabSel,
+        to: &TabSel,
+    ) -> Result<(), (u32, String)> {
+        let sid = self.resolve_squad(squad)?;
+        let from = self
+            .resolve_tab_index(sid, tab)
+            .map_err(|e| (err_code::BAD_REQUEST, e))?;
+        let dest = self
+            .resolve_tab_index(sid, to)
+            .map_err(|e| (err_code::BAD_REQUEST, e))?;
+        let tid = self
+            .session
+            .squad(sid)
+            .ok_or((err_code::BAD_REQUEST, "squad vanished".to_string()))?
+            .tabs[from]
+            .id;
+        if self.reorder_tab(sid, tid, (dest as i64 - from as i64) as i32) {
+            self.push_layout(true);
+        }
         Ok(())
     }
 
@@ -14070,7 +14138,7 @@ impl Core {
                 Flow::Continue
             }
             Command::ReorderTab { squad, tab, delta } => {
-                let Some((current_squad, idx)) = self.session.find_tab(tab) else {
+                let Some((current_squad, _)) = self.session.find_tab(tab) else {
                     self.notice(client_id, "no such tab");
                     return Flow::Continue;
                 };
@@ -14078,27 +14146,7 @@ impl Core {
                     self.notice(client_id, "tab moved to another workspace");
                     return Flow::Continue;
                 }
-                let changed = {
-                    let squad = self.session.squad_mut(squad).expect("find_tab live squad");
-                    let new =
-                        (idx as i64 + delta as i64).clamp(0, squad.tabs.len() as i64 - 1) as usize;
-                    if new == idx {
-                        false
-                    } else {
-                        let active = squad.tabs.get(squad.active_tab).map(|tab| tab.id);
-                        let moved = squad.tabs.remove(idx);
-                        squad.tabs.insert(new, moved);
-                        squad.active_tab = active
-                            .and_then(|id| {
-                                squad.tabs.iter().position(|candidate| candidate.id == id)
-                            })
-                            .unwrap_or_else(|| {
-                                squad.active_tab.min(squad.tabs.len().saturating_sub(1))
-                            });
-                        true
-                    }
-                };
-                if changed {
+                if self.reorder_tab(squad, tab, delta) {
                     self.push_layout(true);
                 }
                 Flow::Continue
@@ -15154,6 +15202,19 @@ impl Core {
                 reply,
             } => {
                 let msg = match self.tab_rename(&squad, &tab, name) {
+                    Ok(()) => ServerMsg::Ok,
+                    Err((code, msg)) => ServerMsg::Err { code, msg },
+                };
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
+            CoreMsg::TabReorder {
+                squad,
+                tab,
+                to,
+                reply,
+            } => {
+                let msg = match self.tab_reorder(&squad, &tab, &to) {
                     Ok(()) => ServerMsg::Ok,
                     Err((code, msg)) => ServerMsg::Err { code, msg },
                 };
@@ -16718,6 +16779,16 @@ async fn handle_control(
                     squad,
                     tab,
                     name,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::TabReorder { squad, tab, to } => {
+            core_tx
+                .send(CoreMsg::TabReorder {
+                    squad,
+                    tab,
+                    to,
                     reply: reply_tx,
                 })
                 .await
@@ -21080,6 +21151,59 @@ mod tests {
         );
         assert_eq!(squad.tabs[squad.active_tab].id, 6);
         assert!(rx.try_recv().is_ok(), "a successful reorder pushes Layout");
+    }
+
+    #[test]
+    fn tab_reorder_control_verb_lands_at_the_named_position() {
+        // (x-cf97) The `fno mux tab move` door: `to` names a 1-based POSITION,
+        // the server computes the delta, and the same trunk moves the tab
+        // while holding the squad's active tab. The ordinal grammar is the
+        // shared one: 0 is a refusal, never a silent zero-based index
+        // (x-1499), and past-the-end is refused rather than clamped.
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], None, leaf_tab(5, 1));
+        core.session
+            .squad_mut(1)
+            .unwrap()
+            .tabs
+            .extend([leaf_tab(6, 2), leaf_tab(7, 3)]);
+        core.session.squad_mut(1).unwrap().active_tab = 2;
+
+        core.tab_reorder(
+            &PaneTarget::SquadId(1),
+            &TabSel::Index(3),
+            &TabSel::Index(1),
+        )
+        .unwrap();
+        let squad = core.session.squad(1).unwrap();
+        assert_eq!(
+            squad.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            vec![7, 5, 6]
+        );
+        assert_eq!(
+            squad.tabs[squad.active_tab].id, 7,
+            "the active tab survives the move"
+        );
+
+        assert!(
+            core.tab_reorder(
+                &PaneTarget::SquadId(1),
+                &TabSel::Index(0),
+                &TabSel::Index(1)
+            )
+            .is_err(),
+            "ordinal 0 is refused"
+        );
+        assert!(
+            core.tab_reorder(
+                &PaneTarget::SquadId(1),
+                &TabSel::Index(1),
+                &TabSel::Index(9)
+            )
+            .is_err(),
+            "past-the-end is refused"
+        );
     }
 
     #[test]

@@ -20,6 +20,7 @@ fn pane(fno_id: Option<&str>, name: Option<&str>) -> PaneInfo {
         child_pid: Some(40859),
         title: None,
         pristine_idle_shell: false,
+        shell_idle: false,
         tab_name: None,
         tab_ordinal: None,
         fno_id: fno_id.map(str::to_string),
