@@ -71,10 +71,8 @@ _AUTONOMOUS_COMMAND_MERGE = "/target {id}"
 @cache
 def _carrier_vocab() -> tuple[tuple[str, ...], str, str]:
     """The carrier vocabulary from the ONE canonical merge_posture table
-    (x-8151/d-450caaeb): authored in the Rust tree, shipped here as generated
-    package data (build.rs byte copy; freshness tripwire in scripts/ci). The
-    Rust engine and these readers answer from the same file and cannot
-    drift."""
+    (x-8151): authored in the Rust tree, shipped here as generated package
+    data. The Rust engine and these readers cannot drift."""
     import tomllib
     from importlib.resources import files
 
