@@ -12142,10 +12142,11 @@ fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRow {
 }
 
 #[tokio::test]
-async fn selector_x_on_live_agent_arms_stop_confirm() {
-    // US1 / AC1-HP (client half): x on a live (non-tombstone) agent row arms
-    // a StopAgent confirm carrying the row's name; nothing is sent until the
-    // confirm commits, and the selector closes (open_confirm).
+async fn selector_x_on_live_agent_arms_remove_confirm() {
+    // US1 / AC1-HP (client half), x-f191 scope b: x on a live (non-tombstone)
+    // agent row arms ONE remove confirm carrying the row's name - the server
+    // orchestrates stop-then-rm behind it. Nothing is sent until the confirm
+    // commits, and the selector closes (open_confirm).
     let mut v = view_with_agents(vec![lifecycle_row("worker-a", false, false)]);
     v.set_squad_view(1, SectionView::Expanded);
     v.selector = Some(agent_row_at(&v, |a| a.name == "worker-a"));
@@ -12154,12 +12155,32 @@ async fn selector_x_on_live_agent_arms_stop_confirm() {
     assert!(buf.is_empty(), "arming a confirm sends nothing");
     assert_eq!(v.selector, None, "the confirm closes the selector");
     match v.confirm.as_ref().map(|c| (&c.action, c.label.as_str())) {
-        Some((ConfirmKind::StopAgent { name }, label)) => {
+        Some((ConfirmKind::RemoveAgent { name }, label)) => {
             assert_eq!(name, "worker-a");
             assert_eq!(label, "worker-a");
         }
-        _ => panic!("expected a StopAgent confirm"),
+        _ => panic!("expected a RemoveAgent confirm"),
     }
+}
+
+#[tokio::test]
+async fn selector_x_commit_reanchors_the_selector_on_the_row() {
+    // (x-f191 scope a+c) The sideline comes back after the commit: the
+    // selection resolves onto the acted row by identity, so the operator is
+    // never thrown out to re-find a greyed row.
+    let mut v = view_with_agents(vec![lifecycle_row("worker-a", false, false)]);
+    v.set_squad_view(1, SectionView::Expanded);
+    let idx = agent_row_at(&v, |a| a.name == "worker-a");
+    v.selector = Some(idx);
+    let mut buf: Vec<u8> = Vec::new();
+    selector_keys(&mut v, b"x", &mut buf).await.unwrap();
+    assert_eq!(v.selector, None, "the confirm closes the selector at arm");
+    confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+    assert_eq!(
+        v.selector,
+        Some(idx),
+        "the commit re-anchors the selector on the acted row"
+    );
 }
 
 #[tokio::test]

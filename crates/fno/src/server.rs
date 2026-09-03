@@ -3487,6 +3487,7 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
     }
 }
 
+
 /// (x-9c5f) Sanitize peek-overlay free-text mail: strip control chars, trim,
 /// refuse blank-after-sanitize and over-`MAX_MAIL_TEXT` (never truncate - a
 /// silently cut instruction to a worker is worse than a visible refusal, Locked
@@ -9738,11 +9739,12 @@ impl Core {
                 .unwrap_or_else(|e| e);
             let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
         });
+    }
 
-    /// (x-f191) The corpse-safe stop: off-loop like [`Self::agent_action`],
-    /// but the verb pair (stop, then rm while the row still reads live) so a
-    /// stored-live row the harness no longer lists reaches the CLI's
-    /// already-absent removal instead of looping on a no-op stop. One press.
+    /// (x-f191) The one-gesture remove: off-loop like
+    /// [`Self::agent_action`], but the verb pair (stop, then rm) so the
+    /// operator states removal intent once. A live row stops first; a corpse
+    /// whose stop no-ops still clears through rm's already-absent gate.
     fn stop_agent_action(&self, id: u64, name: String) {
         let core_tx = self.self_tx.clone();
         tokio::spawn(async move {
@@ -14407,32 +14409,27 @@ impl Core {
                 Flow::Continue
             }
             Command::StopAgent { name } => {
-                // Stop a live sideline row (x-76ea). `resolve_lifecycle_target`
-                // validates the name against THIS server's catalog fail-closed.
-                // (x-f191) The verb itself is corpse-safe: a stop that leaves
-                // the row stored-live falls through to `rm`, whose daemon-side
-                // live gate removes a provably-absent row instead of letting
-                // `x` loop on a no-op stop forever.
+                // Stop a live sideline row (x-76ea). Stop ONLY: this is the
+                // menu's stop-only path; the one-gesture stop-and-remove
+                // composition lives on RemoveAgent (x-f191 scope b).
+                // `resolve_lifecycle_target` validates the name against THIS
+                // server's catalog fail-closed.
                 match self.resolve_lifecycle_target(&name) {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(_row) => self.stop_agent_action(client_id, name),
+                    Ok(_row) => self.agent_action(client_id, "stop", name),
                 }
                 Flow::Continue
             }
             Command::RemoveAgent { name } => {
-                // Remove an exited sideline row (x-76ea). Same resolution as
-                // StopAgent, plus the stop-then-rm ordering: a still-live row is
-                // refused with the stop-first reason (the CLI enforces this too,
-                // but refusing here keeps the notice specific and skips a doomed
-                // subprocess).
-                // `.map(|a| a.exited)` drops the row borrow before the arm bodies
-                // call `&mut self` methods (the resolver now returns a reference).
-                match self.resolve_lifecycle_target(&name).map(|a| a.exited) {
+                // (x-f191 scope b) The operator states the intent ONCE: remove.
+                // The server orchestrates stop-then-rm off-loop - a live row is
+                // stopped as part of its removal (the stop's registry flip is
+                // what the rm leg reads), and a stored-live corpse whose stop
+                // no-ops reaches the CLI's already-absent branch through rm's
+                // daemon-side live gate. Same resolution as StopAgent.
+                match self.resolve_lifecycle_target(&name) {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(false) => {
-                        self.notice(client_id, format!("{name} is still live - stop it first"))
-                    }
-                    Ok(true) => self.agent_action(client_id, "rm", name),
+                    Ok(_row) => self.stop_agent_action(client_id, name),
                 }
                 Flow::Continue
             }
@@ -21387,22 +21384,10 @@ mod tests {
         assert!(drain_notice(&mut rx).unwrap().contains("no such agent"));
     }
 
-    #[test]
-    fn remove_agent_live_row_refused_stop_first() {
-        // US2 (stop-then-rm ordering): RemoveAgent on a still-live registry row
-        // is refused with the stop-first reason (mirrors the CLI's own refusal).
-        let mut core = empty_core();
-        core.agents = vec![bg_row("live-worker", "/tmp", None)]; // exited: false
-        let (c, mut rx) = client_with_rx(1);
-        core.clients.push(c);
-        core.command(
-            1,
-            Command::RemoveAgent {
-                name: "live-worker".into(),
-            },
-        );
-        assert!(drain_notice(&mut rx).unwrap().contains("still live"));
-    }
+    // (x-f191 scope b) The old `remove_agent_live_row_refused_stop_first` is
+    // gone with the contract it pinned: RemoveAgent no longer refuses a
+    // stored-live row - it orchestrates stop-then-rm in one confirmed
+    // gesture, covered end to end by the fake-binary tests below.
 
     // -- x-f191 corpse-safe stop + honest reap timeout -----------------------
 
@@ -21433,21 +21418,6 @@ mod tests {
     }
 
     #[test]
-    fn row_live_in_rows_reads_the_snapshot_not_the_world() {
-        // x-f191: the stored field is exactly a snapshot. A status-live row
-        // (the corpse shape: pid null, exited_at null) reads live HERE; the
-        // live-vs-dead decision is rm's gate, never this fn.
-        let raw = r#"{"entries":[
-            {"name":"corpse","cwd":"/w","status":"live"},
-            {"name":"done","cwd":"/w","status":"exited"}
-        ]}"#;
-        let rows = agents_view::derive_rows(raw, 0).expect("fixture parses");
-        assert!(super::row_live_in_rows(&rows, "corpse"));
-        assert!(!super::row_live_in_rows(&rows, "done"));
-        assert!(!super::row_live_in_rows(&rows, "vanished"));
-    }
-
-    #[test]
     fn compose_stop_remove_reaches_the_already_absent_branch() {
         // The operator's measured case: stop no-ops on the corpse, the rm leg
         // removes it, and the notice quotes the daemon's own verdict.
@@ -21466,10 +21436,14 @@ mod tests {
             notice.starts_with("stop corpse: failed"),
             "stop outcome leads: {notice}"
         );
-        // A refusal is named, not swallowed: the row reads live and stays.
+        // A refusal is named, not swallowed: the row stays and says why.
         let refused = verb_result(false, "", "agent corpse is still live - stop it first");
         let notice = super::compose_stop_remove("stopped corpse", "corpse", &refused);
         assert!(notice.contains("; rm corpse: failed: agent corpse is still live"));
+        // The ordinary one-gesture case: stopped, then removed.
+        let clean = verb_result(true, "", "");
+        let notice = super::compose_stop_remove("stopped corpse", "corpse", &clean);
+        assert_eq!(notice, "stopped corpse; removed it");
     }
 
     #[test]
@@ -21575,9 +21549,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_success_skips_the_rm_leg() {
-        // The designed stop-then-rm protocol stays: a stop that flips the row
-        // exited is done - the second `x` removes. The rm leg never fires.
+    async fn remove_orchestrates_stop_then_rm_on_a_live_row() {
+        // (x-f191 scope b) One confirmed gesture: the stop flips the row
+        // exited and the rm leg removes it in the same press.
         let _serial = fno_env_lock();
         let tmp = std::env::temp_dir().join(format!("fno-x-f191-live-{}", std::process::id()));
         corpse_fixture(&tmp);
@@ -21588,12 +21562,12 @@ mod tests {
              printf '{\"entries\":[{\"name\":\"corpse\",\"cwd\":\"/w\",\"status\":\"exited\"}]}' > \"$FNO_AGENTS_HOME/registry.json\"\n\
              exit 0\n\
              fi\n\
-             echo \"rm must not run\" >&2\n\
-             exit 3\n",
+             echo \"removed: corpse\"\n\
+             exit 0\n",
         );
         let _env = PinnedAgentEnv::set(&tmp.join("fake-agents.sh"), &tmp);
         let notice = super::run_stop_or_remove("corpse").await;
-        assert_eq!(notice, "stopped corpse", "no rm leg on a settled stop");
+        assert_eq!(notice, "stopped corpse; removed it (removed: corpse)");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

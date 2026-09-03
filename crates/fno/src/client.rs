@@ -1193,6 +1193,11 @@ struct View {
     /// time - see [`RowStamp`] / [`RowArm`].
     row_stamp: Option<RowStamp>,
     row_arm: Option<RowArm>,
+    /// (x-f191 scope a+c) The display slot a row-scoped confirm was armed
+    /// from, captured at arm time (the confirm clears the selector). The
+    /// commit re-anchors onto the row's identity; a row the action removed
+    /// falls to this slot, clamped - the neighbour, never a reset.
+    row_slot: Option<usize>,
     /// (v12, x-e780) Active in-scrollback search (prefix+/), when open. While
     /// `Some`, stdin diverts to [`search_keys`] and the bottom chrome shows the
     /// input line / counter. Client-local: opening never sends a message and
@@ -2990,6 +2995,7 @@ impl View {
             notice: None,
             row_stamp: None,
             row_arm: None,
+            row_slot: None,
             search: None,
             search_esc: Vec::new(),
             hover_focus: true,
@@ -6067,6 +6073,28 @@ impl View {
                 Some((stamp.failure, stamp.text.as_str()))
             }
             _ => None,
+        }
+    }
+
+    /// (x-f191 scope a+c) A row-scoped commit keeps the sideline open and
+    /// the selection on the acted row: the operator opened the sideline to
+    /// act, and nothing about the action says they are done. Resolve by row
+    /// identity so the cursor follows the row through its state flip; a row
+    /// the action removed falls back to the slot it was armed from, clamped -
+    /// the neighbour, never a reset to nothing.
+    fn reanchor_after_row_commit(&mut self, name: Option<&str>) {
+        let slot = self.row_slot.take();
+        let Some(name) = name else {
+            return;
+        };
+        let rows = self.display_rows();
+        let idx = rows
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == name))
+            .or(slot);
+        if let Some(i) = idx {
+            let last = rows.len().saturating_sub(1);
+            self.selector = Some(i.min(last));
         }
     }
 
@@ -13695,6 +13723,13 @@ async fn confirm_keys(
         // (x-f191) A row-scoped commit arms the row stamp: its outcome
         // notice will render at the row, not only the tab bar.
         view.arm_row_stamp(&action.action);
+        let row_name = match &action.action {
+            ConfirmKind::StopAgent { name }
+            | ConfirmKind::RemoveAgent { name }
+            | ConfirmKind::StopExternal { name, .. }
+            | ConfirmKind::RemoveExternal { name, .. } => Some(name.clone()),
+            _ => None,
+        };
         let cmds = match action.action {
             ConfirmKind::Dispatch { node } => vec![Command::DispatchNode {
                 node,
@@ -13744,6 +13779,9 @@ async fn confirm_keys(
                 .await
                 .map_err(|e| format!("confirm-action send failed: {e}"))?;
         }
+        // (x-f191 scope a+c) The sideline comes back after a row-scoped
+        // commit: selection resolved onto the acted row, or its neighbour.
+        view.reanchor_after_row_commit(row_name.as_deref());
     }
     Ok(StdinFlow::Continue)
 }
@@ -14497,6 +14535,12 @@ async fn execute_row_menu_action(
                     },
                 },
             };
+            // (x-f191 scope a+c) Same post-commit re-anchor slot the bare `x`
+            // arms: the sideline stays open, the cursor stays on the row.
+            view.row_slot = view
+                .display_rows()
+                .iter()
+                .position(|r| matches!(r, DisplayRow::Agent(row) if row.name == a.name));
             view.open_confirm(ConfirmAction {
                 action: kind,
                 label: a.name.clone(),
@@ -16036,9 +16080,17 @@ async fn selector_keys(
                             attach_id: id,
                             name: name.clone(),
                         },
-                        _ if exited => ConfirmKind::RemoveAgent { name: name.clone() },
-                        _ => ConfirmKind::StopAgent { name: name.clone() },
+                        // (x-f191 scope b) `x` states the intent ONCE: remove.
+                        // The server orchestrates stop-then-rm behind this one
+                        // confirm - a live row is stopped as part of its
+                        // removal, never as a second ceremony. Stop-only lives
+                        // on the row menu's Stop.
+                        _ => ConfirmKind::RemoveAgent { name: name.clone() },
                     };
+                    // (x-f191 scope a+c) The slot feeds the post-commit
+                    // re-anchor: the sideline stays open and the cursor stays
+                    // on this row (or its neighbour) after the commit.
+                    view.row_slot = Some(cur);
                     view.open_confirm(ConfirmAction {
                         action,
                         label: name,
