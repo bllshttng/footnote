@@ -4,7 +4,7 @@ One question drives a feature. Several places in the tree answer it. A plan that
 
 `/blueprint` runs this protocol as step 2b-bis, after discovery grounding (2b) and before the Consolidation Gate (2d). The gate contract, the refusal strings, and the graduation live in [blueprint-gates.md](blueprint-gates.md). The validator teeth live in `scripts/validate-plan.sh` beside the Consolidation Gate. This file teaches the four steps and the sweep rules that make their output trustworthy.
 
-## The unit is a question; the count is the answerers
+## The unit is a question, and the count is the answerers
 
 Phrase the unit as a question, never as a noun phrase. "Is this row reachable?" forces the count into the open. "Row reachability" hides it. The answerer count is the PR estimate, available at plan time. A question with four answerers is a four-PR feature, or a one-PR feature with a four-answerer plan. State the count and the operator chooses between them. Today that number surfaces one PR at a time, after the fact.
 
@@ -14,7 +14,7 @@ The inverse failure exists too: one answerer conflating two questions. A change 
 
 Write it as a question that ends in a question mark. "Was this PR reviewed?" "Which nodes need dispatch?" Never prose. Never a noun phrase. The validator refuses a `question:` without the question mark, because the noun-phrase form is the regression this protocol replaced.
 
-Read law before phrasing. `fno inbox decisions <subject> --lane law --state live --json` returns the operator's own wording when a live ruling exists. Quote that wording and cite its ruling id in the block's `ruling:` field. The operator's words name the question and its authority. The plan's job is the answerer count under that question, never a second phrasing of it.
+Read law before phrasing. When a live ruling exists, `fno inbox decisions <subject> --lane law --state live --json` returns the operator's own wording. Quote that wording and cite its ruling id in the block's `ruling:` field. The operator's words name the question and its authority. The plan's job is the answerer count under that question, never a second phrasing of it.
 
 ## Step 2 - Enumerate every answerer
 
@@ -39,11 +39,11 @@ For each answerer the plan changes, name what supplies it, measured. Quote the e
 
 Read the feed AT THE SITE, never the feed you expect the site to have.
 
-A queue is only as real as its feed. The retracted specimen carried a real, correct measurement (31 rows, all planned) and still named the wrong queue, because it measured the feed it expected instead of the feed at the site.
+A queue is only as real as its feed. The retracted specimen carried a real, correct measurement (31 rows, all planned) and still named the wrong queue. It measured the feed it expected instead of the feed at the site.
 
 ## Step 3 - The count is the estimate
 
-State the answerer count in the plan's `surface:` block as `count:`. That number is the PR-count prediction, and stating it is what lets the operator trade one wide PR against several narrow ones today instead of discovering the price one merged PR at a time.
+State the answerer count in the plan's `surface:` block as `count:`. That number is the PR-count prediction. Stating it lets the operator trade one wide PR against several narrow ones today, instead of discovering the price one merged PR at a time.
 
 ## Step 4 - Dispose of every answerer
 
@@ -56,11 +56,11 @@ Every answerer carries one disposition, in principle 9's vocabulary. No second t
 
 An `out-of-scope` answerer needs only its reason. A changed answerer (`dual-logic` or `shared-vocabulary`) needs `reads`, `feed`, and `emits`, each measured.
 
-Then state `count_after`: the number of answerers left once this plan lands. A plan that pays to find four answerers should leave one, and `dual-logic` is the disposition that does it. A plan may leave the count where it found it, but it must say so in a number a reviewer reads beside `count`. The count trending to one is what makes the next feature on the same question cheap. A gate that only ever adds the count is a permanent tax, and a permanent tax is the rule that gets skipped.
+Then state `count_after`: the number of answerers left once this plan lands. Four answerers found can become one answerer left, and `dual-logic` is the disposition that does it. A plan can leave the count where it found it, but it must say so in a number a reviewer reads beside `count`. The count trending to one is what makes the next feature on the same question cheap. A gate that only ever adds the count is a permanent tax, and a permanent tax is the rule that gets skipped.
 
 ## Why a field and a reviewer, never a paragraph
 
-A rule that fires on a schedule decays to zero. The encounter-voting rule is injected into every session at start, is unambiguous, and drew 9 votes across 796 nodes. A rule that fires on the event it is about survives. The enumeration therefore lives in two event-fired places and nowhere else: the `surface:` block the validator refuses (the planner's event), and one review angle asked of a fresh adversarial context (the reviewer's event, Angle F in the review lane). This file explains the protocol. It is not the gate.
+A rule that fires on a schedule decays to zero. The encounter-voting rule is injected into every session at start, is unambiguous, and drew 9 votes across 796 nodes. A rule that fires on the event it is about survives. The enumeration therefore lives in two event-fired places and nowhere else. The first is the `surface:` block the validator refuses, the planner's event. The second is one review angle asked of a fresh adversarial context, the reviewer's event, Angle F in the review lane. This file explains the protocol. It is not the gate.
 
 ## Specimens
 

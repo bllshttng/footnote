@@ -118,43 +118,33 @@ Do NOT auto-insert a citation to silence the gate: as with Failure Mode
 Ingestion, the point is to force schema thinking into the plan, not to paper
 over its absence.
 
-## Answerer Enumeration Gate (graduated; every plan that changes a read, write, or feed)
+## Answerer Enumeration Gate (graduated, every plan that changes a read, write, or feed)
 
-A plan that fixes one site of a question asked at several sites ships the
-symptom again as PR two. This gate makes the plan count the answerers before
-the PRs do. The protocol that fills the block (the four steps, the sweep
-rules, the quote-the-expression rule, the worked example) lives in
-[answerer-enumeration.md](answerer-enumeration.md). This section is the gate
-contract, modeled on the Schema Citation Gate above.
+A plan that fixes one site of a question asked at several sites ships the symptom again as PR two. This gate makes the plan count the answerers before the PRs do. The protocol that fills the block lives in [answerer-enumeration.md](answerer-enumeration.md): the four steps, the sweep rules, the quote-the-expression rule, and the worked example. This section is the gate contract, modeled on the Schema Citation Gate above.
 
-**When the gate fires.** The plan changes a read, a write, or a feed - any
-site where the code answers a question the plan also touches. The planner
-runs the protocol as step 2b-bis, before the Consolidation Gate: enumerating
-answerers finds sibling SITES, consolidation finds sibling NODES, and a
-question with four answerers often already has two nodes filed against it.
-Sweeping first is what lets 2d see them.
+### Trigger
 
-**Detection.** The gate reads the plan's `surface:` frontmatter block (the
-schema is [quick-template.md](quick-template.md)). A missing block on a plan
-created after 2026-09-03 is the failure; a missing block on a pre-gate plan
-warns until backfilled, the same posture `consolidation:` took. The validator
-also refuses a block whose `question:` does not end in a question mark, whose
-`count:` disagrees with `len(answerers)`, whose answerers carry dispositions
-outside the principle 9 vocabulary plus `out-of-scope`, whose `out-of-scope`
-answerers carry no reason, whose changed answerers carry no `reads`/`emits`,
-or whose `count_after` exceeds `count` or whose `control:` names a path no
-listed answerer sits at.
+The plan changes a read, a write, or a feed: any site where the code answers a question the plan also touches. The planner runs the protocol as step 2b-bis, before the Consolidation Gate. The order is load-bearing: enumerating answerers finds sibling SITES, consolidation finds sibling NODES. A question with four answerers often already has two nodes filed against it. Sweeping first is what lets 2d see them.
 
-**Satisfaction.** Every answerer of one question carries a disposition
-(`dual-logic`, `shared-vocabulary`, `generated-artifact`, or `out-of-scope`
-with a reason). Every changed answerer quotes the expression it evaluates,
-with its line, and names what that feed emits, measured. The count is stated,
-and `count_after` says in a number whether this plan shrinks it.
+### Detection
 
-**Enforcement, graduated by size:**
+The gate reads the plan's `surface:` frontmatter block. The schema is [quick-template.md](quick-template.md). A missing block on a plan created after 2026-09-03 is the failure. A missing block on a pre-gate plan warns until backfilled, the same posture `consolidation:` took. A block that is present but malformed errors at every size. The validator refuses:
 
-- **Full / L plans -> fail closed.** Refuse with the offender and the
-  candidates named:
+- a `question:` without a question mark
+- a `count:` that disagrees with the answerer list
+- dispositions outside the principle 9 vocabulary plus `out-of-scope`
+- an `out-of-scope` answerer with no reason
+- a changed answerer with no `reads` or `emits`
+- a `count_after` above `count`
+- a `control:` naming a path no listed answerer sits at
+
+### Satisfaction
+
+Every answerer of one question carries a disposition: `dual-logic`, `shared-vocabulary`, `generated-artifact`, or `out-of-scope` with a reason. Every changed answerer quotes the expression it evaluates, with its line, and names what that feed emits, measured. The count is stated. `count_after` says in a number whether this plan shrinks it.
+
+### Enforcement, graduated by size
+
+- **Full / L plans -> fail closed.** Refuse with the offender and the candidates named:
 
   ```
   Plan changes {answerer} but names no feed for it. Quote the expression it
@@ -167,13 +157,9 @@ and `count_after` says in a number whether this plan shrinks it.
   reason. Undisposed: {list}.
   ```
 
-- **Quick / -S plans -> warn, proceed.** Small blast radius does not justify
-  blocking, for the same reason the schema gate relaxes. A missing block warns;
-  a malformed block still errors, because an author who did the work did it
-  wrong and a reviewer must see that.
+- **Quick / -S plans -> warn, proceed.** Small blast radius does not justify blocking. The reason is the schema gate's own: small work does not earn a block. A missing block warns. A malformed block still errors, because an author who did the work did it wrong.
 
-Do NOT auto-insert a block to silence the gate: the point is to force the
-enumeration into the plan, not to paper over its absence.
+Do NOT auto-insert a block to silence the gate. The point is to force the enumeration into the plan, not to paper over its absence.
 
 ## Executor Lock Transcription (when a design doc supplies a Locked Decision)
 
