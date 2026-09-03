@@ -3547,7 +3547,7 @@ async fn run_mail_send(name: &str, text: &str) -> String {
     }
 }
 
-/// (x-1d91, native since x-b21e) Drive one reorder verb into the ported
+/// (x-1d91, native since the store port) Drive one reorder verb into the ported
 /// graph store. The `fno` shell-out is retired: the server is a store
 /// keeper client now ([`crate::store_client`]), so the write runs through
 /// the same bounded-lock, version-checked, atomically-published pipeline

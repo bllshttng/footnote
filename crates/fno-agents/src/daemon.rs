@@ -3839,8 +3839,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         match keeper_registry_sweep(&home_sweep, &emitter_sweep) {
                             Ok(report) => {
                                 // Store-socket hygiene rides the same startup
-                                // pass (x-b21e): dead store sockets unlinked,
-                                // live ones untouched. Non-fatal by posture.
+                                // pass: dead store sockets unlinked, live
+                                // ones untouched. Non-fatal by posture.
                                 let store_unlinked =
                                     store_socket_sweep(&home_sweep, &emitter_sweep);
                                 let _ = emitter_sweep.emit(
@@ -9857,7 +9857,7 @@ fn lane_b_keeper_dir(home: &AgentsHome) -> PathBuf {
         .join("threads")
 }
 
-/// Stale store-socket hygiene (x-b21e): the store keeper unlinks its socket
+/// Stale store-socket hygiene: the store keeper unlinks its socket
 /// on every clean exit, so a socket file nobody answers is a kill -9
 /// leftover. The graph client self-heals a dead socket (its
 /// connect-before-bind removes the stale file and rebinds), so this walk is

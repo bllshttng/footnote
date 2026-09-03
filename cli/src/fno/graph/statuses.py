@@ -22,11 +22,12 @@ VALID_STATUSES: frozenset[str] = frozenset(
      "design", "ready"}
 )
 
-# Legacy `status` values -> current vocabulary. Applied on BOTH the read path
-# (`_apply_graph_defaults`, so a not-yet-remutated row reads correctly) and here
-# on the write path, mirroring PRIORITY_MIGRATION. `claimed` was renamed to
-# `in_progress` so the graph vocabulary matches the lifecycle ladder the rest of
-# the system speaks (idea -> design -> ready -> in_progress -> in_review -> done).
+# Legacy `status` values -> current vocabulary. The ported store applies it on
+# the read AND write paths now (graph_store.rs STATUS_MIGRATION); this table
+# stays as the Python-side vocabulary declaration the vocabulary test pins.
+# `claimed` was renamed to `in_progress` so the graph vocabulary matches the
+# lifecycle ladder the rest of the system speaks (idea -> design -> ready ->
+# in_progress -> in_review -> done).
 STATUS_MIGRATION: dict[str, str] = {"claimed": "in_progress"}
 
 # The rungs past which a node can never again be dispatched. `done` (work

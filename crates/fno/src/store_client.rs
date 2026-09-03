@@ -1,4 +1,4 @@
-//! The mux's native path onto the ported graph store (x-b21e). The reorder
+//! The mux's native path onto the ported graph store. The reorder
 //! verbs used to shell the `fno` porcelain server-side; the store is ported
 //! now, so the server speaks the store keeper's framed protocol directly:
 //! `u8 tag | u32 LE length | payload`, the pane keeper's shape (mirrored in
@@ -53,12 +53,24 @@ pub fn store_socket_for(graph: &Path) -> PathBuf {
 }
 
 /// The absolute spelling a nonexistent path hashes to, matching the Python
-/// client's non-strict `resolve()`.
+/// client's non-strict `resolve()`: symlinks in the existing directory
+/// prefix are followed, the missing tail is joined on lexically. A spelling
+/// divergence here would make this client miss a keeper the Python client
+/// spawned for the same graph and spawn a second one.
 fn absolute_lexical(graph: &Path) -> PathBuf {
-    if graph.is_absolute() {
-        return graph.to_path_buf();
+    let abs = if graph.is_absolute() {
+        graph.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(graph)
+    };
+    if let Some(parent) = abs.parent() {
+        if let Ok(resolved_parent) = parent.canonicalize() {
+            if let Some(name) = abs.file_name() {
+                return resolved_parent.join(name);
+            }
+        }
     }
-    std::env::current_dir().unwrap_or_default().join(graph)
+    abs
 }
 
 fn worker_binary() -> Option<PathBuf> {

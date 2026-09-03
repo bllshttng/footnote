@@ -1777,11 +1777,11 @@ pub enum Command {
     /// out between menu-open and dispatch launches no subprocess), then shells the
     /// fixed [`BacklogVerb`] OFF-loop and surfaces the verdict as a notice.
     /// `verb` is an enum, never operator text, so the wire can never widen the
-    /// write. Since x-b21e the verbs drive the ported store keeper directly
-    /// ([`crate::store_client`]) instead of shelling the `fno` porcelain; the
-    /// mux still composes no argv from the wire, the write rides the store's
-    /// bounded-lock pipeline, and there is no optimistic reorder - the order
-    /// changes when the graph reader republishes.
+    /// write. Since the store port the verbs drive the ported store keeper
+    /// directly ([`crate::store_client`]) instead of shelling the `fno`
+    /// porcelain; the mux still composes no argv from the wire, the write
+    /// rides the store's bounded-lock pipeline, and there is no optimistic
+    /// reorder - the order changes when the graph reader republishes.
     BacklogVerb {
         node: String,
         verb: BacklogVerb,
@@ -1791,8 +1791,8 @@ pub enum Command {
 /// (v36, x-1d91) The v1 reorder verb set on a Backlog card, each a fixed
 /// store operation. An enum (not a string) so the wire can never widen the
 /// write. Each variant's doc names the CLI verb whose effect it mirrors -
-/// the effects, not a subprocess: since x-b21e the server drives the ported
-/// store keeper directly ([`crate::store_client`]).
+/// the effects, not a subprocess: since the store port the server drives
+/// the ported store keeper directly ([`crate::store_client`]).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BacklogVerb {
     /// `backlog rank <node> --top` - float the card to the head of its column.

@@ -288,16 +288,9 @@ class _Keeper:
         return stream
 
     def request(self, method: str, params: dict) -> Any:
-        try:
-            stream = self._connect()
-        except FileNotFoundError:
-            raise StoreUnavailable(STATE_ABSENT, f"{self.sock} does not exist") from None
-        except ConnectionRefusedError:
-            raise StoreUnavailable(
-                STATE_NO_LISTENER, f"nothing is listening on {self.sock}"
-            ) from None
-        except OSError as exc:
-            raise StoreUnavailable(STATE_UNREACHABLE, str(exc)) from None
+        # _connect already folds every connect failure into StoreUnavailable
+        # with its state attached.
+        stream = self._connect()
         try:
             req_id = 1
             payload = json.dumps({"id": req_id, "method": method, "params": params}).encode()
@@ -439,8 +432,8 @@ def normalize_plan_path(path: str | None) -> str | None:
     across absolute-vs-relative + trailing-slash conventions.
 
     The one normalizer behind every plan-path guard (the ported Rust
-    implementation answers through the keeper; see x-04b9 for why every
-    comparison site routes through one function).
+    implementation answers through the keeper; one comparison vocabulary is
+    why every comparison site routes through one function).
     """
     result = _client_for(GRAPH_JSON).request("normalize_plan_path", {"path": path})
     return result["path"] if isinstance(result, dict) else None
@@ -451,7 +444,7 @@ def plan_path_owner_conflict(
 ) -> str | None:
     """Return the id of another node already bound to the same ``plan_path``.
 
-    The one-plan-one-node invariant (x-04b9); the check lives in the ported
+    The one-plan-one-node invariant; the check lives in the ported
     store so a write site cannot reimplement it.
     """
     result = _query(entries, "plan_path_owner_conflict", {

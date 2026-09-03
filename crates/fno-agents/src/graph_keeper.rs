@@ -1445,12 +1445,27 @@ pub fn store_socket_for(graph: &std::path::Path) -> PathBuf {
         return sibling;
     }
     use sha2::Digest as _;
-    // Hash the ABSOLUTE spelling: the client resolves the graph before
-    // hashing, so a nonexistent graph absolute-izes lexically here too.
+    // Hash the ABSOLUTE spelling the Python client resolves: an existing
+    // path canonicalizes (symlinks followed); a missing one keeps its
+    // symlinked directory prefix and joins the tail lexically, matching
+    // Python's non-strict resolve(). A spelling divergence would make this
+    // keeper bind a socket no client finds.
     let absolute = match graph.canonicalize() {
         Ok(p) => p,
-        Err(_) if graph.is_absolute() => graph.to_path_buf(),
-        Err(_) => std::env::current_dir().unwrap_or_default().join(graph),
+        Err(_) => {
+            let abs = if graph.is_absolute() {
+                graph.to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(graph)
+            };
+            let resolved = abs
+                .parent()
+                .and_then(|parent| parent.canonicalize().ok())
+                .and_then(|resolved_parent| {
+                    abs.file_name().map(|name| resolved_parent.join(name))
+                });
+            resolved.unwrap_or(abs)
+        }
     };
     let mut h = sha2::Sha256::new();
     h.update(absolute.to_string_lossy().as_bytes());
