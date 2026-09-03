@@ -76,6 +76,7 @@ pub mod graph_keeper;
 pub mod graph_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
+pub mod heal;
 mod identity;
 pub mod interrupt_classify;
 pub mod kill_criteria;
