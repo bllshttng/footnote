@@ -10846,18 +10846,16 @@ impl Core {
     /// remembered tab, so reusing the index lands the new viewer where the old
     /// one was.
     ///
-    /// Saturates at `u8::MAX` rather than wrapping to 0, which would silently
-    /// repoint portal 0 instead of opening a new one. 256 live portals is not
-    /// a case worth a refusal path.
-    fn next_free_portal(&self) -> u8 {
-        (0..=u8::MAX)
-            .find(|idx| {
-                !self
-                    .portals
-                    .get(idx)
-                    .is_some_and(|portal| self.panes.contains_key(&portal.seat))
-            })
-            .unwrap_or(u8::MAX)
+    /// (x-0719) `None` means every index holds a portal whose seat is live.
+    /// The old saturation at `u8::MAX` was itself an occupied index, so a
+    /// full space silently REPOINTED portal 255; the caller refuses instead.
+    fn next_free_portal(&self) -> Option<u8> {
+        (0..=u8::MAX).find(|idx| {
+            !self
+                .portals
+                .get(idx)
+                .is_some_and(|portal| self.panes.contains_key(&portal.seat))
+        })
     }
 
     fn portal_of(&self, pane: Option<u64>) -> Option<u8> {
@@ -13463,7 +13461,19 @@ impl Core {
                     // makes two clients opening a portal at once safe.
                     let portal = match placement.portal_target() {
                         Some(idx) => idx,
-                        None => self.next_free_portal(),
+                        // (x-0719) A full space refuses visibly. Repointing an
+                        // occupied index is the silent wrong action the other
+                        // placement refusals exist to prevent.
+                        None => match self.next_free_portal() {
+                            Some(idx) => idx,
+                            None => {
+                                self.notice(
+                                    client_id,
+                                    "all 256 portal indices are live; close one first",
+                                );
+                                return Flow::Continue;
+                            }
+                        },
                     };
                     return self.reach_portal(client_id, view, vp, portal, &id);
                 }
@@ -26752,6 +26762,51 @@ mod tests {
     }
 
     #[test]
+    fn an_exhausted_portal_space_refuses_instead_of_repointing() {
+        // x-0719 AC8-EDGE: when every index holds a portal whose seat is a
+        // LIVE pane, the old `.unwrap_or(u8::MAX)` fallback handed back 255 -
+        // an occupied index - and `P` silently repointed a portal the operator
+        // was using. The reach now refuses with a notice naming the ceiling
+        // and touches nothing.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, p1, mut rx) = thread_core();
+        for idx in 0..=u8::MAX {
+            core.portals.insert(
+                idx,
+                Portal {
+                    row_key: format!("sentinel-{idx}"),
+                    seat: p1, // a live pane, so every index is held
+                    tab: 1,
+                },
+            );
+        }
+        core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+
+        core.command(
+            client_id,
+            Command::AttachAgent {
+                id: "deadbee1".into(),
+                placement: PanePlacement {
+                    portal_new: true,
+                    ..Default::default()
+                },
+            },
+        );
+
+        assert_eq!(core.portals.len(), 256, "no portal was added or moved");
+        assert_eq!(
+            core.portals.get(&255).map(|e| e.row_key.as_str()),
+            Some("sentinel-255"),
+            "the reach repointed nothing, not even the top index"
+        );
+        let notices = drain_notices(&mut rx);
+        assert!(
+            notices.iter().any(|t| t.contains("256")),
+            "the refusal names the exhausted ceiling: {notices:?}"
+        );
+    }
+
+    #[test]
     fn a_stale_portal_index_is_free_to_reuse() {
         // Liveness, not presence. An entry whose pane closed elsewhere holds
         // no portal, so its index is available - and the reach's own
@@ -26768,7 +26823,7 @@ mod tests {
         );
         assert_eq!(
             core.next_free_portal(),
-            0,
+            Some(0),
             "a stale entry does not reserve its index"
         );
     }
