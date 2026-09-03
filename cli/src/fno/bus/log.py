@@ -121,6 +121,14 @@ class Envelope:
     # body text. Additive: a row written before this field existed reads back
     # through the legacy meta fallback and renders with the peer trailer.
     origin: Optional[str] = None
+    # Confirmed-delivery timestamp, set on the audit record a send appends
+    # AFTER a live lane confirmed (x-f8e3). Additive: pre-existing lines parse
+    # with it None. It is what lets the durable-first row and its later
+    # delivery record share one msg_id while readers suppress the deliverable
+    # twin - a confirmed hosted delivery must not also surface as an unread
+    # durable row, and the log is append-only, so the suppression can only
+    # ever ride a second row keyed on the same id.
+    delivered_at: Optional[str] = None
 
     @classmethod
     def new(
@@ -144,6 +152,7 @@ class Envelope:
         to_kind: Optional[str] = None,
         word_count: Optional[int] = None,
         origin: Optional[str] = None,
+        delivered_at: Optional[str] = None,
     ) -> "Envelope":
         mid = id or new_msg_id()
         return cls(
@@ -165,6 +174,7 @@ class Envelope:
             to_kind=to_kind,
             word_count=word_count,
             origin=origin,
+            delivered_at=delivered_at,
         )
 
 
@@ -182,7 +192,8 @@ def _now_iso() -> str:
 _ALWAYS = ("v", "id", "ts", "thread", "from", "to", "kind")
 _OPTIONAL = (
     "provider_from", "provider_to", "request_id", "in_reply_to", "delivery",
-    "from_session", "from_model", "to_kind", "word_count", "origin", "meta",
+    "from_session", "from_model", "to_kind", "word_count", "origin",
+    "delivered_at", "meta",
 )
 
 
@@ -219,6 +230,8 @@ def to_json_line(env: Envelope) -> str:
         obj["to_kind"] = env.to_kind
     if env.origin:
         obj["origin"] = env.origin
+    if env.delivered_at:
+        obj["delivered_at"] = env.delivered_at
     # `is not None`, not truthiness: a genuine zero-word body (a pasted log
     # masks to nothing) must serialize as 0, not vanish and read back as legacy.
     if env.word_count is not None:
@@ -261,6 +274,7 @@ def from_json_line(line: str) -> Envelope:
         # back to meta so pre-existing lines still render their provenance.
         origin=obj.get("origin")
         or (_meta.get("origin") if isinstance(_meta, dict) else None),
+        delivered_at=obj.get("delivered_at"),
     )
 
 
@@ -470,8 +484,16 @@ def record_hosted_delivery(
     from_model: Optional[str] = None,
     to_kind: Optional[str] = None,
     word_count: Optional[int] = None,
+    delivered_at: Optional[str] = None,
 ) -> Envelope:
-    """Append one audit-only record after confirmed hosted delivery."""
+    """Append one audit-only record after confirmed hosted delivery.
+
+    ``delivered_at`` is the confirmation timestamp. It doubles as the marker
+    that suppresses the durable-first twin: since x-f8e3 the send path writes
+    the durable row BEFORE resolution, so a hosted delivery leaves both rows
+    on the bus, and the only append-only way to keep the recipient from
+    draining the twin is a record on the same msg_id that readers can see.
+    """
     env = Envelope.new(
         id=msg_id,
         thread=thread or msg_id,
@@ -488,6 +510,7 @@ def record_hosted_delivery(
         from_model=from_model,
         to_kind=to_kind,
         word_count=word_count,
+        delivered_at=delivered_at or _now_iso(),
     )
     append(env)
     return env
@@ -509,6 +532,7 @@ def record_typed_delivery(
     from_model: Optional[str] = None,
     to_kind: Optional[str] = None,
     word_count: Optional[int] = None,
+    delivered_at: Optional[str] = None,
 ) -> Envelope:
     """Append one audit-only record after a ``--force`` pane send typed the body.
 
@@ -517,7 +541,8 @@ def record_typed_delivery(
     the recipient saw text with no id and the sender's outbox had no row. With
     the mapping, ``fno agents mail sent`` shows the message and names the transport, and
     a payload that lands in a pane and is never consumed becomes traceable to a
-    pane a reader can go read.
+    pane a reader can go read. ``delivered_at`` suppresses the durable-first
+    twin row the same way a hosted record does (x-f8e3).
     """
     env = Envelope.new(
         id=msg_id,
@@ -538,6 +563,7 @@ def record_typed_delivery(
         from_model=from_model,
         to_kind=to_kind,
         word_count=word_count,
+        delivered_at=delivered_at or _now_iso(),
         meta={
             "transport": "pane",
             "pane_id": str(pane_id),

@@ -903,6 +903,11 @@ def _reply_to_name_handle(
     replies back to and that drain-self scans, NOT a project name."""
     from fno.agents import discover as discover_mod
 
+    # Deliberately NO durable-first write on this lane (x-f8e3): `target` came
+    # off a stored record, and a stored handle may be the retired last-eight
+    # form, which resolution MIGRATES to the bare id (PR #491). Writing before
+    # resolution would strand the row at a retired address, so the reply lane
+    # keeps the write after resolution and accepts its narrower window.
     # `sender_session` is deliberately NOT consulted here. It is validated
     # against the real candidate set in `cmd_reply`, which is the only place
     # that has one: discovery knows which sessions a handle can name, and this
@@ -2221,6 +2226,164 @@ def _row_hosts_keeper_thread(session_id: str) -> bool:
     return "mux/threads/" in sock
 
 
+@dataclasses.dataclass
+class _DurableFirst:
+    """Everything a name-lane send mints before its live ladder, plus the
+    durable row written BEFORE resolution (x-f8e3).
+
+    Resolution (`resolve_or_suggest`) measured 70.37s at load 7.08 on this
+    machine, and it runs before `_name_lane_send` is even entered - so every
+    send used to carry a ~70s window in which a kill destroyed the message
+    with no bus row of any kind. The row below is written first, addressed by
+    the recipient NAME the caller typed (`write_new_thread` needs no
+    resolution), with `provider_to` null. A later confirmed live delivery
+    suppresses it on read via the `delivered_at` record; a live miss leaves it
+    AS the durable floor, so the miss writes no second row.
+    """
+
+    msg_id: str
+    recipient: str
+    sender: str
+    sender_session: Optional[str]
+    sender_harness: Optional[str]
+    sender_model: Optional[str]
+    wrapped: str
+    reservation: object
+    authored_words: int
+    thread: object  # fno.inbox.store.ThreadHandle
+
+
+def _durable_first_send(
+    target: str,
+    message: str,
+    *,
+    from_name: Optional[str],
+    reply_to: Optional[str],
+    style_exception: Optional[str],
+    origin: Optional[str],
+) -> Optional[_DurableFirst]:
+    """Write the durable row for a name-lane send before resolving `target`.
+
+    Returns None when `target` is not a mail address at all (a pane name):
+    those keep refusing downstream exactly as before, with nothing written.
+    Budget reservation happens here because it must precede the write - mail
+    the budget refuses must not leave a row. Exit 12 on a failed write, the
+    same contract the durable floor has always had.
+    """
+    from fno.agents.self_stamp import resolve_self_model, stamp_from
+    from fno.agents.store_fallback import is_session_shaped
+    from fno.dispatch_flags import infer_invoking_harness
+    from fno.harness_identity import LEGACY_HANDLE_RE, session_identity_key
+    from fno.inbox.store import generate_msg_id, write_new_thread
+    from fno.mail.envelope import harness_for_provider, wrap_fno_mail
+
+    if not is_session_shaped(target):
+        return None
+    if LEGACY_HANDLE_RE.fullmatch(target or ""):
+        # A retired <harness>-<short8> form read off a stored record is a data
+        # artifact the ladder MIGRATES to the bare id - a migration that needs
+        # resolution. Writing first would strand the row at a retired address,
+        # so this case keeps the old write-after-resolution order.
+        return None
+    # Address the row the way the recipient DRAINS: UUID-family ids are
+    # case-insensitive, so the raw typed form (an uppercase full id, padding
+    # whitespace) must normalize to the identity key or the row lands at an
+    # address no drain form ever scans. A SELF-send addresses the canonical
+    # short id - the same derivation the ladder's self-send arm makes, and a
+    # cheap ambient-env check, so it can run before the expensive resolution.
+    recipient = _self_recipient(session_identity_key(target.strip())) or (
+        session_identity_key(target.strip())
+    )
+    msg_id = generate_msg_id()
+    sender = stamp_from(from_name)
+    reservation, authored_words = _reserve_budget(
+        sender=sender,
+        recipient=recipient,
+        body=message,
+        msg_id=msg_id,
+        allow_reason=style_exception,
+    )
+    sender_harness = infer_invoking_harness()
+    sender_model = resolve_self_model()
+    sender_session = _reply_session_for(from_name)
+    # The wire `to` carries the normalized address - the same string the
+    # durable row is addressed by, so row and envelope agree without waiting
+    # on resolution (x-f8e3).
+    wrapped = wrap_fno_mail(
+        message,
+        from_=sender,
+        harness=harness_for_provider(sender_harness) if sender_harness else "cli",
+        model=sender_model,
+        to=recipient,
+        id=msg_id,
+        reply_to=reply_to,
+        from_session=sender_session,
+        origin=origin,
+    )
+    try:
+        thread = write_new_thread(
+            recipient=recipient,
+            sender=sender,
+            kind="send",
+            body=wrapped,
+            msg_id=msg_id,
+            to_kind="name",
+            provider_to=None,
+            replies_to=reply_to,
+            # Owner is unknowable before resolution: liveness classification
+            # needs the recipient's reachability. A row without an owner
+            # simply sits outside the dead-letter sweep's vocabulary, which is
+            # the honest answer for a message whose delivery state nothing
+            # has determined yet.
+            owner=None,
+            from_session=sender_session,
+            word_count=authored_words,
+            origin=origin,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        _release_budget(reservation)
+        print(f"durable envelope write failed for {target!r}: {exc}", file=sys.stderr)
+        raise typer.Exit(code=12) from exc
+    return _DurableFirst(
+        msg_id=msg_id,
+        recipient=recipient,
+        sender=sender,
+        sender_session=sender_session,
+        sender_harness=sender_harness,
+        sender_model=sender_model,
+        wrapped=wrapped,
+        reservation=reservation,
+        authored_words=authored_words,
+        thread=thread,
+    )
+
+
+def _retract_durable_first(pre: _DurableFirst) -> None:
+    """Retract a durable-first row after a refusal that queues nothing.
+
+    The log is append-only, so the row cannot be removed; the same withdraw
+    tombstone `mail withdraw` appends makes every reader skip the pair, which
+    keeps each refusal's existing contract - exit non-zero, queue nothing -
+    true even though a row now physically exists on the bus.
+    """
+    from fno.bus.log import WITHDRAW_KIND, Envelope, append
+
+    try:
+        append(
+            Envelope.new(
+                from_=pre.sender,
+                to=pre.recipient,
+                kind=WITHDRAW_KIND,
+                body=f"withdrawn: {pre.msg_id}",
+                thread=pre.msg_id,
+                meta={"withdraws": pre.msg_id},
+                to_kind="name",
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - a failed retraction must not mask the refusal
+        print(f"note: refusal retraction failed for {pre.msg_id}: {exc}", file=sys.stderr)
+
+
 def _name_lane_send(
     message: str,
     *,
@@ -2233,6 +2396,7 @@ def _name_lane_send(
     style_exception: Optional[str] = None,
     force: bool = False,
     origin: Optional[str] = None,
+    pre: Optional[_DurableFirst] = None,
 ) -> None:
     """Name-lane delivery core, shared by ``mail send <name>`` and a name-lane
     ``mail reply`` -- the ONE choke point every delivery ladder rung lives in.
@@ -2249,6 +2413,11 @@ def _name_lane_send(
       ``AmbiguousTokenError`` rather than guessing between two sessions.
     - neither: durable-only, addressed to ``recipient`` (a reply to an offline
       sender).
+
+    ``pre`` carries the durable row the caller already wrote BEFORE resolution
+    (x-f8e3, via `_durable_first_send`): the floor below is then that row, no
+    second write happens on a live miss, and every refusal path must retract
+    the row (`_retract_durable_first`) to keep its queue-nothing contract.
 
     ``reply_to`` stamps BOTH the wire ``reply_to`` attr and the bus
     ``in_reply_to`` from ONE msg-id -- never one set, the other null. Exits 12 on
@@ -2353,44 +2522,56 @@ def _name_lane_send(
     # rides the live-injected envelope AND any durable fallback, so a recipient
     # can reply --to it whether or not a durable thread was written, and the
     # drain dedups a bounded-duplicate on that one id. Passing it to
-    # write_new_thread below reuses it instead of minting a second.
-    msg_id = generate_msg_id()
+    # write_new_thread below reuses it instead of minting a second. With `pre`,
+    # the id and everything minted around it came from the durable-first write
+    # and is reused verbatim - reserving or wrapping twice would double-count
+    # the budget and fork the envelope.
+    if pre is not None:
+        msg_id = pre.msg_id
+        sender = pre.sender
+        reservation, authored_words = pre.reservation, pre.authored_words
+        sender_harness = pre.sender_harness
+        sender_model = pre.sender_model
+        sender_session = pre.sender_session
+        wrapped = pre.wrapped
+    else:
+        msg_id = generate_msg_id()
 
-    # Wire `to` carries the canonical handle, matching the durable-bus recipient
-    # exactly -- `from` is already a handle via stamp_from, so both attrs agree.
-    assert recipient is not None  # every routing branch above resolves the address
-    sender = stamp_from(from_name)
-    reservation, authored_words = _reserve_budget(
-        sender=sender,
-        recipient=recipient,
-        body=message,
-        msg_id=msg_id,
-        allow_reason=style_exception,
-    )
-    sender_harness = infer_invoking_harness()
-    sender_model = resolve_self_model()
-    # The collision-safe reply address (node x-3a64). `from` stays the compact
-    # display handle; `from_session` is the full id, and it is the one a
-    # recipient can answer when two workers share a head-8 clock bucket. None
-    # when this session's identity is unprovable, and then the attribute is
-    # omitted rather than guessed.
-    sender_session = _reply_session_for(from_name)
-    wrapped = wrap_fno_mail(
-        message,
-        from_=sender,
-        # Through harness_for_provider like every other send path: the wire
-        # vocabulary is claude-code, and stamping a raw "claude" here made the
-        # name lane the one producer disagreeing with dispatch, the relay, and
-        # the Rust contract. "cli" survives as the honest no-harness value: the
-        # mapper renders a MISSING provider as "unknown", never a vendor guess.
-        harness=harness_for_provider(sender_harness) if sender_harness else "cli",
-        model=sender_model,
-        to=recipient,
-        id=msg_id,
-        reply_to=reply_to,
-        from_session=sender_session,
-        origin=origin,
-    )
+        # Wire `to` carries the canonical handle, matching the durable-bus recipient
+        # exactly -- `from` is already a handle via stamp_from, so both attrs agree.
+        assert recipient is not None  # every routing branch above resolves the address
+        sender = stamp_from(from_name)
+        reservation, authored_words = _reserve_budget(
+            sender=sender,
+            recipient=recipient,
+            body=message,
+            msg_id=msg_id,
+            allow_reason=style_exception,
+        )
+        sender_harness = infer_invoking_harness()
+        sender_model = resolve_self_model()
+        # The collision-safe reply address (node x-3a64). `from` stays the compact
+        # display handle; `from_session` is the full id, and it is the one a
+        # recipient can answer when two workers share a head-8 clock bucket. None
+        # when this session's identity is unprovable, and then the attribute is
+        # omitted rather than guessed.
+        sender_session = _reply_session_for(from_name)
+        wrapped = wrap_fno_mail(
+            message,
+            from_=sender,
+            # Through harness_for_provider like every other send path: the wire
+            # vocabulary is claude-code, and stamping a raw "claude" here made the
+            # name lane the one producer disagreeing with dispatch, the relay, and
+            # the Rust contract. "cli" survives as the honest no-harness value: the
+            # mapper renders a MISSING provider as "unknown", never a vendor guess.
+            harness=harness_for_provider(sender_harness) if sender_harness else "cli",
+            model=sender_model,
+            to=recipient,
+            id=msg_id,
+            reply_to=reply_to,
+            from_session=sender_session,
+            origin=origin,
+        )
 
     # --force (node x-3a64): change the TRANSPORT, keep every mail semantic. The
     # branch sits here, after the envelope and the msg-id, and before the live
@@ -2407,6 +2588,8 @@ def _name_lane_send(
             # stop. Self-injection has its own supported lane, and it is the raw
             # one: it carries a `self_ok` of its own and never wraps.
             _release_budget(reservation)
+            if pre is not None:
+                _retract_durable_first(pre)
             print(
                 "error: --force cannot type into this session's own prompt. "
                 "Use --to-self --raw to self-inject a verb, or send without "
@@ -2417,6 +2600,8 @@ def _name_lane_send(
         entry = _resolve_pane_entry(resolved, recipient, token)
         if entry is None:
             _release_budget(reservation)
+            if pre is not None:
+                _retract_durable_first(pre)
             print(
                 f"error: --force needs a registry row naming the recipient's "
                 f"pane, and none resolves for {recipient!r}. Send without "
@@ -2501,6 +2686,8 @@ def _name_lane_send(
                         # the mail via the durable floor instead of exit 16.
                         lanes.append(token_lane)
                     else:
+                        if pre is not None:
+                            _retract_durable_first(pre)
                         raise UnreachableTokenError(token)
                 elif token_lane:
                     # Resolved, but uniqueness was unprovable. Do not wake a
@@ -2674,29 +2861,36 @@ def _name_lane_send(
     # on the recipient's terms -- no recovery warning, no escalation, and a
     # receipt that says so instead of reading as a live-miss.
     bus_only = live_reason == BUS_ONLY_POLICY
-    try:
-        th = write_new_thread(
-            recipient=recipient,
-            sender=stamp_from(from_name),
-            kind="send",
-            body=wrapped,
-            msg_id=msg_id,
-            to_kind="name",
-            provider_to=provider,
-            replies_to=reply_to,
-            owner=owner.value,
-            # The durable floor carries the same full sender id the live
-            # envelope does, so a drained reply resolves the collision-safe
-            # address exactly as a live one does (node x-3a64).
-            from_session=sender_session,
-            word_count=authored_words,
-            origin=origin,
-        )
-    except (OSError, ValueError, RuntimeError) as exc2:
-        if not injected:
-            _release_budget(reservation)
-        print(f"durable envelope write failed for {recipient!r}: {exc2}", file=sys.stderr)
-        raise typer.Exit(code=12) from exc2
+    if pre is not None:
+        # The durable row already exists - it was written BEFORE resolution
+        # (x-f8e3), so a kill in the resolution window or mid-ladder still
+        # leaves it. A live miss lands exactly here: this row IS the durable
+        # floor, and writing a second would double-deliver.
+        th = pre.thread
+    else:
+        try:
+            th = write_new_thread(
+                recipient=recipient,
+                sender=stamp_from(from_name),
+                kind="send",
+                body=wrapped,
+                msg_id=msg_id,
+                to_kind="name",
+                provider_to=provider,
+                replies_to=reply_to,
+                owner=owner.value,
+                # The durable floor carries the same full sender id the live
+                # envelope does, so a drained reply resolves the collision-safe
+                # address exactly as a live one does (node x-3a64).
+                from_session=sender_session,
+                word_count=authored_words,
+                origin=origin,
+            )
+        except (OSError, ValueError, RuntimeError) as exc2:
+            if not injected:
+                _release_budget(reservation)
+            print(f"durable envelope write failed for {recipient!r}: {exc2}", file=sys.stderr)
+            raise typer.Exit(code=12) from exc2
     if not bus_only:
         _warn_deferred(recipient, reason=live_reason)
     # Routing-reason disclosure (US10): name WHY this is durable so a delivery
@@ -4555,6 +4749,14 @@ def cmd_send(
         from fno.agents import discover as discover_mod
         from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
 
+        pre = _durable_first_send(
+            name,
+            message,
+            from_name=from_name,
+            reply_to=None,
+            style_exception=style_exception,
+            origin=mail_origin,
+        )
         forced_resolved, forced_suggestions = discover_mod.resolve_or_suggest(name)
         try:
             _name_lane_send(
@@ -4569,6 +4771,7 @@ def cmd_send(
                 style_exception=style_exception,
                 force=True,
                 origin=mail_origin,
+                pre=pre,
             )
         except AmbiguousTokenError as amb:
             # Discovery is liveness-gated, so a registered worker whose listing
@@ -4576,6 +4779,8 @@ def cmd_send(
             # --force exists for. These three refusals belong here for the same
             # reason they belong on the ordinary lane below: without them the
             # verb exits non-zero with an empty terminal and a raw traceback.
+            if pre is not None:
+                _retract_durable_first(pre)
             print(
                 f"ambiguous session token {name!r}: matches "
                 f"{', '.join(amb.candidates)}. Send to a full session id.",
@@ -4583,6 +4788,8 @@ def cmd_send(
             )
             raise typer.Exit(code=2) from amb
         except UnreachableTokenError:
+            if pre is not None:
+                _retract_durable_first(pre)
             hint = (
                 f" Closest live sessions: {', '.join(forced_suggestions)}."
                 if forced_suggestions
@@ -4594,6 +4801,8 @@ def cmd_send(
             )
             raise typer.Exit(code=UNKNOWN_AGENT_EXIT_CODE)
         except UnavailableTokenError as unavailable:
+            if pre is not None:
+                _retract_durable_first(pre)
             stores = ", ".join(unavailable.failed)
             visible = (
                 f" Visible candidates: {', '.join(unavailable.candidates)}."
@@ -4635,6 +4844,14 @@ def cmd_send(
 
         from fno.agents import discover as discover_mod
 
+        pre = _durable_first_send(
+            name,
+            message,
+            from_name=from_name,
+            reply_to=None,
+            style_exception=style_exception,
+            origin=mail_origin,
+        )
         resolved, suggestions = discover_mod.resolve_or_suggest(name)
 
         # x-605c US3: ANY handle-resolved session is delivered TO THAT SESSION,
@@ -4655,6 +4872,7 @@ def cmd_send(
                 resolved=resolved,
                 style_exception=style_exception,
                 origin=mail_origin,
+                pre=pre,
             )
             return
 
@@ -4667,6 +4885,8 @@ def cmd_send(
         from fno.harness_identity import LEGACY_HANDLE_RE
 
         if LEGACY_HANDLE_RE.fullmatch(name or ""):
+            if pre is not None:
+                _retract_durable_first(pre)
             hint = f" Use the bare id instead: {', '.join(suggestions)}." if suggestions else ""
             print(f"retired handle form: {name!r}.{hint}", file=sys.stderr)
             raise typer.Exit(code=exc.exit_code) from exc
@@ -4685,8 +4905,11 @@ def cmd_send(
                 token=name,
                 style_exception=style_exception,
                 origin=mail_origin,
+                pre=pre,
             )
         except AmbiguousTokenError as amb:
+            if pre is not None:
+                _retract_durable_first(pre)
             print(
                 f"ambiguous session token {name!r}: matches "
                 f"{', '.join(amb.candidates)}. Send to a full session id.",
@@ -4696,6 +4919,8 @@ def cmd_send(
         except UnreachableTokenError:
             # AC2-ERR: not a registered agent, not discoverable, and no durable
             # store knows it. Error with the closest live handles, sending nothing.
+            if pre is not None:
+                _retract_durable_first(pre)
             hint = ""
             if suggestions:
                 hint = f" Closest live sessions: {', '.join(suggestions)}."
@@ -4705,6 +4930,8 @@ def cmd_send(
             )
             raise typer.Exit(code=exc.exit_code) from exc
         except UnavailableTokenError as unavailable:
+            if pre is not None:
+                _retract_durable_first(pre)
             stores = ", ".join(unavailable.failed)
             visible = (
                 f" Visible candidates: {', '.join(unavailable.candidates)}."
