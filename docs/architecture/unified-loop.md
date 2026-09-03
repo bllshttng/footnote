@@ -54,6 +54,10 @@ outer loop:
 
 `LoopOutcome` carries the walk-level `TerminationReason`, total `iterations_used`, and a `Vec<UnitResult>` (per-unit evidence + close outcome). For the degenerate single-unit (target) walk, the headline reason shown to the caller is the unit's own evidence reason, not the walk-level `NoWork` that follows it - `NoWork` is plumbing there, not news.
 
+### The scoreboard reads the merge, not the terminal
+
+When its PR merged (`graph.json` `merge_status: merged`, written only from merge evidence), `fno whoami scoreboard` counts the node as shipped - never from the session's `termination_reason`. The terminal is what a session believed. The merge is what happened. The two disagreed by 2x before 2026-09-03: a PR that merges after the session stops is a `reconcile-backstop` row, not a `Done*` terminal. The terminal count prints beside the merge count for one release (`by session terminal alone:`), then drops. The Stop-cause distribution keeps reading "how sessions ended". Ledger rows record `started` and `completed` in aware UTC (`+00:00` suffix) from 2026-09-03. Earlier rows carry a naive-local `completed`. Readers normalize through the fold's `_parse_ts`, not a backfill.
+
 ---
 
 ## The three seams

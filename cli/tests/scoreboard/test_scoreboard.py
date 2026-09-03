@@ -56,11 +56,20 @@ _RECENT = _days_ago(1)
 _OLDER = _days_ago(2)
 
 
-def _wire(monkeypatch, tmp_path, ledger_path):
+def _wire(monkeypatch, tmp_path, ledger_path, *, hermetic_graph=True):
     import fno.paths as paths
 
     monkeypatch.setattr(paths, "ledger_json", lambda: ledger_path)
     monkeypatch.setattr(paths, "graph_json", lambda: tmp_path / "graph.json")
+    if hermetic_graph:
+        # A graph fixture that parses sends read_graph_nodes down the
+        # _apply_graph_defaults seam, which needs the fno-agents-worker
+        # runtime (absent on CI's changed-smoke and pip-only boxes). These
+        # tests judge the fold and the render, not the migration pass, so
+        # identity keeps them hermetic.
+        import fno.graph.store as graph_store
+
+        monkeypatch.setattr(graph_store, "_apply_graph_defaults", lambda entries, **k: entries)
 
 
 # --- AC5-HP -----------------------------------------------------------------
@@ -245,3 +254,101 @@ def test_fr_single_retry_recovers(tmp_path, monkeypatch):
     assert state["n"] == 1  # retried exactly once
     assert len(rows) == 1
     _ = real_sleep  # keep reference; no real sleeping in the test
+
+
+# --- x-b6bd: shipped is the merge, the terminal is a breakdown ---------------
+def test_merged_node_with_backstop_row_counts_shipped():
+    # AC1-HP: a node whose PR merged ships even when its only ledger row is a
+    # reconcile-backstop (the session's terminal never said Done*), and its
+    # spend is ship spend. The second merged node has no ledger row at all -
+    # the population the ledger never saw, reported separately.
+    rows = [
+        {"completed": _RECENT, "termination_reason": "reconcile-backstop", "graph_node_id": "x-m", "cost_usd": 3.0}
+    ]
+    graph = [
+        {"id": "x-m", "merge_status": "merged", "completed_at": _RECENT, "reverted": False},
+        {"id": "x-orphan", "merge_status": "merged", "completed_at": _RECENT},
+        {"merge_status": "merged", "completed_at": _RECENT},  # junk row: no id, never a crash
+    ]
+    sb = build_scoreboard(rows, [], graph, since_days=28, now=datetime.now())
+    assert sb["shipped_nodes"] == 2
+    assert sb["merged_nodes_without_ledger_row"] == 1
+    assert sb["spend"]["ship_terminal_usd"] == 3.0
+    assert sb["spend"]["wedge_terminal_usd"] == 0.0
+
+
+def test_terminal_fallback_counts_node_absent_from_graph():
+    # AC2-HP: the union keeps a Done* row whose node the graph has lost.
+    rows = [{"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-gone", "cost_usd": 1.0}]
+    sb = build_scoreboard(rows, [], [], since_days=28, now=datetime.now())
+    assert sb["shipped_nodes"] == 1
+    assert sb["shipped_by_terminal"] == 1
+
+
+def test_noprogress_merged_node_is_shipped_not_wedge():
+    # The session BELIEVED it made no progress; the merge is what HAPPENED.
+    # Spend follows the node, so this row is ship spend, not wedge spend.
+    rows = [{"completed": _RECENT, "termination_reason": "NoProgress", "graph_node_id": "x-np", "cost_usd": 2.0}]
+    graph = [{"id": "x-np", "merge_status": "merged", "completed_at": _RECENT, "reverted": False}]
+    sb = build_scoreboard(rows, [], graph, since_days=28, now=datetime.now())
+    assert sb["shipped_nodes"] == 1
+    assert sb["spend"]["ship_terminal_usd"] == 2.0
+    assert sb["spend"]["wedge_terminal_usd"] == 0.0
+
+
+def test_shipped_by_terminal_matches_legacy_count():
+    # Parity: with no merged graph nodes the new count degrades to the old one.
+    rows = [
+        {"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 5.0},
+        {"completed": _OLDER, "termination_reason": "NoProgress", "graph_node_id": "x-2", "cost_usd": 2.0},
+    ]
+    sb = build_scoreboard(rows, [], [], since_days=28, now=datetime.now())
+    assert sb["shipped_nodes"] == 1
+    assert sb["shipped_by_terminal"] == 1
+
+
+def test_register_stamps_utc_suffix(monkeypatch, tmp_path):
+    # AC4-HP: the writer's started/completed carry the same +00:00 suffix and
+    # never read completed < started (the 268-rows defect this closes).
+    from fno.cost import _register
+
+    def fake_git(*args):
+        return {
+            ("branch", "--show-current"): "feature/x-1",
+            ("remote", "get-url", "origin"): "",
+            ("rev-parse", "--show-toplevel"): str(tmp_path),
+        }.get(args, "")
+
+    monkeypatch.setattr(_register, "git_cmd", fake_git)
+    monkeypatch.setattr(_register._paths, "resolve_canonical_worktree", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(_register, "_pr_number_from_ship_artifact", lambda *_: None)
+    monkeypatch.setattr(_register, "_pr_number_from_gh", lambda *_: None)
+    monkeypatch.setattr(_register, "sum_plan_points", lambda *_: 0)
+    entry = _register.build_entry({"created_at": "2026-09-03T05:34:17Z", "fno_id": "tgt-utc"}, "")
+    assert entry["started"].endswith("+00:00")
+    assert entry["completed"].endswith("+00:00")
+    assert datetime.fromisoformat(entry["completed"]) >= datetime.fromisoformat(entry["started"])
+    # A malformed stamp is stored verbatim, never a lost row (round-1 finding).
+    assert _register._utc_iso("ts") == "ts"
+    assert _register._utc_iso("2026-09-02T22:43:24Z") == "2026-09-02T22:43:24+00:00"
+
+
+def test_render_shipped_caveat_shows_and_hides(tmp_path, monkeypatch):
+    # AC3-HP: both counts ride together; the caveat only when they differ by
+    # more than 10 percent.
+    rows = [
+        {"completed": _RECENT, "termination_reason": "reconcile-backstop", "graph_node_id": "x-m", "cost_usd": 1.0}
+    ]
+    graph = [{"id": "x-m", "merge_status": "merged", "completed_at": _RECENT}]
+    _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
+    (tmp_path / "graph.json").write_text(json.dumps({"entries": graph}))
+    res = runner.invoke(_app(), [])
+    assert "Shipped" in res.output and "by session terminal alone: 0" in res.output
+    assert "the merge is the count" in res.output  # 0 of 1 = >10% apart
+
+    rows2 = [
+        {"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-m", "cost_usd": 1.0}
+    ]
+    _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows2))
+    res2 = runner.invoke(_app(), [])
+    assert "the merge is the count" not in res2.output  # 1 of 1 = no gap

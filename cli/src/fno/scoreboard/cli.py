@@ -507,6 +507,20 @@ def _render(sb: dict) -> None:
             f"{cov['node_linkage_pct']}% node-linkage coverage - a partial window is not a trend.\n"
         )
 
+    # x-b6bd: shipped is the merge; the terminal count rides beside it for one
+    # release so the correction stays visible, then it drops.
+    shipped = sb.get("shipped_nodes")
+    if shipped is not None:
+        by_term = sb.get("shipped_by_terminal", 0)
+        out(f"\nShipped       {shipped} nodes (merged PR on the node); "
+            f"by session terminal alone: {by_term}\n")
+        if sb.get("merged_nodes_without_ledger_row"):
+            out(f"              merged nodes with no ledger row: "
+                f"{sb['merged_nodes_without_ledger_row']}\n")
+        if shipped and by_term < 0.9 * shipped:
+            out("  ! terminal-only undercounts nodes whose PR merged after the "
+                "session stopped; the merge is the count.\n")
+
     out("\nStop-cause distribution\n")
     if sb["stop_cause"]:
         for reason, n in sorted(sb["stop_cause"].items(), key=lambda kv: (-kv[1], kv[0])):

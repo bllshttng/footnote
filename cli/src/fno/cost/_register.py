@@ -17,7 +17,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fno import paths as _paths
@@ -27,6 +27,28 @@ from fno.terminals import DELIVERED_TERMINALS as _DELIVERED_TERMINALS
 # `sessions` is indistinguishable from a run that had no session at all; this
 # says "we looked and found nothing", which is a different fact.
 LEDGER_SESSION_UNRESOLVED = "unresolved:no-harness-session"
+
+
+def _utc_iso(value: datetime | str | None) -> str | None:
+    """One clock for every `started` / `completed` this writer stamps (x-b6bd):
+    aware UTC with a `+00:00` suffix. The old writer mixed a naive-local
+    `completed` with a `Z` `started`, so any reader subtracting the two was off
+    by the UTC offset. Accepts a datetime or an ISO string (GitHub `merged_at`,
+    a `Z` target-state `created_at`); a naive input is read as UTC and an
+    unparseable string is stored verbatim rather than losing the row to a
+    crash. Rows before 2026-09-03 keep their old shapes - readers normalize,
+    no backfill."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raw = value
+        try:
+            value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return raw  # junk in, junk out: the old writer stored it verbatim
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def sessions_or_unresolved(*candidates: object) -> list[str]:
@@ -490,8 +512,8 @@ def build_entry(
         # worktree key kept (rendered as null) for legacy JSON readers that
         # still look it up; root_path is now the authoritative worktree path.
         "worktree": None,
-        "started": state.get("created_at"),
-        "completed": datetime.now().isoformat(),
+        "started": _utc_iso(state.get("created_at")),
+        "completed": _utc_iso(datetime.now(timezone.utc)),
         "duration_minutes": round(duration, 1) if duration else None,
         "iterations": iteration,
         "compactions": compactions,
@@ -763,7 +785,7 @@ def upsert_ledger_pr(
                 "pr_number": pr_number,
                 "pr_url": pr_url,
                 "project": project,
-                "completed": merged_at,
+                "completed": _utc_iso(merged_at),
                 "backstop": True,
                 "termination_reason": "reconcile-backstop",
                 "session_id": None,
@@ -935,7 +957,7 @@ def build_quick_entry(
         "root_path": root_path or None,
         "worktree": None,
         "started": None,
-        "completed": datetime.now().isoformat(),
+        "completed": _utc_iso(datetime.now(timezone.utc)),
         "duration_minutes": safe_number(cost.get("duration_minutes"), decimals=1),
         "iterations": None,
         "compactions": None,

@@ -306,11 +306,37 @@ def build_scoreboard(
         Counter(r["termination_reason"] for r in windowed if r.get("termination_reason"))
     )
 
+    # Shipped is the merge (x-b6bd): a graph node whose PR merged, in window.
+    # termination_reason is the session's last word about itself - a PR that
+    # merges after the session stopped is a `reconcile-backstop` row, not a
+    # Done* terminal, so the terminal alone undercounts ~2x. It survives as a
+    # fallback for nodes the graph has since lost (archived/deleted), and as
+    # the `shipped_by_terminal` breakdown.
+    merged_nodes = {
+        n["id"]
+        for n in graph_nodes
+        if n.get("id") and n.get("merge_status") == "merged" and _in_window(n.get("completed_at"))
+    }
+    ship_rows = [r for r in windowed if _is_shipped_reason(r.get("termination_reason"))]
+    terminal_shipped = {r["graph_node_id"] for r in ship_rows if r.get("graph_node_id")}
+    shipped_nodes = merged_nodes | terminal_shipped
+
+    # Spend follows the node, not the reason: a run whose PR merged is ship
+    # spend regardless of how its session stopped. A row with no node keeps
+    # the reason-based split (nothing else is known about it).
     ship_cost = wedge_cost = other_cost = 0.0
     for r in windowed:
         cost = _num(r.get("cost_usd"))  # a malformed cost never crashes the fold
         tr = r.get("termination_reason")
-        if _is_shipped_reason(tr):
+        nid = r.get("graph_node_id")
+        if nid:
+            if nid in shipped_nodes:
+                ship_cost += cost
+            elif tr in _WEDGE_REASONS:
+                wedge_cost += cost
+            else:
+                other_cost += cost
+        elif _is_shipped_reason(tr):
             ship_cost += cost
         elif tr in _WEDGE_REASONS:
             wedge_cost += cost
@@ -322,9 +348,7 @@ def build_scoreboard(
         "other_usd": round(other_cost, 2),
     }
 
-    # Shipped nodes in window: distinct graph_node_id among Done* rows.
-    ship_rows = [r for r in windowed if _is_shipped_reason(r.get("termination_reason"))]
-    shipped_nodes = {r["graph_node_id"] for r in ship_rows if r.get("graph_node_id")}
+    window_node_ids = {r.get("graph_node_id") for r in windowed if r.get("graph_node_id")}
 
     autonomy = _autonomy(touch_events, shipped_nodes, cutoff, now)
     survival = _survival(shipped_nodes, ship_rows, graph_nodes)
@@ -334,6 +358,9 @@ def build_scoreboard(
         "state": "full" if full else "partial",
         "since_days": since_days,
         "coverage": coverage,
+        "shipped_nodes": len(shipped_nodes),
+        "shipped_by_terminal": len(terminal_shipped),
+        "merged_nodes_without_ledger_row": len(merged_nodes - window_node_ids),
         "stop_cause": stop_cause,
         "spend": spend,
         "autonomy": autonomy,
@@ -369,6 +396,12 @@ def _survival(shipped_nodes: set, ship_rows: list[dict], graph_nodes: list[dict]
 
     by_id = {n.get("id"): n for n in graph_nodes if n.get("id")}
     ship_ts = {r["graph_node_id"]: _parse_ts(r.get("completed")) for r in ship_rows if r.get("graph_node_id")}
+    # A node that shipped by merge has no ship row, so the graph's completed_at
+    # wins when present; the row's completed is the fallback (x-b6bd).
+    for nid in shipped_nodes:
+        node_ts = _parse_ts(by_id.get(nid, {}).get("completed_at"))
+        if node_ts:
+            ship_ts[nid] = node_ts
     # Fix-nodes grouped by the node they blame.
     fixes: dict[str, list[dict]] = {}
     for gn in graph_nodes:
