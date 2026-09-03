@@ -406,8 +406,22 @@ def validate_execution(
     unstamped historical plan keeps the permissive legacy read (AC3-COMPAT).
     """
     strategy_text = doc.get_section("Execution Strategy")
+    is_quick = doc.frontmatter.get("kind") == "quick-plan"
+    # The quick BODY checks - required sections, template placeholders left in
+    # place, a concrete file path, a runnable verification - are orthogonal to
+    # the Execution Strategy and must run for EVERY quick plan.
+    #
+    # They used to run only in the strategy-absent branch below, which was
+    # sound while `quick` skipped the section. This PR makes every quick plan
+    # carry one, which silently turned that branch into dead code and took the
+    # body checks with it: an unfilled epic-child scaffold went from 3
+    # violations to 0, so a child whose Changes / Files to Modify /
+    # Verification were still seeded HTML comments validated clean. A gate that
+    # a feature quietly switches off is worse than one that was never written.
+    quick_violations = list(_validate_quick(doc).violations) if is_quick else []
+
     if strategy_text is None:
-        if doc.frontmatter.get("kind") == "quick-plan":
+        if is_quick:
             # The one escape hatch, now date-keyed. `quick` was told to skip
             # the section on the assertion that a quick plan is single-task,
             # and nothing checked it: 200 of 232 flat quick-plans in a
@@ -416,7 +430,6 @@ def validate_execution(
             # genuinely single-task plan from one that never declared its
             # parallelism. Pre-gate plans keep the hatch; backfilling their
             # topology would fabricate waves nobody authored.
-            quick = _validate_quick(doc)
             # AUTHORING scope, so undatable frontmatter DEFERS rather than
             # refusing - the same split `plan/cli.py` applies one line above
             # when it calls `difficulty_gate_error(..., undatable_refuses=False)`
@@ -431,10 +444,9 @@ def validate_execution(
             )
             if gate_error:
                 return ExecutionValidationResult(
-                    [*quick.violations, _violation("Execution Strategy", gate_error)],
-                    warnings=list(quick.warnings),
+                    [*quick_violations, _violation("Execution Strategy", gate_error)]
                 )
-            return quick
+            return ExecutionValidationResult(quick_violations)
         return ExecutionValidationResult(
             [_violation("Execution Strategy", "missing ## Execution Strategy section")]
         )
@@ -443,9 +455,11 @@ def validate_execution(
         strategy = parse_execution_strategy(strategy_text)
     except (BriefParseError, TypeError, ValueError) as exc:
         return ExecutionValidationResult(
-            [_violation("Execution Strategy", str(exc))]
+            [*quick_violations, _violation("Execution Strategy", str(exc))]
         )
-    violations: list[ExecutionViolation] = []
+    # Seeded, not started empty: a quick plan that now CARRIES a strategy still
+    # owes its body checks, and this is the path it takes.
+    violations: list[ExecutionViolation] = list(quick_violations)
     mode = str(strategy.get("execution_mode", "")).strip()
     if mode not in _EXECUTION_MODES:
         violations.append(

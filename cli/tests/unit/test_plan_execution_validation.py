@@ -18,10 +18,24 @@ VALIDATOR = REPO_ROOT / "scripts" / "validate-plan.sh"
 
 
 def _write_plan(tmp_path: Path, body: str, *, frontmatter: str = "") -> Path:
+    """Write a plan fixture, stamping the `kind` the BODY actually is.
+
+    The default used to stamp `kind: quick-plan` on every fixture, including
+    the `_full_plan` bodies that open with `## Overview` and carry none of the
+    four quick sections. That was invisible while the quick body checks ran
+    only on plans with no Execution Strategy - every full fixture has one. The
+    moment those checks became unconditional (they had silently stopped
+    running at all), 107 fixtures failed for missing a `## Context` they were
+    never meant to have. The fixture was lying about its own kind; the checks
+    were right.
+    """
+    if not frontmatter:
+        kind = "plan" if "## Overview" in body else "quick-plan"
+        frontmatter = f"status: ready\nkind: {kind}\ncreated: 2026-07-25\n"
     plan = tmp_path / "plan.md"
     plan.write_text(
         "---\n"
-        + (frontmatter or "status: ready\nkind: quick-plan\ncreated: 2026-07-25\n")
+        + frontmatter
         + "---\n\n# Plan\n\n"
         + body,
         encoding="utf-8",
@@ -55,6 +69,9 @@ tasks:
     acceptance: [AC1-HP]
 """
 
+
+
+VALID_STRATEGY_SECTION = "## Execution Strategy\n\n```yaml\n" + VALID_STRATEGY + "```\n"
 
 def test_valid_strategy_has_no_representation_warnings(tmp_path: Path) -> None:
     plan = _write_plan(tmp_path, _full_plan(VALID_STRATEGY))
@@ -1117,3 +1134,79 @@ def test_chain_warning_survives_the_head_declaring_an_empty_list(
     result = validate_execution(load_plan(plan))
 
     assert result.warnings, "the empty-list head must not disqualify the chain"
+
+
+def test_quick_body_checks_still_run_when_a_strategy_is_present(tmp_path):
+    """REGRESSION, caught in review round 2.
+
+    `_validate_quick` ran only in the `strategy_text is None` branch. That was
+    sound while `quick` skipped the section - and this PR makes every quick
+    plan carry one, which turned the branch into dead code and took the body
+    checks with it. An unfilled epic-child scaffold went from 3 violations to
+    0: placeholder Changes, no concrete file path, and no runnable
+    verification all validated clean.
+
+    A gate a feature quietly switches off is worse than one never written.
+    """
+    body = """## Context
+
+Why this is needed.
+
+## Changes
+
+### 1. [change name]
+
+[describe the change here]
+
+## Files to Modify
+
+| File | Action |
+|---|---|
+| `path/to/file.ts` | Modify |
+
+## Verification
+
+1. Manually inspect the result
+
+## Execution Strategy
+
+```yaml
+execution_mode: sequential
+waves:
+  - wave: 1
+    mode: sequential
+    name: Build
+    difficulty: medium
+    tasks: ["1.1"]
+tasks:
+  - id: "1.1"
+    title: Do the work
+    surface: [cli/src/fno/plan/cli.py]
+    verify: fno doctor test cli/tests/unit/test_plan_execution_validation.py
+    acceptance: [AC1-HP]
+```
+"""
+    plan = _write_plan(tmp_path, body)
+
+    result = validate_execution(load_plan(plan))
+    fields = {v.field for v in result.violations}
+
+    assert "Changes" in fields, (
+        f"placeholder Changes must still be caught: {result.violations}"
+    )
+    assert "Files to Modify" in fields, (
+        f"placeholder file path must still be caught: {result.violations}"
+    )
+    assert "Verification" in fields, (
+        f"prose verification must still be caught: {result.violations}"
+    )
+
+
+def test_a_clean_quick_plan_with_a_strategy_still_validates(tmp_path):
+    """The other half: seeding the body violations must not refuse a plan
+    whose body is genuinely filled in."""
+    plan = _write_plan(tmp_path, _quick_plan() + "\n" + VALID_STRATEGY_SECTION)
+
+    result = validate_execution(load_plan(plan))
+
+    assert result.violations == [], result.violations

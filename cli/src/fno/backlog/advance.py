@@ -2696,7 +2696,13 @@ def _join_node(
                 "`ready` - claim it, work it to done, then re-query. Entries "
                 "under `above_band` are not yours. Never dispatch the whole "
                 "set; a joined worker that races the whole set undoes the "
-                "partition this table encodes.\n"
+                "partition this table encodes.\n\n"
+                "A band can REPEAT in the table above: lane count follows the "
+                "plan's width, not the number of distinct bands. If a peer "
+                "shares your band you will sometimes both claim the same first "
+                "entry and one of you will lose the claim. That is the claim "
+                "doing its job, not an error - re-query and take the next "
+                "entry. Never retry a lost claim.\n"
             )
         # The brief NAMES the hub and used to leave the rule implicit. The
         # spawn brief carries "you are the mail hub" / "mail hub is <lead>"
