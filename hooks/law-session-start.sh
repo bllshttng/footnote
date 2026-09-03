@@ -4,10 +4,10 @@
 #
 # The failure this closes, measured 2026-09-02: a session loaded using-fno at
 # full context, was asked about the language boundary, searched docs/,
-# AGENTS.md and .claude/rules/, concluded the direction was unrecorded, and
-# argued against a port - while law d-1d474a79 mandating exactly that port had
-# been live for six hours. It never searched the decision store, because
-# nothing told it to.
+# AGENTS.md and the loaded rule files, concluded the direction was
+# unrecorded, and argued against a port - while law d-1d474a79 mandating
+# exactly that port had been live for six hours. It never searched the
+# decision store, because nothing told it to.
 #
 # Why the nag channel and not a doc or a skill edit. SessionStart fires on
 # startup, resume, clear AND compact. Compaction is the exact moment an agent
