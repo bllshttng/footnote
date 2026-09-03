@@ -140,7 +140,14 @@ set -euo pipefail
 # this residue is the word, `0-indexed, several at once`, the `--portal N`
 # spelling, and one doc link. The ceiling follows the measurement up, zero
 # spare.
-CEILING_BYTES=39162
+# +88 (39162 -> 39250), measured 2026-09-03: the enforcement note on the
+# `<repo>/worktrees/` bullet in .claude/rules/worktrees.md. setup-worktree.sh
+# now refuses a WORKTREE nobody created, and the forbidden-locations list is
+# the one session-start surface that must say so. The committed note ran 231
+# bytes; the incident clause (nine littered directories) moved out of the
+# preamble to the guard's own comment block, and the ceiling follows the
+# 88-byte residue up, zero spare.
+CEILING_BYTES=39250
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
