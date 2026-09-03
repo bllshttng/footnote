@@ -746,9 +746,7 @@ def _read_prs(
         # asymmetry is why this degrades one source rather than both.
         pr_nodes: SourceRead = SourceRead(error=f"pr node binding unreadable: {exc}")
     else:
-        node_by_id = {
-            e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
-        }
+        by_id = {e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e["id"], str)}
         bound: list[dict] = []
         for binding in bindings:
             if binding.verdict == "missing":
@@ -761,7 +759,7 @@ def _read_prs(
             # no single candidate, and a list-order guess is the wrong-node bind.
             if binding.verdict != "bound" or not binding.node_id:
                 continue
-            entry = node_by_id.get(binding.node_id)
+            entry = by_id.get(binding.node_id)
             if entry is None:
                 continue
             bound.append({**entry, "pr_number": binding.pr_number, "pr_url": binding.pr_url})
