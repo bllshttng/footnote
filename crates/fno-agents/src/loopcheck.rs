@@ -2989,7 +2989,7 @@ fn read_pr_info(
                                     Some(reviews_arr),
                                 );
                                 tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
-        tiling.rounds_max = max_rounds;
+                                tiling.rounds_max = max_rounds;
                                 // The impossible axis stays events-only: the
                                 // refresh widened the budget to both axes, and
                                 // recomputing the events count explicitly (not
@@ -6581,7 +6581,7 @@ pub fn compute_range_tiling(
     // no-external arm behind the same gate the Python merge gate uses).
     tiling.rounds_used = rounds_since_last_pass(events_text, head_branch, head_sha, None);
     tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
-        tiling.rounds_max = max_rounds;
+    tiling.rounds_max = max_rounds;
     // Events-only here by construction (no review objects in hand yet), so
     // the impossible axis starts equal to the budget axis; each refresh
     // below widens `rounds_used` to both axes and leaves this one alone.
