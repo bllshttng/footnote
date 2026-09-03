@@ -326,6 +326,12 @@ pub(crate) struct Settings {
     /// CI failures, lint failures and rebases are not rounds, and a pass
     /// refunds nothing: it is one round like any other verdict.
     max_rounds: Option<i64>,
+    /// config.review.carry_interdiff_lines (law d-608344c1, default 100):
+    /// how many interdiff lines (multiset symmetric difference of the two
+    /// PR-code patches against base) a rebase or fix may add while a verdict
+    /// from the older head still carries. `0` disables the arm. Parsed in the
+    /// same block as `max_rounds`; resolved by `carry_interdiff_lines_resolved`.
+    carry_interdiff_lines: Option<i64>,
     /// config.review.nudge (x-b167): per-login overrides for the bot-review
     /// nudge, resolved against BOT_PROFILES by `resolved_nudge_configs`. Empty =
     /// no overrides (the built-in profiles alone decide nudgeability). A
@@ -795,6 +801,17 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
                 .or_else(|| v.as_str().and_then(|raw| raw.trim().parse::<i64>().ok()));
             if parsed.is_some_and(|n| n >= 1) {
                 s.max_rounds = parsed;
+            }
+        }
+        if let Some(v) = review.get("carry_interdiff_lines") {
+            // Same lax contract: an integer (>= 0, where 0 disables the arm)
+            // or its string form; anything else stays None -> the law's
+            // default 100, so a typo cannot silently widen or close the carry.
+            let parsed = v
+                .as_integer()
+                .or_else(|| v.as_str().and_then(|raw| raw.trim().parse::<i64>().ok()));
+            if parsed.is_some_and(|n| n >= 0) {
+                s.carry_interdiff_lines = parsed;
             }
         }
         if let Some(v) = review.get("self_review_required") {
@@ -1506,7 +1523,7 @@ fn reviewer_invocation_for(name: &str, harness: Option<&str>) -> Option<(&'stati
 /// markdown, so the `.md` rule covers them; the `internal/` vault is gitignored
 /// and never appears in a diff. A config file, a lockfile, and a shell script
 /// all count as code.
-fn is_documentation_path(path: &str) -> bool {
+pub(crate) fn is_documentation_path(path: &str) -> bool {
     // A single leading "./" is stripped once; trim_start_matches would also strip
     // a char set and lstrip a literal-repeated run, diverging from the Python
     // mirror (and mangling ".github"). The two classifiers must agree exactly.
@@ -1720,130 +1737,18 @@ fn classify_payload_for_floor(
 
 // ── review freshness: one predicate, both producers (x-5b99 / x-62a1) ─────────
 //
-// Freshness used to be decided TWICE with two different rules: a `github_app`
-// verdict got none at all (a bot opinion was inherited across commits it never
-// read), while a `local_attestation` got a bare sha equality so strict that
-// addressing a review destroyed the proof the review happened. One design,
-// failing opposite ways on its two producers. `review_freshness` is the single
-// rule both now go through.
+// The predicate, its git reads, and the resolver live in
+// `review_freshness.rs`, a module named by their question: `loopcheck.rs` is
+// over the file budget and shrink-only, so the freshness machinery moved there
+// rather than growing here. The x-82ac interdiff-carry arm (law d-608344c1)
+// rode the same move.
 
-/// Whether a review verdict still describes the code at HEAD.
-///
-/// The `Carried` variants are the reason a carry was granted, recorded on
-/// the event so a carry is auditable and can never be mistaken for a fresh
-/// read. Only `Stale` stops a verdict counting toward coverage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Freshness {
-    /// The reviewer read this exact commit.
-    Fresh,
-    /// The PR's own code delta is byte-identical; any tree difference came from
-    /// the base moving under it. A rebase is this shape, which is what makes
-    /// the mandatory pre-merge rebase stop destroying attestations.
-    CarriedBaseSync,
-    /// Only documentation paths changed between the reviewed commit and HEAD.
-    CarriedDocsOnly,
-    /// The PR's own code delta only SHRANK since the review: every raw diff
-    /// line still shipping is byte-identical to one the reviewer read, and the
-    /// vanished lines are paths the base absorbed on the rebase. A strict
-    /// subset of the reviewed diff; the partly-docs partly-shrink rebase that used to fall
-    /// through to `Stale` because the grades were whole-diff and mutually
-    /// exclusive.
-    CarriedSubset,
-    /// Everything else, including every failure path.
-    Stale,
-}
-
-impl Freshness {
-    /// Whether a verdict at this freshness counts toward coverage.
-    pub fn counts(&self) -> bool {
-        !matches!(self, Freshness::Stale)
-    }
-}
-
-/// One side's code-diff identity: the blake3 hash plus the sorted raw diff
-/// lines it was computed over. The hash answers "identical or not"; the line
-/// set also answers "is HEAD a subset of what was reviewed", which is the
-/// [`Freshness::CarriedSubset`] question and cannot be asked of a hash.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CodeDiffIdentity {
-    pub hash: String,
-    pub lines: Vec<String>,
-}
-
-/// Pre-computed git facts for one `(reviewed_sha, head_sha)` pair, so
-/// [`review_freshness`] is pure and unit-tests with no git and no repository.
-#[derive(Debug, Clone, Default)]
-pub struct FreshnessFacts {
-    /// PR code-diff identity at the reviewed commit (see
-    /// [`pr_code_diff_identity`]).
-    pub reviewed_identity: Option<CodeDiffIdentity>,
-    /// The same identity at HEAD.
-    pub head_identity: Option<CodeDiffIdentity>,
-    /// Paths differing between the two TREES (two-dot). `None` on git failure.
-    pub tree_paths: Option<Vec<String>>,
-}
-
-/// The one freshness rule. Pure over pre-computed facts.
-///
-/// `Carried` requires a POSITIVE identity match between two successfully
-/// computed identities. Two `None`s never match, and neither does an empty
-/// result: matching an absence against an absence is what produced this plan's
-/// first (wrong) 63% carry-forward measurement, where every merged PR's
-/// three-dot diff against current `origin/main` was empty and `e3b0c442` - the
-/// hash of the empty string - compared equal to itself twelve times. The real
-/// figure was 2 of 22. Every failure path lands on `Stale`; there is no input
-/// on which a failure produces a carry.
-pub fn review_freshness(reviewed_sha: &str, head_sha: &str, facts: &FreshnessFacts) -> Freshness {
-    // No pinned commit is not evidence of freshness. An absent `commit.oid`, an
-    // attestation with no `head_sha`, and an unresolvable HEAD all land here.
-    if reviewed_sha.is_empty() || head_sha.is_empty() {
-        return Freshness::Stale;
-    }
-    if reviewed_sha == head_sha {
-        return Freshness::Fresh;
-    }
-    let (Some(reviewed), Some(head)) = (
-        facts.reviewed_identity.as_ref(),
-        facts.head_identity.as_ref(),
-    ) else {
-        return Freshness::Stale;
-    };
-    if reviewed.hash != head.hash {
-        // The code delta changed, but it can still have only SHRUNK: every raw
-        // line still shipping was read, and the lines that vanished are paths
-        // the base absorbed on the rebase. Each raw line carries both blob
-        // shas for one path, so a line present in both sets means that path's
-        // change is byte-identical to what the reviewer read. A strict subset
-        // carries; a superset (new unreviewed code) and a rewrite do not.
-        return if is_strict_subset(&head.lines, &reviewed.lines) {
-            Freshness::CarriedSubset
-        } else {
-            Freshness::Stale
-        };
-    }
-    // The identities match, so the code under review is unchanged. The tree
-    // diff only names WHY, and a carry that cannot name its reason is not
-    // auditable - so an unreadable tree diff is Stale like any other failure.
-    let Some(paths) = facts.tree_paths.as_deref() else {
-        return Freshness::Stale;
-    };
-    if !paths.is_empty() && paths.iter().all(|p| is_documentation_path(p)) {
-        Freshness::CarriedDocsOnly
-    } else {
-        Freshness::CarriedBaseSync
-    }
-}
-
-/// Strict subset over two SORTED raw-diff line sets: non-empty (an empty HEAD
-/// identity is `None`, never an empty set, per the absence-matching rule
-/// above), strictly smaller, and every HEAD line present in the reviewed set.
-fn is_strict_subset(head: &[String], reviewed: &[String]) -> bool {
-    head.len() < reviewed.len() && {
-        let have: std::collections::HashSet<&str> = reviewed.iter().map(|s| s.as_str()).collect();
-        head.iter().all(|l| have.contains(l.as_str()))
-    }
-}
+#[cfg(test)]
+pub(crate) use crate::review_freshness::raw_diff_line_path;
+pub use crate::review_freshness::{
+    freshness_rank, review_freshness, CodeDiffIdentity, Freshness, FreshnessFacts,
+    FreshnessResolver,
+};
 
 /// Whether a `review_attestation` line is about the PR under evaluation.
 ///
@@ -1886,162 +1791,6 @@ fn attestation_in_scope(
         return true;
     }
     !attested_branch.is_empty() && !head_branch.is_empty() && attested_branch == head_branch
-}
-
-/// The path from a `git diff --raw` line (`:<meta>\t<path>`), or `""`.
-/// `--no-renames` guarantees one path per line, so there is no second field.
-fn raw_diff_line_path(line: &str) -> &str {
-    line.split('\t').nth(1).unwrap_or("").trim()
-}
-
-/// Content identity of the PR's own CODE changes at `sha`: the three-dot diff
-/// from `merge-base(base, sha)`, documentation paths dropped, hashed.
-///
-/// `--raw --no-abbrev` emits one line per changed path carrying both blob
-/// SHAs, so the identity is content-exact without materializing a patch.
-/// `--no-renames` pins it against a per-user `diff.renames` config that would
-/// otherwise make two runs of the same comparison disagree.
-///
-/// `None` on any git failure AND when nothing outside documentation changed.
-/// An empty code diff is not positive evidence of anything, and letting two of
-/// them compare equal is the absence-matched-against-absence trap above. The
-/// cost is that a documentation-only PR never carries an attestation, which is
-/// the fail-closed direction and matches today's behavior exactly.
-fn pr_code_diff_identity(
-    git_bin: &str,
-    cwd: &Path,
-    base: &str,
-    sha: &str,
-) -> Option<CodeDiffIdentity> {
-    let out = git_bounded(
-        git_bin,
-        &[
-            "diff",
-            "--raw",
-            "--no-abbrev",
-            "--no-renames",
-            &format!("{base}...{sha}"),
-        ],
-        cwd,
-    )?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    let mut lines: Vec<String> = text
-        .lines()
-        .map(|l| l.trim_end().to_string())
-        .filter(|l| !l.is_empty() && !is_documentation_path(raw_diff_line_path(l)))
-        .collect();
-    if lines.is_empty() {
-        return None;
-    }
-    lines.sort_unstable();
-    let mut hasher = blake3::Hasher::new();
-    for line in &lines {
-        hasher.update(line.as_bytes());
-        hasher.update(b"\n");
-    }
-    Some(CodeDiffIdentity {
-        hash: hasher.finalize().to_hex().to_string(),
-        lines,
-    })
-}
-
-/// Paths differing between two TREES (two-dot), or `None` on git failure.
-fn git_tree_paths(git_bin: &str, cwd: &Path, a: &str, b: &str) -> Option<Vec<String>> {
-    let out = git_bounded(git_bin, &["diff", "--name-only", "--no-renames", a, b], cwd)?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect(),
-    )
-}
-
-/// Resolves `reviewed_sha -> Freshness` against one HEAD, memoized so N
-/// verdicts at one commit cost one pair of git calls rather than N.
-///
-/// The HEAD identity is computed once, on first use: a session whose reviewers
-/// are all fresh (the common case) pays no git at all.
-pub struct FreshnessResolver<'a> {
-    git_bin: &'a str,
-    cwd: &'a Path,
-    /// The ref the PR merges into, already qualified (`origin/main`). An
-    /// unresolvable base yields no identity, hence `Stale` - fail closed.
-    base_ref: String,
-    head_sha: String,
-    head_identity: std::cell::RefCell<Option<Option<CodeDiffIdentity>>>,
-    cache: std::cell::RefCell<std::collections::HashMap<String, Freshness>>,
-}
-
-impl<'a> FreshnessResolver<'a> {
-    pub fn new(git_bin: &'a str, cwd: &'a Path, base_ref: &str, head_sha: &str) -> Self {
-        let base = base_ref.trim();
-        Self {
-            git_bin,
-            cwd,
-            // `gh pr view` returns a BARE branch name, and a branch name may
-            // itself contain a slash (`release/2.0`), so "has a slash" does not
-            // mean "already remote-qualified" - it only means the caller may
-            // have passed one of ours. Test the `origin/` prefix instead: a
-            // bare `release/2.0` resolves to a local ref that a fresh worktree
-            // usually does not have, and the identity then fails to compute for
-            // every commit, silently taking the carry away on exactly the
-            // long-lived release branches that rebase most.
-            base_ref: if base.is_empty() {
-                "origin/main".to_string()
-            } else if base.starts_with("origin/") {
-                base.to_string()
-            } else {
-                format!("origin/{base}")
-            },
-            head_sha: head_sha.to_string(),
-            head_identity: std::cell::RefCell::new(None),
-            cache: std::cell::RefCell::new(std::collections::HashMap::new()),
-        }
-    }
-
-    fn head_identity(&self) -> Option<CodeDiffIdentity> {
-        let mut slot = self.head_identity.borrow_mut();
-        slot.get_or_insert_with(|| {
-            pr_code_diff_identity(self.git_bin, self.cwd, &self.base_ref, &self.head_sha)
-        })
-        .clone()
-    }
-
-    /// Freshness of a verdict recorded at `reviewed_sha`. Never panics, never
-    /// fails: every unreadable input resolves to `Stale`.
-    pub fn freshness(&self, reviewed_sha: &str) -> Freshness {
-        if reviewed_sha.is_empty() {
-            return Freshness::Stale;
-        }
-        if reviewed_sha == self.head_sha {
-            return Freshness::Fresh;
-        }
-        if let Some(hit) = self.cache.borrow().get(reviewed_sha) {
-            return *hit;
-        }
-        let facts = FreshnessFacts {
-            reviewed_identity: pr_code_diff_identity(
-                self.git_bin,
-                self.cwd,
-                &self.base_ref,
-                reviewed_sha,
-            ),
-            head_identity: self.head_identity(),
-            tree_paths: git_tree_paths(self.git_bin, self.cwd, reviewed_sha, &self.head_sha),
-        };
-        let verdict = review_freshness(reviewed_sha, &self.head_sha, &facts);
-        self.cache
-            .borrow_mut()
-            .insert(reviewed_sha.to_string(), verdict);
-        verdict
-    }
 }
 
 fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
@@ -2899,6 +2648,10 @@ fn read_pr_info(
     require_corroboration: bool,
     github_approval_satisfies: bool,
     max_rounds: i64,
+    // The resolved `review.carry_interdiff_lines` (law d-608344c1): how many
+    // interdiff lines a rebase or fix may add and still carry an attestation.
+    // `0` disables the arm. Resolved by the caller from settings, default 100.
+    carry_interdiff_lines: usize,
     // The resolved `review.posture` , computed by the caller from the
     // parsed settings. None on callers that have no settings context.
     posture: Option<&PostureConfig>,
@@ -3005,7 +2758,7 @@ fn read_pr_info(
         .get("baseRefName")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let resolver = FreshnessResolver::new(git_bin, cwd, base_ref, head_sha);
+    let resolver = FreshnessResolver::new(git_bin, cwd, base_ref, head_sha, carry_interdiff_lines);
     let freshness = |sha: &str| resolver.freshness(sha);
 
     // The range-tiling answer for this PR's attestation chain, computed ONCE
@@ -3236,6 +2989,7 @@ fn read_pr_info(
                                     Some(reviews_arr),
                                 );
                                 tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
+                                tiling.rounds_max = max_rounds;
                                 // The impossible axis stays events-only: the
                                 // refresh widened the budget to both axes, and
                                 // recomputing the events count explicitly (not
@@ -3496,6 +3250,7 @@ fn read_pr_info(
         tiling.rounds_used =
             rounds_since_last_pass(&events_text, &head_branch, head_sha, Some(reviews_arr));
         tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
+        tiling.rounds_max = max_rounds;
         // Same split as the no-external arm above: the budget widens to both
         // axes, the impossible axis stays events-only.
         tiling.events_rounds_exhausted =
@@ -5003,6 +4758,16 @@ pub struct PostureVerdict {
 /// `floor_off` reads the EFFECTIVE value. A config carrying an unclaimed
 /// false reads floor-on here, which errs toward holding the gate - never
 /// toward clearing it.
+/// The resolved `review.carry_interdiff_lines` (law d-608344c1): the law's
+/// default is 100; `0` disables the arm; a negative config value is a typo and
+/// reads as the default rather than as a refusal nobody asked for.
+fn carry_interdiff_lines_resolved(settings: &Settings) -> usize {
+    match settings.carry_interdiff_lines {
+        Some(n) if n >= 0 => n as usize,
+        _ => 100,
+    }
+}
+
 fn resolve_posture_config(settings: &Settings) -> PostureConfig {
     if let Some(p) = settings.posture.as_deref() {
         if let Some((components, rank, cost, freshness, diversity)) = posture_rung(p) {
@@ -6282,18 +6047,6 @@ fn is_attestation_origin_unknown(o: &AttestationOrigin) -> bool {
     matches!(o, AttestationOrigin::Unknown)
 }
 
-/// Order for "which of this reviewer's reviews is the best evidence". Fresh
-/// beats a carry beats stale; the carry reasons are equally good, since
-/// all three mean the code under review is unchanged or a subset of what was
-/// read.
-fn freshness_rank(f: Freshness) -> u8 {
-    match f {
-        Freshness::Fresh => 2,
-        Freshness::CarriedBaseSync | Freshness::CarriedDocsOnly | Freshness::CarriedSubset => 1,
-        Freshness::Stale => 0,
-    }
-}
-
 /// Label a local attestation's authorship from its emitting session vs the
 /// worktree's authoring session. A match is `SelfAttested`; a non-empty
 /// mismatch is `OtherSession` (NOT "independent" - a self-handoff successor or
@@ -6371,6 +6124,11 @@ pub struct RangeTiling {
     /// reads the same events with the same scoping; computed even on the
     /// git-failure paths, which answer tiling fail-closed but rounds honestly.
     pub rounds_used: i64,
+    /// The `config.review.max_rounds` budget `rounds_exhausted` was computed
+    /// against, carried so the row is self-contained: `fno do pr status`
+    /// prints the gate's pair verbatim instead of re-reading config (one
+    /// producer per number; x-027b).
+    pub rounds_max: i64,
     /// Whether `rounds_used` exceeds the resolved `config.review.max_rounds`.
     /// Advisory on this struct - the merge gate re-derives before refusing -
     /// but the status surface reads it to name its own blocker.
@@ -6715,8 +6473,13 @@ fn git_rev_list(git_bin: &str, cwd: &Path, args: &[&str]) -> Option<Vec<String>>
 /// measured lane's review bursts and the worker's replies share a login, a
 /// state, and a commit), and over-counting fires the cap on a worker already
 /// push-replying without re-review, where the old under-count spun forever.
-/// The answer is the MAX of the two, never the sum: a healthy lane leaves
-/// both traces per round and must not count it twice. Scoped exactly like
+/// The answer is ONE shared head set across both axes, never the sum of two
+/// independent counters: a healthy lane leaves both traces per round (the
+/// review object AND the attestation at the same commit), so a head counts
+/// once whoever recorded it - and a bot round at one sha beside a local
+/// attestation at another is two rounds, which separate per-axis counters
+/// followed by a max() would have under-counted (law d-608344c1: a round is
+/// keyed by head). Scoped exactly like
 /// the tiling and disposition scans: branch match, with the legacy
 /// exact-head admission. Pure: scans its inputs, no IO. The Python
 /// gate-side mirror is `rounds_since_last_pass` in `_coverage_gate.py`; the
@@ -6727,8 +6490,8 @@ pub fn rounds_since_last_pass(
     head_sha: &str,
     reviews: Option<&[Value]>,
 ) -> i64 {
-    let mut rounds: i64 = 0;
-    let mut counted_heads: Vec<String> = Vec::new();
+    let mut declared_rounds: i64 = 0;
+    let mut counted_heads: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -6752,24 +6515,19 @@ pub fn rounds_since_last_pass(
         match val.pointer("/data/review_round").and_then(|v| v.as_i64()) {
             // A declared round number is already the round's identity, so the
             // running max cannot double-count and needs no head collapse.
-            Some(n) if n >= 0 => rounds = rounds.max(n),
+            Some(n) if n >= 0 => declared_rounds = declared_rounds.max(n),
             // One reviewed head is ONE round, the same unit the reviews axis
             // uses (DISTINCT commit.oid). Without this the two axes measure
-            // different things and max() over them is not a budget: a
+            // different things and the total is not a budget: a
             // producer that emits a corrective second verdict at an unchanged
             // head spends two rounds for zero code change.
             _ => {
-                if counted_heads.iter().any(|h| h == line_head) {
-                    continue;
-                }
-                counted_heads.push(line_head.to_string());
-                rounds += 1;
+                counted_heads.insert(line_head.to_string());
             }
         }
     }
-    let events_rounds = rounds;
     let Some(reviews) = reviews else {
-        return events_rounds;
+        return declared_rounds.max(counted_heads.len() as i64);
     };
     // The reviews axis. An object counts when it names a real reviewed
     // commit (state and commit.oid present). Any login may carry it: the
@@ -6777,7 +6535,6 @@ pub fn rounds_since_last_pass(
     // own login, so an author filter deletes the trace on exactly that
     // lane, and reply volume is already neutral because the unit is the
     // DISTINCT commit.
-    let mut counted: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for review in reviews {
         if review
             .get("state")
@@ -6794,9 +6551,9 @@ pub fn rounds_since_last_pass(
         else {
             continue;
         };
-        counted.insert(oid);
+        counted_heads.insert(oid.to_string());
     }
-    events_rounds.max(counted.len() as i64)
+    declared_rounds.max(counted_heads.len() as i64)
 }
 
 /// Compute the range tiling for one PR's attestation chain.
@@ -6824,6 +6581,7 @@ pub fn compute_range_tiling(
     // no-external arm behind the same gate the Python merge gate uses).
     tiling.rounds_used = rounds_since_last_pass(events_text, head_branch, head_sha, None);
     tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
+    tiling.rounds_max = max_rounds;
     // Events-only here by construction (no review objects in hand yet), so
     // the impossible axis starts equal to the budget axis; each refresh
     // below widens `rounds_used` to both axes and leaves this one alone.
@@ -7936,6 +7694,10 @@ fn coverage_event_data_full(
         // `events_rounds_exhausted` rides along so the audit row shows the
         // axis the impossible verdict actually read.
         data["rounds_used"] = serde_json::json!(t.rounds_used);
+        // The budget beside the count, so the row is the one producer of the
+        // pair: `fno do pr status` reads both from here instead of re-reading
+        // config (x-027b: two readers of one number disagreed on PR 1380).
+        data["rounds_max"] = serde_json::json!(t.rounds_max);
         data["rounds_exhausted"] = serde_json::json!(t.rounds_exhausted);
         data["events_rounds_exhausted"] = serde_json::json!(t.events_rounds_exhausted);
         data["impossible"] = serde_json::json!(t.impossible);
@@ -10359,6 +10121,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             settings.require_corroboration.unwrap_or(false),
             settings.github_approval_satisfies.unwrap_or(true),
             settings.max_rounds.unwrap_or(2).max(1),
+            carry_interdiff_lines_resolved(&settings),
             Some(&resolve_posture_config(&settings)),
             &resolved_local_peer_reviewers_for_author(&settings, author_harness.as_deref()),
         );
@@ -11297,6 +11060,7 @@ fn run_done(
     require_corroboration: bool,
     github_approval_satisfies: bool,
     max_rounds: i64,
+    carry_interdiff_lines: usize,
     posture: Option<&PostureConfig>,
     peer_reviewers: &[String],
 ) -> Result<PrInfo, GhReadError> {
@@ -11322,6 +11086,7 @@ fn run_done(
         require_corroboration,
         github_approval_satisfies,
         max_rounds,
+        carry_interdiff_lines,
         posture,
         peer_reviewers,
     )?;
@@ -12112,7 +11877,7 @@ fn path_lookup(bin: &OsStr) -> Option<std::path::PathBuf> {
 /// every caller already treats no-answer as its conservative outcome
 /// (unshipped, dirty, unknown branch), so the degrade direction is the same
 /// one each caller documented for a failing git.
-fn git_bounded(git_bin: &str, args: &[&str], cwd: &Path) -> Option<BoundedOutput> {
+pub(crate) fn git_bounded(git_bin: &str, args: &[&str], cwd: &Path) -> Option<BoundedOutput> {
     let read_name = format!("git {}", args.first().unwrap_or(&"?"));
     match run_bounded(OsStr::new(git_bin), args, cwd, stopgate_read_timeout()) {
         BoundedRun::Completed(out) => Some(out),
@@ -14209,6 +13974,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         inputs.settings.require_corroboration.unwrap_or(false),
         inputs.settings.github_approval_satisfies.unwrap_or(true),
         inputs.settings.max_rounds.unwrap_or(2).max(1),
+        carry_interdiff_lines_resolved(&inputs.settings),
         Some(&resolve_posture_config(&inputs.settings)),
         &resolved_local_peer_reviewers_for_author(
             &inputs.settings,
@@ -14868,6 +14634,9 @@ mod tests {
             reviewed_identity: reviewed.map(|h| ident_of(&[h])),
             head_identity: head.map(|h| ident_of(&[h])),
             tree_paths: tree.map(|p| p.iter().map(|s| s.to_string()).collect()),
+            // Default facts carry no interdiff and a cap of 0, which disables
+            // the x-82ac arm: these tests pin the pre-existing arms exactly.
+            ..Default::default()
         }
     }
 
@@ -14876,6 +14645,7 @@ mod tests {
             reviewed_identity: Some(ident_of(reviewed)),
             head_identity: Some(ident_of(head)),
             tree_paths: tree.map(|p| p.iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
         }
     }
 
@@ -15035,23 +14805,29 @@ mod tests {
     }
 
     #[test]
-    fn resolver_carries_an_identical_rebase_and_expires_a_conflict() {
-        // The whole x-e8db contract on the resolver itself: a rebase that
-        // rewrote every commit but changed no content keeps the attestation
-        // (a Carried verdict counts), and a conflict resolution that changed
-        // the delta loses it. One test, both directions, so a regression in
-        // either can never leave the other green-looking.
+    fn resolver_carries_an_identical_rebase_and_a_small_conflict() {
+        // The x-e8db contract on the resolver itself, as amended by the
+        // interdiff arm (law d-608344c1): a rebase that rewrote every commit
+        // but changed no content keeps the attestation (CarriedBaseSync), and
+        // a tiny conflict resolution carries as CarriedInterdiff with the
+        // measured line count. The expiry boundary itself (>= cap stales) is
+        // the pure tests' in review_freshness; a fixture cannot hit it
+        // without a 100-line conflict edit.
         let (tmp, reviewed, head) = rebased_repo(false);
         let repo = tmp.path().join("r");
-        let resolver = FreshnessResolver::new("git", &repo, "main", &head);
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
         let verdict = resolver.freshness(&reviewed);
         assert!(verdict.counts(), "identical rebase must carry: {verdict:?}");
 
         let (tmp, reviewed, head) = rebased_repo(true);
         let repo = tmp.path().join("r");
-        let resolver = FreshnessResolver::new("git", &repo, "main", &head);
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
         let verdict = resolver.freshness(&reviewed);
-        assert_eq!(verdict, Freshness::Stale, "conflict resolution must expire");
+        assert_eq!(
+            verdict,
+            Freshness::CarriedInterdiff { lines: 4, cap: 100 },
+            "a 4-line conflict resolution must carry"
+        );
     }
 
     #[test]
@@ -15188,23 +14964,57 @@ mod tests {
         // resolves to the local ref, which in a stale worktree is not the base.
         let cwd = std::env::temp_dir();
         assert_eq!(
-            FreshnessResolver::new("git", &cwd, "main", "abc").base_ref,
+            FreshnessResolver::new("git", &cwd, "main", "abc", 100).base_ref,
             "origin/main"
         );
         assert_eq!(
-            FreshnessResolver::new("git", &cwd, "origin/release", "abc").base_ref,
+            FreshnessResolver::new("git", &cwd, "origin/release", "abc", 100).base_ref,
             "origin/release"
         );
         // A slash in the name is not remote-qualification: `release/2.0` is a
         // bare branch and must still be qualified, or the identity resolves
         // against a local ref the worktree may not have.
         assert_eq!(
-            FreshnessResolver::new("git", &cwd, "release/2.0", "abc").base_ref,
+            FreshnessResolver::new("git", &cwd, "release/2.0", "abc", 100).base_ref,
             "origin/release/2.0"
         );
         assert_eq!(
-            FreshnessResolver::new("git", &cwd, "", "abc").base_ref,
+            FreshnessResolver::new("git", &cwd, "", "abc", 100).base_ref,
             "origin/main"
+        );
+    }
+
+    // ── one rounds number across axes (law d-608344c1 / x-027b) ─────────────
+
+    fn attest_line(head: &str, branch: &str) -> String {
+        format!(
+            "{{\"type\":\"review_attestation\",\"data\":{{\"head_sha\":\"{head}\",\"branch\":\"{branch}\",\"reviewer\":\"code-review\",\"verdict\":\"pass\"}}}}"
+        )
+    }
+
+    #[test]
+    fn rounds_bot_review_and_local_attestation_at_one_sha_are_one_round() {
+        // The law's sentence: a round is keyed by HEAD, not by who recorded
+        // it. A GitHub App review object and a local attestation at the same
+        // commit are ONE round; the same two traces at different heads are
+        // two - which the per-axis counters the shared set replaces would
+        // have under-counted as max(1, 1).
+        let events = format!("{}\n", attest_line("aaaaaaaaaa", "feature/x"));
+        let reviews = vec![serde_json::json!({
+            "state": "CHANGES_REQUESTED",
+            "commit": {"oid": "aaaaaaaaaa"},
+        })];
+        assert_eq!(
+            rounds_since_last_pass(&events, "feature/x", "bbbbbbbbbb", Some(&reviews)),
+            1
+        );
+        let reviews_b = vec![serde_json::json!({
+            "state": "APPROVED",
+            "commit": {"oid": "cccccccccc"},
+        })];
+        assert_eq!(
+            rounds_since_last_pass(&events, "feature/x", "bbbbbbbbbb", Some(&reviews_b)),
+            2
         );
     }
 

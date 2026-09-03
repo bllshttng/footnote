@@ -865,6 +865,14 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
             "node_id": None,
             "claim_state": None,
         },
+        # One producer per number (x-027b): a row with no rounds at this head
+        # answers null with the note, never a locally computed floor.
+        "rounds_used": None,
+        "max_rounds": None,
+        "rounds_exhausted": None,
+        "rounds_note": (
+            "no review_coverage row at this head; run fno-agents review-coverage"
+        ),
         "review_activity": {
             "blocker": "",
             "detail": "",
@@ -1776,9 +1784,6 @@ def test_local_pass_conjunct_is_satisfiable_on_the_real_read_path(
     }
     events.write_text(json.dumps(covered_row) + "\n", encoding="utf-8")
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
-    monkeypatch.setattr(
-        _reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: True
-    )
     _status.run_status("42", cwd=str(tmp_path))
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is True, out["ready_blockers"]
@@ -2247,10 +2252,12 @@ def _commit_reviewed_history(tmp_path) -> str:
     return _git(tmp_path, "rev-parse", "HEAD")
 
 
-def test_read_review_coverage_rejects_rebased_out_review(
+def test_read_review_coverage_rejects_a_stale_labeled_review(
     tmp_path, monkeypatch, capsys
 ):
-    """A stored fresh stamp cannot survive when its commit leaves HEAD history."""
+    """A verdict the producer labeled `stale` - what the Rust predicate emits
+    when the reviewed sha left HEAD's content, here a rewritten history -
+    holds the row uncovered, and no Python git-walk re-litigates the label."""
     from fno.pr._reviews import read_review_coverage
 
     reviewed_sha = _commit_reviewed_history(tmp_path)
@@ -2268,7 +2275,7 @@ def test_read_review_coverage_rejects_rebased_out_review(
             "name": "code-review",
             "verdict": "reviewed",
             "reviewed_sha": reviewed_sha,
-            "freshness": "fresh",
+            "freshness": "stale",
         },
     )
 
@@ -2293,7 +2300,8 @@ def test_read_review_coverage_rejects_rebased_out_review(
 
 
 def test_read_review_coverage_rejects_verdict_without_freshness(tmp_path):
-    """Missing freshness metadata is unknown evidence, never a fresh review."""
+    """Missing freshness metadata is unknown evidence, never a fresh review:
+    the verdict is not counted, so the row cannot read covered."""
     from fno.pr._reviews import read_review_coverage
 
     head = _commit_reviewed_history(tmp_path)
@@ -2311,16 +2319,17 @@ def test_read_review_coverage_rejects_verdict_without_freshness(tmp_path):
 
     got = read_review_coverage(1004, cwd=str(tmp_path), head=head)
     assert got["coverage"] != "covered"
-    assert got["verdicts"][0]["freshness"] == "stale"
-    assert got["stale_verdicts"][0]["reviewed_sha"] == head
+    assert "freshness" not in got["verdicts"][0]
+    assert got["stale_verdicts"] == []
 
 
 def test_read_review_coverage_expires_a_push_after_review(tmp_path):
     """The Rust predicate has no ancestry arm: a commit pushed after the
-    review carries a strict superset of the reviewed delta, and ancestry alone
-    must not read it fresh. The old name of this test was 'preserves ancestor
-    review' - exactly the arm removed, because it let a merge accept an
-    increment the stop gate called stale."""
+    review carries a strict superset of the reviewed delta, so the producer
+    labels the verdict `stale`, and the stored label holds the row uncovered.
+    The old name of this test was 'preserves ancestor review' - exactly the
+    arm removed, because it let a merge accept an increment the stop gate
+    called stale."""
     from fno.pr._reviews import read_review_coverage
 
     reviewed_sha = _commit_reviewed_history(tmp_path)
@@ -2337,7 +2346,7 @@ def test_read_review_coverage_expires_a_push_after_review(tmp_path):
             "name": "code-review",
             "verdict": "reviewed",
             "reviewed_sha": reviewed_sha,
-            "freshness": "fresh",
+            "freshness": "stale",
         },
     )
 
@@ -2765,9 +2774,6 @@ def test_status_recomputes_a_missing_coverage_row(monkeypatch, capsys, tmp_path)
         return True, ""
 
     monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake_verb)
-    monkeypatch.setattr(
-        _reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: True
-    )
     # The status read resolves the project log from its cwd; point it at the
     # fixture. The lane is pinned on because recompute rides on it: a no-lane
     # repo must not fire the producer, and tmp_path resolves no real config.
@@ -2833,9 +2839,10 @@ def test_status_prints_degraded_recompute_reason_on_stderr(monkeypatch, capsys, 
     assert "quota exhausted" in cap.err, cap.err
 
 
-def test_status_recompute_failure_degrades_to_unknown(monkeypatch, capsys, tmp_path):
-    """The verb unavailable -> the existing unknown sentinel, exit 0: a
-    read-only report never goes non-zero on a coverage read."""
+def test_status_recompute_failure_reads_unmeasurable(monkeypatch, capsys, tmp_path):
+    """No instrument AND no row -> `unmeasurable`, never a Python-side
+    freshness (the deleted mirror's job), and never a non-zero exit: a
+    read-only report does not fail on a coverage read."""
     import json
 
     from fno.pr import _reviews
@@ -2861,7 +2868,10 @@ def test_status_recompute_failure_degrades_to_unknown(monkeypatch, capsys, tmp_p
     code = _status.run_status("42", cwd=str(tmp_path))
     assert code == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["review_coverage"]["coverage"] == "unknown"
+    assert out["review_coverage"]["coverage"] == "unmeasurable"
+    assert "fno doctor update" in out["review_coverage"]["reason"]
+    assert out["ready"] is False
+    assert "review_coverage_uncovered" in out["ready_blockers"]
 
 
 def test_no_lane_repo_never_fires_the_recompute(monkeypatch, capsys, tmp_path):
@@ -3148,12 +3158,14 @@ def test_main_prints_the_gh_call_counter(monkeypatch, capsys):
 # from one constructed source of truth.
 
 
-def _rounds_status_on(monkeypatch, capsys, tmp_path, events_text):
+def _rounds_status_on(monkeypatch, capsys, tmp_path, events_text, gate_row=None):
     """run_status against a tmp repo whose events log is `events_text`.
 
     Returns the parsed JSON payload. The PR read carries a head branch (the
     chain-scope input the cap conjunct needs) and the coverage read a
-    covered row, so the rounds keys are the only thing under test.
+    covered row - `gate_row` is what that row reports for the round budget,
+    the fields exactly as the Rust producer writes them - so the payload's
+    rounds passthrough is the only thing under test.
     """
     from fno.pr import _merge
 
@@ -3189,6 +3201,7 @@ def _rounds_status_on(monkeypatch, capsys, tmp_path, events_text):
             "review_state": "reviewed",
             "reviewed_count": 1,
             "head_sha": head,
+            **(gate_row or {}),
         },
     )
     monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
@@ -3241,46 +3254,61 @@ _HARD = {
 }
 
 
-def test_payload_carries_the_budget_and_its_axis(monkeypatch, capsys, tmp_path):
-    """Five events-axis rounds at max_rounds 2: rounds_used 5,
-    rounds_exhausted true, and the axis labelled - an unlabelled floor is
-    how the two surfaces started disagreeing."""
+def test_payload_carries_the_budget_from_the_gate_row(monkeypatch, capsys, tmp_path):
+    """The gate's row reads rounds_used 5 against a budget of 2: the payload
+    carries the pair verbatim, with no second axis key - `rounds_axis` is
+    the deleted floor's vocabulary and must stay dead (x-027b)."""
     text = "\n".join(
         [
             _rounds_event(0, "fail", [_HARD]),
             *(_rounds_event(i, "pass", []) for i in range(1, 5)),
         ]
     )
-    out = _rounds_status_on(monkeypatch, capsys, tmp_path, text)
+    out = _rounds_status_on(
+        monkeypatch,
+        capsys,
+        tmp_path,
+        text,
+        gate_row={"rounds_used": 5, "rounds_max": 2, "rounds_exhausted": True},
+    )
     assert out["rounds_used"] == 5
     assert out["max_rounds"] == 2
     assert out["rounds_exhausted"] is True
-    assert out["rounds_axis"] == "events"
-    # The floor is NAMED, never implied: a bot-heavy PR under-reports here.
-    assert "floor" in out["rounds_axis_note"]
+    assert "rounds_axis" not in out
+    assert "rounds_axis_note" not in out
     # And the same chain holds ready back through the re-derived conjunct.
     assert out["ready"] is False
     assert "review_coverage_impossible" in out["ready_blockers"]
 
 
-def test_payload_reports_an_events_floor_on_a_bot_heavy_pr(
+def test_payload_reports_the_gate_budget_on_a_bot_heavy_pr(
     monkeypatch, capsys, tmp_path
 ):
-    """One events-axis round beside five bot-reviewed commits: status reports
-    1, labels the axis, and does not claim the merge gate's budget."""
+    """One events-axis round beside five bot-reviewed commits: the row the
+    gate wrote carries BOTH axes, so status prints the gate's 6 instead of a
+    locally recomputed events-only floor of 1 (the PR-1380 disagreement)."""
     text = _rounds_event(0, "pass", [])
-    out = _rounds_status_on(monkeypatch, capsys, tmp_path, text)
-    assert out["rounds_used"] == 1
-    assert out["rounds_axis"] == "events"
-    assert out["rounds_exhausted"] is False
-    assert "fno do pr merge" in out["rounds_axis_note"]
+    out = _rounds_status_on(
+        monkeypatch,
+        capsys,
+        tmp_path,
+        text,
+        gate_row={"rounds_used": 6, "rounds_max": 2, "rounds_exhausted": True},
+    )
+    assert out["rounds_used"] == 6
+    assert out["rounds_exhausted"] is True
+    assert "rounds_axis" not in out
 
 
-def test_payload_rounds_keys_present_on_a_chainless_pr(monkeypatch, capsys, tmp_path):
-    """No attestation chain at all: rounds_used 0, exhausted false, and no
-    key omitted - an absent key is indistinguishable from an unasked one."""
+def test_payload_rounds_null_with_a_note_when_the_row_has_none(
+    monkeypatch, capsys, tmp_path
+):
+    """No rounds on the row at this head: null fields plus the note naming
+    the producer to run - never a locally computed floor, and no key
+    omitted (an absent key is indistinguishable from an unasked one)."""
     out = _rounds_status_on(monkeypatch, capsys, tmp_path, "")
-    assert out["rounds_used"] == 0
-    assert out["rounds_exhausted"] is False
-    assert out["max_rounds"] == 2
-    assert out["rounds_axis"] == "events"
+    assert out["rounds_used"] is None
+    assert out["rounds_exhausted"] is None
+    assert out["max_rounds"] is None
+    assert "fno-agents review-coverage" in out["rounds_note"]
+    assert "rounds_axis" not in out

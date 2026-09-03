@@ -478,6 +478,20 @@ data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdi
 # which is on PATH in the uv test env where the mux is not installed.
 "${FNO:-fno}" doctor event emit -t review_attestation -s target -d "$data"
 
+# The per-round disposition comment (the law's human-visible half): when the
+# findings file carried dispositions, the writer posts ONE machine-parseable
+# `fno-review-round` comment indexing each finding's outcome - fixed at sha,
+# declined with a reason, or no disposition. Best-effort and quiet: the
+# attestation is the gate evidence, the comment is its index, and a failed
+# post must never fail an emit. The subcommand is idempotent at (pr, head)
+# and posts nothing on a findings-free round, so this call site adds no
+# second copy of either rule.
+if [[ -n "$findings_file" ]] && jq -e '((.dispositions // []) | length) > 0' \
+    <<<"$findings_json" >/dev/null 2>&1; then
+  "${FNO:-fno}" do review post-dispositions --findings-file "$findings_file" \
+    --head "$head_sha" --reviewer "$reviewer" >/dev/null 2>&1 || true
+fi
+
 # The review has landed a verdict for this head, so the hold that said one was
 # RUNNING has nothing left to protect. Released HERE, at the positive completion
 # marker, so the release and the proof of completion are one event and cannot

@@ -2047,16 +2047,44 @@ def _review_invocation_report(
             "fno doctor: review invocations: scan complete; "
             f"none lost in the last {window_seconds // 60}m"
         ]
+    # The settle sweep runs HERE, before the report: a lost invocation that
+    # can settle becomes a ledger row, and the report says `settled` beside it
+    # instead of re-reporting a loss the run just repaired. A settle failure
+    # is reported as a refusal, never raised - the scan stays a report.
+    settle_results: dict[str, dict[str, Any]] = {}
+    settle_error = ""
+    try:
+        from fno.review.invocation import invocation_ttl_minutes, settle_lost_invocations
+
+        for row in settle_lost_invocations(
+            ttl_minutes=invocation_ttl_minutes(), now=observed_at
+        ):
+            settle_results[str(row.get("invocation_id"))] = row
+    except Exception as exc:  # noqa: BLE001 - report the refusal, never die
+        settle_error = str(exc)
     lines = [
         "fno doctor: review invocations: "
         f"{len(lost)} sent attempt(s) have no matching attestation "
         f"after {window_seconds // 60}m"
     ]
     for invocation_id, _event_time, data in lost[:5]:
-        lines.append(
-            f"  lost {invocation_id}: transport={data.get('transport', 'unmeasured')} "
+        base = (
+            f"  {invocation_id}: transport={data.get('transport', 'unmeasured')} "
             f"receipt={data.get('receipt', 'unmeasured')}"
         )
+        settled_row = settle_results.get(invocation_id)
+        if settled_row and settled_row.get("settled"):
+            lines.append(
+                f"  settled {base[2:]} "
+                f"(lost attestation at {str(settled_row.get('head', ''))[:9]})"
+            )
+        elif settled_row:
+            lines.append(
+                f"  lost {base[2:]} (settle refused: {settled_row.get('reason')})"
+            )
+        else:
+            suffix = f" (settle sweep failed: {settle_error})" if settle_error else ""
+            lines.append(f"  lost {base[2:]}{suffix}")
     if len(lost) > 5:
         lines.append(f"  ... {len(lost) - 5} more lost invocation(s)")
     return lines

@@ -245,3 +245,164 @@ def parse_review_invocation(raw: str) -> dict[str, Any] | None:
         "level_source": level_source,
         "flags": flags,
     }
+
+
+#: The invocation id the single writer stamps when it cannot join a real one;
+#: an attestation carrying it settles nothing (no row exists to close).
+_UNJOINED = "UNJOINED"
+
+
+def invocation_ttl_minutes() -> int:
+    """The configured `review.invocation_ttl_minutes`, 15 on any unreadable
+    config - the same default the schema ships, so a broken config cannot
+    widen the settle sweep by accident."""
+    try:
+        from fno.config import load_settings
+
+        return int(getattr(load_settings().review, "invocation_ttl_minutes", 15))
+    except Exception:  # noqa: BLE001 - unreadable config keeps the shipped default
+        return 15
+
+
+def settle_lost_invocations(
+    *,
+    ttl_minutes: int = 15,
+    cwd: Path | None = None,
+    events_path: Path | None = None,
+    now: Any = None,
+) -> "list[dict[str, Any]]":
+    """Turn every lost review invocation into one settled ledger row.
+
+    A ``review_invocation`` row with ``stage: sent`` and no answering
+    ``review_attestation`` after ``ttl_minutes`` reads as "never asked"; this
+    emits ONE ``review_attestation`` per lost row through the single validated
+    builder (verdict ``fail``, ``output_contract: lost``), so coverage reads
+    ``uncovered`` with a named reason and the loop that already re-fires on
+    uncovered re-dispatches. Settling makes the loss VISIBLE; it schedules
+    nothing new. Idempotent by a positive marker: any attestation carrying the
+    id answers it, once. ``settled: False`` names the refusal and writes
+    nothing.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    if events_path is None:
+        from fno.paths import project_events_json
+
+        events_path = project_events_json()
+    observed_at = now or datetime.now(timezone.utc)
+    cutoff = observed_at - timedelta(minutes=ttl_minutes)
+    sent: "dict[str, tuple[datetime, dict[str, Any]]]" = {}
+    answered: "set[str]" = set()
+    try:
+        with Path(events_path).open(encoding="utf-8") as stream:
+            for raw in stream:  # prefiltered: the journal is tens of MB on the stop path
+                if "review_invocation" not in raw and "review_attestation" not in raw:
+                    continue
+                try:
+                    event = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                data = event.get("data")
+                if not isinstance(data, dict):
+                    continue
+                invocation_id = data.get("invocation_id")
+                if not isinstance(invocation_id, str) or not invocation_id:
+                    continue
+                if invocation_id == _UNJOINED:
+                    continue
+                if event.get("type") == "review_invocation":
+                    if data.get("stage") == "sent":
+                        try:
+                            event_time = datetime.fromisoformat(
+                                str(event.get("ts", "")).replace("Z", "+00:00")
+                            )
+                        except ValueError:
+                            continue
+                        if event_time.tzinfo is None:
+                            event_time = event_time.replace(tzinfo=timezone.utc)
+                        # First sent row wins: the OLDER timestamp is the
+                        # conservative TTL input.
+                        sent.setdefault(invocation_id, (event_time, data))
+                    elif data.get("stage") == "refused":
+                        answered.add(invocation_id)
+                elif event.get("type") == "review_attestation":
+                    answered.add(invocation_id)
+    except (FileNotFoundError, OSError):
+        return []
+
+    lost = [
+        (invocation_id, event_time, data)
+        for invocation_id, (event_time, data) in sorted(sent.items())
+        if event_time <= cutoff and invocation_id not in answered
+    ]
+    if not lost:
+        return []
+    head_sha, branch = _settle_head_pin(cwd)
+    results: "list[dict[str, Any]]" = []
+    for invocation_id, _event_time, data in lost:
+        if not head_sha or not branch:
+            results.append(
+                {
+                    "invocation_id": invocation_id,
+                    "settled": False,
+                    "reason": "no readable head to pin (not a git repo or detached HEAD)",
+                }
+            )
+            continue
+        from fno.events import _build, append_event
+
+        reviewer = str(data.get("verb") or "/code-review").lstrip("/").split(":")[-1]
+        try:
+            append_event(
+                _build(
+                    "review_attestation",
+                    "hook",
+                    {
+                        "reviewer": reviewer or "code-review",
+                        "head_sha": head_sha,
+                        "verdict": "fail",
+                        # The settle context, not a reviewer's session: this row
+                        # answers "the attempt died", never "a review ran".
+                        "session_id": "settle",
+                        "output_contract": "lost",
+                        "invocation_id": invocation_id,
+                        "settle_note": (
+                            "invocation lost: sent, delivered, and never answered; "
+                            "emitted by the settle sweep"
+                        ),
+                    },
+                ),
+                events_path=events_path,
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed settle is reported, not raised
+            results.append(
+                {"invocation_id": invocation_id, "settled": False, "reason": str(exc)}
+            )
+            continue
+        results.append({"invocation_id": invocation_id, "settled": True, "head": head_sha})
+    return results
+
+
+def _settle_head_pin(cwd: Path | None) -> "tuple[str, str]":
+    """`(head_sha, branch)` at ``cwd``, both empty when either is unreadable
+    (the writer refuses a detached HEAD; the settle inherits that refusal)."""
+    import subprocess
+
+    def _git(*args: str) -> str:
+        try:
+            proc = subprocess.run(
+                ["git", *args],
+                cwd=str(cwd) if cwd else None,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return proc.stdout.strip() if proc.returncode == 0 else ""
+
+    head_sha = _git("rev-parse", "HEAD")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+    if not head_sha or not branch or branch == "HEAD":
+        return "", ""
+    return head_sha, branch

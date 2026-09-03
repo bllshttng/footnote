@@ -287,12 +287,13 @@ Addressing a review invalidated the proof the review happened.
 An agent given three findings, fixing them in three commits, owed three re-reviews.
 Across footnote PRs 824-831, PR 828 moved through six heads and PR 830 through five.
 
-Both now call one predicate, `review_freshness(reviewed_sha, head_sha)`. It lives in `crates/fno-agents/src/loopcheck.rs` and returns one of five states:
+Both now call one predicate, `review_freshness(reviewed_sha, head_sha)`. It lives in `crates/fno-agents/src/review_freshness.rs`, moved there from `loopcheck.rs` (over the file budget, shrink-only) and named by its question. It returns one of six states:
 
 - `fresh` - the reviewer read this exact commit.
 - `carried_base_sync` - the PR's own code delta is byte-identical. Any tree difference came from the base moving. A rebase is this shape.
 - `carried_docs_only` - only documentation paths changed since the reviewed commit.
 - `carried_subset` - the code delta only shrank. Every raw line still shipping is byte-identical to one the reviewer read. The vanished lines are paths the base absorbed on the rebase. The grade compares the sorted raw lines the identity keeps beside its hash. The HEAD set contained in the reviewed set is a shrink. A line the reviewer never saw is new unreviewed code.
+- `carried_interdiff(n=<lines>, cap=<bound>)` - the code delta changed, but by fewer than `review.carry_interdiff_lines` lines (default 100, the attestation law d-608344c1's threshold). The measure is the multiset symmetric difference of the two patches against the base, never a head-to-head diff, so base movement contributes nothing. This is the small-change arm: a rebase whose conflict resolution touched three lines carries instead of costing a full round. An unreadable patch read on either side never carries (it is `stale` whatever the identities say), and `0` in config disables the arm.
 - `stale` - everything else, **including every failure path**.
 
 `carried_*` is decided by comparing a **PR code-diff identity** at each commit.
@@ -311,7 +312,7 @@ Four separate places ask "has this reviewer reviewed this code".
 
 All four go through the predicate: the coverage count, the attestation scan, the presence check behind `missing_bots`, and `finalize`'s arming check.
 
-The Python merge gate's recheck (`_verdicts_with_current_freshness` in `cli/src/fno/pr/_reviews.py`) is the fifth. It used to answer with ancestry alone, and that cut both ways. It killed every `carried_*` verdict the predicate had minted the moment a rebase rewrote the sha: the operator's daily rebase treadmill. It also read a push-after-review head as fresh, because the reviewed commit remained an ancestor. Its freshness test is now the predicate's own rule with no extra arms. Exact-head equality is fresh. The recheck builds the same code-diff identity `pr_code_diff_identity` builds: `git diff --raw --no-abbrev --no-renames base...sha`, documentation paths dropped. Identity equality carries, with the tree-paths read readable, like the Rust carry's auditability requirement. When the base absorbed paths on the rebase, a strict subset also carries. A push of new unreviewed code, a sibling edit, a reindent, or an unreadable identity is a new review. The base is the PR's own `baseRefName`, remote-qualified. A base that does not resolve, or a base read that fails, leaves the question unanswerable, and both gates expire the verdict. Only a read with no PR number to ask defaults to `origin/main`/`origin/master`. Base, identity, and tree-path reads memoize on sha-keyed module caches. Because the identity is the same construction rather than an approximation, the two gates expire the same changes.
+The Python merge gate's recheck (`_verdicts_with_current_freshness` in `cli/src/fno/pr/_reviews.py`) was the fifth answerer, and it is retired. It mirrored the predicate in a second language: identity construction, cache discipline, decision for decision. That is principle 9's exact shape, one question with two implementations. The divergence was measured, not hypothetical: `fno do pr status` computed a local rounds floor of 3 on a PR where the gate's own row said 1. Python now READS the freshness label the Rust producer wrote at emit time and recomputes nothing; a row whose head no longer matches is the recompute arm's input, and with the `fno-agents` binary absent the freshness answer is `unmeasurable` with the remedy named (`install it or run fno doctor update`), never a Python-side guess. The round budget reads the same way: `rounds_used`, the budget, and exhaustion arrive on the gate's own `review_coverage` row, and one head set is shared across the attestation and GitHub-review axes, so a bot review and a local attestation at one commit are one round (the law's sentence, d-608344c1).
 
 Fix one and leave the others on a bare equality, and the gate stays exactly as tight as before.
 The softening is then purely decorative.
@@ -320,6 +321,14 @@ A `stale` verdict is **recorded, not dropped**.
 `CoverageVerdict::Stale` says a reviewer responded against an older commit.
 
 That is a different fact from `absent`, and it calls for a different response: ask for a re-read, rather than wait for a first read.
+
+### Lost invocations settle into the ledger
+
+Producer reachability has a failure mode the freshness rule cannot see: a review dispatch that was sent, delivered, and never answered.
+The invocation row exists (`review_invocation`, `stage: sent`), the doctor's scan finds it, and until now nothing turned it into coverage evidence - the gate read "no row", indistinguishable from "never asked", and waited.
+The settle sweep (`settle_lost_invocations`, reachable as `fno do review invocations settle` and run by the doctor's report and the target stop hook) closes that: after `review.invocation_ttl_minutes` (default 15) with no answering attestation, one `review_attestation` row is emitted through the single validated builder - verdict `fail`, `output_contract: lost`, the invocation id carried in `data`.
+Coverage then reads `uncovered` with a named reason instead of silence, and the loop that already re-fires on `uncovered` does the re-dispatching; settling makes the loss visible, it does not schedule anything new.
+Idempotent by a positive marker: an invocation with any attestation carrying its id - a real review, a refusal row, or an earlier settle - never settles twice, so a second sweep adds zero rows.
 
 ### CI carry: the same idea, a second implementation, on purpose
 

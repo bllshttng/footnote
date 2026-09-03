@@ -44,11 +44,10 @@ def _row(*, tiled=None, chain=None, freshness="stale", reviewed_sha="c3"):
 
 
 class TestTilingChainExemption:
-    def test_tiled_chain_member_keeps_the_row_covered(self, monkeypatch):
-        # The describes-test fails closed for everything: only the chain
-        # exemption can carry this verdict, so the test proves the exemption
-        # rather than a lucky freshness carry.
-        monkeypatch.setattr(_reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: False)
+    def test_tiled_chain_member_keeps_the_row_covered(self):
+        # The stored freshness label is stale and the shaper recomputes
+        # nothing, so only the chain exemption can carry this verdict: the
+        # test proves the exemption rather than a lucky freshness carry.
         shaped = _reviews._shape_review_coverage(
             _row(tiled=True, chain=["c3"], reviewed_sha="c3", freshness="stale"),
             head="head",
@@ -58,8 +57,7 @@ class TestTilingChainExemption:
         assert shaped["review_state"] == "reviewed"
         assert shaped["reviewed_count"] == 1
 
-    def test_no_tiling_data_keeps_today_single_sha_rule(self, monkeypatch):
-        monkeypatch.setattr(_reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: False)
+    def test_no_tiling_data_keeps_today_single_sha_rule(self):
         shaped = _reviews._shape_review_coverage(
             _row(reviewed_sha="c3", freshness="stale"),
             head="head",
@@ -68,8 +66,7 @@ class TestTilingChainExemption:
         assert shaped["coverage"] == "uncovered"
         assert shaped["reviewed_count"] == 0
 
-    def test_not_tiled_chain_does_not_rescue(self, monkeypatch):
-        monkeypatch.setattr(_reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: False)
+    def test_not_tiled_chain_does_not_rescue(self):
         shaped = _reviews._shape_review_coverage(
             _row(tiled=False, chain=["c3"], reviewed_sha="c3", freshness="stale"),
             head="head",
@@ -77,8 +74,7 @@ class TestTilingChainExemption:
         )
         assert shaped["coverage"] == "uncovered"
 
-    def test_chain_member_outside_the_chain_is_not_rescued(self, monkeypatch):
-        monkeypatch.setattr(_reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: False)
+    def test_chain_member_outside_the_chain_is_not_rescued(self):
         shaped = _reviews._shape_review_coverage(
             _row(tiled=True, chain=["c9"], reviewed_sha="c3", freshness="stale"),
             head="head",
@@ -86,8 +82,7 @@ class TestTilingChainExemption:
         )
         assert shaped["coverage"] == "uncovered"
 
-    def test_fresh_verdict_still_counts_without_any_chain(self, monkeypatch):
-        monkeypatch.setattr(_reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: True)
+    def test_fresh_verdict_still_counts_without_any_chain(self):
         shaped = _reviews._shape_review_coverage(
             _row(reviewed_sha="head", freshness="fresh"),
             head="head",

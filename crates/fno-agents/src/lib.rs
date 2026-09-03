@@ -106,6 +106,7 @@ pub mod reap_render;
 pub mod receipt;
 pub mod reentry;
 pub mod resume_args;
+pub mod review_freshness;
 pub mod roster_progress;
 pub mod run_outcome;
 pub mod run_state;

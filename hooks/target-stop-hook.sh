@@ -527,6 +527,17 @@ verb_rc=0
 if [[ "$STATE_FILE" == "$DELIVERY_PENDING_STATE" ]]; then
     DECISION_JSON='{"decision":"allow","termination_reason":"DoneDelivery","message":"retrying generic delivery finalization"}'
 else
+    # One settle sweep before the checker, TARGET loops only: a lost review
+    # invocation becomes a `lost` attestation row, so the gate's next read
+    # answers a named refusal instead of waiting on silence. A king driver
+    # owns no review invocations, and its manifest resolution must stay the
+    # hook's last `fno` call. Best-effort and quiet - a missing fno or a
+    # failed sweep must never hold the stop gate, and the doctor's report
+    # re-runs the sweep on its own schedule.
+    if [[ "$DRIVER" == "target" ]] && command -v fno >/dev/null 2>&1; then
+        (cd "$TARGET_CWD" 2>/dev/null \
+            && fno do review invocations settle >/dev/null 2>&1) || true
+    fi
     DECISION_JSON=$("$BIN" loop-check \
         --driver "$DRIVER" \
         --state "$STATE_FILE" \

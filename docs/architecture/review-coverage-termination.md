@@ -57,9 +57,15 @@ The Python gate and the Rust stop gate read the same law. The Rust side shells t
 
 ## The round budget
 
-`config.review.max_rounds` (default 2, at least 1) budgets the review rounds across the whole life of a PR. A round is one reviewed HEAD. Two verdicts at one unchanged head are one round. A cap whose size depends on how a reviewer batches its output is not a cap. A pass is one round like any other and refunds nothing, though it still satisfies coverage on its own terms. CI failures, lint failures and rebases are not rounds. A PR merges after one to three reviews and never waits for a round to come back clean.
+The round is the attestation law's unit (`d-608344c1`, 2026-09-03). Coverage holds when the ledger has, at the current head, one round with zero findings or two rounds with every finding disposed. A head within the interdiff carry of an attested head (`review.carry_interdiff_lines`, default 100) counts as that head. A round is keyed by HEAD. Two verdicts at one unchanged head are one round. A GitHub App review beside a local attestation at one commit is also one round: the counter is one shared set of heads across both evidence axes, not two axis counters reconciled by a max. A cap whose size depends on how a reviewer batches its output is not a cap.
+
+`config.review.max_rounds` (default 2, at least 1) budgets those rounds across the whole life of a PR. A pass is one round like any other and refunds nothing, though it still satisfies coverage on its own terms. CI failures, lint failures and rebases are not rounds. A rebase or fix commit that moves the head by fewer than `review.carry_interdiff_lines` lines carries the prior round's attestation instead of costing a new one. At the threshold or over, or when either patch read fails, the carry dies and a fresh round is owed. A PR merges after one to three reviews and never waits for a round to come back clean.
 
 At the cap the gate stops asking for reviews. A hard finding answers IMPOSSIBLE. Everything else is filed as a node and the merge proceeds, with the filed keys and their node ids on the merge receipt. One review stays the floor, so an unreviewed PR is still uncovered. A finding the gate cannot FILE is one it must not wave through, so a filing failure refuses instead.
+
+## When the reviewer never answered: the lost state
+
+A dispatch that was sent and never answered used to read as "never asked": the gate waited on a verdict that would not come. The settle sweep (`fno do review invocations settle`, also run by `fno doctor` and the stop hook) closes that. After `review.invocation_ttl_minutes` (default 15) with no answering attestation, one `review_attestation` row lands with `verdict: fail` and `output_contract: lost`, the invocation id carried in `data`. Coverage at the head reads `uncovered (lost)` - a named refusal the loop's existing uncovered-recovery can act on - instead of an absence with three explanations. The sweep is idempotent by a positive answered marker, so re-running it adds nothing.
 
 ## What this gate claims, and what it does not
 
@@ -77,6 +83,8 @@ At the cap the gate stops asking for reviews. A hard finding answers IMPOSSIBLE.
 
 - The producer-side classifier: `cli/src/fno/review/findings.py`.
 - The gate-side re-derivation and the four states: `cli/src/fno/pr/_coverage_gate.py`.
+- The freshness predicate and its interdiff-carry arm: `crates/fno-agents/src/review_freshness.rs`.
 - The Rust gate twin (tiling, dispositions, rounds, human approvals): `crates/fno-agents/src/loopcheck.rs`.
+- The settle sweep: `cli/src/fno/review/invocation.py`.
 - The event schema (finding records, range tiling, round fields): `cli/src/fno/events/schema.yaml`.
 - The review lanes this composes with: [review-lanes.md](review-lanes.md).

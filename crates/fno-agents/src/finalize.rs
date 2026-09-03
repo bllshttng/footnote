@@ -2095,7 +2095,7 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
         .get("baseRefName")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let resolver = crate::loopcheck::FreshnessResolver::new("git", cwd, base, head);
+    let resolver = crate::loopcheck::FreshnessResolver::new("git", cwd, base, head, 100);
 
     for app in optional_apps {
         let (verdict, _, _) =
