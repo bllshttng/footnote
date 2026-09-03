@@ -256,6 +256,35 @@ const SIGNATURES: &[Signature] = &[
         },
     },
     Signature {
+        name: "review-gate",
+        plan: "escalate: not a CI failure; it clears when the review attests",
+        matches: |c| c.check.starts_with("fno/review-coverage"),
+        // A red review-coverage status is the gate saying the review has not
+        // landed yet. Nothing in the diff fixes it, and reporting it as an
+        // unrecognized CI failure would send someone hunting a defect that
+        // does not exist.
+        resolve: |_| Remedy::Escalate {
+            repro: "not a CI failure; run the review, then `fno do pr status <n>`".to_string(),
+        },
+    },
+    Signature {
+        name: "smoke-step",
+        plan: "escalate: the shard runner names its own failing step",
+        matches: |c| smoke_failed_step(c.log).is_some(),
+        // Ordered ABOVE guard-script because a smoke shard runs dozens of
+        // guards and EVERY one announces itself on success. Prefix-matching
+        // the log named a guard that had passed, and the repro exited 0 --
+        // a report that reads like a diagnosis and points at nothing. The
+        // runner's own fail-fast line names the step outright, so it wins
+        // wherever it exists.
+        resolve: |c| Remedy::Escalate {
+            repro: match smoke_failed_step(c.log) {
+                Some(step) => format!("failing step: {step}; the log's group carries its output"),
+                None => "the shard runner named no step".to_string(),
+            },
+        },
+    },
+    Signature {
         name: "guard-script",
         plan: "escalate: repro is the guard's own script",
         matches: |c| guard_script(c.log).is_some(),
@@ -378,12 +407,18 @@ fn default_fmt_crates() -> Vec<String> {
 
 /// The node ids `check-pr-node-closure` said the branch names. Its refusal
 /// reads `... names x-f8e3, and the exact trailer claims none of them.`
+///
+/// Several candidates are joined with commas and NO space (`IFS=,` in the
+/// guard), so a `[^,]+` capture cannot cross them: on a two-node branch it
+/// matched nothing at all, the finding became an empty `EditBody`, and the
+/// remedy was a silent no-op. The capture is lazy across commas instead, and
+/// the split takes both separators.
 fn closure_nodes(log: &str) -> Vec<String> {
-    let re = Regex::new(r"names ([^,]+), and the exact trailer claims none").expect("static regex");
+    let re = Regex::new(r"names (.+?), and the exact trailer claims none").expect("static regex");
     match re.captures(log) {
         Some(caps) => caps[1]
-            .split_whitespace()
-            .map(|s| s.trim_end_matches(',').to_string())
+            .split([',', ' '])
+            .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect(),
         None => Vec::new(),
@@ -453,12 +488,32 @@ fn cargo_test_names(log: &str) -> Vec<String> {
     re.captures_iter(log).map(|c| c[1].to_string()).collect()
 }
 
-/// The guard that refused, from its own `check-<name>: ` line prefix. Only the
+/// The step a smoke shard stopped on, from the runner's own fail-fast line.
+/// Load-bearing because the shard's steps are not all `check-*` scripts: the
+/// verb-surface ratchet prints `verb-ratchet:`, and nothing in a prefix scan
+/// can see it.
+fn smoke_failed_step(log: &str) -> Option<String> {
+    let re = Regex::new(r"(?m)^smoke: step failed, stopping \(fail-fast\): (.+)$")
+        .expect("static regex");
+    re.captures(log).map(|c| c[1].trim().to_string())
+}
+
+/// The guard that REFUSED, from its own `check-<name>: ` line prefix. Only the
 /// shell guards under `scripts/ci/` print this; the two Python ones do not, so
 /// they fall through to `unknown` rather than being handed a wrong repro.
+///
+/// The one that matters is the LAST such line before the runner's error
+/// marker, not the first in the log. A `guards` job runs dozens of these and
+/// every one announces itself on SUCCESS too, so taking the first match named
+/// a guard that had passed and handed over a repro that exits 0 -- a report
+/// that reads like a diagnosis and points at nothing.
 fn guard_script(log: &str) -> Option<String> {
     let re = Regex::new(r"(?m)^(check-[a-z0-9-]+): ").expect("static regex");
-    re.captures(log).map(|c| c[1].to_string())
+    let head = match log.find("##[error]") {
+        Some(at) => &log[..at],
+        None => log,
+    };
+    re.captures_iter(head).last().map(|c| c[1].to_string())
 }
 
 // ── check-row reading ───────────────────────────────────────────────────────
@@ -602,27 +657,69 @@ fn run(
     args: &[&str],
     cwd: &std::path::Path,
     timeout: std::time::Duration,
-) -> Result<(bool, String), String> {
+) -> Result<(bool, String, String), String> {
     match crate::loopcheck::bounded_read(bin.as_ref(), args, cwd, "heal", timeout) {
         Ok(out) => Ok((
             out.status.success(),
             String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr_tail).into_owned(),
         )),
-        Err(err) => Err(crate::loopcheck::bounded_read_diagnostic(bin, &err)),
+        // heal's own wording. `bounded_read_diagnostic` hardcodes a
+        // `loop-check:` prefix, and naming a subsystem that did not run sends
+        // a reader to the wrong place.
+        Err(err) => Err(
+            crate::loopcheck::bounded_read_diagnostic("pr-heal", &err).replacen(
+                "loop-check: ",
+                "",
+                1,
+            ),
+        ),
     }
 }
 
 /// `gh api` against the current repo. `{owner}`/`{repo}` are gh's own
 /// placeholders, resolved from the checkout, so heal never reads the remote
 /// just to learn its own name.
+///
+/// `--allow-escape-sequences` is not optional: gh refuses a colorized job log
+/// without it, through a pipe and a redirect alike. The retry without the
+/// flag covers a gh too old to know it, which is the same fallback the Python
+/// twin in `fno.pr._logs` carries. Without it, an older gh kills every read
+/// here, not just the log fetch.
 fn gh_api(a: &Args, path: &str, extra: &[&str]) -> Result<String, String> {
     let mut args: Vec<&str> = vec!["api", "--allow-escape-sequences", path];
     args.extend_from_slice(extra);
-    let (ok, out) = run(&a.gh_bin, &args, &a.cwd, READ_TIMEOUT)?;
+    let (ok, out, err) = run(&a.gh_bin, &args, &a.cwd, READ_TIMEOUT)?;
     if ok {
-        Ok(out)
-    } else {
-        Err(format!("gh api {path} failed"))
+        return Ok(out);
+    }
+    if err.to_lowercase().contains("unknown flag") {
+        let mut plain: Vec<&str> = vec!["api", path];
+        plain.extend_from_slice(extra);
+        let (ok, out, err) = run(&a.gh_bin, &plain, &a.cwd, READ_TIMEOUT)?;
+        if ok {
+            return Ok(out);
+        }
+        return Err(format!("gh api {path} failed: {}", err.trim()));
+    }
+    // The stderr tail is the whole difference between "404" and "rate limit"
+    // and "log expired"; a bare "failed" sends a reader back to gh by hand.
+    Err(format!("gh api {path} failed: {}", err.trim()))
+}
+
+/// Read a paginated `gh api` endpoint as one JSON array of PAGES.
+///
+/// `--paginate` alone concatenates page bodies with NO separator (`}{` for
+/// objects, `][` for arrays), which is not parseable JSON and has no reliable
+/// split point: a `][` appears inside any PR body carrying a markdown
+/// reference link. `--slurp` is gh's own answer and wraps the pages in a real
+/// array, so nothing here has to guess at a boundary.
+fn gh_api_pages(a: &Args, path: &str) -> Result<Vec<Value>, String> {
+    let raw = gh_api(a, path, &["--paginate", "--slurp"])?;
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(Value::Array(pages)) => Ok(pages),
+        Ok(other) => Ok(vec![other]),
+        Err(e) => Err(format!("gh api {path} returned unparseable pages: {e}")),
     }
 }
 
@@ -658,28 +755,13 @@ fn read_pr(a: &Args, pr: &str) -> Result<(String, String, String), String> {
 /// routes it away unconditionally, so a heal built on it could never run. The
 /// translation below is the whole cost of reading the cheap endpoint.
 fn read_checks(a: &Args, head: &str) -> Result<Value, String> {
-    let raw = gh_api(
+    let pages = gh_api_pages(
         a,
         &format!("repos/{{owner}}/{{repo}}/commits/{head}/check-runs"),
-        &["--paginate"],
     )?;
     let mut rows: Vec<Value> = Vec::new();
-    // --paginate concatenates one JSON object per page.
-    for page in raw
-        .split_inclusive('}')
-        .collect::<Vec<_>>()
-        .join("")
-        .split("\n{")
-    {
-        let text = if page.starts_with('{') {
-            page.to_string()
-        } else {
-            format!("{{{page}")
-        };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else {
-            continue;
-        };
-        let Some(runs) = v.get("check_runs").and_then(|r| r.as_array()) else {
+    for page in pages {
+        let Some(runs) = page.get("check_runs").and_then(|r| r.as_array()) else {
             continue;
         };
         for run in runs {
@@ -687,16 +769,65 @@ fn read_checks(a: &Args, head: &str) -> Result<Value, String> {
                 "name": run.get("name").and_then(|v| v.as_str()).unwrap_or(""),
                 "bucket": rest_bucket(run),
                 "link": run.get("html_url").and_then(|v| v.as_str()).unwrap_or(""),
-                "workflow": run.pointer("/check_suite/id").map(|v| v.to_string()).unwrap_or_default(),
+                "workflow": run
+                    .pointer("/check_suite/id")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
                 "startedAt": run.get("started_at").and_then(|v| v.as_str()).unwrap_or(""),
                 "completedAt": run.get("completed_at").and_then(|v| v.as_str()).unwrap_or(""),
             }));
         }
     }
+    // The check-runs endpoint returns ONLY check-runs. A commit StatusContext
+    // (`fno/review-coverage`, `stacked-base-guard`) lives on a different
+    // endpoint, and reading one without the other is a false green: a PR whose
+    // every job passed while a status failed reported "nothing red".
+    rows.extend(read_statuses(a, head));
     if rows.is_empty() {
         return Err("check-runs read named no checks".to_string());
     }
     Ok(Value::Array(rows))
+}
+
+/// The commit's StatusContexts, in the same row shape as the check-runs.
+/// A read failure yields none rather than aborting the run: the check-runs
+/// half is still worth reporting, and the caller's exit code already treats
+/// an unreadable world as unsettled.
+fn read_statuses(a: &Args, head: &str) -> Vec<Value> {
+    let Ok(raw) = gh_api(
+        a,
+        &format!("repos/{{owner}}/{{repo}}/commits/{head}/status"),
+        &[],
+    ) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
+    let Some(rows) = v.get("statuses").and_then(|s| s.as_array()) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .map(|st| {
+            let state = st
+                .get("state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            serde_json::json!({
+                "name": st.get("context").and_then(|v| v.as_str()).unwrap_or(""),
+                "bucket": match state.as_str() {
+                    "success" => "pass",
+                    "pending" => "pending",
+                    _ => "fail",
+                },
+                "link": st.get("target_url").and_then(|v| v.as_str()).unwrap_or(""),
+                "workflow": "",
+                "startedAt": st.get("created_at").and_then(|v| v.as_str()).unwrap_or(""),
+                "completedAt": st.get("updated_at").and_then(|v| v.as_str()).unwrap_or(""),
+            })
+        })
+        .collect()
 }
 
 /// A REST check-run's `status`/`conclusion` folded to the `gh pr checks`
@@ -770,10 +901,10 @@ fn refuse_wrong_worktree(a: &Args, head_ref: &str) -> Option<String> {
         &a.cwd,
         READ_TIMEOUT,
     )
-    .map(|(_, out)| out.trim().to_string())
+    .map(|(_, out, _)| out.trim().to_string())
     .unwrap_or_default();
     let dirty = run(&a.git_bin, &["status", "--porcelain"], &a.cwd, READ_TIMEOUT)
-        .map(|(_, out)| !out.trim().is_empty())
+        .map(|(_, out, _)| !out.trim().is_empty())
         .unwrap_or(true);
     let mut reasons = Vec::new();
     if branch != head_ref {
@@ -787,6 +918,13 @@ fn refuse_wrong_worktree(a: &Args, head_ref: &str) -> Option<String> {
     } else {
         Some(reasons.join("; "))
     }
+}
+
+/// Whether the worktree carries uncommitted changes.
+fn dirty(a: &Args) -> bool {
+    run(&a.git_bin, &["status", "--porcelain"], &a.cwd, READ_TIMEOUT)
+        .map(|(_, out, _)| !out.trim().is_empty())
+        .unwrap_or(false)
 }
 
 /// Apply the auto remedies. Returns the signatures that were fixed and
@@ -803,7 +941,7 @@ fn apply_auto(a: &Args, findings: &mut [Finding]) -> Vec<String> {
             let dir = a.cwd.join(&cmd.cwd);
             let argv: Vec<&str> = cmd.argv.iter().map(|s| s.as_str()).collect();
             let ok = run(argv[0], &argv[1..], &dir, REMEDY_TIMEOUT)
-                .map(|(ok, _)| ok)
+                .map(|(ok, _, _)| ok)
                 .unwrap_or(false);
             if !ok {
                 failure = Some(cmd.render());
@@ -811,6 +949,21 @@ fn apply_auto(a: &Args, findings: &mut [Finding]) -> Vec<String> {
             }
         }
         match failure {
+            // A remedy whose run AND verify both exit 0 while the tree stays
+            // clean fixed nothing: CI is red on something this checkout does
+            // not reproduce (a different toolchain, or a check that has not
+            // re-run). Counting that as healed reported exit 0 with the check
+            // still red, which is the false green heal exists to end.
+            None if !dirty(a) => {
+                f.remedy = Remedy::Escalate {
+                    repro: format!(
+                        "the remedy ran clean and changed nothing, so this red \
+                         does not reproduce here; compare toolchains, or re-read \
+                         after the next run: {}",
+                        cmds.first().map(Cmd::render).unwrap_or_default()
+                    ),
+                }
+            }
             None => healed.push(f.signature.to_string()),
             Some(cmd) => {
                 f.remedy = Remedy::Escalate {
@@ -835,7 +988,7 @@ fn apply_edit_body(a: &Args, pr: &str, body: &str, findings: &[Finding]) -> Resu
             // the graph. Pasting a candidate out of the refusal is the exact
             // move that refusal warns against: a branch segment can match the
             // id grammar without naming a real node.
-            let (ok, out) = run(
+            let (ok, out, _) = run(
                 "fno",
                 &["do", "pr", "closure-trailer", node],
                 &a.cwd,
@@ -856,7 +1009,7 @@ fn apply_edit_body(a: &Args, pr: &str, body: &str, findings: &[Finding]) -> Resu
         let _ = std::fs::create_dir_all(parent);
     }
     std::fs::write(&path, &new_body).map_err(|e| format!("write body file: {e}"))?;
-    let (ok, _) = run(
+    let (ok, _, _) = run(
         &a.gh_bin,
         &["pr", "edit", pr, "--body-file", &path.to_string_lossy()],
         &a.cwd,
@@ -888,16 +1041,22 @@ fn report(findings: &[Finding], dry_run: bool) -> i32 {
     if own.is_empty() {
         return EXIT_CLEAN;
     }
-    if own.iter().all(|f| matches!(f.remedy, Remedy::Auto { .. })) && !dry_run {
-        return EXIT_CLEAN;
-    }
-    if own
+    // An escalation is the only thing left for a person to do. A dry run
+    // reports what it WOULD do, so its remaining Auto and EditBody rows are
+    // still work; after --apply they have been done. An applied EditBody used
+    // to fall through to "escalations remain" with no repro to show for it.
+    let escalations = own
         .iter()
-        .any(|f| matches!(f.remedy, Remedy::Escalate { .. }))
-    {
+        .filter(|f| matches!(f.remedy, Remedy::Escalate { .. }))
+        .count();
+    if escalations > 0 {
         return EXIT_ESCALATIONS;
     }
-    EXIT_ESCALATIONS
+    if dry_run {
+        EXIT_ESCALATIONS
+    } else {
+        EXIT_CLEAN
+    }
 }
 
 /// `fno-agents pr-heal <n> [--apply] [--all] [--playbook]`.
@@ -934,43 +1093,51 @@ pub fn run_heal(argv: &[String]) -> i32 {
 /// One heal per red open PR, report-only. Uses the REST listing for the same
 /// reason [`read_checks`] does: `gh pr list` is GraphQL and gets routed away.
 fn run_all(a: &Args) -> i32 {
-    let raw = match gh_api(
-        a,
-        "repos/{owner}/{repo}/pulls?state=open&per_page=50",
-        &["--paginate"],
-    ) {
-        Ok(raw) => raw,
+    let pages = match gh_api_pages(a, "repos/{owner}/{repo}/pulls?state=open&per_page=100") {
+        Ok(pages) => pages,
         Err(msg) => {
             eprintln!("pr-heal: {msg}");
             return EXIT_READ_ERROR;
         }
     };
     let mut worst = EXIT_CLEAN;
-    for num in open_pr_numbers(&raw) {
+    for num in open_pr_numbers(&pages) {
         println!("── PR {num}");
-        let code = run_one(a, &num);
-        if code != EXIT_CLEAN {
-            worst = code;
-        }
+        worst = worse_of(worst, run_one(a, &num));
     }
     worst
 }
 
-/// The PR numbers in a (possibly paginated) REST pulls listing.
-pub(crate) fn open_pr_numbers(raw: &str) -> Vec<String> {
+/// The exit code a caller should act on first when several PRs answered.
+/// A read error outranks an escalation, which outranks in-flight: keeping
+/// whichever code came LAST let a later escalation mask an earlier failure to
+/// read the world at all.
+pub(crate) fn worse_of(a: i32, b: i32) -> i32 {
+    let rank = |code: i32| match code {
+        EXIT_CLEAN => 0,
+        EXIT_IN_FLIGHT => 1,
+        EXIT_ESCALATIONS => 2,
+        _ => 3,
+    };
+    if rank(b) > rank(a) {
+        b
+    } else {
+        a
+    }
+}
+
+/// The PR numbers in a slurped REST pulls listing (an array of pages, each a
+/// JSON array of PRs).
+pub(crate) fn open_pr_numbers(pages: &[Value]) -> Vec<String> {
     let mut out = Vec::new();
-    for chunk in raw.split("][").collect::<Vec<_>>() {
-        let text = format!(
-            "{}{}{}",
-            if chunk.starts_with('[') { "" } else { "[" },
-            chunk,
-            if chunk.ends_with(']') { "" } else { "]" }
-        );
-        if let Ok(Value::Array(rows)) = serde_json::from_str::<Value>(&text) {
-            for row in rows {
-                if let Some(n) = row.get("number").and_then(|v| v.as_u64()) {
-                    out.push(n.to_string());
-                }
+    for page in pages {
+        let rows = match page {
+            Value::Array(rows) => rows.clone(),
+            other => vec![other.clone()],
+        };
+        for row in rows {
+            if let Some(n) = row.get("number").and_then(|v| v.as_u64()) {
+                out.push(n.to_string());
             }
         }
     }
@@ -1015,13 +1182,13 @@ fn run_one(a: &Args, pr: &str) -> i32 {
     let mut committed = false;
     if !healed.is_empty() {
         let dirty = run(&a.git_bin, &["status", "--porcelain"], &a.cwd, READ_TIMEOUT)
-            .map(|(_, out)| !out.trim().is_empty())
+            .map(|(_, out, _)| !out.trim().is_empty())
             .unwrap_or(false);
         if dirty {
             let msg = format!("style: heal {}", healed.join(", "));
             let _ = run(&a.git_bin, &["add", "-u"], &a.cwd, READ_TIMEOUT);
-            let (ok, _) = run(&a.git_bin, &["commit", "-m", &msg], &a.cwd, READ_TIMEOUT)
-                .unwrap_or((false, String::new()));
+            let (ok, _, _) = run(&a.git_bin, &["commit", "-m", &msg], &a.cwd, READ_TIMEOUT)
+                .unwrap_or((false, String::new(), String::new()));
             committed = ok;
         }
     }
@@ -1041,8 +1208,11 @@ fn run_one(a: &Args, pr: &str) -> i32 {
             EXIT_IN_FLIGHT
         }
         Ok(_) => {
-            let (ok, _) =
-                run(&a.git_bin, &["push"], &a.cwd, READ_TIMEOUT).unwrap_or((false, String::new()));
+            let (ok, _, _) = run(&a.git_bin, &["push"], &a.cwd, READ_TIMEOUT).unwrap_or((
+                false,
+                String::new(),
+                String::new(),
+            ));
             if ok {
                 println!("pushed once");
                 code
@@ -1305,6 +1475,63 @@ mod tests {
             Remedy::Escalate {
                 repro: "bash scripts/ci/check-file-budget.sh".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn a_smoke_shard_reads_the_runners_own_failing_step_not_a_guard_prefix() {
+        // The real log that misdiagnosed: dozens of passing guards announcing
+        // themselves, then a failure from a step that prints no `check-`
+        // prefix at all. Prefix-matching named `check-pitfalls`, which passes.
+        let log = concat!(
+            "check-pitfalls: 4/10 entries, all valid\n",
+            "smoke: pass     2s  In-N-Out menu-cap ratchet\n",
+            "verb-ratchet: collapsed action inventory drifted from the map\n",
+            "smoke: step failed, stopping (fail-fast): Verb-surface ratchet (real count)\n",
+            "##[error]Process completed with exit code 1.\n",
+        );
+        let f = classify(&ctx("smoke-rest", "guards", log), false);
+        assert_eq!(f.signature, "smoke-step");
+        match f.remedy {
+            Remedy::Escalate { repro } => {
+                assert!(repro.contains("Verb-surface ratchet"), "{repro}");
+                assert!(!repro.contains("check-pitfalls"), "{repro}");
+            }
+            other => panic!("expected Escalate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_guards_job_names_the_guard_that_refused_not_the_first_that_announced() {
+        // Every guard announces itself on success too, so a `guards` log is
+        // mostly passing prefixes. The repro has to name the last one before
+        // the error marker; the first one exits 0 and diagnoses nothing.
+        let log = concat!(
+            "check-retired-command-strings: OK: inspected 21 site(s)\n",
+            "check-reachable-paths self-test: OK (canaries fired)\n",
+            "check-reachable-paths: findings:\n",
+            "  A new twin literal (in both .py and .rs): --allow-escape-sequences\n",
+            "##[error]Process completed with exit code 1.\n",
+            "check-package-path-escapes: OK\n",
+        );
+        let f = classify(&ctx("guards", "guards", log), false);
+        assert_eq!(f.signature, "guard-script");
+        assert_eq!(
+            f.remedy,
+            Remedy::Escalate {
+                repro: "bash scripts/ci/check-reachable-paths.sh".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_red_review_coverage_status_is_the_gate_not_a_defect() {
+        let f = classify(&ctx("fno/review-coverage", "", ""), false);
+        assert_eq!(f.signature, "review-gate");
+        assert!(
+            matches!(&f.remedy, Remedy::Escalate { repro } if repro.contains("not a CI failure")),
+            "{:?}",
+            f.remedy
         );
     }
 
@@ -1607,13 +1834,45 @@ exit 0
 
     #[test]
     fn open_pr_numbers_reads_one_page_and_several() {
-        assert_eq!(
-            open_pr_numbers(r#"[{"number":7},{"number":9}]"#),
-            vec!["7", "9"]
+        // --slurp hands back an array of pages, so nothing has to find a
+        // boundary. The old hand-rolled `split("][")` cut inside any PR body
+        // carrying a markdown reference link and dropped those PRs silently.
+        let one: Vec<Value> = vec![json!([{"number": 7}, {"number": 9}])];
+        assert_eq!(open_pr_numbers(&one), vec!["7", "9"]);
+
+        let many: Vec<Value> = vec![json!([{"number": 7}]), json!([{"number": 9}])];
+        assert_eq!(open_pr_numbers(&many), vec!["7", "9"]);
+
+        let with_bracket_pair: Vec<Value> =
+            vec![json!([{"number": 7, "body": "see [the doc][ref]"}])];
+        assert_eq!(open_pr_numbers(&with_bracket_pair), vec!["7"]);
+    }
+
+    #[test]
+    fn a_read_error_outranks_an_escalation_across_prs() {
+        // Keeping the LAST non-clean code let a later escalation mask an
+        // earlier failure to read the world at all.
+        assert_eq!(worse_of(EXIT_READ_ERROR, EXIT_ESCALATIONS), EXIT_READ_ERROR);
+        assert_eq!(worse_of(EXIT_ESCALATIONS, EXIT_IN_FLIGHT), EXIT_ESCALATIONS);
+        assert_eq!(worse_of(EXIT_CLEAN, EXIT_IN_FLIGHT), EXIT_IN_FLIGHT);
+        assert_eq!(worse_of(EXIT_CLEAN, EXIT_CLEAN), EXIT_CLEAN);
+    }
+
+    #[test]
+    fn a_multi_node_branch_still_yields_its_closure_nodes() {
+        // The guard joins candidates with commas and NO space, so a capture
+        // that cannot cross a comma matched nothing and the remedy became a
+        // silent no-op on exactly the branches that needed it most.
+        let log = concat!(
+            "check-pr-node-closure: HEAD ref 'feature/x-a1-x-b2' names x-a1,x-b2, ",
+            "and the exact trailer claims none of them.\n",
         );
+        let f = classify(&ctx("check-pr-node-closure", "pr-node-closure", log), false);
         assert_eq!(
-            open_pr_numbers(r#"[{"number":7}][{"number":9}]"#),
-            vec!["7", "9"]
+            f.remedy,
+            Remedy::EditBody {
+                nodes: vec!["x-a1".to_string(), "x-b2".to_string()]
+            }
         );
     }
 
