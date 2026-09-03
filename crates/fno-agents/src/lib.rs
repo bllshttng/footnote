@@ -102,6 +102,7 @@ pub mod pi;
 pub mod protocol;
 pub mod provider;
 pub mod readiness;
+pub mod reap_render;
 pub mod receipt;
 pub mod reentry;
 pub mod roster_progress;
