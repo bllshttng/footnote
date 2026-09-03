@@ -539,6 +539,43 @@ def test_the_active_state_set_is_imported_not_copied():
     assert board_mod.ACTIVE_STATES is _ACTIVE_STATES
 
 
+# --- the driver predicate (one answer, two queues) ---------------------------
+
+
+def test_node_driver_answers_active_for_a_live_claim_with_a_fresh_holder():
+    from fno.king.board import _node_driver
+
+    claim = _claim("x-live", holder="target-session:busy")
+    state, found = _node_driver(
+        "x-live",
+        {"x-live": claim},
+        {"target-session:busy": {"state": "working", "age_s": 12}},
+    )
+    assert state == "active"
+    assert found is claim
+
+
+def test_node_driver_answers_stalled_for_a_live_claim_with_no_active_holder():
+    from fno.king.board import _node_driver
+
+    claim = _claim("x-quiet", holder="target-session:ghost")
+    state, found = _node_driver("x-quiet", {"x-quiet": claim}, {})
+    assert state == "stalled"
+    assert found is claim
+
+
+def test_node_driver_answers_none_for_an_absent_or_dead_claim():
+    """``none`` covers both an absent claim (the worker exited cleanly and
+    released) and a dead one (the lock outlived its holder). The dead half
+    belongs to `stale_claim` too; the caller filters further."""
+    from fno.king.board import _DEAD_CLAIM_STATES, _node_driver
+
+    assert _node_driver("x-gone", {}, {}) == ("none", None)
+    for state in sorted(_DEAD_CLAIM_STATES):
+        claim = _claim("x-dead", state=state)
+        assert _node_driver("x-dead", {"x-dead": claim}, {}) == ("none", claim)
+
+
 # --- AC1-ERR ----------------------------------------------------------------
 
 

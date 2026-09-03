@@ -164,6 +164,39 @@ def _holder_is_active(activity: Optional[dict]) -> bool:
     return age <= STALLED_AFTER_S
 
 
+def _node_driver(
+    node_id: object, claim_by_node: dict[str, dict], holder_activity: dict[str, dict]
+) -> tuple[str, Optional[dict]]:
+    """Who is driving this node: ``active``, ``stalled``, or ``none``.
+
+    One answer, two queues. ``stalled_holder`` selects ``stalled`` and
+    ``undriven_pr`` selects ``none``, so the two partition by construction. A
+    parity harness between two copies of this test would be the trigger to
+    merge them (AGENTS.md principle 9); naming the predicate once IS that
+    merge, applied to the predicate rather than to the queue.
+
+    ``none`` covers both an absent claim (the worker exited cleanly and
+    released) and a dead one (the lock outlived its holder). The dead half also
+    belongs to ``stale_claim``, whose remedy is a reap; a queue that wants
+    dispatchable work must not confuse the two, so callers filter further.
+
+    ``suspect`` is NOT one of them and must never become one. A suspect claim
+    is TTL-unexpired with an unproven holder pid, and claims.rs treats it like
+    ``Live`` for acquire and dispatch precisely so it is never stolen. Under
+    load every claim on a machine can read suspect while its holder's
+    transcript was written seconds ago (measured 2026-09-03: 5 of 15 node
+    claims suspect, 0 stale). Adding it to ``_DEAD_CLAIM_STATES`` would hand
+    every one of those nodes to a second worker.
+    """
+    claim = claim_by_node.get(str(node_id))
+    if claim is None or claim.get("state") in _DEAD_CLAIM_STATES:
+        return "none", claim
+    holder = str(claim.get("holder") or "")
+    if _holder_is_active(holder_activity.get(holder)):
+        return "active", claim
+    return "stalled", claim
+
+
 def compile_scope_ids(scope: str, entries: list[dict], *, resolve=None) -> set[str]:
     """Compile a canonical crown scope into the graph node ids it contains."""
     from fno.agents.crown import _canonical_project, resolve_crown, split_scope
@@ -340,12 +373,12 @@ def build_board(
         # the king at done work (x-94f8's stalled_holder queue).
         if node.get("status") in TERMINAL_RUNGS:
             continue
-        claim = claim_by_node.get(str(node.get("id")))
-        if claim is None or claim.get("state") in _DEAD_CLAIM_STATES:
+        state, claim = _node_driver(
+            node.get("id"), claim_by_node, inputs.holder_activity
+        )
+        if state != "stalled":
             continue
         holder = str(claim.get("holder") or "")
-        if _holder_is_active(inputs.holder_activity.get(holder)):
-            continue
         if not in_scope("stalled_holder", node.get("id"), node):
             continue
         stalled.append(
