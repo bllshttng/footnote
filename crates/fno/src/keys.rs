@@ -360,9 +360,12 @@ const GLOBAL_CHORD_PREFIX: &[u8] = b"\x1b[1;7";
 pub enum Event {
     Forward(Vec<u8>),
     Cmd(Command),
-    /// Prefix+digit: select the Nth tab of the viewed squad. The scanner
-    /// only knows the index; the client resolves it to a stable `TabId`
-    /// against its last `Layout` (v3: `SelectTab` names ids, not indices).
+    /// Digit tab jump (x-cf97): select the tab at this 1-BASED ordinal - the
+    /// number the operator reads off the tab strip. The scanner only knows the
+    /// ordinal; the client resolves it to a stable `TabId` against its last
+    /// `Layout` (v3: `SelectTab` names ids, not indices). x-1499's caution
+    /// lives at that resolution: the ordinal is the SHIFTING identifier space
+    /// and is resolved to the id once, at keypress, never carried.
     SelectTabIdx(usize),
     Detach,
     /// Open the sideline selector (prefix+w). Selector-mode keys are
@@ -419,6 +422,11 @@ pub enum Event {
     /// `rename-window` convention, x-c150). The client owns the typing mode
     /// and resolves the active tab's stable id; the chord only opens it.
     OpenRename,
+    /// Open the move-tab-to-position prompt (prefix+#, x-cf97): type the
+    /// 1-based destination ordinal. The client owns the typing mode, computes
+    /// the delta against the tab's current index, and sends ONE
+    /// `Command::ReorderTab`; the chord only opens the prompt.
+    OpenMoveTo,
     /// Reorder the active tab one slot within its squad (prefix+`<`/`>`,
     /// x-0333). The client resolves the active tab's stable id before sending.
     ReorderTab(i32),
@@ -444,6 +452,12 @@ enum State {
     ChordEsc(Vec<u8>),
     /// Saw the prefix; the next key (or escape sequence) is a chord.
     Prefix,
+    /// (x-cf97) Holding a tab number: the digits typed so far after a prefix
+    /// digit or an Alt+digit. More digits keep appending; Enter, any
+    /// non-digit, or the caller's quiet-window flush resolves the ordinal.
+    /// Bytes stored are the raw digit bytes so the parse (and its cap) lives
+    /// in one place.
+    Digits(Vec<u8>),
     /// Accumulating an escape sequence after the prefix (arrows / Ctrl-arrows
     /// / Shift-arrows / a paste-open marker), possibly split across reads.
     PrefixEsc(Vec<u8>),
@@ -583,6 +597,15 @@ impl Scanner {
                     seq.push(b);
                     if GLOBAL_CHORD_PREFIX.starts_with(&seq) {
                         self.state = State::ChordEsc(seq);
+                    } else if seq.len() == 2 && seq[1].is_ascii_digit() {
+                        // (x-cf97) Alt+digit arms the same tab-number buffer
+                        // the prefix digit path arms: ESC + digit is the one
+                        // representable modifier form of a digit (Ctrl+digit
+                        // is not, Locked Decision 1), and later PLAIN digits
+                        // keep appending, so Alt+3 4 reaches tab 34 with no
+                        // second Alt. Any pending plain bytes go first.
+                        flush(&mut plain, &mut out);
+                        self.state = State::Digits(vec![seq[1]]);
                     } else if seq.len() == GLOBAL_CHORD_PREFIX.len() + 1 {
                         match esc_chord(&seq) {
                             EscScan::Complete(ev) => {
@@ -622,10 +645,47 @@ impl Scanner {
                 State::Prefix => {
                     if b == 0x1b {
                         self.state = State::PrefixEsc(vec![0x1b]);
+                    } else if b.is_ascii_digit() {
+                        // (x-cf97) A digit holds instead of firing: more
+                        // digits keep appending (tab 34 is reachable), Enter
+                        // or a non-digit resolves, and the caller's
+                        // quiet-window flush covers the number-then-nothing
+                        // case. One buffer, three doors in.
+                        self.state = State::Digits(vec![b]);
                     } else {
                         let ev = self.chord(b);
                         self.arm_if_repeat(&ev, now);
                         out.push(ev);
+                    }
+                }
+                State::Digits(mut digits) => {
+                    if b.is_ascii_digit() && digits.len() < 6 {
+                        // (review) Six digits is far past any tab strip; the
+                        // cap only bounds the buffer, never the receipt - a
+                        // longer typing resolves to the out-of-range notice
+                        // naming the FULL number, so nothing a digit gesture
+                        // absorbs is ever silent.
+                        digits.push(b);
+                        self.state = State::Digits(digits);
+                    } else if b == b'\r' || b == b'\n' {
+                        // Enter resolves explicitly - the no-wait door.
+                        flush(&mut plain, &mut out);
+                        out.push(select_tab_event(&digits));
+                        self.state = State::Normal(0);
+                    } else if b == 0x1b {
+                        // Esc cancels the gesture; the Esc itself is consumed,
+                        // never forwarded - it may only have been closing the
+                        // number the operator just typed.
+                        self.state = State::Normal(0);
+                    } else {
+                        // Any other byte ends the number and is re-dispatched
+                        // through the Normal arms, so prefix+3+j still lands
+                        // tab 3 AND forwards `j` exactly as the old
+                        // fire-immediately behavior did.
+                        flush(&mut plain, &mut out);
+                        out.push(select_tab_event(&digits));
+                        self.state = State::Normal(0);
+                        replay = true;
                     }
                 }
                 State::PrefixEsc(mut seq) => {
@@ -643,6 +703,10 @@ impl Scanner {
                         // Still ambiguous between a chord and a marker: keep
                         // accumulating (split-across-reads safe).
                         self.state = State::PrefixEsc(seq);
+                    } else if seq.len() == 2 && seq[1].is_ascii_digit() {
+                        // (x-cf97) Alt+digit after the prefix: same buffer, so
+                        // both modifier forms reach one gesture.
+                        self.state = State::Digits(vec![seq[1]]);
                     } else {
                         match esc_chord(&seq) {
                             EscScan::Complete(ev) => {
@@ -683,6 +747,24 @@ impl Scanner {
             let idx = release_to_plain(&mut plain, &seq);
             self.state = paste_state(idx);
             (!plain.is_empty()).then_some(Event::Forward(plain))
+        } else {
+            None
+        }
+    }
+
+    /// (x-cf97) A tab number is being held, waiting for Enter, a non-digit,
+    /// or the caller's quiet-window flush. The client read loop polls this to
+    /// arm that window - a number typed and then left alone must still land,
+    /// without waiting for the next keypress forever.
+    pub fn digits_pending(&self) -> bool {
+        matches!(self.state, State::Digits(_))
+    }
+
+    /// (x-cf97) Resolve a held tab number once input has gone quiet past the
+    /// flush window. `None` when nothing is held.
+    pub fn flush_digits(&mut self) -> Option<Event> {
+        if let State::Digits(digits) = std::mem::replace(&mut self.state, State::Normal(0)) {
+            (!digits.is_empty()).then(|| select_tab_event(&digits))
         } else {
             None
         }
@@ -953,6 +1035,13 @@ fn default_bindings() -> Vec<KeyBinding> {
             WorkspacesTabs,
             "move tab right",
         ),
+        b(
+            b'#',
+            "move-tab-to",
+            OpenMoveTo,
+            WorkspacesTabs,
+            "move tab to an index",
+        ),
         // navigation (scrollback blocks + goto/search)
         b(
             b'[',
@@ -1141,6 +1230,12 @@ pub const MENU_BINDINGS: &[MenuKeyBinding] = &[
         action: "move-tab-right",
         key: b'>',
     },
+    // (x-cf97) The move-to prompt: same byte as its prefix chord, one
+    // vocabulary inside the menu and out.
+    MenuKeyBinding {
+        action: "move-tab-to",
+        key: b'#',
+    },
     // (x-d545) The row-menu verbs, teachable by keyboard now. Letters reuse
     // the sideline's own vocabulary so the two scopes teach one keyboard:
     // `s` stop (the sideline spends `x` on stop-then-remove and `X` on bulk
@@ -1229,7 +1324,7 @@ pub fn prefix_hint() -> String {
         (&["close-pane"], "", "close"),
         (&["new-tab"], "", "tab"),
         (&["next-tab", "prev-tab"], "/", "cycle"),
-        (&[], "", "1-9 tab"),
+        (&[], "", "<n> tab"),
         (&["close-tab"], "", "close-tab"),
         (&["selector"], "", "select"),
         (&["toggle-sideline"], "", "sideline"),
@@ -1269,12 +1364,13 @@ pub fn prefix_hint() -> String {
 pub fn meta_rows() -> Vec<(String, String, KeySection)> {
     let p = key_disp(prefix());
     vec![
-        // The digit range is nine by construction (one byte, nine of them), so
-        // the row states its own ceiling and names the uncapped way past it
-        // rather than leaving a 14-tab operator to discover `f` by accident.
+        // (x-cf97) The digit jump reads arbitrary numbers now, so the row
+        // names the resolve doors instead of a nine-tab ceiling: Enter is the
+        // explicit one, the quiet window covers number-then-nothing, and a
+        // non-digit ends the number and falls through to the next chord.
         (
-            "1-9".into(),
-            "select tab (first 9; f goes past)".into(),
+            format!("{p} <n>"),
+            "jump to tab by number (Enter; Alt works too)".into(),
             KeySection::WorkspacesTabs,
         ),
         (
@@ -1362,11 +1458,26 @@ fn chord(b: u8) -> Event {
     chord_for(&keymap(), b)
 }
 
+/// (x-cf97) Parse held digit bytes into the 1-based ordinal event. An
+/// unparseable or zero reading still emits the event: the CLIENT resolves it
+/// against the live layout and answers with a notice naming the miss, never a
+/// silent BEL - a number that does nothing reads as a dead keybind.
+fn select_tab_event(digits: &[u8]) -> Event {
+    let n: u32 = std::str::from_utf8(digits)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    Event::SelectTabIdx(n as usize)
+}
+
 fn chord_for(map: &Keymap, b: u8) -> Event {
     match b {
         // prefix-prefix = one literal prefix byte, whatever the prefix now is.
         _ if b == map.prefix => Event::Forward(vec![b]),
-        b'1'..=b'9' => Event::SelectTabIdx((b - b'1') as usize),
+        // (x-cf97) 1-based ordinal; the scan loop routes digits into the
+        // multi-digit buffer before this table is consulted, so a lone
+        // resolution here only serves `resolve_chord` callers.
+        b'1'..=b'9' => Event::SelectTabIdx((b - b'0') as usize),
         _ => bindings_for(map)
             .into_iter()
             .find(|kb| kb.key == b)
@@ -1516,7 +1627,25 @@ mod tests {
             vec![Event::Cmd(Command::ResizeDir(Dir::Up))]
         );
         assert_eq!(scan_all(&[b"\x02x"]), vec![Event::Cmd(Command::ClosePane)]);
-        assert_eq!(scan_all(&[b"\x027"]), vec![Event::SelectTabIdx(6)]);
+        // (x-cf97) Digits hold into the multi-digit buffer instead of firing:
+        // a lone digit waits for the caller's flush, Enter resolves
+        // explicitly, and a non-digit resolves AND forwards - the old
+        // single-digit muscle memory (tab, then next key) is preserved.
+        assert_eq!(scan_all(&[b"\x027"]), vec![]);
+        assert_eq!(scan_all(&[b"\x027\r"]), vec![Event::SelectTabIdx(7)]);
+        let mut digits = Scanner::default();
+        let now = Instant::now();
+        assert_eq!(digits.scan(b"\x023", now), vec![]);
+        assert_eq!(digits.scan(b"4", now), vec![]);
+        assert_eq!(
+            digits.scan(b"j", now),
+            vec![Event::SelectTabIdx(34), Event::Forward(b"j".to_vec())]
+        );
+        // Alt+digit arms the same buffer, and later plain digits append.
+        let mut alt = Scanner::default();
+        assert_eq!(alt.scan(b"\x1b3", now), vec![]);
+        assert_eq!(alt.scan(b"0", now), vec![]);
+        assert_eq!(alt.scan(b"\r", now), vec![Event::SelectTabIdx(30)]);
         assert_eq!(scan_all(&[b"\x02&"]), vec![Event::Cmd(Command::CloseTab)]);
         assert_eq!(scan_all(&[b"\x02w"]), vec![Event::OpenSelector]);
         assert_eq!(scan_all(&[b"\x02a"]), vec![Event::OpenAnswers]);
@@ -1755,7 +1884,7 @@ mod tests {
         assert_eq!(
             hint,
             " % \" split · hjkl focus · HJKL resize · x close · c tab · n/p cycle \
-             · 1-9 tab · & close-tab · w select · b sideline · g grab · f find \
+             · <n> tab · & close-tab · w select · b sideline · g grab · f find \
              · / search · s status · d detach · ? all keys"
         );
         let disp = |action: &str| {
@@ -1994,11 +2123,12 @@ mod tests {
         assert_eq!(scan_all(&[b"\x02q"]), vec![Event::Bell]);
 
         // (x-3e17, AC2-INV) The never-leak guarantee, swept over the whole byte
-        // space rather than one specimen. This design deliberately adds NO
-        // scanner chord and NO held-byte state - the discoverability fix is
-        // four label strings - and this is what pins that: if a later change
-        // starts accumulating bytes after the prefix, some byte in this sweep
-        // stops being a lone Bell and the assertion names it.
+        // space rather than one specimen. x-cf97 adds ONE deliberate held-byte
+        // state, the tab-number buffer, so the digits 0-9 join the exclusion
+        // set: a digit after the prefix holds into the buffer (with its own
+        // out-of-range notice downstream) instead of answering one Bell. If a
+        // later change starts accumulating any OTHER byte after the prefix,
+        // this sweep names it.
         //
         // ESC is excluded because it legitimately opens a multi-byte arrow scan
         // (Partial, not Bell); the digits and the prefix are structural
@@ -2006,7 +2136,7 @@ mod tests {
         let bound: std::collections::HashSet<u8> =
             key_bindings().into_iter().map(|kb| kb.key).collect();
         for b in 0u8..=255 {
-            if b == prefix() || b == 0x1b || (b'1'..=b'9').contains(&b) || bound.contains(&b) {
+            if b == prefix() || b == 0x1b || b.is_ascii_digit() || bound.contains(&b) {
                 continue;
             }
             assert_eq!(

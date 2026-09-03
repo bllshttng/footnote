@@ -322,14 +322,15 @@ fn main() {
                  | fno mux serve --web [--session <name>] [--bind <addr>] [--port <n>] \
                  | fno mux pane {PANE_VERBS} ... ({PANE_REFERENCE_USAGE}) \
                  | fno mux block pipe|annotate ... \
-                 | fno mux tab ls|create|rename|join|close ... (--tab takes the visible \
-                   1-based ordinal, id:<n> for the stable id) \
+                 | fno mux tab ls|create|rename|join|move|close ... (--tab takes the visible \
+                   1-based ordinal, id:<n> for the stable id; move takes --to <ordinal>) \
                  | fno mux layout get|apply|graft ... \
                  | fno mux where <fno_id-or-tab> \
                  | fno mux view <selector> [--url] [--fzf] [--json] \
                    (a tab ordinal/id/name resolves as a location; qualify \
                    with --workspace when it repeats) \
-                 | fno mux workspace prune [--dry-run] [--include-named] [--tabs-only] [--dead-only] [--json] \
+                 | fno mux workspace prune [--dry-run] [--include-named] [--tabs-only] [--dead-only] \
+                   [--include-used-shells] [--json] \
                  | fno mux workspace restore [--dry-run] [--harness <h>] [--json]"
             );
             std::process::exit(2);

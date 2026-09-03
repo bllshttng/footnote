@@ -2043,8 +2043,17 @@ struct LiveTab {
     squad_id: u64,
     squad_name: Option<String>,
     tab_id: u64,
+    /// The pane-joined tab label (v51), so a receipt can NAME a tab instead
+    /// of counting it.
+    tab_name: Option<String>,
     pane_count: usize,
     pristine: bool,
+    /// (x-cf97) Every pane in the tab is a spent shell: `cmd: None`, no
+    /// `fno_id`, measured idle NOW (ran something, at a prompt). The AND-fold
+    /// over panes mirrors `pristine`, but the predicate is deliberately
+    /// narrower than `!pristine` - it can only ever hold for bare shells,
+    /// never for an agent or a running command.
+    used_shell_only: bool,
 }
 
 /// Read every live tab once, keeping WHICH sessions answered. The same
@@ -2090,11 +2099,17 @@ fn live_tabs() -> (Vec<LiveTab>, Vec<String>, usize, Vec<String>) {
                         squad_id: pane.squad_id,
                         squad_name: pane.squad_name.clone(),
                         tab_id: pane.tab_id,
+                        tab_name: pane.tab_name.clone(),
                         pane_count: 0,
                         pristine: true,
+                        used_shell_only: true,
                     });
                     tab.pane_count += 1;
                     tab.pristine &= pane.pristine_idle_shell;
+                    // (x-cf97) `shell_idle` already carries `cmd: None`; the
+                    // `fno_id` clause here keeps an occupied pane out of the
+                    // category even if its shell layer reads idle.
+                    tab.used_shell_only &= pane.fno_id.is_none() && pane.shell_idle;
                 }
             }
             _ => unreachable.push(name),
@@ -2109,9 +2124,52 @@ struct TabPruneOutcome {
     would_close: usize,
     skipped_named: usize,
     kept: usize,
+    /// (x-cf97) `kept` is one number covering four reasons; these split it so
+    /// a receipt can say WHY a tab stayed. Within a run fold they sum to
+    /// `kept`; `kept_not_probed` covers the no-fold case on its own, so the
+    /// arithmetic stays auditable instead of trusted.
+    kept_last_in_squad: usize,
+    kept_not_pristine: usize,
+    kept_zero_panes: usize,
+    kept_unreachable: usize,
+    /// The fold never ran (`--dead-only`, or no session answered): every tab
+    /// is "kept" only in the sense that nobody looked. Counted separately so
+    /// the four real reasons still sum to `kept` when it did run.
+    kept_not_probed: usize,
+    /// (x-cf97) The used-shell population that passed every guard: tabs the
+    /// opt-in flag WOULD close. Counted whatever the flag did, so the sweep
+    /// modal can carry the number while the default posture stays off.
+    used_shells: usize,
+    /// The used-shell subset of `closed`/`would_close`.
+    closed_used: usize,
+    would_close_used: usize,
+    /// One label per tab this pass would close (or closed) - nineteen is past
+    /// the point where a bare count is a decision an operator can make.
+    closed_named: Vec<String>,
 }
 
-fn prune_live_tabs(tabs: &[LiveTab], include_named: bool, dry_run: bool) -> TabPruneOutcome {
+/// The receipt label for one live tab: name what it is where, so a sweep line
+/// is judgeable without cross-referencing `fno mux tab ls`.
+fn live_tab_label(tab: &LiveTab) -> String {
+    let squad = tab
+        .squad_name
+        .clone()
+        .unwrap_or_else(|| format!("squad {}", tab.squad_id));
+    match &tab.tab_name {
+        Some(name) if !name.is_empty() => format!(
+            "{} / {squad} / \u{201c}{name}\u{201d} (tab {})",
+            tab.session, tab.tab_id
+        ),
+        _ => format!("{} / {squad} / tab {} (unnamed)", tab.session, tab.tab_id),
+    }
+}
+
+fn prune_live_tabs(
+    tabs: &[LiveTab],
+    include_named: bool,
+    dry_run: bool,
+    include_used_shells: bool,
+) -> TabPruneOutcome {
     let mut out = TabPruneOutcome::default();
     // Tabs still open per workspace, counted up front and decremented as this
     // loop folds. A workspace's LAST tab is never surplus: closing it removes
@@ -2142,27 +2200,82 @@ fn prune_live_tabs(tabs: &[LiveTab], include_named: bool, dry_run: bool) -> TabP
             .get_mut(&(tab.session.as_str(), tab.squad_id))
             .expect("counted above");
         if *open < 2 {
+            out.kept_last_in_squad += 1;
             out.kept += 1;
             continue;
         }
-        if !tab.pristine || tab.pane_count == 0 {
+        // The zero-pane guard is NOT loosened by the used-shell category
+        // (x-cf97): `pristine` is an AND-fold, so a zero-pane tab reads
+        // pristine VACUOUSLY, with no pane having voted, and the absence-
+        // is-not-an-outcome rule keeps it out of every close arm. Counting
+        // the population here is what makes it visible.
+        if tab.pane_count == 0 {
+            out.kept_zero_panes += 1;
             out.kept += 1;
             continue;
         }
-        // Both branches decrement on the SAME counter, and only when the tab
-        // actually goes: a refused or failed close leaves it open, so the
-        // remaining count must not move or the next tab of this squad would
-        // read one fewer than are really there.
+        if !tab.pristine {
+            // (x-cf97) The one widening, and it is opt-in: a tab of spent
+            // shells (cmd: None, no fno_id, idle now) closes only when the
+            // operator asked for that category by name. Anything else merely
+            // not-pristine - an agent pane, a running command, an unmeasured
+            // shell - stays kept, by design.
+            if tab.used_shell_only && include_used_shells {
+                out.used_shells += 1;
+                out.closed_named.push(live_tab_label(tab));
+                // Both branches decrement on the SAME counter, and only when
+                // the tab actually goes: a refused or failed close leaves it
+                // open, so the remaining count must not move or the next tab
+                // of this squad would read one fewer than are really there.
+                if dry_run {
+                    out.would_close += 1;
+                    out.would_close_used += 1;
+                    *open -= 1;
+                    continue;
+                }
+                if close_live_tab(tab) {
+                    out.closed += 1;
+                    out.closed_used += 1;
+                    *open -= 1;
+                } else {
+                    out.kept_unreachable += 1;
+                    out.kept += 1;
+                }
+                continue;
+            }
+            if tab.used_shell_only {
+                out.used_shells += 1;
+            }
+            out.kept_not_pristine += 1;
+            out.kept += 1;
+            continue;
+        }
         if dry_run {
             out.would_close += 1;
+            out.closed_named.push(live_tab_label(tab));
             *open -= 1;
             continue;
         }
-        let Ok(sock) = proto::socket_path(&tab.session) else {
+        if close_live_tab(tab) {
+            out.closed += 1;
+            *open -= 1;
+        } else {
+            out.kept_unreachable += 1;
             out.kept += 1;
-            continue;
-        };
-        match control_roundtrip(
+        }
+    }
+    out
+}
+
+/// One close roundtrip for a tab the fold has decided to close. `true` only
+/// on the positive `TabClosed` receipt - a refused close keeps the tab and is
+/// counted as kept, never as a silent success.
+fn close_live_tab(tab: &LiveTab) -> bool {
+    let Ok(sock) = proto::socket_path(&tab.session) else {
+        return false;
+    };
+    matches!(
+        control_roundtrip(
             &sock,
             &tab.session,
             ControlVerb::TabClose {
@@ -2170,15 +2283,9 @@ fn prune_live_tabs(tabs: &[LiveTab], include_named: bool, dry_run: bool) -> TabP
                 tab: TabSel::Id(tab.tab_id),
                 force: false,
             },
-        ) {
-            Ok(ServerMsg::TabClosed { .. }) => {
-                out.closed += 1;
-                *open -= 1;
-            }
-            Ok(_) | Err(_) => out.kept += 1,
-        }
-    }
-    out
+        ),
+        Ok(ServerMsg::TabClosed { .. })
+    )
 }
 
 /// Which halves of the sweep the per-session probe results permit.
@@ -2215,7 +2322,7 @@ fn unreachable_notice(unreachable: &[String]) -> String {
 }
 
 /// `fno mux workspace prune [--dry-run] [--include-named] [--tabs-only]
-/// [--dead-only] [--json]`: remove squads
+/// [--dead-only] [--include-used-shells] [--json]`: remove squads
 /// whose every recorded origin is gone and which host no live member or pane
 /// (x-a572). Named squads require `--include-named`. The predicate is
 /// re-evaluated under the store lock against fresh fs state, and the receipt is
@@ -2225,6 +2332,14 @@ fn unreachable_notice(unreachable: &[String]) -> String {
 /// `--dead-only` reaps dead members alone and removes no squad row; together
 /// they run exactly those two halves, so the sweep modal's "both" can never
 /// remove a squad row the modal never offered to remove.
+///
+/// `--include-used-shells` (x-cf97) is the one tab-fold widening, and it is
+/// OPT-IN: a tab of spent bare shells (every pane `cmd: None`, no `fno_id`,
+/// measured idle now) closes only when this flag names the category. Without
+/// the flag the receipt still counts that population (`tabs_used_shells`)
+/// and splits every kept tab by reason, so the operator can see the size of
+/// the choice before making it. The receipt names each tab it would close
+/// (dry-run) or closed (apply) in `tabs_close_named`.
 ///
 /// Two arms run in ONE call and they must not contradict each other. The tab arm
 /// folds surplus pristine tabs; the squad arm decides store rows, and a live pane
@@ -2238,6 +2353,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
     let mut json = false;
     let mut tabs_only = false;
     let mut dead_only = false;
+    let mut include_used_shells = false;
     for a in args {
         match a.to_str() {
             Some("--dry-run") => dry_run = true,
@@ -2245,6 +2361,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
             Some("--json") => json = true,
             Some("--tabs-only") => tabs_only = true,
             Some("--dead-only") => dead_only = true,
+            Some("--include-used-shells") => include_used_shells = true,
             Some(other) => {
                 eprintln!("fno mux workspace prune: unknown argument {other:?}");
                 return EXIT_USAGE;
@@ -2260,10 +2377,11 @@ fn squad_prune(args: &[OsString]) -> i32 {
     let (tabs, live_cwds, answered, unreachable) = live_tabs();
     let scope = sweep_scope(answered, &unreachable);
     let tab_outcome = if scope.fold_tabs && !dead_only {
-        prune_live_tabs(&tabs, include_named, dry_run)
+        prune_live_tabs(&tabs, include_named, dry_run, include_used_shells)
     } else {
         TabPruneOutcome {
             kept: tabs.len(),
+            kept_not_probed: tabs.len(),
             ..TabPruneOutcome::default()
         }
     };
@@ -2398,10 +2516,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
             members_reaped,
             members_kept_live,
             members_kept_unknown,
-            tab_outcome.closed,
-            tab_outcome.would_close,
-            tab_outcome.skipped_named,
-            tab_outcome.kept,
+            &tab_outcome,
             probed,
             &unreachable,
             notice.as_deref(),
@@ -2450,10 +2565,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
             members_kept_live,
             members_kept_unknown,
             include_named,
-            tab_outcome.closed,
-            tab_outcome.would_close,
-            tab_outcome.skipped_named,
-            tab_outcome.kept,
+            &tab_outcome,
             answered,
             probed,
             &unreachable,
@@ -2471,7 +2583,10 @@ fn prune_identity(sq: &crate::squad_store::PrunedSquad) -> String {
     }
 }
 
-/// The one-line summary after a (dry-)run: count pruned plus why the rest stayed.
+/// The one-line summary after a (dry-)run: count pruned plus why the rest
+/// stayed. The tabs line splits `kept` by reason (x-cf97) so "kept 22" is
+/// never again one opaque number, and a dry-run NAMES each tab it would
+/// close - a count alone stopped being a decision somewhere around tab six.
 #[allow(clippy::too_many_arguments)]
 fn print_prune_summary(
     verb: &str,
@@ -2483,10 +2598,7 @@ fn print_prune_summary(
     members_kept_live: usize,
     members_kept_unknown: usize,
     include_named: bool,
-    tabs_closed: usize,
-    tabs_would_close: usize,
-    tabs_skipped_named: usize,
-    tabs_kept: usize,
+    tabs: &TabPruneOutcome,
     answered: usize,
     probed: usize,
     unreachable: &[String],
@@ -2497,13 +2609,39 @@ fn print_prune_summary(
     // apply reading `tabs 1 (would close 0, ...)` put the closed count beside
     // a zero and read as a no-op.
     let (tabs_word, tabs_n) = if verb == "pruned" {
-        ("closed", tabs_closed)
+        ("closed", tabs.closed)
     } else {
-        ("would close", tabs_would_close)
+        ("would close", tabs.would_close)
     };
     parts.push(format!(
-        "tabs {tabs_word} {tabs_n} (skipped named {tabs_skipped_named}, kept {tabs_kept}, server reachable {answered}/{probed})"
+        "tabs {tabs_word} {tabs_n} (skipped named {}, kept {} = last-in-squad {}, not-pristine {}, zero-pane {}, unreachable {}{}, server reachable {answered}/{probed})",
+        tabs.skipped_named,
+        tabs.kept,
+        tabs.kept_last_in_squad,
+        tabs.kept_not_pristine,
+        tabs.kept_zero_panes,
+        tabs.kept_unreachable,
+        if tabs.kept_not_probed > 0 {
+            format!(", not-probed {}", tabs.kept_not_probed)
+        } else {
+            String::new()
+        },
     ));
+    for label in &tabs.closed_named {
+        let name_verb = if verb == "pruned" {
+            "closed"
+        } else {
+            "would close"
+        };
+        println!("{name_verb}: {label}");
+    }
+    if tabs.used_shells > 0 && tabs.would_close_used == 0 && tabs.closed_used == 0 {
+        // The opt-in population the pass saw but (flag off) did not act on.
+        parts.push(format!(
+            "used shells {} (pass --include-used-shells)",
+            tabs.used_shells
+        ));
+    }
     if !unreachable.is_empty() {
         parts.push(format!(
             "skipped unreachable session(s): {}",
@@ -2550,10 +2688,7 @@ fn render_prune_json(
     members_reaped: usize,
     members_kept_live: usize,
     members_kept_unknown: usize,
-    tabs_closed: usize,
-    tabs_would_close: usize,
-    tabs_skipped_named: usize,
-    tabs_kept: usize,
+    tabs: &TabPruneOutcome,
     probed: usize,
     unreachable: &[String],
     notice: Option<&str>,
@@ -2582,10 +2717,24 @@ fn render_prune_json(
             "members_reaped": members_reaped,
             "members_kept_live": members_kept_live,
             "members_kept_unknown": members_kept_unknown,
-            "tabs_closed": tabs_closed,
-            "tabs_would_close": tabs_would_close,
-            "tabs_skipped_named": tabs_skipped_named,
-            "tabs_kept": tabs_kept,
+            "tabs_closed": tabs.closed,
+            "tabs_would_close": tabs.would_close,
+            "tabs_skipped_named": tabs.skipped_named,
+            "tabs_kept": tabs.kept,
+            // (x-cf97) The kept split and the opt-in used-shell population:
+            // the four reasons sum to `tabs_kept` whenever the fold ran, and
+            // `kept_not_probed` covers the run where it did not.
+            "tabs_kept_last_in_squad": tabs.kept_last_in_squad,
+            "tabs_kept_not_pristine": tabs.kept_not_pristine,
+            "tabs_kept_zero_panes": tabs.kept_zero_panes,
+            "tabs_kept_unreachable": tabs.kept_unreachable,
+            "tabs_kept_not_probed": tabs.kept_not_probed,
+            "tabs_used_shells": tabs.used_shells,
+            "tabs_closed_used_shells": tabs.closed_used,
+            "tabs_would_close_used_shells": tabs.would_close_used,
+            // (review) One key covers both runs on purpose: on a dry-run these
+            // are the candidates, on an apply they are what actually closed.
+            "tabs_close_named": tabs.closed_named,
             "server_reachable": unreachable.is_empty(),
             "sessions_probed": probed,
             "sessions_unreachable": unreachable,
@@ -3690,7 +3839,7 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
     let verb = match args.first().and_then(|a| a.to_str()) {
         Some(v) => v.to_string(),
         None => {
-            eprintln!("fno mux tab: needs a verb: ls|create|rename|join|close");
+            eprintln!("fno mux tab: needs a verb: ls|create|rename|join|move|close");
             return EXIT_USAGE;
         }
     };
@@ -3704,6 +3853,7 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
     let mut at = None;
     let mut dir = None;
     let mut force = false;
+    let mut to = None;
     let mut i = 1;
     while i < args.len() {
         let tok = match args[i].to_str() {
@@ -3724,6 +3874,17 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
                         return Err("duplicate --tab".into());
                     }
                     tab_sel = Some(parse_tab_sel(&flag_value(args, &mut i, "--tab")?)?);
+                }
+                // (x-cf97) A POSITION, not a tab: ordinal only, parsed as the
+                // 1-based `Index` selector so the shared "ordinal starts at 1"
+                // refusal covers a 0 or a past-the-end number.
+                "--to" => {
+                    if to.is_some() {
+                        return Err("duplicate --to".into());
+                    }
+                    to = Some(TabSel::Index(
+                        parse_u64(&flag_value(args, &mut i, "--to")?, "--to")? as usize,
+                    ));
                 }
                 "--src" => src = Some(parse_tab_sel(&flag_value(args, &mut i, "--src")?)?),
                 "--at" => at = Some(parse_u64(&flag_value(args, &mut i, "--at")?, "--at")?),
@@ -3788,8 +3949,22 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
                 force,
             }
         }
+        // (x-cf97) The direct-destination move: `--to` names the POSITION (the
+        // same 1-based ordinal the tab bar shows), the server computes the
+        // delta and runs the trunk the interactive reorder runs.
+        "move" => {
+            let (Some(tab), Some(to)) = (tab_sel, to) else {
+                eprintln!("fno mux tab move: needs --tab <sel> and --to <ordinal>");
+                return EXIT_USAGE;
+            };
+            ControlVerb::TabReorder {
+                squad: squad_target(squad),
+                tab,
+                to,
+            }
+        }
         other => {
-            eprintln!("fno mux tab: unknown verb {other} (ls|create|rename|join|close)");
+            eprintln!("fno mux tab: unknown verb {other} (ls|create|rename|join|move|close)");
             return EXIT_USAGE;
         }
     };
@@ -7150,32 +7325,46 @@ mod tests {
                 squad_id: 1,
                 squad_name: None,
                 tab_id: 11,
+                tab_name: None,
                 pane_count: 1,
                 pristine: true,
+                used_shell_only: false,
             },
             LiveTab {
                 session: "main".into(),
                 squad_id: 1,
                 squad_name: None,
                 tab_id: 12,
+                tab_name: None,
                 pane_count: 1,
                 pristine: false,
+                used_shell_only: false,
             },
             LiveTab {
                 session: "main".into(),
                 squad_id: 2,
                 squad_name: Some("named".into()),
                 tab_id: 21,
+                tab_name: None,
                 pane_count: 1,
                 pristine: true,
+                used_shell_only: false,
             },
         ];
 
-        let outcome = prune_live_tabs(&tabs, false, true);
+        let outcome = prune_live_tabs(&tabs, false, true, false);
         assert_eq!(outcome.would_close, 1);
         assert_eq!(outcome.closed, 0);
         assert_eq!(outcome.skipped_named, 1);
         assert_eq!(outcome.kept, 1);
+        // (x-cf97) The kept split accounts for the one kept tab. Tab 11 closed
+        // first, so tab 12 was the squad's LAST tab standing when it was
+        // evaluated - the decrement order is the reason it names.
+        assert_eq!(outcome.kept_last_in_squad, 1);
+        assert_eq!(outcome.kept_not_pristine, 0);
+        assert_eq!(outcome.kept_zero_panes, 0);
+        assert_eq!(outcome.kept_unreachable, 0);
+        assert_eq!(outcome.kept_not_probed, 0);
     }
 
     #[test]
@@ -7192,29 +7381,34 @@ mod tests {
             squad_id: 1,
             squad_name: None,
             tab_id: 11,
+            tab_name: None,
             pane_count: 1,
             pristine: true,
+            used_shell_only: false,
         }];
-        let outcome = prune_live_tabs(&only, false, false);
+        let outcome = prune_live_tabs(&only, false, false, false);
         assert_eq!(outcome.closed, 0, "a workspace's only tab is never closed");
         assert_eq!(outcome.would_close, 0);
         assert_eq!(outcome.kept, 1);
+        assert_eq!(outcome.kept_last_in_squad, 1, "the reason names the guard");
 
         let pristine_tab = |tab_id: u64| LiveTab {
             session: "main".into(),
             squad_id: 1,
             squad_name: None,
             tab_id,
+            tab_name: None,
             pane_count: 1,
             pristine: true,
+            used_shell_only: false,
         };
         let pair = vec![pristine_tab(11), pristine_tab(12)];
-        let outcome = prune_live_tabs(&pair, false, true);
+        let outcome = prune_live_tabs(&pair, false, true, false);
         assert_eq!(outcome.would_close, 1, "the surplus tab folds");
         assert_eq!(outcome.kept, 1, "one tab is left standing");
 
         let three = vec![pristine_tab(11), pristine_tab(12), pristine_tab(13)];
-        let outcome = prune_live_tabs(&three, false, true);
+        let outcome = prune_live_tabs(&three, false, true, false);
         assert_eq!(outcome.would_close, 2, "the count decrements as tabs fold");
         assert_eq!(outcome.kept, 1, "a workspace never folds to zero tabs");
     }
@@ -7236,8 +7430,10 @@ mod tests {
             squad_id: 1,
             squad_name: None,
             tab_id,
+            tab_name: None,
             pane_count: 1,
             pristine: true,
+            used_shell_only: false,
         };
         // Five tabs in one squad: four pristine, one running. The fold
         // empties the squad to its LAST tab - the running one is it - so all
@@ -7249,15 +7445,22 @@ mod tests {
             squad_id: 1,
             squad_name: None,
             tab_id: 15,
+            tab_name: None,
             pane_count: 1,
             pristine: false,
+            used_shell_only: false,
         });
-        let outcome = prune_live_tabs(&tabs, false, true);
+        let outcome = prune_live_tabs(&tabs, false, true, false);
         assert_eq!(
             outcome.would_close, 4,
             "the fold runs despite the dead sibling"
         );
         assert_eq!(outcome.kept, 1, "the squad's last tab stands");
+        // (x-cf97) The five-way kept arithmetic accounts for every tab.
+        assert_eq!(outcome.kept_last_in_squad, 1);
+        assert_eq!(outcome.kept_not_pristine, 0);
+        assert_eq!(outcome.kept_zero_panes, 0);
+        assert_eq!(outcome.kept_unreachable, 0);
     }
 
     #[test]
@@ -7277,6 +7480,125 @@ mod tests {
             two,
             "server liveness incomplete for session(s) a-dead, z-dead; no squad records changed"
         );
+    }
+
+    fn used_shell_tab(tab_id: u64) -> LiveTab {
+        LiveTab {
+            session: "main".into(),
+            squad_id: 1,
+            squad_name: None,
+            tab_id,
+            tab_name: Some(format!("t{tab_id}")),
+            pane_count: 1,
+            pristine: false,
+            used_shell_only: true,
+        }
+    }
+
+    #[test]
+    fn workspace_prune_used_shell_category_is_opt_in_and_named() {
+        // (x-cf97) The default sweep's posture is UNCHANGED: a tab of spent
+        // shells is kept_not_pristine, exactly what it was before this
+        // category existed. Only the named flag moves it, and the dry-run
+        // receipt then NAMES the tab it would close - a count alone is not a
+        // decision at nineteen tabs.
+        let tabs = vec![
+            used_shell_tab(31),
+            used_shell_tab(32),
+            // An agent pane's tab is merely not-pristine and NEVER qualifies:
+            // the category can only ever hold bare shells.
+            LiveTab {
+                session: "main".into(),
+                squad_id: 1,
+                squad_name: None,
+                tab_id: 33,
+                tab_name: Some("agent".into()),
+                pane_count: 1,
+                pristine: false,
+                used_shell_only: false,
+            },
+        ];
+
+        let off = prune_live_tabs(&tabs, false, true, false);
+        assert_eq!(off.would_close, 0, "the default posture closes nothing new");
+        assert_eq!(off.kept_not_pristine, 3);
+        assert_eq!(off.kept, 3);
+        assert_eq!(off.used_shells, 2, "the population is counted either way");
+        assert!(off.closed_named.is_empty(), "nothing is named for closing");
+
+        let on = prune_live_tabs(&tabs, false, true, true);
+        assert_eq!(on.would_close, 2, "the flag closes the qualifying pair");
+        assert_eq!(on.would_close_used, 2);
+        // Both used shells closed first, so the agent tab was the squad's
+        // LAST tab standing by the time it was evaluated.
+        assert_eq!(on.kept_last_in_squad, 1, "the agent tab still stays");
+        assert_eq!(on.kept_not_pristine, 0);
+        assert_eq!(on.kept, 1);
+        assert_eq!(on.closed_named.len(), 2, "each candidate is named");
+        assert!(
+            on.closed_named.iter().all(|l| l.contains("main")),
+            "labels carry the session: {on:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_prune_used_shell_never_closes_a_workspace_last_tab() {
+        // The last-in-squad guard outranks the new category: closing a
+        // workspace's only tab removes the squad, and the used-shell flag
+        // must not become a workspace destroyer.
+        let only = vec![used_shell_tab(41)];
+        let outcome = prune_live_tabs(&only, false, true, true);
+        assert_eq!(outcome.would_close, 0);
+        assert_eq!(outcome.kept_last_in_squad, 1);
+        assert_eq!(outcome.kept, 1);
+    }
+
+    #[test]
+    fn workspace_prune_skipped_fold_counts_as_not_probed() {
+        // `--dead-only` skips the fold: every tab is "kept" only in the sense
+        // that nobody looked, and the receipt says so instead of folding them
+        // into a real reason.
+        let tabs = vec![used_shell_tab(51), used_shell_tab(52)];
+        let outcome = TabPruneOutcome {
+            kept: tabs.len(),
+            kept_not_probed: tabs.len(),
+            ..TabPruneOutcome::default()
+        };
+        assert_eq!(outcome.kept, outcome.kept_not_probed);
+        assert_eq!(
+            outcome.kept_last_in_squad
+                + outcome.kept_not_pristine
+                + outcome.kept_zero_panes
+                + outcome.kept_unreachable,
+            0
+        );
+    }
+
+    #[test]
+    fn live_tab_label_names_session_squad_and_tab() {
+        let tab = LiveTab {
+            session: "main".into(),
+            squad_id: 3,
+            squad_name: Some("ops".into()),
+            tab_id: 9,
+            tab_name: Some("shells".into()),
+            pane_count: 1,
+            pristine: false,
+            used_shell_only: true,
+        };
+        let label = live_tab_label(&tab);
+        assert!(label.contains("main"), "{label}");
+        assert!(label.contains("ops"), "{label}");
+        assert!(label.contains("shells"), "{label}");
+        assert!(label.contains("9"), "{label}");
+        let unnamed = LiveTab {
+            squad_name: None,
+            tab_name: None,
+            ..tab
+        };
+        let label = live_tab_label(&unnamed);
+        assert!(label.contains("squad 3"), "{label}");
+        assert!(label.contains("unnamed"), "{label}");
     }
 
     #[test]

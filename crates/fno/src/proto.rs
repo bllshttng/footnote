@@ -315,7 +315,14 @@ fn default_true() -> bool {
 /// and `AgentRow.portal` - additive fields that make the one thread pane an
 /// addressable set. The `thread_pane` bool stays as a compatibility alias
 /// meaning portal 0, so the floor does not move.
-pub const PROTO_VERSION: u32 = 64;
+///
+/// v65 (x-cf97, tab organization): `ControlVerb::TabReorder { squad, tab, to }`
+/// - the CLI door onto the reorder trunk the TUI already owns - and
+/// `PaneInfo.shell_idle`, the measured "idle now" reading (ran something, at a
+/// prompt now) the used-shell prune sweep needs to tell a spent shell from a
+/// running one. A new verb is not additive-tolerant; the field rides the same
+/// generation per house rule.
+pub const PROTO_VERSION: u32 = 65;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -840,6 +847,17 @@ pub enum ControlVerb {
         squad: PaneTarget,
         tab: TabSel,
         name: String,
+    },
+    /// (v65, x-cf97) Move a tab within its squad so it lands at the `to`
+    /// position -> [`ServerMsg::Ok`]. Both selectors resolve through the same
+    /// 1-based-ordinal grammar as every other `Tab*` verb; the server computes
+    /// the delta and runs the exact trunk the interactive
+    /// `Command::ReorderTab` runs, so a move over the wire cannot hold the
+    /// active tab differently than a move from the tab bar.
+    TabReorder {
+        squad: PaneTarget,
+        tab: TabSel,
+        to: TabSel,
     },
     /// Close one whole tab through the same cascade as the interactive
     /// `Command::CloseTab`. An unforced close guards every pane against a
@@ -2421,6 +2439,14 @@ pub struct PaneInfo {
     /// Missing/false is never treated as empty by a cleanup caller.
     #[serde(default)]
     pub pristine_idle_shell: bool,
+    /// (v65, x-cf97) The pane ran something and sits at a prompt NOW: shell
+    /// integration measured (`saw_marker`), no command running, at least one
+    /// completed block. Deliberately narrower than `!pristine_idle_shell`,
+    /// which also covers running and unmeasured panes - a cleanup caller may
+    /// close on this reading, never on the bare negation. `#[serde(default)]`
+    /// keeps a pre-v65 reader wire-tolerant.
+    #[serde(default)]
+    pub shell_idle: bool,
     /// (v51, x-1499) The pane's tab name and 1-based ordinal, so the human
     /// listing prints `tab=<name-or-·N> tab_id=<id>`. `None` for a pane
     /// mid-teardown (not in any tab) or on a pre-v51 reply.
@@ -4222,7 +4248,8 @@ mod tests {
         // 57 -> 58; the classified-lineage pair bumped it 58 -> 59; the
         // workspace-restore verb (x-7b5e) re-bumped it 59 -> 60 (second to
         // merge); DND presence (x-7d02) bumps it 60 -> 61; the sideline lane
-        // axes (x-1b35) bump it 62 -> 63.
+        // axes (x-1b35) bump it 62 -> 63; the portals fields (x-8f9d) bump it
+        // 63 -> 64; the tab-organization pair (x-cf97) bumps it 64 -> 65.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -4231,7 +4258,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 64);
+        assert_eq!(PROTO_VERSION, 65);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4783,6 +4810,7 @@ mod tests {
         for msg in [
             ServerMsg::PaneList {
                 panes: vec![PaneInfo {
+                    shell_idle: false,
                     pane_id: 4,
                     squad_id: 1,
                     squad_name: None,

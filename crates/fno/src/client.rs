@@ -256,6 +256,11 @@ const HINT_DELAY: Duration = Duration::from_millis(400);
 /// until the next keystroke. 40ms: far above intra-CSI byte gaps, far below
 /// the latency a typist feels.
 const CHORD_FLUSH_AFTER: Duration = Duration::from_millis(40);
+/// (x-cf97) How long a held tab number waits for the next digit before
+/// resolving - the tmux escape-time analog for a typed number. Far above an
+/// inter-keystroke gap (so `3` then `4` lands tab 34, never 3 then 4), short
+/// enough that a one-digit jump feels immediate. Enter always resolves now.
+const DIGIT_FLUSH_AFTER: Duration = Duration::from_millis(400);
 /// Transient notice lifetime on the tab bar.
 const NOTICE_TTL: Duration = Duration::from_secs(3);
 
@@ -1232,6 +1237,14 @@ struct View {
     /// EMPTY buffer still sends (blank = clear back to the derived label),
     /// unlike `create`.
     rename: Option<(RenameTarget, String)>,
+    /// (x-cf97) The pending move-to-position prompt: `(tab captured at open,
+    /// typed destination)`, `Some` while the tab menu's `Move to…` entry (or
+    /// `prefix+#`) has it open. Keys divert to [`move_to_keys`], the rename
+    /// overlay's shape with a numeric grammar: digits/backspace edit, Enter
+    /// computes the delta and sends ONE `Command::ReorderTab`, Esc cancels,
+    /// and an out-of-range ordinal keeps the prompt open with a notice - it
+    /// never sends a clamped guess.
+    move_to: Option<(TabId, String)>,
     /// (x-e4f1) The lane-colors drill + text-entry state for the settings
     /// Colors tab. Client-local ephemera like `create`/`rename`; dormant while
     /// another tab or no popup is front, reset on tab switch away from Colors.
@@ -1356,6 +1369,10 @@ struct View {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SweepScope {
     Tabs,
+    /// (x-cf97) The opt-in half: idle shells the operator has typed in. Its
+    /// own row, its own count, its own confirmation - never folded into the
+    /// default tabs half, whose posture stays exactly what it was.
+    UsedShells,
     Dead,
     Both,
 }
@@ -1371,8 +1388,17 @@ enum SweepAction {
 /// What a finished sweep verb reports back to the UI loop.
 #[derive(Debug, Clone)]
 enum SweepMsg {
-    Counts { tabs: usize, dead: usize },
-    Applied { closed: usize, reaped: usize },
+    Counts {
+        tabs: usize,
+        dead: usize,
+        /// (x-cf97) The used-shell population, counted on every probe so its
+        /// modal row can carry its own number even though the flag is off.
+        used: usize,
+    },
+    Applied {
+        closed: usize,
+        reaped: usize,
+    },
     Failed(String),
 }
 
@@ -1863,6 +1889,12 @@ enum MenuAction {
     TabNew,
     TabRename,
     TabReorder(i32),
+    /// (x-cf97) Open the move-to-position prompt on the pinned tab: type the
+    /// 1-based destination, the client computes the delta and sends ONE
+    /// `Command::ReorderTab`. The direct-destination gesture the ±1 pair
+    /// cannot be - moving tab 22 to slot 3 costs one prompt, not nineteen
+    /// presses.
+    TabMoveTo,
     TabJoin(Dir),
     TabClose,
     /// (x-92d3 6.2) Respawn an exited row - the menu twin of peek `r`, the
@@ -1894,6 +1926,7 @@ impl MenuAction {
             } else {
                 "move-tab-right"
             }),
+            MenuAction::TabMoveTo => Some("move-tab-to"),
             MenuAction::Remove => Some("remove-row"),
             // (x-d545) The row-menu verbs join the keyboard: every entry that
             // can carry a key now shows one, and the drawn glyph and the
@@ -2288,6 +2321,10 @@ fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor) -> RowMenu {
         &[MenuAction::TabReorder(1)],
     );
     add(
+        entry_acc("⇥", "Move to…", "move-tab-to"),
+        &[MenuAction::TabMoveTo],
+    );
+    add(
         PopupRow::Grid(vec![cell("◧", "Join Left"), cell("◨", "Join Right")]),
         &[
             MenuAction::TabJoin(Dir::Left),
@@ -2340,6 +2377,10 @@ enum AuxAction {
     /// Apply the prune with one scope. Each choice is the confirmation: the
     /// modal named the counts, the tap picked the half.
     SweepTabs,
+    /// (x-cf97) The opt-in used-shell half: `--tabs-only
+    /// --include-used-shells`. Its own row so a tap can only ever pick the
+    /// posture the modal showed.
+    SweepUsedShells,
     SweepDeadAgents,
     SweepBoth,
     Detach,
@@ -2841,10 +2882,14 @@ fn build_update_modal(outcome: Option<&UpdateOutcome>) -> AuxPopup {
 
 /// Build the centered sweep-threads choice modal from one
 /// `mux workspace prune --dry-run` reading: close the surplus pristine
-/// tabs, reap the dead member rows, or both. A zero count greys its entry
-/// out (0 targets, so arrows skip it and a click is swallowed); with both
-/// counts zero there is nothing to choose, and the header says so.
-fn build_sweep_modal(tabs: usize, dead: usize) -> AuxPopup {
+/// tabs, close the opt-in used-shell tabs, reap the dead member rows, or
+/// combinations. A zero count greys its entry out (0 targets, so arrows skip
+/// it and a click is swallowed); with every count zero there is nothing to
+/// choose, and the header says so. Each row carries its OWN count, and the
+/// tap IS the confirmation - the used-shell half is a separate row, never a
+/// rider on the default tabs half, so the sweep's posture is visible before
+/// it acts (x-cf97).
+fn build_sweep_modal(tabs: usize, used: usize, dead: usize) -> AuxPopup {
     let choice = |label: String, hint: &str, enabled: bool| PopupRow::Entry {
         glyph: "♺".into(),
         label,
@@ -2860,6 +2905,21 @@ fn build_sweep_modal(tabs: usize, dead: usize) -> AuxPopup {
     ));
     if tabs > 0 {
         actions.push(AuxAction::SweepTabs);
+    }
+    rows.push(choice(
+        format!("+ used shells ({used})"),
+        // (review) The flag is ADDITIVE on the CLI: the apply closes the
+        // spent shells AND the surplus pristine tabs, so the hint names the
+        // real total and the row says "+" - the count a row shows must bound
+        // what its tap closes.
+        &format!(
+            "close spent shells plus the {tabs} surplus tabs ({} total)",
+            tabs + used
+        ),
+        used > 0,
+    ));
+    if used > 0 {
+        actions.push(AuxAction::SweepUsedShells);
     }
     rows.push(choice(
         format!("dead agents ({dead})"),
@@ -2920,6 +2980,12 @@ async fn run_sweep_verb(action: SweepAction) -> SweepMsg {
         SweepAction::Apply(scope) => {
             match scope {
                 SweepScope::Tabs => args.push("--tabs-only".to_string()),
+                // (x-cf97) The opt-in half: tabs-only PLUS the flag that
+                // widens the tab fold to spent shells. Never the default.
+                SweepScope::UsedShells => {
+                    args.push("--tabs-only".to_string());
+                    args.push("--include-used-shells".to_string());
+                }
                 SweepScope::Dead => args.push("--dead-only".to_string()),
                 // Both halves, and nothing else: bare prune would also remove
                 // stale squad rows, which the modal never offered to remove.
@@ -2965,12 +3031,25 @@ async fn run_sweep_verb(action: SweepAction) -> SweepMsg {
             ) else {
                 return SweepMsg::Failed("prune output missing count fields".into());
             };
+            // (x-cf97) The used-shell population rides every probe: the field
+            // is missing only when the deployed CLI predates it, which is the
+            // same two-process disagreement the tabs/dead reads refuse on -
+            // but the refusal names the remedy instead of a dead end.
+            // (review) A zero default would grey the row out and LIE about a
+            // population the stale CLI cannot count, so the probe stays
+            // fail-loud.
+            let Some(used) = parsed["tabs_used_shells"].as_u64().map(|v| v as usize) else {
+                return SweepMsg::Failed(
+                    "prune output missing count fields - stale fno CLI? run fno doctor update"
+                        .into(),
+                );
+            };
             if let Some(notice) = parsed["notice"].as_str() {
                 if !notice.is_empty() {
                     return SweepMsg::Failed(notice.to_string());
                 }
             }
-            SweepMsg::Counts { tabs, dead }
+            SweepMsg::Counts { tabs, dead, used }
         }
         SweepAction::Apply(_) => {
             let (Some(closed), Some(reaped)) = (
@@ -3097,6 +3176,7 @@ impl View {
             create_esc: Vec::new(),
             rename: None,
             rename_esc: Vec::new(),
+            move_to: None,
             pending_new_tab: None,
             marks: std::collections::HashSet::new(),
             recruit: None,
@@ -3603,6 +3683,25 @@ impl View {
         self.rename_esc.clear();
     }
 
+    /// Open the move-to-position prompt for `tab` (x-cf97), clearing any other
+    /// keyboard-opened overlay first - the same discipline as
+    /// [`View::open_rename`], whose shape this prompt copies: a surface that
+    /// forgets one of those clears leaves two overlays live at once.
+    fn open_move_to(&mut self, tab: TabId) {
+        self.selector = None;
+        self.answers = None;
+        self.yard = None;
+        self.search = None;
+        self.move_pick = None;
+        self.attach_place = None;
+        self.create = None;
+        self.nav = None;
+        self.recruit = None;
+        self.recruit_esc.clear();
+        self.clear_peek();
+        self.move_to = Some((tab, String::new()));
+    }
+
     /// The greatest tab id in the active squad (ids are monotonic + never
     /// reused, so the max is the newest tab), or `None` when the active squad
     /// is absent/empty (x-0f9d US1). Used only as the arm-time baseline.
@@ -4088,6 +4187,7 @@ impl View {
             || self.attach_place.is_some()
             || self.create.is_some()
             || self.rename.is_some()
+            || self.move_to.is_some()
             || self.recruit.is_some()
             || self.search.is_some()
             || self.peek_input.is_some()
@@ -7180,6 +7280,7 @@ impl View {
             && (self.confirm.is_some()
                 || self.create.is_some()
                 || self.rename.is_some()
+                || self.move_to.is_some()
                 || self.recruit.is_some()
                 || self.search.is_some()
                 || self.hint
@@ -7286,6 +7387,19 @@ impl View {
                 &format!("rename {noun}"),
                 name,
                 Some("empty resets to auto"),
+            );
+            return;
+        }
+        // The move-to prompt (x-cf97): the typed number IS the body; the hint
+        // names the grammar so a `4` never reads as "move 4 left".
+        if let Some((_, buf)) = &self.move_to {
+            self.draw_name_modal(
+                cells,
+                rows,
+                cols,
+                "move tab to position",
+                buf,
+                Some("1-based; Enter moves"),
             );
             return;
         }
@@ -11392,6 +11506,10 @@ async fn attach_and_run(
     // the truth for WHETHER a candidate is held; this only remembers SINCE
     // WHEN, exactly like `prefix_since`.
     let mut chord_since: Option<Instant> = None;
+    // (x-cf97) Same clock for the held tab number: the scanner state is the
+    // truth for WHETHER digits are held; this remembers SINCE WHEN, so a
+    // number typed and then left alone still lands.
+    let mut digits_since: Option<Instant> = None;
     // Carries a partial SGR mouse report split across reads (mouse.rs).
     let mut mouse_carry: Vec<u8> = Vec::new();
     // Clipboard delivery runs on a blocking thread and reports its outcome back
@@ -11605,6 +11723,10 @@ async fn attach_and_run(
         // pending after this window is a lone Esc (or a torn write older than
         // the window) and must not wait for the next keypress.
         let chord_flush_deadline = chord_since.map(|t| t + CHORD_FLUSH_AFTER);
+        // (x-cf97) The held tab number's quiet-window deadline; Enter and the
+        // non-digit terminator resolve sooner, this only covers
+        // number-then-nothing.
+        let digits_flush_deadline = digits_since.map(|t| t + DIGIT_FLUSH_AFTER);
         let pane_ids_deadline = view.pane_ids_until;
         // The which-key hint fires once per pending chord (US4, AC4-HP).
         let hint_deadline = if view.hint {
@@ -11901,6 +12023,14 @@ async fn attach_and_run(
                             } else {
                                 chord_since = None;
                             }
+                            // (x-cf97) Same one-way sync for a held tab
+                            // number: arm the quiet window once; Enter or a
+                            // non-digit clears it by clearing the state.
+                            if scanner.digits_pending() {
+                                digits_since.get_or_insert_with(Instant::now);
+                            } else {
+                                digits_since = None;
+                            }
                             if let Err(e) = compositor.draw(&view.compose()) {
                                 break Err(format!("draw: {e}"));
                             }
@@ -12120,17 +12250,17 @@ async fn attach_and_run(
                 // stomped by a landing probe.
                 view.sweep_inflight = false;
                 match msg {
-                    SweepMsg::Counts { tabs, dead } => {
+                    SweepMsg::Counts { tabs, used, dead } => {
                         // A popup opened after the tap is the operator's
                         // NEWER intent; it is never stomped by a landing
                         // probe. The tap is answered with a notice instead
                         // of silently dropped.
                         if view.aux.is_none() {
-                            view.aux = Some(build_sweep_modal(tabs, dead));
+                            view.aux = Some(build_sweep_modal(tabs, used, dead));
                             view.aux_esc.clear();
                         } else {
                             view.set_notice(format!(
-                                "sweep ready: tabs {tabs}, dead agents {dead} - reopen the menu"
+                                "sweep ready: tabs {tabs}, used shells {used}, dead agents {dead} - reopen the menu"
                             ));
                         }
                     }
@@ -12189,6 +12319,28 @@ async fn attach_and_run(
                 if let Some(event) = scanner.flush_chord() {
                     if let Err(e) = dispatch_event(&mut view, event, &mut sock_w).await {
                         break Err(e);
+                    }
+                }
+            }
+            _ = async {
+                match digits_flush_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if digits_flush_deadline.is_some() => {
+                // (x-cf97) Quiet window elapsed with a tab number still held:
+                // resolve it. The dispatch answers an out-of-range number
+                // with a notice, so a missed jump is never a silent no-op -
+                // and unlike the chord release above (whose send repaints via
+                // the pane's own output), a notice only exists if THIS loop
+                // draws it.
+                digits_since = None;
+                if let Some(event) = scanner.flush_digits() {
+                    if let Err(e) = dispatch_event(&mut view, event, &mut sock_w).await {
+                        break Err(e);
+                    }
+                    if let Err(e) = compositor.draw(&view.compose()) {
+                        break Err(format!("draw: {e}"));
                     }
                 }
             }
@@ -13123,6 +13275,10 @@ async fn handle_stdin(
         // lingering overlay never swallows the typed name (x-9e5e finding).
         return rename_keys(view, &passthrough, sock_w).await;
     }
+    if view.move_to.is_some() {
+        // (x-cf97) Same precedence slot as the rename overlay it mirrors.
+        return move_to_keys(view, &passthrough, sock_w).await;
+    }
     if view.recruit.is_some() {
         return recruit_keys(view, &passthrough, sock_w).await;
     }
@@ -13176,16 +13332,22 @@ async fn dispatch_event(
                 .await
                 .map_err(|e| format!("command send failed: {e}"))?;
         }
-        Event::SelectTabIdx(idx) => {
-            // Resolve the digit's index to a stable TabId against the
-            // last Layout; an out-of-range digit is a local BEL, never a
-            // wire message the server would refuse anyway.
-            let id = view
+        Event::SelectTabIdx(ordinal) => {
+            // (x-cf97) The event carries the 1-BASED ordinal the operator
+            // reads off the tab strip (x-1499's three-identifier-spaces trap:
+            // the ordinal is the SHIFTING space and is deliberately what a
+            // number gesture addresses; it is resolved to the stable TabId
+            // HERE, once, so a layout push mid-gesture cannot move the
+            // target). An out-of-range number answers with a notice naming
+            // the miss - a silent BEL reads as a dead keybind - plus the BEL,
+            // and never a wire message the server would refuse anyway.
+            let squad = view
                 .layout
                 .squads
                 .iter()
-                .find(|s| s.id == view.layout.active_squad)
-                .and_then(|s| s.tabs.get(idx))
+                .find(|s| s.id == view.layout.active_squad);
+            let id = squad
+                .and_then(|s| ordinal.checked_sub(1).and_then(|idx| s.tabs.get(idx)))
                 .map(|t| t.id);
             match id {
                 Some(id) => {
@@ -13195,6 +13357,8 @@ async fn dispatch_event(
                 }
                 None => {
                     let _ = raw_out(b"\x07");
+                    let count = squad.map(|s| s.tabs.len()).unwrap_or(0);
+                    view.set_notice(format!("no tab {ordinal} ({count} open)"));
                 }
             }
         }
@@ -13440,6 +13604,28 @@ async fn dispatch_event(
                     view.open_rename(RenameTarget::Tab(id));
                     // Swallow same-chunk bytes after the chord, like
                     // SearchOpen: nothing may leak into the pane.
+                    return Ok(DispatchFlow::Break);
+                }
+                None => {
+                    let _ = raw_out(b"\x07");
+                }
+            }
+        }
+        Event::OpenMoveTo => {
+            // (x-cf97) Move-to targets the ACTIVE tab, resolved to its stable
+            // id at open so a tab switch mid-edit cannot retarget the send -
+            // the OpenRename discipline. Same-chunk bytes after the chord are
+            // swallowed, like every prompt-opening chord.
+            let tab = view
+                .layout
+                .squads
+                .iter()
+                .find(|s| s.id == view.layout.active_squad)
+                .and_then(|s| s.tabs.get(s.active_tab))
+                .map(|t| t.id);
+            match tab {
+                Some(id) => {
+                    view.open_move_to(id);
                     return Ok(DispatchFlow::Break);
                 }
                 None => {
@@ -14059,6 +14245,17 @@ async fn execute_row_menu_action(
             .map_err(|e| format!("reorder-tab send failed: {e}"))?;
             return Ok(());
         }
+        (MenuTarget::Tab(tid), MenuAction::TabMoveTo) => {
+            // Same execute-time re-resolution as the reorder pair: a tab that
+            // closed or moved between open and pick is a notice, never a
+            // redirected action.
+            if view.find_tab(tid).is_none() {
+                view.set_notice("tab is no longer here".into());
+                return Ok(());
+            }
+            view.open_move_to(tid);
+            return Ok(());
+        }
         (MenuTarget::Tab(tid), MenuAction::TabJoin(dir)) => {
             // Join the whole tab into the VIEWED tab as a split of the focused
             // pane - the menu twin of dragging the tab cell onto a content
@@ -14111,6 +14308,7 @@ async fn execute_row_menu_action(
         | (_, MenuAction::TabNew)
         | (_, MenuAction::TabRename)
         | (_, MenuAction::TabReorder(_))
+        | (_, MenuAction::TabMoveTo)
         | (_, MenuAction::TabJoin(_))
         | (_, MenuAction::TabClose) => {
             view.set_notice("action does not apply to this row".into());
@@ -14359,6 +14557,7 @@ async fn execute_row_menu_action(
         MenuAction::TabNew
         | MenuAction::TabRename
         | MenuAction::TabReorder(_)
+        | MenuAction::TabMoveTo
         | MenuAction::TabJoin(_)
         | MenuAction::TabClose => view.set_notice("tab actions need a tab cell".into()),
     }
@@ -14634,6 +14833,7 @@ async fn execute_aux_action(
             }
         }
         AuxAction::SweepTabs => begin_sweep_apply(view, SweepScope::Tabs),
+        AuxAction::SweepUsedShells => begin_sweep_apply(view, SweepScope::UsedShells),
         AuxAction::SweepDeadAgents => begin_sweep_apply(view, SweepScope::Dead),
         AuxAction::SweepBoth => begin_sweep_apply(view, SweepScope::Both),
         AuxAction::OpenConnections => {
@@ -16871,6 +17071,89 @@ async fn rename_keys(
                 }
                 _ => {}
             },
+        }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// Move-to-position prompt keys (x-cf97). The rename overlay's shape
+/// ([`rename_keys`]: Esc cancels locally, Backspace pops, printable append)
+/// with a numeric grammar: only digits enter the buffer, Enter resolves the
+/// 1-based ordinal against the tab's squad strip, computes the delta to the
+/// tab's current index, and sends ONE `Command::ReorderTab`. An out-of-range
+/// ordinal keeps the prompt open with a notice - it never sends a clamped
+/// guess, because a move that lands somewhere else than named is worse than
+/// no move. The tab id was captured at open, so a tab switch mid-edit cannot
+/// retarget the send.
+async fn move_to_keys(
+    view: &mut View,
+    bytes: &[u8],
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<StdinFlow, String> {
+    for &b in bytes {
+        if view.move_to.is_none() {
+            break;
+        }
+        match b {
+            0x1b => {
+                view.move_to = None;
+                break;
+            }
+            b'\r' | b'\n' => {
+                if let Some((tab, buf)) = view.move_to.take() {
+                    let ordinal: usize = buf.parse().unwrap_or(0);
+                    let Some((squad, current_idx, _)) = view.find_tab(tab) else {
+                        view.set_notice("tab is no longer here".into());
+                        break;
+                    };
+                    let len = view
+                        .layout
+                        .squads
+                        .iter()
+                        .find(|s| s.id == squad)
+                        .map(|s| s.tabs.len())
+                        .unwrap_or(0);
+                    if ordinal == 0 || ordinal > len {
+                        // Re-open with the typed text intact: the prompt stays
+                        // open with a notice, so a typo costs a Backspace, not
+                        // the whole gesture.
+                        view.move_to = Some((tab, buf));
+                        view.set_notice(format!("position is 1..={len}"));
+                    } else {
+                        let delta = ordinal as i64 - 1 - current_idx as i64;
+                        if delta == 0 {
+                            view.set_notice(format!("tab already at {ordinal}"));
+                        } else {
+                            write_msg(
+                                sock_w,
+                                &ClientMsg::Command(Command::ReorderTab {
+                                    squad,
+                                    tab,
+                                    delta: delta as i32,
+                                }),
+                            )
+                            .await
+                            .map_err(|e| format!("reorder-tab send failed: {e}"))?;
+                        }
+                    }
+                }
+                break;
+            }
+            0x7f | 0x08 => {
+                if let Some((_, buf)) = view.move_to.as_mut() {
+                    buf.pop();
+                }
+            }
+            b'0'..=b'9' => {
+                if let Some((_, buf)) = view.move_to.as_mut() {
+                    // Four digits is far past any tab strip; the cap keeps the
+                    // operator seeing exactly the number Enter will send.
+                    if buf.len() < 4 {
+                        buf.push(b as char);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     Ok(StdinFlow::Continue)
@@ -22406,13 +22689,15 @@ mod tests {
             text.contains("find: goto squad/tab/pane/agent"),
             "the f binding's action names every row class nav_rows emits"
         );
-        // The digit row must state its ceiling AND the way past it. Asserting
-        // both halves is what stops a later trim from restoring a bare
-        // `select tab`, which is the label that made `f` look like the lesser
-        // tool in the first place.
+        // (x-cf97) The digit row names the gesture, its resolve doors, and the
+        // Alt form. The number jump is no longer capped at nine, so the old
+        // "first 9; f goes past" ceiling would now be the lie; what must stay
+        // is the honest description of an input path the scanner really runs.
         assert!(
-            text.contains("first 9") && text.contains("f goes past"),
-            "the 1-9 row states its ceiling and names the uncapped way past it"
+            text.contains("jump to tab by number")
+                && text.contains("Enter")
+                && text.contains("Alt works too"),
+            "the digit row names the gesture and its resolve doors"
         );
     }
 
@@ -24097,6 +24382,7 @@ mod tests {
                 super::MenuAction::TabRename,
                 super::MenuAction::TabReorder(-1),
                 super::MenuAction::TabReorder(1),
+                super::MenuAction::TabMoveTo,
                 super::MenuAction::TabJoin(Dir::Left),
                 super::MenuAction::TabJoin(Dir::Right),
                 super::MenuAction::TabJoin(Dir::Up),
@@ -26697,17 +26983,19 @@ mod tests {
     }
 
     /// The choice modal is centered (not anchored to the menu cell), offers
-    /// the three choices with live counts, and a zero count greys its entry
-    /// out rather than offering a lie.
+    /// the choices with live counts, and a zero count greys its entry
+    /// out rather than offering a lie. The used-shell half (x-cf97) is its
+    /// own row with its own count - never a rider on the tabs half.
     #[test]
     fn sweep_modal_is_centered_with_live_counts_and_inert_zeroes() {
-        let modal = build_sweep_modal(3, 7);
+        let modal = build_sweep_modal(3, 19, 7);
         assert_eq!(modal.popup.anchor, Anchor::Center);
-        assert_eq!(modal.popup.targets().len(), 3, "{:?}", modal.popup.rows);
+        assert_eq!(modal.popup.targets().len(), 4, "{:?}", modal.popup.rows);
         assert_eq!(
             modal.actions,
             vec![
                 AuxAction::SweepTabs,
+                AuxAction::SweepUsedShells,
                 AuxAction::SweepDeadAgents,
                 AuxAction::SweepBoth
             ]
@@ -26723,12 +27011,16 @@ mod tests {
             .collect();
         assert!(labels.contains(&("tabs (3)".into(), true)), "{labels:?}");
         assert!(
+            labels.contains(&("+ used shells (19)".into(), true)),
+            "{labels:?}"
+        );
+        assert!(
             labels.contains(&("dead agents (7)".into(), true)),
             "{labels:?}"
         );
         assert!(labels.contains(&("both".into(), true)), "{labels:?}");
 
-        let half = build_sweep_modal(0, 2);
+        let half = build_sweep_modal(0, 0, 2);
         assert_eq!(
             half.popup.targets().len(),
             2,
@@ -26739,7 +27031,7 @@ mod tests {
             vec![AuxAction::SweepDeadAgents, AuxAction::SweepBoth]
         );
 
-        let empty = build_sweep_modal(0, 0);
+        let empty = build_sweep_modal(0, 0, 0);
         assert_eq!(empty.popup.targets().len(), 0, "{:?}", empty.popup.rows);
         assert!(empty
             .popup
@@ -34373,6 +34665,82 @@ mod tests {
             })
         );
         assert_eq!(v.rename, None, "submit closes the overlay");
+    }
+
+    #[tokio::test]
+    async fn move_to_keys_enter_sends_one_reorder_with_the_computed_delta() {
+        // (x-cf97) The typed ordinal is 1-based, the delta is computed against
+        // the tab's current index, and ONE ReorderTab carries it.
+        let mut v = two_pane_view();
+        v.open_move_to(1); // squad 1's second tab: visible ordinal 2
+        let mut buf: Vec<u8> = Vec::new();
+        move_to_keys(&mut v, b"1\r", &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert_eq!(
+            msg,
+            ClientMsg::Command(Command::ReorderTab {
+                squad: 1,
+                tab: 1,
+                delta: -1
+            })
+        );
+        assert_eq!(v.move_to, None, "submit closes the prompt");
+    }
+
+    #[tokio::test]
+    async fn move_to_keys_out_of_range_keeps_the_prompt_open_with_a_notice() {
+        // The prompt never sends a clamped guess: ordinal 3 in a two-tab
+        // squad re-opens with the typed text intact and says so.
+        let mut v = two_pane_view();
+        v.open_move_to(1);
+        let mut buf: Vec<u8> = Vec::new();
+        move_to_keys(&mut v, b"3\r", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "nothing is sent");
+        let (tab, text) = v.move_to.expect("the prompt stays open");
+        assert_eq!((tab, text.as_str()), (1, "3"));
+        assert!(v.notice.is_some(), "the refusal names the range");
+    }
+
+    #[tokio::test]
+    async fn move_to_keys_esc_cancels_and_swallows_the_tail() {
+        let mut v = two_pane_view();
+        v.open_move_to(0);
+        let mut buf: Vec<u8> = Vec::new();
+        move_to_keys(&mut v, b"2\x1b9", &mut buf).await.unwrap();
+        assert_eq!(v.move_to, None, "Esc cancels the prompt");
+        assert!(buf.is_empty(), "no tail byte reaches the pane");
+    }
+
+    #[tokio::test]
+    async fn jump_to_a_number_that_names_no_tab_sets_a_notice_and_sends_nothing() {
+        // (x-cf97) A digit that names no tab answers with a notice naming the
+        // miss - a silent BEL reads as a dead keybind - and never a wire
+        // message the server would refuse. The event now carries the 1-based
+        // ordinal the operator reads off the strip, so 1 is the FIRST tab,
+        // and 0 (an unparseable hold) is refused like any other miss.
+        let mut v = two_pane_view();
+        let mut buf: Vec<u8> = Vec::new();
+        dispatch_event(&mut v, Event::SelectTabIdx(99), &mut buf)
+            .await
+            .unwrap();
+        assert!(buf.is_empty(), "nothing is sent for a missing tab");
+        let (text, _) = v.notice.expect("the refusal names the miss");
+        assert!(text.contains("no tab 99"), "{text}");
+        assert!(
+            text.contains("2 open"),
+            "the notice names the count: {text}"
+        );
+
+        // Ordinal 1 is the FIRST tab (1-based), not the second.
+        let mut v = two_pane_view();
+        let mut buf: Vec<u8> = Vec::new();
+        dispatch_event(&mut v, Event::SelectTabIdx(1), &mut buf)
+            .await
+            .unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let msg: ClientMsg = crate::proto::read_msg_sync(&mut cur).unwrap();
+        assert_eq!(msg, ClientMsg::Command(Command::SelectTab(0)));
     }
 
     #[tokio::test]
