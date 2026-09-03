@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
-from fno.pr import _coverage_gate, _merge, _reviews, _status
+import pytest
+
+from fno.pr import _coverage_gate, _merge, _status
 from fno.pr._proc import Result
 
 from .test_pr_merge import FakeRun, enabled  # noqa: F401
@@ -48,17 +49,15 @@ def _prepare_gate(monkeypatch, tmp_path, row: dict, *, require_corroboration: bo
         "disposition_refusal",
         lambda chain, cov, cwd: ("", "", [], []),
     )
+    # The real model, never a SimpleNamespace: the merge floor reads other
+    # review fields (posture) off this same object, so a stub carrying only the
+    # field under test turns any new floor read into a failure of THIS test.
+    from fno.config import ReviewBlock, SettingsModel
+
     monkeypatch.setattr(
         "fno.config.load_settings_for_repo",
-        lambda root: SimpleNamespace(
-            review=SimpleNamespace(
-                require_corroboration=require_corroboration,
-                posture=None,
-                github_apps=None,
-                peers=False,
-                self_review_required=True,
-                reviewers=[],
-            )
+        lambda root: SettingsModel(
+            review=ReviewBlock(require_corroboration=require_corroboration)
         ),
     )
 
@@ -106,11 +105,44 @@ def test_policy_on_keeps_self_attested_coverage_refused(monkeypatch, tmp_path):
     assert _coverage_gate.SELF_ATTESTED_NOTE_PREFIX not in note
 
 
+def test_dead_probe_costs_the_note_but_never_the_verdict(monkeypatch, tmp_path):
+    """Policy off, the note is additive, so an unreadable approval flag drops
+    the note and leaves the row COVERED."""
+    _prepare_gate(monkeypatch, tmp_path, _self_attested_row(), require_corroboration=False)
+
+    def _boom(cwd):
+        raise RuntimeError("config unreadable")
+
+    monkeypatch.setattr(_coverage_gate, "_github_approval_satisfies", _boom)
+
+    state, refusal, _, note, _ = _coverage_gate._ordinary_verdict(
+        42, str(tmp_path), recompute=True
+    )
+
+    assert state == _coverage_gate.COVERED
+    assert refusal == ""
+    assert _coverage_gate.SELF_ATTESTED_NOTE_PREFIX not in note
+
+
+def test_dead_probe_under_policy_on_fails_closed(monkeypatch, tmp_path):
+    """Policy on, the refusal IS the verdict. Swallowing here would merge a row
+    the gate never checked, so the probe's failure must reach the caller."""
+    _prepare_gate(monkeypatch, tmp_path, _self_attested_row(), require_corroboration=True)
+
+    def _boom(cwd):
+        raise RuntimeError("config unreadable")
+
+    monkeypatch.setattr(_coverage_gate, "_github_approval_satisfies", _boom)
+
+    with pytest.raises(RuntimeError, match="config unreadable"):
+        _coverage_gate._ordinary_verdict(42, str(tmp_path), recompute=True)
+
+
 def test_covered_merge_receipt_names_self_attestation(
-    enabled,
+    enabled,  # noqa: F811 - the imported fixture, rebound as this test's parameter
     monkeypatch,
     capsys,
-    tmp_path,  # noqa: F811
+    tmp_path,
 ):
     _prepare_gate(monkeypatch, tmp_path, _self_attested_row(), require_corroboration=False)
     fake = FakeRun(
@@ -121,32 +153,57 @@ def test_covered_merge_receipt_names_self_attestation(
 
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
 
+    # The WHOLE line, never a substring: the first spelling of this receipt
+    # printed "coverage coverage is the author's own ..." and a substring
+    # assertion passed it.
     assert (
-        "coverage is the author's own local attestation, uncorroborated" in capsys.readouterr().err
+        "self-attested only: coverage is the author's own local attestation, "
+        "uncorroborated (config.review.require_corroboration = false)"
+    ) in [line.strip() for line in capsys.readouterr().err.splitlines()]
+
+
+def _fetch_stub(state: str):
+    return lambda pr, cwd: (
+        {
+            "state": state,
+            "headRefOid": HEAD,
+            "statusCheckRollup": [
+                {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
+            ],
+        },
+        "",
     )
 
 
-def test_status_notes_terminal_and_unknown_coverage(monkeypatch, capsys):
-    monkeypatch.setattr(
-        _status,
-        "_fetch",
-        lambda pr, cwd: (
-            {
-                "state": "MERGED",
-                "headRefOid": HEAD,
-                "statusCheckRollup": [
-                    {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
-                ],
-            },
-            "",
-        ),
-    )
+def test_status_notes_terminal_coverage(monkeypatch, capsys):
+    monkeypatch.setattr(_status, "_fetch", _fetch_stub("MERGED"))
 
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
 
+    assert out["review_coverage"]["coverage"] == "not_asked"
     assert out["review_coverage"]["note"] == (
         "not asked: PR is terminal (merged or closed); this says nothing about "
         "coverage at merge time"
     )
-    assert _reviews._UNKNOWN_COVERAGE["note"] == "coverage probe failed"
+
+
+def test_status_notes_unknown_coverage_when_the_probe_dies(monkeypatch, capsys):
+    """The read-failure sentinel reaches the payload, and says which sentinel it
+    is. Asserting the constant against its own literal would pass with the
+    terminal sentinel wired here instead - the collapse this note exists to
+    prevent."""
+    monkeypatch.setattr(_status, "_fetch", _fetch_stub("OPEN"))
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: False)
+    monkeypatch.setattr(_status, "_merge_hold_reason", lambda pr, cwd: None)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("events log unreadable")
+
+    monkeypatch.setattr(_status, "read_review_coverage", _boom)
+
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["review_coverage"]["coverage"] == "unknown"
+    assert out["review_coverage"]["note"] == "coverage probe failed"

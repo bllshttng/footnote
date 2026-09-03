@@ -1952,10 +1952,10 @@ def run_merge(
         "",
     )
     if seg:
-        print(
-            "coverage " + seg[len(_coverage_gate.SELF_ATTESTED_NOTE_PREFIX) :],
-            file=sys.stderr,
-        )
+        # The segment is already a whole sentence carrying its own label, so it
+        # prints verbatim. Re-labelling it here spelled "coverage coverage is
+        # the author's own ..." on the receipt this PR exists to make readable.
+        print(seg, file=sys.stderr)
 
     # covered_head (from the gate) pins the merge so a racing push after the
     # coverage check cannot land an unreviewed head (x-0eaf TOCTOU). The

@@ -546,37 +546,72 @@ def rests_on_self_attestation_alone(
     )
 
 
-def _corroboration_refusal(cov: Optional[dict], cwd: str) -> Optional[str]:
-    """The refusal when ``config.review.require_corroboration`` is on and the
-    coverage row rests on the author's own attestation alone. None when the
-    policy is off, the row carries corroboration, or authorship is unmeasured
-    (an unmeasured row is not proof of corroboration, but it is not proof of
-    its absence either - fail open, as the Rust-side predicate does).
+def _corroboration_verdict(cov: Optional[dict], cwd: str) -> Tuple[str, str]:
+    """The corroboration rule read ONCE, as the two sentences it can produce:
+    ``(refusal, note)``. At most one is ever non-empty.
+
+    The policy-on refusal and the policy-off note are inverse readings of a
+    single measurement, so they share one config read and one predicate call.
+    Two copies would let them drift into disagreeing about the same evidence,
+    and they would say so on the receipt: one PR refused as uncorroborated
+    while a sibling's covered receipt calls the identical row corroborated.
+    ``rests_on_self_attestation_alone`` already documents what that costs -
+    it was a third implementation of one counting rule.
+
+    Empty on both when the row carries corroboration, when authorship is
+    unmeasured (not proof of corroboration, but not proof of its absence
+    either - fail open, as the Rust-side predicate does), or when the config
+    is unreadable.
     """
     if not cov:
-        return None
+        return "", ""
     try:
-
         from fno.config import load_settings_for_repo
 
         root = _repo_root(cwd)
         _log_config_receipt(root, "config.review.require_corroboration")
         review = load_settings_for_repo(root).review
-        if not getattr(review, "require_corroboration", False):
-            return None
+        required = bool(getattr(review, "require_corroboration", False))
     except Exception:  # noqa: BLE001 - an unreadable config never tightens a gate
-        return None
+        return "", ""
 
-    if not rests_on_self_attestation_alone(
-        cov, _github_approval_satisfies(cwd)
-    ):
-        return None
-    return (
-        "coverage rests on the author's own attestation alone "
-        "(config.review.require_corroboration = true); corroboration satisfies "
-        "it two ways: a second session's head-pinned attestation, or a GitHub "
-        "App review"
+    try:
+        rests_alone = rests_on_self_attestation_alone(cov, _github_approval_satisfies(cwd))
+    except Exception:  # noqa: BLE001 - the guard differs by posture, below
+        # The two postures want opposite things from a probe that cannot
+        # answer. Policy off, the note is additive: a dead probe costs the
+        # note and never the verdict. Policy on, the refusal IS the verdict,
+        # and `coverage_verdict` is called unguarded by `run_merge`, so
+        # re-raising fails the merge closed instead of merging a row this
+        # gate never managed to check.
+        if required:
+            raise
+        return "", ""
+
+    if not rests_alone:
+        return "", ""
+    if required:
+        return (
+            "coverage rests on the author's own attestation alone "
+            "(config.review.require_corroboration = true); corroboration satisfies "
+            "it two ways: a second session's head-pinned attestation, or a GitHub "
+            "App review"
+        ), ""
+    # Policy off, so this row COVERS - and the receipt still names what the
+    # coverage rests on. A merge nobody but the author vouched for is a fact
+    # about the merge, not a refusal to make it.
+    return "", (
+        SELF_ATTESTED_NOTE_PREFIX
+        + "coverage is the author's own local attestation, uncorroborated "
+        "(config.review.require_corroboration = false)"
     )
+
+
+def _corroboration_refusal(cov: Optional[dict], cwd: str) -> Optional[str]:
+    """The refusal half of :func:`_corroboration_verdict`, for the readers that
+    want only it (``fno do pr status``). None when there is none.
+    """
+    return _corroboration_verdict(cov, cwd)[0] or None
 
 
 def posture_refusal(cov: Optional[dict], *, recomputed: bool = False) -> Optional[str]:
@@ -698,7 +733,7 @@ def _ordinary_verdict(
             return UNANSWERED, "", "", f"events read raised: {exc}", None
 
     covered, failed = covered_conjuncts(cov, head, code_review_required)
-    corroboration = _corroboration_refusal(cov, cwd)
+    corroboration, self_attested_note = _corroboration_verdict(cov, cwd)
     # `recomputed` is the freshness proof: only a row the producer JUST wrote
     # can prove the binary resolved no rung. A stored pre-posture row is
     # legacy evidence, not a stale binary.
@@ -810,23 +845,6 @@ def _ordinary_verdict(
             remaining = _rounds_remaining_note(rounds, max_rounds)
             note = "; ".join(x for x in (recompute_note, unread_note, remaining) if x)
             return REFUSED, disposition_text, "", note, (head, disposition_hard)
-        self_attested_note = ""
-        try:
-            from fno.config import load_settings_for_repo
-
-            root = _repo_root(cwd)
-            _log_config_receipt(root, "config.review.require_corroboration")
-            review = load_settings_for_repo(root).review
-            if not getattr(review, "require_corroboration", False) and cov is not None and rests_on_self_attestation_alone(
-                cov, _github_approval_satisfies(cwd)
-            ):
-                self_attested_note = (
-                    SELF_ATTESTED_NOTE_PREFIX
-                    + "coverage is the author's own local attestation, uncorroborated "
-                    "(config.review.require_corroboration = false)"
-                )
-        except Exception:  # noqa: BLE001 - additive signal, never tightens the gate
-            pass
         notes = [
             n
             for n in (
