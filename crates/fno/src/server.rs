@@ -8568,14 +8568,22 @@ impl Core {
     }
 
     /// Broadcast a one-line notice to every attached client (restore + degraded
-    /// paths that are not scoped to one sender).
-    fn notice_all(&self, text: impl Into<String>) {
+    /// paths that are not scoped to one sender). Reports whether ANY client
+    /// received it, so a caller latching on the broadcast knows the message
+    /// actually landed (x-0719): a latch set on an empty room burns a
+    /// once-per-lifetime notice on nobody.
+    fn notice_all(&self, text: impl Into<String>) -> bool {
         let text = text.into();
+        let mut delivered = false;
         for c in &self.clients {
-            let _ = c
-                .reliable_tx
-                .try_send(ServerMsg::Notice { text: text.clone() });
+            if c.reliable_tx
+                .try_send(ServerMsg::Notice { text: text.clone() })
+                .is_ok()
+            {
+                delivered = true;
+            }
         }
+        delivered
     }
 
     /// (x-c914) The birth account + isolated `config_dir` for a to-be-attached
@@ -9273,9 +9281,11 @@ impl Core {
                                 }
                                 member_panes.push((binding, pid, m.tab_name.clone()));
                             }
-                            Err(error) => self.notice_all(format!(
-                                "restore: could not hold {worker_name}: {error}"
-                            )),
+                            Err(error) => {
+                                self.notice_all(format!(
+                                    "restore: could not hold {worker_name}: {error}"
+                                ));
+                            }
                         }
                         continue;
                     }
@@ -9459,10 +9469,12 @@ impl Core {
                                 ));
                             }
                         }
-                        None => self.notice_all(format!(
-                            "restore: tab {} has a malformed stored tree; restoring flat",
-                            st.tab_name.as_deref().unwrap_or("?")
-                        )),
+                        None => {
+                            self.notice_all(format!(
+                                "restore: tab {} has a malformed stored tree; restoring flat",
+                                st.tab_name.as_deref().unwrap_or("?")
+                            ));
+                        }
                     }
                 }
                 // A live member pane no tree placed (recruited after the last
@@ -14872,7 +14884,9 @@ impl Core {
                 for n in notices {
                     match to {
                         Some(cid) => self.notice(cid, n),
-                        None => self.notice_all(n),
+                        None => {
+                            self.notice_all(n);
+                        }
                     }
                 }
                 Flow::Continue
@@ -15409,10 +15423,15 @@ impl Core {
                     && self.portals.is_empty()
                     && rows.iter().any(|a| a.mux.is_none() && !a.exited)
                 {
-                    self.portal_noticed = true;
-                    self.notice_all(
+                    // (x-0719) Latch on DELIVERY, not on the attempt: workers
+                    // register before an operator attaches in the ordinary
+                    // daemon startup, so a latch set with no client attached
+                    // would burn the once-per-lifetime notice on nobody.
+                    if self.notice_all(
                         "thread row present: reach a row (Enter or click) to open portal 0; P opens another portal beside it",
-                    );
+                    ) {
+                        self.portal_noticed = true;
+                    }
                 }
                 self.agents = rows;
                 self.branch_by_cwd = branches;
@@ -26804,6 +26823,84 @@ mod tests {
             notices.iter().any(|t| t.contains("256")),
             "the refusal names the exhausted ceiling: {notices:?}"
         );
+    }
+
+    #[test]
+    fn the_portal_notice_latches_on_delivery() {
+        // x-0719 AC10-HP: with a client attached, the first paneless live row
+        // both delivers the discoverability notice and sets the latch.
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(32);
+        core.attach(
+            9,
+            24,
+            80,
+            "/tmp/seen".into(),
+            "/tmp/seen".into(),
+            tx,
+            DirtyMap::default(),
+            Arc::new(Notify::new()),
+        );
+        while rx.try_recv().is_ok() {}
+        let rows = vec![bg_row("bg-worker", "/tmp/seen", None)];
+
+        core.handle_msg(CoreMsg::AgentRows {
+            rows,
+            branches: HashMap::new(),
+            tails: HashMap::new(),
+        });
+
+        let notices = drain_notices(&mut rx);
+        assert!(
+            notices.iter().any(|t| t.contains("portal 0")),
+            "the notice reached the attached client: {notices:?}"
+        );
+        assert!(core.portal_noticed, "the latch set on a real delivery");
+    }
+
+    #[test]
+    fn the_portal_notice_waits_for_a_client() {
+        // x-0719 AC11-EDGE: a daemon whose workers register before an operator
+        // attaches is the ORDINARY startup ordering. The old set-before-
+        // broadcast burned the once-per-lifetime latch on nobody, and the
+        // discoverability notice never fired again. With no client attached
+        // the latch stays unset; a later row event delivers.
+        let mut core = empty_core();
+        let rows = vec![bg_row("bg-worker", "/tmp/seen", None)];
+        core.handle_msg(CoreMsg::AgentRows {
+            rows: rows.clone(),
+            branches: HashMap::new(),
+            tails: HashMap::new(),
+        });
+        assert!(!core.portal_noticed, "no client: the latch stays unset");
+
+        core.shells = vec!["/bin/cat".into()];
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(32);
+        core.attach(
+            9,
+            24,
+            80,
+            "/tmp/seen".into(),
+            "/tmp/seen".into(),
+            tx,
+            DirtyMap::default(),
+            Arc::new(Notify::new()),
+        );
+        while rx.try_recv().is_ok() {}
+        core.handle_msg(CoreMsg::AgentRows {
+            rows,
+            branches: HashMap::new(),
+            tails: HashMap::new(),
+        });
+
+        assert!(
+            drain_notices(&mut rx)
+                .iter()
+                .any(|t| t.contains("portal 0")),
+            "the deferred notice delivers once a client exists"
+        );
+        assert!(core.portal_noticed, "delivered once, then latched");
     }
 
     #[test]
