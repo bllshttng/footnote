@@ -282,11 +282,12 @@ const LOCK_FILE: &str = "fno-process-admission.lock";
 const CHILD_MARKERS_FILE: &str = "fno-process-admission.children";
 const ADMISSION_SWITCH: &str = "FNO_PROCESS_ADMISSION";
 
-/// The accepted spellings, named once so the parser and every error message
-/// cannot drift. An invalid value refuses the spawn, so this is the one
-/// switch in the codebase whose vocabulary an operator meets while already
-/// wedged; it accepts the obvious synonyms rather than failing closed on a
-/// plausible one.
+/// The accepted spellings. An invalid value refuses the spawn, so this is
+/// the one switch in the codebase whose vocabulary an operator meets while
+/// already wedged; it accepts the obvious synonyms rather than failing
+/// closed on a plausible one. The arrays are the parser and
+/// `ADMISSION_ACCEPTED` is what the operator reads, so a test holds the two
+/// together rather than a comment asking that they be kept in step.
 const ADMISSION_OFF: [&str; 4] = ["off", "false", "0", "no"];
 const ADMISSION_ON: [&str; 4] = ["on", "true", "1", "yes"];
 /// Shared with the e2e assertions, like `BYPASS_HINT`, so the accepted set
@@ -1138,10 +1139,53 @@ mod tests {
     /// guard is held for the whole test, not just the setup.
     static LEDGER_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn isolate(label: &str) -> (std::sync::MutexGuard<'static, ()>, PathBuf) {
+    /// Holds the ledger lock and puts both env vars back on drop.
+    ///
+    /// Neither var may leak past the test. `server.rs` latches `FNO_E2E`
+    /// into a `OnceLock` for the life of the process, and `pty.rs` reads it
+    /// per call, so one leaked set here turns on E2E behavior for every
+    /// later test in this binary. Neither may simply be left unset either:
+    /// without `FNO_E2E`, `admission_state_suffix()` answers `global` and
+    /// this helper would delete the operator's live ledger.
+    struct LedgerEnv {
+        _guard: Option<std::sync::MutexGuard<'static, ()>>,
+        previous: [(&'static str, Option<std::ffi::OsString>); 2],
+    }
+
+    impl LedgerEnv {
+        /// Save both vars now and put them back on drop. The lock is
+        /// optional so a caller already holding it can save and restore
+        /// inside its own critical section.
+        fn capture(guard: Option<std::sync::MutexGuard<'static, ()>>) -> Self {
+            Self {
+                _guard: guard,
+                previous: [
+                    ("FNO_E2E", std::env::var_os("FNO_E2E")),
+                    (
+                        "FNO_MUX_ADMISSION_NAMESPACE",
+                        std::env::var_os("FNO_MUX_ADMISSION_NAMESPACE"),
+                    ),
+                ],
+            }
+        }
+    }
+
+    impl Drop for LedgerEnv {
+        fn drop(&mut self) {
+            for (name, value) in &self.previous {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    fn isolate(label: &str) -> (LedgerEnv, PathBuf) {
         let guard = LEDGER_ENV
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let env = LedgerEnv::capture(Some(guard));
         std::env::set_var("FNO_E2E", "1");
         std::env::set_var(
             "FNO_MUX_ADMISSION_NAMESPACE",
@@ -1150,7 +1194,33 @@ mod tests {
         let path = admission_marker_path().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let _ = std::fs::remove_file(&path);
-        (guard, path)
+        (env, path)
+    }
+
+    /// The guard is the whole reason these tests may touch a process-global
+    /// env var at all, so prove it puts both back rather than trusting the
+    /// shape of the Drop impl.
+    #[test]
+    fn ledger_guard_restores_both_env_vars_on_drop() {
+        // The lock is taken here, not by `capture`, so the before-read, the
+        // mutation and the after-read all sit in one critical section. A
+        // baseline read outside it would see a sibling's value and this test
+        // would report that as a leak.
+        let _lock = LEDGER_ENV
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = (
+            std::env::var_os("FNO_E2E"),
+            std::env::var_os("FNO_MUX_ADMISSION_NAMESPACE"),
+        );
+        {
+            let _env = LedgerEnv::capture(None);
+            std::env::set_var("FNO_E2E", "1");
+            std::env::set_var("FNO_MUX_ADMISSION_NAMESPACE", "guard-restores");
+            assert_eq!(std::env::var_os("FNO_E2E").as_deref(), Some("1".as_ref()));
+        }
+        assert_eq!(std::env::var_os("FNO_E2E"), before.0);
+        assert_eq!(std::env::var_os("FNO_MUX_ADMISSION_NAMESPACE"), before.1);
     }
 
     /// The measured 2026-09-02 wedge: one alive-but-unreadable marker pid
@@ -1242,5 +1312,20 @@ mod tests {
         }
         let error = parse_admission_switch("maybe").unwrap_err();
         assert!(error.contains(ADMISSION_ACCEPTED), "{error}");
+    }
+
+    /// The refusal an operator reads must list every spelling the parser
+    /// takes. A synonym added to an array and forgotten in the string would
+    /// otherwise leave the recovery vocabulary understated.
+    #[test]
+    fn accepted_set_text_lists_every_spelling_the_parser_takes() {
+        for accepted in ADMISSION_OFF.iter().chain(ADMISSION_ON.iter()) {
+            assert!(
+                ADMISSION_ACCEPTED
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|word| word == *accepted),
+                "{accepted:?} is accepted but missing from {ADMISSION_ACCEPTED:?}"
+            );
+        }
     }
 }
