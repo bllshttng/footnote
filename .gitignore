@@ -10,6 +10,14 @@
 .claude/scheduled_tasks.json
 .claude/worktrees/
 
+# Backstop only. A worktree belongs at .claude/worktrees/<name> above or at
+# ~/.fno/worktrees/<name>; /worktrees/ is on the forbidden list in
+# .claude/rules/worktrees.md and setup-worktree.sh now refuses to build one
+# there. This line keeps anything that still lands here off `git status`, so a
+# stray tree cannot read as work in progress. Anchored: cli/tests and the docs
+# both discuss worktrees/ paths that must stay tracked.
+/worktrees/
+
 # Top-level scratch plans are personal/working specs (the canonical plans live
 # in the Obsidian vault under internal/). Keep them out of the public tree so
 # they cannot leak machine paths or private project names. Anchored to root so

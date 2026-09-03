@@ -131,7 +131,16 @@ case "$sub $verb" in
     printf '%s\n' "$repo" >> "$S/repo_ensure.log"
     [[ -f "$S/ensure_fail" ]] && exit 1
     [[ -f "$S/ensure_policy_never" ]] && { printf '%s\n' "$repo"; exit 0; }
-    printf '%s/worktrees/%s\n' "$repo" "$name" ;;
+    # Return a path under the sandbox, and CREATE it, because the real verb
+    # creates the worktree before it prints one. The old mock printed
+    # "$repo/worktrees/$name" without creating it, and since $repo here is the
+    # REAL canonical root, the dispatcher's setup-worktree.sh call went on to
+    # build each one for real: nine of them sat untracked at a location
+    # .claude/rules/worktrees.md forbids outright. Which root fed ensure is
+    # asserted from repo_ensure.log above, so the returned path never needs to
+    # be inside the live checkout to prove it.
+    mkdir -p "$S/ensured/$name"
+    printf '%s/ensured/%s\n' "$S" "$name" ;;
   "agents spawn")
     spawn_node=""; _prev=""
     for a in "$@"; do
@@ -622,12 +631,18 @@ echo "$out" | grep -q "^parked ab-dddd4444 reason=\"claimed but node:ab-dddd4444
   && pass "codex-P2: claimed-status + non-live claim parked for manual recovery" \
   || fail "codex-P2: claimed/non-live not parked: $out"
 
-# ---- a node with a recorded (cross-project) cwd dispatches with --cwd ----
+# ---- a node with a recorded (cross-project) cwd reaches the right project ----
+# Same prefix trap as AC6 below: the recorded cwd is the ensure ROOT, and the
+# landing is the ensured worktree under it, so a substring grep for the raw cwd
+# matched the ensured path and would have kept matching if the dispatch stopped
+# honoring the recorded cwd. repo_ensure.log is the field that answers WHICH
+# project the isolation was taken off, which is what cross-project means here.
 reset_mock; set_status ab-aaaa1111 ready; set_cwd ab-aaaa1111 /tmp/example-pipeline
 bash "$DISPATCH" ab-aaaa1111 >/dev/null 2>&1
-grep -q -- "--cwd /tmp/example-pipeline" "$MOCKSTATE/ask.log" \
-  && pass "codex-P2: dispatch passes the node's recorded cwd to fno agents spawn" \
-  || fail "codex-P2: --cwd not passed: $(cat "$MOCKSTATE/ask.log" 2>/dev/null)"
+last_repo="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"; last_repo="${last_repo//$'\n'/}"
+[[ "$last_repo" == "/tmp/example-pipeline" ]] && grep -q -- "--cwd $MOCKSTATE/ensured/" "$MOCKSTATE/ask.log" \
+  && pass "codex-P2: dispatch isolates off the node's recorded cwd, not the caller's" \
+  || fail "codex-P2: ensure repo '$last_repo' want '/tmp/example-pipeline': $(cat "$MOCKSTATE/ask.log" 2>/dev/null)"
 
 echo ""
 echo "--- ab-77b691dc: canonical-default dispatch (--fresh / --here) ---"
@@ -644,7 +659,7 @@ _expect_root=""
 # sed, not tail: the rtk wrapper on this machine silently empties tail -1.
 last_repo="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"; last_repo="${last_repo//$'\n'/}"
 if [[ -n "$_expect_root" && "$last_repo" == "$_expect_root" ]] \
-   && grep -q -- "--cwd $_expect_root/worktrees/" "$MOCKSTATE/ask.log" \
+   && grep -q -- "--cwd $MOCKSTATE/ensured/" "$MOCKSTATE/ask.log" \
    && ! grep -q -- "--fresh" "$MOCKSTATE/ask.log"; then
   pass "AC1: no node cwd -> ensured worktree off the canonical root, no --fresh"
 else
@@ -671,13 +686,23 @@ else
   fail "AC2: --here still added a cwd flag: $(cat "$MOCKSTATE/ask.log" 2>/dev/null)"
 fi
 
-# ---- --cwd (node-recorded) wins over the --fresh default (never both) ----
+# ---- a recorded node cwd feeds ensure and never falls back to --fresh ----
+# The recorded cwd is the ROOT the isolation is taken off, not the landing: a
+# node-cwd dispatch routes through worktree ensure exactly as a cwd-less one
+# does. So the assertion reads repo_ensure.log for the root and the ask log for
+# the ensured landing. The old spelling grepped for "--cwd /tmp/example-pipeline"
+# and passed on a prefix: the real flag was --cwd /tmp/example-pipeline/worktrees/
+# target-ab-aaaa1111, an ensured path, and the substring matched it. It would
+# have kept passing had the dispatch stopped honoring the node cwd entirely.
 reset_mock; set_status ab-aaaa1111 ready; set_cwd ab-aaaa1111 /tmp/example-pipeline
 bash "$DISPATCH" ab-aaaa1111 >/dev/null 2>&1
-if grep -q -- "--cwd /tmp/example-pipeline" "$MOCKSTATE/ask.log" && ! grep -q -- "--fresh" "$MOCKSTATE/ask.log"; then
-  pass "AC6: a recorded node cwd uses --cwd and never adds --fresh"
+last_repo="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"; last_repo="${last_repo//$'\n'/}"
+if [[ "$last_repo" == "/tmp/example-pipeline" ]] \
+   && grep -q -- "--cwd $MOCKSTATE/ensured/" "$MOCKSTATE/ask.log" \
+   && ! grep -q -- "--fresh" "$MOCKSTATE/ask.log"; then
+  pass "AC6: a recorded node cwd is the root fed to ensure, and never adds --fresh"
 else
-  fail "AC6: node-cwd path added --fresh or dropped --cwd: $(cat "$MOCKSTATE/ask.log" 2>/dev/null)"
+  fail "AC6: node-cwd path wrong: ensure repo '$last_repo' want '/tmp/example-pipeline': $(cat "$MOCKSTATE/ask.log" 2>/dev/null)"
 fi
 
 # ---- --dry-run reflects the worktree-ensure default in its preview line ----
@@ -873,7 +898,7 @@ last_repo="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"; last_repo="${last_r
 [[ "$last_repo" == "/resolved/root" ]] \
   && pass "AC1-HP: real dispatch feeds _resolved_cwd to worktree ensure" \
   || fail "AC1-HP: ensure got repo '$last_repo', want /resolved/root"
-grep -q -- "--cwd /resolved/root/worktrees/" "$MOCKSTATE/ask.log" 2>/dev/null \
+grep -q -- "--cwd $MOCKSTATE/ensured/" "$MOCKSTATE/ask.log" 2>/dev/null \
   && pass "AC1-HP: worker spawns into the ensured worktree under the resolved root" \
   || fail "AC1-HP: spawn cwd wrong: $(cat "$MOCKSTATE/ask.log" 2>/dev/null)"
 
@@ -1010,7 +1035,7 @@ reset_mock; set_status ab-bbbb1111 ready
 set_resolved_cwd ab-bbbb1111 "$NODE_REPO"
 out="$(bash "$DISPATCH" ab-bbbb1111 2>&1)"
 spawn_cwd="$(sed -n 's/.*--cwd \([^ ]*\).*/\1/p' "$MOCKSTATE/ask.log" 2>/dev/null | head -1)"
-if [[ -n "$spawn_cwd" && "$spawn_cwd" == "$NODE_REPO/worktrees/"* && -f "$spawn_cwd/.setup-ran" ]]; then
+if [[ -n "$spawn_cwd" && "$spawn_cwd" == "$MOCKSTATE/ensured/"* && -f "$spawn_cwd/.setup-ran" ]]; then
   pass "isolation: node-cwd dispatch spawns into the ensured worktree with state linked"
 else
   fail "isolation: spawn cwd '$spawn_cwd' is not a set-up ensured worktree: $out"

@@ -419,14 +419,23 @@ for id in "${NODES[@]}"; do
   # command", so an `fno` too old to know this verb would otherwise read as
   # "unrepresentable" and refuse the whole fleet.
   # Streams are merged so a refusal's cause survives; the exit code disambiguates
-  # which stream it came from. Merging means a stray warning on stderr can ride
-  # along, so a name is adopted only when the WHOLE capture matches the runtime
-  # contract - `grep -q` would not do: it matches per line, so a warning followed
-  # by a valid name would pass the guard and then be adopted in full.
+  # which stream it came from. Merging means a stray warning on stderr rides
+  # along, so the name is read as the LAST line of the capture and that line
+  # alone must match the runtime contract. `grep -q` would not do: it matches
+  # per line, so a warning followed by a valid name would pass the guard and
+  # then be adopted in full.
+  #
+  # Matching the WHOLE capture instead rejected any run that warned at all, and
+  # the degrade path below assembles an UNCAPPED name that a long node id then
+  # refuses outright. A live config notice on stderr reproduced exactly that on
+  # 2026-09-03: a 28-char node id dispatched no worker and said almost nothing.
+  # The last line keeps a warning unadoptable, because a warning is not it,
+  # without discarding the name the canonical owner actually returned.
   name_out="$(FNO_AGENTS_RUNTIME=python fno agents name target "$id" --slug "$node_slug" 2>&1)"
   name_rc=$?
+  name_last="${name_out##*$'\n'}"
   agent_name=""
-  [[ "$name_rc" -eq 0 && "$name_out" =~ ^[A-Za-z0-9_-]{1,64}$ ]] && agent_name="$name_out"
+  [[ "$name_rc" -eq 0 && "$name_last" =~ ^[A-Za-z0-9_-]{1,64}$ ]] && agent_name="$name_last"
   if [[ "$name_rc" -eq 3 ]]; then
     # Exit 3 covers every refusal cause (over-budget identity, invalid
     # characters, empty identity), so relay the real message rather than
