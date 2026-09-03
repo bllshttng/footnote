@@ -45,7 +45,7 @@ def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
 # -- tests --
 
 
-def test_the_reaper_reaps_a_keeper_it_can_name(tmp_path):
+def test_the_reaper_reaps_a_keeper_it_can_name(tmp_path, monkeypatch):
     """Positive control for the spawn ledger (the zero-filter rule).
 
     A filter that reports zero proves nothing unless it can first name a
@@ -54,6 +54,13 @@ def test_the_reaper_reaps_a_keeper_it_can_name(tmp_path):
     dead after it - by number, never by absence.
     """
     from fno.graph import store as store_mod
+
+    # The session bounds spawned keepers to 5s idle (conftest). On a loaded
+    # runner the gap between this test's read and its liveness assert can
+    # outrun that clock, and the keeper's own idle exit (rc 0) pre-kills the
+    # control. Spawn this one with idle exit disabled: the reaper, not the
+    # clock, must be what kills it.
+    monkeypatch.setenv("FNO_STORE_KEEPER_IDLE_SECS", "0")
 
     graph = _make_graph(tmp_path, [{"id": "ab-reap", "title": "reap me"}])
     _client = store_mod._client_for(graph)  # spawns the keeper on demand
