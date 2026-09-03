@@ -32,6 +32,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "drive",
     "drive-authority",
     "finalize",
+    "graph-get",
     "grid",
     "help",
     "host",
@@ -246,6 +247,15 @@ async fn run(args: Vec<String>) -> i32 {
     // empty stdout (exit 0). Direct dispatch; no daemon RPC.
     if verb == "kill-check" {
         return fno_agents::kill_criteria::run_kill_check(&args[1..]);
+    }
+
+    // `graph-get <id>...` is the Rust batch counterpart to `fno backlog get`
+    // (x-997a). `fno backlog get` forwards here only when handed more than one
+    // id; it is not a routable `fno agents` verb (same reasoning as
+    // `kill-check`/`pr-heal`), so it stays out of CLIENT_VERB_USAGE /
+    // RUST_CLIENT_VERBS. Reads graph.json directly; no daemon RPC.
+    if verb == "graph-get" {
+        return fno_agents::graph_get::run_graph_get(&args[1..]);
     }
 
     // `verify-evidence` is the Rust port of scripts/lib/verify-event-evidence.sh

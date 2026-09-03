@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -5964,11 +5965,38 @@ def _render_external_get(id: str, field: Optional[str]) -> None:
     typer.echo(json.dumps(joined, indent=2))
 
 
+def _cmd_get_batch(ids: List[str]) -> None:
+    """Several ids in one call: forward to the Rust `graph-get` batch verb
+    rather than reading graph.json once per id (x-997a). Mirrors
+    `cli/src/fno/phase/cli.py`'s kill-check forwarder: resolve the bundled
+    binary, print its own not-found message with the 127-class remedy on a
+    missing binary, else run it and propagate its exit code and stdout
+    (a JSON array in argument order) untouched.
+    """
+    from fno.rust_binary import resolve_binary
+    from fno._subprocess_util import propagate_returncode
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno backlog get: the fno-agents binary was not found, and a batch "
+            "read of several ids needs it. It ships in the `pip install fno` "
+            "wheel and with the plugin; reinstall fno or run `fno doctor update "
+            "--rust`, or set FNO_AGENTS_BIN to its path. Pass one id at a time "
+            "to use the all-Python path instead.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    result = subprocess.run([str(binary), "graph-get", *ids, "--json"], check=False)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
 @cli.command("get")
 def cmd_get(
-    id: str = typer.Argument(
+    ids: List[str] = typer.Argument(
         ...,
-        help="Node ab-id, slug, or bare 8-hex (e.g. ab-ff6f96e0 | dashless-spawn | ff6f96e0)",
+        help="One or more node ab-id, slug, or bare 8-hex "
+        "(e.g. ab-ff6f96e0 | dashless-spawn | ff6f96e0)",
     ),
     field: Optional[str] = typer.Option(None, help="Print only this field"),
     grouped: bool = typer.Option(
@@ -5986,6 +6014,23 @@ def cmd_get(
 ) -> None:
     from fno.graph.fuzzy import resolve_node
     from fno.tracker import active_backend_name
+
+    # A single id keeps today's all-Python path byte for byte - every existing
+    # caller (VALIDATE steps, `--field`, `--grouped`, `--strict`) passes one id
+    # and must see no change. Several ids is a NEW shape with a narrower
+    # contract: one JSON array, always, no field/grouped/strict projection - a
+    # per-row field/grouped choice is a second feature nobody asked for here.
+    if len(ids) > 1:
+        if field or grouped or strict:
+            typer.echo(
+                "fno backlog get: --field/--grouped/--strict take exactly one id; "
+                "pass one id at a time for those, or drop them for a plain batch read.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        _cmd_get_batch(ids)
+        return
+    id = ids[0]
 
     # Pre-rename spelling; shell consumers outside this repo still pass it.
     if field == "_status":

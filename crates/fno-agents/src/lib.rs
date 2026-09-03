@@ -72,6 +72,7 @@ pub mod events_limits;
 pub mod finalize;
 pub mod gc;
 pub mod gemini_ask;
+pub mod graph_get;
 pub mod graph_keeper;
 pub mod graph_store;
 pub mod harness_capabilities;
