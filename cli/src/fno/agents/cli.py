@@ -1021,12 +1021,12 @@ def _resolve_spawn_merge_grant(message: str) -> dict:
     """
     from datetime import datetime, timezone
 
-    from fno.agents.rust_posture import carries_no_merge
+    from fno.agents.harness_map import message_carries_no_merge
     from fno.config import load_settings
 
     recorded_by = (os.environ.get("FNO_AGENT_SELF") or "").strip() or "spawn"
     recorded_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if carries_no_merge(message):
+    if message_carries_no_merge(message):
         return {
             "approved": False,
             "source": "no-merge-flag",

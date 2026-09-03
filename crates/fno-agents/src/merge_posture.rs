@@ -35,7 +35,11 @@ fn table() -> &'static Carrier {
                 .as_array()
                 .expect("target_family.spellings must be a list")
                 .iter()
-                .map(|v| v.as_str().expect("spellings entries must be strings").to_string())
+                .map(|v| {
+                    v.as_str()
+                        .expect("spellings entries must be strings")
+                        .to_string()
+                })
                 .collect(),
             flag: carrier["flag"].as_str().expect("carrier.flag").to_string(),
             legacy_token: carrier["legacy_token"]
@@ -150,14 +154,12 @@ pub fn posture_action(message: &str, prior: Option<&str>) -> (EnvAction, Option<
     if message_carries_bare_token(message) || !is_target_family(message) {
         return (EnvAction::Hold, None);
     }
-    let note = prior
-        .filter(|p| !p.is_empty())
-        .map(|_| {
-            "fno agents spawn: inherited TARGET_NO_MERGE cleared; the \
+    let note = prior.filter(|p| !p.is_empty()).map(|_| {
+        "fno agents spawn: inherited TARGET_NO_MERGE cleared; the \
              /target-family message carries no --no-merge flag and the \
              message is authoritative"
-                .to_string()
-        });
+            .to_string()
+    });
     (EnvAction::Clear, note)
 }
 
