@@ -146,6 +146,48 @@ def message_carries_no_merge(message: str) -> bool:
     return is_target_family(message) and " --no-merge " in f" {message} "
 
 
+def apply_merge_posture_env(message: str, *, note_stream=None) -> str | None:
+    """One carrier owner for every spawn lane: set or clear ``TARGET_NO_MERGE``
+    in ``os.environ`` from the message, and return the prior value.
+
+    x-8151: this was the inline block in ``cmd_spawn``, re-derived a second time
+    in the fno-agents client (Rust) and a third in skills/agent spawn.sh. The
+    wrapper door (rust_runtime) now calls this before exec'ing the binary, so
+    the Rust and shell copies are gone and one vocabulary decides every
+    substrate. Semantics, unchanged since their rounds: a family message with
+    the flag arms the carrier; a family message with a bare token OUTSIDE flag
+    position neither arms nor clears (ambiguous, round 11); a family message
+    with no token clears an inherited carrier loudly (the message is
+    authoritative, round 8); a non-family message clears NOTHING (an operator's
+    exported carrier is a documented control input, and a leak errs toward
+    refusing merges, the safe side).
+
+    Returns the prior ``os.environ`` value (or None) so a caller that must
+    restore the process env (the spawn path's finally) captured it BEFORE the
+    mutation.
+    """
+    import os
+    import sys
+
+    if note_stream is None:
+        note_stream = sys.stderr
+    prior = os.environ.get("TARGET_NO_MERGE")
+    if message_carries_no_merge(message):
+        os.environ["TARGET_NO_MERGE"] = "1"
+    elif is_target_family(message) and " no-merge " in f" {message} ":
+        pass
+    elif is_target_family(message):
+        if prior:
+            print(
+                "fno agents spawn: inherited TARGET_NO_MERGE cleared; the "
+                "/target-family message carries no --no-merge flag and the "
+                "message is authoritative",
+                file=note_stream,
+            )
+        os.environ.pop("TARGET_NO_MERGE", None)
+    return prior
+
+
 def _refused_reason(harness: str) -> str:
     """The loud-refusal message for a deprecated harness with no dispatch lane -
     names the successor (agy) so the failure is actionable (AC2-ERR / AC3-UI)."""

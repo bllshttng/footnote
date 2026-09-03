@@ -8,9 +8,16 @@ rewrite the legacy bare `no-merge` token to the flag. Lanes that shell
 env directly at their spawn sites. Without a carrier, a worker that drops the
 flag post-compaction folds no refusal at init and a configured auto-merge
 stands unrevoked.
+
+x-8151: the process-env half of that contract is ONE function,
+`apply_merge_posture_env`, called by cmd_spawn AND by the rust_runtime exec
+door (which deleted the client.rs re-derivation). These tests pin its
+semantics so every lane keeps answering from one vocabulary.
 """
 
-from fno.agents.harness_map import resolve_dispatch
+import pytest
+
+from fno.agents.harness_map import apply_merge_posture_env, resolve_dispatch
 
 
 def test_builtin_no_merge_command_carries_env_refusal():
@@ -69,3 +76,61 @@ def test_non_target_slash_command_args_are_untouched():
     )
     assert dispatch["command"] == "/think summarize the no-merge posture x-1"
     assert "TARGET_NO_MERGE" not in dispatch["env"]
+
+
+# --------------------------------------------------------------------------- #
+# x-8151
+
+# --------------------------------------------------------------------------- #
+# x-8151: apply_merge_posture_env - the one carrier owner for every lane
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def _clean_carrier(monkeypatch):
+    monkeypatch.delenv("TARGET_NO_MERGE", raising=False)
+
+
+def test_flag_family_message_arms_carrier_and_returns_prior(monkeypatch):
+    monkeypatch.setenv("TARGET_NO_MERGE", "legacy-value")
+    prior = apply_merge_posture_env("/target --no-merge x-1")
+    assert prior == "legacy-value"
+    import os
+
+    assert os.environ["TARGET_NO_MERGE"] == "1"
+
+
+def test_prose_message_clears_nothing(monkeypatch):
+    monkeypatch.setenv("TARGET_NO_MERGE", "1")
+    prior = apply_merge_posture_env("please discuss the no-merge rollout")
+    assert prior == "1"
+    import os
+
+    assert os.environ["TARGET_NO_MERGE"] == "1"
+
+
+def test_flagless_family_message_clears_inherited_carrier_loudly(monkeypatch, capsys):
+    monkeypatch.setenv("TARGET_NO_MERGE", "1")
+    prior = apply_merge_posture_env("/target x-1")
+    assert prior == "1"
+    import os
+
+    assert "TARGET_NO_MERGE" not in os.environ
+    assert "inherited TARGET_NO_MERGE cleared" in capsys.readouterr().err
+
+
+def test_bare_token_family_message_neither_arms_nor_clears(monkeypatch):
+    monkeypatch.setenv("TARGET_NO_MERGE", "1")
+    prior = apply_merge_posture_env("/target no-merge x-1")
+    assert prior == "1"
+    import os
+
+    assert os.environ["TARGET_NO_MERGE"] == "1"
+
+
+def test_guard_named_flag_is_not_the_carrier():
+    prior = apply_merge_posture_env("/target --no-merge-guard x-1")
+    assert prior is None
+    import os
+
+    assert "TARGET_NO_MERGE" not in os.environ

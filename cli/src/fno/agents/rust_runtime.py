@@ -1079,10 +1079,49 @@ def _is_output_format_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     )
 
 
+def _apply_merge_posture_at_exec(
+    group: "click.Group", args: Sequence[str], *, _stderr: IO[str]
+) -> None:
+    """Set/clear the TARGET_NO_MERGE carrier for an about-to-exec spawn (x-8151).
+
+    Parses the spawn args with the REAL Click command (``resilient_parsing``:
+    unknown flags and missing required params degrade instead of raising), so
+    the message positional has no second hand-rolled scanner to drift. The
+    resulting env mutation crosses ``os.execv`` into the binary, whose spawn
+    arms inherit the carrier instead of re-deriving the predicate (the deleted
+    client.rs copy). A parse that somehow still fails prints one loud stderr
+    line and execs anyway: a silent miss here could drop an operator's refusal
+    posture, and failing the whole exec over a carrier question would take
+    every rust-lane spawn hostage.
+    """
+    try:
+        import click
+
+        ctx = click.Context(group)
+        spawn_cmd = group.get_command(ctx, "spawn")
+        if spawn_cmd is None:
+            return
+        sctx = spawn_cmd.make_context(
+            "spawn", list(args[1:]), resilient_parsing=True
+        )
+        message = sctx.params.get("message") or ""
+        from fno.agents.harness_map import apply_merge_posture_env
+
+        apply_merge_posture_env(message, note_stream=_stderr)
+    except Exception as exc:  # noqa: BLE001 - exec must not hang on a parse
+        print(
+            f"fno agents spawn: TARGET_NO_MERGE carrier not applied at the "
+            f"exec door (arg parse failed: {exc!r}); the flag in the message "
+            "remains the attributable carrier",
+            file=_stderr,
+        )
+
+
 def route_to_rust(
     args: Sequence[str],
     *,
     binary: Optional[Path] = None,
+    group: Optional[click.Group] = None,
     _exec: Callable[..., None] = os.execv,
     _resolve: Callable[[], Optional[Path]] = rust_binary.resolve_binary,
     _stderr: Optional[IO[str]] = None,
@@ -1104,10 +1143,21 @@ def route_to_rust(
     missing-binary exit. When ``binary`` is ``None`` (the forced ``=rust`` path),
     ``_resolve`` runs and a missing binary is the hard 127 error.
 
+    ``group`` (the agents runtime group) turns this door into the x-8151 carrier
+    gate for ``spawn``: before exec, the real Click parser extracts the message
+    positional and ``harness_map.apply_merge_posture_env`` sets or clears
+    ``TARGET_NO_MERGE`` in ``os.environ``, which ``execv`` hands to the binary.
+    This is the ONE owner of the verdict on the binary lane - the client-side
+    re-derivation it replaces was the copy x-8151 deleted. The Python dispatch
+    (pane / forced-python / no-binary) never passes here, and ``cmd_spawn``
+    applies the same helper on that lane: exactly one application per spawn.
+
     The ``_exec`` / ``_resolve`` / ``_stderr`` hooks exist purely so the decision
     logic is unit-testable without actually replacing the test process.
     """
     err = _stderr if _stderr is not None else sys.stderr
+    if args and args[0] == "spawn" and group is not None:
+        _apply_merge_posture_at_exec(group, args, _stderr=err)
     if binary is None:
         binary = _resolve()
     if binary is None:
@@ -1401,7 +1451,8 @@ def make_agents_group_cls() -> type:
                 if mode == "rust" and not py_spawn:
                     _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
                     _scrub_ambient_identity_at_exec(verb)
-                    route_to_rust(list(args))  # execs; does not return
+                    # group=self: the exec door is the carrier gate (x-8151).
+                    route_to_rust(list(args), group=self)  # execs; does not return
                 elif mode == "auto" and verb in AUTO_ROUTE_VERBS and not py_spawn:
                     # Since ab-73da4ac2 this includes ``ask`` for every provider
                     # (the unconditional flip): the Rust client owns the full
@@ -1412,7 +1463,10 @@ def make_agents_group_cls() -> type:
                     if binary is not None:
                         _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
                         _scrub_ambient_identity_at_exec(verb)
-                        route_to_rust(list(args), binary=binary)  # execs
+                        # group=self: the exec door is the carrier gate (x-8151).
+                        route_to_rust(
+                            list(args), binary=binary, group=self
+                        )  # execs
                     # else: no installed binary -> Python dispatch below.
                 # mode == "python", or no installed binary -> Python dispatch below.
             return super().make_context(info_name, args, parent=parent, **extra)
