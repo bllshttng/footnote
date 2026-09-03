@@ -7253,31 +7253,11 @@ mod tests {
         harness: Option<&str>,
     ) -> crate::agents_view::RegistryAgent {
         crate::agents_view::RegistryAgent {
-            model: None,
-            route: None,
-            spawned_by_session: None,
-            session_id: None,
-            harness_session_id: None,
-            predecessor_session_ids: Vec::new(),
-            forked_from_session_id: None,
             name: name.into(),
             cwd: "/tmp/seen".into(),
-            exited: false,
-            dnd: false,
-            liveness: crate::agents_view::Liveness::Alive,
-            badge: None,
-            reason: None,
-            mux: None,
-            answerable: None,
             attach_id: attach.map(str::to_owned),
-            external: false,
-            account: None,
-            claude_session_uuid: None,
-            log_path: None,
-            updated_at: None,
-            crown_level: None,
-            crown_scope: None,
             harness: harness.map(str::to_owned),
+            ..Default::default()
         }
     }
 
@@ -7809,31 +7789,10 @@ mod tests {
 
     fn reg_row(name: &str, session_id: Option<&str>) -> crate::agents_view::RegistryAgent {
         crate::agents_view::RegistryAgent {
-            model: None,
-            route: None,
-            spawned_by_session: None,
             name: name.to_string(),
             cwd: "/x".into(),
             session_id: session_id.map(str::to_string),
-            harness_session_id: None,
-            predecessor_session_ids: Vec::new(),
-            forked_from_session_id: None,
-            exited: false,
-            dnd: false,
-            badge: None,
-            reason: None,
-            mux: None,
-            answerable: None,
-            attach_id: None,
-            external: false,
-            account: None,
-            claude_session_uuid: None,
-            log_path: None,
-            updated_at: None,
-            crown_level: None,
-            crown_scope: None,
-            liveness: crate::agents_view::Liveness::Alive,
-            harness: None,
+            ..Default::default()
         }
     }
 
