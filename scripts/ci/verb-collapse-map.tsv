@@ -334,6 +334,7 @@ do target start	T1	do target start	31
 do target status	T1	do target status	8
 do think dispatch	T1	do think dispatch	4
 do think inspect	T1	do think inspect	7
+doctor bash-census	T1	doctor bash-census	0
 doctor bundle check	T1	doctor bundle check	8
 doctor bundle lint	T1	doctor bundle lint	1
 doctor codemap	T1	doctor codemap	18

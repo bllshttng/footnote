@@ -85,8 +85,10 @@ def test_map_covers_current_surface_once():
     # landed native store write detaches to replay the Python-owned views:
     # 554 -> 555. The attestation ledger adds `do review invocations` and
     # `do review post-dispositions`: 557 -> 559. x-8151 allocated
-    # `dispatch family` twice (top-level and under agents): 559 -> 561.
-    assert len(mapped) == 561, (
+    # `dispatch family` twice (top-level and under agents): 559 -> 561. x-997a
+    # adds `doctor bash-census`, the hidden Bash-call-shape census verb:
+    # counted from the merged file, not taken from either side, 561 -> 562.
+    assert len(mapped) == 562, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

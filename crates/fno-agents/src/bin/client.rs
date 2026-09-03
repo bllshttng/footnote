@@ -61,6 +61,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "resume",
     "review-start",
     "rm",
+    "session-start-bytes",
     "spawn",
     "status",
     "stop",
@@ -238,8 +239,7 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::kill_criteria::run_kill_check(&args[1..]);
     }
 
-    // `graph-get`/`bash-census`/`session-start-bytes` (x-997a): daemon-free
-    // reads, not routable `fno agents` verbs (same reasoning as kill-check).
+    // `graph-get`/`bash-census`/`session-start-bytes` (x-997a): daemon-free reads, not routable `fno agents` verbs (same reasoning as kill-check).
     if verb == "graph-get" {
         return fno_agents::graph_get::run_graph_get(&args[1..]);
     }
