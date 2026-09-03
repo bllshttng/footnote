@@ -101,3 +101,5 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 | "Rebase before merge" | `fno do pr rebase --base=origin/main` |
 
 Prefer the smaller surface: a skill spawns a new agent context; a CLI call does not.
+
+In a worktree Bash refuses heredocs, command substitution and loops, so write the script with Write and run `bash <file>`; use Read, Grep and Glob for every read; never lead a command with `cd`, the cwd persists.
