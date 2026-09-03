@@ -369,7 +369,14 @@ if [[ ! -f "$STATE_FILE" ]]; then
         exit 0
     else
         if [[ "$TARGET_NO_MATCH" -eq 1 ]]; then
-            echo "loop-check: no manifest names session ${RESOLVE_HARNESS_ID}; visitor allowed" >&2
+            # Name every id that was tried, not just the first. This is the one
+            # line a human reads when a session was let go, and this hook let
+            # codex targets go silently for six days; a diagnostic that names
+            # one of four attempts sends the next reader after the wrong id.
+            # The marker itself is a contract (docs/architecture/unified-loop.md,
+            # and hooks/agy-target-stop-hook.sh emits the same string), so the
+            # detail is APPENDED and the matched prefix stays byte-identical.
+            echo "loop-check: no manifest names session ${RESOLVE_HARNESS_ID}; visitor allowed (tried: ${RESOLVE_IDS[*]})" >&2
         fi
         exit 0
     fi

@@ -106,13 +106,16 @@ run_agy() {
     : > "$stderr_file"
     : > "$stdout_file"
     rm -f "$TMP/state-record" "$TMP/cwd-record"
-    AGY_RC=0
+    # No rc capture: the agy adapter is JSON-only on stdout and has no exit-2
+    # path, so its exit code carries no verdict. Every caller below asserts on
+    # AGY_STDOUT. A captured code nothing reads is the shape that let a test
+    # certify a resolve while the gate behind it was still off.
     (
         cd "$TMP/b" || exit 1
         env HOME="$TMP/home" FNO_AGENTS_BIN="$STUB" CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= SELECTED_STATE="$TMP/a/.fno/target-state.md" \
             RESOLVER_RC="$resolver_rc" STATE_RECORD="$TMP/state-record" CWD_RECORD="$TMP/cwd-record" \
             bash "$AGY_HOOK" <<< "{\"conversationId\":\"session-a\",\"transcriptPath\":\"$TMP/session-a.jsonl\",\"workspacePaths\":[\"$TMP/b\"],\"fullyIdle\":true}"
-    ) >"$stdout_file" 2>"$stderr_file" || AGY_RC=$?
+    ) >"$stdout_file" 2>"$stderr_file" || true
     AGY_STDOUT="$(cat "$stdout_file")"
     AGY_STDERR="$(cat "$stderr_file")"
 }
