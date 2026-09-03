@@ -22,6 +22,7 @@ from fno.graph.depends import (
     _derive_title,
 )
 from fno.graph.statuses import VALID_STATUSES
+from fno.graph._reconcile import node_is_open
 
 
 # Source-field vocabulary for nodes intaked from a plan. Both spellings
@@ -427,6 +428,21 @@ def make_selection_sort_key(
     # Once per sort, not once per comparison: the key below runs O(n log n)
     # times and this answer does not change while it does.
     child_progress_epics = _epics_with_child_progress(id_to_entry)
+    # Fan-out: how many OPEN nodes wait on each id (x-e451). Within a band the
+    # node more work hangs on goes first; it sits AFTER the priority terms
+    # because priority is a decision and fan-out is a measurement - a p2 that
+    # blocks three nodes must not jump a p1 that blocks none.
+    dependents: dict[str, int] = {}
+    for e in entries:
+        if not isinstance(e, dict) or not node_is_open(e):
+            continue
+        for bid in e.get("blocked_by") or []:
+            if isinstance(bid, str):
+                dependents[bid] = dependents.get(bid, 0) + 1
+
+    def _fanout(node_id: object) -> int:
+        # Negated: more dependents sorts EARLIER. Junk ids fan out as zero.
+        return -dependents.get(node_id, 0) if isinstance(node_id, str) else 0
     # Board == work order: `next` must demote orphans exactly where the board
     # does, or the board shows one order and the walker works another. Computed
     # here (not passed by every caller) so no call site can forget it; fails
@@ -469,19 +485,21 @@ def make_selection_sort_key(
                 _prio(epic),             # highest-priority epic first
                 _sort_text(epic.get("created_at")),  # group one epic together
                 child_prio,
-                child_orphan,        # in-band: after priority, before created_at
+                _fanout(node_id),    # in-band: after priority, before orphan
+                child_orphan,
                 child_created,
             )
         # Loose node: tier 1. Middle fields mirror the child fields so the
         # tuple stays comparable; tier already separates loose from epic
         # children, so loose nodes only ever compare among themselves and
-        # resolve on flat (priority, created_at).
-        # Decision fields lead: priority, then orphan-last, then created_at.
-        # The trailing pair only pads the tuple to the epic branch's arity;
-        # tier (index 1) already separates the two, so it is never compared.
+        # resolve on flat (priority, fan-out, created_at).
+        # Decision fields lead: priority, then fan-out, then orphan-last,
+        # then created_at. The trailing triple only pads the tuple to the
+        # epic branch's arity; tier (index 1) already separates the two, so
+        # it is never compared.
         return lane + (
-            band, 1, 0, child_prio, child_orphan, child_created,
-            child_prio, child_created,
+            band, 1, 0, child_prio, _fanout(node_id), child_orphan, child_created,
+            child_prio, _fanout(node_id), child_created,
         )
 
     return key

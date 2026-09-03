@@ -646,3 +646,39 @@ def test_render_md_does_not_place_live_claimed_in_now(tmp_path):
     content = output.read_text()
     later_section = content.split("## Later")[1].split("## Triage")[0]
     assert "LiveNode" in later_section
+
+
+# -- fan-out in the selection key (x-e451) --
+
+
+def test_selection_fanout_orders_a_node_with_dependents_first():
+    """Two loose p2 nodes: the one open work hangs on sorts first, even when
+    the idle one is older. A measurement sits after priority, so a p1 still
+    outranks fan-out, and a curated rank outranks everything."""
+    X = _entry("ab-22220001", created_at="2026-02-01T00:00:00Z")
+    Y = _entry("ab-22220002", created_at="2026-01-01T00:00:00Z")
+    d1 = _entry("ab-22220003", blocked_by=["ab-22220001"])
+    d2 = _entry("ab-22220004", blocked_by=["ab-22220001"])
+    ordered = [e["id"] for e in sorted([X, Y, d1, d2], key=_lane_key([X, Y, d1, d2]))]
+    assert ordered[:2] == ["ab-22220001", "ab-22220002"]
+
+    # Priority is a decision and outranks the measurement.
+    Y["priority"] = "p1"
+    ordered = [e["id"] for e in sorted([X, Y, d1, d2], key=_lane_key([X, Y, d1, d2]))]
+    assert ordered[0] == "ab-22220002"
+
+    # A curated rank still outranks everything unranked.
+    Y["rank"] = 3.0
+    ordered = [e["id"] for e in sorted([X, Y, d1, d2], key=_lane_key([X, Y, d1, d2]))]
+    assert ordered[0] == "ab-22220002"
+
+
+def test_selection_fanout_counts_only_open_dependents():
+    """A blocked_by from a done or superseded-closed node is not fan-out."""
+    X = _entry("ab-22220011", created_at="2026-02-01T00:00:00Z")
+    Y = _entry("ab-22220012", created_at="2026-01-01T00:00:00Z")
+    done_dep = _entry("ab-22220013", blocked_by=["ab-22220011"],
+                      completed_at="2026-03-01T00:00:00Z")
+    ordered = [e["id"] for e in sorted([X, Y, done_dep], key=_lane_key([X, Y, done_dep]))]
+    # Y is older, and X's only dependent is closed: Y first.
+    assert ordered[0] == "ab-22220012"
