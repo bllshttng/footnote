@@ -293,6 +293,14 @@ def board_cmd(
     state: Optional[Path] = typer.Option(
         None, "--state", hidden=True, help="King manifest whose scope bounds the board."
     ),
+    budget_ms: Optional[int] = typer.Option(
+        None,
+        "--budget-ms",
+        help="Whole-board budget in milliseconds. Every per-source slice is "
+        "derived from this one total; a caller that enforces an outer timer "
+        "(the stop gate) passes that same bound in, so the board returns a "
+        "payload naming what it could not read instead of being killed.",
+    ),
 ) -> None:
     """Report every queue that would keep a king working.
 
@@ -339,9 +347,9 @@ def board_cmd(
                 "exit_code": 1,
             }
         else:
-            board = read_board(scope=scope)
+            board = read_board(scope=scope, budget_ms=budget_ms)
     else:
-        board = read_board()
+        board = read_board(budget_ms=budget_ms)
     if as_json:
         typer.echo(json.dumps(board, indent=2))
     else:

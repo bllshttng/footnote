@@ -13402,16 +13402,40 @@ pub(crate) fn read_king_board(
     // regardless of that exit code; only an absent or unparseable one is a read
     // failure, and that one blocks, because a king that cannot see its board
     // must not certify itself finished.
+    //
+    // The bound is handed IN as well as enforced here: the board derives every
+    // per-source slice from this same total (`--budget-ms`), so there is no
+    // independent inner default to invert (the old per-read 60s sat above this
+    // whole-board 30s kill and could never fire). The board now self-enforces
+    // and returns a payload naming what it could not read, so a timeout here
+    // means the board did not answer in time - this change's own bug, not a
+    // slow source - and the message says exactly that.
+    let budget = stopgate_read_timeout();
+    let budget_arg = format!("{}", budget.as_millis());
     let state_arg = state_path.to_string_lossy().into_owned();
     let read = bounded_read(
         fno_bin.as_ref(),
-        &["inbox", "board", "--json", "--state", &state_arg],
+        &[
+            "inbox",
+            "board",
+            "--json",
+            "--state",
+            &state_arg,
+            "--budget-ms",
+            &budget_arg,
+        ],
         cwd,
         "king_board",
-        stopgate_read_timeout(),
+        budget,
     )
     .map_err(|e| match e.kind {
-        ReadErrorKind::TimedOut => e.render(),
+        ReadErrorKind::TimedOut => format!(
+            "king board did not self-report within its {:.1}s budget; the board \
+             was given this same bound and names what it could not read, so a \
+             timeout here is a defect in the board's deadline enforcement, not \
+             a slow source",
+            budget.as_secs_f64()
+        ),
         ReadErrorKind::Failed => {
             format!("cannot run {fno_bin} inbox board: {}", e.stderr_tail)
         }
