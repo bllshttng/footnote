@@ -5164,15 +5164,18 @@ def cmd_rm(
     from fno.agents.dispatch import DispatchAskError, rm_agent
 
     try:
-        rm_agent(
-            name,
-            force=force,
-            audit_actor=audit_actor,
-            audit_reason=audit_reason,
-            audit_request_id=audit_request_id,
-            audit_worktree_touched=True if audit_worktree_touched else None,
-            audit_reclaimed_bytes=audit_reclaimed_bytes,
-        )
+        kwargs: dict[str, Any] = {"force": force}
+        if audit_actor is not None:
+            kwargs["audit_actor"] = audit_actor
+        if audit_reason != "operator-requested":
+            kwargs["audit_reason"] = audit_reason
+        if audit_request_id is not None:
+            kwargs["audit_request_id"] = audit_request_id
+        if audit_worktree_touched:
+            kwargs["audit_worktree_touched"] = True
+        if audit_reclaimed_bytes is not None:
+            kwargs["audit_reclaimed_bytes"] = audit_reclaimed_bytes
+        rm_agent(name, **kwargs)
     except DispatchAskError as exc:
         print(str(exc), file=sys.stderr)
         raise typer.Exit(code=exc.exit_code) from exc
