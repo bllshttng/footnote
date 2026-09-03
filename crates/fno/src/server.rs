@@ -10741,6 +10741,33 @@ impl Core {
     /// rather than tested: pane ids allocate from zero (`next_pane_id`), so
     /// pane 0 is a valid seat and a truthiness test on it is the x-d914
     /// defect that made six live workers invisible.
+    /// (x-8f9d) The lowest portal index nothing LIVE holds.
+    ///
+    /// Server-side on purpose. A client computing this from the rows it last
+    /// rendered races every other client: two of them pick the same number and
+    /// the second reach repoints the first one's brand-new portal. The server
+    /// handles reaches one at a time, so allocating here cannot collide.
+    ///
+    /// Liveness, not presence, the same read `close_pane` uses: an entry whose
+    /// pane closed elsewhere is stale, and its index is free to reuse. The
+    /// reach's own stale-slot path then reads the leftover entry for its
+    /// remembered tab, so reusing the index lands the new viewer where the old
+    /// one was.
+    ///
+    /// Saturates at `u8::MAX` rather than wrapping to 0, which would silently
+    /// repoint portal 0 instead of opening a new one. 256 live portals is not
+    /// a case worth a refusal path.
+    fn next_free_portal(&self) -> u8 {
+        (0..=u8::MAX)
+            .find(|idx| {
+                !self
+                    .portals
+                    .get(idx)
+                    .is_some_and(|portal| self.panes.contains_key(&portal.seat))
+            })
+            .unwrap_or(u8::MAX)
+    }
+
     fn portal_of(&self, pane: Option<u64>) -> Option<u8> {
         let pane = pane?;
         self.portals
@@ -13328,7 +13355,7 @@ impl Core {
                 // nothing past this point sees two fields that overlap: a
                 // pre-v64 client's `thread_pane: true` lands in portal 0,
                 // exactly where it always did.
-                if let Some(portal) = placement.portal_target() {
+                if placement.wants_portal() {
                     if placement.here
                         || placement.split.is_some()
                         || placement.at.is_some()
@@ -13338,6 +13365,14 @@ impl Core {
                         self.notice(client_id, "a portal takes no split, target, or anchor");
                         return Flow::Continue;
                     }
+                    // An explicit index wins over "any". `portal_new` names no
+                    // index BECAUSE the caller must not choose one: allocating
+                    // here, where reaches are handled one at a time, is what
+                    // makes two clients opening a portal at once safe.
+                    let portal = match placement.portal_target() {
+                        Some(idx) => idx,
+                        None => self.next_free_portal(),
+                    };
                     return self.reach_portal(client_id, view, vp, portal, &id);
                 }
                 // Validate the jobId shape (8 hex digits) BEFORE it reaches the
@@ -19751,6 +19786,7 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
                     portal: None,
                     target: PaneTarget::SquadId(1),
                     split: Some(Dir::Down),
@@ -19786,6 +19822,7 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
                     portal: None,
                     target: PaneTarget::SquadId(1),
                     split: Some(Dir::Down),
@@ -19824,6 +19861,7 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
                     portal: None,
                     target: PaneTarget::SquadId(1),
                     split: Some(Dir::Down),
@@ -21368,6 +21406,7 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
                     portal: None,
                     tab: None,
                     at: None,
@@ -21422,6 +21461,7 @@ mod tests {
             80,
             false,
             PanePlacement {
+                portal_new: false,
                 portal: None,
                 tab: None,
                 at: None,
@@ -21465,6 +21505,7 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
                     portal: None,
                     tab: None,
                     at: None,
@@ -23505,6 +23546,7 @@ mod tests {
             Command::AttachAgent {
                 id: "deadbee1".into(),
                 placement: PanePlacement {
+                    portal_new: false,
                     portal: None,
                     tab: None,
                     at: None,
@@ -25298,6 +25340,7 @@ mod tests {
             Command::AttachAgent {
                 id: "deadbee2".into(),
                 placement: PanePlacement {
+                    portal_new: false,
                     portal: None,
                     tab: None,
                     at: None,
@@ -26512,6 +26555,73 @@ mod tests {
         assert_ne!(
             core.portals[&1].seat, a_seat,
             "two portals never share a seat"
+        );
+    }
+
+    #[test]
+    fn the_server_allocates_the_next_free_portal() {
+        // `portal_new` names no index because the CALLER must not choose one.
+        // Two clients computing "next free" from the rows they last rendered
+        // pick the same number, and the second reach repoints the first one's
+        // brand-new portal. The server handles reaches one at a time, so
+        // allocating here cannot collide.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _rx) = thread_core();
+        core.agents = vec![
+            bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+            bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+            bg_row("target-c", "/tmp/seen", Some("deadbee3")),
+        ];
+        let new_portal = |id: &str| Command::AttachAgent {
+            id: id.into(),
+            placement: PanePlacement {
+                portal_new: true,
+                ..Default::default()
+            },
+        };
+
+        core.command(client_id, new_portal("deadbee1"));
+        assert_eq!(
+            core.portals.keys().copied().collect::<Vec<_>>(),
+            vec![0],
+            "the first new portal is 0"
+        );
+        core.command(client_id, new_portal("deadbee2"));
+        assert_eq!(
+            core.portals.keys().copied().collect::<Vec<_>>(),
+            vec![0, 1],
+            "the second lands beside it, not on top of it"
+        );
+
+        // An explicit index still wins over "any": addressing is unchanged.
+        core.command(client_id, portal_reach_cmd("deadbee3", 0));
+        assert_eq!(
+            core.portals.get(&0).map(|e| e.row_key.as_str()),
+            Some("deadbee3"),
+            "an addressed reach repoints the index it named"
+        );
+        assert_eq!(core.portals.len(), 2, "and mints nothing new");
+    }
+
+    #[test]
+    fn a_stale_portal_index_is_free_to_reuse() {
+        // Liveness, not presence. An entry whose pane closed elsewhere holds
+        // no portal, so its index is available - and the reach's own
+        // stale-slot path then reads that leftover entry for its remembered
+        // tab, landing the new viewer where the old one was.
+        let mut core = empty_core();
+        core.portals.insert(
+            0,
+            Portal {
+                row_key: "gone".to_string(),
+                seat: 99_999, // never in `panes`
+                tab: 1,
+            },
+        );
+        assert_eq!(
+            core.next_free_portal(),
+            0,
+            "a stale entry does not reserve its index"
         );
     }
 
@@ -29218,6 +29328,7 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
                     portal: None,
                     tab: None,
                     at: None,
@@ -29276,6 +29387,7 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
                     portal: None,
                     tab: None,
                     at: None,
@@ -29337,6 +29449,7 @@ mod tests {
                 80,
                 false,
                 PanePlacement {
+                    portal_new: false,
                     portal: None,
                     tab: None,
                     at: None,

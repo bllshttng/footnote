@@ -3893,23 +3893,6 @@ impl View {
     /// N-reachable-paths trap in miniature: the mission-squad exclusion had
     /// already been fixed twice, and the `.take(9)` cap had to be removed
     /// twice. Now there is one.
-    /// (x-8f9d) The lowest portal index nothing currently holds, read off the
-    /// rows the server already derived. No separate client-side portal state:
-    /// a row carries its index or carries `None`, and the union of those is
-    /// the set of open portals.
-    ///
-    /// Saturates at `u8::MAX` rather than wrapping to 0, which would silently
-    /// repoint portal 0 instead of opening a new one. 256 open portals is not
-    /// a case worth a refusal path; landing on the last index is honest and
-    /// self-limiting.
-    fn next_free_portal(&self) -> u8 {
-        let taken: std::collections::BTreeSet<u8> =
-            self.layout.agents.iter().filter_map(|a| a.portal).collect();
-        (0..=u8::MAX)
-            .find(|idx| !taken.contains(idx))
-            .unwrap_or(u8::MAX)
-    }
-
     fn attach_dst_squads(&self) -> Vec<u64> {
         self.layout
             .squads
@@ -14169,6 +14152,7 @@ async fn execute_row_menu_action(
                 &ClientMsg::Command(Command::AttachAgent {
                     id,
                     placement: PanePlacement {
+                        portal_new: false,
                         target: PaneTarget::CurrentRoute,
                         split,
                         here: false,
@@ -15785,15 +15769,19 @@ async fn selector_keys(
                 };
                 match picked {
                     Some(id) => {
-                        let portal = view.next_free_portal();
                         view.clear_peek();
                         view.selector = None;
                         apply_hit(
                             view,
                             ChromeHit::Cmds(vec![Command::AttachAgent {
                                 id,
+                                // The SERVER picks the index. A client
+                                // computing it from the rows it last rendered
+                                // races every other client onto the same
+                                // number, and the loser's new portal is
+                                // silently repointed.
                                 placement: PanePlacement {
-                                    portal: Some(portal),
+                                    portal_new: true,
                                     ..PanePlacement::default()
                                 },
                             }]),
@@ -16285,6 +16273,7 @@ async fn attach_place_keys(
             &ClientMsg::Command(Command::AttachAgent {
                 id: picker.id,
                 placement: PanePlacement {
+                    portal_new: false,
                     target: match dst.filter(|_| !here) {
                         Some(sid) => PaneTarget::SquadId(sid),
                         None => PaneTarget::CurrentRoute,
@@ -30109,6 +30098,7 @@ mod tests {
             ClientMsg::Command(Command::AttachAgent {
                 id: "c19cd2c3".into(),
                 placement: PanePlacement {
+                    portal_new: false,
                     portal: None,
                     tab: None,
                     at: None,
@@ -30472,6 +30462,7 @@ mod tests {
             ClientMsg::Command(Command::AttachAgent {
                 id: "c19cd2c3".into(),
                 placement: PanePlacement {
+                    portal_new: false,
                     portal: None,
                     tab: None,
                     at: None,
@@ -30524,6 +30515,7 @@ mod tests {
             ClientMsg::Command(Command::AttachAgent {
                 id: "c19cd2c3".into(),
                 placement: PanePlacement {
+                    portal_new: false,
                     portal: None,
                     tab: None,
                     at: None,

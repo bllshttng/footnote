@@ -53,7 +53,11 @@ Liveness is counted from `panes`, not from `portals.len()`. An entry left stale-
 
 ## Wire
 
-`PanePlacement.portal: Option<u8>` and `AgentRow.portal: Option<u8>` arrived in proto v64. Both are additive and `#[serde(default)]`, so the compatibility floor did not move. A v63 client still attaches.
+`PanePlacement.portal: Option<u8>`, `PanePlacement.portal_new: bool` and `AgentRow.portal: Option<u8>` arrived in proto v64. All three are additive and `#[serde(default)]`, so the compatibility floor did not move. A v63 client still attaches.
+
+`portal` names an index. `portal_new` asks for the next free one and names none, because the caller must not choose it. Two clients computing "next free" from the rows they last rendered pick the same number, and the second reach repoints the first one's new portal. The server handles reaches one at a time, so it allocates. An explicit index wins over `portal_new`.
+
+The allocator reads liveness, not presence, the same read `close_pane` uses. An entry whose pane closed elsewhere holds no portal, so its index is free. The reach's stale-slot path then reads that leftover entry for its remembered tab, which lands the new viewer where the old one was.
 
 `PanePlacement.thread_pane: bool` stays for one generation as a deprecated alias meaning portal 0. Code reads it only through `PanePlacement::portal_target()`. That folds the two fields into one value at the server's decode edge, so nothing past that point sees two fields that overlap. When `MIN_COMPAT_PROTO` passes 64, drop the bool.
 

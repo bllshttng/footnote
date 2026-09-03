@@ -100,6 +100,7 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
         &scratch,
         &cwd,
         PanePlacement {
+            portal_new: false,
             portal: None,
             tab: None,
             at: None,
@@ -141,6 +142,7 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
         &scratch,
         &cwd,
         PanePlacement {
+            portal_new: false,
             portal: None,
             tab: None,
             at: None,
@@ -658,6 +660,7 @@ fn run_pane_receipt(
 
 fn exact_placement(at: u64, split: Dir) -> PanePlacement {
     PanePlacement {
+        portal_new: false,
         portal: None,
         tab: None,
         at: Some(at),
@@ -684,6 +687,7 @@ fn exact_current_places_beside_anchor_not_focus() {
         &scratch,
         &cwd,
         PanePlacement {
+            portal_new: false,
             portal: None,
             tab: None,
             at: None,
@@ -731,6 +735,7 @@ fn exact_current_refuses_stale_anchor_selector_and_min_size() {
         &scratch,
         &cwd,
         PanePlacement {
+            portal_new: false,
             portal: None,
             tab: None,
             at: None,
@@ -797,6 +802,7 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
         &scratch,
         &cwd,
         PanePlacement {
+            portal_new: false,
             portal: None,
             tab: None,
             at: None,
@@ -819,6 +825,7 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
         &scratch,
         &cwd,
         PanePlacement {
+            portal_new: false,
             portal: None,
             tab: None,
             at: None,
@@ -848,6 +855,7 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
         &scratch,
         &cwd,
         PanePlacement {
+            portal_new: false,
             portal: None,
             tab: None,
             at: None,
@@ -916,6 +924,7 @@ fn layout_graft_replaces_anchor_and_preserves_enclosing_tab() {
         &scratch,
         &cwd,
         PanePlacement {
+            portal_new: false,
             portal: None,
             tab: None,
             at: None,

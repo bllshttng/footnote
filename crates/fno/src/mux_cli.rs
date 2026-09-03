@@ -3190,6 +3190,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 claim,
                 worker,
                 placement: PanePlacement {
+                    portal_new: false,
                     target: squad
                         .map(PaneTarget::SquadName)
                         .unwrap_or(PaneTarget::CurrentRoute),

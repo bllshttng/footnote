@@ -512,6 +512,7 @@ fn concurrent_strict_spawn_only_one_commits() {
             rows: None,
             claim: false,
             placement: PanePlacement {
+                portal_new: false,
                 portal: None,
                 tab: None,
                 at: Some(pane1),

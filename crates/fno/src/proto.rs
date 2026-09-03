@@ -311,10 +311,10 @@ fn default_true() -> bool {
 /// worker pane from the visible tree without changing the frozen client-session
 /// `ClientMsg::Detach` behavior.
 ///
-/// v64 (x-8f9d, portals): `PanePlacement.portal` and `AgentRow.portal` -
-/// additive fields that make the one thread pane an addressable set. The
-/// `thread_pane` bool stays as a compatibility alias meaning portal 0, so
-/// the floor does not move.
+/// v64 (x-8f9d, portals): `PanePlacement.portal`, `PanePlacement.portal_new`
+/// and `AgentRow.portal` - additive fields that make the one thread pane an
+/// addressable set. The `thread_pane` bool stays as a compatibility alias
+/// meaning portal 0, so the floor does not move.
 pub const PROTO_VERSION: u32 = 64;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
@@ -658,6 +658,20 @@ pub struct PanePlacement {
     /// compatibility floor does not move (see `MIN_COMPAT_PROTO` above).
     #[serde(default)]
     pub portal: Option<u8>,
+    /// (v64, x-8f9d) Open in the NEXT FREE portal, letting the SERVER pick the
+    /// index. Set by the sideline's new-portal gesture, which knows it wants
+    /// "another one" and not a particular number.
+    ///
+    /// The index cannot be chosen by the caller. Two clients computing it from
+    /// the rows they last rendered both pick the same number, and the second
+    /// reach silently repoints the first one's brand-new portal. The server
+    /// processes reaches one at a time, so allocating there is atomic by
+    /// construction.
+    ///
+    /// Ignored when `portal` names an index: an explicit address wins over
+    /// "any". Additive and `#[serde(default)]`, so the floor does not move.
+    #[serde(default)]
+    pub portal_new: bool,
 }
 
 impl PanePlacement {
@@ -668,6 +682,16 @@ impl PanePlacement {
     pub fn portal_target(&self) -> Option<u8> {
         self.portal
             .or(if self.thread_pane { Some(0) } else { None })
+    }
+
+    /// (x-8f9d) Does this placement ask for a portal at all, by any of the
+    /// three spellings? `portal_target` answers WHICH index and cannot answer
+    /// this one, because `portal_new` names no index - the server picks it.
+    /// The geometry refusal and the routing decision both read this, so a
+    /// new-portal reach is refused and routed on the same terms as an
+    /// addressed one.
+    pub fn wants_portal(&self) -> bool {
+        self.portal_target().is_some() || self.portal_new
     }
 }
 
@@ -4714,6 +4738,7 @@ mod tests {
     #[test]
     fn proto_v28_placement_roundtrips_for_pane_run_and_attach() {
         let placement = PanePlacement {
+            portal_new: false,
             portal: None,
             tab: None,
             at: None,
