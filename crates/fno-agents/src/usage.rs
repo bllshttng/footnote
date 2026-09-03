@@ -29,6 +29,7 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     // because this line is what `restart --help` prints.
     "restart [--force]  # --force: break-glass SIGKILL of the lockfile holder; plain restart is graceful",
     "reap [--json] [--dry-run]",
+    "rename <name> --name <new-label>   -- renames the registry LABEL. The old label keeps resolving as an alias and the harness session is untouched",
     "stop <name> [--force]",
     // retired-ok: help names the existing Claude callee to describe actual behavior, not to teach a direct retired command.
     "rm <name> [--force]   --force drops the registry row even when the row is LIVE or harness teardown fails; a live pane worker that cannot be stopped is still refused; a claude row's harness session is removed too (claude rm <short_id>), and claude removes that session's WORKTREE under its own guards - it keeps a worktree with uncommitted changes and refuses one holding commits it cannot confirm are saved elsewhere; a non-claude bg or headless process survives, a mux-hosted pane is killed with it",

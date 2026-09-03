@@ -1636,7 +1636,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         spawned_by_session: parent_session,
         spawned_by_harness: parent_harness,
         spawned_by_cwd: parent_cwd,
-        legacy_claude_short_id: None,
+        ..Default::default()
     }
 }
 

@@ -4575,6 +4575,8 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
         // it stays on the async runtime rather than the blocking pool.
         Some("status") => handle_status(ctx, req).await,
         Some("reconcile") => run_blocking(ctx, req, handle_reconcile).await,
+        // Label rename: the registry transaction under the flock, off-loop.
+        Some("rename") => run_blocking(ctx, req, handle_rename).await,
         // Inside-leg state push (E3.2): a per-turn hook stores the latest
         // {working|blocked|done} on the matching claude row. Pure flock + CPU.
         Some("report") => run_blocking(ctx, req, handle_report).await,
@@ -4584,15 +4586,6 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
             format!("unknown agent verb in `{}`", req.method),
         ),
     }
-}
-
-/// Validate an agent name: 1..=64 chars from `[A-Za-z0-9_-]` (US1 dispatch rule).
-fn valid_agent_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Derive a short id from a name, made unique against the registry.
@@ -4641,7 +4634,7 @@ fn is_non_terminal(s: AgentStatus) -> bool {
 async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
     let p = &req.params;
     let name = match p.get("name").and_then(|v| v.as_str()) {
-        Some(n) if valid_agent_name(n) => n.to_string(),
+        Some(n) if state::is_valid_registry_label(n) => n.to_string(),
         Some(_) => {
             return Response::err(
                 req.id,
@@ -5005,6 +4998,7 @@ fn build_claude_stream_entry(
         fno_id: None,
         delivery_policy: None,
         sandbox_posture: None,
+        ..Default::default()
     }
 }
 
@@ -5480,6 +5474,7 @@ fn build_codex_thread_entry(
             }
             .to_string(),
         ),
+        ..Default::default()
     }
 }
 
@@ -10419,6 +10414,11 @@ fn run_reconcile_sweep(
         entries,
         outcome,
     })
+}
+
+/// The agent.rename route. state.rs owns the grammar and the transaction.
+fn handle_rename(ctx: &Ctx, req: &Request) -> Response {
+    state::rename_response(&ctx.home.registry_json(), req)
 }
 
 fn handle_reconcile(ctx: &Ctx, req: &Request) -> Response {
@@ -16015,11 +16015,11 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
 
     #[test]
     fn agent_name_validation() {
-        assert!(valid_agent_name("worker-A_1"));
-        assert!(!valid_agent_name(""));
-        assert!(!valid_agent_name(&"x".repeat(65)));
-        assert!(!valid_agent_name("has space"));
-        assert!(!valid_agent_name("inject;rm"));
+        assert!(state::is_valid_registry_label("worker-A_1"));
+        assert!(!state::is_valid_registry_label(""));
+        assert!(!state::is_valid_registry_label(&"x".repeat(65)));
+        assert!(!state::is_valid_registry_label("has space"));
+        assert!(!state::is_valid_registry_label("inject;rm"));
     }
 
     #[test]

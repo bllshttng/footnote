@@ -1309,6 +1309,7 @@ fn dispatch_create(
         fno_id: None,
         delivery_policy: None,
         sandbox_posture: None,
+        ..Default::default()
     };
 
     match update_registry(registry_path, |reg| {

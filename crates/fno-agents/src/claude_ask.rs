@@ -3689,7 +3689,7 @@ fn create(
         spawned_by_session: parent_session,
         spawned_by_harness: parent_harness,
         spawned_by_cwd: parent_cwd,
-        legacy_claude_short_id: None,
+        ..Default::default()
     };
 
     // Re-check the name UNDER the registry lock before appending. The per-agent

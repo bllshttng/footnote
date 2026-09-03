@@ -470,6 +470,13 @@ pub struct MuxRef {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RegistryEntry {
     pub name: String,
+    /// Prior labels that must keep resolving, Python's `AgentEntry.aliases`
+    /// (`registry.py:343`). `rename_agent` appends the old label here. Without
+    /// this mirror a Rust registry write would DROP the field off every
+    /// Python-authored row (no serde catch-all on this struct), silencing
+    /// every historical address in one write.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     /// Daemon-set PTY field. Python's `AgentEntry` now mirrors it as
     /// `short_id: str = ""` (ab-b946b59c) so a real PTY row in a mixed registry
     /// is Python-readable and round-trips losslessly; `skip_serializing_if`
@@ -1729,6 +1736,172 @@ where
     Ok(out)
 }
 
+/// Rename a row's LABEL in one transaction, the Rust port of Python's
+/// `rename_agent` (`cli/src/fno/agents/registry.py:2632`). Label-only: the
+/// harness identity `(harness, harness_session_id, short_id)` is the lock, so a
+/// rename never crosses into the worker's own harness - claude and codex keep
+/// their native session names. The old label lands in `aliases` and keeps
+/// resolving. `token` resolves through the same tiers the sibling verbs accept
+/// (`find_name_or_full_session_id`: label, full session id + canonical handle,
+/// related/predecessor ids) plus the transport short id and a prior label held
+/// as an alias.
+pub fn rename_agent(path: &Path, token: &str, new_name: &str) -> Result<(String, String), String> {
+    if !is_valid_registry_label(new_name) {
+        return Err(
+            "registry name must be 1-64 letters, numbers, underscores, or hyphens".to_string(),
+        );
+    }
+    // Resolve BEFORE the lock. The resolution reads the same file the
+    // transaction re-reads under the lock, and the identity re-check inside the
+    // closure is what makes a mid-flight change a typed refusal rather than a
+    // rename of the wrong row (Python's "changed before rename"). The tiers
+    // mirror Python's `resolve_agent_in` exactly: a FULL session id (any of
+    // harness/related/predecessor, case-insensitive per the shared tier helper)
+    // wins outright; otherwise name, alias, transport short id, canonical
+    // handle (first-8) and legacy suffix (last-8) are unioned and the union
+    // must be unique.
+    use crate::identity::session_handle_tier;
+    let snapshot = load_registry(path).map_err(|e| e.to_string())?;
+    let session_tier = |e: &RegistryEntry| {
+        [
+            e.harness_session_id.as_deref(),
+            e.related_session_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .chain(e.predecessor_session_ids.iter().map(String::as_str))
+        .find_map(|session_id| session_handle_tier(token, session_id))
+    };
+    let label_tier = |e: &RegistryEntry| {
+        e.name == token
+            || (!e.short_id.is_empty() && e.short_id == token)
+            || e.aliases.iter().any(|a| a == token)
+            || session_tier(e).is_some()
+    };
+    let by_full: Vec<&RegistryEntry> = snapshot
+        .entries
+        .iter()
+        .filter(|e| session_tier(e) == Some(0))
+        .collect();
+    let matches: Vec<&RegistryEntry> = if by_full.is_empty() {
+        snapshot.entries.iter().filter(|e| label_tier(e)).collect()
+    } else {
+        by_full
+    };
+    let source = match matches.as_slice() {
+        [one] => one,
+        [] => return Err(format!("no such agent: {token}")),
+        _ => return Err(format!("{token} is ambiguous - use its full session id")),
+    };
+    let identity = (
+        source.harness.clone(),
+        source.harness_session_id.clone(),
+        source.short_id.clone(),
+    );
+    let old_name = source.name.clone();
+    if old_name == new_name {
+        return Ok((old_name, new_name.to_string()));
+    }
+    let resolved_name = old_name.clone();
+    // The closure's Result IS the transaction verdict: update_registry hands it
+    // back as the Ok payload, so an inner Err must propagate - dropping it would
+    // report a refused rename as a success.
+    match update_registry(path, |registry| {
+        let idx = registry
+            .entries
+            .iter()
+            .position(|e| {
+                (
+                    e.harness.clone(),
+                    e.harness_session_id.clone(),
+                    e.short_id.clone(),
+                ) == identity
+                    && e.name == resolved_name
+            })
+            .ok_or_else(|| {
+                format!(
+                    "agent {resolved_name:?} changed before rename; retry with its full session id"
+                )
+            })?;
+        // "Names another worker" includes a label the worker still ANSWERS to:
+        // a prior label held as another row's alias refuses too, or the renamed
+        // label would resolve ambiguous (two rows) the moment anyone used it.
+        if registry.entries.iter().enumerate().any(|(i, e)| {
+            i != idx && (e.name == new_name || e.aliases.iter().any(|a| a == new_name))
+        }) {
+            return Err(format!(
+                "registry label {new_name:?} already names another worker"
+            ));
+        }
+        let target = &mut registry.entries[idx];
+        if !target.aliases.iter().any(|a| a == &resolved_name) {
+            target.aliases.push(resolved_name.clone());
+        }
+        target.name = new_name.to_string();
+        Ok(())
+    }) {
+        Ok(inner) => inner?,
+        Err(e) => return Err(e.to_string()),
+    }
+    Ok((old_name, new_name.to_string()))
+}
+
+/// The label grammar `rename_agent` enforces (1..=64 chars from
+/// `[A-Za-z0-9_-]`). The ONE grammar predicate in this crate: the daemon's
+/// `valid_agent_name` delegates here, so the spawn-time name rule and the
+/// rename-time rule cannot drift. (fno's proto.rs carries its own copy for the
+/// pre-subprocess notice; the crates do not link, only shell.)
+pub fn is_valid_registry_label(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// The `agent.rename` RPC handler, beside the transaction it serves (the
+/// daemon module is shrink-only). Grammar is refused BEFORE any lock: a
+/// hostile token must never reach a write. `rename_agent` owns resolution,
+/// the identity lock, the duplicate refusal and the alias append; the harness
+/// session is untouched by construction.
+pub(crate) fn rename_response(
+    registry_path: &Path,
+    req: &crate::protocol::Request,
+) -> crate::protocol::Response {
+    use crate::protocol::{ErrorCode, Response};
+    let token = match req.params.get("name").and_then(|v| v.as_str()) {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidParams,
+                "rename needs a <name> (current label, short id, or full session id)",
+            )
+        }
+    };
+    let Some(new_name) = req.params.get("new_name").and_then(|v| v.as_str()) else {
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidParams,
+            "rename needs --name <new-label>",
+        );
+    };
+    if !is_valid_registry_label(new_name) {
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidParams,
+            "registry name must be 1-64 letters, numbers, underscores, or hyphens",
+        );
+    }
+    match rename_agent(registry_path, token, new_name) {
+        Ok((old, new)) => Response::ok(
+            req.id,
+            serde_json::json!({"renamed": true, "old_name": old, "new_name": new}),
+        ),
+        Err(msg) => Response::err(req.id, ErrorCode::Internal, msg),
+    }
+}
+
 /// Removal accounting at the write choke point (x-a879): every row the
 /// closure dropped gets a recovery receipt staged first and a
 /// `registry_row_removed` event naming the row, the remover and the reason,
@@ -1750,8 +1923,19 @@ fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[Regi
         .map(|e| e.short_id.as_str())
         .filter(|s| !s.is_empty())
         .collect();
-    let after_names: std::collections::BTreeSet<&str> =
-        after.iter().map(|e| e.name.as_str()).collect();
+    // A surviving row's PRIOR labels count as its presence: rename_agent moves
+    // the old name into `aliases`, so an id-less renamed row keeps matching
+    // here through its alias. Without this the row stages a false
+    // registry_row_removed for a row that is alive.
+    let after_names: std::collections::BTreeSet<&str> = after
+        .iter()
+        .flat_map(|e| {
+            e.aliases
+                .iter()
+                .map(String::as_str)
+                .chain([e.name.as_str()])
+        })
+        .collect();
     let removed: Vec<&RegistryEntry> = before
         .iter()
         .filter(|e| {
@@ -2555,6 +2739,189 @@ mod tests {
             registry.find_name_or_full_session_id("session-b").is_some(),
             "the current session still joins"
         );
+    }
+
+    // rename_agent: label mutation with identity lock + alias carry.
+
+    #[test]
+    fn rename_agent_renames_and_carries_the_old_label_as_alias() {
+        let dir = tmpdir("rename-happy");
+        let path = dir.join("registry.json");
+        update_registry(&path, |registry| {
+            let mut e = sample_entry("worker-a");
+            e.harness = Some("claude".into());
+            e.harness_session_id = Some("aaaaaaaa-0000-0000-0000-111111111111".into());
+            registry.entries.push(e);
+        })
+        .unwrap();
+
+        let (old, new) = rename_agent(&path, "worker-a", "worker-b").unwrap();
+        assert_eq!(old, "worker-a");
+        assert_eq!(new, "worker-b");
+
+        let reg = load_registry(&path).unwrap();
+        let row = reg
+            .find("worker-b")
+            .expect("renamed row under the new label");
+        assert_eq!(row.aliases, vec!["worker-a".to_string()]);
+        assert_eq!(
+            row.harness_session_id.as_deref(),
+            Some("aaaaaaaa-0000-0000-0000-111111111111")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rename_agent_resolves_by_short_id_and_full_session_id() {
+        let dir = tmpdir("rename-tokens");
+        let path = dir.join("registry.json");
+        update_registry(&path, |registry| {
+            let mut e = sample_entry("worker-a");
+            e.short_id = "abcd1234".into();
+            e.harness_session_id = Some("aaaaaaaa-0000-0000-0000-111111111111".into());
+            registry.entries.push(e);
+        })
+        .unwrap();
+        rename_agent(&path, "abcd1234", "worker-b").unwrap();
+        assert!(load_registry(&path).unwrap().find("worker-b").is_some());
+
+        rename_agent(&path, "aaaaaaaa-0000-0000-0000-111111111111", "worker-c").unwrap();
+        let reg = load_registry(&path).unwrap();
+        let row = reg.find("worker-c").unwrap();
+        assert_eq!(
+            row.aliases,
+            vec!["worker-a".to_string(), "worker-b".to_string()]
+        );
+
+        // Code review: the sibling-verb tiers ride along - a canonical handle
+        // (first 8 of the session id) and a related session id resolve too.
+        let mut forked = sample_entry("worker-f");
+        forked.harness_session_id = Some("bbbbbbbb-0000-0000-0000-222222222222".into());
+        forked.related_session_id = Some("cccccccc-0000-0000-0000-333333333333".into());
+        update_registry(&path, |registry| registry.entries.push(forked)).unwrap();
+        rename_agent(&path, "bbbbbbbb", "worker-g").unwrap();
+        assert!(load_registry(&path).unwrap().find("worker-g").is_some());
+        rename_agent(&path, "cccccccc-0000-0000-0000-333333333333", "worker-h").unwrap();
+        assert!(load_registry(&path).unwrap().find("worker-h").is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rename_agent_refuses_duplicate_and_unknown_and_grammar() {
+        let dir = tmpdir("rename-refusals");
+        let path = dir.join("registry.json");
+        update_registry(&path, |registry| {
+            let mut a = sample_entry("worker-a");
+            a.harness_session_id = Some("aaaaaaaa-0000-0000-0000-111111111111".into());
+            registry.entries.push(a);
+            registry.entries.push(sample_entry("worker-b"));
+        })
+        .unwrap();
+
+        let dup = rename_agent(&path, "worker-a", "worker-b").unwrap_err();
+        assert!(dup.contains("already names another worker"), "{dup}");
+        // Renaming onto a label another row ANSWERS to (its alias) refuses the
+        // same way: that label must not be made ambiguous at resolve time.
+        rename_agent(&path, "worker-b", "worker-x").unwrap();
+        let alias_dup = rename_agent(&path, "worker-b", "worker-a").unwrap_err();
+        assert!(
+            alias_dup.contains("already names another worker"),
+            "{alias_dup}"
+        );
+        let unknown = rename_agent(&path, "no-such-row", "worker-c").unwrap_err();
+        assert!(unknown.contains("no such agent"), "{unknown}");
+        let grammar = rename_agent(&path, "worker-a", "bad label!").unwrap_err();
+        assert!(grammar.contains("1-64 letters"), "{grammar}");
+        // Nothing was written by any refused call (the b->x rename above DID
+        // land: worker-b is gone, worker-x holds it).
+        let reg = load_registry(&path).unwrap();
+        assert!(reg.find("worker-a").is_some() && reg.find("worker-x").is_some());
+        assert!(reg.find("worker-b").is_none() && reg.find("worker-c").is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rename_agent_by_old_label_after_rename_still_lands_on_the_row() {
+        // The "changed before rename" guard needs identity present but the
+        // resolved name moved; the alias tier is its observable twin: an old
+        // label resolves to the SAME identity, so the write must land.
+        let dir = tmpdir("rename-alias-tier");
+        let path = dir.join("registry.json");
+        update_registry(&path, |registry| {
+            let mut e = sample_entry("worker-a");
+            e.harness_session_id = Some("aaaaaaaa-0000-0000-0000-111111111111".into());
+            registry.entries.push(e);
+        })
+        .unwrap();
+        rename_agent(&path, "worker-a", "worker-b").unwrap();
+        rename_agent(&path, "worker-a", "worker-c").unwrap();
+        let reg = load_registry(&path).unwrap();
+        let row = reg
+            .find("worker-c")
+            .expect("alias token reached the same row");
+        assert_eq!(
+            row.aliases,
+            vec!["worker-a".to_string(), "worker-b".to_string()]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rename_agent_same_label_is_a_noop() {
+        let dir = tmpdir("rename-noop");
+        let path = dir.join("registry.json");
+        update_registry(&path, |registry| {
+            registry.entries.push(sample_entry("worker-a"));
+        })
+        .unwrap();
+        let (old, new) = rename_agent(&path, "worker-a", "worker-a").unwrap();
+        assert_eq!((old, new), ("worker-a".to_string(), "worker-a".to_string()));
+        let reg = load_registry(&path).unwrap();
+        let row = reg.find("worker-a").unwrap();
+        assert!(row.aliases.is_empty(), "no self-alias on a no-op rename");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rename_agent_id_less_row_leaves_no_false_removal_accounting() {
+        // A LEGACY id-less row (no session id, no short id; on disk from before
+        // the resolvable-handle invariant) renamed matches NO removal signal
+        // except its alias, and account_for_removed_rows must read the alias or
+        // it fires registry_row_removed for a live row. The fixture is
+        // hand-written JSON because the write choke point refuses to MINT such
+        // a row.
+        let dir = tmpdir("rename-id-less");
+        let path = dir.join("registry.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "schema_version": REGISTRY_SCHEMA_VERSION,
+                "agents": [{
+                    "name": "worker-a",
+                    "cwd": "/tmp/x",
+                    "project_root": "/tmp/x",
+                    "status": "live",
+                    "created_at": "2026-05-24T00:00:00Z"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(load_registry(&path).unwrap().find("worker-a").is_some());
+        // The choke point itself refuses: a renamed row reads as NEW to
+        // validate_resolvable_handle (its old name left the before map), and an
+        // id-less row has no handle - so this verb cannot mint the unresolvable
+        // row the accounting fear began with. Fail-closed refusal, row intact.
+        let refused = rename_agent(&path, "worker-a", "worker-b").unwrap_err();
+        assert!(refused.contains("no resolvable handle"), "{refused}");
+        assert!(load_registry(&path).unwrap().find("worker-a").is_some());
+        assert!(load_registry(&path).unwrap().find("worker-b").is_none());
+        // The ALIAS half of the accounting fix still matters for the path the
+        // refusal does not reach: a row renamed by Python's retask (which
+        // carries aliases) survives a later Rust write without a false
+        // registry_row_removed. Covered by the alias membership in
+        // account_for_removed_rows' after_names.
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
