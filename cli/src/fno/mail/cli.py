@@ -2870,7 +2870,11 @@ def _name_lane_send(
         # The durable row already exists - it was written BEFORE resolution,
         # so a kill in the resolution window or mid-ladder still
         # leaves it. A live miss lands exactly here: this row IS the durable
-        # floor, and writing a second would double-deliver.
+        # floor, and writing a second would double-deliver. The pre-row's
+        # provider_to stays null even though `provider` is known by now: the
+        # bus log is append-only, so the field cannot be backfilled, and its
+        # only reader renders it informationally. Never losing the message
+        # outranks that audit decoration.
         th = pre.thread
     else:
         try:
