@@ -130,8 +130,6 @@ def test_routing_block_tolerates_extra_keys():
 
 
 def test_sideline_colors_axis_tables_parse():
-    from fno.config import SidelineBlock
-
     s = _settings({
         "sideline": {"colors": {
             "harness": {"codex": "cyan"},

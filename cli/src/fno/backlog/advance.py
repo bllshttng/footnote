@@ -107,7 +107,7 @@ def _auto_continue_resolve(
         return env.strip().lower() in _TRUTHY, "env"
 
     try:
-        from fno.config import auto_merge_grant, load_settings, load_settings_for_repo
+        from fno.config import load_settings, load_settings_for_repo
 
         settings = (
             load_settings_for_repo(Path(project_root)) if project_root else load_settings()
@@ -1364,7 +1364,7 @@ def _spawn_worker(
     allow_merge = False
     settings_obj = None
     try:
-        from fno.config import load_settings, load_settings_for_repo
+        from fno.config import auto_merge_grant, load_settings, load_settings_for_repo
 
         settings_obj = (
             load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
