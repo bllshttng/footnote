@@ -1067,6 +1067,11 @@ fn apply_edit_body(
                 &a.cwd,
                 READ_TIMEOUT,
             )?;
+            // The empty-stdout half is not defensive padding. Measured
+            // against the real verb: an id the graph does not know exits 0
+            // and prints NOTHING, with nothing on stderr either. Trusting
+            // the exit code alone would append a blank line to the PR body
+            // and report the trailer added.
             if !ok || out.trim().is_empty() {
                 return Err(format!("could not generate a closure trailer for {node}"));
             }
