@@ -312,6 +312,8 @@ The verdict is published where GitHub can see it as two contexts on the PR head.
 
 `apply-merge-ruleset.sh` makes only `fno/review-coverage` and `stacked-base-guard` required on the default branch. The bypass list is empty, so every client path is refused by GitHub itself rather than by advice. The diagnostic context remains outside the required ruleset so an instrument outage cannot be rendered as a code verdict.
 
+Branch protection is absent on main. The file budget is outside the ruleset: no required check names it. A raw `gh pr merge` lands a head that grew an over-budget file with no gate seeing it. `fno do pr merge` is the gate for growth: the preflight verification event it trusts runs `scripts/ci/check-file-budget.sh` from main's copy against the merge base. When main itself grows past the budget, the `guards` push run alarms instead. The platform-native closure is a separate operator decision. It makes the budget check required, or adds a merge queue that re-runs CI on the queue's merge commit with main's workflow. Either one changes how `fno do pr merge` lands a PR.
+
 One source also has to mean one *location*.
 
 Every worktree resolves its local journal from the worktree root, and setup symlinks that file to the canonical checkout's journal. An isolated reviewer, author, merge, and reconcile all observe the same repository evidence.
