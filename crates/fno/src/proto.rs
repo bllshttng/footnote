@@ -315,6 +315,11 @@ fn default_true() -> bool {
 /// "idle now" reading the used-shell prune sweep needs. A new verb is not
 /// additive-tolerant; the field rides the same generation.
 /// v66 (sideline rename): `Command::RenameAgent` - a new verb, this generation.
+/// The same generation also adds `ControlVerb::ThreadPane`'s
+/// `#[serde(default)]` `placement` - the tab/split/at/target a FRESH portal
+/// open honors, now that the geometry refusal lives inside `reach_portal`
+/// where the slot lookup knows occupancy. Additive, so the compatibility
+/// floor does not move; a repoint keeps owning its geometry and says so.
 pub const PROTO_VERSION: u32 = 66;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
@@ -907,6 +912,15 @@ pub enum ControlVerb {
         /// additive and the compatibility floor does not move.
         #[serde(default)]
         portal: Option<u8>,
+        /// (v66, x-9b60) The placement a FRESH portal open honors (`tab`,
+        /// `split`, `at`, `target`). Additive and `#[serde(default)]`: a
+        /// pre-v66 client sends no placement and decodes to the default,
+        /// wire-identical to v65, so the compatibility floor does not move.
+        /// A portal that already exists keeps owning its geometry - the
+        /// server ignores these fields on a repoint and says so; `here` is
+        /// refused outright, exactly as it always was.
+        #[serde(default)]
+        placement: PanePlacement,
     },
     /// Join a whole source tab into the anchor pane's tab as a split, removing
     /// the now-empty source tab -> [`ServerMsg::Ok`]. Refuses join-into-self up
@@ -4248,7 +4262,8 @@ mod tests {
         // workspace-restore verb (x-7b5e) re-bumped it 59 -> 60 (second to
         // merge); DND presence (x-7d02) bumps it 60 -> 61; the sideline lane
         // axes (x-1b35) bump it 62 -> 63; the portals fields (x-8f9d) bump it
-        // 63 -> 64; the tab-organization pair (x-cf97) bumps it 64 -> 65.
+        // 63 -> 64; the tab-organization pair (x-cf97) bumps it 64 -> 65; the
+        // ThreadPane placement field (x-9b60) bumps it 65 -> 66.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -4956,6 +4971,41 @@ mod tests {
             "server proto version missing: {err}"
         );
         assert!(err.contains(BUILD_VERSION), "server build missing: {err}");
+    }
+
+    #[test]
+    fn thread_pane_placement_field_is_additive() {
+        // (x-9b60, AC6-REG) A client built before v66 sends a ThreadPane
+        // carrying only `name` and `portal`: it decodes to the default
+        // placement and behaves exactly as v65 did. The default round-trips
+        // absent, so the wire shape of every existing caller is unchanged.
+        let pre_v66 = r#"{"ThreadPane":{"name":"w2","portal":1}}"#;
+        let verb: ControlVerb = serde_json::from_str(pre_v66).unwrap();
+        match verb {
+            ControlVerb::ThreadPane {
+                name,
+                portal,
+                placement,
+            } => {
+                assert_eq!(name, "w2");
+                assert_eq!(portal, Some(1));
+                assert_eq!(placement, PanePlacement::default());
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        // The new field round-trips when present.
+        let verb = ControlVerb::ThreadPane {
+            name: "w2".into(),
+            portal: Some(1),
+            placement: PanePlacement {
+                tab: Some(TabSel::Id(2)),
+                split: Some(Dir::Right),
+                ..Default::default()
+            },
+        };
+        let back: ControlVerb =
+            serde_json::from_str(&serde_json::to_string(&verb).unwrap()).unwrap();
+        assert_eq!(verb, back);
     }
 
     #[test]
