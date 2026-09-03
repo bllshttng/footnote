@@ -17933,7 +17933,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     }
 
     #[test]
-    #[test]
     fn store_socket_sweep_unlinks_the_dead_and_leaves_the_live() {
         // Dead sockets (kill -9 leftovers) are unlinked from both walk
         // locations; a socket with a live listener is left exactly as found.

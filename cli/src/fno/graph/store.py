@@ -508,10 +508,31 @@ def _apply_graph_defaults(entries: list[dict], *, keep_malformed: bool = False) 
     return result["entries"]
 
 
+def _plan_rung_map(entries: list[dict]) -> "dict[str, str]":
+    """Node id -> the rung of the node's linked plan, computed client-side.
+
+    Plan documents are read on THIS side of the seam only (the Python rung
+    table, ``ladder.plan_rung``); the store consumes the map as data, so its
+    plan-based status derivation is driven entirely by what the client sent.
+    """
+    from fno.graph.ladder import plan_rung
+
+    return {
+        str(e["id"]): plan_rung(e).value
+        for e in entries
+        if isinstance(e, dict) and e.get("id")
+    }
+
+
 def recompute_statuses_via_store(entries: list[dict]) -> list[dict]:
     """The write-path status cascade (statuses.recompute_statuses), answered
-    by the ported store. Pure over the given rows: no file I/O, no publish."""
-    result = _client_for(GRAPH_JSON).request("recompute", {"entries": entries})
+    by the ported store. Pure over the given rows: no file I/O, no publish.
+
+    The rung map rides along: without it the store keeps stored statuses
+    instead of re-deriving plan-based ones."""
+    result = _client_for(GRAPH_JSON).request(
+        "recompute", {"entries": entries, "plan_rungs": _plan_rung_map(entries)}
+    )
     return result["entries"]
 
 
@@ -792,6 +813,11 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     detection, canonicalization) and publishes under the bounded lock with
     backup + sidecar. Renders, claim releases, and the nudge run after the
     publish lands -- the same post-lock position the file leg used.
+
+    The plan-rung map is computed over the MUTATED rows (the rows the
+    keeper's recompute will see), so a node a mutator just bound to a plan
+    derives from that plan on the same write, exactly as the pre-port store
+    did.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -804,7 +830,11 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
         try:
             outcome = client.request(
                 "commit",
-                {"version": snap["version"], "entries": entries},
+                {
+                    "version": snap["version"],
+                    "entries": entries,
+                    "plan_rungs": _plan_rung_map(entries),
+                },
             )
             break
         except _Conflict:
@@ -883,9 +913,17 @@ def _run_op(path: Path, name: str, params: dict) -> dict:
     """One typed op through the keeper's full locked cycle, followed by the
     same post-publish duties a mutator-based write ran (renders, releases,
     nudge): the targeted helpers replaced locked_mutate_graph calls, so they
-    carry the same visible effects."""
+    carry the same visible effects.
+
+    The plan-rung map rides in the op params, computed over the begin
+    snapshot: a session op that opens or closes a do row re-derives
+    in_progress the way any full write would. No Python op mutates
+    plan_path, so a snapshot-derived map is exact."""
     path = Path(path)
-    result = _client_for(path).request("op", {"name": name, "params": params})
+    client = _client_for(path)
+    snap = client.request("begin", {})
+    params = {**params, "plan_rungs": _plan_rung_map(snap["entries"])}
+    result = client.request("op", {"name": name, "params": params})
     _finish_mutation(path, result["outcome"])
     return result["op"]
 

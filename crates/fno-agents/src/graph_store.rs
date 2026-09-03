@@ -25,6 +25,7 @@
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -991,122 +992,30 @@ pub fn apply_defaults(entries: &mut Vec<Value>, keep_malformed: bool) {
 }
 
 // ---------------------------------------------------------------------------
-// plan_rung: the plan-doc probe, ported from ladder.py
+// plan_rung: supplied by the client, never read here
 // ---------------------------------------------------------------------------
 
-/// Filesystem path for a node's plan doc (ladder.resolve_plan_probe):
-/// strip a `#anchor`, expand `~`, resolve a relative path against the NODE's
-/// own `cwd`, never the calling process's.
-pub fn resolve_plan_probe(entry: &Value) -> Option<PathBuf> {
-    let plan_path = s_str(entry, "plan_path")?;
-    if plan_path.is_empty() {
-        return None;
+/// The rung a node's linked plan sits on, as the CLIENT supplied it
+/// (ladder.plan_rung answers on the Python side of the seam: repo law keeps
+/// plan-document reading in the Python rung table, so the store consumes
+/// rungs as data). `rungs` maps node id to the ladder rung string; a node
+/// absent from the map reads as rung "none".
+pub fn supplied_plan_rung(entry: &Value, rungs: &BTreeMap<String, String>) -> &'static str {
+    let raw = match (is_dict(entry), entry_id(entry)) {
+        (true, Some(id)) => rungs.get(id).map(String::as_str),
+        _ => None,
     }
-    let probe = plan_path.split('#').next().unwrap_or(plan_path);
-    if probe.is_empty() {
-        return None;
-    }
-    let expanded = if let Some(rest) = probe.strip_prefix("~/") {
-        home_dir()?.join(rest)
-    } else if probe == "~" {
-        home_dir()?
-    } else {
-        PathBuf::from(probe)
-    };
-    if expanded.is_absolute() {
-        return Some(expanded);
-    }
-    let cwd = s_str(entry, "cwd")?;
-    if cwd.is_empty() {
-        return None;
-    }
-    Some(Path::new(cwd).join(expanded))
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
-}
-
-/// `(status_or_none, readable)` for the plan at `probe`
-/// (ladder._read_status_scalar): readable is false only when the document
-/// genuinely cannot be parsed; a readable doc with no frontmatter or no
-/// `status` answers (None, true).
-fn read_status_scalar(probe: &Path) -> (Option<String>, bool) {
-    let Ok(text) = std::fs::read_to_string(probe) else {
-        return (None, false);
-    };
-    if text.trim().is_empty() {
-        return (None, false);
-    }
-    let mut lines = text.lines();
-    if lines.next().map(str::trim) != Some("---") {
-        return (None, true);
-    }
-    let rest: Vec<&str> = lines.collect();
-    let Some(end) = rest.iter().position(|l| l.trim() == "---") else {
-        return (None, false);
-    };
-    let body = rest[..end].join("\n");
-    let Ok(fm) = serde_yaml_ng::from_str::<Value>(&body) else {
-        return (None, false);
-    };
-    let Some(obj) = fm.as_object() else {
-        // An empty frontmatter block parses to null in Python's yaml.safe_load
-        // and reads as "no status, readable"; a non-mapping (a list, a scalar)
-        // is genuinely unparseable as a mapping.
-        if fm.is_null() {
-            return (None, true);
-        }
-        return (None, false);
-    };
-    let Some(status) = obj.get("status") else {
-        return (None, true);
-    };
-    let raw = match status {
-        Value::Null => String::new(),
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    };
-    (Some(raw), true)
-}
-
-/// Normalized plan status with any retired spelling resolved
-/// (plan._status.canonical_status).
-fn canonical_plan_status(raw: &str) -> String {
+    .unwrap_or("none");
     let s = raw.trim().trim_matches(['\'', '"']).to_lowercase();
-    PLAN_STATUS_ALIASES
+    if s == "none" {
+        // Not a table member: "nothing on disk" answers NONE directly.
+        return "none";
+    }
+    let canonical = PLAN_STATUS_ALIASES
         .iter()
-        .find(|(from, _)| *from == s)
-        .map(|(_, to)| to.to_string())
-        .unwrap_or(s)
-}
-
-/// The rung a node's linked plan sits on (ladder.plan_rung). Never raises:
-/// every failure answers a rung, and the two "cannot tell" shapes stay
-/// distinct (UNREADABLE) from "nothing on disk" (NONE).
-pub fn plan_rung(entry: &Value) -> &'static str {
-    if !is_dict(entry) {
-        return "none";
-    }
-    let Some(plan_path) = s_str(entry, "plan_path") else {
-        return "none";
-    };
-    if plan_path.is_empty() {
-        return "none";
-    }
-    let Some(probe) = resolve_plan_probe(entry) else {
-        return "unreadable";
-    };
-    let (raw, readable) = read_status_scalar(&probe);
-    if !readable {
-        return "unreadable";
-    }
-    let Some(raw) = raw else {
-        // Readable, but declares no status: READY, which every surface
-        // derived for it before ladder.py existed.
-        return "ready";
-    };
-    let canonical = canonical_plan_status(&raw);
+        .find(|(from, _)| *from == &s)
+        .map(|(_, to)| *to)
+        .unwrap_or(s.as_str());
     STATUS_TO_RUNG
         .iter()
         .find(|(from, _)| *from == canonical)
@@ -1175,6 +1084,17 @@ fn is_open_do_row(row: &Value) -> bool {
 /// deliberately NOT derived here - dependency satisfaction is answered fresh
 /// on every read instead.
 pub fn recompute_statuses(entries: &mut [Value]) {
+    recompute_statuses_with_plan_rungs(entries, None)
+}
+
+/// `plan_rungs` is None when the caller supplies no plan data: plan-derived
+/// statuses then keep their stored values instead of re-deriving (a mux-side
+/// op write never flips a node's status behind the plan's back). The Python
+/// client always supplies the map, computed by `ladder.plan_rung`.
+pub fn recompute_statuses_with_plan_rungs(
+    entries: &mut [Value],
+    plan_rungs: Option<&BTreeMap<String, String>>,
+) {
     normalize_lock_fields(entries);
 
     let valid_ids: std::collections::HashSet<String> = entries
@@ -1283,7 +1203,12 @@ pub fn recompute_statuses(entries: &mut [Value]) {
             && !deferred
             && !has_pr
         {
-            Some(plan_rung(e))
+            match plan_rungs {
+                Some(map) => Some(supplied_plan_rung(e, map)),
+                // No plan data supplied: the ladder write below is skipped and
+                // the entry keeps its stored status.
+                None => None,
+            }
         } else {
             None
         };
@@ -1338,10 +1263,10 @@ pub fn recompute_statuses(entries: &mut [Value]) {
         }
         if locked || open_do {
             obj.insert("status".to_string(), Value::String("in_progress".into()));
-        } else {
+        } else if let Some(derived) = rung {
             obj.insert(
                 "status".to_string(),
-                Value::String(rung_to_graph_status(rung.unwrap_or("none")).to_string()),
+                Value::String(rung_to_graph_status(derived).to_string()),
             );
         }
     }
@@ -1815,6 +1740,12 @@ pub struct MutateInput {
     /// that already serialized the whole read-apply-publish cycle under one
     /// gate (the keeper's own ops).
     pub base_version: Option<String>,
+    /// Node id -> the rung of the node's linked plan, as the client computed
+    /// it with the Python rung table (`ladder.plan_rung`). Repo law keeps
+    /// plan-document reading on the Python side, so the store derives
+    /// plan-based statuses ONLY from this map; `None` keeps stored statuses
+    /// (a caller that is not re-deriving from plans).
+    pub plan_rungs: Option<BTreeMap<String, String>>,
 }
 
 /// The content digest a begin/commit pair compares (the wire "version").
@@ -1866,7 +1797,7 @@ pub fn locked_mutate(
     let mut pre = raw.clone();
     apply_defaults(&mut pre, false);
     let mut pre_normalized = pre.clone();
-    recompute_statuses(&mut pre_normalized);
+    recompute_statuses_with_plan_rungs(&mut pre_normalized, input.plan_rungs.as_ref());
     let status_normalized: std::collections::HashMap<String, String> = pre_normalized
         .iter()
         .filter(|e| is_dict(e))
@@ -1932,7 +1863,7 @@ pub fn locked_mutate(
 
     // Slug assignment on EVERY persisted mutation (ab-f82e8083).
     ensure_slugs(&mut entries);
-    recompute_statuses(&mut entries);
+    recompute_statuses_with_plan_rungs(&mut entries, input.plan_rungs.as_ref());
 
     // touched_at stamp: a curation-field change vs the pre-image.
     let now_iso = now_isoformat();
@@ -2211,6 +2142,7 @@ mod tests {
                 entries: vec![json!({"id": "ab-1", "title": "t", "details": ""})],
                 canonical_path: None,
                 base_version: None,
+                plan_rungs: None,
             },
             Duration::from_secs(2),
         )
@@ -2223,6 +2155,7 @@ mod tests {
                 entries: vec![json!({"id": "ab-1", "completion_note": "   "})],
                 canonical_path: None,
                 base_version: None,
+                plan_rungs: None,
             },
             Duration::from_secs(2),
         )
@@ -2235,6 +2168,7 @@ mod tests {
                 entries: vec![json!({"id": "ab-1", "title": "t"})],
                 canonical_path: None,
                 base_version: None,
+                plan_rungs: None,
             },
             Duration::from_secs(2),
         )
@@ -2277,17 +2211,21 @@ mod tests {
     }
 
     #[test]
-    fn rung_reads_plan_frontmatter_not_headings() {
-        let dir = tempfile::tempdir().unwrap();
-        let plan = dir.path().join("plan.md");
-        std::fs::write(&plan, "---\nstatus: design\n---\n\n# x\n").unwrap();
-        let e = json!({"id": "n", "plan_path": plan.to_string_lossy(), "cwd": dir.path()});
-        assert_eq!(plan_rung(&e), "design");
-        // A doc declaring no status reads ready, never unreadable.
-        let plan2 = dir.path().join("plan2.md");
-        std::fs::write(&plan2, "# no frontmatter\n").unwrap();
-        let e2 = json!({"id": "n", "plan_path": plan2.to_string_lossy(), "cwd": dir.path()});
-        assert_eq!(plan_rung(&e2), "ready");
+    fn plan_rungs_arrive_from_the_client_and_derive() {
+        // Repo law keeps plan-document reading on the Python side, so the
+        // store consumes the rungs the client computed with the rung table.
+        let mut entries = vec![json!({"id": "n", "plan_path": "plan.md"})];
+        let rungs = BTreeMap::from([("n".to_string(), "design".to_string())]);
+        recompute_statuses_with_plan_rungs(&mut entries, Some(&rungs));
+        assert_eq!(s_str(&entries[0], "status"), Some("design"));
+        // A node the map does not name reads as rung "none".
+        let mut entries2 = vec![json!({"id": "m", "plan_path": "plan.md"})];
+        recompute_statuses_with_plan_rungs(&mut entries2, Some(&rungs));
+        assert_eq!(s_str(&entries2[0], "status"), Some("idea"));
+        // NO map at all: stored statuses stay (a caller not re-deriving).
+        let mut entries3 = vec![json!({"id": "n", "plan_path": "plan.md", "status": "ready"})];
+        recompute_statuses_with_plan_rungs(&mut entries3, None);
+        assert_eq!(s_str(&entries3[0], "status"), Some("ready"));
     }
 
     #[test]
@@ -2332,6 +2270,7 @@ mod tests {
                 entries,
                 canonical_path: None,
                 base_version: None,
+                plan_rungs: None,
             },
             Duration::from_secs(2),
         )

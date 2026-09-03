@@ -336,8 +336,9 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
             );
             entries
         }),
-        "recompute" => handle_pure(&params, |mut entries, _p| {
-            graph_store::recompute_statuses(&mut entries);
+        "recompute" => handle_pure(&params, |mut entries, p| {
+            let plan_rungs = plan_rung_map(p);
+            graph_store::recompute_statuses_with_plan_rungs(&mut entries, plan_rungs.as_ref());
             entries
         }),
         // The read-time readiness overlay (statuses.compute_readiness), for
@@ -457,10 +458,24 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
             entries,
             canonical_path: state.canonical.then(|| state.graph.clone()),
             base_version: Some(version.to_string()),
+            plan_rungs: plan_rung_map(params),
         },
         state.lock_timeout,
     )?;
     Ok(outcome_json(&outcome))
+}
+
+/// The client-supplied node id -> plan rung map (see
+/// `graph_store::supplied_plan_rung`): repo law keeps plan-document reading
+/// on the Python side, so the map crosses as data. Absent key = the caller
+/// is not re-deriving from plans, and stored statuses stay.
+fn plan_rung_map(params: &Value) -> Option<std::collections::BTreeMap<String, String>> {
+    let obj = params.get("plan_rungs")?.as_object()?;
+    Some(
+        obj.iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect(),
+    )
 }
 
 fn outcome_json(outcome: &graph_store::MutateOutcome) -> Value {
@@ -1397,6 +1412,11 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
             entries,
             canonical_path: state.canonical.then(|| state.graph.clone()),
             base_version: Some(base),
+            // The Python client sends the begin snapshot's map with every op
+            // (a session op that opens or closes a do row re-derives
+            // in_progress like any full write); a caller that sends none
+            // keeps stored statuses.
+            plan_rungs: plan_rung_map(&p),
         },
         state.lock_timeout,
     )?;

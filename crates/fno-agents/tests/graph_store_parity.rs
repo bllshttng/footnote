@@ -113,12 +113,25 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
     let mutate = |entries: Vec<Value>, g: &Path| -> graph_store::MutateOutcome {
         // Single-writer probes: no interleaving, so the snapshot is current.
         let base = graph_store::file_content_version(g);
+        // The map is what the frozen Python leg's client computes: the
+        // fixtures ship no plan documents, so ladder.plan_rung answers
+        // "none" for every row.
+        let rungs: std::collections::BTreeMap<String, String> = entries
+            .iter()
+            .filter(|e| e.is_object())
+            .filter_map(|e| {
+                e.get("id")
+                    .and_then(Value::as_str)
+                    .map(|i| (i.to_string(), "none".to_string()))
+            })
+            .collect();
         graph_store::locked_mutate(
             g,
             MutateInput {
                 entries,
                 canonical_path: None,
                 base_version: Some(base),
+                plan_rungs: Some(rungs),
             },
             std::time::Duration::from_secs(5),
         )
@@ -596,6 +609,7 @@ fn concurrent_writers_never_lose_an_update_through_the_bounded_cycle() {
                         entries,
                         canonical_path: None,
                         base_version: Some(base),
+                        plan_rungs: None, // concurrent-writer probe: statuses stay stored
                     },
                     std::time::Duration::from_secs(10),
                 ) {
