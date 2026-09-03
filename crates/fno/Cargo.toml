@@ -48,6 +48,10 @@ serde_json = "1"
 # Read the flat `config.toml` (x-8526 stage 3): the interactive server reads
 # `config.mux.*` directly (digest_overlay Pattern B) instead of shelling `fno`.
 toml = "0.8"
+# Popup chrome measures and paints in terminal columns (x-1b68): a fullwidth
+# glyph is one char and two cells. Already resolved transitively via
+# alacritty_terminal, so this adds no new build artifact.
+unicode-width = "0.2"
 thiserror = "2"
 tokio = { version = "1", features = [
     "rt-multi-thread",

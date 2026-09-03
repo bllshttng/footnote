@@ -31,6 +31,7 @@ use crate::chrome;
 use crate::keys::{
     key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner, PANE_IDS_REPEAT_WINDOW,
 };
+use crate::lane_colors_panel::LaneColorsUi;
 use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
 use crate::proto::{
     self, cell_flags, is_mission_squad, read_msg, write_msg, AgentBadge, AgentNoPaneReason,
@@ -2362,7 +2363,7 @@ struct AuxPopup {
 /// surface or detach; settings entries change a live setting; a kanban entry
 /// names a card. Not `Copy` since x-1d91 - a card action carries its node id.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum AuxAction {
+pub(crate) enum AuxAction {
     OpenKeybinds,
     OpenSettings,
     OpenConnections,
@@ -2439,228 +2440,6 @@ fn build_prefix_settings_rows(live_prefix: &str) -> (Vec<PopupRow>, Vec<AuxActio
             enabled: true,
         });
         actions.push(AuxAction::ApplyPrefix(spec.into()));
-    }
-    (rows, actions)
-}
-
-/// (x-e4f1) The four `[sideline.colors]` axis tables, in display order.
-const LANE_AXES: [&str; 4] = ["harness", "route", "model", "row"];
-
-/// (x-e4f1) The named colors the picker offers: exactly `parse_color`'s
-/// accepted set (the picker-drift test asserts every entry parses, so the two
-/// lists cannot drift silently).
-const LANE_COLOR_NAMES: [&str; 16] = [
-    "black",
-    "red",
-    "green",
-    "yellow",
-    "blue",
-    "magenta",
-    "cyan",
-    "white",
-    "gray",
-    "light_red",
-    "light_green",
-    "light_yellow",
-    "light_blue",
-    "light_magenta",
-    "light_cyan",
-    "light_white",
-];
-
-/// (x-e4f1) The lane-colors drill state for the settings Colors tab: which
-/// level the operator is on (axis list -> key list -> picker) and any open
-/// text entry. Client-local ephemera, the `create`/`rename` class.
-#[derive(Debug, Default)]
-struct LaneColorsUi {
-    /// `Some(axis)` = the key list for that axis; `None` = the four-axis list.
-    axis: Option<String>,
-    /// `Some((axis, key))` = the color picker is open for that mapping.
-    pick: Option<(String, String)>,
-    /// `Some((axis, buffer))` = naming a NEW key for that axis.
-    key_entry: Option<(String, String)>,
-    /// `Some(buffer)` = free-form color entry for the key being picked
-    /// (`pick` carries the (axis, key) context).
-    custom_entry: Option<String>,
-    /// Split-arrow safety for the text entries, same as `create_esc`.
-    entry_esc: Vec<u8>,
-}
-
-impl LaneColorsUi {
-    fn is_entry(&self) -> bool {
-        self.key_entry.is_some() || self.custom_entry.is_some()
-    }
-    /// Drop text-entry buffers, keeping the drill level.
-    fn clear_entry(&mut self) {
-        self.key_entry = None;
-        self.custom_entry = None;
-        self.entry_esc.clear();
-    }
-    /// Drop the drill entirely (tab switch away from Colors).
-    fn reset(&mut self) {
-        self.axis = None;
-        self.pick = None;
-        self.clear_entry();
-    }
-}
-
-/// (x-e4f1) The palette entries for one axis name, in config order.
-fn lane_axis_entries(
-    pal: &crate::sideline_color::SidelinePalette,
-    axis: &str,
-) -> Vec<(String, String)> {
-    match axis {
-        "harness" => pal.harness.clone(),
-        "route" => pal.route.clone(),
-        "model" => pal.model.clone(),
-        _ => pal.row.clone(),
-    }
-}
-
-/// (x-e4f1) The color currently configured for one (axis, key), if any.
-fn current_lane_color(
-    pal: &crate::sideline_color::SidelinePalette,
-    axis: &str,
-    key: &str,
-) -> Option<String> {
-    lane_axis_entries(pal, axis)
-        .into_iter()
-        .find(|(k, _)| k == key)
-        .map(|(_, v)| v)
-}
-
-/// (x-e4f1) Merge one (key, color) into an axis block and serialize the WHOLE
-/// block as a JSON object. `fno config set` refuses per-key dotted writes
-/// inside dict fields, so the picker replaces the whole block (REPLACE
-/// semantics) with the one key updated - the merge source is re-read fresh
-/// by the caller right before this runs.
-fn merged_axis_json(entries: &[(String, String)], key: &str, color: &str) -> String {
-    let mut map = serde_json::Map::new();
-    for (k, v) in entries {
-        if k != key {
-            map.insert(k.clone(), serde_json::Value::String(v.clone()));
-        }
-    }
-    map.insert(
-        key.to_string(),
-        serde_json::Value::String(color.to_string()),
-    );
-    serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_default()
-}
-
-/// (x-e4f1) Build the settings Colors tab rows for the current drill level:
-/// axis list -> key list -> picker -> (replacing the picker) the free-form
-/// color entry. The free function is the testable seam: `palette()` is a
-/// process-global cache, so tests pass a literal palette instead of seeding
-/// the cache.
-fn build_lane_color_rows(
-    pal: &crate::sideline_color::SidelinePalette,
-    ui: &LaneColorsUi,
-) -> (Vec<PopupRow>, Vec<AuxAction>) {
-    let mut rows = Vec::new();
-    let mut actions = Vec::new();
-    if let Some((axis, key)) = &ui.pick {
-        if ui.custom_entry.is_some() {
-            // Free-form entry replaces the picker view; Enter is handled by
-            // the key divert, so the rows are display-only context.
-            let buf = ui.custom_entry.as_deref().unwrap_or("");
-            rows.push(PopupRow::Header(format!("{axis}.{key}: {buf}")));
-            rows.push(PopupRow::Rule);
-            rows.push(PopupRow::Entry {
-                glyph: " ".into(),
-                label: "enter: name | indexed(n) | #rrggbb".into(),
-                hint: String::new(),
-                enabled: false,
-            });
-            return (rows, actions);
-        }
-        // Picker level: the named colors, the current value marked.
-        rows.push(PopupRow::Header(format!("{axis}.{key}")));
-        rows.push(PopupRow::Rule);
-        let current = current_lane_color(pal, axis, key);
-        for name in LANE_COLOR_NAMES {
-            let active = current.as_deref() == Some(name);
-            rows.push(PopupRow::Entry {
-                glyph: if active { "●" } else { "○" }.into(),
-                label: name.into(),
-                hint: if active { "current" } else { "" }.into(),
-                enabled: true,
-            });
-            actions.push(AuxAction::LaneColorSet(
-                axis.clone(),
-                key.clone(),
-                (*name).into(),
-            ));
-        }
-        rows.push(PopupRow::Rule);
-        rows.push(PopupRow::Entry {
-            glyph: "✎".into(),
-            label: "custom…".into(),
-            hint: "indexed(n), #rrggbb".into(),
-            enabled: true,
-        });
-        actions.push(AuxAction::LaneColorCustom(axis.clone(), key.clone()));
-        return (rows, actions);
-    }
-    if let Some((axis, buf)) = &ui.key_entry {
-        // Key-naming entry: live echo + the keys already on this axis.
-        rows.push(PopupRow::Header(format!("{axis} key: {buf}")));
-        rows.push(PopupRow::Rule);
-        for (k, v) in lane_axis_entries(pal, axis) {
-            rows.push(PopupRow::Entry {
-                glyph: "○".into(),
-                label: format!("{k} = {v}"),
-                hint: String::new(),
-                enabled: true,
-            });
-            actions.push(AuxAction::LaneColorEdit(axis.clone(), k));
-        }
-        return (rows, actions);
-    }
-    if let Some(axis) = &ui.axis {
-        // Key list: this axis's mappings + the add-key row.
-        rows.push(PopupRow::Header(axis.clone()));
-        rows.push(PopupRow::Rule);
-        for (k, v) in lane_axis_entries(pal, axis) {
-            rows.push(PopupRow::Entry {
-                glyph: "○".into(),
-                label: format!("{k} = {v}"),
-                hint: String::new(),
-                enabled: true,
-            });
-            actions.push(AuxAction::LaneColorEdit(axis.clone(), k));
-        }
-        rows.push(PopupRow::Entry {
-            glyph: "＋".into(),
-            label: "add key".into(),
-            hint: String::new(),
-            enabled: true,
-        });
-        actions.push(AuxAction::LaneColorAdd(axis.clone()));
-        return (rows, actions);
-    }
-    // Axis list: every axis's mappings grouped under its header, each group
-    // followed by its add-key row.
-    rows.push(PopupRow::Header("colors".into()));
-    rows.push(PopupRow::Rule);
-    for axis in LANE_AXES {
-        rows.push(PopupRow::Header((*axis).into()));
-        for (k, v) in lane_axis_entries(pal, axis) {
-            rows.push(PopupRow::Entry {
-                glyph: "○".into(),
-                label: format!("{k} = {v}"),
-                hint: String::new(),
-                enabled: true,
-            });
-            actions.push(AuxAction::LaneColorEdit((*axis).into(), k));
-        }
-        rows.push(PopupRow::Entry {
-            glyph: "＋".into(),
-            label: format!("add {axis} key"),
-            hint: String::new(),
-            enabled: true,
-        });
-        actions.push(AuxAction::LaneColorAdd((*axis).into()));
     }
     (rows, actions)
 }
@@ -4377,8 +4156,10 @@ impl View {
                 (rows, actions) = build_prefix_settings_rows(&crate::keys::prefix_display());
             }
             SettingsTab::Colors => {
-                (rows, actions) =
-                    build_lane_color_rows(crate::sideline_color::palette(), &self.lane);
+                (rows, actions) = crate::lane_colors_panel::build_lane_color_rows(
+                    crate::sideline_color::palette(),
+                    &self.lane,
+                );
             }
         }
         let popup = Popup::new(rows, Anchor::Center)
@@ -15219,8 +15000,9 @@ async fn lane_color_save(
     color: &str,
 ) -> Result<(), String> {
     crate::sideline_color::reload_palette();
-    let json = merged_axis_json(
-        &lane_axis_entries(crate::sideline_color::palette(), axis),
+    use crate::lane_colors_panel as panel;
+    let json = panel::merged_axis_json(
+        &panel::lane_axis_entries(crate::sideline_color::palette(), axis),
         key,
         color,
     );
@@ -15231,7 +15013,7 @@ async fn lane_color_save(
             // palette read can land in different config layers (a concurrent
             // block-replace, or a project config shadowing the global write).
             // A lost write is surfaced here, never silently swallowed.
-            if current_lane_color(crate::sideline_color::palette(), axis, key).as_deref()
+            if panel::current_lane_color(crate::sideline_color::palette(), axis, key).as_deref()
                 == Some(color)
             {
                 format!("{axis}.{key}: {color}")
@@ -26565,152 +26347,6 @@ mod tests {
         assert_eq!(v.settings_tab, SettingsTab::Colors);
         aux_keys(&mut v, b"\t", &mut buf).await.unwrap();
         assert_eq!(v.settings_tab, SettingsTab::General);
-    }
-
-    // (x-e4f1) A literal palette for the lane-colors tests; the process
-    // palette() cache cannot be seeded per-test, so every builder test passes
-    // the literal through the free-function seam.
-    fn lane_pal(route: &[(&str, &str)]) -> crate::sideline_color::SidelinePalette {
-        crate::sideline_color::SidelinePalette {
-            route: route
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn lane_colors_axis_list_groups_every_axis_under_its_header() {
-        let pal = lane_pal(&[("zai", "green")]);
-        let (rows, actions) = build_lane_color_rows(&pal, &LaneColorsUi::default());
-        // One header per axis, in display order.
-        let headers: Vec<&str> = LANE_AXES.to_vec();
-        let mut seen_headers = rows.iter().filter_map(|r| match r {
-            PopupRow::Header(h) if LANE_AXES.contains(&h.as_str()) => Some(h.as_str()),
-            _ => None,
-        });
-        for h in headers {
-            assert_eq!(
-                seen_headers.next(),
-                Some(h),
-                "axis {h} header present in order"
-            );
-        }
-        // The one configured mapping renders as `key = color` and opens the picker.
-        assert!(rows
-            .iter()
-            .any(|r| matches!(r, PopupRow::Entry { label, .. } if label == "zai = green")));
-        assert!(actions.iter().any(
-            |a| matches!(a, AuxAction::LaneColorEdit(axis, key) if axis == "route" && key == "zai")
-        ));
-        // Every axis offers its add-key row (positive marker per axis).
-        for axis in LANE_AXES {
-            assert!(
-                actions
-                    .iter()
-                    .any(|a| matches!(a, AuxAction::LaneColorAdd(a_axis) if a_axis == axis)),
-                "add row present for axis {axis}"
-            );
-        }
-    }
-
-    #[test]
-    fn lane_color_picker_lists_the_parser_vocabulary_and_marks_the_current() {
-        let pal = lane_pal(&[("zai", "green")]);
-        let ui = LaneColorsUi {
-            pick: Some(("route".into(), "zai".into())),
-            ..Default::default()
-        };
-        let (rows, actions) = build_lane_color_rows(&pal, &ui);
-        // Drift guard: every picker name must satisfy parse_color, so a name
-        // added without parser support fails here instead of refusing at save.
-        let names: Vec<&str> = actions
-            .iter()
-            .filter_map(|a| match a {
-                AuxAction::LaneColorSet(_, _, color) => Some(color.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(names, LANE_COLOR_NAMES.to_vec());
-        for name in &names {
-            assert!(
-                crate::sideline_color::parse_color(name).is_some(),
-                "picker name {name} must parse"
-            );
-        }
-        // The current value is marked, not just listed.
-        assert!(rows.iter().any(|r| matches!(
-            r,
-            PopupRow::Entry { glyph, hint, .. } if glyph == "●" && hint == "current"
-        )));
-        // The free-form entry is offered beside the names.
-        assert!(actions
-            .iter()
-            .any(|a| matches!(a, AuxAction::LaneColorCustom(axis, key) if axis == "route" && key == "zai")));
-    }
-
-    #[test]
-    fn lane_color_custom_entry_is_display_only_with_a_live_echo() {
-        let pal = lane_pal(&[]);
-        let ui = LaneColorsUi {
-            pick: Some(("route".into(), "zai".into())),
-            custom_entry: Some("#12abF0".into()),
-            ..Default::default()
-        };
-        let (rows, actions) = build_lane_color_rows(&pal, &ui);
-        // The typed buffer echoes in the header.
-        assert!(matches!(
-            rows.first(),
-            Some(PopupRow::Header(h)) if h.contains("#12abF0")
-        ));
-        // No save action is reachable from a display-only entry; submit goes
-        // through the key divert, never a row.
-        assert!(actions.is_empty());
-        assert!(rows
-            .iter()
-            .any(|r| matches!(r, PopupRow::Entry { enabled: false, .. })));
-    }
-
-    #[test]
-    fn lane_color_key_entry_echoes_the_buffer_and_lists_existing_keys() {
-        let pal = lane_pal(&[("zai", "green"), ("openai", "blue")]);
-        let ui = LaneColorsUi {
-            key_entry: Some(("route".into(), "o".into())),
-            ..Default::default()
-        };
-        let (rows, actions) = build_lane_color_rows(&pal, &ui);
-        assert!(matches!(
-            rows.first(),
-            Some(PopupRow::Header(h)) if h == "route key: o"
-        ));
-        // Existing keys are listed so an existing mapping is pickable.
-        assert!(rows
-            .iter()
-            .any(|r| matches!(r, PopupRow::Entry { label, .. } if label == "openai = blue")));
-        assert_eq!(
-            actions
-                .iter()
-                .filter(|a| matches!(a, AuxAction::LaneColorEdit(_, _)))
-                .count(),
-            2
-        );
-    }
-
-    #[test]
-    fn merged_axis_json_replaces_one_key_and_keeps_the_rest() {
-        let entries = vec![
-            ("zai".to_string(), "green".to_string()),
-            ("openai".to_string(), "blue".to_string()),
-        ];
-        let out = merged_axis_json(&entries, "zai", "magenta");
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["zai"], "magenta", "existing key replaced");
-        assert_eq!(v["openai"], "blue", "untouched key kept");
-        let out = merged_axis_json(&entries, "openrouter", "magenta");
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["openrouter"], "magenta", "new key inserted");
-        assert_eq!(v["zai"], "green", "existing key kept");
     }
 
     #[tokio::test]

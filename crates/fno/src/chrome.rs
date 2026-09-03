@@ -19,6 +19,19 @@
 use crate::popup::Anchor;
 use crate::proto::Cell;
 use crate::theme::{cell_style, Role, Theme};
+use unicode_width::UnicodeWidthChar;
+
+/// The display width of one char in terminal columns. A fullwidth glyph is one
+/// char and two cells (x-1b68); zero-width and control chars still occupy one
+/// cell in the buffer model.
+pub(crate) fn char_cols(ch: char) -> usize {
+    ch.width().unwrap_or(1).max(1)
+}
+
+/// The display width of a string in terminal columns.
+pub(crate) fn str_cols(s: &str) -> usize {
+    s.chars().map(char_cols).sum()
+}
 
 /// How much chrome a block wears. Derived from the anchor; never passed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,11 +103,22 @@ impl Chrome {
     /// surfaces this change has no business resizing.
     pub fn fit_to(mut self, inner_w: usize) -> Self {
         let elide = |s: &str, w: usize| -> String {
-            if s.chars().count() <= w {
+            if str_cols(s) <= w {
                 return s.to_string();
             }
+            // Cut by display width, not char count: a wide char is two columns
+            // and must not straddle the cut.
             let keep = w.saturating_sub(1);
-            let head: String = s.chars().take(keep).collect();
+            let mut head = String::new();
+            let mut cols = 0usize;
+            for ch in s.chars() {
+                let cw = char_cols(ch);
+                if cols + cw > keep {
+                    break;
+                }
+                head.push(ch);
+                cols += cw;
+            }
             format!("{head}…")
         };
         if let Some(f) = self.footer.take() {
@@ -152,7 +176,7 @@ impl Chrome {
         let title_w = match self.level {
             Level::Bare => return ESC_INNER,
             Level::Full if self.title.is_empty() => ESC_INNER,
-            Level::Full => self.title.chars().count() + 9, // `─ {title} ─ esc `
+            Level::Full => str_cols(&self.title) + 9, // `─ {title} ─ esc `
         };
         // (x-b465) The subtitle and footer are chrome the caller never sized:
         // body lines arrive pre-padded to `body_w`, those two arrive raw. A
@@ -160,8 +184,8 @@ impl Chrome {
         // difference, so the box rendered one column ragged - visible the first
         // time a modal set a footer wider than its content. Widen to fit them
         // instead of cutting them.
-        let sub_w = self.subtitle.as_ref().map_or(0, |s| s.chars().count());
-        let foot_w = self.footer.as_ref().map_or(0, |f| f.chars().count());
+        let sub_w = self.subtitle.as_ref().map_or(0, |s| str_cols(s));
+        let foot_w = self.footer.as_ref().map_or(0, |f| str_cols(f));
         title_w.max(sub_w).max(foot_w)
     }
 }
@@ -307,10 +331,10 @@ pub fn frame(body: &[BodyLine], chrome: &Chrome, body_w: usize, scroll: Option<S
 /// never collide with a body row's real target (an index).
 pub const ESC_CLOSE_HIT: usize = usize::MAX;
 
-/// The `(char offset, char len)` of a footer's close affordance when it
-/// carries one: the words `esc close` when present, else a bare `esc`. Char
-/// offsets, matching how `content_row` lays the text out; `frame` shifts them
-/// into framed coordinates.
+/// The `(column offset, column len)` of a footer's close affordance when it
+/// carries one: the words `esc close` when present, else a bare `esc`. Column
+/// offsets, so they compare against `inner_w` and land the hit span on the
+/// painted columns; the words are ASCII, so the span length is its char count.
 fn esc_close_span(footer: &str) -> Option<(usize, usize)> {
     let chars: Vec<char> = footer.chars().collect();
     let find = |needle: &[char]| chars.windows(needle.len()).position(|w| w == needle);
@@ -319,11 +343,60 @@ fn esc_close_span(footer: &str) -> Option<(usize, usize)> {
     find(&long)
         .map(|o| (o, long.len()))
         .or_else(|| find(&short).map(|o| (o, short.len())))
+        .map(|(char_off, len)| {
+            let cols: usize = chars[..char_off].iter().map(|&c| char_cols(c)).sum();
+            (cols, len)
+        })
 }
 
 /// Framed width: left border + body + optional scrollbar + right border.
 pub fn chrome_frame_width(body_w: usize, has_scroll: bool) -> usize {
     Chrome::FRAME_COLS + body_w + usize::from(has_scroll)
+}
+
+/// Paint one line's chars into the cell buffer starting at column `c0`,
+/// advancing by DISPLAY columns: a fullwidth glyph claims its lead cell plus a
+/// `WIDE_SPACER` continuation cell, which every renderer of the buffer skips so
+/// the glyph renders across both columns (x-1b68). Roles are one per char and
+/// walk in lockstep with the text.
+#[allow(clippy::too_many_arguments)] // one shared loop for both painters
+pub(crate) fn paint_line(
+    cells: &mut [Cell],
+    rows: usize,
+    cols: usize,
+    sr: usize,
+    c0: usize,
+    text: &str,
+    roles: &[Role],
+    theme: &Theme,
+) {
+    if sr >= rows {
+        return;
+    }
+    let mut sc = c0;
+    for (j, ch) in text.chars().enumerate() {
+        if sc >= cols {
+            break;
+        }
+        let role = roles.get(j).copied().unwrap_or(Role::Body);
+        let (fg, bg, flags) = cell_style(role, theme);
+        cells[sr * cols + sc] = Cell {
+            c: ch,
+            fg,
+            bg,
+            flags,
+        };
+        let w = char_cols(ch);
+        if w == 2 && sc + 1 < cols {
+            cells[sr * cols + sc + 1] = Cell {
+                c: ' ',
+                fg,
+                bg,
+                flags: flags | crate::proto::cell_flags::WIDE_SPACER,
+            };
+        }
+        sc += w;
+    }
 }
 
 /// Blit framed lines into the cell buffer at `origin`, each cell colored by its
@@ -338,24 +411,16 @@ pub fn blit(
 ) {
     let (r0, c0) = origin;
     for (i, line) in framed.lines.iter().enumerate() {
-        let sr = r0 + i;
-        if sr >= rows {
-            break;
-        }
-        for (j, ch) in line.text.chars().enumerate() {
-            let sc = c0 + j;
-            if sc >= cols {
-                break;
-            }
-            let role = line.roles.get(j).copied().unwrap_or(Role::Body);
-            let (fg, bg, flags) = cell_style(role, theme);
-            cells[sr * cols + sc] = Cell {
-                c: ch,
-                fg,
-                bg,
-                flags,
-            };
-        }
+        paint_line(
+            cells,
+            rows,
+            cols,
+            r0 + i,
+            c0,
+            &line.text,
+            &line.roles,
+            theme,
+        );
     }
 }
 
@@ -378,7 +443,8 @@ fn flatten(mut row: Vec<Seg>) -> FramedLine {
     }
 }
 
-/// Pad `inner` with `fill` up to `inner_w`, then wrap in left/right edges.
+/// Pad `inner` with `fill` up to `inner_w` (display columns), then wrap in
+/// left/right edges.
 fn edge_row(
     left: char,
     right: char,
@@ -386,7 +452,7 @@ fn edge_row(
     mut inner: Vec<Seg>,
     inner_w: usize,
 ) -> FramedLine {
-    let used = inner.len();
+    let used = inner.iter().map(|(c, _)| char_cols(*c)).sum();
     for _ in used..inner_w {
         inner.push((fill, Role::Border));
     }
@@ -400,11 +466,21 @@ fn edge_row(
 /// `│ content │`, content left-aligned, padded with spaces (same role) so the
 /// inverse block stays a clean rectangle.
 fn content_row(content: &str, role: Role, inner_w: usize) -> FramedLine {
-    // Truncate as well as pad. `min_inner_w` widens the box to fit the subtitle
-    // and footer, so this only bites when the TERMINAL is too narrow for them -
-    // and there a clipped word beats a border pushed off the right edge.
-    let mut inner: Vec<Seg> = content.chars().take(inner_w).map(|c| (c, role)).collect();
-    let used = inner.len();
+    // Truncate as well as pad, by DISPLAY columns. `min_inner_w` widens the box
+    // to fit the subtitle and footer, so this only bites when the TERMINAL is
+    // too narrow for them - and there a clipped word beats a border pushed off
+    // the right edge. A wide char that does not fully fit is dropped whole
+    // rather than straddling the cut.
+    let mut inner: Vec<Seg> = Vec::with_capacity(inner_w);
+    let mut used = 0usize;
+    for ch in content.chars() {
+        let cw = char_cols(ch);
+        if used + cw > inner_w {
+            break;
+        }
+        inner.push((ch, role));
+        used += cw;
+    }
     for _ in used..inner_w {
         inner.push((' ', role));
     }
@@ -432,7 +508,8 @@ fn tab_row(tabs: &[(String, bool)], inner_w: usize) -> FramedLine {
 }
 
 fn content_row_from_segs(mut inner: Vec<Seg>, inner_w: usize) -> FramedLine {
-    let used = inner.len();
+    // Pad by DISPLAY columns: a wide seg claims two of them.
+    let used = inner.iter().map(|(c, _)| char_cols(*c)).sum();
     for _ in used..inner_w {
         inner.push((' ', Role::Tab(false)));
     }
@@ -458,23 +535,22 @@ fn esc_segs() -> Vec<Seg> {
 /// share, so the chip's placement math and its clickable span can never
 /// drift apart between the Full title bar and a Bare menu's inline hint.
 ///
-/// The hit offset: `chip_pos` is `inner.len()` right before the chip segs are
-/// appended, so `+1` skips the row's own left border (added by `edge_row`)
-/// and `+1` again skips the chip's leading padding space - the same "past
-/// the left border" shift [`frame`] already applies to the footer's close
-/// span.
+/// The hit offset: `chip_col` is the column the chip starts at (the width of
+/// everything already on the row), so `+1` skips the row's own left border
+/// (added by `edge_row`) and `+1` again skips the chip's leading padding
+/// space - the same "past the left border" shift [`frame`] already applies
+/// to the footer's close span.
 fn chip_border_row(left: char, right: char, mut inner: Vec<Seg>, inner_w: usize) -> FramedLine {
     let chip = esc_segs();
-    let used = inner.len();
-    let reserve = chip.len();
+    let used = inner.iter().map(|(c, _)| char_cols(*c)).sum();
+    let reserve = chip.iter().map(|(c, _)| char_cols(*c)).sum::<usize>();
     for _ in used..inner_w.saturating_sub(reserve) {
         inner.push(('─', Role::Border));
     }
-    let chip_pos = inner.len();
+    let chip_col = used;
     inner.extend(chip);
     let mut row = edge_row(left, right, '─', inner, inner_w);
-    row.hits
-        .push((ESC_CLOSE_HIT, chip_pos + 2, "esc".chars().count()));
+    row.hits.push((ESC_CLOSE_HIT, chip_col + 2, 3));
     row
 }
 
@@ -531,31 +607,39 @@ fn body_row(
         line.sel_span
             .is_some_and(|(off, len)| j >= off && j < off + len)
     };
-    for j in 0..body_w {
-        let (ch, role) = match chars.get(j) {
-            Some(&c) => {
-                let role = if line.disabled {
-                    Role::BodyDim
-                } else if line.header {
-                    Role::BodyHead
-                } else if in_sel(j) {
-                    Role::BodySel
-                } else {
-                    Role::Body
-                };
-                (c, role)
-            }
-            None => (
-                ' ',
-                if line.disabled {
-                    Role::BodyDim
-                } else {
-                    Role::Body
-                },
-            ),
+    // Walk by DISPLAY columns: a wide char claims two of the `body_w` cells,
+    // so a row of N chars is not N columns (x-1b68). `sel_span` offsets are
+    // char-based (full-row spans from the popup), so the role walk stays
+    // char-indexed while the cell walk is column-indexed.
+    let mut col = 0usize;
+    for (char_idx, &c) in chars.iter().enumerate() {
+        if col >= body_w {
+            break;
+        }
+        let cw = char_cols(c);
+        if col + cw > body_w {
+            break;
+        }
+        let role = if line.disabled {
+            Role::BodyDim
+        } else if line.header {
+            Role::BodyHead
+        } else if in_sel(char_idx) {
+            Role::BodySel
+        } else {
+            Role::Body
         };
-        text.push(ch);
+        text.push(c);
         roles.push(role);
+        col += cw;
+    }
+    for _ in col..body_w {
+        text.push(' ');
+        roles.push(if line.disabled {
+            Role::BodyDim
+        } else {
+            Role::Body
+        });
     }
 
     if let Some(s) = scroll {
@@ -970,6 +1054,99 @@ mod tests {
         assert!(!framed.lines.is_empty());
         // Every line is at least the two border chars wide.
         assert!(framed.lines.iter().all(|l| l.text.chars().count() >= 2));
+    }
+
+    #[test]
+    fn a_frame_with_fullwidth_glyphs_stays_square() {
+        // (x-1b68) U+FF0B is one char and TWO columns. The frame is sized in
+        // columns, so a row carrying it measures two columns more than its
+        // char count and every row of the block must still agree.
+        let wide = BodyLine::plain("add harness ＋ key");
+        let cjk = BodyLine::plain("モデル key");
+        let c = Chrome::new("settings", Anchor::Center);
+        let framed = frame(&[wide, cjk, bl("plain")], &c, 18, None);
+        for line in &framed.lines {
+            assert_eq!(
+                str_cols(&line.text),
+                framed.width,
+                "every row is the framed width in columns: {:?}",
+                line.text
+            );
+            // A closing border sits on the last column of every row: '┐' on
+            // the top, '│' on body rows, '┘' on the bottom.
+            let last = line.text.chars().last();
+            assert!(
+                matches!(last, Some('┐') | Some('┘') | Some('│')),
+                "the right border closes every row: {:?}",
+                line.text
+            );
+        }
+        assert_eq!(str_cols(&framed.lines[0].text), framed.width);
+    }
+
+    #[test]
+    fn blit_paints_fullwidth_glyphs_across_two_cells() {
+        // The lead cell carries the glyph, the next cell is a WIDE_SPACER the
+        // terminal writer skips, and the char after the glyph lands two
+        // columns on - the alignment that was off by one before (x-1b68).
+        // Geometry for body "a＋b" in a 6-column body (empty title: the ESC
+        // chip's minimum is 6, so body_w stays 6): col0 border, col1 'a',
+        // col2 lead, col3 spacer, col4 'b', col5-6 padding, col7 border.
+        let c = Chrome::new("", Anchor::Center);
+        let framed = frame(&[bl("a＋b")], &c, 6, None);
+        let theme = Theme::default_theme();
+        let mut cells = vec![Cell::default(); 5 * framed.width];
+        blit(&mut cells, 5, framed.width, (0, 0), &framed, &theme);
+        // Row 0 is the top border; the body row is row 1.
+        let row = &cells[framed.width..2 * framed.width];
+        assert_eq!(row[0].c, '│');
+        assert_eq!(row[1].c, 'a');
+        assert_eq!(row[2].c, '＋', "the lead cell carries the glyph");
+        assert_eq!(row[3].c, ' ', "the continuation cell renders nothing");
+        assert!(
+            row[3].flags & crate::proto::cell_flags::WIDE_SPACER != 0,
+            "and it is flagged WIDE_SPACER"
+        );
+        assert_eq!(row[4].c, 'b', "the next char lands at column+2");
+        assert!(
+            row[4].flags & crate::proto::cell_flags::WIDE_SPACER == 0,
+            "no spacer on a narrow char"
+        );
+        assert_eq!(row[7].c, '│', "the right border stays inside the frame");
+    }
+
+    #[test]
+    fn a_scrolling_frame_counts_the_scrollbar_column_and_stays_square() {
+        // Defaults make the Colors panel taller as well as wider: on overflow
+        // a scrollbar column rides INSIDE the right border, and the width math
+        // must count it alongside any wide glyphs (x-1b68).
+        let wide = BodyLine::plain("add model ＋");
+        let c = Chrome::new("", Anchor::Center);
+        let framed = frame(
+            &[wide, bl("a"), bl("b")],
+            &c,
+            12,
+            Some(Scroll {
+                pos: 0,
+                total: 9,
+                visible: 3,
+            }),
+        );
+        assert_eq!(
+            framed.width,
+            chrome_frame_width(12, true),
+            "the scrollbar column is in the frame width"
+        );
+        for line in &framed.lines {
+            assert_eq!(str_cols(&line.text), framed.width);
+        }
+        // The scrollbar cells exist and sit inside the border.
+        let thumb_or_track = framed
+            .lines
+            .iter()
+            .filter(|l| l.text.contains('█') || l.text.contains('░'))
+            .count();
+        assert!(thumb_or_track > 0, "the scrollbar is painted");
     }
 
     #[test]

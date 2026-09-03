@@ -221,28 +221,58 @@ pub fn reload_palette() {
     *PAL.write().unwrap() = None;
 }
 
-/// The built-in fallback table, consulted only when nothing in config
-/// declares a color for this row. Route-keyed first (the bill-separating
+/// The built-in fallback table as COLOR NAMES, consulted only when nothing in
+/// config declares a color for this row. Route-keyed first (the bill-separating
 /// axis, the default thing that is colored), then harness-keyed. An axis
 /// absent here renders `Color::Default` - silence, never a wrong lane.
-fn builtin_color(axis: Axis, value: &str) -> Option<Color> {
-    let named = |idx: u8| Some(Color::Indexed(idx));
+/// Names (not indices) so the settings Colors tab can print what a key
+/// resolves to (x-1b68); `builtin_color` parses them back to `Color`.
+fn builtin_color_name(axis: Axis, value: &str) -> Option<&'static str> {
     match axis {
         Axis::Route => match value {
-            "zai" => named(2),        // green: the GLM-via-zai bill
-            "openrouter" => named(5), // magenta: the open catalog bill
-            "openai" => named(4),     // blue: codex / GPT lanes
-            "anthropic" => named(6),  // cyan: subscription claude
+            "zai" => Some("green"),          // the GLM-via-zai bill
+            "openrouter" => Some("magenta"), // the open catalog bill
+            "openai" => Some("blue"),        // codex / GPT lanes
+            "anthropic" => Some("cyan"),     // subscription claude
             _ => None,
         },
         Axis::Harness => match value {
-            "codex" => named(4),
-            "agy" => named(3),
-            "opencode" => named(13),
-            "cursor" => named(12),
-            "pi" => named(11),
+            "codex" => Some("blue"),
+            "agy" => Some("yellow"),
+            "opencode" => Some("light_magenta"),
+            "cursor" => Some("light_blue"),
+            "pi" => Some("light_yellow"),
             _ => None,
         },
+    }
+}
+
+fn builtin_color(axis: Axis, value: &str) -> Option<Color> {
+    builtin_color_name(axis, value).and_then(parse_color)
+}
+
+/// The built-in defaults for one axis name ("harness" | "route" | "model" |
+/// "row"), as `(key, color-name)` pairs - the same table [`resolve_with`]
+/// falls back to, exposed for the settings Colors tab so an operator sees
+/// what every lane currently resolves to (x-1b68). Model and row are
+/// config-only keys (no built-in can know an operator's catalog), so they
+/// are empty here.
+pub fn builtin_defaults(axis: &str) -> &'static [(&'static str, &'static str)] {
+    match axis {
+        "route" => &[
+            ("zai", "green"),
+            ("openrouter", "magenta"),
+            ("openai", "blue"),
+            ("anthropic", "cyan"),
+        ],
+        "harness" => &[
+            ("codex", "blue"),
+            ("agy", "yellow"),
+            ("opencode", "light_magenta"),
+            ("cursor", "light_blue"),
+            ("pi", "light_yellow"),
+        ],
+        _ => &[],
     }
 }
 
@@ -650,6 +680,68 @@ mod tests {
     // (x-e4f1) The settings UI reads the cached palette through the pub
     // accessor and invalidates it through reload_palette; both behave on the
     // module-scope cache.
+    // (x-1b68) The builtin table is stored as COLOR NAMES so the settings
+    // Colors tab can print what a key resolves to. Every name must parse back
+    // to the exact Color the table always resolved to, or the UI and the
+    // cascade would disagree.
+    #[test]
+    fn builtin_names_round_trip_to_the_same_colors() {
+        assert_eq!(builtin_color(Axis::Route, "zai"), Some(Color::Indexed(2)));
+        assert_eq!(
+            builtin_color(Axis::Route, "openrouter"),
+            Some(Color::Indexed(5))
+        );
+        assert_eq!(
+            builtin_color(Axis::Route, "openai"),
+            Some(Color::Indexed(4))
+        );
+        assert_eq!(
+            builtin_color(Axis::Route, "anthropic"),
+            Some(Color::Indexed(6))
+        );
+        assert_eq!(
+            builtin_color(Axis::Harness, "codex"),
+            Some(Color::Indexed(4))
+        );
+        assert_eq!(builtin_color(Axis::Harness, "agy"), Some(Color::Indexed(3)));
+        assert_eq!(
+            builtin_color(Axis::Harness, "opencode"),
+            Some(Color::Indexed(13))
+        );
+        assert_eq!(
+            builtin_color(Axis::Harness, "cursor"),
+            Some(Color::Indexed(12))
+        );
+        assert_eq!(builtin_color(Axis::Harness, "pi"), Some(Color::Indexed(11)));
+    }
+
+    #[test]
+    fn builtin_defaults_mirror_the_cascade_table() {
+        for (axis, values) in [
+            ("route", &["zai", "openrouter", "openai", "anthropic"][..]),
+            ("harness", &["codex", "agy", "opencode", "cursor", "pi"][..]),
+        ] {
+            let defaults = builtin_defaults(axis);
+            assert_eq!(
+                defaults.len(),
+                values.len(),
+                "{axis}: the accessor and the cascade table must agree"
+            );
+            for ((key, name), expected_key) in defaults.iter().zip(values) {
+                assert_eq!(key, expected_key);
+                assert!(
+                    parse_color(name).is_some(),
+                    "{axis}: {key}'s default color name must resolve"
+                );
+            }
+        }
+        // Model and row are config-only axes: no built-in can know an
+        // operator's catalog, so the panel has nothing to mark (default).
+        assert!(builtin_defaults("model").is_empty());
+        assert!(builtin_defaults("row").is_empty());
+        assert!(builtin_defaults("nonsense").is_empty());
+    }
+
     #[test]
     fn palette_accessor_exposes_all_four_axes() {
         let p = pal(
