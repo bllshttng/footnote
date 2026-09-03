@@ -1,6 +1,11 @@
 # Hidden options on argument-dispatched actions, one per line.
 agents ask !--provider
 agents discovered-json !--provider
+agents rm !--audit-actor
+agents rm !--audit-reason
+agents rm !--audit-reclaimed-bytes
+agents rm !--audit-request-id
+agents rm !--audit-worktree-touched
 agents gate !--notes
 agents gate !--probe
 agents gate !--record

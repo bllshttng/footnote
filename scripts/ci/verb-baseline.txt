@@ -43,7 +43,7 @@ agents loop
 agents loop-check
 agents needs
 agents resume
-agents rm
+agents rm !--audit-actor !--audit-reason !--audit-reclaimed-bytes !--audit-request-id !--audit-worktree-touched
 agents spawn !--bounded-placement !--output-format !--recorded-provider !--squad
 annotate
 annotate list
