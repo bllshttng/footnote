@@ -678,9 +678,16 @@ for id in "${NODES[@]}"; do
     n_failed=$((n_failed + 1))
     continue
   fi
-  if [[ -n "$node_cwd" ]]; then
-    resolved_json="$( ( cd "$node_cwd" 2>/dev/null && fno "${resolve_args[@]}" 2>/dev/null ) )"; resolve_rc=$?
+  if [[ -n "$node_cwd" && -d "$node_cwd" ]]; then
+    resolved_json="$( ( cd "$node_cwd" && fno "${resolve_args[@]}" 2>/dev/null ) )"; resolve_rc=$?
   else
+    # The node's own dir is gone (stale worktree, fake/mocked path): a from-config
+    # read there could only answer from the wrong cwd, so thread no-merge - the
+    # node's posture is unreadable, and Locked Decision 6 never grants on a
+    # failed read. The dispatch itself still proceeds from the caller's cwd.
+    if [[ "${posture_args[*]}" == *from-config* ]]; then
+      resolve_args=("${resolve_args[@]/--merge-posture from-config/--merge-posture no-merge}")
+    fi
     resolved_json="$(fno "${resolve_args[@]}" 2>/dev/null)"; resolve_rc=$?
   fi
   if [[ "$resolve_rc" -ne 0 ]] || ! printf '%s' "$resolved_json" | jq -e '.command' >/dev/null 2>&1; then

@@ -165,19 +165,32 @@ case "$sub $verb" in
     # existing scenario expects the claude bg lane). A resolve_* state file
     # overrides: resolve_fail -> exit 2 (no autonomous substrate); resolve_pair
     # holds a "harness/substrate" pair (headless fallback scenarios).
+    printf '%s\n' "$*" >> "$S/resolve.log"
     if [[ -f "$S/resolve_fail" ]]; then echo "dispatch resolve: unknown harness (mock)" >&2; exit 2; fi
     pair="claude/bg"
     [[ -f "$S/resolve_pair" ]] && pair="$(cat "$S/resolve_pair")"
     h="${pair%%/*}"
-    # Parse the verb/brief resolver path (--node <id> [--verb <v>]).
-    r_node=""; r_verb=""; _prev=""
+    # Parse the verb/brief/posture resolver path (--node <id> [--verb <v>]
+    # [--merge-posture <p>]).
+    r_node=""; r_verb=""; r_posture=""; _prev=""
     for a in "$@"; do
-      case "$_prev" in --node|--id) r_node="$a" ;; --verb) r_verb="$a" ;; esac
+      case "$_prev" in --node|--id) r_node="$a" ;; --verb) r_verb="$a" ;; --merge-posture) r_posture="$a" ;; esac
       _prev="$a"
     done
+    # x-4391/x-8151: the RESOLVER owns the merge posture now; the launcher only
+    # threads it. from-config folds the same grant source the config-get case
+    # models, and every error shape degrades to no-merge.
+    posture="$r_posture"
+    if [[ "$posture" == "from-config" || -z "$posture" ]]; then
+      grant="none"
+      [[ -f "$PWD/.fno/auto_merge" ]] && grant="$(cat "$PWD/.fno/auto_merge")"
+      [[ "$grant" == "none" ]] && grant="$(cat "$S/cfg_auto_merge" 2>/dev/null || echo none)"
+      [[ -f "$S/cfg_auto_merge_err" ]] && grant="unreadable"
+      [[ "$grant" == "dispatch" ]] && posture="allow" || posture="no-merge"
+    fi
     if [[ -n "$r_verb" ]]; then
-      # x-a5e4 verb path: the resolver NORMALIZES the verb per-harness and does
-      # NOT bake no-merge in (the launcher injects it). Mirrors resolve_dispatch.
+      # x-a5e4 verb path: the resolver NORMALIZES the verb per-harness. The
+      # posture (not the launcher) adds the carrier below.
       bare="${r_verb#/}"
       case "$h" in
         claude|agy) cmd="/$bare {id}" ;;
@@ -186,12 +199,23 @@ case "$sub $verb" in
         *)          cmd='REFUSED: harness deprecated (successor: agy), no dispatch lane' ;;
       esac
     else
-      # builtin (no verb): mirrors harness_map dispatch_command (x-567d, x-de43).
+      # builtin (no verb): the plain template; the posture below decides the
+      # carrier, mirroring resolve_dispatch's allow-override contract.
       case "$h" in
-        claude|agy) cmd='/target --no-merge {id}' ;;
-        codex)      cmd='$fno:target --no-merge {id}' ;;
-        opencode)   cmd='/fno:target --no-merge {id}' ;;
+        claude|agy) cmd='/target {id}' ;;
+        codex)      cmd='$fno:target {id}' ;;
+        opencode)   cmd='/fno:target {id}' ;;
         *)          cmd='REFUSED: harness deprecated (successor: agy), no dispatch lane' ;;
+      esac
+    fi
+    # x-8151: no-merge injects on every rung, once, into family commands only.
+    # allow never edits a command (a refusal it carries wins).
+    if [[ "$posture" == "no-merge" && "$cmd" != *REFUSED* ]]; then
+      case "${cmd%%[[:space:]]*}" in
+        /target|/fno:target|\$fno:target)
+          if [[ "$cmd" != *"--no-merge"* ]]; then
+            if [[ "$cmd" == *" "* ]]; then cmd="${cmd/ / --no-merge }"; else cmd="$cmd --no-merge"; fi
+          fi ;;
       esac
     fi
     # The real resolver substitutes {id} when --node is given (per-node path).
@@ -340,22 +364,26 @@ grep -q '/target --no-merge ab-aaaa1111' "$MOCKSTATE/ask.log" \
   && pass "x-4391 AC1-ERR: config read failure degrades to no-merge" \
   || fail "x-4391 config err degrade: $(cat "$MOCKSTATE/ask.log")"
 
-# AC1-EDGE: the REAL strip_no_merge (loaded from the script, no drift) removes
-# only the space-delimited standalone token, never a substring, and skips a
-# non-/target command.
-eval "$(sed -n '/^strip_no_merge() {/,/^}/p' "$DISPATCH")"
-[[ "$(strip_no_merge '/target no-merge x-1')" == '/target x-1' ]] \
-  && pass "x-4391 AC1-EDGE: standalone no-merge stripped" || fail "AC1-EDGE standalone: $(strip_no_merge '/target no-merge x-1')"
-[[ "$(strip_no_merge '/target --no-merge x-1')" == '/target x-1' ]] \
-  && pass "x-9d11 AC1-EDGE: the --no-merge flag is stripped under allow posture" || fail "AC1-EDGE flag: $(strip_no_merge '/target --no-merge x-1')"
-[[ "$(strip_no_merge '/target no-merger-x')" == '/target no-merger-x' ]] \
-  && pass "x-4391 AC1-EDGE: no-merge substring preserved" || fail "AC1-EDGE substring: $(strip_no_merge '/target no-merger-x')"
-[[ "$(strip_no_merge '$fno:target no-merge x-1')" == '$fno:target x-1' ]] \
-  && pass "x-4391 AC1-EDGE: codex \$fno:target token stripped" || fail "AC1-EDGE codex"
-[[ "$(strip_no_merge '/fno:target --no-merge x-1')" == '/fno:target x-1' ]] \
-  && pass "x-9d11 AC1-EDGE round 12: opencode /fno:target flag stripped" || fail "AC1-EDGE opencode: $(strip_no_merge '/fno:target --no-merge x-1')"
-[[ "$(strip_no_merge '/think x-1')" == '/think x-1' ]] \
-  && pass "x-4391 AC1-EDGE: non-/target command untouched" || fail "AC1-EDGE non-target"
+# x-8151: the strip/inject grammar left the shell with the resolver (it lives
+# in the canonical carrier table's readers, unit-tested in the lint suites);
+# the launcher only THREADS the posture. These are the wire-level equivalents
+# of the old strip-helper cases: the tri-state must reach the resolve call
+# verbatim, whatever the operator passed.
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+bash "$DISPATCH" --allow-merge ab-aaaa1111 >/dev/null 2>&1
+grep -q -- "--merge-posture allow" "$MOCKSTATE/resolve.log" \
+  && pass "x-8151 wiring: --allow-merge threads --merge-posture allow" \
+  || fail "x-8151 wiring allow: $(cat "$MOCKSTATE/resolve.log" 2>/dev/null)"
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+bash "$DISPATCH" --no-merge ab-aaaa1111 >/dev/null 2>&1
+grep -q -- "--merge-posture no-merge" "$MOCKSTATE/resolve.log" \
+  && pass "x-8151 wiring: --no-merge threads --merge-posture no-merge" \
+  || fail "x-8151 wiring no-merge: $(cat "$MOCKSTATE/resolve.log" 2>/dev/null)"
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+bash "$DISPATCH" ab-aaaa1111 >/dev/null 2>&1
+grep -q -- "--merge-posture from-config" "$MOCKSTATE/resolve.log" \
+  && pass "x-8151 wiring: the default threads --merge-posture from-config" \
+  || fail "x-8151 wiring default: $(cat "$MOCKSTATE/resolve.log" 2>/dev/null)"
 
 # AC2-EDGE (codex P2): per-node posture reads THIS node's project cwd, not the
 # dispatcher's. Node B's project opts in via its own .fno/auto_merge while the
