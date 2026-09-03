@@ -6,7 +6,7 @@ Project context for AI agents (Claude Code, Gemini CLI, Codex CLI). Canonical so
 
 ## Precedence and output style
 
-Generic per-machine coding skills (ponytail, karpathy-guidelines, similar) are advisory here; this file's principles win. Two live cases: "shortest diff" loses to principle 4 (fix what you find, in this PR), and tool-branded comments (`// ponytail:`) are barred by the comment principle.
+Generic per-machine coding skills (ponytail, karpathy-guidelines, similar) are advisory here; this file's principles win. So "shortest diff" loses to principle 4, and tool-branded comments are barred by principle 6.
 
 Lead responses with the next action, number multi-step work, give concrete time estimates, and drop preamble, recaps, and closers. Details: [docs/output-style.md](docs/output-style.md).
 
@@ -21,6 +21,7 @@ Lead responses with the next action, number multi-step work, give concrete time 
 6. **Comments earn their place.** Match the surrounding file's comment density and idiom; add one only for a non-obvious invariant, race, or why-not-the-obvious. Never ticket/PR/node IDs (`scripts/ci/check-no-internal-refs.sh` fails on them).
 7. **Reproduce before you fix.** Reproduce a bug end-to-end on the real user path before editing; the repro is also the proof the fix landed. When a UI is in the loop, exercise it and be picky (see #4).
 8. **Quality outweighs cost.** Weight quality, simplicity, robustness, and maintainability over effort-now. Never overrides #2.
+9. **Delete a leg, never a harness that forces two to agree.** Writing a parity guard is itself the trigger to port instead. Protocol: [dual-implementation-inventory](docs/architecture/dual-implementation-inventory.md).
 
 ## Pitfalls corpus (capped)
 
@@ -195,13 +196,6 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **Self-containment (CI-enforced):** driver skills (`/target`) must be portable. They allow no `${REPO_ROOT}/scripts/` refs, path escapes, or runtime `Skill()` calls between drivers. Build-time reuse uses `skill-bundles.yaml` and `fno doctor bundle`. The `bundle check` action gates freshness.
 - **TDD:** failing test -> red -> minimal code -> green -> verify -> atomic commit.
 - **Testing:** `python skills/execute/orchestrator.py --help`; `./scripts/validate-test-first.sh`.
-
-## Plugin installation
-
-```bash
-claude --plugin-dir /path/to/footnote          # development
-ln -s /path/to/footnote ~/.claude/plugins/fno  # permanent
-```
 
 ## Deep-dive docs
 
