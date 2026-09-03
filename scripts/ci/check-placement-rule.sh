@@ -244,6 +244,7 @@ crates/fno-agents/src/daemon.rs
 crates/fno-agents/src/finalize.rs
 crates/fno-agents/src/model_env_scrub.rs
 crates/fno-agents/src/provider.rs
+crates/fno-agents/src/session_start_bytes.rs
 crates/fno-agents/src/state.rs
 crates/fno-agents/src/stream_worker.rs
 crates/fno-agents/src/bin/client.rs

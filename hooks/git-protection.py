@@ -73,6 +73,9 @@ PUSH_STAMP_DIR = FNO_HOME / "push-stamps"
 # CI probe alone cannot see the run it just started. This window covers that
 # blind spot and nothing else; the pending read is the real instrument.
 PUSH_DEBOUNCE_SECONDS = 120
+# `fno do pr status`'s own probe, distinct from the merge vetoes' pair below -
+# a push-time read, not a merge-time one, so it does not share their budget.
+_PUSH_STATUS_PROBE_TIMEOUT = 10
 
 # Substitution forms that run a command without being a separate segment. Any of
 # them disqualifies an authorization: a command substitution IS a second
@@ -272,7 +275,7 @@ def _read_push_status(cwd=None):
             ["fno", "do", "pr", "status", "--json"],
             capture_output=True,
             text=True,
-            timeout=_VETO_PROBE_TIMEOUT,
+            timeout=_PUSH_STATUS_PROBE_TIMEOUT,
             cwd=cwd,
         )
     except Exception:  # noqa: BLE001 - incl. FileNotFoundError / TimeoutExpired

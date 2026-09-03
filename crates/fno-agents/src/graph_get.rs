@@ -32,6 +32,19 @@ fn default_graph_path() -> PathBuf {
     home.join(".fno").join("graph.json")
 }
 
+/// Whether an external tracker backend is selected, resolved exactly as the
+/// Python side resolves it (`FNO_TRACKER_BACKEND`, default `graph`). Mirrors
+/// `fno::backlog_view::external_backend_selected` rather than linking that
+/// crate: fno-agents keeps `fno` a dev/test-only dependency (see this crate's
+/// Cargo.toml), so each side re-implements this one-line contract and a test
+/// pins it against the same resolution.
+fn external_backend_selected() -> bool {
+    match std::env::var("FNO_TRACKER_BACKEND") {
+        Ok(v) => !v.trim().is_empty() && v.trim() != "graph",
+        Err(_) => false,
+    }
+}
+
 /// Match one requested token against `id` first, then `slug`, case-insensitive
 /// (mirrors `fuzzy.resolve_node`'s exact-match tiers for these two shapes).
 fn find_entry<'a>(entries: &'a [Value], token: &str) -> Option<&'a Value> {
@@ -71,6 +84,7 @@ fn get_rows(entries: &[Value], ids: &[String]) -> (Vec<Value>, bool) {
 pub fn run_graph_get(args: &[String]) -> i32 {
     let mut ids: Vec<String> = Vec::new();
     let mut graph_path = default_graph_path();
+    let mut graph_overridden = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -80,7 +94,10 @@ pub fn run_graph_get(args: &[String]) -> i32 {
             "--graph" => {
                 i += 1;
                 match args.get(i) {
-                    Some(p) => graph_path = PathBuf::from(p),
+                    Some(p) => {
+                        graph_path = PathBuf::from(p);
+                        graph_overridden = true;
+                    }
                     None => {
                         eprintln!("fno-agents graph-get: --graph needs a path");
                         return 2;
@@ -98,6 +115,17 @@ pub fn run_graph_get(args: &[String]) -> i32 {
     if ids.is_empty() {
         eprintln!("fno-agents graph-get: needs at least one <id>");
         return 2;
+    }
+    // An explicit --graph names a real file (a test fixture, an operator
+    // override) and is trusted as given; only the DEFAULT store is unsafe to
+    // read blind, because an external tracker backend makes it stale.
+    if !graph_overridden && external_backend_selected() {
+        eprintln!(
+            "fno-agents graph-get: this reads graph.json directly; under an \
+             external tracker backend that store is not authoritative. Pass \
+             one id at a time to `fno backlog get` instead."
+        );
+        return 1;
     }
 
     let mut entries = match graph_store::read_defaulted(&graph_path, false) {
@@ -169,6 +197,23 @@ mod tests {
     fn no_ids_is_a_usage_error() {
         let args = vec!["--json".to_string()];
         assert_eq!(run_graph_get(&args), 2);
+    }
+
+    /// Serializes tests that set `FNO_TRACKER_BACKEND`: process-wide env, so a
+    /// concurrent reader elsewhere in this binary must never see it mid-flip.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn an_external_backend_refuses_the_default_store_but_not_an_explicit_one() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("FNO_TRACKER_BACKEND", "github");
+        let refused = run_graph_get(&["x-997a".to_string()]);
+        let dir = write_graph(&[node("x-997a", "fewer-gated")]);
+        let graph = dir.path().join("graph.json").display().to_string();
+        let overridden = run_graph_get(&["x-997a".to_string(), "--graph".to_string(), graph]);
+        std::env::remove_var("FNO_TRACKER_BACKEND");
+        assert_eq!(refused, 1);
+        assert_eq!(overridden, 0);
     }
 
     #[test]
