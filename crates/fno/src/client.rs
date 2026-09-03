@@ -269,6 +269,48 @@ const DIGIT_FLUSH_AFTER: Duration = Duration::from_millis(400);
 /// Transient notice lifetime on the tab bar.
 const NOTICE_TTL: Duration = Duration::from_secs(3);
 
+/// (x-f191) How long a row-scoped outcome stamp stays on its sideline row.
+/// Outlives NOTICE_TTL on purpose: the tab-bar notice expires first, and the
+/// stamp at the row is what the operator falls back to finding.
+const ROW_STAMP_TTL: Duration = Duration::from_secs(8);
+/// How long an armed row stamp waits for the action's outcome notice. Must
+/// exceed the longest row action: stop can fall through to rm, two bounded
+/// subprocesses of 20s each.
+const ROW_STAMP_ARM_TTL: Duration = Duration::from_secs(60);
+/// The substrings that mark an outcome notice a FAILURE. Positive success is
+/// everything else that resolves the arm - a stamp on an unclassified
+/// outcome reads as success, which is the safe polarity: the row is still
+/// there to be pressed again either way.
+const ROW_FAILURE_MARKS: [&str; 8] = [
+    ": timed out",
+    ": failed",
+    ": unavailable",
+    "no such agent",
+    "is still live",
+    "is ambiguous",
+    "is external",
+    "no longer a live external row",
+];
+
+/// (x-f191) A row-scoped action outcome, stamped ON the sideline row it
+/// names. The tab-bar notice stays the full-text channel (x-0175); the stamp
+/// is the placement fix: the outcome renders at the row the operator acted
+/// on, not the far corner of the screen.
+struct RowStamp {
+    name: String,
+    text: String,
+    failure: bool,
+    expires: Instant,
+}
+
+/// The armed half: an action dispatched at a named row, waiting for the
+/// notice that resolves it. At most one at a time - a second arm replaces
+/// the first, whose outcome then lands in the tab bar only.
+struct RowArm {
+    name: String,
+    expires: Instant,
+}
+
 /// The client-side pane identity overlay follows the scanner's repeat grace.
 pub const PANE_ID_REVEAL_WINDOW: Duration = PANE_IDS_REPEAT_WINDOW;
 
@@ -1131,6 +1173,10 @@ struct View {
     /// an absence; the next keypress dismisses it (like [`View::overlay`]).
     digest: Option<Vec<String>>,
     notice: Option<(String, Instant)>,
+    /// (x-f191) The row-scoped outcome stamp and its armed action, one at a
+    /// time - see [`RowStamp`] / [`RowArm`].
+    row_stamp: Option<RowStamp>,
+    row_arm: Option<RowArm>,
     /// (v12, x-e780) Active in-scrollback search (prefix+/), when open. While
     /// `Some`, stdin diverts to [`search_keys`] and the bottom chrome shows the
     /// input line / counter. Client-local: opening never sends a message and
@@ -2926,6 +2972,8 @@ impl View {
             yard_gen: 0,
             digest: None,
             notice: None,
+            row_stamp: None,
+            row_arm: None,
             search: None,
             search_esc: Vec::new(),
             hover_focus: true,
@@ -5946,6 +5994,66 @@ impl View {
         self.notice = Some((text, Instant::now() + NOTICE_TTL));
     }
 
+    /// (x-f191) Arm the row stamp for a row-scoped confirm commit: the next
+    /// notice naming this row renders beside the row, not only in the tab
+    /// bar. No-op for bulk and non-row confirms (reap, squad, close-tab).
+    fn arm_row_stamp(&mut self, action: &ConfirmKind) {
+        let name = match action {
+            ConfirmKind::StopAgent { name }
+            | ConfirmKind::RemoveAgent { name }
+            | ConfirmKind::StopExternal { name, .. }
+            | ConfirmKind::RemoveExternal { name, .. } => Some(name.clone()),
+            _ => None,
+        };
+        if let Some(name) = name {
+            self.row_arm = Some(RowArm {
+                name,
+                expires: Instant::now() + ROW_STAMP_ARM_TTL,
+            });
+        }
+    }
+
+    /// (x-f191) Resolve an armed row stamp against an incoming notice: a
+    /// notice naming the armed row stamps that row (success or failure) and
+    /// disarms. An unrelated or late notice leaves the arm alone.
+    fn resolve_row_stamp(&mut self, text: &str) {
+        let now = Instant::now();
+        let Some(arm) = self.row_arm.as_ref() else {
+            return;
+        };
+        if now >= arm.expires {
+            self.row_arm = None;
+            return;
+        }
+        if !text.contains(&arm.name) {
+            return;
+        }
+        let name = arm.name.clone();
+        let failure = ROW_FAILURE_MARKS.iter().any(|m| text.contains(m));
+        self.row_arm = None;
+        self.row_stamp = Some(RowStamp {
+            name,
+            text: text.to_string(),
+            failure,
+            expires: now + ROW_STAMP_TTL,
+        });
+    }
+
+    /// The live stamp for the row being painted, if it names this row.
+    /// `None` past expiry, so the stamp self-clears without a timer.
+    fn row_stamp_for(&self, drow: &DisplayRow) -> Option<(bool, &str)> {
+        let stamp = self.row_stamp.as_ref()?;
+        if Instant::now() >= stamp.expires {
+            return None;
+        }
+        match drow {
+            DisplayRow::Agent(a) if a.name == stamp.name => {
+                Some((stamp.failure, stamp.text.as_str()))
+            }
+            _ => None,
+        }
+    }
+
     /// A section's effective view, resolved live every frame (x-c5ee). The one
     /// authority behind both the caret glyph and the row filter, so they can
     /// never disagree. Order:
@@ -8280,6 +8388,8 @@ impl View {
             // `header_band_flags` and carry zero standing INVERSE cells).
             let is_band =
                 is_focus || matches!(&drow, DisplayRow::Sel(_) | DisplayRow::Header { .. });
+            // (x-f191) Read the row stamp before `drow` moves into the match.
+            let row_stamp = self.row_stamp_for(&drow);
             // (x-df4c) The row tuple carries `fg` now: most rows are
             // `Color::Default`, but a needs-attention (Blocked) agent row or card
             // paints the accent, so the color must reach the cells below.
@@ -8657,6 +8767,42 @@ impl View {
             // for it (x-4374).
             if mark_caret && text_w >= 1 {
                 cells[r * cols].fg = self.theme.accent;
+            }
+            // (x-f191) A row-scoped outcome stamp: right-aligned INVERSE on
+            // the row, the same grammar as the tab-bar notice, so the outcome
+            // of the action the operator just confirmed renders AT the row
+            // they acted on instead of the opposite corner. Skipped on the
+            // pinned top row, whose right edge the density button owns.
+            if r > 0 {
+                if let Some((failure, stamp_text)) = row_stamp {
+                    let mark = if failure { "✗ " } else { "✓ " };
+                    let stamp: Vec<(char, usize)> = format!("{mark}{stamp_text}")
+                        .chars()
+                        .map(|ch| (ch, glyph_cols(ch)))
+                        .collect();
+                    let width: usize = stamp.iter().map(|(_, w)| *w).sum();
+                    let mut start = text_w.saturating_sub(width);
+                    for (ch, w) in stamp {
+                        if start + w > text_w {
+                            break;
+                        }
+                        cells[r * cols + start] = Cell {
+                            c: ch,
+                            fg: Color::Default,
+                            bg: Color::Default,
+                            flags: cell_flags::INVERSE,
+                        };
+                        if w == 2 {
+                            cells[r * cols + start + 1] = Cell {
+                                c: ' ',
+                                fg: Color::Default,
+                                bg: Color::Default,
+                                flags: cell_flags::INVERSE | cell_flags::WIDE_SPACER,
+                            };
+                        }
+                        start += w;
+                    }
+                }
             }
         }
         // (x-b186) The density button, painted LAST over the sideline's top row.
@@ -11639,6 +11785,9 @@ async fn attach_and_run(
                     // spinning and every further verb blocked until the timeout,
                     // which then overwrote the real reason with a generic one.
                     view.settle_backlog_pending_on_notice();
+                    // (x-f191) A row-scoped outcome stamps its row before the
+                    // tab-bar notice takes the full text.
+                    view.resolve_row_stamp(&text);
                     view.set_notice(text);
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
@@ -13511,6 +13660,9 @@ async fn confirm_keys(
         }
         // Most confirms are one command; clear-dead (x-f300) fans out to one
         // Remove per exited row, so the commit path speaks in a list.
+        // (x-f191) A row-scoped commit arms the row stamp: its outcome
+        // notice will render at the row, not only the tab bar.
+        view.arm_row_stamp(&action.action);
         let cmds = match action.action {
             ConfirmKind::Dispatch { node } => vec![Command::DispatchNode {
                 node,
@@ -17350,8 +17502,5 @@ fn map_color(c: Color) -> CtColor {
         Color::Indexed(i) => CtColor::AnsiValue(i),
         Color::Rgb(r, g, b) => CtColor::Rgb { r, g, b },
     }
-}
-
-#[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
