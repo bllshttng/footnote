@@ -102,6 +102,7 @@ if [[ -n "$BASE_SHA" ]]; then
     }
     if [[ -z "${BASE:-}" ]]; then
         echo "check-file-budget: FILE_BUDGET_BASE_SHA $BASE_SHA does not resolve" >&2
+        echo "       (the checkout must hold that commit; unset FILE_BUDGET_BASE_SHA to use the merge base)" >&2
         exit 2
     fi
     PUSH_ALARM=1
