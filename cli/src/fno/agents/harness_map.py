@@ -67,11 +67,38 @@ _SLASH, _CODEX_SKILL, _REFUSED = "slash", "codex-skill", "refused"
 _AUTONOMOUS_COMMAND = AUTONOMOUS_COMMAND = "/target --no-merge {id}"
 _AUTONOMOUS_COMMAND_MERGE = "/target {id}"
 
-# The /target-family first tokens (the per-harness spellings normalize_command
-# emits). The refusal carrier's vocabulary is scoped to these: rewriting the
-# args of another slash verb would mutate its instruction text, and prose is
-# not a control input (x-9d11).
-_TARGET_FAMILY = ("/target", "/fno:target", "$fno:target")
+
+@cache
+def _carrier_vocab() -> tuple[tuple[str, ...], str, str]:
+    """The merge-refusal carrier's vocabulary, read from the ONE canonical
+    table (x-8151/d-450caaeb).
+
+    ``merge_posture.toml`` is authored in the Rust tree
+    (``crates/fno-agents/src/``) and shipped here as generated package data
+    (``build.rs`` produces the byte copy; ``scripts/ci/check-merge-posture-
+    fresh.sh`` trips on a hand edit), the same distribution the harness
+    capability table rides. The spellings, the flag, and the legacy token are
+    DATA, so they are single-sourced as a file - the Rust engine
+    (``fno_agents::merge_posture``) and these readers answer from the same
+    table and cannot drift the way the old hand-copied spelling lists did.
+    """
+    import tomllib
+    from importlib.resources import files
+
+    text = files("fno.agents").joinpath("merge_posture.toml").read_text(
+        encoding="utf-8"
+    )
+    table = tomllib.loads(text)
+    return (
+        tuple(table["target_family"]["spellings"]),
+        str(table["carrier"]["flag"]),
+        str(table["carrier"]["legacy_token"]),
+    )
+
+
+# The /target-family first tokens, FROM the table (never a retyped literal).
+_TARGET_FAMILY = _carrier_vocab()[0]
+
 
 
 @cache
@@ -112,13 +139,14 @@ def normalize_legacy_no_merge(command: str) -> str:
     free text (``/target fix the no-merge carrier bug`` is a real feature
     description), and rewriting the word anywhere would mutate prompt text the
     operator typed and arm a refusal from prose (round 10)."""
+    _spellings, flag, legacy = _carrier_vocab()
     parts = command.split()
     if not parts or parts[0] not in _TARGET_FAMILY:
         return command
-    if len(parts) >= 2 and parts[1] == "no-merge":
-        parts[1] = "--no-merge"
-    elif len(parts) >= 3 and parts[-1] == "no-merge":
-        parts[-1] = "--no-merge"
+    if len(parts) >= 2 and parts[1] == legacy:
+        parts[1] = flag
+    elif len(parts) >= 3 and parts[-1] == legacy:
+        parts[-1] = flag
     else:
         return command
     return " ".join(parts)
@@ -145,12 +173,13 @@ def inject_no_merge_into_command(command: str) -> str:
     x-8151: this is the inject half the dispatch shell used to re-derive with a
     two-spelling prefix match (the copy that missed ``/fno:target`` and dropped
     opencode refusals). One vocabulary decides membership."""
+    _spellings, flag, _legacy = _carrier_vocab()
     if not is_target_family(command):
         return command
-    if " --no-merge " in f" {command} ":
+    if f" {flag} " in f" {command} ":
         return command
     parts = command.split()
-    return " ".join([parts[0], "--no-merge", *parts[1:]])
+    return " ".join([parts[0], flag, *parts[1:]])
 
 
 def strip_no_merge_from_command(command: str) -> str:
@@ -161,10 +190,11 @@ def strip_no_merge_from_command(command: str) -> str:
     only), and non-family commands pass through so a prose brief's text is
     never mangled. Under an allow posture the resolver strips; the flag's
     absence is what makes ``auto_merge.grant=dispatch`` live."""
+    _spellings, flag, legacy = _carrier_vocab()
     if not is_target_family(command):
         return command
     parts = command.split()
-    for token in ("--no-merge", "no-merge"):
+    for token in (flag, legacy):
         if token in parts[1:]:
             parts.remove(token)
     return " ".join(parts)
@@ -177,24 +207,22 @@ def message_carries_no_merge(message: str) -> bool:
     the flag arms no env carrier, and neither does prose. The word-padded
     match is too: ``--no-merge-guard`` (a different flag) is not the carrier
     (round 8, angle A)."""
-    return is_target_family(message) and " --no-merge " in f" {message} "
+    _spellings, flag, _legacy = _carrier_vocab()
+    return is_target_family(message) and f" {flag} " in f" {message} "
 
 
 def apply_merge_posture_env(message: str, *, note_stream=None) -> str | None:
     """One carrier owner for every spawn lane: set or clear ``TARGET_NO_MERGE``
     in ``os.environ`` from the message, and return the prior value.
 
-    x-8151: this was the inline block in ``cmd_spawn``, re-derived a second time
-    in the fno-agents client (Rust) and a third in skills/agent spawn.sh. The
-    wrapper door (rust_runtime) now calls this before exec'ing the binary, so
-    the Rust and shell copies are gone and one vocabulary decides every
-    substrate. Semantics, unchanged since their rounds: a family message with
+    Semantics, unchanged since their rounds: a family message with
     the flag arms the carrier; a family message with a bare token OUTSIDE flag
     position neither arms nor clears (ambiguous, round 11); a family message
     with no token clears an inherited carrier loudly (the message is
     authoritative, round 8); a non-family message clears NOTHING (an operator's
     exported carrier is a documented control input, and a leak errs toward
-    refusing merges, the safe side).
+    refusing merges, the safe side). The same verdict runs inside the Rust
+    binary's spawn lane (``fno_agents::merge_posture``), from the same table.
 
     Returns the prior ``os.environ`` value (or None) so a caller that must
     restore the process env (the spawn path's finally) captured it BEFORE the
@@ -203,12 +231,13 @@ def apply_merge_posture_env(message: str, *, note_stream=None) -> str | None:
     import os
     import sys
 
+    _spellings, flag, legacy = _carrier_vocab()
     if note_stream is None:
         note_stream = sys.stderr
     prior = os.environ.get("TARGET_NO_MERGE")
     if message_carries_no_merge(message):
         os.environ["TARGET_NO_MERGE"] = "1"
-    elif is_target_family(message) and " no-merge " in f" {message} ":
+    elif is_target_family(message) and f" {legacy} " in f" {message} ":
         pass
     elif is_target_family(message):
         if prior:

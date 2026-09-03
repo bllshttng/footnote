@@ -1021,12 +1021,12 @@ def _resolve_spawn_merge_grant(message: str) -> dict:
     """
     from datetime import datetime, timezone
 
-    from fno.agents.harness_map import message_carries_no_merge
+    from fno.agents.rust_posture import carries_no_merge
     from fno.config import load_settings
 
     recorded_by = (os.environ.get("FNO_AGENT_SELF") or "").strip() or "spawn"
     recorded_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if message_carries_no_merge(message):
+    if carries_no_merge(message):
         return {
             "approved": False,
             "source": "no-merge-flag",
@@ -2418,9 +2418,9 @@ def cmd_spawn(
     # inherits os.environ directly, so an inherited carrier must be cleared
     # here too, not only on the bg/headless export path (review round 7).
     # x-8151: the semantics live in harness_map.apply_merge_posture_env - the
-    # one owner the wrapper door (rust_runtime) also calls before exec'ing the
-    # binary, so every substrate lane decides from the same vocabulary. The
-    # helper returns the PRIOR value, captured before the mutation.
+    # one owner on the Python lane, and the binary's spawn path answers from
+    # the same table for its lane. The helper returns the PRIOR value,
+    # captured before the mutation.
     prov_prev["TARGET_NO_MERGE"] = apply_merge_posture_env(message)
 
     # Per-worker identity for task claims: the roster name is the only

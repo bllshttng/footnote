@@ -964,9 +964,9 @@ def test_is_target_family_pins_the_carrier_vocabulary():
     """The refusal carrier judges only /target-family first tokens (x-9d11).
 
     Direct pins for the predicate trio every spawn lane shares: the family
-    gate, the word-padded flag match, and the legacy token rewrite. A drift
-    here re-opens either the prose-manufactures-a-refusal defect or the
-    family-scoping regression (rounds 6/8)."""
+    gate, the word-padded flag match, and the legacy token rewrite. The
+    vocabulary comes from the canonical merge_posture table (x-8151); the
+    Rust engine's tests pin the same answers from the same table."""
     from fno.agents.harness_map import is_target_family
 
     assert is_target_family("/target x-1")

@@ -1033,12 +1033,16 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     use fno_agents::opencode_ask::dispatch_opencode_once;
     use fno_agents::state::load_registry;
 
-    // x-9d11 refusal carrier, Rust lane: the carrier arrives by INHERITANCE -
-    // the Python wrapper door (rust_runtime.route_to_rust) applies
-    // harness_map.apply_merge_posture_env to os.environ before exec'ing this
-    // binary, and every child env below inherits the parent's (model_env_scrub
-    // keeps TARGET_NO_MERGE as protected bookkeeping). x-8151 deleted the
-    // client-side re-derivation of that predicate: one vocabulary, one owner.
+    // x-9d11 refusal carrier, Rust lane: the verdict is computed HERE, in the
+    // one owner of the grammar (`merge_posture`), so a direct `fno-agents
+    // spawn` gets the same posture as a Python-fronted one. It is applied to
+    // this process's env and every child env below inherits it (model_env_scrub
+    // keeps TARGET_NO_MERGE as protected bookkeeping). Idempotent with the
+    // Python lane's application, which runs the same verdict through the
+    // `dispatch-posture` verb.
+    if let Some(message) = params.get("message").and_then(|v| v.as_str()) {
+        fno_agents::merge_posture::apply_env_from_message(message);
+    }
 
     let provider_param = params.get("provider").and_then(|v| v.as_str());
     // `substrate` is a CLIENT-ONLY routing key: build_request validates and

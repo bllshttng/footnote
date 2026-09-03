@@ -234,6 +234,11 @@ jobs:
         timeout-minutes: 5
         run: bash tests/ci/test_check_harness_capabilities_fresh.sh
 
+      - name: Merge-posture carrier table fresh (one canonical source, byte-identical copy)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-merge-posture-fresh.sh
+
       # The complete harness roster vs its shipped evidence: setup docs, the
       # Rust provider dispatch arms, and the Python adapter registry. stdlib
       # only - no package install, no Rust build, no network.

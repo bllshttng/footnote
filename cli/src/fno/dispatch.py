@@ -274,11 +274,12 @@ def cmd_family(
 
     x-8151: prints ``family`` or ``other`` and exits 0 either way - the same
     nothing-at-runtime contract as ``dispatch resolve`` (no spawn, no claim,
-    no config read). The /target-family vocabulary lives in
-    harness_map._TARGET_FAMILY and this verb is its only shell-readable
-    surface, so the dispatch and normalize scripts ask instead of carrying
-    hand-copied pattern lists (the copies drifted; opencode refusals were
-    dropped by a two-spelling prefix match)."""
+    no config read). The /target-family vocabulary lives in the canonical
+    merge_posture table (``merge_posture.toml``, authored in the Rust tree and
+    shipped here as generated package data) and this verb is its only
+    shell-readable surface, so the dispatch and normalize scripts ask instead
+    of carrying hand-copied pattern lists (the copies drifted; opencode
+    refusals were dropped by a two-spelling prefix match)."""
     from fno.agents.harness_map import is_target_family
 
     typer.echo("family" if is_target_family(message) else "other")

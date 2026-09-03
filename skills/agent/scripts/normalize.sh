@@ -331,20 +331,30 @@ set +f
 # MUST match tier 1, or the re-normalize would reclassify as tier 2 forever. The
 # describe-it fuzzy tier (tier 4) is whatever is left - free prose - and lives
 # entirely in the SKILL body behind a confirm.
-# x-8151: the /target-family spelling list is ONE vocabulary
-# (harness_map._TARGET_FAMILY). This file classifies every input, so it
-# carries a generated-checked MIRROR of that list - the same shape as
-# resolve_command_surface's static fallback - and
-# cli/tests/unit/test_normalize_family_mirror.py fails the moment the mirror
-# drifts from the source table (spelling added or renamed there, mirror
-# stale here). The old hand-copied `^/target`-only arm missed /fno:target and
-# $fno:target messages, discarding the deliberate-naming signal for those
-# spellings. Slow paths that can afford a subprocess ask the source directly
-# (`fno agents dispatch family`, the porcelain helper); this hot classifier
-# does not.
-_normalize_family_regex='^(/target|/fno:target|\$fno:target)([[:space:]]|$)'
+# x-8151/d-450caaeb: family membership is answered by the owner's one
+# shell-readable surface, `fno dispatch family` - a pure, side-effect-free
+# verb (no daemon, no config read) whose answer comes from the canonical
+# merge_posture table. This file carries NO hand-copied spelling list: the
+# old regex mirror and its Python parity test are gone (writing the parity
+# guard is itself the trigger to port). FAMILY_RESOLVER is test-injectable
+# (mirrors the provider and slug resolvers): a command taking the message and
+# printing `family` or `other`. A failed or unavailable ask REFUSES the whole
+# normalize loud, never reads as `other`: a family message misread as prose
+# would seed verbatim instead of dispatching, and a skipped no-merge append
+# would let a fire-and-forget worker merge (Locked Decision 6: never grant on
+# a failed read). Remedy for a stale install: `fno doctor update`.
 _normalize_is_family() {
-  printf '%s' "$1" | grep -qE "$_normalize_family_regex"
+  local _answer
+  if [[ -n "${FAMILY_RESOLVER:-}" ]]; then
+    _answer="$("$FAMILY_RESOLVER" "$1" 2>/dev/null)" || _answer=""
+  else
+    _answer="$(fno dispatch family --message="$1" 2>/dev/null)" || _answer=""
+  fi
+  case "$_answer" in
+    family) return 0 ;;
+    other)  return 1 ;;
+    *) emit_error "cannot classify the message against the /target-family vocabulary (the 'fno dispatch family' ask failed; is the installed fno stale? run 'fno doctor update', or set FAMILY_RESOLVER in tests)" ;;
+  esac
 }
 
 NODE=""
