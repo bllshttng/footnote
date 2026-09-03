@@ -32,6 +32,8 @@ Work every angle in this same context, in one pass - do not skip angles for lack
 | xhigh | the 10-angle set, adds D and E | 15 | recall |
 | max | the 10-angle set, adds D and E | 15 | recall |
 
+Angle F (sibling answerer) runs at every level, low through max, on top of the sets above: it reads the plan's `surface:` block rather than more hunks, so it costs one grep, not a wider pass.
+
 ### The low pass
 
 One tool call: read the unified diff from Phase 0. No full-file reads. Flag runtime-correctness bugs visible from the hunk alone: inverted/wrong condition, off-by-one, null/undefined deref where adjacent lines show the value can be absent, removed guard, falsy-zero check, missing `await`, wrong-variable copy-paste, error swallowed in a catch that should propagate. Also flag, still from the hunk alone, new code that duplicates an existing helper visible in the diff context, and dead code the diff leaves behind. Do not flag style, naming, perf, missing tests, or anything outside the hunk.
@@ -55,6 +57,10 @@ Scan for the classic pitfalls of the diff's language/framework - for example: JS
 ### Angle E - wrapper/proxy correctness
 
 When the PR adds or modifies a type that wraps another (cache, proxy, decorator, adapter): check that every method routes to the wrapped instance and not back through a registry/session/global - e.g. a caching provider holding a `delegate` field that resolves IDs via `session.get(...)` instead of `delegate.get(...)` will re-enter the cache or recurse. Also check that the wrapper forwards all the methods the callers actually use.
+
+### Angle F - sibling answerer
+
+For the one question this diff answers (take it from the plan's `surface:` block when the PR has one; phrase it yourself when it does not), find one answerer the diff did not touch: another read or write of the same field, a second timeout on the same read, a second id format for the same thing, a second constant for the same limit. Grep the symbol, not the word. If you find one the block does not list, that is a candidate: the plan undercounted, and the next PR on this feature is already visible. If the block lists it as `out-of-scope`, check that the reason still holds against the diff.
 
 ### Reuse
 
