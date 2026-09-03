@@ -1249,9 +1249,27 @@ def _needs_rust_binary(root: Path, rel: str) -> bool:
 
 
 def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, str, str]]:
-    """Turn selections into runner steps, fastest-signal first."""
+    """Turn selections into runner steps, fastest-signal first.
+
+    "Fastest-signal first" has one exception: the graph store's read path is
+    the keeper, and the keeper needs ``fno-agents-worker`` on disk. A packet
+    that runs pytest before the build makes every graph-touching test crash
+    with StoreUnavailable instead of answering - measured on a PR whose stem
+    selection pulled in tests/graph/test_board.py while the crates change
+    selected the build step that would have satisfied it. So when pytest AND
+    the build are both mapped, the build goes first, exactly as the full
+    smoke orders it.
+    """
     pytest_targets = [s["target"] for s in selections if s["kind"] == "pytest"]
+    shell_rels = sorted({s["target"] for s in selections if s["kind"] == "shell"})
+    by_name = {name: (name, cwd, cmd) for name, cwd, cmd in _STRUCTURAL_STEPS}
+    build_selected = (_RUST_BUILD_STEP in by_name) and (
+        any(s["kind"] == "step" and s["target"] == _RUST_BUILD_STEP for s in selections)
+        or any(_needs_rust_binary(root, rel) for rel in shell_rels)
+    )
     steps: list[tuple[str, str, str]] = []
+    if pytest_targets and build_selected:
+        steps.append(by_name[_RUST_BUILD_STEP])
     if pytest_targets:
         targets = sorted(set(pytest_targets))
         # xdist costs more than it saves on a handful of files.
@@ -1259,15 +1277,16 @@ def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, st
         steps.append((f"Pytest (changed subset, {len(targets)} file(s))", ".",
                       f"uv run --project cli pytest --tb=short -q{par} "
                       + " ".join(shlex.quote(t) for t in targets)))
-    shell_rels = sorted({s["target"] for s in selections if s["kind"] == "shell"})
-    by_name = {name: (name, cwd, cmd) for name, cwd, cmd in _STRUCTURAL_STEPS}
     if any(_needs_rust_binary(root, rel) for rel in shell_rels) and _RUST_BUILD_STEP in by_name:
-        steps.append(by_name[_RUST_BUILD_STEP])
+        if not (pytest_targets and build_selected):
+            steps.append(by_name[_RUST_BUILD_STEP])
     for rel in shell_rels:
         steps.append((rel, ".", f"bash {shlex.quote(rel)}"))
     shell_targets = set(shell_rels)
     for name in sorted({s["target"] for s in selections if s["kind"] == "step"}):
         step = by_name[name]
+        if name == _RUST_BUILD_STEP and steps and steps[0] == step:
+            continue  # already placed ahead of pytest; never run the build twice
         refs = {t.strip("./") for t in _SH_PATH_RE.findall(step[2])}
         if refs and refs <= shell_targets:
             continue  # every harness it wraps is already selected directly

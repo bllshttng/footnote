@@ -345,6 +345,24 @@ def test_plain_harness_does_not_drag_in_the_rust_build(tmp_path: Path) -> None:
     assert _RUST_BUILD_STEP not in [s[0] for s in _changed_steps(tmp_path, sel)]
 
 
+def test_rust_build_precedes_pytest_in_the_changed_packet(tmp_path: Path) -> None:
+    """The graph store's read path is the keeper, and the keeper needs
+    fno-agents-worker on disk. A packet that runs pytest before the build
+    makes every graph-touching test crash with StoreUnavailable instead of
+    answering, so a crates change that selects both must build first - the
+    full smoke's own ordering."""
+    from fno.test_cmd import _RUST_BUILD_STEP, _changed_steps
+    _repo(tmp_path)
+    sel, _ = select_changed(
+        tmp_path, ["crates/fno-agents/src/loop_runtime.rs", "cli/src/fno/widget.py"]
+    )
+    names = [s[0] for s in _changed_steps(tmp_path, sel)]
+    assert _RUST_BUILD_STEP in names, names
+    assert names.index(_RUST_BUILD_STEP) < names.index(
+        "Pytest (changed subset, 1 file(s))"
+    ), names
+
+
 def test_parent_dir_source_ref_resolves_to_the_real_helper(tmp_path: Path) -> None:
     """`source "$SCRIPT_DIR/../lib/config.sh"` is how shared helpers are used."""
     _repo(tmp_path)
