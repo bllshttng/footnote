@@ -127,8 +127,25 @@ def _spawn_idle_keepers(tmp_path: Path, count: int) -> list[int]:
     return pids
 
 
+def _assert_reaped_or_reused(pids: list[int]) -> None:
+    """Every pid must have LEFT the zombie state: collected out of the table,
+    or its pid number already reused by a live process on a fast-cycling host.
+    Either proves the drain reaped it - a pid still answering zombie IS the
+    unreaped child. (A bare NoSuchProcess assert would false-fail on reuse.)"""
+    import psutil
+
+    for pid in pids:
+        try:
+            status = psutil.Process(pid).status()
+        except psutil.NoSuchProcess:
+            continue
+        assert status != psutil.STATUS_ZOMBIE, (
+            f"pid {pid} still answers zombie; the drain did not reap it"
+        )
+
+
 def test_exited_keepers_are_zombies_until_drained(tmp_path, monkeypatch):
-    """Positive control for the mid-run zombie defect and its drain (x-b366).
+    """Positive control for the mid-run zombie defect and its drain.
 
     A keeper that self-exits stays in the process table as a zombie under
     this worker's pid until someone collects its status; before the drain
@@ -149,11 +166,7 @@ def test_exited_keepers_are_zombies_until_drained(tmp_path, monkeypatch):
 
     reaped = store_mod.drain_exited_keepers()
     assert reaped == len(pids), f"drain must name every exited keeper; reaped {reaped}"
-    import psutil
-
-    for pid in pids:
-        with pytest.raises(psutil.NoSuchProcess):
-            psutil.Process(pid).status()
+    _assert_reaped_or_reused(pids)
 
 
 @pytest.mark.xdist_group(name="keeper-zombie")
@@ -181,15 +194,12 @@ def test_drain_fixture_reaps_zombies_between_tests_midrun():
     """Mid-run leg of the pair: the previous test's zombies must be gone.
 
     The session-scoped reaper has NOT run yet - this assertion fires between
-    tests, exactly where the defect lived. The pids must be out of the
-    process table (reaped, not merely SIGTERMed: a zombie answers kill(pid,
-    0)) and the spawn ledger must be empty. Pair runs on one xdist worker via
+    tests, exactly where the defect lived. No recorded pid may still answer
+    zombie (reaped, not merely SIGTERMed). Pair runs on one xdist worker via
     the keeper-zombie group; alone it would assert nothing, so it skips.
     """
     if not _ZOMBIE_PROBE_PIDS:
         pytest.skip("companion spawn leg did not run in this worker")
-    import psutil
-
     still_zombie = [
         pid
         for pid in _ZOMBIE_PROBE_PIDS
@@ -200,9 +210,7 @@ def test_drain_fixture_reaps_zombies_between_tests_midrun():
         f"boundary mid-run (pids {still_zombie}); the autouse drain fixture "
         f"must reap between tests, not only at session teardown"
     )
-    for pid in _ZOMBIE_PROBE_PIDS:
-        with pytest.raises(psutil.NoSuchProcess):
-            psutil.Process(pid).status()
+    _assert_reaped_or_reused(_ZOMBIE_PROBE_PIDS)
 
 
 def test_locked_by_normalized_from_legacy_session_id():
