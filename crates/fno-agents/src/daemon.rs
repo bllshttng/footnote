@@ -9864,9 +9864,14 @@ fn lane_b_keeper_dir(home: &AgentsHome) -> PathBuf {
 /// tidiness plus an honest dead count, never liveness authority: a socket
 /// with a live listener is left exactly as found, and an unreadable one is
 /// left for the process-table reaper (keeper_lane) rather than guessed at.
-/// Walks the two locations the client's `store_socket_for` can place a
-/// socket: state-root siblings (`<graph>.store.sock`) and the hashed temp
-/// root (`fno-store-<uid>/`, whose contents are ours by construction).
+///
+/// A state-root SIBLING socket is unlinked only when its graph file is gone
+/// too: a rebind requires a client, a client requires the graph, so with the
+/// graph absent no keeper can ever be behind the path and the probe-then-
+/// unlink race with a self-healing client cannot happen. A sibling whose
+/// graph still lives stays for the client's own connect-before-bind. The
+/// hashed temp root is different: its contents are ours by construction and
+/// its graph names are hashed away, so the probe alone decides.
 pub fn store_socket_sweep(home: &AgentsHome, emitter: &EventEmitter) -> usize {
     // SAFETY: getuid reads a per-process kernel value; it cannot fail or race.
     let uid = unsafe { libc::getuid() };
@@ -9907,6 +9912,20 @@ pub fn store_socket_sweep_in(
                 continue;
             }
             let path = entry.path();
+            // Sibling ownership rule: `<name>.store.sock` is only ours to
+            // unlink when `<name>` (its graph) is gone. With the graph
+            // present, a client rebind is always one connection away and
+            // unlinking here could steal a socket a keeper just bound.
+            if !in_temp_root {
+                let graph = path.with_file_name(
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().trim_end_matches(".store.sock").to_string())
+                        .unwrap_or_default(),
+                );
+                if graph.exists() {
+                    continue;
+                }
+            }
             let dead = match std::os::unix::net::UnixStream::connect(&path) {
                 Ok(stream) => {
                     // A live keeper is behind it: leave the socket alone.
@@ -17934,38 +17953,50 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
 
     #[test]
     fn store_socket_sweep_unlinks_the_dead_and_leaves_the_live() {
-        // Dead sockets (kill -9 leftovers) are unlinked from both walk
-        // locations; a socket with a live listener is left exactly as found.
+        // Sibling sockets whose graph still lives stay for the client's
+        // connect-before-bind; orphaned sockets (graph gone) and hashed-root
+        // litter are unlinked; a live listener is left exactly as found.
         let home = keeper_sweep_home("storesock");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let state_root = home.root().parent().unwrap().to_path_buf();
         let temp_root = state_root.join("hashed");
 
-        // The true kill -9 leftover: a bound socket whose listener is gone
-        // (ECONNREFUSED), not a plain file.
-        let dead_sibling = state_root.join("graph.json.store.sock");
-        let corpse = std::os::unix::net::UnixListener::bind(&dead_sibling).unwrap();
+        // A dead sibling whose graph still exists: NOT ours to unlink. A
+        // client rebind is one connection away, and unlinking here is the
+        // steal race this rule exists to close.
+        let shielded_sock = state_root.join("graph.json.store.sock");
+        let corpse = std::os::unix::net::UnixListener::bind(&shielded_sock).unwrap();
         drop(corpse);
+        let shielded_graph = state_root.join("graph.json");
+        std::fs::write(&shielded_graph, b"{}").unwrap();
+
+        // An orphaned sibling: same dead shape, but its graph is gone, so no
+        // keeper can ever be behind the path again.
+        let orphan_sock = state_root.join("deleted-graph.json.store.sock");
+        let corpse2 = std::os::unix::net::UnixListener::bind(&orphan_sock).unwrap();
+        drop(corpse2);
+
         let dead_hashed = temp_root.join(".fno-store-abcdef1234567890.sock");
         std::fs::create_dir_all(&temp_root).unwrap();
         // The hashed root is ours by construction, so its litter can also be
         // a bare file (ENOTSOCK) - covered on this fixture.
         std::fs::write(&dead_hashed, b"").unwrap();
+
         // A live listener: a bound unix socket in the state root.
         let live_sock = state_root.join("other.store.sock");
         let listener = std::os::unix::net::UnixListener::bind(&live_sock).unwrap();
-        // An unrelated file the state-root walk must never touch.
-        let bystander = state_root.join("graph.json");
-        std::fs::write(&bystander, b"{}").unwrap();
 
         let unlinked = store_socket_sweep_in(&home, temp_root, &emitter);
-        assert_eq!(unlinked, 2, "both dead sockets unlinked");
-        assert!(!dead_sibling.exists());
+        assert_eq!(unlinked, 2, "the orphan and the hashed litter unlinked");
+        assert!(shielded_sock.exists(), "a shielded sibling is never unlinked");
+        assert!(!orphan_sock.exists(), "an orphaned socket is unlinked");
         assert!(!dead_hashed.exists());
         assert!(live_sock.exists(), "a live listener is never unlinked");
-        assert!(bystander.exists(), "non-socket files are untouched");
+        assert!(shielded_graph.exists(), "non-socket files are untouched");
         drop(listener);
         let _ = std::fs::remove_file(&live_sock);
+        let _ = std::fs::remove_file(&shielded_sock);
+        let _ = std::fs::remove_file(&shielded_graph);
     }
 
     #[test]

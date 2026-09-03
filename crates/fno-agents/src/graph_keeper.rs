@@ -256,7 +256,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
             break;
         }
         match listener.accept() {
-            Ok((mut stream, _addr)) => {
+            Ok((stream, _addr)) => {
                 last_activity = std::time::Instant::now();
                 // BSD accept() hands the listener's O_NONBLOCK to the accepted
                 // socket, and serve_client does blocking reads: an inherited

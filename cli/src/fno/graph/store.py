@@ -752,9 +752,6 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
     nudge. The file leg ran all of these after its lock dropped; the client
     runs them after the keeper's publish lands, which is the same position
     relative to other writers."""
-    from fno.graph.render import render_graph_md
-    from fno.paths import vault_root
-
     path = Path(path)
     dropped = outcome["dropped"]
     backup = outcome["backup"]
@@ -782,6 +779,46 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
     # projections are operator-chosen paths that must never hold (or wait
     # on) the graph lock. Bytes are never partial (atomic replaces).
     entries = outcome["entries"]
+    _render_published_views(entries, is_canonical, path)
+    # Wake the active-backlog drain daemon (x-c070): best-effort, never
+    # wedges the mutation.
+    try:
+        from fno.active_backlog import touch_nudge
+
+        touch_nudge()
+    except Exception:
+        pass
+    return entries
+
+
+def render_canonical_views() -> None:
+    """Replay the canonical post-publish views from a fresh read.
+
+    The store's NATIVE writers (the mux reorder verbs) land graph bytes
+    through the keeper without the Python post-publish pass; this is the
+    pass they replay, so a native write leaves the same derived views
+    (graph.md, the configured board targets) a CLI write would. Every step
+    is best-effort: a render failure never rewrites history.
+    """
+    from fno import paths as _paths
+
+    graph = _paths.graph_json()
+    entries = read_graph(graph)
+    try:
+        entries = apply_readiness_overlay_via_store(entries)
+    except Exception:  # noqa: BLE001 - a render-freshness pass never fails a landed publish
+        pass
+    _render_published_views(entries, True, Path(graph))
+
+
+def _render_published_views(entries: list[dict], is_canonical: bool, path: Path) -> None:
+    """The view projections a landed publish owes: the readiness overlay,
+    graph.md, and the canonical/configured board targets (or a sibling
+    graph.html for test graphs)."""
+    from fno.graph.render import render_graph_md
+    from fno.graph import _constants as _gc
+    from fno.paths import vault_root
+
     # recompute (server-side) does not derive `blocked` - it is a read-time
     # overlay - so re-apply it before rendering, or a mutation that newly
     # blocks/unblocks a sibling renders stale in graph.md until the next
@@ -790,8 +827,6 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
         entries = apply_readiness_overlay_via_store(entries)
     except Exception:  # noqa: BLE001 - a render-freshness pass never fails a landed publish
         pass
-    from fno.graph import _constants as _gc
-
     md_target = _gc.GRAPH_MD if is_canonical else path.with_name("graph.md")
     try:
         _obsidian = vault_root() is not None
@@ -826,15 +861,6 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
             render_graph_html(_archived, path.with_name("graph.html"))
         except OSError as e:
             print(f"Warning: graph.html render failed: {e}", file=sys.stderr)
-    # Wake the active-backlog drain daemon (x-c070): best-effort, never
-    # wedges the mutation.
-    try:
-        from fno.active_backlog import touch_nudge
-
-        touch_nudge()
-    except Exception:
-        pass
-    return entries
 
 
 def locked_mutate_graph(path: Path, mutator) -> list[dict]:

@@ -2,17 +2,32 @@
 
 Pure logic (partition guards, age filter, dedup merge) plus the command's
 dry-run/apply behavior and `backlog get`'s read-through into the archive.
+
+Since the store port every command here rides the keeper, so the module
+needs the compiled runtime and skips whole where the smoke harness deleted
+the worker binary (the parity-test convention).
 """
 from __future__ import annotations
 
-import json
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+import pytest
 
-from typer.testing import CliRunner
+from fno.rust_binary import find_dev_binary
 
-from fno.cli import app
-from fno.graph.archive import (
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+pytestmark = requires_rust
+
+import json  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from typer.testing import CliRunner  # noqa: E402
+
+from fno.cli import app  # noqa: E402
+from fno.graph.archive import (  # noqa: E402
     merge_into_archive,
     partition_for_archive,
     remint_archive_collisions,
