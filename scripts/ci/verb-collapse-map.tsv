@@ -556,3 +556,5 @@ worktree status	T1	worktree status	1
 worktree stranded	T1	worktree stranded	1
 agents stale-escalate	T1	agents stale-escalate	6
 agents harness probe	T1	agents harness probe	0	
+do review invocations	T1	do review invocations	3	
+do review post-dispositions	T1	do review post-dispositions	1	
