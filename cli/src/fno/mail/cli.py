@@ -3302,10 +3302,8 @@ def _raw_send(
     stripped = payload.strip()
     if not stripped.startswith("/"):
         _refused(
-            "payload must start with / (a verb invocation); free prose belongs "
-            "in an ordinary wrapped send. Answering an interactive prompt "
-            "(a [Y/n], a menu digit) is `fno agents ask <name> \"<answer>\"`, "
-            "not this lane",
+            "payload must start with / (a verb invocation); free prose belongs in an ordinary "
+            "wrapped send. Answering a prompt (a [Y/n]) is `fno agents ask <name> \"<answer>\"`",
             usage=True,
         )
     if stripped == "/":
