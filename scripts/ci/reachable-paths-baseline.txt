@@ -53,7 +53,7 @@ A	empty supported {action}	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-ag
 A	failed to read {log_path}: {exc}	py=cli/src/fno/agents/read.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	fno agents resume: registry read failed: {exc}	py=cli/src/fno/agents/resume_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	fno agents trace: agent name is required unless --all is set	py=cli/src/fno/agents/trace_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
-A	fno mux ls --json failed	py=cli/src/fno/update.py;rs=crates/fno/src/client.rs	# msg-twin
+A	fno mux ls --json failed	py=cli/src/fno/update.py;rs=crates/fno/src/client_tests.rs	# msg-twin
 A	fno/review-coverage-unavailable	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol: check-coverage-context-parity.sh pins the py consts against every surface, loopcheck.rs included
 A	fno_global_settings_path	py=cli/src/fno/adapters/providers/loader.py|cli/src/fno/config_io.py|cli/src/fno/conftest.py|cli/src/fno/hermetic.py;rs=crates/fno-agents/src/agents_config.rs|crates/fno/src/agents_view.rs|crates/fno/src/digest_overlay.rs|crates/fno/src/sideline_color.rs	# protocol
 A	fno_mux_shell_integration	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno/src/client.rs|crates/fno/src/pty.rs	# protocol
@@ -77,7 +77,7 @@ A	interactive resume single-writer	py=cli/src/fno/agents/resume_cli.py;rs=crates
 A	key and holder must be non-empty	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claims.rs	# msg-twin
 A	live but not currently routable	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno-agents/src/gc.rs	# msg-twin
 A	message must be non-empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs	# msg-twin
-A	mine: failed: item text must be one non-empty line	py=cli/src/fno/outstanding/mine.py;rs=crates/fno/src/client.rs	# msg-twin
+A	mine: failed: item text must be one non-empty line	py=cli/src/fno/outstanding/mine.py;rs=crates/fno/src/client_tests.rs	# msg-twin
 A	needs every session lane	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# msg-twin
 A	menu_walk needs ordered model and effort targets	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract
 A	no active drive authority	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
