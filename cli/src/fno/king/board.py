@@ -68,6 +68,7 @@ SRC_CLAIMS = "fno agents claim list -J --include-stale --prefix node:"
 SRC_PRS = (
     "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url"
 )
+SRC_PR_NODES = f"{SRC_PRS} + fno backlog get <id>"
 SRC_QUESTIONS = "fno inbox outstanding --json"
 SRC_NEEDS = "fno agents needs --json"
 
@@ -427,6 +428,72 @@ def build_board(
         {"number": r.get("number"), "title": r.get("title")} for r in inputs.prs.rows()
     ]
 
+    # `stalled_holder`'s complement, and the second half of ONE predicate.
+    # That queue starts from a CLAIM, so a worker that exited cleanly and
+    # RELEASED its claim leaves a node with no claim row and is skipped at its
+    # `claim is None` guard. It catches the worker that died mid-grip and
+    # misses the worker that let go. Measured 2026-09-03: 7 of 12 open PRs in
+    # the second state, 0 in the first, while the board reported 123 actionable
+    # rows and named none of the seven.
+    #
+    # It is NOT sourced from `fno backlog ready`, for the reason recorded above
+    # `stalled_holder` and for one of its own: `ready` never returns
+    # `in_review`. Candidates are open PRs bound back to their node.
+    #
+    # Reports only. Deciding a PR is dead is the operator's judgment, so
+    # nothing here closes, defers or touches a node; a node the operator
+    # ALREADY deferred or blocked is skipped rather than nagged back up.
+    from fno.graph.statuses import derived_status, is_terminal_entry
+
+    mergeable_numbers = (
+        {r.get("number") for r in pr_rows} if autonomous_merge else set()
+    )
+    undriven: list[dict] = []
+    # Fail CLOSED on an unreadable claim list, in the LOOP rather than at the
+    # render. `claim_by_node` is built from `inputs.claims.rows()`, which
+    # answers [] for an errored source, so every node here would read `claim is
+    # None`, resolve to `none`, and hand the king a dispatch over every live
+    # worker at once. A timed-out probe read as absent is the one failure this
+    # queue can cause that is worse than the gap it closes. `_queue` discards
+    # these rows too, and both layers stay: this one so no row is ever built,
+    # that one so the queue reads `unreadable` rather than empty.
+    claims_readable = inputs.claims.ok
+    for node in (
+        inputs.pr_nodes.rows() if (inputs.pr_nodes and claims_readable) else []
+    ):
+        if node.get("priority") not in KING_PRIORITIES:
+            continue
+        # A raw graph entry, not a `fno backlog get` payload, so closure is
+        # asked of the helper. `read_graph` does not run the recompute
+        # migration, and a legacy row carries a stale open `status` beside a
+        # real `completed_at`.
+        if is_terminal_entry(node):
+            continue
+        if derived_status(node) in {"deferred", "blocked"}:
+            continue
+        state, _claim = _node_driver(node.get("id"), claim_by_node, inputs.holder_activity)
+        if state != "none":
+            continue
+        # When the king can merge, a green mergeable PR's remedy is the merge
+        # `mergeable_pr` already names, not a second worker. When it cannot,
+        # that queue is report-only and nobody acts, so the PR still needs a
+        # driver and belongs here. The queues stay disjoint on the row the king
+        # would actually act on.
+        if node.get("pr_number") in mergeable_numbers:
+            continue
+        if not in_scope("undriven_pr", node.get("id"), node):
+            continue
+        undriven.append(
+            {
+                "id": node.get("id"),
+                "priority": node.get("priority"),
+                "title": node.get("title"),
+                "status": derived_status(node),
+                "pr_number": node.get("pr_number"),
+                "pr_url": node.get("pr_url"),
+            }
+        )
+
     # One outstanding read, three streams. A non-dict payload (a verb that
     # changed shape) degrades to empty streams rather than a crash, mirroring
     # every other reader here.
@@ -519,6 +586,19 @@ def build_board(
             SourceRead(error=inputs.claims.error or inputs.claimed_nodes.error),
             stalled,
             actionable=True,
+        ),
+        _queue(
+            "undriven_pr",
+            SRC_PR_NODES,
+            SourceRead(
+                error=(inputs.pr_nodes.error if inputs.pr_nodes else "")
+                or inputs.claims.error
+            ),
+            undriven,
+            actionable=True,
+            note="an open PR with nobody driving it; report only, never close "
+            "or defer one - that judgment is the operator's",
+            verb="/fno:target",
         ),
         _queue(
             "mergeable_pr",
