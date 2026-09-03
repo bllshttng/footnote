@@ -292,8 +292,9 @@ pub fn resolve_with(
     let matches =
         |declared: &str, actual: Option<&str>| declared.is_empty() || actual == Some(declared);
     let matched_row = pal.routing_rows.iter().find(|r| {
-        (r.harness.is_empty() && r.model.is_empty() && r.route.is_empty() && r.account.is_empty())
-            == false
+        // An all-empty row declares nothing, so it would match every agent.
+        // Skip it rather than let it swallow the first-declaration-wins race.
+        !(r.harness.is_empty() && r.model.is_empty() && r.route.is_empty() && r.account.is_empty())
             && matches(&r.harness, harness)
             && matches(&r.model, model)
             && matches(&r.route, route)

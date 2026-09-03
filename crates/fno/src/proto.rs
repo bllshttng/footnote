@@ -310,7 +310,12 @@ fn default_true() -> bool {
 /// v62 (row detach): `Command::DetachPane { pane }` removes a live
 /// worker pane from the visible tree without changing the frozen client-session
 /// `ClientMsg::Detach` behavior.
-pub const PROTO_VERSION: u32 = 63;
+///
+/// v64 (x-8f9d, portals): `PanePlacement.portal` and `AgentRow.portal` -
+/// additive fields that make the one thread pane an addressable set. The
+/// `thread_pane` bool stays as a compatibility alias meaning portal 0, so
+/// the floor does not move.
+pub const PROTO_VERSION: u32 = 64;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -633,15 +638,37 @@ pub struct PanePlacement {
     /// split refuses. Absent on legacy and non-agent placement requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_panes: Option<usize>,
-    /// (x-07c2) Route this reach into the ONE dedicated thread pane instead
-    /// of an ordinary placement: no slot yet opens one (never persisted as a
-    /// squad member), a slot on another row repoints it in place, a slot on
-    /// this row focuses it. Mutually exclusive with `here`, `at`, `split`
-    /// and a non-default `target` (the dedicated pane owns its geometry);
-    /// the server refuses a conflicting combination. `#[serde(default)]`
-    /// keeps every existing placement wire-identical.
+    /// (x-07c2) DEPRECATED by `portal` below, kept as the compatibility
+    /// alias for one generation: `true` means portal 0. Read ONLY when
+    /// `portal` is absent, and only through [`PanePlacement::portal_target`]
+    /// so no code past the decode edge ever sees two fields that overlap.
+    /// Drop it when `MIN_COMPAT_PROTO` passes 64, the version `portal`
+    /// shipped in.
     #[serde(default)]
     pub thread_pane: bool,
+    /// (v64, x-8f9d) Which portal this placement targets. `Some(n)` reaches
+    /// portal n; `None` is no portal. A portal is the dedicated pane a
+    /// thread is shown through, indexed from 0 and addressable at launch.
+    /// No portal at n opens one (never persisted as a squad member), a
+    /// portal at n on another row repoints it in place, a portal at n on
+    /// this row focuses it. Mutually exclusive with `here`, `at`, `split`
+    /// and a non-default `target` (a portal owns its geometry); the server
+    /// refuses a conflicting combination. Additive and `#[serde(default)]`,
+    /// so every existing placement stays wire-identical and the
+    /// compatibility floor does not move (see `MIN_COMPAT_PROTO` above).
+    #[serde(default)]
+    pub portal: Option<u8>,
+}
+
+impl PanePlacement {
+    /// (x-8f9d) The portal this placement targets, folding the deprecated
+    /// `thread_pane` alias. `portal` wins; `thread_pane: true` resolves to
+    /// portal 0, which is where every pre-v64 client always landed. This is
+    /// the one normalisation, so callers read a single value.
+    pub fn portal_target(&self) -> Option<u8> {
+        self.portal
+            .or(if self.thread_pane { Some(0) } else { None })
+    }
 }
 
 /// (v60, x-7b5e) One member's line of a workspace-restore report. `outcome`
@@ -838,7 +865,14 @@ pub enum ControlVerb {
     /// (`Notice` carrying where it opened/repointed/focused) or an `Err`
     /// naming the refusal. Runs the exact command path a TUI reach runs, so
     /// the two doors cannot drift.
-    ThreadPane { name: String },
+    ThreadPane {
+        name: String,
+        /// (v64, x-8f9d) Which portal to reach through. `None` is portal 0,
+        /// which is where every pre-v64 caller landed, so the field is
+        /// additive and the compatibility floor does not move.
+        #[serde(default)]
+        portal: Option<u8>,
+    },
     /// Join a whole source tab into the anchor pane's tab as a split, removing
     /// the now-empty source tab -> [`ServerMsg::Ok`]. Refuses join-into-self up
     /// front ([`err_code::BAD_REQUEST`]).
@@ -1121,6 +1155,16 @@ pub struct AgentRow {
     /// The mux pane hosting this agent in THIS session; `None` = a watch-only
     /// row (bg/headless/daemon-worker agents surfaced from the registry).
     pub pane_id: Option<u64>,
+    /// (v64, x-8f9d) The portal showing this row, when `pane_id` is a portal
+    /// seat. DERIVED at projection time by matching `pane_id` against the
+    /// server's open portals, never stored per row: the row-to-pane relation
+    /// is a POINTER, so one row moving between portals stays ONE row whose
+    /// index changes. `None` = this row is not shown through a portal, never
+    /// "unknown". Match on the `Option` and compare seats for EQUALITY: pane
+    /// ids allocate from zero, so pane 0 is a valid seat and a truthiness
+    /// test on it is the x-d914 defect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portal: Option<u8>,
     /// In-TTL inside-leg badge; `None` = liveness-only (never a scraped guess).
     pub badge: Option<AgentBadge>,
     /// The report's human reason, when badged.
@@ -4160,7 +4204,13 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 63);
+        assert_eq!(PROTO_VERSION, 64);
+        // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
+        // Both are additive `#[serde(default)]` fields, so the floor does NOT
+        // move with them - a v63 client still attaches. Pinned beside the
+        // version because a bump that DID move the floor would refuse every
+        // older client, and that must never happen by accident.
+        assert_eq!(MIN_COMPAT_PROTO, 58);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -4462,6 +4512,7 @@ mod tests {
                         squad: Some(1),
                         name: "peer".into(),
                         pane_id: Some(4),
+                        portal: None,
                         badge: Some(AgentBadge::Blocked),
                         reason: Some("permission prompt".into()),
                         exited: false,
@@ -4513,6 +4564,7 @@ mod tests {
                         squad: None,
                         name: "bg-watch".into(),
                         pane_id: None,
+                        portal: None,
                         badge: None,
                         reason: None,
                         exited: true,
@@ -4662,6 +4714,7 @@ mod tests {
     #[test]
     fn proto_v28_placement_roundtrips_for_pane_run_and_attach() {
         let placement = PanePlacement {
+            portal: None,
             tab: None,
             at: None,
             target: PaneTarget::SquadId(42),
