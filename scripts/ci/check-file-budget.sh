@@ -87,18 +87,27 @@ BASE_SHA="${FILE_BUDGET_BASE_SHA:-}"
 if [[ "$BASE_SHA" == "0000000000000000000000000000000000000000" ]]; then
     BASE_SHA=""   # a branch's first push: no previous tip exists to diff
 fi
+
+# A shallow checkout (actions/checkout's default depth is 1) holds neither the
+# previous tip nor full history, so base lookups fail with no output. Heal by
+# fetching full history once; local clones and deep CI checkouts never pay for
+# this. The caller retries its own lookup afterwards and refuses if it still
+# will not resolve - never a silent pass. Always succeeds: set -e runs this
+# mid-list, and the retry, not the return code, is the verdict.
+heal_shallow() {
+    [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]] || return 0
+    git fetch --quiet --unshallow "$REMOTE" 2>/dev/null || true
+    return 0
+}
+
 if [[ -n "$BASE_SHA" ]]; then
     # The push-to-main alarm (guards.yml passes github.event.before). An
     # explicit sha never falls back to the merge base: on main the merge base
     # IS HEAD, and that silent empty diff is the green-on-nothing trap this
     # override exists to close.
     BASE="$(git rev-parse --verify --quiet "$BASE_SHA^{commit}")" || {
-        # A shallow checkout does not hold the previous tip; heal like the
-        # merge-base path below, then refuse if it still will not resolve.
-        if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
-            git fetch --quiet --unshallow "$REMOTE" 2>/dev/null || true
-            BASE="$(git rev-parse --verify --quiet "$BASE_SHA^{commit}")" || true
-        fi
+        heal_shallow
+        BASE="$(git rev-parse --verify --quiet "$BASE_SHA^{commit}")" || true
     }
     if [[ -z "${BASE:-}" ]]; then
         echo "check-file-budget: FILE_BUDGET_BASE_SHA $BASE_SHA does not resolve" >&2
@@ -119,15 +128,8 @@ else
         exit 2
     }
     BASE="$(git merge-base "$BASE_TIP" HEAD 2>/dev/null)" || {
-        # A shallow checkout (actions/checkout's default depth is 1) leaves HEAD
-        # and the base in disconnected graphs, and merge-base then fails with no
-        # output. Heal the shallow case by fetching full history once; local
-        # clones and deep CI checkouts never pay for this. If a base still cannot
-        # be established, refuse - never a silent pass.
-        if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
-            git fetch --quiet --unshallow "$REMOTE" 2>/dev/null || true
-            BASE="$(git merge-base "$BASE_TIP" HEAD 2>/dev/null)" || true
-        fi
+        heal_shallow
+        BASE="$(git merge-base "$BASE_TIP" HEAD 2>/dev/null)" || true
         if [[ -z "${BASE:-}" ]]; then
             echo "check-file-budget: cannot establish a merge base between $REMOTE/$BASE_REF and HEAD" >&2
             echo "       (shallow or unrelated histories? fetch --unshallow, or fix PR_BASE_REF/PR_REMOTE)" >&2
@@ -205,7 +207,12 @@ while IFS=$'\t' read -r added deleted path; do
         echo "check-file-budget: $path is a new file at $head_lines lines (budget $BUDGET). A production file is not born over budget. Put the new code in a module named by the question it answers (never server2.rs), and move the code you touched with it. Files over budget today: $(live_count); each shrink is banked." >> "$findings"
         fails=1
     fi
-done < <(git -c core.quotepath=off diff --numstat -M "$BASE"...HEAD -- '*.rs' '*.py' '*.sh' '*.ts' '*.tsx')
+# Two-dot, deliberately: the diff must measure from BASE exactly. On the
+# merge-base path BASE is an ancestor of HEAD, so BASE..HEAD and BASE...HEAD
+# are identical there; on the explicit-sha path a sha that is not an ancestor
+# (a force-push overwrite) must still be honored as pinned, which three-dot
+# would silently widen to the merge base.
+done < <(git -c core.quotepath=off diff --numstat -M "$BASE"..HEAD -- '*.rs' '*.py' '*.sh' '*.ts' '*.tsx')
 
 py_net=$((py_added - py_deleted))
 if [[ "$py_net" -gt "$PY_ALLOWANCE" ]]; then
