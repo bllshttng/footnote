@@ -212,11 +212,31 @@ const SIGNATURES: &[Signature] = &[
         name: "pytest",
         plan: "escalate: repro names the failing node ids",
         matches: |c| !pytest_nodeids(c.log).is_empty(),
+        resolve: |c| {
+            let ids = pytest_nodeids(c.log);
+            let shown: Vec<String> = ids.iter().take(PYTEST_REPRO_CAP).cloned().collect();
+            let mut repro = format!("cd cli && uv run pytest {}", shown.join(" "));
+            if ids.len() > shown.len() {
+                repro.push_str(&format!(
+                    "  # and {} more; the log lists them all",
+                    ids.len() - shown.len()
+                ));
+            }
+            Remedy::Escalate { repro }
+        },
+    },
+    Signature {
+        name: "shard-rollup",
+        plan: "escalate: a fan-in gate; the real failures are its named shards",
+        matches: |c| shard_rollup_shards(c.log).is_some(),
+        // Not unknown, and not a defect of its own. This job runs one echo and
+        // exits on its shards' results, so classifying it `unknown` printed 38
+        // lines of runner boilerplate on every red PR and pointed at nothing.
         resolve: |c| Remedy::Escalate {
-            repro: format!(
-                "cd cli && uv run pytest {}",
-                pytest_nodeids(c.log).join(" ")
-            ),
+            repro: match shard_rollup_shards(c.log) {
+                Some(shards) => format!("a fan-in gate; heal the failing shard: {shards}"),
+                None => "a fan-in gate; heal its failing shards".to_string(),
+            },
         },
     },
     Signature {
@@ -392,12 +412,39 @@ fn pytest_nodeids(log: &str) -> Vec<String> {
     let re = Regex::new(r"(?m)^FAILED (\S+::\S+)").expect("static regex");
     let mut ids: Vec<String> = Vec::new();
     for caps in re.captures_iter(log) {
-        let id = caps[1].to_string();
+        // Shards disagree about the working directory: one prints
+        // `tests/unit/x.py::t`, another `cli/tests/unit/x.py::t`. Dropping a
+        // leading `cli/` makes both spellings one repro that runs from `cli`;
+        // without it half the repros named a path that does not exist there.
+        let id = caps[1].trim_start_matches("cli/").to_string();
         if !ids.contains(&id) {
             ids.push(id);
         }
     }
     ids
+}
+
+/// How many failing node ids a repro names before it stops being a command
+/// and starts being a paste of the log.
+const PYTEST_REPRO_CAP: usize = 5;
+
+/// The shards a fan-in gate folded, from its own `<name>=<result>` echo.
+/// `Some` only when at least one of them failed.
+fn shard_rollup_shards(log: &str) -> Option<String> {
+    let re =
+        Regex::new(r"(?m)^([a-z0-9-]+=(?:success|failure)(?: [a-z0-9-]+=(?:success|failure))+)$")
+            .expect("static regex");
+    let line = re.captures(log)?.get(1)?.as_str();
+    let failed: Vec<&str> = line
+        .split_whitespace()
+        .filter(|pair| pair.ends_with("=failure"))
+        .map(|pair| pair.trim_end_matches("=failure"))
+        .collect();
+    if failed.is_empty() {
+        None
+    } else {
+        Some(failed.join(", "))
+    }
 }
 
 /// The cargo tests that failed, from `test <path> ... FAILED`.
@@ -1164,6 +1211,70 @@ mod tests {
             }
             other => panic!("expected Escalate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_pytest_repro_runs_from_cli_whichever_cwd_the_shard_used() {
+        // Two real shards, two spellings of the same path. Both repros have
+        // to run from `cli`, so the `cli/` prefix is dropped rather than
+        // producing a path that does not exist there.
+        let log = concat!(
+            "FAILED tests/unit/test_a.py::test_one - x\n",
+            "FAILED cli/tests/unit/test_b.py::test_two - y\n",
+        );
+        let f = classify(&ctx("smoke-pytest", "guards", log), false);
+        match f.remedy {
+            Remedy::Escalate { repro } => {
+                assert!(repro.contains("tests/unit/test_b.py::test_two"), "{repro}");
+                assert!(!repro.contains("cli/tests/"), "{repro}");
+            }
+            other => panic!("expected Escalate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_long_pytest_failure_list_is_capped_and_says_how_many_it_dropped() {
+        let log: String = (1..=9)
+            .map(|n| format!("FAILED tests/unit/t.py::test_{n} - x"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let f = classify(&ctx("smoke-pytest", "guards", &log), false);
+        match f.remedy {
+            Remedy::Escalate { repro } => {
+                assert!(repro.contains("test_5"), "{repro}");
+                assert!(!repro.contains("test_6"), "{repro}");
+                assert!(repro.contains("and 4 more"), "{repro}");
+            }
+            other => panic!("expected Escalate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fan_in_gate_names_its_failing_shards_instead_of_reading_unknown() {
+        // The `smoke` job's whole log, near enough: one echo and an exit on
+        // its shards' results. Classified `unknown` it printed 38 lines of
+        // runner boilerplate on every red PR and pointed at nothing.
+        let log = concat!(
+            "##[group]Run echo \"smoke-pytest=failure smoke-rest=failure\"\n",
+            "smoke-pytest=failure smoke-rest=failure\n",
+            "##[error]Process completed with exit code 1.\n",
+        );
+        let f = classify(&ctx("smoke", "guards", log), false);
+        assert_eq!(f.signature, "shard-rollup");
+        match f.remedy {
+            Remedy::Escalate { repro } => {
+                assert!(repro.contains("smoke-pytest"), "{repro}");
+                assert!(repro.contains("smoke-rest"), "{repro}");
+            }
+            other => panic!("expected Escalate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_all_green_rollup_is_not_a_shard_rollup_finding() {
+        // The gate only classifies when a shard actually failed; an all-green
+        // echo in some other job's log must not capture that job.
+        assert_eq!(shard_rollup_shards("a=success b=success"), None);
     }
 
     #[test]
