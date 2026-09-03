@@ -9919,7 +9919,11 @@ pub fn store_socket_sweep_in(
             if !in_temp_root {
                 let graph = path.with_file_name(
                     path.file_name()
-                        .map(|n| n.to_string_lossy().trim_end_matches(".store.sock").to_string())
+                        .map(|n| {
+                            n.to_string_lossy()
+                                .trim_end_matches(".store.sock")
+                                .to_string()
+                        })
                         .unwrap_or_default(),
                 );
                 if graph.exists() {
@@ -17988,7 +17992,10 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
 
         let unlinked = store_socket_sweep_in(&home, temp_root, &emitter);
         assert_eq!(unlinked, 2, "the orphan and the hashed litter unlinked");
-        assert!(shielded_sock.exists(), "a shielded sibling is never unlinked");
+        assert!(
+            shielded_sock.exists(),
+            "a shielded sibling is never unlinked"
+        );
         assert!(!orphan_sock.exists(), "an orphaned socket is unlinked");
         assert!(!dead_hashed.exists());
         assert!(live_sock.exists(), "a live listener is never unlinked");
