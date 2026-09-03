@@ -38,9 +38,7 @@ Everything else stays invocable by full name: `blueprint`, `execute` (`execute w
 
 Atomic, lock-protected, schema-validated. Use for exact state transitions, not orchestration.
 
-Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `pane` is mux-hosted at a fixed place. `thread` is the persistent lane and hosts no pane until one is created; view: a `portal`. `headless` is the only non-interactive substrate, and it is one-shot. `bg` is a deprecated one-release alias naming that same interactive `thread`. New commands and capability keys use `thread`. `fno mux where` reporting `hosts no live pane` is an absence of a PANE, never of life. Observe with `fno agents peek`, drive with `fno agents attach`, or mail.
-
-A `portal` is the dedicated pane a thread is shown through, indexed from 0. This does not change substrate semantics: a thread still hosts no pane until one is created, and a portal is what one is. Several threads can each hold a portal, so the existing Join Left/Right/Up/Down tile them side by side in one tab. Name the index at launch with `fno mux thread <name> --portal N`; in the sideline, Enter reaches portal 0 and `P` opens the next free one. A row renders `◫N` for the portal showing it, derived per frame, so a row moving between portals stays ONE row. A portal is never persisted and never rebuilt by restore.
+Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `pane` is mux-hosted at a fixed place. `thread` is the persistent lane and hosts no pane until one is created; view: a `portal`, 0-indexed, several at once (`--portal N`). `headless` is the only non-interactive substrate, and it is one-shot. `bg` is a deprecated one-release alias naming that same interactive `thread`. New commands and capability keys use `thread`. `fno mux where` reporting `hosts no live pane` is an absence of a PANE, never of life. Observe with `fno agents peek`, drive with `fno agents attach`, or mail.
 
 | Verb family | What it owns |
 |-------------|--------------|

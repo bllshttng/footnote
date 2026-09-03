@@ -131,7 +131,16 @@ set -euo pipefail
 # observer). The status table is the one discovery channel every session
 # reads, the clause is compressed to the two names and their three axes, and
 # the ceiling follows the measurement up, zero spare.
-CEILING_BYTES=39064
+# +98 (39064 -> 39162), measured 2026-09-03: `portal` enters the substrate
+# vocabulary in AGENTS.md and skills/using-fno/SKILL.md. It is a new
+# first-class term beside pane, thread and headless, and a session that does
+# not know it cannot open a second one or read the `◫N` the sideline renders.
+# A +1255 first draft explained the whole mechanic in both files; all of it
+# moved to docs/architecture/portals.md, which is not paid at startup, and
+# this residue is the word, `0-indexed, several at once`, the `--portal N`
+# spelling, and one doc link. The ceiling follows the measurement up, zero
+# spare.
+CEILING_BYTES=39162
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
