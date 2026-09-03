@@ -101,10 +101,12 @@ def test_upsert_backstop_row_carries_the_node_sessions(ledger_path):
 def test_upsert_backstop_row_marks_when_node_has_none(ledger_path):
     _write_ledger(ledger_path, [])
     _register.upsert_ledger_pr(
-        "x-5566", 508, "https://github.com/o/r/pull/508", "r", "ts"
+        "x-5566", 508, "https://github.com/o/r/pull/508", "r", "2026-09-02T22:43:24Z"
     )
     row = json.loads(ledger_path.read_text())["entries"][-1]
     assert row["sessions"] == [LEDGER_SESSION_UNRESOLVED]
+    # x-b6bd: the backstop row's completed carries the one UTC shape too.
+    assert row["completed"] == "2026-09-02T22:43:24+00:00"
 
 
 # --- change 2: the harvest ---------------------------------------------------
