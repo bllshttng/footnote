@@ -605,6 +605,11 @@ struct Args {
     gh_bin: String,
     git_bin: String,
     cwd: std::path::PathBuf,
+    /// Prepended when resolving a remedy's binary (`cargo`, `uv`). Empty
+    /// means resolve off PATH. It exists so a test can inject a stub WITHOUT
+    /// mutating the process PATH: PATH is global, and a stub `git` placed
+    /// there leaked into three unrelated tests running in parallel.
+    bin_dir: String,
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
@@ -616,6 +621,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         gh_bin: "gh".to_string(),
         git_bin: "git".to_string(),
         cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        bin_dir: String::new(),
     };
     let mut i = 0;
     while i < argv.len() {
@@ -639,6 +645,10 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             }
             "--cwd" => {
                 a.cwd = std::path::PathBuf::from(take("--cwd")?);
+                i += 1;
+            }
+            "--bin-dir" => {
+                a.bin_dir = take("--bin-dir")?;
                 i += 1;
             }
             other if other.starts_with('-') => return Err(format!("unknown flag: {other}")),
@@ -940,7 +950,15 @@ fn apply_auto(a: &Args, findings: &mut [Finding]) -> Vec<String> {
         for cmd in cmds.iter().chain(verify.iter()) {
             let dir = a.cwd.join(&cmd.cwd);
             let argv: Vec<&str> = cmd.argv.iter().map(|s| s.as_str()).collect();
-            let ok = run(argv[0], &argv[1..], &dir, REMEDY_TIMEOUT)
+            let bin = if a.bin_dir.is_empty() {
+                argv[0].to_string()
+            } else {
+                std::path::Path::new(&a.bin_dir)
+                    .join(argv[0])
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let ok = run(&bin, &argv[1..], &dir, REMEDY_TIMEOUT)
                 .map(|(ok, _, _)| ok)
                 .unwrap_or(false);
             if !ok {
@@ -1710,22 +1728,6 @@ exit 0
         std::fs::read_to_string(dir.join(name)).unwrap_or_default()
     }
 
-    /// Remedies resolve their binary off PATH (`cargo`, `uv`), so a test that
-    /// exercises one has to put its stub there. PATH is process-wide, so the
-    /// tests that touch it hold this lock and restore what they found -- the
-    /// same shape the claims-root tests in `loopcheck` use.
-    static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Run `f` with `dir` first on PATH.
-    fn with_stub_path<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{previous}", dir.display()));
-        let out = f();
-        std::env::set_var("PATH", previous);
-        out
-    }
-
     fn args_for(dir: &Path, extra: &[&str]) -> Vec<String> {
         let mut v = vec![
             "1".to_string(),
@@ -1736,6 +1738,8 @@ exit 0
             "--cwd".to_string(),
             dir.to_string_lossy().into_owned(),
         ];
+        v.push("--bin-dir".to_string());
+        v.push(dir.to_string_lossy().into_owned());
         v.extend(extra.iter().map(|s| s.to_string()));
         v
     }
@@ -1784,7 +1788,7 @@ exit 0
         stub_gh(d, false);
         stub_git(d, "feature/x", false);
         stub_cargo(d);
-        with_stub_path(d, || run_heal(&args_for(d, &["--apply"])));
+        run_heal(&args_for(d, &["--apply"]));
         let git = log_of(d, "git.log");
         assert_eq!(git.matches("git commit").count(), 1, "{git}");
         assert_eq!(git.matches("git push").count(), 1, "{git}");
@@ -1798,7 +1802,7 @@ exit 0
         stub_gh(d, true);
         stub_git(d, "feature/x", false);
         stub_cargo(d);
-        let code = with_stub_path(d, || run_heal(&args_for(d, &["--apply"])));
+        let code = run_heal(&args_for(d, &["--apply"]));
         assert_eq!(code, EXIT_IN_FLIGHT);
         let git = log_of(d, "git.log");
         assert_eq!(git.matches("git commit").count(), 1, "the fix is kept");
