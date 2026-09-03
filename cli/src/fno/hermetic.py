@@ -192,6 +192,9 @@ _ENVIRONMENT: tuple[str, ...] = (
 _RUNNER_PASSTHROUGH = (
     "FNO_REAL_CODEX_PLUGIN_TEST",  # .github/workflows/cli-ci.yml
     "FNO_RUST_FRONT",  # .github/workflows/cli-ci.yml, via $GITHUB_ENV
+    # The smoke workflow sets this on the pytest step so each matrix leg keeps
+    # its own collected test slice instead of silently running the full suite.
+    "FNO_PYTEST_SHARD",  # .github/workflows/cli-ci.yml
     "FNO_LIVE_PROVIDER_USAGE",  # opt-in integration gate; test restores real HOME
     # opt-in live pi journey (cli/tests/agents/test_pi_journey.py). Without
     # this keep the FNO_* prefix sweep clears the flag before the module reads
