@@ -577,24 +577,9 @@ fn center(s: &str, w: usize) -> String {
 pub fn draw(cells: &mut [Cell], rows: usize, cols: usize, r: &Rendered, theme: &Theme) {
     let (r0, c0) = r.origin;
     for (i, line) in r.lines.iter().enumerate() {
-        let sr = r0 + i;
-        if sr >= rows {
-            break;
-        }
-        for (j, ch) in line.text.chars().enumerate() {
-            let sc = c0 + j;
-            if sc >= cols {
-                break;
-            }
-            let role = line.roles.get(j).copied().unwrap_or(Role::Body);
-            let (fg, bg, flags) = cell_style(role, theme);
-            cells[sr * cols + sc] = Cell {
-                c: ch,
-                fg,
-                bg,
-                flags,
-            };
-        }
+        chrome::paint_line(
+            cells, rows, cols, r0 + i, c0, &line.text, &line.roles, theme,
+        );
     }
 }
 

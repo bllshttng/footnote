@@ -354,6 +354,50 @@ pub fn chrome_frame_width(body_w: usize, has_scroll: bool) -> usize {
     Chrome::FRAME_COLS + body_w + usize::from(has_scroll)
 }
 
+/// Paint one line's chars into the cell buffer starting at column `c0`,
+/// advancing by DISPLAY columns: a fullwidth glyph claims its lead cell plus a
+/// `WIDE_SPACER` continuation cell, which every renderer of the buffer skips so
+/// the glyph renders across both columns (x-1b68). Roles are one per char and
+/// walk in lockstep with the text.
+pub(crate) fn paint_line(
+    cells: &mut [Cell],
+    rows: usize,
+    cols: usize,
+    sr: usize,
+    c0: usize,
+    text: &str,
+    roles: &[Role],
+    theme: &Theme,
+) {
+    if sr >= rows {
+        return;
+    }
+    let mut sc = c0;
+    for (j, ch) in text.chars().enumerate() {
+        if sc >= cols {
+            break;
+        }
+        let role = roles.get(j).copied().unwrap_or(Role::Body);
+        let (fg, bg, flags) = cell_style(role, theme);
+        cells[sr * cols + sc] = Cell {
+            c: ch,
+            fg,
+            bg,
+            flags,
+        };
+        let w = char_cols(ch);
+        if w == 2 && sc + 1 < cols {
+            cells[sr * cols + sc + 1] = Cell {
+                c: ' ',
+                fg,
+                bg,
+                flags: flags | crate::proto::cell_flags::WIDE_SPACER,
+            };
+        }
+        sc += w;
+    }
+}
+
 /// Blit framed lines into the cell buffer at `origin`, each cell colored by its
 /// role against `theme`. Cell-bounds-checked (a tiny terminal clips, no panic).
 pub fn blit(
@@ -366,24 +410,9 @@ pub fn blit(
 ) {
     let (r0, c0) = origin;
     for (i, line) in framed.lines.iter().enumerate() {
-        let sr = r0 + i;
-        if sr >= rows {
-            break;
-        }
-        for (j, ch) in line.text.chars().enumerate() {
-            let sc = c0 + j;
-            if sc >= cols {
-                break;
-            }
-            let role = line.roles.get(j).copied().unwrap_or(Role::Body);
-            let (fg, bg, flags) = cell_style(role, theme);
-            cells[sr * cols + sc] = Cell {
-                c: ch,
-                fg,
-                bg,
-                flags,
-            };
-        }
+        paint_line(
+            cells, rows, cols, r0 + i, c0, &line.text, &line.roles, theme,
+        );
     }
 }
 
@@ -1020,6 +1049,99 @@ mod tests {
         assert!(!framed.lines.is_empty());
         // Every line is at least the two border chars wide.
         assert!(framed.lines.iter().all(|l| l.text.chars().count() >= 2));
+    }
+
+    #[test]
+    fn a_frame_with_fullwidth_glyphs_stays_square() {
+        // (x-1b68) U+FF0B is one char and TWO columns. The frame is sized in
+        // columns, so a row carrying it measures two columns more than its
+        // char count and every row of the block must still agree.
+        let wide = BodyLine::plain("add harness ＋ key");
+        let cjk = BodyLine::plain("モデル key");
+        let c = Chrome::new("settings", Anchor::Center);
+        let framed = frame(&[wide, cjk, bl("plain")], &c, 18, None);
+        for line in &framed.lines {
+            assert_eq!(
+                str_cols(&line.text),
+                framed.width,
+                "every row is the framed width in columns: {:?}",
+                line.text
+            );
+            // A closing border sits on the last column of every row: '┐' on
+            // the top, '│' on body rows, '┘' on the bottom.
+            let last = line.text.chars().last();
+            assert!(
+                matches!(last, Some('┐') | Some('┘') | Some('│')),
+                "the right border closes every row: {:?}",
+                line.text
+            );
+        }
+        assert_eq!(str_cols(&framed.lines[0].text), framed.width);
+    }
+
+    #[test]
+    fn blit_paints_fullwidth_glyphs_across_two_cells() {
+        // The lead cell carries the glyph, the next cell is a WIDE_SPACER the
+        // terminal writer skips, and the char after the glyph lands two
+        // columns on - the alignment that was off by one before (x-1b68).
+        // Geometry for body "a＋b" in a 6-column body (empty title: the ESC
+        // chip's minimum is 6, so body_w stays 6): col0 border, col1 'a',
+        // col2 lead, col3 spacer, col4 'b', col5-6 padding, col7 border.
+        let c = Chrome::new("", Anchor::Center);
+        let framed = frame(&[bl("a＋b")], &c, 6, None);
+        let theme = Theme::default_theme();
+        let mut cells = vec![Cell::default(); 5 * framed.width];
+        blit(&mut cells, 5, framed.width, (0, 0), &framed, &theme);
+        // Row 0 is the top border; the body row is row 1.
+        let row = &cells[framed.width..2 * framed.width];
+        assert_eq!(row[0].c, '│');
+        assert_eq!(row[1].c, 'a');
+        assert_eq!(row[2].c, '＋', "the lead cell carries the glyph");
+        assert_eq!(row[3].c, ' ', "the continuation cell renders nothing");
+        assert!(
+            row[3].flags & crate::proto::cell_flags::WIDE_SPACER != 0,
+            "and it is flagged WIDE_SPACER"
+        );
+        assert_eq!(row[4].c, 'b', "the next char lands at column+2");
+        assert!(
+            row[4].flags & crate::proto::cell_flags::WIDE_SPACER == 0,
+            "no spacer on a narrow char"
+        );
+        assert_eq!(row[7].c, '│', "the right border stays inside the frame");
+    }
+
+    #[test]
+    fn a_scrolling_frame_counts_the_scrollbar_column_and_stays_square() {
+        // Defaults make the Colors panel taller as well as wider: on overflow
+        // a scrollbar column rides INSIDE the right border, and the width math
+        // must count it alongside any wide glyphs (x-1b68).
+        let wide = BodyLine::plain("add model ＋");
+        let c = Chrome::new("", Anchor::Center);
+        let framed = frame(
+            &[wide, bl("a"), bl("b")],
+            &c,
+            12,
+            Some(Scroll {
+                pos: 0,
+                total: 9,
+                visible: 3,
+            }),
+        );
+        assert_eq!(
+            framed.width,
+            chrome_frame_width(12, true),
+            "the scrollbar column is in the frame width"
+        );
+        for line in &framed.lines {
+            assert_eq!(str_cols(&line.text), framed.width);
+        }
+        // The scrollbar cells exist and sit inside the border.
+        let thumb_or_track = framed
+            .lines
+            .iter()
+            .filter(|l| l.text.contains('█') || l.text.contains('░'))
+            .count();
+        assert!(thumb_or_track > 0, "the scrollbar is painted");
     }
 
     #[test]
