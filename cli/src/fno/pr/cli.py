@@ -390,7 +390,7 @@ def logs(
 def heal(
     pr_number: Optional[int] = typer.Argument(None, help="GitHub PR number."),
     apply: bool = typer.Option(False, "--apply", help="Fix, commit, push once."),
-    all_prs: bool = typer.Option(False, "--all", help="Report every red open PR."),
+    all_prs: bool = typer.Option(False, "--all", "-A", help="Report every red open PR."),
     playbook: bool = typer.Option(False, "--playbook", help="Print the signature table."),
 ) -> None:
     import subprocess

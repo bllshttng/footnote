@@ -310,9 +310,12 @@ async fn run(args: Vec<String>) -> i32 {
     // `pr-heal` classifies a red check and applies the mechanical fix. Binary-
     // direct behind `fno do pr heal`, like `kill-check`: it is NOT a routable
     // `fno agents` verb, so it stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS
-    // (whose lengths the --help parity test asserts equal). Daemon-free, so it
+    // (whose lengths the --help parity test asserts equal). `matches!` rather
+    // than `verb == "..."` for the same reason `version` uses it: the Python
+    // parity guard scrapes `verb == "..."` and would demand a RUST_CLIENT_VERBS
+    // row for a verb that is not an `fno agents` verb. Daemon-free, so it
     // dispatches here before build_request.
-    if verb == "pr-heal" {
+    if matches!(verb, "pr-heal") {
         return fno_agents::heal::run_heal(&args[1..]);
     }
     // `subscribe`: follow the daemon's own `events.jsonl` and stream registry
