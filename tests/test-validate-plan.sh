@@ -310,6 +310,18 @@ project: fno
 consolidation:
   outcome: proceed_alone
   proceed_alone_against: []
+surface:
+  question: "Does the semantic execution contract validate?"
+  sweep: "bash tests/test-validate-plan.sh"
+  control: skills/blueprint/scripts/validate-plan.sh
+  answerers:
+    - at: skills/blueprint/scripts/validate-plan.sh
+      disposition: dual-logic
+      reads: "_semantic_validate delegates to fno do plan validate --execution"
+      feed: "fno do plan validate --execution"
+      emits: "exit 0 with the semantic execution contract valid receipt"
+  count: 1
+  count_after: 1
 ---
 
 # Semantic plan
@@ -510,6 +522,215 @@ if echo "$OUTPUT" | grep -q "TOOLFAIL" && echo "$OUTPUT" | grep -q "last probe e
     pass "AC8f: Tool failure is distinct from a plan violation and keeps its cause"
 else
     fail "AC8f: Tool failure was indistinguishable or lost its cause: $OUTPUT"
+fi
+
+# --- AC10: Answerer Enumeration (surface: block, step 2b-bis gate) ---
+echo ""
+echo "--- AC10: Answerer Enumeration ---"
+
+# The passing base: post-gate, non-quick, consolidation + a well-formed
+# surface block. Every variant below derives from one of these two fixtures.
+PLAN_SURFACE="$TMPDIR_BASE/surface.md"
+cat > "$PLAN_SURFACE" <<'HEREDOC'
+---
+status: ready
+created: 2026-09-10
+project: fno
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+surface:
+  question: "Is this row reachable?"
+  sweep: "rg -n 'ref truthy' src/"
+  control: src/reader.py:10
+  answerers:
+    - at: src/reader.py:10
+      disposition: dual-logic
+      reads: "if row.ref:"
+      feed: "SELECT ref FROM rows"
+      emits: "12 rows, 2 with null ref (measured)"
+    - at: src/writer.py:20
+      disposition: out-of-scope
+      reason: "writer emits, never reads; fixed by the dual-logic leg"
+    - at: src/checker.py:30
+      disposition: out-of-scope
+      reason: "already validates the ref before use"
+  count: 3
+  count_after: 2
+---
+
+# Surface gate fixture
+HEREDOC
+PLAN_SURFACE_NOBLOCK="$TMPDIR_BASE/surface_noblock.md"
+cat > "$PLAN_SURFACE_NOBLOCK" <<'HEREDOC'
+---
+status: ready
+created: 2026-09-10
+project: fno
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+---
+
+# Surface gate fixture, no surface block
+HEREDOC
+
+OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 0 ]] && echo "$OUTPUT" | grep -q "surface block (step 2b-bis gate): question"; then
+    pass "AC10a: Well-formed surface block passes and prints its receipt"
+else
+    fail "AC10a: Well-formed surface block should pass (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# V1, the gate bites: a post-gate non-quick plan with no block exits 1.
+OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_NOBLOCK" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "no surface: block in frontmatter"; then
+    pass "AC10b: Post-gate non-quick plan without surface block fails"
+else
+    fail "AC10b: Missing block should fail closed (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# V2, graduation: the same blockless plan as a quick plan warns and exits 0.
+# The body carries the minimum the semantic contract asks of a quick plan
+# (difficulty band, Changes, Files to Modify, Verification), so the only
+# variable under test is the gate's graduation.
+PLAN_SURFACE_QUICK="$TMPDIR_BASE/surface_quick.md"
+cat > "$PLAN_SURFACE_QUICK" <<'HEREDOC'
+---
+kind: quick-plan
+status: ready
+created: 2026-09-10
+difficulty: low
+project: fno
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+---
+
+# Quick fixture, no surface block
+
+## Context
+
+Minimal quick plan for the graduation probe.
+
+## Changes
+
+### 1. Only change
+
+**Files:** `src/reader.py`
+
+Do the one thing.
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `src/reader.py` | Modify - validate the ref |
+
+## Verification
+
+1. `bash tests/probe.sh` - passes
+
+## Execution Strategy
+
+```yaml
+execution_mode: sequential
+waves:
+  - wave: 1
+    mode: parallel
+    name: quick fixture probe
+    difficulty: low
+    tasks: ['1.1']
+tasks:
+  - id: '1.1'
+    title: Only change
+    surface: ['src/reader.py']
+    verify: bash tests/test-validate-plan.sh
+    acceptance:
+      - Given a row, when the ref is null, then the reader reports unreachable
+```
+HEREDOC
+OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_QUICK" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 0 ]] && echo "$OUTPUT" | grep -q "no surface: block (quick plan)"; then
+    pass "AC10c: Quick plan without block warns and proceeds"
+else
+    fail "AC10c: Quick plan graduation should warn-only (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# V3, the question tooth: a noun-phrase question is the regression.
+PLAN_SURFACE_NOUN="$TMPDIR_BASE/surface_noun.md"
+sed 's/Is this row reachable?/row reachability/' "$PLAN_SURFACE" > "$PLAN_SURFACE_NOUN"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_NOUN" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "does not end in a question mark"; then
+    pass "AC10d: Noun-phrase question fails the question mark tooth"
+else
+    fail "AC10d: Noun-phrase question should fail (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# V4, the disposition tooth: an out-of-scope with no reason is undisposed.
+PLAN_SURFACE_NOREASON="$TMPDIR_BASE/surface_noreason.md"
+sed '/reason: "writer emits/d' "$PLAN_SURFACE" > "$PLAN_SURFACE_NOREASON"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_NOREASON" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "Undisposed: src/writer.py:20"; then
+    pass "AC10e: Out-of-scope without reason is named undisposed"
+else
+    fail "AC10e: Missing reason should fail naming the answerer (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# V5, the feed tooth: a changed answerer needs reads AND emits.
+PLAN_SURFACE_NOREADS="$TMPDIR_BASE/surface_noreads.md"
+sed '/reads: "if row.ref:/d' "$PLAN_SURFACE" > "$PLAN_SURFACE_NOREADS"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_NOREADS" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "names no feed for it"; then
+    pass "AC10f: Changed answerer without reads fails with the feed refusal"
+else
+    fail "AC10f: Missing reads should fail (exit $EXIT_CODE): $OUTPUT"
+fi
+
+PLAN_SURFACE_NOEMITS="$TMPDIR_BASE/surface_noemits.md"
+sed 's/emits: "12 rows, 2 with null ref (measured)"/emits: ""/' "$PLAN_SURFACE" > "$PLAN_SURFACE_NOEMITS"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_NOEMITS" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "names no feed for it"; then
+    pass "AC10g: Changed answerer with empty emits still fails"
+else
+    fail "AC10g: Empty emits should fail (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# V6, the count tooth: the count is the estimate and must match.
+PLAN_SURFACE_COUNT="$TMPDIR_BASE/surface_count.md"
+sed 's/^  count: 3/  count: 1/' "$PLAN_SURFACE" > "$PLAN_SURFACE_COUNT"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_COUNT" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "must match what was found"; then
+    pass "AC10h: Count disagreement with the answerer list fails"
+else
+    fail "AC10h: Count mismatch should fail (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# V9, the shrink tooth and the control tooth.
+PLAN_SURFACE_SHRINK="$TMPDIR_BASE/surface_shrink.md"
+sed 's/^  count_after: 2/  count_after: 4/' "$PLAN_SURFACE" > "$PLAN_SURFACE_SHRINK"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_SHRINK" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "exceeds count"; then
+    pass "AC10i: count_after above count fails"
+else
+    fail "AC10i: Growing count_after should fail (exit $EXIT_CODE): $OUTPUT"
+fi
+
+PLAN_SURFACE_CONTROL="$TMPDIR_BASE/surface_control.md"
+sed 's#control: src/reader.py:10#control: src/nowhere.py:1#' "$PLAN_SURFACE" > "$PLAN_SURFACE_CONTROL"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE_CONTROL" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "names no listed answerer"; then
+    pass "AC10j: A control that is not an answerer fails naming the control"
+else
+    fail "AC10j: Phantom control should fail (exit $EXIT_CODE): $OUTPUT"
+fi
+
+PLAN_SURFACE_CONTROL_OK="$TMPDIR_BASE/surface_control_ok.md"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 0 ]] && echo "$OUTPUT" | grep -q "control \`src/reader.py:10\` returned by the sweep"; then
+    pass "AC10k: A matching control prints its own receipt"
+else
+    fail "AC10k: Matching control receipt missing (exit $EXIT_CODE): $OUTPUT"
 fi
 
 # --- Summary ---
