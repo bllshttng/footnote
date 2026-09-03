@@ -198,7 +198,7 @@ After `next()` returns the unit and `close()` is called, subsequent `next()` cal
 
 A target driver asks whether its one deliverable shipped. A king has no PR, so pointing the target driver at one can never reach a clean terminal state. `done_probes` are additive only. A plan can add conjuncts and can never silence the PR, CI, and review conjuncts underneath. The run burns to `NoProgress` or `Budget` while looking like it is working. The king driver asks the king's question instead, which is whether the board is clean.
 
-`fno inbox board --json` reads ten queues through verbs that already exist and computes nothing they already answer. Every queue carries the literal shell command that produced it, so board emptiness is reproducible by a third party rather than asserted. `undispatched` is planned work awaiting a worker. `unplanned` is unplanned work awaiting a blueprint. They use different verbs and are disjoint on `plan_path`. The `undispatched` queue has an independent source. `fno backlog undispatched --json` scans graph entries and the complete node-claim snapshot. It does not reuse the ranked dispatch selector, so a selector omission is nameable rather than an empty queue.
+`fno inbox board --json` reads eleven queues through verbs that already exist and computes nothing they already answer. Every queue carries the literal shell command that produced it, so board emptiness is reproducible by a third party rather than asserted. `undispatched` is planned work awaiting a worker. `unplanned` is unplanned work awaiting a blueprint. They use different verbs and are disjoint on `plan_path`. The `undispatched` queue has an independent source. `fno backlog undispatched --json` scans graph entries and the complete node-claim snapshot. It does not reuse the ranked dispatch selector, so a selector omission is nameable rather than an empty queue.
 
 | Queue | Read | King can shrink it |
 |---|---|---|
@@ -206,6 +206,9 @@ A target driver asks whether its one deliverable shipped. A king has no PR, so p
 | `undispatched` | `fno backlog undispatched --json` | yes, by spawning a worker |
 | `unplanned` | `fno backlog ready --json -A` | yes, by blueprinting it |
 | `stalled_holder` | `fno agents claim list -J` + `fno backlog get <id>` + `fno agents peek <holder>` | yes, by one wake per node |
+| `undriven_pr` | `gh pr list --state open` + the graph | yes, by dispatching one target worker |
+
+`stalled_holder` and `undriven_pr` are two queues over ONE predicate, `_node_driver`, which answers who is driving a node: `active`, `stalled`, or `none`. `stalled_holder` selects `stalled`. `undriven_pr` selects `none`. They cannot disagree, because neither computes its own answer. The reason there are two queues at all is sourcing. `stalled_holder` starts from the claim list, so it can only reach a worker still holding its lock. `undriven_pr` starts from open PRs bound back to their node, so it catches the worker that exited cleanly and released. Measured 2026-09-03: 7 of 12 open PRs sat undriven that way while the board named none of them. `undriven_pr` is report-only toward the node. It never closes or defers anything, and a node the operator already deferred or blocked is skipped, not nagged back up.
 | `mergeable_pr` | `gh pr list` | only under `config.king.autonomous_merge` |
 | `stale_claim` | `fno agents claim list -J --include-stale` | yes, by `fno agents claim reap` |
 | `operator_question` | `fno inbox outstanding --json` | no, a human answers it |

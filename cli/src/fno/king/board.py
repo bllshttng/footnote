@@ -1,4 +1,4 @@
-"""Read the ten queues that decide whether a king still has work.
+"""Read the eleven queues that decide whether a king still has work.
 
 Three properties are load-bearing and each has a test that fails loudly when it
 breaks.
@@ -140,7 +140,7 @@ def _as_dict(value: Any) -> dict:
     through a PATH-resolved ``fno``, so a stale deployed CLI can answer with an
     older stream shape (a list where a dict belongs, string counts). A
     structural surprise in ONE stream must degrade that stream, never raise
-    out of ``build_board`` - an exception here kills all ten queues instead
+    out of ``build_board`` - an exception here kills all eleven queues instead
     of the designed one-unreadable-queue exit.
     """
     return value if isinstance(value, dict) else {}
