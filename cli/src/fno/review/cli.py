@@ -179,6 +179,51 @@ def classify(
     )
 
 
+@review_app.command("invocations", hidden=True)
+def invocations(
+    action: str = typer.Argument(
+        "list",
+        help="`list` reports lost invocations; `settle` emits one lost "
+        "attestation per unanswered one older than the TTL.",
+    ),
+) -> None:
+    """Report or settle lost review invocations.
+
+    A sent invocation with no answering attestation after
+    `review.invocation_ttl_minutes` is a dispatch the fleet paid for that
+    coverage never saw. `settle` turns each into one `lost` attestation row,
+    so the gate reads a named refusal instead of waiting on silence.
+    Idempotent: an invocation with any answering attestation settles once
+    and never again.
+    """
+    from fno.review.invocation import settle_lost_invocations
+
+    if action not in ("list", "settle"):
+        typer.secho(f"invocations: unknown action '{action}' (list | settle)", err=True)
+        raise typer.Exit(code=2)
+    try:
+        from fno.config import load_settings
+
+        ttl = int(getattr(load_settings().review, "invocation_ttl_minutes", 15))
+    except Exception:  # noqa: BLE001 - unreadable config keeps the shipped default
+        ttl = 15
+    rows = settle_lost_invocations(ttl_minutes=ttl, emit=action == "settle")
+    if not rows:
+        typer.echo(f"invocations: none lost beyond the {ttl}m TTL")
+        return
+    if action == "list":
+        for row in rows:
+            typer.echo(f"  lost {row['invocation_id']}: {row.get('reason', 'unanswered')}")
+        return
+    settled = sum(1 for row in rows if row.get("settled"))
+    typer.echo(f"invocations: {len(rows)} lost, {settled} settled now")
+    for row in rows:
+        if row.get("settled"):
+            typer.echo(f"  settled {row['invocation_id']} at {str(row.get('head'))[:9]}")
+        else:
+            typer.echo(f"  refused {row['invocation_id']}: {row.get('reason')}")
+
+
 @review_app.command("resolve-level", hidden=True)
 def resolve_level(
     level: str = typer.Argument(

@@ -1410,6 +1410,13 @@ class ReviewBlock(BaseModel):
     # a re-read. `0` disables the arm, keeping the identity-equality rule
     # alone.
     carry_interdiff_lines: int = Field(default=100, ge=0)
+    # How long after a review dispatch (a `review_invocation` row with
+    # stage: sent) with no answering attestation the settle sweep declares
+    # the attempt lost and emits one `lost` attestation row for it, so the
+    # gate reads a named refusal instead of waiting on silence. Promoted
+    # from the doctor scan's hardcoded 15-minute window; the settle sweep
+    # and the doctor report read the same number from here.
+    invocation_ttl_minutes: int = Field(default=15, ge=1)
     # Categories a CONFIRMED-free finding may carry and still be non-blocking.
     # A configured list EXTENDS the shipped default rather than replacing it,
     # so a project cannot silently narrow the gate by naming one category. The

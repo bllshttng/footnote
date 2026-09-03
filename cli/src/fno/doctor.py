@@ -2047,19 +2047,66 @@ def _review_invocation_report(
             "fno doctor: review invocations: scan complete; "
             f"none lost in the last {window_seconds // 60}m"
         ]
+    # The settle sweep runs HERE, before the report: a lost invocation that
+    # can settle becomes a ledger row, and the report says `settled` beside it
+    # instead of re-reporting a loss the run just repaired. A settle failure
+    # is reported as a refusal, never raised - the scan stays a report.
+    settle_results: dict[str, dict[str, Any]] = {}
+    try:
+        from fno.review.invocation import settle_lost_invocations
+
+        for row in settle_lost_invocations(
+            ttl_minutes=_invocation_ttl_minutes(), now=observed_at
+        ):
+            settle_results[str(row.get("invocation_id"))] = row
+    except Exception as exc:  # noqa: BLE001 - report the refusal, never die
+        settle_results = {}
+        settle_error = str(exc)
+    else:
+        settle_error = ""
     lines = [
         "fno doctor: review invocations: "
         f"{len(lost)} sent attempt(s) have no matching attestation "
         f"after {window_seconds // 60}m"
     ]
     for invocation_id, _event_time, data in lost[:5]:
-        lines.append(
-            f"  lost {invocation_id}: transport={data.get('transport', 'unmeasured')} "
-            f"receipt={data.get('receipt', 'unmeasured')}"
-        )
+        transport = data.get("transport", "unmeasured")
+        receipt = data.get("receipt", "unmeasured")
+        row = settle_results.get(invocation_id)
+        if row and row.get("settled"):
+            lines.append(
+                f"  settled {invocation_id}: transport={transport} "
+                f"receipt={receipt} (lost; a lost attestation was emitted at "
+                f"{str(row.get('head', ''))[:9]})"
+            )
+        elif row or settle_error:
+            reason = (
+                str(row.get("reason")) if row else f"settle sweep failed: {settle_error}"
+            )
+            lines.append(
+                f"  lost {invocation_id}: transport={transport} "
+                f"receipt={receipt} (settle refused: {reason})"
+            )
+        else:
+            lines.append(
+                f"  lost {invocation_id}: transport={transport} "
+                f"receipt={receipt}"
+            )
     if len(lost) > 5:
         lines.append(f"  ... {len(lost) - 5} more lost invocation(s)")
     return lines
+
+
+def _invocation_ttl_minutes() -> int:
+    """The configured `review.invocation_ttl_minutes`, 15 on any unreadable
+    config - the same default the schema ships, so a broken config cannot
+    widen the settle sweep by accident."""
+    try:
+        from fno.config import load_settings
+
+        return int(getattr(load_settings().review, "invocation_ttl_minutes", 15))
+    except Exception:  # noqa: BLE001 - unreadable config keeps the shipped default
+        return 15
 
 
 def _emit_human(

@@ -244,6 +244,13 @@ event_types:
         retraction_reason:
           type: string
           description: "The --reason text a retraction was emitted with, verbatim. The audit trail for why a pass stopped counting."
+        output_contract:
+          type: string
+          enum: [json_block, report_findings, prose_unparseable, lost]
+          description: "The contract the review's result surfaced under, carried from the invocation row. `lost` marks the SETTLE row (review.invocation_ttl_minutes exhausted with no answering attestation): verdict fail by construction, emitted by the settle sweep with the invocation id in data. Coverage reads it as uncovered with a named reason - an answered loss, never silence."
+        settle_note:
+          type: string
+          description: "Human-readable provenance on a settle row: why the row exists (the invocation died unanswered) and that no review ran. Present only on output_contract lost."
         model:
           type: string
           description: "The model the attesting session CLAIMED to be running (read from ANTHROPIC_MODEL at emit). Optional and best-effort: it reports what the environment asserted, not proof of the model that answered. Empty means NOT OBSERVABLE, never proof of the primary model - an unrouted session leaves it unset, and so does a routed codex worker, whose route rides in `-c model=...` config args with only the API key in env. The producer now REFUSES to record a claim it can prove false: a non-`claude*` model name with an empty or anthropic.com base URL cannot be the model that answered (the request silently falls back to the primary Anthropic model), so that case records empty rather than a value a reader would take as fact. A live specimen produced exactly that wrong record on 2026-08-12. The residue is a claim that is merely unverified rather than known-false, and no environment-side check closes that one. Recorded because a routed worker renders its own verdict on the routed model - role guards are per-spawn and cannot see a verdict emitted later inside an already-routed process. Not read by loop-check; this is the audit trail a capability floor would need."
@@ -394,7 +401,7 @@ event_types:
           enum: [inline, fork]
         output_contract:
           type: string
-          enum: [report_findings, json_block, prose_unparseable]
+          enum: [report_findings, json_block, prose_unparseable, lost]
         subagent_count:
           type: integer
         band:
