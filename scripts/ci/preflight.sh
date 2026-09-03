@@ -1188,6 +1188,31 @@ else
     record_leg "" "tracker gates (fno)" skipped 0
 fi
 
+# file budget (over-budget tracked files shrink-only) ------------------------
+# Static, seconds-fast. Unlike every other leg, the script comes from the
+# CANONICAL tree, not the candidate: run_hermetic still cd's into the
+# candidate, so the rule runs there against its HEAD, but a branch cut before
+# the gate has no copy of its own and a branch must not be able to loosen the
+# gate by editing it (PR 1416 merged four grown files on a head whose CI
+# predated the rule; this leg is the merge primitive's answer).
+if retry_run_leg file-budget:fno; then
+    echo "preflight: === file budget (over-budget files shrink-only, Python tree net cap) ==="
+    fb0="$SECONDS"
+    run_hermetic bash "$CANONICAL_ROOT/scripts/ci/check-file-budget.sh"
+    fb=$?
+    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+    FILE_BUDGET_INCLUDED=1
+    if [[ $fb -eq 0 ]]; then
+        record_leg file-budget:fno "file budget (fno)" pass $(( SECONDS - fb0 ))
+    else
+        record_leg file-budget:fno "file budget (fno)" fail $(( SECONDS - fb0 ))
+        FAIL=1
+    fi
+else
+    echo "preflight: === file budget (skipped - not in the retry leg record) ==="
+    record_leg "" "file budget (fno)" skipped 0
+fi
+
 # rust-ci legs (pinned fmt, cargo test, advisory audit) ----------------------
 have_pinned_fmt() { rustup toolchain list 2>/dev/null | grep "^$PINNED_FMT" >/dev/null; }
 
@@ -1460,6 +1485,7 @@ write_leg_record
 REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents-unit cargo-test:fno-agents-e2e cargo-test:fno-unit cargo-test:fno-e2e)
 [[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
 [[ "${TG_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(tracker-gates:fno)
+[[ "${FILE_BUDGET_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(file-budget:fno)
 REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
 REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
 # Coverage-derived mode: a run that executed every required leg is FULL whether

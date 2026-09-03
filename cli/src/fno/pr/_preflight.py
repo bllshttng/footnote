@@ -77,6 +77,7 @@ _PREFLIGHT_BASE_SCOPE = frozenset(
 # is "every required leg present, nothing unknown added" rather than equality.
 _PREFLIGHT_OPTIONAL_SCOPE = frozenset(
     {
+        "file-budget:fno",
         "squads-leak-guard:fno",
         "tracker-gates:fno",
     }
