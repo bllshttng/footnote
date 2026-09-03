@@ -2070,8 +2070,9 @@ def test_route_tuple_identical_across_launchers(iso, tmp_path, monkeypatch):
     assert adv_captured["dispatch_account"] == "codex-acct"
     assert disp_captured["launch_account"] == "codex-acct"
     assert disp_captured["account_env"] == env
-    # Codex takes its own command surface, never a raw claude slash verb.
-    assert disp_captured["message"] == f"$fno:target --no-merge {DISPATCH_NODE['id']}"
+    # The dispatcher passes the portable seed to the pane funnel, which owns
+    # provider-specific normalization before building Codex's argv.
+    assert disp_captured["message"] == f"/target --no-merge {DISPATCH_NODE['id']}"
     # Both launchers leave one post-spawn cutover receipt naming the same
     # destination, triggering window, and reason.
     for receipt in (
