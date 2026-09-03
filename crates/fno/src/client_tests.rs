@@ -4,6 +4,7 @@ use crate::vt::frame_text;
 
 // (x-0719) The nav filter/overlay test run lives in its own module; this
 // file is shrink-only under the file-budget gate.
+#[path = "client/tests/nav_tests.rs"]
 mod nav_tests;
 
 #[test]
@@ -1109,8 +1110,8 @@ fn pane_id_reveal_labels_each_id_inside_its_own_rectangle() {
     let cols = view.term.1 as usize;
     for (pid, rect) in &view.layout.panes {
         let label = format!("pane {pid}");
-        let start = view.panel_w() as usize + rect.x as usize + rect.cols as usize
-            - label.chars().count();
+        let start =
+            view.panel_w() as usize + rect.x as usize + rect.cols as usize - label.chars().count();
         let row = TAB_BAR_ROWS as usize + rect.y as usize;
         let painted: String = label
             .chars()
@@ -4297,9 +4298,7 @@ fn section_header_is_clickable_but_never_selector_selectable() {
     let hdr = view
         .display_rows()
         .iter()
-        .position(
-            |r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::Elsewhere),
-        )
+        .position(|r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::Elsewhere))
         .expect("elsewhere header present");
     assert!(matches!(
         view.row_action(hdr),
@@ -5806,9 +5805,7 @@ fn nonworkspace_section_with_no_dead_rows_gets_a_notice() {
     let hdr = v
         .display_rows()
         .iter()
-        .position(
-            |r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::Elsewhere),
-        )
+        .position(|r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::Elsewhere))
         .expect("elsewhere band");
     assert!(!v.open_row_menu(hdr, Anchor::Center));
     assert!(v.row_menu.is_none());
@@ -6582,9 +6579,7 @@ fn backlog_header_has_no_menu_and_stays_silent() {
     let hdr = v
         .display_rows()
         .iter()
-        .position(
-            |r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::WorkQueue),
-        )
+        .position(|r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::WorkQueue))
         .expect("a backlog card renders the Backlog band");
     v.notice = None;
     assert!(!v.open_row_menu(hdr, Anchor::Center));
@@ -6633,9 +6628,7 @@ async fn clear_dead_works_on_the_elsewhere_band_too() {
     let hdr = v
         .display_rows()
         .iter()
-        .position(
-            |r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::Elsewhere),
-        )
+        .position(|r| matches!(r, DisplayRow::Header { key, .. } if *key == SectionKey::Elsewhere))
         .expect("elsewhere band");
     assert!(v.open_row_menu(hdr, Anchor::Center));
     let mut buf: Vec<u8> = Vec::new();
@@ -8218,8 +8211,7 @@ async fn x7683_right_press_on_a_sideline_row_under_answers_yard_digest_opens_not
         ),
     ];
     for (name, open) in overlays {
-        let mut v =
-            view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
         open(&mut v);
         let mut scanner = Scanner::default();
         let mut carry = Vec::new();
@@ -11159,9 +11151,9 @@ fn section_header_reads_backlog() {
     // AC1-HP: the section is titled "Backlog", not "work queue".
     let v = backlog_view(vec![bcard("x-a", CardState::Ready)], 1);
     assert!(
-        v.display_rows().iter().any(
-            |r| matches!(r, DisplayRow::Header { label, .. } if label.contains("backlog"))
-        ),
+        v.display_rows()
+            .iter()
+            .any(|r| matches!(r, DisplayRow::Header { label, .. } if label.contains("backlog"))),
         "the section header names the Backlog"
     );
 }
@@ -14679,8 +14671,7 @@ fn attention_key_orders_the_shared_fixture() {
         env!("CARGO_MANIFEST_DIR"),
         "/../../schemas/agents-attention-order.json"
     ));
-    let fixture: serde_json::Value =
-        serde_json::from_str(FIXTURE).expect("fixture is valid JSON");
+    let fixture: serde_json::Value = serde_json::from_str(FIXTURE).expect("fixture is valid JSON");
     let need_of = |kind: Option<&str>| -> Option<NeedKind> {
         match kind? {
             "decision" => Some(NeedKind::Decision),
@@ -15793,8 +15784,7 @@ fn needs_overlay_lines_empty_and_capped_footers() {
         need_shown: 1,
         need_total: 8,
     };
-    let capped =
-        needs_overlay_lines(&capped_projection, 0, NeedsFooter::AsOf, NeedsFooter::AsOf);
+    let capped = needs_overlay_lines(&capped_projection, 0, NeedsFooter::AsOf, NeedsFooter::AsOf);
     assert!(capped.iter().any(|l| l.contains("1 of 8 shown")));
 }
 
@@ -15881,8 +15871,7 @@ fn rendered_cursor_indexes_the_same_projection_row() {
     v.needs_fold = Some(vec![fold_item("carveout_stale", "pile", true)]);
     let projection = v.needs_projection();
     let selected = 1;
-    let lines =
-        needs_overlay_lines(&projection, selected, NeedsFooter::AsOf, NeedsFooter::AsOf);
+    let lines = needs_overlay_lines(&projection, selected, NeedsFooter::AsOf, NeedsFooter::AsOf);
     let selected_line = lines.iter().find(|line| line.contains('▸')).unwrap();
     assert!(selected_line.contains(projection.rows[selected].label()));
 }
