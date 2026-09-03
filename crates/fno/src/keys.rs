@@ -659,10 +659,12 @@ impl Scanner {
                     }
                 }
                 State::Digits(mut digits) => {
-                    if b.is_ascii_digit() && digits.len() < 4 {
-                        // Four digits is far past any tab strip; past the cap
-                        // further digits are absorbed so the eventual
-                        // out-of-range notice names the number actually held.
+                    if b.is_ascii_digit() && digits.len() < 6 {
+                        // (review) Six digits is far past any tab strip; the
+                        // cap only bounds the buffer, never the receipt - a
+                        // longer typing resolves to the out-of-range notice
+                        // naming the FULL number, so nothing a digit gesture
+                        // absorbs is ever silent.
                         digits.push(b);
                         self.state = State::Digits(digits);
                     } else if b == b'\r' || b == b'\n' {

@@ -2338,8 +2338,8 @@ fn unreachable_notice(unreachable: &[String]) -> String {
 /// measured idle now) closes only when this flag names the category. Without
 /// the flag the receipt still counts that population (`tabs_used_shells`)
 /// and splits every kept tab by reason, so the operator can see the size of
-/// the choice before making it. The dry-run receipt names each tab it would
-/// close, in `tabs_would_close_named`.
+/// the choice before making it. The receipt names each tab it would close
+/// (dry-run) or closed (apply) in `tabs_close_named`.
 ///
 /// Two arms run in ONE call and they must not contradict each other. The tab arm
 /// folds surplus pristine tabs; the squad arm decides store rows, and a live pane
@@ -2732,7 +2732,9 @@ fn render_prune_json(
             "tabs_used_shells": tabs.used_shells,
             "tabs_closed_used_shells": tabs.closed_used,
             "tabs_would_close_used_shells": tabs.would_close_used,
-            "tabs_would_close_named": tabs.closed_named,
+            // (review) One key covers both runs on purpose: on a dry-run these
+            // are the candidates, on an apply they are what actually closed.
+            "tabs_close_named": tabs.closed_named,
             "server_reachable": unreachable.is_empty(),
             "sessions_probed": probed,
             "sessions_unreachable": unreachable,

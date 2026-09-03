@@ -2907,8 +2907,15 @@ fn build_sweep_modal(tabs: usize, used: usize, dead: usize) -> AuxPopup {
         actions.push(AuxAction::SweepTabs);
     }
     rows.push(choice(
-        format!("used shells ({used})"),
-        "close idle shell tabs you have typed in",
+        format!("+ used shells ({used})"),
+        // (review) The flag is ADDITIVE on the CLI: the apply closes the
+        // spent shells AND the surplus pristine tabs, so the hint names the
+        // real total and the row says "+" - the count a row shows must bound
+        // what its tap closes.
+        &format!(
+            "close spent shells plus the {tabs} surplus tabs ({} total)",
+            tabs + used
+        ),
         used > 0,
     ));
     if used > 0 {
@@ -3024,12 +3031,18 @@ async fn run_sweep_verb(action: SweepAction) -> SweepMsg {
             ) else {
                 return SweepMsg::Failed("prune output missing count fields".into());
             };
-            // (x-cf97) The used-shell population rides every probe: the
-            // field is missing only when the deployed CLI predates it, which
-            // is the same two-process disagreement the tabs/dead reads
-            // refuse on.
+            // (x-cf97) The used-shell population rides every probe: the field
+            // is missing only when the deployed CLI predates it, which is the
+            // same two-process disagreement the tabs/dead reads refuse on -
+            // but the refusal names the remedy instead of a dead end.
+            // (review) A zero default would grey the row out and LIE about a
+            // population the stale CLI cannot count, so the probe stays
+            // fail-loud.
             let Some(used) = parsed["tabs_used_shells"].as_u64().map(|v| v as usize) else {
-                return SweepMsg::Failed("prune output missing count fields".into());
+                return SweepMsg::Failed(
+                    "prune output missing count fields - stale fno CLI? run fno doctor update"
+                        .into(),
+                );
             };
             if let Some(notice) = parsed["notice"].as_str() {
                 if !notice.is_empty() {
@@ -26998,7 +27011,7 @@ mod tests {
             .collect();
         assert!(labels.contains(&("tabs (3)".into(), true)), "{labels:?}");
         assert!(
-            labels.contains(&("used shells (19)".into(), true)),
+            labels.contains(&("+ used shells (19)".into(), true)),
             "{labels:?}"
         );
         assert!(
