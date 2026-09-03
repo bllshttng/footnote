@@ -1510,11 +1510,9 @@ def cmd_spawn(
         "--portal",
         help=(
             "Portal placement (x-9b60): open portal N (0-255) showing the new "
-            "worker, in one call. --substrate thread only: a thread hosts no "
-            "pane until a portal opens one, and this is that one call. Makes "
-            "--workspace/-s, --split/-x, --at, and --tab meaningful for a "
-            "thread: a fresh portal open honors them; a portal that already "
-            "has a live viewer keeps its geometry."
+            "worker, in one call. --substrate thread only. Makes the placement "
+            "flags meaningful for a thread: a fresh portal open honors them; "
+            "a portal that already has a live viewer keeps its geometry."
         ),
     ),
     bounded_placement: bool = typer.Option(
@@ -1858,20 +1856,11 @@ def cmd_spawn(
             )
             raise typer.Exit(code=2)
 
-    # x-3e38 pane placement, portal lane x-9b60: the contract lives beside the
-    # placement vocabulary it judges (spawn_defaults.placement_refusal); this
-    # seam only prints the named refusal and exits.
     from fno.agents.spawn_defaults import placement_refusal
 
     refusal = placement_refusal(
-        substrate=substrate,
-        once=once,
-        squad=squad,
-        split=split,
-        at=at,
-        tab=tab,
-        portal=portal,
-        bounded_placement=bounded_placement,
+        substrate=substrate, once=once, squad=squad, split=split, at=at,
+        tab=tab, portal=portal, bounded_placement=bounded_placement,
     )
     if refusal is not None:
         print(refusal, file=sys.stderr)

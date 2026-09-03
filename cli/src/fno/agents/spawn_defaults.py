@@ -173,13 +173,9 @@ def placement_refusal(
     bounded_placement: bool,
 ) -> Optional[str]:
     """The pane/portal placement contract (x-3e38; portal lane x-9b60) as one
-    named refusal, or None when the combination is legal. Lives beside the
-    placement vocabulary it judges; cmd_spawn only prints and exits.
-
-    squad/split name mux geometry, which the pane substrate owns. A portal
-    is the pane a thread hosts, so the placement flags become legal for a
-    thread WHEN --portal names it, and stay refused for a bare thread where
-    they would still mean nothing."""
+    named refusal, or None when the combination is legal. A portal is the
+    pane a thread hosts: the placement flags are legal for a thread WHEN
+    --portal names it, refused for a bare thread where they mean nothing."""
     placement_requested = (
         bounded_placement
         or squad is not None
@@ -224,12 +220,9 @@ def placement_refusal(
             "with --split, --at, or --tab"
         )
     if at is not None:
-        # `--at current` is the exact-anchor spelling: the mux CLI resolves the
-        # calling pane from FNO_PANE and sets the strict (Refuse) policy, so the
-        # spawn always carries the placement receipt and the readiness gate. A
-        # numeric anchor is a low-level `mux pane run` concern (it keeps the
-        # legacy new-tab fallback) and is intentionally not exposed here, where
-        # every `--at` value implies the exact-placement contract.
+        # `--at current` is the exact-anchor spelling (the mux CLI resolves it
+        # from FNO_PANE, strict Refuse fallback). A numeric anchor is a
+        # low-level `mux pane run` concern, never exposed here.
         if at != "current":
             return "--at must be `current` (the exact-anchor spelling)"
         if split is None:
