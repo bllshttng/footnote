@@ -15007,7 +15007,19 @@ async fn lane_color_save(
     let notice = match spawn_config_set(&format!("sideline.colors.{axis}"), &json).await {
         Ok(()) => {
             crate::sideline_color::reload_palette();
-            format!("{axis}.{key}: {color}")
+            // Verify at the palette's own source: the CLI write and the
+            // palette read can land in different config layers (a concurrent
+            // block-replace, or a project config shadowing the global write).
+            // A lost write is surfaced here, never silently swallowed.
+            if current_lane_color(crate::sideline_color::palette(), axis, key).as_deref()
+                == Some(color)
+            {
+                format!("{axis}.{key}: {color}")
+            } else {
+                format!(
+                    "{axis}.{key}: save did not stick in the config the sideline reads; check config layering"
+                )
+            }
         }
         Err(_) => format!("{axis}.{key}: save failed"),
     };
@@ -15033,17 +15045,26 @@ async fn aux_mouse(
         }
         MouseKind::Press(MouseButton::Left) => {
             // Any esc-close chrome target (footer words, title-bar chip)
-            // closes the popup; checked before the entry routers.
+            // closes the popup; checked before the entry routers. A dismiss
+            // while a lane text entry is armed drops the buffer with it, so
+            // the entry can never outlive the modal and capture keys later.
             if view
                 .aux
                 .as_ref()
                 .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
             {
+                view.lane.clear_entry();
                 view.aux = None;
                 return Ok(StdinFlow::Continue);
             }
             match view.aux_hit(rep.row, rep.col) {
                 Some(t) => {
+                    // (x-e4f1) While a lane text entry owns the keyboard, row
+                    // clicks are inert: acting on a picker row mid-typing
+                    // would leave the buffer armed under a changed view.
+                    if view.lane.is_entry() {
+                        return Ok(StdinFlow::Continue);
+                    }
                     if let Some(m) = view.aux.as_mut() {
                         m.popup.select(t);
                     }
@@ -15057,6 +15078,7 @@ async fn aux_mouse(
                 None => {
                     // In-block miss (a header) is swallowed; off-block dismisses.
                     if !view.aux_block_contains(rep.row, rep.col) {
+                        view.lane.clear_entry();
                         view.aux = None;
                     }
                 }
@@ -26365,6 +26387,30 @@ mod tests {
         // real terminal's next chunk would.
         aux_keys(&mut v, b"\x1bx", &mut buf).await.unwrap();
         assert!(v.lane.custom_entry.is_none(), "entry cancelled");
+        assert_eq!(v.lane.pick, Some(("route".into(), "zai".into())));
+    }
+
+    #[tokio::test]
+    async fn lane_entry_buffer_dies_with_a_mouse_dismiss() {
+        let mut v = two_pane_view();
+        v.settings_tab = SettingsTab::Colors;
+        v.aux = Some(v.build_settings_modal());
+        v.lane.pick = Some(("route".into(), "zai".into()));
+        v.lane.custom_entry = Some("#12".into());
+        v.reopen_settings_keeping_sel();
+        let mut buf: Vec<u8> = Vec::new();
+        // A click OFF the block dismisses the modal AND drops the buffer, so
+        // a stale entry can never capture keys in a reopened modal. (Row
+        // clicks are additionally guarded inert while an entry is armed; the
+        // entry views render no selectable targets of their own, so that
+        // guard has no deterministic click surface against an ambient
+        // palette and is covered by review, not by this test.)
+        aux_mouse(&mut v, left_click(1, 1), &mut buf).await.unwrap();
+        assert!(v.aux.is_none(), "off-block click dismisses");
+        assert!(
+            v.lane.custom_entry.is_none(),
+            "the buffer died with the modal"
+        );
         assert_eq!(v.lane.pick, Some(("route".into(), "zai".into())));
     }
 
