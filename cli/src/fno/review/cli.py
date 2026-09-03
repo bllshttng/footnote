@@ -235,8 +235,6 @@ def post_dispositions(
     finding, each naming its disposition or its absence. Idempotent at
     (pr, head) via the marker line; a round with no dispositions posts nothing.
     """
-    import subprocess
-
     try:
         payload = json.loads(findings_file.read_text(encoding="utf-8"))
     except OSError as exc:

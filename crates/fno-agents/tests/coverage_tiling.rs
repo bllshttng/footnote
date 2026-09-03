@@ -1037,9 +1037,10 @@ fn round_budget_pass_does_not_truncate_the_github_axis() {
     let repo = tmp.path();
     let (_base, shas, head) = repo_with(repo, 4);
     // A pass at 12:00 no longer truncates the reviews axis: the connector
-    // round at 11:00 was a real round and stays counted. Two attested
-    // rounds plus three reviewed commits answer 3 (the max of the axes),
-    // never the refund answer 2-on-the-events-axis-alone.
+    // round at 11:00 was a real round and stays counted. The counter is one
+    // shared set of heads across both axes (the law's sentence), so the
+    // distinct heads attested or reviewed - shas[0..3], four of them -
+    // answer 4, never the refund answer 2-on-the-events-axis-alone.
     let events = events_file(
         repo,
         &[
@@ -1065,7 +1066,7 @@ fn round_budget_pass_does_not_truncate_the_github_axis() {
     ];
     assert_eq!(
         rounds_since_last_pass(&events, BRANCH, &head, Some(&reviews)),
-        3
+        4
     );
 }
 
@@ -1677,11 +1678,13 @@ fn cap_the_impossible_conjunct_reads_the_events_axis_alone() {
     let reviews: Vec<serde_json::Value> = (0..5)
         .map(|i| serde_json::json!({"state": "APPROVED", "commit": {"oid": format!("r{i:038x}")}}))
         .collect();
-    // The reported budget: max of both axes (a bot round IS a round). The
-    // Python side asserts rounds_used == 5 on this same chain.
+    // The reported budget: one shared head set across both axes (the law's
+    // sentence, d-608344c1), so the attestation head plus five distinct
+    // reviewed commits answer 6 - a bot round IS a round, and heads the two
+    // axes share are counted once.
     assert_eq!(
         rounds_since_last_pass(&events, CAP_BRANCH, &head, Some(&reviews)),
-        5
+        6
     );
     // The events axis alone: 1 of 2, not spent.
     assert_eq!(rounds_since_last_pass(&events, CAP_BRANCH, &head, None), 1);

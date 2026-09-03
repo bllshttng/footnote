@@ -165,7 +165,6 @@ def _repo_root(cwd: Optional[str] = None) -> Path:
 # `finalize.rs` instead of one. Re-exported under the old private names so every
 # call site and test here reads unchanged.
 from fno.paths import repo_identity as _repo_identity  # noqa: E402
-from fno.pr._merge import _is_documentation_path  # noqa: E402
 
 
 def _scan_coverage(
