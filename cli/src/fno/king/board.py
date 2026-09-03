@@ -124,6 +124,12 @@ class BoardInputs:
     #: Independent planned-unclaimed inventory. Production collection always
     #: supplies it; None keeps pure test fixtures source-compatible.
     undispatched: SourceRead | None = None
+    #: Graph rows for nodes bound to an OPEN PR, each annotated with the
+    #: `pr_number` actually open. Sourced from the PR listing and the graph,
+    #: never from a selector: `fno backlog ready` filters through
+    #: `live_claimed_node_ids` AND never returns `in_review`, so it removes
+    #: exactly these rows twice over.
+    pr_nodes: SourceRead | None = None
 
 
 def _as_dict(value: Any) -> dict:
@@ -644,8 +650,15 @@ def _run_json(cmd: list[str], *, timeout: int = 60) -> SourceRead:
         return SourceRead(error=f"unparseable output: {exc}")
 
 
-def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
-    """Open PRs that are green, mergeable and unmerged.
+def _read_prs(
+    timeout: int, max_pr_reads: int
+) -> tuple[SourceRead, SourceRead, list[str]]:
+    """Open PRs that are green, mergeable and unmerged, plus their nodes.
+
+    The second source is the graph row of every node an open PR binds back to,
+    each annotated with the ``pr_number`` actually open: ``undriven_pr``'s
+    candidate universe. Sourced here because the listing and the graph read are
+    already paid for - a second read would buy nothing.
 
     Costs exactly ONE call: the rollup arrives inside the listing, so there is
     no per-PR status read to cap. The bound therefore sits on the CALL, via
@@ -673,7 +686,7 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
         timeout=timeout,
     )
     if not listing.ok:
-        return listing, []
+        return listing, listing, []
     rows = listing.rows()
     warnings: list[str] = []
     # A listing that comes back exactly AT its limit is indistinguishable from
@@ -688,16 +701,44 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
         from fno.graph._reconcile import classify_open_pr_bindings
         from fno.graph.store import read_graph_strict
 
-        bindings = classify_open_pr_bindings(rows, read_graph_strict(paths.graph_json()))
+        entries = read_graph_strict(paths.graph_json())
+        bindings = classify_open_pr_bindings(rows, entries)
     except Exception as exc:  # noqa: BLE001 - mergeability remains readable
         warnings.append(f"pr_node_binding_unreadable: {exc}")
+        # An unreadable binding is an unreadable QUEUE, never an empty one.
+        # `mergeable_pr` survives a broken graph read because it needs no node;
+        # `undriven_pr` is nothing but nodes, so it must go dark loudly. That
+        # asymmetry is the module docstring's one-unreadable-queue promise, and
+        # it is why this degrades one source rather than both.
+        pr_nodes: SourceRead = SourceRead(error=f"pr node binding unreadable: {exc}")
     else:
+        node_by_id = {
+            e["id"]: e
+            for e in entries
+            if isinstance(e, dict) and isinstance(e.get("id"), str)
+        }
+        bound: list[dict] = []
         for binding in bindings:
             if binding.verdict == "missing":
                 warnings.append(
                     f"pr_node_binding_missing: #{binding.pr_number} "
                     f"{binding.head_ref} -> {binding.node_id}"
                 )
+            # `bound` is the only verdict that carries a node which points BACK
+            # at this PR. `missing` names a real node with no back-reference and
+            # is already warned above (its fix is the reconcile heal, not a
+            # dispatch); `untracked` and `ambiguous` carry no single candidate
+            # at all, and a guess picked from list order is the wrong-node bind
+            # that classifier exists to prevent.
+            if binding.verdict != "bound" or not binding.node_id:
+                continue
+            entry = node_by_id.get(binding.node_id)
+            if entry is None:
+                continue
+            bound.append(
+                {**entry, "pr_number": binding.pr_number, "pr_url": binding.pr_url}
+            )
+        pr_nodes = SourceRead(payload=bound)
     # Every fetched row is judged. They cost the same one call whether read or
     # discarded, so dropping any of them buys nothing and loses real work.
     ready: list[dict] = []
@@ -732,7 +773,7 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
         if "pending" in classes:
             continue
         ready.append({"number": pr.get("number"), "title": pr.get("title")})
-    return SourceRead(payload=ready), warnings
+    return SourceRead(payload=ready), pr_nodes, warnings
 
 
 #: Per-project rows rendered for the capture stream. The count stays whole;
@@ -857,7 +898,7 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
     claims = _run_json([*_fno(), "agents", "claim", "list", "-J", "--include-stale", "--prefix", "node:"],
         timeout=timeout,
     )
-    prs, warnings = _read_prs(timeout, max_pr_reads)
+    prs, pr_nodes, warnings = _read_prs(timeout, max_pr_reads)
     claimed_nodes, holders, claimed_warnings = _read_claimed_nodes(claims, timeout)
     warnings.extend(claimed_warnings)
 
@@ -867,6 +908,7 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
         claimed_nodes=claimed_nodes,
         holder_activity=_resolve_holder_activity(holders),
         prs=prs,
+        pr_nodes=pr_nodes,
         outstanding=_read_outstanding(timeout),
         needs=_run_json([*_fno(), "agents", "needs", "--json"], timeout=timeout),
         lane=_read_lane(),

@@ -713,7 +713,7 @@ def test_only_a_finished_green_pr_counts_as_mergeable(check, expected, monkeypat
         }
     ]
     monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
-    read, _ = board_mod._read_prs(timeout=1, max_pr_reads=10)
+    read, _, _ = board_mod._read_prs(timeout=1, max_pr_reads=10)
     assert len(read.rows()) == expected
 
 
@@ -724,7 +724,7 @@ def test_an_unmergeable_pr_is_not_the_kings_work(monkeypatch):
         {"number": 1, "title": "t", "mergeable": "CONFLICTING", "statusCheckRollup": []}
     ]
     monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
-    read, _ = board_mod._read_prs(timeout=1, max_pr_reads=10)
+    read, _, _ = board_mod._read_prs(timeout=1, max_pr_reads=10)
     assert read.rows() == []
 
 
@@ -773,7 +773,7 @@ def test_missing_bindings_warn_for_pending_red_and_green_prs(monkeypatch, tmp_pa
     ]
     monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
 
-    read, warnings = board_mod._read_prs(timeout=1, max_pr_reads=10)
+    read, _, warnings = board_mod._read_prs(timeout=1, max_pr_reads=10)
 
     assert read.rows() == [{"number": 3, "title": "green"}]
     assert {"#1", "#2", "#3"} <= {
@@ -814,7 +814,7 @@ def test_a_superseded_red_beside_a_fresh_green_reads_mergeable(monkeypatch):
         }
     ]
     monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
-    read, _ = board_mod._read_prs(timeout=1, max_pr_reads=10)
+    read, _, _ = board_mod._read_prs(timeout=1, max_pr_reads=10)
     assert [r["number"] for r in read.rows()] == [917]
 
 
@@ -853,7 +853,7 @@ def test_a_listing_that_hits_its_bound_is_reported(monkeypatch):
         for n in range(5)
     ]
     monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
-    _, warnings = board_mod._read_prs(timeout=1, max_pr_reads=5)
+    _, _, warnings = board_mod._read_prs(timeout=1, max_pr_reads=5)
     assert any("5" in w and "mergeable_pr" in w for w in warnings), warnings
 
 
@@ -870,8 +870,88 @@ def test_every_fetched_pr_is_judged(monkeypatch):
         for n in range(8)
     ]
     monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
-    read, _ = board_mod._read_prs(timeout=1, max_pr_reads=5)
+    read, _, _ = board_mod._read_prs(timeout=1, max_pr_reads=5)
     assert len(read.rows()) == 8
+
+
+# --- the open-PR node rows (undriven_pr's source) -----------------------------
+
+
+def test_read_prs_carries_the_bound_node_rows_as_their_own_source(monkeypatch, tmp_path):
+    """`fno backlog ready` removes live-claimed rows AND never returns
+    in_review, so an undriven-PR queue's candidates can only come from here:
+    the open-PR listing intersected with the graph."""
+    from fno import paths
+    from fno.king import board as board_mod
+
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(
+        json.dumps({"entries": [{"id": "x-a0a3", "status": "in_review", "pr_number": 1394}]})
+    )
+    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
+    listing = [
+        {
+            "number": 1394,
+            "title": "t",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+            "headRefName": "feature/x-a0a3",
+            "url": "https://github.com/o/r/pull/1394",
+        }
+    ]
+    monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
+
+    prs, pr_nodes, _warnings = board_mod._read_prs(timeout=1, max_pr_reads=10)
+
+    rows = pr_nodes.rows()
+    assert [r["id"] for r in rows] == ["x-a0a3"]
+    assert rows[0]["pr_number"] == 1394
+    assert rows[0]["pr_url"] == "https://github.com/o/r/pull/1394"
+    assert prs.ok
+
+
+def test_an_unreadable_graph_leaves_prs_readable_and_pr_nodes_unreadable(monkeypatch):
+    """`mergeable_pr` survives a broken graph read because it needs no node;
+    a node queue degrades to UNREADABLE, never to empty - an empty read is
+    the clean-board lie this module exists against."""
+    import fno.graph.store as store_mod
+    from fno.king import board as board_mod
+
+    def _boom(_path):
+        raise RuntimeError("graph unreadable")
+
+    monkeypatch.setattr(store_mod, "read_graph_strict", _boom)
+    listing = [
+        {
+            "number": 1,
+            "title": "t",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+            "headRefName": "feature/x-1111",
+            "url": "u1",
+        }
+    ]
+    monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
+
+    prs, pr_nodes, warnings = board_mod._read_prs(timeout=1, max_pr_reads=10)
+
+    assert prs.ok and prs.rows()
+    assert not pr_nodes.ok
+    assert any(w.startswith("pr_node_binding_unreadable") for w in warnings)
+
+
+def test_a_failing_pr_listing_blinds_both_pr_sources_with_the_same_cause(monkeypatch):
+    from fno.king import board as board_mod
+
+    dead = SourceRead(error="exit 1: gh auth expired")
+    monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: dead)
+
+    prs, pr_nodes, warnings = board_mod._read_prs(timeout=1, max_pr_reads=10)
+
+    assert not prs.ok
+    assert not pr_nodes.ok
+    assert prs.error == pr_nodes.error
+    assert warnings == []
 
 
 # --- truncation -------------------------------------------------------------
