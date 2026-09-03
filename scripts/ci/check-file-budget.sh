@@ -75,7 +75,22 @@ BASE_TIP="$(git rev-parse --verify --quiet "$REMOTE/$BASE_REF")" || {
     echo "       (fetch it, or set PR_BASE_REF/PR_REMOTE)" >&2
     exit 2
 }
-BASE="$(git merge-base "$BASE_TIP" HEAD)"
+BASE="$(git merge-base "$BASE_TIP" HEAD 2>/dev/null)" || {
+    # A shallow checkout (actions/checkout's default depth is 1) leaves HEAD
+    # and the base in disconnected graphs, and merge-base then fails with no
+    # output. Heal the shallow case by fetching full history once; local
+    # clones and deep CI checkouts never pay for this. If a base still cannot
+    # be established, refuse - never a silent pass.
+    if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
+        git fetch --quiet --unshallow "$REMOTE" 2>/dev/null || true
+        BASE="$(git merge-base "$BASE_TIP" HEAD 2>/dev/null)" || true
+    fi
+    if [[ -z "${BASE:-}" ]]; then
+        echo "check-file-budget: cannot establish a merge base between $REMOTE/$BASE_REF and HEAD" >&2
+        echo "       (shallow or unrelated histories? fetch --unshallow, or fix PR_BASE_REF/PR_REMOTE)" >&2
+        exit 2
+    fi
+}
 
 _CACHED_COUNT=""
 live_count() {
