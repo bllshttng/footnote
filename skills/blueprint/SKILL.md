@@ -578,6 +578,7 @@ Environment-specific traps that defy reasonable assumptions.
 ## References
 
 - [references/blueprint-gates.md](references/blueprint-gates.md) - All state-keyed gates (claims, schema, executor, model, provenance, PRODUCT.md, impeccable_stages, done_probes, kill-criteria detail, collision, peer heads-up)
+- [references/answerer-enumeration.md](references/answerer-enumeration.md) - Answerer enumeration protocol (step 2b-bis)
 - [references/epic-decomposition.md](references/epic-decomposition.md) - `group N` bounded epic decomposition
 - [references/discovery-gate.md](references/discovery-gate.md) - Discovery-gate question protocol
 - [references/quick-template.md](references/quick-template.md) - Full plan template

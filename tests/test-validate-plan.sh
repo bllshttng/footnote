@@ -725,7 +725,6 @@ else
     fail "AC10j: Phantom control should fail (exit $EXIT_CODE): $OUTPUT"
 fi
 
-PLAN_SURFACE_CONTROL_OK="$TMPDIR_BASE/surface_control_ok.md"
 OUTPUT=$(bash "$VALIDATE" "$PLAN_SURFACE" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 if [[ $EXIT_CODE -eq 0 ]] && echo "$OUTPUT" | grep -q "control \`src/reader.py:10\` returned by the sweep"; then
     pass "AC10k: A matching control prints its own receipt"
