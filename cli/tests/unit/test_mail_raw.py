@@ -456,6 +456,30 @@ def test_raw_codex_review_uses_process_owned_sender_with_inherited_marker(
     assert calls[0]["audit_sender"] == SID_CLAUDE[:8]
 
 
+def test_raw_accepts_target_self_review_codex_payload(
+    mailbox, monkeypatch, capsys
+):
+    from fno.mail.cli import _raw_send
+
+    _seed_codex_app_server(mailbox, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._review_start_codex",
+        lambda session, target, **_audit: calls.append((session, target))
+        or {
+            "delivered": True,
+            "turn_id": "turn-self-review",
+            "review_thread_id": "review-self-review",
+        },
+    )
+    payload = "/review medium --comment 1427 HEAD abc1234 against origin/main"
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("codexpeer", payload, self_ok=False)
+    assert exc.value.exit_code == 0
+    assert calls == [(SID_CODEX, "baseBranch:origin/main")]
+    assert "target=baseBranch:origin/main" in capsys.readouterr().out
+
+
 def test_raw_refuses_unparsed_codex_review_remainder_before_rpc(
     mailbox, monkeypatch, capsys
 ):
@@ -472,7 +496,7 @@ def test_raw_refuses_unparsed_codex_review_remainder_before_rpc(
             "review_thread_id": "review-3",
         },
     )
-    payload = "/review high --comment 1394 HEAD abc1234 against origin/main"
+    payload = "/review focus on concurrency"
     with pytest.raises(typer.Exit) as exc:
         _raw_send("codexpeer", payload, self_ok=False)
     assert exc.value.exit_code == 2

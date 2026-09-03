@@ -3076,7 +3076,9 @@ def _escalate_to_human(
 _CODEX_REVIEW_VERBS = frozenset(_harness_capabilities("codex")["review_verbs"])
 _COMMIT_SHA = re.compile(r"[0-9a-fA-F]{7,64}")
 _EXPLICIT_PR_REVIEW = re.compile(
-    r"^HEAD (?P<head>[0-9a-fA-F]{7,64}) of PR (?P<pr>[1-9][0-9]*) "
+    r"^(?:(?:low|medium|high|xhigh|max) --comment [1-9][0-9]* )?"
+    r"HEAD (?P<head>[0-9a-fA-F]{7,64})"
+    r"(?: of PR (?P<pr>[1-9][0-9]*))? "
     r"against origin/(?P<base>[A-Za-z0-9][A-Za-z0-9._/-]*)$"
 )
 
