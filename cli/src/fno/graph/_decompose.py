@@ -404,7 +404,16 @@ def epic_wave_slice(
             lines.append("    acceptance:")
             lines.extend(f"      - {_yaml_str(a)}" for a in acceptance)
         if t.get("blocked_by_declared"):
-            kept = [b for b in (t.get("blocked_by") or []) if str(b) in sliced_ids]
+            # Filtered against `by_id`, not `sliced_ids`, for the same reason
+            # the wave `tasks:` line is: `sliced_ids` comes from the waves'
+            # own id lists with no check that a task row exists, so an epic
+            # naming an id it never defines would keep that id here while the
+            # tasks block skips it - minting a child that fails its own
+            # `blocked_by unknown task` check.
+            kept = [
+                b for b in (t.get("blocked_by") or [])
+                if str(b) in sliced_ids and str(b) in by_id
+            ]
             lines.append("    blocked_by: [" + ", ".join(f"'{b}'" for b in kept) + "]")
     lines.append("```")
     return "\n".join(lines), None

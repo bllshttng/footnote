@@ -1684,13 +1684,20 @@ PYEOF
       # column 0 inside a fenced block as the key itself, and this very
       # feature's own docs print that shape - so the documentation would arm
       # the trigger it documents. awk stops at the closing `---`.
-      _jt_fm="$(awk '/^---[[:space:]]*$/{c++; if(c==2) exit; next} c==1' "$_jt_plan" 2>/dev/null | sed -n 's/^join:[[:space:]]*//p' | head -1 | tr -d '"' | tr -d "'" | xargs)"
+      # Frontmatter only, and the VALUE only: strip a trailing `# comment`
+      # before comparing. The key is documented in SKILL.md as
+      # `join: <manual|auto>   # who hands out the remaining waves`, so without
+      # this the documented shape yields "auto # who hands out..." and never
+      # matches - the doc would describe a trigger it disables. PlanFrontmatter
+      # parses the same file as YAML and reads a bare `auto`, so the two
+      # readers of one key have to agree.
+      _jt_fm="$(awk '/^---[[:space:]]*$/{c++; if(c==2) exit; next} c==1' "$_jt_plan" 2>/dev/null | sed -n 's/^join:[[:space:]]*//p' | head -1 | sed 's/[[:space:]]*#.*$//' | tr -d '"' | tr -d "'" | xargs)"
       # The retired spelling is NOT an alias - reviving it would keep a key
       # nothing else reads alive forever. But a plan carrying it would
       # otherwise stop auto-joining in silence, and a silent behavior change is
       # worse than either outcome, so say so once and let the author choose.
       if [[ -z "$_jt_fm" ]]; then
-        _jt_old="$(awk '/^---[[:space:]]*$/{c++; if(c==2) exit; next} c==1' "$_jt_plan" 2>/dev/null | sed -n 's/^orchestration:[[:space:]]*//p' | head -1 | tr -d '"' | tr -d "'" | xargs)"
+        _jt_old="$(awk '/^---[[:space:]]*$/{c++; if(c==2) exit; next} c==1' "$_jt_plan" 2>/dev/null | sed -n 's/^orchestration:[[:space:]]*//p' | head -1 | sed 's/[[:space:]]*#.*$//' | tr -d '"' | tr -d "'" | xargs)"
         if [[ -n "$_jt_old" ]]; then
           echo "target: plan carries the retired key 'orchestration: $_jt_old'; it is now 'join: manual|auto' (mechanical -> auto, king -> manual) and join did NOT fire. Update the plan's frontmatter." >&2
         fi

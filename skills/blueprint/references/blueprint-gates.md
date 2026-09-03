@@ -479,8 +479,14 @@ The gate runs after the Execution Strategy is enriched and before `validate-plan
 **Print the measured width beside the question.** The answer is only meaningful with it. `auto` on a width-1 plan hands out nothing, and `manual` on a width-6 plan parks five lanes.
 
 ```bash
-WIDTH=$(python3 -m fno.backlog.join_trigger width "$PLAN_PATH" 2>/dev/null); WIDTH_RC=$?
+FNO_ROOT="${CLAUDE_PLUGIN_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+[[ -z "${FNO_PYTHON:-}" && -f "$FNO_ROOT/scripts/lib/fno-python.sh" ]] \
+  && source "$FNO_ROOT/scripts/lib/fno-python.sh" && fno_python_init "$FNO_ROOT"
+WIDTH=$(PYTHONPATH="$FNO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
+  "${FNO_PYTHON:-python3}" -m fno.backlog.join_trigger width "$PLAN_PATH" 2>/dev/null); WIDTH_RC=$?
 ```
+
+**Resolve the interpreter; do not call bare `python3`.** A stock `python3` cannot import `fno` (verified: `ModuleNotFoundError`), so a bare call makes `WIDTH_RC` 1 on every plan. The gate then takes the unmeasured row every time and records `manual` without ever printing the width it exists to print - a gate that looks like it ran and measured nothing. `init-target-state.sh` resolves `$FNO_PYTHON` and sets `PYTHONPATH` for exactly this reason, and the snippet above is that same resolution.
 
 That is the same canonical probe `init-target-state.sh` shells out to. When the plan cannot be measured, it exits 1 and prints nothing. Otherwise it prints the measured int and exits 0. Branch on the exit code, never on the empty string:
 
