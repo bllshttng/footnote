@@ -256,8 +256,15 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
             break;
         }
         match listener.accept() {
-            Ok((stream, _addr)) => {
+            Ok((mut stream, _addr)) => {
                 last_activity = std::time::Instant::now();
+                // BSD accept() hands the listener's O_NONBLOCK to the accepted
+                // socket, and serve_client does blocking reads: an inherited
+                // non-blocking stream reads WouldBlock and hangs up before
+                // the client's first frame lands. Restore blocking mode.
+                if stream.set_nonblocking(false).is_err() {
+                    continue;
+                }
                 let state = Arc::clone(&state);
                 let identify = identify.clone();
                 let shutdown = Arc::clone(&shutdown);
