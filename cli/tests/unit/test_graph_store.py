@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -21,7 +20,6 @@ from fno.graph.store import (
     locked_mutate_graph,
     read_graph,
 )
-from fno.graph.statuses import recompute_statuses, is_stale_lock
 
 
 # -- helpers --
@@ -34,6 +32,34 @@ def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
 
 
 # -- tests --
+
+
+def test_the_reaper_reaps_a_keeper_it_can_name(tmp_path):
+    """Positive control for the spawn ledger (the zero-filter rule).
+
+    A filter that reports zero proves nothing unless it can first name a
+    target it DID see. This test makes the ledger name a real keeper pid,
+    asserts that pid is alive before the reap, and asserts the same pid is
+    dead after it - by number, never by absence.
+    """
+    from fno.graph import store as store_mod
+
+    graph = _make_graph(tmp_path, [{"id": "ab-reap", "title": "reap me"}])
+    _client = store_mod._client_for(graph)  # spawns the keeper on demand
+    keeper = _client.request("read", {"strict": False, "keep_malformed": False})
+    assert keeper["entries"], "keeper must answer before the reap control"
+
+    ledger = store_mod._SPAWNED_KEEPERS
+    assert ledger, "a spawned keeper must be addressable in the spawn ledger"
+    pid = next(iter(ledger))
+    proc, _sock = ledger[pid]
+    assert proc.poll() is None, "the named keeper must be alive before the reap"
+
+    survivors = store_mod.reap_spawned_keepers(timeout=15.0)
+    assert survivors == [], f"reaper left {len(survivors)} keeper(s) alive"
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    assert proc.poll() is not None, "the named keeper must be dead after the reap"
 
 
 def test_locked_by_normalized_from_legacy_session_id():

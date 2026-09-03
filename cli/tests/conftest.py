@@ -95,6 +95,36 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(pytest.mark.xdist_group(name="serial"))
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _reap_store_keepers():
+    """Every spawned graph-store keeper dies with the test session.
+
+    The store client spawns a detached ``fno-agents-worker --store-keeper``
+    per fixture graph on demand, and the keeper is immortal by design. A
+    session that touches many graphs therefore leaks one live worker per
+    graph unless the spawner reaps them (measured 2026-09-03: 6,855 live
+    keepers after one pytest pass, load 117, every fno call paying 4x
+    startup). Two layers here:
+
+    - ``FNO_STORE_KEEPER_IDLE_SECS`` bounds every keeper this session spawns
+      to a short self-exit, so even a keeper the reaper never hears about
+      cannot outlive the run by long.
+    - The teardown SIGTERMs every keeper the client recorded and ASSERTS the
+      alive count returns to zero. The assert is the point: a teardown that
+      merely runs is decoration, and the positive signal is the count, not
+      the pass.
+    """
+    os.environ.setdefault("FNO_STORE_KEEPER_IDLE_SECS", "5")
+    yield
+    from fno.graph.store import reap_spawned_keepers
+
+    survivors = reap_spawned_keepers(timeout=15.0)
+    assert not survivors, (
+        f"{len(survivors)} store keeper(s) outlived the test session "
+        f"(pids {sorted(survivors)[:10]}); the spawn ledger must drain to zero"
+    )
+
+
 @pytest.fixture(autouse=True)
 def _stable_fno_py_cmd(monkeypatch):
     """Pin source self-shellouts to a bare ``["fno-py"]`` prefix (x-69b3).

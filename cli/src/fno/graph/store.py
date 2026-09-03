@@ -250,13 +250,54 @@ def _spawn_keeper(path: Path) -> subprocess.Popen:
     ]
     if _is_canonical(path):
         argv.append("--canonical")
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         argv,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    # The ledger every test-session reaper reads: a keeper is detached and
+    # outlives its spawner by design, so the spawn that created it owes the
+    # teardown an addressable handle. The Popen is kept, not just the pid:
+    # poll() reaps the exited child, which a kill(pid, 0) liveness probe
+    # cannot do (a zombie answers).
+    _SPAWNED_KEEPERS[proc.pid] = (proc, sock)
+    return proc
+
+
+_SPAWNED_KEEPERS: "dict[int, tuple[subprocess.Popen, Path]]" = {}
+
+
+def reap_spawned_keepers(timeout: float = 10.0) -> "list[int]":
+    """SIGTERM every keeper this process spawned and wait for each to die.
+
+    The store client spawns detached keepers on demand; a test session that
+    touches many fixture graphs would otherwise leak one immortal keeper per
+    graph (measured at 6,855 live keepers after one pytest pass on 2026-09-03,
+    load 117). Returns the pids that refused to die inside `timeout` - an
+    honest non-empty answer, never a silent pass.
+    """
+    import signal
+    import time as _time
+
+    for proc, _sock in list(_SPAWNED_KEEPERS.values()):
+        if proc.poll() is None:
+            try:
+                proc.send_signal(signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+    deadline = _time.monotonic() + timeout
+    while _SPAWNED_KEEPERS and _time.monotonic() < deadline:
+        for pid in list(_SPAWNED_KEEPERS):
+            proc, _sock = _SPAWNED_KEEPERS[pid]
+            if proc.poll() is not None:
+                del _SPAWNED_KEEPERS[pid]
+        if _SPAWNED_KEEPERS:
+            _time.sleep(0.05)
+    survivors = list(_SPAWNED_KEEPERS)
+    _SPAWNED_KEEPERS.clear()
+    return survivors
 
 
 class _Keeper:

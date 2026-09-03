@@ -62,7 +62,20 @@ pub struct KeeperConfig {
     /// closure-release hook and canonical-board effects.
     pub canonical: bool,
     pub lock_timeout: Duration,
+    /// Idle self-exit bound. A keeper is long-lived by design in production,
+    /// but its spawner can vanish without a Shutdown frame - a crashed CLI,
+    /// a killed pytest worker above all - and one orphan per fixture graph
+    /// compounded into thousands of live workers on one machine (measured
+    /// 2026-09-03: 6,955 keepers after one day of pytest runs, load 117).
+    /// With this set, a keeper with zero client threads and no accepted
+    /// connection for this long exits and unlinks its socket; the next
+    /// client re-spawns it. Default: ten minutes. `FNO_STORE_KEEPER_IDLE_SECS`
+    /// overrides it; that variable set to 0 disables idle exit entirely.
+    pub idle_limit: Option<Duration>,
 }
+
+/// The default idle bound for a keeper whose spawner set no override.
+pub const DEFAULT_IDLE_LIMIT: Option<Duration> = Some(Duration::from_secs(600));
 
 pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> {
     let mut sock: Option<String> = None;
@@ -89,12 +102,26 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
             other => return Err(format!("unknown arg: {other}")),
         }
     }
+    let idle_limit = match std::env::var("FNO_STORE_KEEPER_IDLE_SECS") {
+        Ok(v) if v.trim() == "0" => None,
+        Ok(v) => v
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|secs| *secs > 0)
+            .map(Duration::from_secs),
+        // No override: the default bound. A keeper the spawner abandoned
+        // still dies, on a clock long enough that an operator's back-to-back
+        // verbs keep one keeper alive across the session.
+        Err(_) => DEFAULT_IDLE_LIMIT,
+    };
     Ok(KeeperConfig {
         sock: PathBuf::from(sock.ok_or("missing --sock")?),
         graph: PathBuf::from(graph.ok_or("missing --graph")?),
         session,
         canonical,
         lock_timeout,
+        idle_limit,
     })
 }
 
@@ -219,21 +246,51 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     .into_bytes();
 
     let shutdown = Arc::new(AtomicU64::new(0));
-    for stream in listener.incoming() {
+    let active_clients = Arc::new(AtomicU64::new(0));
+    let mut last_activity = std::time::Instant::now();
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("cannot poll {}: {e}", cfg.sock.display()))?;
+    loop {
         if shutdown.load(Ordering::SeqCst) == 1 {
             break;
         }
-        let Ok(stream) = stream else { break };
-        let state = Arc::clone(&state);
-        let identify = identify.clone();
-        let shutdown = Arc::clone(&shutdown);
-        // One thread per connection: a slow store call never starves the
-        // accept loop, and a client connecting while the daemon gets SIGTERM
-        // is served rather than queued behind it.
-        std::thread::Builder::new()
-            .name("fno-store-cli".into())
-            .spawn(move || serve_client(state, stream, identify, shutdown))
-            .map_err(|e| format!("store client thread: {e}"))?;
+        match listener.accept() {
+            Ok((stream, _addr)) => {
+                last_activity = std::time::Instant::now();
+                let state = Arc::clone(&state);
+                let identify = identify.clone();
+                let shutdown = Arc::clone(&shutdown);
+                let active_clients = Arc::clone(&active_clients);
+                active_clients.fetch_add(1, Ordering::SeqCst);
+                // One thread per connection: a slow store call never starves
+                // the accept loop, and a client connecting while the daemon
+                // gets SIGTERM is served rather than queued behind it.
+                let spawned = std::thread::Builder::new()
+                    .name("fno-store-cli".into())
+                    .spawn({
+                        let active_clients = Arc::clone(&active_clients);
+                        move || {
+                            serve_client(state, stream, identify, shutdown);
+                            active_clients.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    });
+                if spawned.is_err() {
+                    active_clients.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if let Some(limit) = cfg.idle_limit {
+                    if active_clients.load(Ordering::SeqCst) == 0
+                        && last_activity.elapsed() >= limit
+                    {
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => break,
+        }
     }
     let _ = std::fs::remove_file(&cfg.sock);
     Ok(())
@@ -1461,9 +1518,7 @@ pub fn store_socket_for(graph: &std::path::Path) -> PathBuf {
             let resolved = abs
                 .parent()
                 .and_then(|parent| parent.canonicalize().ok())
-                .and_then(|resolved_parent| {
-                    abs.file_name().map(|name| resolved_parent.join(name))
-                });
+                .and_then(|resolved_parent| abs.file_name().map(|name| resolved_parent.join(name)));
             resolved.unwrap_or(abs)
         }
     };
@@ -1486,6 +1541,33 @@ pub fn store_socket_for(graph: &std::path::Path) -> PathBuf {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_keeper_with_an_idle_deadline_exits_and_unlinks_its_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("idle.store.sock");
+        let cfg = KeeperConfig {
+            sock: sock.clone(),
+            graph: dir.path().join("graph.json"),
+            session: "test-idle".into(),
+            canonical: false,
+            lock_timeout: Duration::from_secs(2),
+            idle_limit: Some(Duration::from_millis(700)),
+        };
+        let handle = std::thread::spawn(move || run(cfg));
+        let mut bound = false;
+        for _ in 0..100 {
+            if UnixStream::connect(&sock).is_ok() {
+                bound = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(bound, "keeper never bound its socket");
+        let result = handle.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(!sock.exists(), "idle exit must unlink the socket");
+    }
 
     #[test]
     fn session_append_records_a_merge_grant_and_fills_absent_on_duplicate() {
