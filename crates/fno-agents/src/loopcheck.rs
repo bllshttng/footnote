@@ -2989,6 +2989,7 @@ fn read_pr_info(
                                     Some(reviews_arr),
                                 );
                                 tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
+        tiling.rounds_max = max_rounds;
                                 // The impossible axis stays events-only: the
                                 // refresh widened the budget to both axes, and
                                 // recomputing the events count explicitly (not
@@ -3249,6 +3250,7 @@ fn read_pr_info(
         tiling.rounds_used =
             rounds_since_last_pass(&events_text, &head_branch, head_sha, Some(reviews_arr));
         tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
+        tiling.rounds_max = max_rounds;
         // Same split as the no-external arm above: the budget widens to both
         // axes, the impossible axis stays events-only.
         tiling.events_rounds_exhausted =
@@ -6122,6 +6124,11 @@ pub struct RangeTiling {
     /// reads the same events with the same scoping; computed even on the
     /// git-failure paths, which answer tiling fail-closed but rounds honestly.
     pub rounds_used: i64,
+    /// The `config.review.max_rounds` budget `rounds_exhausted` was computed
+    /// against, carried so the row is self-contained: `fno do pr status`
+    /// prints the gate's pair verbatim instead of re-reading config (one
+    /// producer per number; x-027b).
+    pub rounds_max: i64,
     /// Whether `rounds_used` exceeds the resolved `config.review.max_rounds`.
     /// Advisory on this struct - the merge gate re-derives before refusing -
     /// but the status surface reads it to name its own blocker.
@@ -6466,8 +6473,13 @@ fn git_rev_list(git_bin: &str, cwd: &Path, args: &[&str]) -> Option<Vec<String>>
 /// measured lane's review bursts and the worker's replies share a login, a
 /// state, and a commit), and over-counting fires the cap on a worker already
 /// push-replying without re-review, where the old under-count spun forever.
-/// The answer is the MAX of the two, never the sum: a healthy lane leaves
-/// both traces per round and must not count it twice. Scoped exactly like
+/// The answer is ONE shared head set across both axes, never the sum of two
+/// independent counters: a healthy lane leaves both traces per round (the
+/// review object AND the attestation at the same commit), so a head counts
+/// once whoever recorded it - and a bot round at one sha beside a local
+/// attestation at another is two rounds, which separate per-axis counters
+/// followed by a max() would have under-counted (law d-608344c1: a round is
+/// keyed by head). Scoped exactly like
 /// the tiling and disposition scans: branch match, with the legacy
 /// exact-head admission. Pure: scans its inputs, no IO. The Python
 /// gate-side mirror is `rounds_since_last_pass` in `_coverage_gate.py`; the
@@ -6478,8 +6490,8 @@ pub fn rounds_since_last_pass(
     head_sha: &str,
     reviews: Option<&[Value]>,
 ) -> i64 {
-    let mut rounds: i64 = 0;
-    let mut counted_heads: Vec<String> = Vec::new();
+    let mut declared_rounds: i64 = 0;
+    let mut counted_heads: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -6503,24 +6515,19 @@ pub fn rounds_since_last_pass(
         match val.pointer("/data/review_round").and_then(|v| v.as_i64()) {
             // A declared round number is already the round's identity, so the
             // running max cannot double-count and needs no head collapse.
-            Some(n) if n >= 0 => rounds = rounds.max(n),
+            Some(n) if n >= 0 => declared_rounds = declared_rounds.max(n),
             // One reviewed head is ONE round, the same unit the reviews axis
             // uses (DISTINCT commit.oid). Without this the two axes measure
-            // different things and max() over them is not a budget: a
+            // different things and the total is not a budget: a
             // producer that emits a corrective second verdict at an unchanged
             // head spends two rounds for zero code change.
             _ => {
-                if counted_heads.iter().any(|h| h == line_head) {
-                    continue;
-                }
-                counted_heads.push(line_head.to_string());
-                rounds += 1;
+                counted_heads.insert(line_head.to_string());
             }
         }
     }
-    let events_rounds = rounds;
     let Some(reviews) = reviews else {
-        return events_rounds;
+        return declared_rounds.max(counted_heads.len() as i64);
     };
     // The reviews axis. An object counts when it names a real reviewed
     // commit (state and commit.oid present). Any login may carry it: the
@@ -6528,7 +6535,6 @@ pub fn rounds_since_last_pass(
     // own login, so an author filter deletes the trace on exactly that
     // lane, and reply volume is already neutral because the unit is the
     // DISTINCT commit.
-    let mut counted: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for review in reviews {
         if review
             .get("state")
@@ -6545,9 +6551,9 @@ pub fn rounds_since_last_pass(
         else {
             continue;
         };
-        counted.insert(oid);
+        counted_heads.insert(oid.to_string());
     }
-    events_rounds.max(counted.len() as i64)
+    declared_rounds.max(counted_heads.len() as i64)
 }
 
 /// Compute the range tiling for one PR's attestation chain.
@@ -6575,6 +6581,7 @@ pub fn compute_range_tiling(
     // no-external arm behind the same gate the Python merge gate uses).
     tiling.rounds_used = rounds_since_last_pass(events_text, head_branch, head_sha, None);
     tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
+        tiling.rounds_max = max_rounds;
     // Events-only here by construction (no review objects in hand yet), so
     // the impossible axis starts equal to the budget axis; each refresh
     // below widens `rounds_used` to both axes and leaves this one alone.
@@ -7687,6 +7694,10 @@ fn coverage_event_data_full(
         // `events_rounds_exhausted` rides along so the audit row shows the
         // axis the impossible verdict actually read.
         data["rounds_used"] = serde_json::json!(t.rounds_used);
+        // The budget beside the count, so the row is the one producer of the
+        // pair: `fno do pr status` reads both from here instead of re-reading
+        // config (x-027b: two readers of one number disagreed on PR 1380).
+        data["rounds_max"] = serde_json::json!(t.rounds_max);
         data["rounds_exhausted"] = serde_json::json!(t.rounds_exhausted);
         data["events_rounds_exhausted"] = serde_json::json!(t.events_rounds_exhausted);
         data["impossible"] = serde_json::json!(t.impossible);
@@ -14964,6 +14975,40 @@ mod tests {
         assert_eq!(
             FreshnessResolver::new("git", &cwd, "", "abc", 100).base_ref,
             "origin/main"
+        );
+    }
+
+    // ── one rounds number across axes (law d-608344c1 / x-027b) ─────────────
+
+    fn attest_line(head: &str, branch: &str) -> String {
+        format!(
+            "{{\"type\":\"review_attestation\",\"data\":{{\"head_sha\":\"{head}\",\"branch\":\"{branch}\",\"reviewer\":\"code-review\",\"verdict\":\"pass\"}}}}"
+        )
+    }
+
+    #[test]
+    fn rounds_bot_review_and_local_attestation_at_one_sha_are_one_round() {
+        // The law's sentence: a round is keyed by HEAD, not by who recorded
+        // it. A GitHub App review object and a local attestation at the same
+        // commit are ONE round; the same two traces at different heads are
+        // two - which the per-axis counters the shared set replaces would
+        // have under-counted as max(1, 1).
+        let events = format!("{}\n", attest_line("aaaaaaaaaa", "feature/x"));
+        let reviews = vec![serde_json::json!({
+            "state": "CHANGES_REQUESTED",
+            "commit": {"oid": "aaaaaaaaaa"},
+        })];
+        assert_eq!(
+            rounds_since_last_pass(&events, "feature/x", "bbbbbbbbbb", Some(&reviews)),
+            1
+        );
+        let reviews_b = vec![serde_json::json!({
+            "state": "APPROVED",
+            "commit": {"oid": "cccccccccc"},
+        })];
+        assert_eq!(
+            rounds_since_last_pass(&events, "feature/x", "bbbbbbbbbb", Some(&reviews_b)),
+            2
         );
     }
 

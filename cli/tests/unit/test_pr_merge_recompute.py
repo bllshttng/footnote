@@ -56,7 +56,11 @@ def _stub_recompute(
                 "producer": "local_attestation",
                 "verdict": "reviewed",
                 "reviewed_sha": reviewed_sha or head,
-                "freshness": "fresh",
+                # The label the real producer writes: `stale` when the verdict
+                # describes a sha the rebase rewrote out (the Rust predicate's
+                # answer, read from the stored row ever since the Python
+                # mirror was deleted).
+                "freshness": "fresh" if ancestor else "stale",
             }]
         with open(events, "a", encoding="utf-8") as fh:
             fh.write(
@@ -68,11 +72,6 @@ def _stub_recompute(
         return True, why
 
     monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake)
-    # Hermetic: the describes-test is the one seam (no ancestry arm exists
-    # anymore); stub it so no real git/gh runs.
-    monkeypatch.setattr(
-        _reviews, "_reviewed_sha_still_describes_head", lambda *a, **k: ancestor
-    )
     # Route the gate through the REAL read (the `enabled` fixture's covered
     # stub would bypass the recompute entirely): the only seam is the verb.
     monkeypatch.setattr(
@@ -113,7 +112,10 @@ def test_recompute_unavailable_fails_closed(enabled, monkeypatch, capsys, tmp_pa
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     reason = _last_json(capsys, stream="err")["reason"]
-    assert "no review_coverage event" in reason
+    # No row AND no instrument: the answer is unmeasurable, the remedy named,
+    # never a Python-side freshness (the deleted mirror's old job).
+    assert "unmeasurable" in reason, reason
+    assert "fno doctor update" in reason, reason
     assert "recompute unavailable: fno-agents not found" in reason, reason
 
 

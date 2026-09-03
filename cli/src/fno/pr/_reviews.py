@@ -25,12 +25,23 @@ from fno.pr_watch._discover import _reviewer_matches
 
 Runner = Callable[..., Result]
 
-_COUNTED_FRESHNESS = {
-    "fresh",
-    "carried_base_sync",
-    "carried_docs_only",
-    "carried_subset",
-}
+#: Freshness labels the Rust producer writes that count toward coverage.
+#: The carried_interdiff labels are parameterized by their measured numbers
+#: (`carried_interdiff(n=6, cap=100)`), so membership is a prefix test on
+#: that one shape rather than an open-ended set the producer could drift from.
+_COUNTED_FRESHNESS = frozenset(
+    {"fresh", "carried_base_sync", "carried_docs_only", "carried_subset"}
+)
+_INTERDIFF_PREFIX = "carried_interdiff("
+
+
+def counted_freshness(label: object) -> bool:
+    """Whether a stored freshness label counts toward coverage."""
+    if not isinstance(label, str):
+        return False
+    return label in _COUNTED_FRESHNESS or (
+        label.startswith(_INTERDIFF_PREFIX) and label.endswith(")")
+    )
 _KNOWN_REVIEW_VERDICTS = {"reviewed", "stale", "refused", "errored", "absent"}
 _KNOWN_COVERAGE_PRODUCERS = {"github_app", "local_attestation"}
 _KNOWN_REVIEW_STATES = {"reviewed", "unreviewed", "reviewer_refused"}
@@ -107,6 +118,12 @@ _UNKNOWN_COVERAGE: dict[str, object] = {
     "head_sha": None,
     "stale_verdicts": [],
 }
+
+#: The remedy an unmeasurable coverage answer names: the instrument is
+#: missing, and the fix is installing it, never recomputing the answer in a
+#: second language (the mirror this constant's path replaces did exactly
+#: that, and diverged from the gate).
+_UNMEASURABLE_REASON = "fno-agents not on PATH; install it or run fno doctor update"
 
 # A TERMINAL PR (merged or closed) is never ASKED for coverage: the gate guards
 # what WOULD merge and a terminal PR has no would left. Distinct from
@@ -499,6 +516,21 @@ def review_coverage_for_gate(
                 pinned = ""
         else:
             note = f"recompute unavailable: {why}"
+            if data is None and why == "fno-agents not found":
+                # No stored row AND no instrument to compute one: the answer
+                # is "unmeasurable", never a Python-side freshness. The
+                # git-walk mirror this replaces guessed an answer here and
+                # diverged from the gate (x-027b's class); refusing with the
+                # remedy named is the posture every other missing-instrument
+                # gate takes (validate-plan.sh, check-proto-version-bump.sh).
+                data = {
+                    "coverage": "unmeasurable",
+                    "reason": _UNMEASURABLE_REASON,
+                    "reviewed_count": 0,
+                    "stale_verdicts": [],
+                    "verdicts": [],
+                }
+                note = f"{note}; {_UNMEASURABLE_REASON}"
     return data, "; ".join(x for x in (note, pinned) if x)
 
 
@@ -619,250 +651,6 @@ def _is_covered(data: Optional[dict]) -> bool:
         return False
 
 
-def _pr_code_diff_identity(
-    sha: str, base_ref: str, cwd: Optional[str]
-) -> Optional[tuple[str, frozenset[str]]]:
-    """Content identity of the PR's own CODE changes at ``sha``.
-
-    A faithful mirror of ``pr_code_diff_identity`` in loopcheck.rs, decision
-    for decision: the same ``git diff --raw --no-abbrev --no-renames
-    base...sha`` (one line per changed path carrying both blob SHAs, so a
-    sibling edit to the same file or a reindent changes the identity where a
-    patch-id would not), documentation paths dropped, sorted, hashed. The
-    hash algorithm differs (sha256 vs blake3) but only the EQUALITY decision
-    crosses the language line, and the line sets make the subset test
-    possible. ``None`` on any git failure AND when nothing outside
-    documentation changed - an empty code diff is not evidence, the
-    absence-matched-against-absence trap."""
-    try:
-        diff = run(
-            ["git", "diff", "--raw", "--no-abbrev", "--no-renames", f"{base_ref}...{sha}"],
-            cwd=cwd,
-            timeout=15,
-        )
-    except Exception:  # noqa: BLE001 - an unreadable proof is not fresh
-        return None
-    if diff.returncode != 0:
-        return None
-    lines = []
-    for line in (diff.stdout or "").splitlines():
-        line = line.rstrip()
-        if not line:
-            continue
-        path = line.split("\t")[1].strip() if "\t" in line else ""
-        if _is_documentation_path(path):
-            continue
-        lines.append(line)
-    if not lines:
-        return None
-    lines.sort()
-    import hashlib
-
-    digest = hashlib.sha256()
-    for line in lines:
-        digest.update(line.encode("utf-8", "replace"))
-        digest.update(b"\n")
-    return digest.hexdigest(), frozenset(lines)
-
-
-# Sha-keyed identity and tree-path memos. A commit's identity never changes,
-# so the entry is valid forever - provided the BASE side of the key is also
-# immutable, so identities key on the base ref's resolved COMMIT, not the
-# moving ref name. The bound keeps a long-lived process from growing without
-# limit. A base branch CAN be retargeted, so the ref resolution carries a TTL.
-_IDENTITY_CACHE: dict[tuple[str, str, str], "Optional[tuple[str, frozenset[str]]]"] = {}
-_TREE_PATHS_CACHE: dict[tuple[str, str, str], bool] = {}
-_BASE_REF_CACHE: dict[tuple[str, int], tuple[float, Optional[str]]] = {}
-_BASE_COMMIT_CACHE: dict[tuple[str, str], tuple[float, str]] = {}
-_BASE_REF_TTL = 300.0
-_CACHE_BOUND = 256
-
-
-def _base_commit_of(base_ref: str, cwd: Optional[str]) -> str:
-    """The commit ``base_ref`` resolves to, for use as an immutable cache key
-    (the ref name moves under a fetch; the commit does not). Empty on any
-    failure, which simply de-duplicates less. TTL-memoized: it runs per
-    identity lookup."""
-    key = (base_ref, cwd or "")
-    hit = _BASE_COMMIT_CACHE.get(key)
-    now = time.monotonic()
-    if hit is not None and now - hit[0] < _BASE_REF_TTL:
-        return hit[1]
-    try:
-        result = run(
-            ["git", "rev-parse", f"{base_ref}^{{commit}}"],
-            cwd=cwd,
-            timeout=5,
-        )
-        commit = result.stdout.strip() if result.returncode == 0 else ""
-    except Exception:  # noqa: BLE001
-        commit = ""
-    if commit:
-        # Only successes memoize: a failed resolve cached as "" would key
-        # later identities on the moving ref NAME, the exact aliasing the
-        # resolved-commit key exists to prevent.
-        if len(_BASE_COMMIT_CACHE) >= _CACHE_BOUND:
-            _BASE_COMMIT_CACHE.pop(next(iter(_BASE_COMMIT_CACHE)))
-        _BASE_COMMIT_CACHE[key] = (now, commit)
-    return commit
-
-
-def _identity_of(
-    sha: str, base_ref: str, cwd: Optional[str]
-) -> "Optional[tuple[str, frozenset[str]]]":
-    base_commit = _base_commit_of(base_ref, cwd)
-    key = (sha, base_commit or base_ref, cwd or "")
-    # The diff runs against the RESOLVED COMMIT, the same object the key
-    # names. Diffing the live ref would let a base rewrite inside the
-    # base-commit TTL compare two identities built against different bases
-    # under one key; pinning both sides to one commit keeps the comparison
-    # coherent even when the TTL serves the pre-rewrite resolution.
-    effective_base = base_commit or base_ref
-    if key not in _IDENTITY_CACHE:
-        value = _pr_code_diff_identity(sha, effective_base, cwd)
-        if value is not None:
-            # Only successes memoize: None means the git read failed (or the
-            # code diff is empty), and either recomputes cheaply. Pinning a
-            # transient failure would keep verdicts stale for the process
-            # life.
-            if len(_IDENTITY_CACHE) >= _CACHE_BOUND:
-                _IDENTITY_CACHE.pop(next(iter(_IDENTITY_CACHE)))
-            _IDENTITY_CACHE[key] = value
-        return value
-    return _IDENTITY_CACHE[key]
-
-
-def _tree_paths_readable(reviewed_sha: str, head: str, cwd: Optional[str]) -> bool:
-    """Whether the two-dot name-only diff between the shas is READABLE.
-
-    The Rust rule requires the tree-paths read on an identity match: a carry
-    that cannot name why it carries is Stale. Python does not split the carry
-    reasons, so only the readability conjunct crosses the language line."""
-    key = (reviewed_sha, head, cwd or "")
-    if key not in _TREE_PATHS_CACHE:
-        try:
-            result = run(
-                ["git", "diff", "--name-only", "--no-renames", reviewed_sha, head],
-                cwd=cwd,
-                timeout=10,
-            )
-            readable = result.returncode == 0
-        except Exception:  # noqa: BLE001 - an unreadable proof is not fresh
-            readable = False
-        if readable:
-            # Only successes memoize: a False from a transient git failure
-            # is not a property of the sha pair.
-            if len(_TREE_PATHS_CACHE) >= _CACHE_BOUND:
-                _TREE_PATHS_CACHE.pop(next(iter(_TREE_PATHS_CACHE)))
-            _TREE_PATHS_CACHE[key] = readable
-        return readable
-    return _TREE_PATHS_CACHE[key]
-
-
-def _resolve_base_ref(cwd: Optional[str], pr_number: int = 0) -> Optional[str]:
-    """The ref the PR merges into, remote-qualified like the Rust resolver.
-
-    ``gh pr view`` supplies the real base branch first. When that read
-    SUCCEEDS, the qualified ref is the answer the Rust resolver would use:
-    if it does not resolve locally, the content test is unanswerable (None,
-    fail closed) - falling back to origin/main there would compute both
-    identities against the wrong base and CARRY a rebase the stop gate
-    expired, the disagreement this mirror exists to prevent. A FAILED read
-    with a PR number is the same unanswerable state: the Rust resolver
-    expires everything when its read fails, so the defaults (origin/main,
-    then origin/master) apply only when there is no PR to ask at all.
-    Memoized with a TTL: status polls fire this per pass, the read spends
-    the per-USER GraphQL quota, and a base retarget is rare."""
-    key = (cwd or "", pr_number)
-    hit = _BASE_REF_CACHE.get(key)
-    now = time.monotonic()
-    if hit is not None and now - hit[0] < _BASE_REF_TTL:
-        return hit[1]
-    resolved: Optional[str] = None
-    candidates: list[str] = []
-    base_known = False
-    if pr_number:
-        try:
-            view = run(
-                ["gh", "pr", "view", str(pr_number), "--json", "baseRefName"],
-                cwd=cwd,
-                timeout=10,
-            )
-            if view.returncode == 0:
-                base = (json.loads(view.stdout or "{}") or {}).get("baseRefName")
-                if isinstance(base, str) and base.strip():
-                    candidates.append(f"origin/{base.strip()}")
-                    base_known = True
-        except Exception:  # noqa: BLE001 - a failed read is fail-closed below
-            pass
-        if not base_known:
-            # Unanswerable, not defaultable: cache None so the poll loop
-            # cannot hammer a failing gh, and let the TTL bound the blip.
-            if len(_BASE_REF_CACHE) >= _CACHE_BOUND:
-                _BASE_REF_CACHE.pop(next(iter(_BASE_REF_CACHE)))
-            _BASE_REF_CACHE[key] = (now, None)
-            return None
-    else:
-        candidates += ["origin/main", "origin/master"]
-    for ref in candidates:
-        try:
-            result = run(
-                ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
-                cwd=cwd,
-                timeout=5,
-            )
-        except Exception:  # noqa: BLE001 - next ref may still resolve
-            continue
-        if result.returncode == 0:
-            resolved = ref
-            break
-    if len(_BASE_REF_CACHE) >= _CACHE_BOUND:
-        _BASE_REF_CACHE.pop(next(iter(_BASE_REF_CACHE)))
-    _BASE_REF_CACHE[key] = (now, resolved)
-    return resolved
-
-
-def _reviewed_sha_still_describes_head(
-    reviewed_sha: str,
-    head: str,
-    cwd: Optional[str],
-    pr_number: int = 0,
-) -> bool:
-    """Whether the change the reviewer read still ships at ``head``.
-
-    The SAME rule ``review_freshness`` applies, decision for decision, with
-    no extra arms: the reviewer read this exact commit; or the code-diff
-    identities at ``reviewed_sha`` and at ``head`` carry equal (and the
-    tree-paths read between them is readable, like the Rust carry's own
-    auditability requirement); or the head delta strictly SHRANK (every raw
-    line still shipping was read; the vanished lines are paths the base
-    absorbed on the rebase). Anything else - a push of new unreviewed code
-    after the review, a sibling edit to the same file, a reindented
-    resolution, an unreadable identity on either side - is a new review.
-    There is deliberately NO ancestry arm: ancestry alone proved a push-after-
-    review head fresh here while the Rust rule expired it, and a merge must
-    not accept an increment the stop gate calls stale. Resolves its own base
-    (fail closed) through the module caches, and is the one seam hermetic
-    tests stub."""
-    if reviewed_sha == head:
-        return True
-    base_ref = _resolve_base_ref(cwd, pr_number)
-    if base_ref is None:
-        return False
-    reviewed = _identity_of(reviewed_sha, base_ref, cwd)
-    if reviewed is None:
-        return False
-    current_head = _identity_of(head, base_ref, cwd)
-    if current_head is None:
-        return False
-    if reviewed[0] == current_head[0]:
-        # The Rust carry is auditable: it requires the tree-paths read, and a
-        # carry that cannot name why it carries is Stale. Readability is the
-        # only part of that read the equal-identity decision depends on.
-        return _tree_paths_readable(reviewed_sha, head, cwd)
-    return current_head[1] < reviewed[1]
-
-
 def _tiling_chain(data: dict) -> set[str]:
     """The covering chain's head shas, when the row's tiling answer is tiled.
 
@@ -880,69 +668,6 @@ def _tiling_chain(data: dict) -> set[str]:
     if not isinstance(heads, list):
         return set()
     return {h for h in heads if isinstance(h, str) and h}
-
-
-def _verdicts_with_current_freshness(
-    data: dict, head: Optional[str], cwd: Optional[str], pr_number: int = 0
-) -> list[dict]:
-    """Copy verdicts and recheck stored freshness against current history.
-
-    A freshness stamp describes the branch only when it was written. When a
-    current head is available, the reviewed change must still ship at that
-    head under the SAME rule the Rust predicate applies (x-e8db: every rebase
-    used to invalidate every attestation, even one that reviewed
-    byte-identical content). Missing metadata or an unreadable identity
-    cannot prove freshness. The base ref and the head identity resolve lazily
-    and once per pass: N stale verdicts at N shas cost one base read and one
-    head diff, not N of each.
-
-    A member of a TILED chain is exempt from the single-sha recheck: its
-    range, not its head alone, is what covers the PR.
-    """
-    verdicts = data.get("verdicts")
-    if not isinstance(verdicts, list):
-        return []
-    # Narrowed once for the closure below (mypy cannot carry the loop's
-    # truthiness guard into it): the closure is only invoked under `head`.
-    current_head = head or ""
-    chain = _tiling_chain(data)
-
-    def _describes(reviewed_sha: str) -> bool:
-        # The one seam: hermetic tests stub the describes-test, so the closure
-        # delegates straight to it and every memo (base ref, identities, tree
-        # paths) lives in the module caches the callee reads.
-        if not current_head:
-            return False
-        return _reviewed_sha_still_describes_head(
-            reviewed_sha, current_head, cwd, pr_number=pr_number
-        )
-
-    describes: dict[str, bool] = {}
-    shaped: list[dict] = []
-    for verdict in verdicts:
-        if not isinstance(verdict, dict):
-            continue
-        current = dict(verdict)
-        verdict_kind = verdict.get("verdict")
-        stale = verdict_kind == "stale"
-        reviewed_sha = verdict.get("reviewed_sha")
-        if verdict_kind == "reviewed":
-            stale = verdict.get("freshness") not in _COUNTED_FRESHNESS
-        elif verdict_kind != "stale":
-            current.pop("freshness", None)
-        if verdict_kind == "reviewed" and head:
-            in_chain = isinstance(reviewed_sha, str) and reviewed_sha in chain
-            if not in_chain:
-                if not isinstance(reviewed_sha, str) or not reviewed_sha:
-                    stale = True
-                elif reviewed_sha not in describes:
-                    describes[reviewed_sha] = _describes(reviewed_sha)
-                if isinstance(reviewed_sha, str) and not describes.get(reviewed_sha, False):
-                    stale = True
-        if stale:
-            current["freshness"] = "stale"
-        shaped.append(current)
-    return shaped
 
 
 def _stale_verdicts(verdicts: list[dict]) -> list[dict]:
@@ -1034,7 +759,7 @@ def _derive_review_state(
         verdict.get("verdict") == "reviewed"
         and _human_approval_counts(verdict, github_approval_satisfies)
         and (
-            verdict.get("freshness") in _COUNTED_FRESHNESS
+            counted_freshness(verdict.get("freshness"))
             or verdict.get("reviewed_sha") in chain
         )
         for verdict in verdicts
@@ -1045,12 +770,36 @@ def _derive_review_state(
     return "unreviewed"
 
 
+def _verdicts_as_stored(data: dict) -> list[dict]:
+    """Copy verdicts, dropping the freshness label off non-review rows.
+
+    Freshness is a READ here, never a recomputation: the Rust producer
+    computed it at emit time against its own head, and a row whose head no
+    longer matches the caller's is the recompute arm's input (x-3a3f), not
+    this function's. The Python git-walk mirror this replaces answered the
+    same question a second way and diverged from the gate (x-027b's class);
+    principle 9 deletes the leg instead of maintaining the twin.
+    """
+    verdicts = data.get("verdicts")
+    if not isinstance(verdicts, list):
+        return []
+    shaped: list[dict] = []
+    for verdict in verdicts:
+        if not isinstance(verdict, dict):
+            continue
+        current = dict(verdict)
+        if current.get("verdict") not in ("reviewed", "stale"):
+            current.pop("freshness", None)
+        shaped.append(current)
+    return shaped
+
+
 def _shape_review_coverage(
     data: dict, head: Optional[str], cwd: Optional[str], pr_number: int = 0
 ) -> dict:
     """Shape one event and invalidate any unproven covered verdict."""
     shaped = dict(data)
-    verdicts = _verdicts_with_current_freshness(data, head, cwd, pr_number)
+    verdicts = _verdicts_as_stored(data)
     shaped["verdicts"] = verdicts
     shaped["stale_verdicts"] = _stale_verdicts(verdicts)
     review_state = _derive_review_state(
@@ -1084,7 +833,7 @@ def _shape_review_coverage(
     valid = [
         v
         for v in reviewed
-        if v.get("freshness") in _COUNTED_FRESHNESS or v.get("reviewed_sha") in chain
+        if counted_freshness(v.get("freshness")) or v.get("reviewed_sha") in chain
     ]
     if malformed or not reviewed or len(valid) != len(reviewed):
         shaped["coverage"] = "uncovered"
@@ -1174,6 +923,17 @@ def read_review_coverage(
         "head_sha": latest.get("head_sha"),
         "stale_verdicts": latest.get("stale_verdicts", []),
     }
+    # The gate's own round budget, passed through verbatim: one producer per
+    # number (x-027b). Keys stay absent when the row predates them, and the
+    # status payload reads that absence as "no row at this head" rather than
+    # re-deriving a floor from events.
+    for _key in ("rounds_used", "rounds_max", "rounds_exhausted", "impossible"):
+        if latest.get(_key) is not None:
+            shaped[_key] = latest[_key]
+    if latest.get("reason"):
+        # The unmeasurable row's remedy: a synthesized answer has no event to
+        # re-read, so the reason rides the shaped dict to every consumer.
+        shaped["reason"] = latest["reason"]
     if latest.get("review_state") in _KNOWN_REVIEW_STATES:
         shaped["review_state"] = latest["review_state"]
     # The raw verdict list rides along when present (older events carry none):

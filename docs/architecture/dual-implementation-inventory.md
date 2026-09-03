@@ -57,6 +57,8 @@ All five are finished ports. Their oracle legs are gone. Each converted case now
 
 There are four, in retirement order. The ask adapters and the graph store are retired (2026-09-02). The claim classifier and the native graph reader are still live duals.
 
+**The review-freshness mirror.** `_pr_code_diff_identity` and `_reviewed_sha_still_describes_head` in `cli/src/fno/pr/_reviews.py` mirrored `review_freshness` in loopcheck.rs decision for decision, as the fallback freshness answer when the Rust instrument was absent. Retired 2026-09-03: the fallback guessed where every other missing-instrument gate refuses, and it disagreed with the gate it mirrored (a locally recomputed rounds/freshness floor read 3 where the gate said 1 on one PR). The one predicate now lives in `crates/fno-agents/src/review_freshness.rs`; with the binary absent, `fno do pr status` answers `unmeasurable` and names the remedy.
+
 **The claim classifier.** Dual. It goes first. When it was sequenced, no parity guard pinned it. Silent drift was possible, and that is why it leads. `claim_classifier_parity.rs` pins it now while its port runs.
 
 **The ask adapters.** `fno.agents.harnesses.claude` and `fno.agents.harnesses.codex`, pinned by the two differential harnesses until their port completed (2026-09-02). The Rust runtime already owned production `ask` end to end. The port deleted the Python ask functions and moved the last Python-only caller duty, `--to-project` anycast resolution, into `cmd_ask` ahead of the binary exec. The surviving Python surface is spawn substrate, not ask: `parse_short_id` for bg receipts, the registry reply readers, and `codex.create` for one-shot spawns.
