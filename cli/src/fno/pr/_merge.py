@@ -37,7 +37,7 @@ import shutil
 import sys
 import time
 from contextlib import contextmanager
-from typing import Any, Iterator, List, Literal, NamedTuple, Optional, Sequence, Tuple
+from typing import Any, Iterator, List, Literal, Optional, Sequence, Tuple
 
 from fno.pr._proc import ToolMissing, run
 
@@ -2068,8 +2068,6 @@ def _checks_verdict(
     pr_number: int,
     repo: str,
     ignore_contexts: Sequence[str] = (),
-    *,
-    data: Optional[dict] = None,
 ) -> tuple[str, dict, str]:
     """CI verdict for the PR plus the head it describes.
 
@@ -2082,10 +2080,6 @@ def _checks_verdict(
     ``headRefOid`` rides along because a verdict is only meaningful for the SHA
     it was computed on: the caller pins the merge to that SHA so a push landing
     between this read and the merge cannot slip an unverified head through.
-
-    ``data`` (x-8151) hands in a payload already fetched - the guarded merge
-    reads rollup, head, and armed state from ONE REST request - so the merge
-    path pays no second fetch for the same answer.
     """
     from fno.pr._status import verdict_for
 
@@ -2098,12 +2092,11 @@ def _checks_verdict(
     # ToolMissing is deliberately NOT caught: the module contract reserves 127
     # for a missing gh, and both sibling handlers emit it. Swallowing it here
     # would demote that to a generic exit-1 "checks are unknown".
-    if data is None:
-        from fno.pr._rest import fetch_pr_rest
+    from fno.pr._rest import fetch_pr_rest
 
-        data, reason = fetch_pr_rest(str(pr_number), cwd=repo, runner=run)
-        if data is None:
-            return _miss(reason or "REST checks read failed")
+    data, reason = fetch_pr_rest(str(pr_number), cwd=repo, runner=run)
+    if data is None:
+        return _miss(reason or "REST checks read failed")
     rollup = data.get("statusCheckRollup") or []
     ignored = set(ignore_contexts)
     if ignored:
@@ -2125,95 +2118,16 @@ def _checks_verdict(
     return (verdict, counts, (data.get("headRefOid") or "").strip())
 
 
-class _MergeGuard(NamedTuple):
-    """The pre-merge guard answers, from the fewest reads (x-8151).
-
-    ``armed`` says GitHub's queue owns the PR (stand down); it rides the light
-    pulls fetch. ``verdict`` / ``counts`` / ``verified_head`` are the
-    require_checks_pass read; they are meaningful only when ``checks_read`` is
-    true. ``data`` is the full payload when that read ran, so the caller
-    composes further reads without a third round-trip; it is None when no
-    checks read happened OR when one failed (``fetch_reason`` names why).
-    """
-
-    data: Optional[dict]
-    fetch_reason: str
-    armed: bool
-    checks_read: bool
-    verdict: str
-    counts: dict
-    verified_head: str
-
-
-def _guarded_merge(
-    pr_number: int,
-    repo: str,
-    auto_merge,
-    *,
-    enforce_checks: bool,
-    ignore_contexts: Sequence[str] = (),
-) -> _MergeGuard:
-    """Everything that must be true before any `gh pr merge` runs, read once.
-
-    x-9d11's one-arming-path stand-down and require_checks_pass enforcement
-    used to be hand-orchestrated separately in _do_merge and in _verify's
-    _bounded_remediation - the same ~35 lines twice, drifting in emission but
-    sharing nothing. One light pulls fetch answers armed + head together (the
-    armed question used to cost its own `gh pr view` round-trip), and the
-    heavy rollup read runs only when checks are actually enforced, so a
-    require_checks_pass=false merge pays no more than the armed probe did.
-    ToolMissing propagates (the module contract reserves 127) exactly as both
-    former copies handled it."""
-    from fno.pr._rest import fetch_pr_info_rest
-
-    info, reason = fetch_pr_info_rest(str(pr_number), cwd=repo, runner=run)
-    if info is None:
-        return _MergeGuard(
-            data=None,
-            fetch_reason=reason or "REST merge-state read failed",
-            armed=False,
-            checks_read=False,
-            verdict="unknown",
-            counts={},
-            verified_head="",
-        )
-    armed = bool(info.get("auto_merge_enabled"))
-    head = (info.get("head_sha") or "").strip()
-    if armed or not enforce_checks:
-        return _MergeGuard(
-            data=None,
-            fetch_reason="",
-            armed=armed,
-            checks_read=False,
-            verdict="unknown",
-            counts={},
-            verified_head=head,
-        )
-    from fno.pr._rest import fetch_pr_rest
-
-    data, fetch_reason = fetch_pr_rest(str(pr_number), cwd=repo, runner=run)
-    if data is None:
-        return _MergeGuard(
-            data=None,
-            fetch_reason=fetch_reason or "REST checks read failed",
-            armed=armed,
-            checks_read=False,
-            verdict="unknown",
-            counts={},
-            verified_head=head,
-        )
-    verdict, counts, head = _checks_verdict(
-        pr_number, repo, ignore_contexts, data=data
+def _already_armed(pr_number: int, repo: str) -> bool:
+    """True when GitHub's native auto-merge queue owns this PR (finalize armed
+    it). ONE probe argv shared by every executor that must stand down (x-9d11
+    AC5-CON), so a probe-shape change cannot drift between merge paths."""
+    res = _gh(
+        ["pr", "view", str(pr_number), "--json", "autoMergeRequest",
+         "-q", ".autoMergeRequest.enabled"],
+        repo,
     )
-    return _MergeGuard(
-        data=data,
-        fetch_reason="",
-        armed=armed,
-        checks_read=True,
-        verdict=verdict,
-        counts=counts,
-        verified_head=head,
-    )
+    return res.ok and res.stdout.strip() == "true"
 
 
 def _do_merge(
@@ -2224,50 +2138,31 @@ def _do_merge(
     gate_verdict: Optional[tuple] = None,
 ) -> int:
     """Steps (3)-(4): build + run the gh merge and classify the outcome."""
-    # x-8151: the armed probe and the require_checks_pass verdict come from
-    # _guarded_merge's ONE fetched payload, not two sequential round-trips.
     # AC5-CON (x-9d11): exactly one arming path. finalize.rs owns GitHub's
     # auto-merge queue; if the PR is already armed there, merging here would
     # race the queue. Say so and stand down - the queue merges it when checks
     # pass, so the merge is not being lost, just not duplicated.
-    ignore_contexts: Sequence[str] = ()
-    if auto_merge.require_checks_pass and gate_verdict is not None:
-        from fno.pr import _coverage_gate, _reviews
-
-        if gate_verdict[0] == _coverage_gate.COVERED:
-            # Both coverage contexts are THIS merge's own projections,
-            # not generic CI: the required context (covered verdict)
-            # and the diagnostic (an unknown-read stamp that says
-            # "retry the review verb", not "wait"). Ignoring only the
-            # required one let a pending diagnostic hold a covered,
-            # CI-green merge, and the clearing publish runs after this
-            # verdict, so a bare retry held again. One shared
-            # collection, not a third spelling of the filter.
-            ignore_contexts = tuple(_reviews.COVERAGE_STATUS_CONTEXTS)
     try:
-        guard = _guarded_merge(
-            pr_number,
-            repo,
-            auto_merge,
-            enforce_checks=auto_merge.require_checks_pass,
-            ignore_contexts=ignore_contexts,
-        )
+        armed = _already_armed(pr_number, repo)
     except ToolMissing:
+        # _already_armed calls _gh, which can raise ToolMissing same as the
+        # sibling checks/merge calls below - it owes the same handler (review
+        # round 12).
         _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
         return 127
-    strategy = auto_merge.merge_strategy
-    if guard.armed:
+    if armed:
         _emit(
             pr_number,
             "skipped",
             "PR already armed in GitHub's auto-merge queue (armed by fno-agents "
             "finalize at the terminal); the queue merges it when checks pass",
-            strategy,
+            auto_merge.merge_strategy,
             err=False,
         )
         return 2
 
     # (3) Build command.
+    strategy = auto_merge.merge_strategy
     cmd: List[str] = ["pr", "merge", str(pr_number), f"--{strategy}"]
     # Deliberately NO --delete-branch (x-9d11): it makes gh delete the LOCAL
     # branch too, which fails "is already used by worktree" from inside the
@@ -2280,14 +2175,33 @@ def _do_merge(
     # outright. One arming path: this verb EXECUTES. require_checks_pass is
     # enforced here, before the merge call, instead of delegated to the queue
     # (x-8543: an already-green PR merges without the repo having the feature).
+    # Set when THIS process is the one vouching for the checks; the worktree
+    # recovery path reads it so its server-side merge is pinned to the same
+    # SHA the verdict came from.
     verified_head = ""
     if auto_merge.require_checks_pass:
-        verified_head = guard.verified_head
-        verdict = guard.verdict
-        # A failed read is verdict=unknown with the reason carried where the
-        # operator reads it - held, retry-later, never a failed-ship stamp
-        # (round 7), exactly like an unreadable rollup read mid-payload.
-        counts = guard.counts if guard.checks_read else {"why": guard.fetch_reason}
+        try:
+            ignore_contexts: Sequence[str] = ()
+            if gate_verdict is not None:
+                from fno.pr import _coverage_gate, _reviews
+
+                if gate_verdict[0] == _coverage_gate.COVERED:
+                    # Both coverage contexts are THIS merge's own projections,
+                    # not generic CI: the required context (covered verdict)
+                    # and the diagnostic (an unknown-read stamp that says
+                    # "retry the review verb", not "wait"). Ignoring only the
+                    # required one let a pending diagnostic hold a covered,
+                    # CI-green merge, and the clearing publish runs after this
+                    # verdict, so a bare retry held again. One shared
+                    # collection, not a third spelling of the filter.
+                    ignore_contexts = tuple(_reviews.COVERAGE_STATUS_CONTEXTS)
+            verdict, counts, head_read = _checks_verdict(
+                pr_number, repo, ignore_contexts=ignore_contexts
+            )
+        except ToolMissing:
+            _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
+            return 127
+        verified_head = head_read
         if verdict != "green":
             # pending = wait for required checks (retry when green). unknown =
             # no rollup at all (gh failure, or a repo with no CI): retry-later,

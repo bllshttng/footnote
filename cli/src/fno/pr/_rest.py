@@ -406,15 +406,6 @@ def fetch_pr_info_rest(
     author = user.get("login") if isinstance(user, dict) else None
     if author is not None and not isinstance(author, str):
         return None, "gh api pulls/<n> carried malformed author login"
-    # GitHub's native auto-merge queue state rides the SAME pulls payload
-    # (null, or an object with `enabled`): x-8151's fold-in retires the merge
-    # path's separate `gh pr view --json autoMergeRequest` round-trip by
-    # answering the armed question from this one read. A malformed value
-    # degrades to False (never armed) rather than failing the whole fetch.
-    auto_merge_block = pr_data.get("auto_merge")
-    auto_merge_enabled = bool(
-        isinstance(auto_merge_block, dict) and auto_merge_block.get("enabled")
-    )
     return (
         {
             "pr": int(pr),
@@ -427,7 +418,6 @@ def fetch_pr_info_rest(
             "merged_at": merged_at,
             "merge_sha": merge_sha,
             "author": author,
-            "auto_merge_enabled": auto_merge_enabled,
         },
         "",
     )
@@ -520,9 +510,7 @@ def fetch_pr_rest(
     """Same contract as the old GraphQL `_fetch`: `(pr_json, reason)`.
 
     `pr_json` carries `state`, `statusCheckRollup`, `headRefOid`, `headRefName`,
-    `mergeable`, and `autoMergeRequest.enabled` (x-8151: the armed state rides
-    the same read instead of a second `gh pr view` round-trip) - the keys
-    `run_status` reads. `reason` is empty on success and names the
+    `mergeable` - the keys `run_status` reads. `reason` is empty on success and names the
     failure class otherwise; `(None, reason)` must reach the caller as a loud
     `verdict: error`, never as an absent answer.
     """
@@ -662,8 +650,6 @@ def fetch_pr_rest(
             # validates head.ref on the same request.
             "headRefName": info["head_ref"],
             "mergeable": info["mergeable"],
-            # Same payload as the armed state, already fetched (x-8151).
-            "autoMergeRequest": {"enabled": info["auto_merge_enabled"]},
         },
         "",
     )

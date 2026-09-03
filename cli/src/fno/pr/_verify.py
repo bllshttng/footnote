@@ -496,27 +496,17 @@ def _bounded_remediation(
     # enforced here with the shared verdict helper, head-pinned like _do_merge.
     # x-9d11 AC5-CON: same one-arming-path rule as _do_merge - if finalize
     # already armed GitHub's queue, stand down instead of racing it.
-    # x-8151: the armed probe and the checks verdict are ONE _guarded_merge
-    # read, not two sequential gh calls; this was the second hand-orchestrated
-    # copy of that pre-merge contract, and it shares the helper now.
     from fno.pr import _merge as _merge_mod
-    from fno.pr import _reviews as _reviews_mod
 
     try:
-        guard = _merge_mod._guarded_merge(
-            int(pr_number),
-            cwd,
-            auto_merge,
-            enforce_checks=bool(auto_merge.require_checks_pass),
-            ignore_contexts=tuple(_reviews_mod.COVERAGE_STATUS_CONTEXTS),
-        )
+        armed = _merge_mod._already_armed(int(pr_number), cwd)
     except ToolMissing:
-        # The guard deliberately propagates ToolMissing (the module contract
-        # reserves 127 for a missing gh); this call site owes the same handler
-        # its siblings have (review rounds 7 and 12).
+        # _already_armed calls _gh, which can raise ToolMissing same as the
+        # sibling _checks_verdict call below - it owes the same handler its
+        # sibling call sites have (review round 12).
         sys.stderr.write("verify-pr-merged: gh CLI not installed\n")
         return 127
-    if guard.armed:
+    if armed:
         _emit_audit(
             repo_root, state_file, pr_number, "merge_attempt_did_not_complete",
             {"reason": "already armed in GitHub auto-merge queue"},
@@ -529,23 +519,41 @@ def _bounded_remediation(
         return 1
 
     if auto_merge.require_checks_pass:
-        # A failed read flows through as verdict=unknown (held, retry-later,
-        # round 7) - never a failed-ship stamp - same as an unreadable rollup.
-        if guard.verdict != "green":
+        try:
+            from fno.pr import _reviews as _reviews_mod
+
+            # The SECOND merge path (a guard on one of N reachable paths is
+            # decorative): the do-merge path ignores the coverage projections
+            # it published itself, and the remediation merge must agree, or a
+            # pending diagnostic holds a covered PR here while bef2c16's fix
+            # lets the same PR through there. The ruleset still enforces the
+            # required context server-side.
+            verdict, _counts, head_read = _merge_mod._checks_verdict(
+                int(pr_number),
+                cwd,
+                ignore_contexts=tuple(_reviews_mod.COVERAGE_STATUS_CONTEXTS),
+            )
+        except ToolMissing:
+            # _checks_verdict deliberately propagates it (the module contract
+            # reserves 127 for a missing gh); this third call site owes the
+            # same handler its siblings have (review round 7).
+            sys.stderr.write("verify-pr-merged: gh CLI not installed\n")
+            return 127
+        if verdict != "green":
             _emit_audit(
                 repo_root,
                 state_file,
                 pr_number,
                 "merge_attempt_did_not_complete",
-                {"checks": guard.verdict},
+                {"checks": verdict},
             )
             sys.stdout.write(
                 f"merge_attempt_did_not_complete: PR #{pr_number} checks are "
-                f"{guard.verdict}; require_checks_pass forbids merging without "
-                f"green (retry when green)\n"
+                f"{verdict}; require_checks_pass forbids merging without green "
+                f"(retry when green)\n"
             )
             return 1
-        if not guard.verified_head:
+        if not head_read:
             # Same fail-closed rule as _do_merge: green but unpinnable is not
             # mergeable - an unpinned merge could land a head the verdict never
             # described.
@@ -559,7 +567,7 @@ def _bounded_remediation(
                 "head the verdict cannot be pinned to\n"
             )
             return 1
-        cmd += ["--match-head-commit", guard.verified_head]
+        cmd += ["--match-head-commit", head_read]
     res = run(cmd, cwd=cwd)
     gh_stderr = res.stderr or ""
     if res.ok:

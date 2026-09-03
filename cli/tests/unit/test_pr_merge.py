@@ -187,15 +187,6 @@ class FakeRun:
                                 "state": str(self.checks.get("state") or "OPEN").lower(),
                                 "merged": self.checks.get("state") == "MERGED",
                                 "mergeable": True,
-                                # x-8151: the armed state rides the SAME pulls
-                                # payload (null, or {enabled: bool}), retiring
-                                # the separate `gh pr view --json
-                                # autoMergeRequest` probe from the merge path.
-                                "auto_merge": (
-                                    {"enabled": True}
-                                    if self.auto_merge_request.strip() == "true"
-                                    else None
-                                ),
                                 "head": {
                                     "sha": self.checks.get("headRefOid", "deadbeefcafe"),
                                     "ref": self.head_ref,
@@ -1995,23 +1986,15 @@ def test_a_missing_gh_during_the_checks_read_keeps_exit_127(
 def test_a_missing_gh_during_the_already_armed_probe_keeps_exit_127(
     enabled, monkeypatch, capsys, tmp_path
 ):
-    """The armed read owes the same 127 contract its sibling checks/merge
-    calls have (review round 12): it must not propagate a raw ToolMissing past
-    _do_merge. x-8151: the armed state now rides the pulls fetch - the same
-    argv the coverage gate's head read uses - so that read is pinned and the
-    vanishing gh surfaces in the guard's own read (checks unenforced here, so
-    the light armed fetch is the guard's only read)."""
+    """_already_armed's own gh call owes the same 127 contract its sibling
+    checks/merge calls have (review round 12): it must not propagate a raw
+    ToolMissing past _do_merge."""
     (tmp_path / ".fno").mkdir()
-    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, cwd: "deadbeefcafe")
 
-    class _GhVanishes(FakeRun):
+    class _GhVanishes(_AutoMergeRejectingRun):
         def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
             cmd = list(cmd)
-            if (
-                cmd[:2] == ["gh", "api"]
-                and any("/pulls/" in a for a in cmd)
-                and "--jq" not in cmd
-            ):
+            if cmd[:3] == ["gh", "pr", "view"] and "autoMergeRequest" in cmd:
                 raise ToolMissing("gh")
             return super().__call__(
                 cmd, cwd=cwd, env=env, input_text=input_text, timeout=timeout

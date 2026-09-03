@@ -358,20 +358,15 @@ def test_bounded_remediation_stays_single_poll(tmp_path, gh_on, monkeypatch):
 def test_a_missing_gh_during_the_already_armed_probe_keeps_exit_127(
     tmp_path, gh_on, monkeypatch, capsys
 ):
-    """The armed read owes the same 127 contract its sibling _checks_verdict
-    call has (review round 12): it must not propagate a raw ToolMissing past
-    _bounded_remediation. x-8151: the armed state rides the pulls fetch, so
-    the vanishing-gh probe targets that read."""
+    """_already_armed's own gh call owes the same 127 contract its sibling
+    _checks_verdict call has (review round 12): it must not propagate a raw
+    ToolMissing past _bounded_remediation."""
     sf = _state_file(tmp_path)
 
     class _GhVanishes(FakeGH):
         def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
             cmd = list(cmd)
-            if (
-                cmd[:2] == ["gh", "api"]
-                and any("/pulls/" in a for a in cmd)
-                and "--jq" not in cmd
-            ):
+            if cmd[:3] == ["gh", "pr", "view"] and "autoMergeRequest" in cmd:
                 raise ToolMissing("gh")
             return super().__call__(
                 cmd, cwd=cwd, env=env, input_text=input_text, timeout=timeout
