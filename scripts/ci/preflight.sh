@@ -1201,6 +1201,7 @@ if retry_run_leg file-budget:fno; then
     run_hermetic bash "$CANONICAL_ROOT/scripts/ci/check-file-budget.sh"
     fb=$?
     REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+    FILE_BUDGET_INCLUDED=1
     if [[ $fb -eq 0 ]]; then
         record_leg file-budget:fno "file budget (fno)" pass $(( SECONDS - fb0 ))
     else
@@ -1484,6 +1485,7 @@ write_leg_record
 REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents-unit cargo-test:fno-agents-e2e cargo-test:fno-unit cargo-test:fno-e2e)
 [[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
 [[ "${TG_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(tracker-gates:fno)
+[[ "${FILE_BUDGET_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(file-budget:fno)
 REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
 REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
 # Coverage-derived mode: a run that executed every required leg is FULL whether
