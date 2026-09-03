@@ -88,7 +88,7 @@ the sole POSITIVE term rather than the whole answer:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, TypeGuard
 
 from fno.agents.session_truth import (
     STALE_ATTENTION_S,
@@ -354,6 +354,38 @@ def exit_falsifier(entry: Any) -> Optional[str]:
     return "exit-recorded" if stored == _STORED_EXITED else None
 
 
+def mux_ref_names_a_pane(mux: Any) -> TypeGuard[dict]:
+    """True when ``mux`` could name a real pane: a dict with a non-empty
+    session and an integer pane_id of at least 1.
+
+    A :data:`~typing.TypeGuard`, not a plain ``bool``: callers gate pane
+    access on it (``entry.mux["session"]`` under ``if mux_ref_names_a_pane(
+    entry.mux):``), and the checker must narrow the ref to a dict there the
+    way the old truthiness test accidentally did.
+
+    Pane ids are allocated from a floor of 1 -- ``pane_id_floor`` in
+    ``crates/fno/src/server.rs`` returns ``persisted.max(registry_floor).max(1)``,
+    and the pane-id claiming comment in ``mux_spawn.py`` states the same fact
+    ("per server starting at 1") -- so a ``pane_id`` of 0 is not a dead pane,
+    it is an unset field that leaked into the ref. Structural on purpose:
+    ``registry_falsifier`` runs once per registry row on every ``fno agents
+    list``, so a resolution probe here would hang one mux round-trip per row
+    off a rendering path.
+
+    ``bool`` is excluded explicitly because ``isinstance(True, int)`` is True
+    in Python, and a ``pane_id`` of ``True`` is a leaked flag, not a pane.
+    """
+    if not isinstance(mux, dict):
+        return False
+    session = mux.get("session")
+    if not isinstance(session, str) or not session:
+        return False
+    pane_id = mux.get("pane_id")
+    if isinstance(pane_id, bool) or not isinstance(pane_id, int):
+        return False
+    return pane_id >= 1
+
+
 def registry_falsifier(entry: Any) -> Optional[str]:
     """The falsifier a registry ROW carries, or None when it carries none.
 
@@ -372,6 +404,11 @@ def registry_falsifier(entry: Any) -> Optional[str]:
     transcript stays under the staleness window. Swap the wrong authority for
     the right one rather than removing it.
 
+    A row whose ref names no pane is not a pane row: it is judged by its pid
+    and its exit tombstone exactly as a null-ref row is, because a ref that
+    fails :func:`mux_ref_names_a_pane` is a wrong value, and a wrong value is
+    worse than no value.
+
     A non-pane row has two falsifiers, not one, because reconcile destroys the
     first when it fires: proving the child gone nulls the pid, so the recorded
     exit is the only surviving evidence of a death this registry already
@@ -384,7 +421,7 @@ def registry_falsifier(entry: Any) -> Optional[str]:
     how one of them ends up with a decorative guard.
     """
     mux = getattr(entry, "mux", None)
-    if mux:
+    if mux_ref_names_a_pane(mux):
         return pane_falsifier(mux)
     return pid_falsifier(
         getattr(entry, "pid", None), getattr(entry, "pid_start_time", None)
