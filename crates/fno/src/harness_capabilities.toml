@@ -4,7 +4,7 @@
 # resync BOTH copies, not just the first:
 #   bash scripts/ci/check-harness-capabilities-fresh.sh --write
 # scripts/ci/check-harness-capabilities-fresh.sh fails CI when any copy differs.
-map_version = 15
+map_version = 16
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -126,6 +126,15 @@ tokens = ["/model {model}", "/effort {effort}"]
 effort_labels = {}
 status_command = "/status"
 status_pattern = 'Model:\s+(?P<model>\S+).*?(?:reasoning|effort)\s+(?P<effort>minimal|low|medium|high|xhigh|max)'
+
+# FEATURES. Both states are measured. spawn: one of the two journey-proven
+# thread lanes. review: Claude Code ships /code-review, and the fno review
+# lane drives it on claude workers today.
+[harness.claude.features.review]
+state = "native"
+
+[harness.claude.features.spawn]
+state = "native"
 
 [harness.codex]
 permission_bypass = ["--dangerously-bypass-approvals-and-sandbox"]
@@ -250,6 +259,16 @@ effort_labels = { low = "Low", medium = "Medium (default)", high = "High", xhigh
 status_command = "/status"
 status_pattern = 'Model:\s+(?P<model>\S+).*?reasoning\s+(?P<effort>minimal|low|medium|high|xhigh|max)'
 
+# FEATURES. Both states are measured. spawn: the second journey-proven
+# thread lane. review: the only structured review path in the table -
+# `review_verbs` above map onto the app-server daemon's review RPC, which
+# the mail lane's own --check exercises.
+[harness.codex.features.review]
+state = "native"
+
+[harness.codex.features.spawn]
+state = "native"
+
 [harness.gemini]
 permission_bypass = ["--yolo"]
 resume = "native-continue"
@@ -332,6 +351,13 @@ tokens = []
 effort_labels = {}
 status_command = ""
 status_pattern = ""
+
+# FEATURES. spawn reads absent, not unmeasured, and that is a measurement of
+# this table, not of gemini: the lane is pane-only and the harness is
+# deprecated (its command_surface is refused; the successor is agy), so no
+# thread arm exists to wire and none will be.
+[harness.gemini.features.spawn]
+state = "absent"
 
 [harness.agy]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -417,6 +443,15 @@ tokens = []
 effort_labels = {}
 status_command = ""
 status_pattern = ""
+
+# FEATURES. spawn reads absent, and the distinction from unmeasured is the
+# whole point: agy's resume primitive IS measured working (2026-08-26,
+# quoted-token recall from a fresh process), but fno ships no thread arm for
+# it - the pane lane is the only wired transport. `capable` would claim a
+# harness-side exposure whose driver question fno has not answered; `absent`
+# states what a spawn dispatch hits today. Re-measure the day the arm lands.
+[harness.agy.features.spawn]
+state = "absent"
 
 [harness.opencode]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -507,6 +542,13 @@ tokens = []
 effort_labels = {}
 status_command = ""
 status_pattern = ""
+
+# FEATURES. spawn: the thread/headless launch seam is wired and accepted -
+# the seam-arm evidence that seats opencode in the spawn roster. The serve
+# lane's steering gap is a mechanics question the pane keys above still
+# answer honestly; it does not demote the arm.
+[harness.opencode.features.spawn]
+state = "native"
 
 # pi (@earendil-works/pi-coding-agent 0.84.2), a DUAL-LANE harness. Which lane
 # a session gets is a choice fno makes at exec, never a property of pi:
@@ -703,6 +745,13 @@ effort_labels = {}
 status_command = ""
 status_pattern = ""
 
+# FEATURES. spawn: the keeper-hosted thread lane survived the double-SIGKILL
+# restart journey (first green 2026-09-01 on pi 0.84.2,
+# cli/tests/agents/test_thread_keeper_journey.py) - the same journey evidence
+# that seats pi in the spawn roster.
+[harness.pi.features.spawn]
+state = "native"
+
 # cursor-agent is a pane-only fno harness. Its --print stream-json mode is
 # output-only: it has no input-format, rpc, acp, serve, or stdio drive lane.
 [harness.cursor-agent]
@@ -810,6 +859,13 @@ tokens = []
 effort_labels = {}
 status_command = ""
 status_pattern = ""
+
+# FEATURES. spawn: the create-chat lane mints the chat id and hosts the TUI
+# under the keeper, journey-backed - the same evidence that seats
+# cursor-agent in the spawn roster.
+[harness.cursor-agent.features.spawn]
+state = "native"
+
 # HOW EACH FIELD CAN BE SETTLED (x-244c). A capability question is one of two
 # kinds. A DECLARED fact - does this flag exist, what values does it take - is
 # the vendor's own statement about its own interface, so its authority is a
@@ -845,6 +901,78 @@ marker = "the resumed conversation's store record gains the token planted in the
 [probe.send_keys_enter_delay_ms]
 kind = "unprobeable"
 reason = "measured over 5 delays x 3 trials on a live pane; no one-shot probe recovers it"
+
+# THE FEATURES DIMENSION (x-a3e8). Each per-harness row may carry a
+# [harness.<name>.features.<key>] stanza answering WHAT A HARNESS CAN DO, held
+# beside the keystroke mechanics above and never instead of them. Ten keys,
+# closed so a typo is a parse error rather than a silent new dimension:
+#
+#   review  spawn  rpc  server  plugins  hooks  skills_dir
+#   subagent_dispatch  mcp  acp
+#
+# A claim's only field is `state`, one of four:
+#
+#   native      the harness exposes it AND fno drives it; a wired lane exists
+#   capable     the harness exposes it and fno has NO wired arm
+#   absent      MEASURED not to exist on this harness
+#   unmeasured  nobody has looked
+#
+# `capable` is the state `thread = false` could not say and the old hardcoded
+# spawn tuple could only encode as prose beside a literal. A key ABSENT from a
+# row reads unmeasured and refuses nothing at load: the refusal lives in the
+# lane that consumes the feature, which names the key, the state, and the
+# probe that would settle it. Every key used on any row must carry a
+# [probe.features.<key>] declaration below, or the table refuses to load -
+# a claim without an instrument is a guess with extra steps. Declarations are
+# written once and applied to every harness.
+
+[probe."features.review"]
+kind = "behavioral"
+marker = "a review verb dispatched on the harness's lane returns a structured verdict artifact, not a delivery receipt"
+
+[probe."features.spawn"]
+kind = "behavioral"
+marker = "an unattended spawn, drive and stop on the harness's thread lane ends at the loop's own stop gate, not at a timeout (the keeper-journey template)"
+
+[probe."features.rpc"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\b(app-server|rpc|daemon)\b'
+
+[probe."features.server"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\b(serve|server|listen)\b'
+
+[probe."features.plugins"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\bplugins?\b'
+
+[probe."features.hooks"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\bhooks?\b'
+
+[probe."features.skills_dir"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\bskills?\b'
+
+[probe."features.subagent_dispatch"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\bsubagents?\b'
+
+[probe."features.mcp"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\bmcp\b'
+
+[probe."features.acp"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\bacp\b'
 
 # grok joins on the same keeper lane pi and cursor-agent use (x-fd31). Its
 # drive transports (leader daemon on a unix socket, WebSocket listener, ACP
@@ -973,3 +1101,10 @@ tokens = []
 effort_labels = {}
 status_command = ""
 status_pattern = ""
+
+# FEATURES. spawn: the caller-assigned --session-id lane is measured live
+# (2026-09-02, grok 1.0.13: create adopted the id, SIGKILL ended the
+# process, --resume recalled the planted token) - the same measurement that
+# seats grok in the spawn roster.
+[harness.grok.features.spawn]
+state = "native"

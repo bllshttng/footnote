@@ -43,6 +43,28 @@ const REMOVE_STRATEGIES: [&str; 3] = ["claude-short-id", "codex-session-index", 
 /// vendor-produced state marker settles it. `unprobeable`: no authority and
 /// no marker, and the declaration must say why.
 const PROBE_KINDS: [&str; 3] = ["declared", "behavioral", "unprobeable"];
+/// The closed feature key set (x-a3e8). A feature is what a harness can DO -
+/// a review command, an RPC surface, a plugin system - as opposed to the
+/// keystroke mechanics above, which model how fno PUPPETS a pane. Closed so a
+/// typo is a parse error rather than a silent new dimension.
+const FEATURE_KEYS: [&str; 10] = [
+    "review",
+    "spawn",
+    "rpc",
+    "server",
+    "plugins",
+    "hooks",
+    "skills_dir",
+    "subagent_dispatch",
+    "mcp",
+    "acp",
+];
+/// The four states a feature claim may DECLARE, kept identical to the Python
+/// validator in cli/src/fno/agents/harness_map.py so the two runtimes cannot
+/// disagree. `capable` is the load-bearing third state: the harness exposes
+/// the feature and fno has NO wired arm for it. `thread = false` could not say
+/// that, and `SPAWN_HARNESSES` could only encode it as a tuple plus prose.
+const FEATURE_STATES: [&str; 4] = ["native", "capable", "absent", "unmeasured"];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("harness capability contract: {0}")]
@@ -124,6 +146,24 @@ pub struct HarnessCapabilities {
     pub permission_response: BTreeMap<String, PermissionResponse>,
     pub resume_strategy: ResumeStrategy,
     pub model_switch_strategy: ModelSwitchStrategy,
+    /// What this harness can DO, keyed by [`FEATURE_KEYS`] (x-a3e8) - a second
+    /// dimension beside the pane mechanics, not a rewrite of them. A key
+    /// ABSENT here reads `unmeasured`, which is legal and renders as a
+    /// visible gap; the refusal lives in the lanes that consume a feature,
+    /// not in the parse. Every key used on any row must carry a
+    /// `[probe.features.<key>]` declaration, enforced in
+    /// [`HarnessContract::validate`].
+    #[serde(default)]
+    pub features: BTreeMap<String, FeatureClaim>,
+}
+
+/// One feature claim. Its only field is `state`; the vocabulary and the
+/// probe coupling are the contract.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeatureClaim {
+    /// One of [`FEATURE_STATES`].
+    pub state: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -240,6 +280,29 @@ impl HarnessContract {
         }
         for (field, decl) in &self.probe {
             validate_probe_decl(field, decl)?;
+        }
+        // A feature declaration may only name a key in the closed set, and a
+        // feature USED on any row may only exist beside a declaration: the
+        // declaration is what makes the claim checkable, so a claim without
+        // one is a guess the table refuses to carry (x-a3e8, AC2).
+        for field in self.probe.keys() {
+            if let Some(key) = field.strip_prefix("features.") {
+                if !FEATURE_KEYS.contains(&key) {
+                    return Err(ContractError(format!(
+                        "probe {field:?}: {key:?} is not one of the feature keys"
+                    )));
+                }
+            }
+        }
+        for (harness, caps) in &self.harness {
+            for key in caps.features.keys() {
+                let path = format!("features.{key}");
+                if !self.probe.contains_key(&path) {
+                    return Err(ContractError(format!(
+                        "harness {harness:?} uses feature {key:?} with no [probe.{path}] declaration"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -584,6 +647,22 @@ fn validate_probe_decl(field: &str, decl: &ProbeDecl) -> Result<(), ContractErro
 }
 
 fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), ContractError> {
+    for (key, claim) in &caps.features {
+        if !FEATURE_KEYS.contains(&key.as_str()) {
+            return Err(field_error(
+                harness,
+                "features",
+                &format!("unknown feature key {key:?}"),
+            ));
+        }
+        if !FEATURE_STATES.contains(&claim.state.as_str()) {
+            return Err(field_error(
+                harness,
+                &format!("features.{key}"),
+                &format!("unknown state {:?}", claim.state),
+            ));
+        }
+    }
     let allowed_keys: BTreeSet<&str> = [
         "1",
         "2",
@@ -1378,5 +1457,93 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("session_id, not a short_id"), "{err}");
+    }
+
+    /// The features dimension beside the keystrokes (x-a3e8). The measured
+    /// cells are pinned: the spawn set must equal the roster the spawn
+    /// refusal used to hardcode, and the pane-only rows must read absent,
+    /// because a state that silently drifted would put a refusal back in a
+    /// lane that works.
+    #[test]
+    fn feature_claims_read_their_measured_states() {
+        let contract = HarnessContract::packaged().unwrap();
+        let state = |h: &str, k: &str| {
+            contract
+                .capabilities(h)
+                .unwrap()
+                .features
+                .get(k)
+                .map(|claim| claim.state.as_str())
+                .unwrap_or("unmeasured")
+        };
+        for harness in ["claude", "codex", "opencode", "pi", "cursor-agent", "grok"] {
+            assert_eq!(state(harness, "spawn"), "native", "{harness}");
+        }
+        assert_eq!(state("agy", "spawn"), "absent");
+        assert_eq!(state("gemini", "spawn"), "absent");
+        assert_eq!(state("claude", "review"), "native");
+        assert_eq!(state("codex", "review"), "native");
+        assert_eq!(state("claude", "mcp"), "unmeasured");
+        assert_eq!(state("agy", "acp"), "unmeasured");
+    }
+
+    #[test]
+    fn an_out_of_set_feature_state_is_refused_naming_harness_key_and_value() {
+        let bad = CAPABILITY_TOML.replacen(
+            "[harness.claude.features.spawn]\nstate = \"native\"",
+            "[harness.claude.features.spawn]\nstate = \"wired\"",
+            1,
+        );
+        let err = HarnessContract::parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("claude"), "{err}");
+        assert!(err.contains("features.spawn"), "{err}");
+        assert!(err.contains("wired"), "{err}");
+    }
+
+    #[test]
+    fn the_feature_key_set_is_closed() {
+        let bad = CAPABILITY_TOML.replacen(
+            "[harness.claude.features.spawn]",
+            "[harness.claude.features.spwan]",
+            1,
+        );
+        let err = HarnessContract::parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("claude"), "{err}");
+        assert!(err.contains("spwan"), "{err}");
+    }
+
+    #[test]
+    fn a_used_feature_needs_its_probe_declaration() {
+        // Rename the declaration out of the features namespace (a legal
+        // field declaration, so the only remaining defect is the missing
+        // coupling) and the use below it refuses by name.
+        let bad = CAPABILITY_TOML.replacen(
+            "[probe.\"features.spawn\"]",
+            "[probe.\"spawn-decl-removed\"]",
+            1,
+        );
+        let err = HarnessContract::parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("features.spawn"), "{err}");
+        assert!(err.contains("declaration"), "{err}");
+    }
+
+    #[test]
+    fn a_feature_declaration_may_only_name_a_feature_key() {
+        let bad = CAPABILITY_TOML.replacen(
+            "[probe.\"features.spawn\"]",
+            "[probe.\"features.spwan\"]",
+            1,
+        );
+        let err = HarnessContract::parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("spwan"), "{err}");
+        assert!(err.contains("feature keys"), "{err}");
+    }
+
+    #[test]
+    fn a_row_without_a_features_table_loads_with_no_refusal() {
+        let stanza = "[harness.agy.features.spawn]\nstate = \"absent\"\n";
+        let stripped = CAPABILITY_TOML.replacen(stanza, "", 1);
+        let contract = HarnessContract::parse(&stripped).unwrap();
+        assert!(contract.capabilities("agy").unwrap().features.is_empty());
     }
 }

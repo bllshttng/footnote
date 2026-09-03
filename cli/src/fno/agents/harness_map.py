@@ -267,6 +267,20 @@ _REMOVE_STRATEGIES = {"claude-short-id", "codex-session-index", "registry-only"}
 # validator's LOOP_PARTICIPATION so the two runtimes cannot disagree about which
 # contracts are legal. The table's comment carries the per-harness measurement.
 _LOOP_PARTICIPATION = {"native", "extension", "none"}
+# The closed feature key set (x-a3e8). A feature is what a harness can DO - a
+# review command, an RPC surface, a plugin system - as opposed to the keystroke
+# mechanics, which model how fno PUPPETS a pane. Closed so a typo is a parse
+# error rather than a silent new dimension.
+_FEATURE_KEYS = frozenset({
+    "review", "spawn", "rpc", "server", "plugins", "hooks",
+    "skills_dir", "subagent_dispatch", "mcp", "acp",
+})
+# The four states a feature claim may declare, kept identical to the Rust
+# validator's FEATURE_STATES so the two runtimes cannot disagree. `capable`
+# is the load-bearing third state: the harness exposes the feature and fno
+# has NO wired arm for it. `thread = false` could not say that, and
+# SPAWN_HARNESSES could only encode it as a tuple plus prose.
+_FEATURE_STATES = frozenset({"native", "capable", "absent", "unmeasured"})
 
 
 def _contract_error(harness: str, field: str, detail: str) -> "DispatchResolveError":
@@ -490,6 +504,20 @@ def _validate_row(harness: str, caps: dict) -> None:
         raise _contract_error(harness, "session_binding", "bad required/timeout values")
     if binding["timeout_ms"] < 0 or (binding["required"] and binding["timeout_ms"] == 0):
         raise _contract_error(harness, "session_binding", "required binding needs a timeout")
+    features = caps.get("features")
+    if features is None:
+        return
+    if not isinstance(features, dict):
+        raise _contract_error(harness, "features", "must be a table of feature claims")
+    for key, claim in features.items():
+        if key not in _FEATURE_KEYS:
+            raise _contract_error(harness, "features", f"unknown feature key {key!r}")
+        if not isinstance(claim, dict) or set(claim) != {"state"}:
+            raise _contract_error(harness, f"features.{key}", "a feature claim carries only state")
+        if claim["state"] not in _FEATURE_STATES:
+            raise _contract_error(
+                harness, f"features.{key}", f"unknown state {claim['state']!r}"
+            )
 
 
 def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
@@ -519,6 +547,25 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
     for harness, caps in harnesses.items():
         _validate_row(harness, caps)
     _validate_probe_decls(root.get("probe"))
+    probe = root.get("probe") or {}
+    # A feature declaration may only name a key in the closed set, and a
+    # feature USED on any row may only exist beside a declaration: the
+    # declaration is what makes the claim checkable, so a claim without one
+    # is a guess the table refuses to carry (x-a3e8).
+    for field in probe:
+        key = field[len("features."):] if field.startswith("features.") else None
+        if key is not None and key not in _FEATURE_KEYS:
+            raise _contract_error(
+                field, "probe.key", f"{key!r} is not one of the feature keys"
+            )
+    for harness, caps in harnesses.items():
+        for key in (caps.get("features") or {}):
+            if f"features.{key}" not in probe:
+                raise _contract_error(
+                    harness,
+                    f"features.{key}",
+                    f"used with no [probe.features.{key}] declaration",
+                )
     return version, harnesses
 
 
@@ -875,6 +922,24 @@ def known_harnesses() -> list[str]:
     supported-harness roster is ``fno.harness_names.KNOWN_HARNESSES``, which
     is wider - hermes and openclaw sit on it with no row here."""
     return sorted(_HARNESS_CAPS)
+
+
+def feature_claim(harness: str, key: str) -> str:
+    """The declared state of ``key`` on ``harness``: one of ``native``,
+    ``capable``, ``absent``, ``unmeasured`` (x-a3e8). A key ABSENT from the
+    row reads ``unmeasured`` - a feature nobody measured is a visible gap,
+    never a refusal; the refusal lives in the lane that consumes the
+    feature. Unknown harness raises like :func:`capabilities`; an unknown
+    KEY raises too, because a caller asking for a key outside the closed
+    set is a typo, not a measurement."""
+    caps = capabilities(harness)
+    if key not in _FEATURE_KEYS:
+        raise DispatchResolveError(
+            f"unknown feature key {key!r}; the feature vocabulary knows: "
+            f"{', '.join(sorted(_FEATURE_KEYS))}"
+        )
+    claim = caps.get("features") or {}
+    return claim.get(key, {}).get("state", "unmeasured") if isinstance(claim, dict) else "unmeasured"
 
 
 def capabilities(harness: str) -> dict:
