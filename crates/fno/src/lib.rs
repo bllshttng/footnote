@@ -19,6 +19,7 @@ pub mod digest_overlay;
 #[cfg(test)]
 pub mod frame_html;
 pub mod keys;
+pub mod lane_colors_panel;
 pub mod link;
 pub mod mouse;
 pub mod mux_cli;
