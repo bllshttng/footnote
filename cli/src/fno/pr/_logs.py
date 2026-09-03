@@ -116,6 +116,33 @@ def _job_ref(check: dict) -> Optional[tuple[str, str, str]]:
     return (m.group(1), m.group(2), m.group(3)) if m else None
 
 
+def fetch_job_log(
+    owner: str,
+    repo: str,
+    job_id: str,
+    cwd: Optional[str] = None,
+    runner=None,
+) -> Result:
+    """Fetch one Actions job's raw log. The ONE place that read is spelled.
+
+    A CI log is colorized, and since gh 2.60 `gh api` REFUSES to emit a
+    response carrying terminal escape sequences unless `--allow-escape-
+    sequences` is passed. The refusal is not TTY-gated: it fires through a
+    pipe and through a redirect, exits 1, and writes nothing. Without the
+    flag every reader of a colorized log recorded "log unavailable" and the
+    diagnosis silently degraded to check counts.
+
+    The retry without the flag covers a gh old enough not to know it; such a
+    gh does not refuse either, so the second attempt is the whole fix there.
+    """
+    runner = runner or run
+    endpoint = f"repos/{owner}/{repo}/actions/jobs/{job_id}/logs"
+    res = runner(["gh", "api", "--allow-escape-sequences", endpoint], cwd=cwd)
+    if not res.ok and "unknown flag" in (res.stderr or "").lower():
+        res = runner(["gh", "api", endpoint], cwd=cwd)
+    return res
+
+
 def _spool(root: Path, text: str) -> Optional[Path]:
     """Write `text` to <root>/.fno/last-ci.log via temp+rename.
 
@@ -193,7 +220,7 @@ def run_logs(
 
     owner, repo, job_id = ref
     print(f"fetching: {_check_name(target)} (job {job_id})", flush=True)
-    res = run(["gh", "api", f"repos/{owner}/{repo}/actions/jobs/{job_id}/logs"], cwd=cwd)
+    res = fetch_job_log(owner, repo, job_id, cwd)
     if not res.ok:
         sys.stderr.write(
             f"fno do pr logs: could not fetch the log for {_check_name(target)}: "

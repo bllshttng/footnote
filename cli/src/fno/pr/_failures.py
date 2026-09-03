@@ -28,7 +28,7 @@ import json
 import re
 from typing import Callable, Optional, Sequence
 
-from fno.pr._logs import _check_name, _job_ref
+from fno.pr._logs import _check_name, _job_ref, fetch_job_log
 from fno.pr._proc import run
 
 # `smoke: step failed, stopping (fail-fast): <name>` (test_cmd.py), plus the
@@ -202,7 +202,7 @@ def collect_failures(
             continue
         owner, repo, job_id = ref
         entry["job_id"] = job_id
-        log_res = runner(["gh", "api", f"repos/{owner}/{repo}/actions/jobs/{job_id}/logs"], cwd=cwd)
+        log_res = fetch_job_log(owner, repo, job_id, cwd, runner)
         log_text = log_res.stdout if log_res.ok else ""
         if not log_res.ok:
             entry["detail"] = f"log unavailable: {(log_res.stderr or 'gh error').strip()[:160]}"

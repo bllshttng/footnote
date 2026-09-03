@@ -271,3 +271,49 @@ def test_superseded_cancelled_run_is_not_a_failure(gh, tmp_path, capsys):
 
     assert _logs.run_logs("1", root=tmp_path) == 0
     assert not fake.fetched_a_log
+
+
+class _FlagRecorder:
+    """Records each gh argv and answers per a scripted list of Results."""
+
+    def __init__(self, *results):
+        self._results = list(results)
+        self.calls = []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(list(cmd))
+        return self._results[min(len(self.calls) - 1, len(self._results) - 1)]
+
+
+def test_job_log_fetch_allows_escape_sequences():
+    """A CI log is colorized, and gh REFUSES to emit a response carrying
+    terminal escape sequences without this flag - through a pipe and through
+    a redirect, not only on a TTY. Without it every colorized log read as
+    'log unavailable' and the diagnosis degraded to check counts."""
+    gh = _FlagRecorder(Result(0, "Diff in /w/crates/fno/src/x.rs:1:", ""))
+    res = _logs.fetch_job_log("o", "r", "42", None, gh)
+    assert res.ok
+    assert gh.calls == [
+        ["gh", "api", "--allow-escape-sequences", "repos/o/r/actions/jobs/42/logs"]
+    ]
+
+
+def test_job_log_fetch_retries_without_the_flag_on_an_older_gh():
+    """A gh too old to know the flag is also too old to refuse, so the plain
+    retry is the whole fix there - never a permanent read failure."""
+    gh = _FlagRecorder(
+        Result(1, "", "unknown flag: --allow-escape-sequences"),
+        Result(0, "the log", ""),
+    )
+    res = _logs.fetch_job_log("o", "r", "42", None, gh)
+    assert res.ok and res.stdout == "the log"
+    assert gh.calls[1] == ["gh", "api", "repos/o/r/actions/jobs/42/logs"]
+
+
+def test_job_log_fetch_does_not_retry_a_real_error():
+    """A 410 (expired retention) is not a flag problem; retrying would spend
+    a second read to learn the same thing."""
+    gh = _FlagRecorder(Result(1, "", "HTTP 410: Gone"))
+    res = _logs.fetch_job_log("o", "r", "42", None, gh)
+    assert not res.ok
+    assert len(gh.calls) == 1
