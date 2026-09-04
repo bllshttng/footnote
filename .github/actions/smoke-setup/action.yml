@@ -96,3 +96,8 @@ runs:
         cargo build --manifest-path crates/fno-agents/Cargo.toml
         echo "FNO_RUST_FRONT=$PWD/crates/fno/target/debug/fno" >> "$GITHUB_ENV"
         echo "FNO_AGENTS_FRONT=$PWD/crates/fno-agents/target/debug/fno-agents" >> "$GITHUB_ENV"
+        # The native claim door resolves through $FNO_AGENTS_BIN, and hermetic
+        # test children only forward THIS name, so the fresh build must be
+        # exported under it or pytest children silently exercise a stale
+        # PATH binary against the post-port claim surface.
+        echo "FNO_AGENTS_BIN=$PWD/crates/fno-agents/target/debug/fno-agents" >> "$GITHUB_ENV"
