@@ -274,7 +274,7 @@ mod tests {
         let s = crate::daemon::GcSummary {
             kept_not_terminal: vec![
                 ("nt1".to_string(), "tail: stalled".to_string()),
-                ("nt2".to_string(), "no tail read".to_string()),
+                ("nt2".to_string(), "not probed: no idle signal".to_string()),
             ],
             ..Default::default()
         };
@@ -284,18 +284,18 @@ mod tests {
             "no named gate for the not-terminal row: {text}"
         );
         assert!(text.contains("  kept nt2 (not terminal:"));
-        // A row held because it died mid-turn and one held because nothing
-        // could read its transcript are different problems with different
-        // fixes, and the gate name alone spells them the same.
+        // A row whose probe ran and answered and one the sweep never asked are
+        // different problems with different fixes, and the gate name alone
+        // spells them the same.
         assert!(text.contains("tail: stalled"), "{text}");
-        assert!(text.contains("no tail read"), "{text}");
+        assert!(text.contains("not probed: no idle signal"), "{text}");
         let out = render_reap(&s, true, false);
         let v: Value = serde_json::from_str(out.trim()).expect("valid json");
         assert_eq!(
             v["kept_not_terminal"],
             json!([
                 {"id": "nt1", "reason": "tail: stalled"},
-                {"id": "nt2", "reason": "no tail read"},
+                {"id": "nt2", "reason": "not probed: no idle signal"},
             ])
         );
     }

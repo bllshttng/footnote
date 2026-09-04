@@ -1458,25 +1458,6 @@ pub(crate) fn index_tree(
     Ok(out)
 }
 
-/// The most recently written of the store's matches, for the freshness probe.
-/// Newest, not first: a session can leave stubs in other project dirs, and a
-/// stub whose creation post-dates the real transcript's last turn must not
-/// read as the fresher one is stale (a misread there only KEEPS a row, the
-/// fail-safe direction).
-fn newest_by_mtime(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
-    paths
-        .iter()
-        .max_by_key(|p| {
-            std::fs::metadata(p)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-        })
-        .cloned()
-}
-
 /// Harness-session cascades per sweep: bounded so one sweep cannot turn into an
 /// unbounded subprocess farm; the remainder is candidates on the next tick.
 const CASCADE_CAP: usize = 10;
@@ -2592,6 +2573,9 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         row: crate::gc::GcRow,
         id: String,
         grace_secs: i64,
+        /// The idle reading that fed the dormant gate, kept so a row the gate
+        /// did not open for can be told WHY it was never probed.
+        idle: Option<i64>,
         /// The handle this row escalated to the probe, when the stat gate could
         /// not answer its liveness question from disk alone.
         dormant_handle: Option<String>,
@@ -2668,24 +2652,20 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         };
         let harness_session_gone = store_hits.as_ref().map(|m| m.is_empty());
         let transcript_fresh = if !is_live && past_grace {
-            let harness_path = store_hits.as_deref().and_then(newest_by_mtime);
-            // The `log_path` fallback stays available only to rows a terminal
-            // status or a dead pid already condemned. The stamped-contradiction
-            // arm reads staleness ONLY from the session's own harness store,
-            // because a store lookup can come back empty for two reasons: the
-            // session ended, or the lookup was aimed at the wrong tree. That
-            // second one is real - a codex child that inherited a claude pane's
-            // CLAUDE_CONFIG_DIR is looked for under `<config_dir>/projects`,
-            // where codex never writes - and a stale `log_path` copy nobody
-            // updates would then read as positively stale for a LIVE session.
-            match harness_path
+            // The stamped-contradiction arm resolves the transcript through the
+            // shared rule: the harness store first, the `log_path` fallback
+            // only for a row already condemned.
+            transcript_fresh_probe(
+                crate::gc::row_transcript(
+                    store_hits.as_deref(),
+                    e.log_path.as_deref(),
+                    terminal_or_dead,
+                )
                 .as_deref()
-                .and_then(|p| p.to_str())
-                .or_else(|| terminal_or_dead.then_some(e.log_path.as_deref()).flatten())
-            {
-                Some(path) => transcript_fresh_probe(Some(path), now, grace_secs),
-                None => None,
-            }
+                .and_then(|p| p.to_str()),
+                now,
+                grace_secs,
+            )
         } else {
             None
         };
@@ -2709,17 +2689,25 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         // shortfall. Removing it means every escalated row is judged this
         // sweep, and the count spent is reported.
         let mut dormant_handle = None;
-        // A thread row owns no pid by design, so a restarted daemon reads it as
-        // not live and never probed its tail - the one reading that can say the
-        // work is over. A one-shot ask is excluded by name, not by shape: since
-        // v9 it carries the claude jobId in `short_id`, so the pid-less test
-        // alone would pull it into an eviction route it never used before.
-        if is_live || (e.pid.is_none() && !e.short_id.is_empty() && !e.is_one_shot_ask()) {
+        let mut idle = None;
+        // Every pid-less row gets its tail read. The two identity clauses this
+        // gate used to demand (a short_id the harness issued, not-a-one-shot)
+        // said nothing about whether the tail is worth reading, and they held
+        // 31 of 32 kept-not-terminal rows out of the probe while their
+        // transcripts sat on disk unread. This gate only answers "should we
+        // READ this tail"; removal stays with gc_action, which requires a
+        // positive `done` tail plus past-grace and its own corroboration gates.
+        if is_live || e.pid.is_none() {
             // The idle gate's transcript read comes from the same store index
-            // (in memory after the first build), never a fresh walk.
-            let transcript = store_matches(e)
-                .and_then(|m| newest_by_mtime(&m))
-                .or_else(|| e.log_path.as_deref().map(std::path::PathBuf::from));
+            // (in memory after the first build), never a fresh walk, through the
+            // same shared rule the contradiction arm uses - the unconditional
+            // `log_path` fallback read a 0-byte wrapper log for 21 claude rows
+            // that have the real transcript in their own store.
+            let transcript = crate::gc::row_transcript(
+                store_matches(e).as_deref(),
+                e.log_path.as_deref(),
+                terminal_or_dead,
+            );
             // `row_idle_secs` folds the transcript's mtime into `idle`, so this
             // gate opening already proves the transcript has been untouched for
             // longer than grace - an hour by default, against a sweep every
@@ -2727,14 +2715,9 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
             // is not here: growth since the last sweep leaves an mtime seconds
             // old, and such a row never reaches this branch at all. See
             // `a_live_row_with_a_growing_transcript_is_never_probed_by_the_dormant_gate`.
-            if let Some(idle) = row_idle_secs(e, now, transcript.as_deref()) {
-                if idle > grace_secs {
-                    dormant_handle = Some(if e.short_id.is_empty() {
-                        e.name.clone()
-                    } else {
-                        e.short_id.clone()
-                    });
-                }
+            idle = row_idle_secs(e, now, transcript.as_deref());
+            if idle.map_or(false, |secs| secs > grace_secs) {
+                dormant_handle = Some(crate::gc::row_handle(e));
             }
         }
         // Filled in by pass two from the batched probe. A row the stat gate
@@ -2789,16 +2772,13 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         if needs_probe {
             row.worktree_clean = worktree_clean_probe(&e.cwd);
         }
-        let id = if e.short_id.is_empty() {
-            e.name.clone()
-        } else {
-            e.short_id.clone()
-        };
+        let id = crate::gc::row_handle(e);
         pending.push(PendingRow {
             entry: e,
             row,
             id,
             grace_secs,
+            idle,
             dormant_handle,
         });
     }
@@ -2826,6 +2806,7 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
             mut row,
             id,
             grace_secs,
+            idle,
             dormant_handle,
         } = p;
         // Only a POSITIVE `done` reading evicts. A handle the batch could not
@@ -2925,7 +2906,23 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
                                 id,
                                 match tail_state {
                                     Some(state) => format!("tail: {state}"),
-                                    None => "no tail read".to_string(),
+                                    // The probe RAN for this handle and answered
+                                    // nothing: the attempted-and-failed verdict,
+                                    // and still a keep - only `done` evicts.
+                                    None if dormant_handle.is_some() => "tail: unknown".to_string(),
+                                    // The probe was NEVER ASKED. Name the gate
+                                    // that held it: the verdict this arm used
+                                    // to print was heard as read-and-failed and
+                                    // produced a wrong root cause.
+                                    None => format!(
+                                        "not probed: {}",
+                                        crate::gc::not_probed_reason(
+                                            e,
+                                            row.is_live,
+                                            idle,
+                                            grace_secs
+                                        )
+                                    ),
                                 },
                             ));
                         }
@@ -2974,11 +2971,7 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
             if to_reap.get(&e.name) != Some(&e.created_at) {
                 continue;
             }
-            let id = if e.short_id.is_empty() {
-                e.name.clone()
-            } else {
-                e.short_id.clone()
-            };
+            let id = crate::gc::row_handle(e);
             if backstop_ids.contains_key(&e.name) {
                 summary.reaped_backstop.push(id);
             } else if dormant_ids.contains_key(&e.name) {
@@ -3113,11 +3106,7 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
                     if !accounted {
                         continue;
                     }
-                    let row_id = if e.short_id.is_empty() {
-                        e.name.clone()
-                    } else {
-                        e.short_id.clone()
-                    };
+                    let row_id = crate::gc::row_handle(e);
                     let node_session = if let (Some(node_id), Some(node_cascade)) =
                         (node_id.as_deref(), node_cascade)
                     {
@@ -3280,11 +3269,7 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
                             ),
                         ]),
                     );
-                    let reaped_id = if e.short_id.is_empty() {
-                        e.name.clone()
-                    } else {
-                        e.short_id.clone()
-                    };
+                    let reaped_id = crate::gc::row_handle(e);
                     // A backstop removal is counted ONLY in its own list, never
                     // in both. Two totals that overlap cannot be compared, and
                     // comparing them is the point. A dormant reap likewise: it
