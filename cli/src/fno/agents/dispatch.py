@@ -4837,6 +4837,15 @@ def reconcile_agents(
             exit_code=12,
         ) from exc
 
+    # (x-1ab9 task 3.1) The one-time session-names migration rides every
+    # reconcile: file aliases fold into the rows they answer to. Best-effort;
+    # the count is an event, not a signature change.
+    from fno.agents.registry import merge_session_names_into_aliases
+
+    _merged = merge_session_names_into_aliases()
+    if _merged:
+        events.emit("session_aliases_merged", count=_merged)
+
     entry_by_name = {entry.name: entry for entry in entries}
     # (x-1ab9) The PRIMARY index is (harness, harness_session_id) - law
     # d-e952ed19: a label can be renamed by its harness mid-flight; the pair

@@ -1747,11 +1747,36 @@ def _resolve_aliases(live: list[dict], name_map_path: Path) -> dict[str, str]:
                     time.sleep(min(_ALIAS_LOCK_POLL_SECONDS, remaining))
             try:
                 stored = _load_name_map(name_map_path)
+                # (x-1ab9 task 3.1) Rows are the PRIMARY name store: a row's
+                # own alias outranks the legacy file for the same session id.
+                # The file keeps its readers (external roster rows carry no
+                # fno row to hold an alias) until the mail-address surface
+                # folds it (x-c64d).
+                row_aliases: dict[str, str] = {}
+                try:
+                    from fno.agents.registry import load_registry
+
+                    for entry in load_registry():
+                        alias = next(
+                            (
+                                a
+                                for a in (getattr(entry, "aliases", None) or [])
+                                if a and not _is_accreted(a) and not LEGACY_HANDLE_RE.fullmatch(a)
+                            ),
+                            None,
+                        )
+                        sid = entry.harness_session_id or entry.short_id
+                        if alias and sid:
+                            row_aliases[sid] = alias
+                except (OSError, ValueError):
+                    row_aliases = {}
                 # Retire any alias whose session is no longer live.
                 pruned = {sid: nm for sid, nm in stored.items() if sid in live_sids}
                 for r in live:
                     sid = r["session_id"]
-                    if (
+                    if sid in row_aliases:
+                        aliases[sid] = row_aliases[sid]
+                    elif (
                         sid in pruned
                         and isinstance(pruned[sid], str)
                         and pruned[sid]
@@ -2196,7 +2221,23 @@ def _alias_to_session_ids(token: str, name_map_path: Optional[Path]) -> tuple[li
         return [], False
     if not isinstance(stored, dict):
         return [], False
-    return [sid for sid, alias in stored.items() if isinstance(sid, str) and alias == token], True
+    hits = [sid for sid, alias in stored.items() if isinstance(sid, str) and alias == token]
+    # (x-1ab9 task 3.1) The rows are the primary name store: an alias a row
+    # carries resolves even after the legacy file pruned it or never had it.
+    # A row read failure is a miss here, never a wrong answer.
+    try:
+        from fno.agents.registry import load_registry
+
+        for entry in load_registry():
+            if token in (getattr(entry, "aliases", None) or []):
+                sid = getattr(entry, "harness_session_id", None) or getattr(
+                    entry, "short_id", None
+                )
+                if sid and sid not in hits:
+                    hits.append(sid)
+    except (OSError, ValueError):
+        pass
+    return hits, True
 
 
 def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, bool]:

@@ -592,3 +592,59 @@ def test_non_claude_restamp_emits_the_classified_transition(
     assert classified[0]["data"]["classification"] == "succession"
     assert classified[0]["data"]["predecessor_session_id"] == BIRTH
     assert classified[0]["data"]["successor_session_id"] == REMINT
+
+
+# -- x-1ab9 task 3.1: one name store (session-names fold) --------------------
+
+
+def _row_with_sid(name, sid, short):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry([
+        AgentEntry(
+            name=name,
+            harness="claude",
+            harness_session_id=sid,
+            short_id=short,
+            cwd="/proj",
+            log_path="",
+            status="live",
+        )
+    ])
+
+
+def test_reconcile_migration_folds_a_file_alias_into_its_row_ac5_hp(
+    tmp_path, monkeypatch
+) -> None:
+    """AC5-HP: an alias the overlay file carries for a session lands on the
+    row the session answers to, the mail reader resolves it from the row, and
+    a second merge is a no-op (idempotent)."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.discover import _alias_to_session_ids, default_name_map_path
+    from fno.agents.registry import load_registry, merge_session_names_into_aliases
+
+    _row_with_sid("target-x-f0c2", BIRTH, "f0c2abcd")
+    name_map = default_name_map_path()
+    name_map.parent.mkdir(parents=True, exist_ok=True)
+    name_map.write_text(json.dumps({BIRTH: "legible-alias"}), encoding="utf-8")
+
+    assert merge_session_names_into_aliases() == 1
+    row = load_registry()[0]
+    assert "legible-alias" in row.aliases, "the row carries the folded alias"
+    ids, read_ok = _alias_to_session_ids("legible-alias", None)
+    assert read_ok and BIRTH in ids, "mail resolution answers from the row"
+    assert merge_session_names_into_aliases() == 0, "a replay merges nothing"
+
+
+def test_append_row_alias_refuses_an_alias_another_row_answers_to(
+    tmp_path, monkeypatch
+) -> None:
+    """An ambiguous alias is no address: the append fails closed when another
+    row already answers to it, so `find` never has to guess."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import append_row_alias, load_registry
+
+    _row_with_sid("row-a", BIRTH, "aaaa1111")
+    _row_with_sid("legible-alias", REMINT, "bbbb2222")
+    assert append_row_alias("row-a", "legible-alias") is False
+    assert "legible-alias" not in load_registry()[0].aliases, "the ambiguous alias never lands"
