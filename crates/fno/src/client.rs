@@ -1134,6 +1134,16 @@ struct View {
     yard_want: bool,
     yard_inflight: bool,
     yard_gen: u64,
+    /// (x-3cb3) The court panel. `Some(opened_at)` while it is on screen; the
+    /// fold beside it follows the yard's discipline exactly - gen-tagged,
+    /// one in flight, TTL-cached, degraded loud.
+    court: Option<Instant>,
+    court_fold: Option<crate::court_overlay::Court>,
+    court_fold_at: Option<Instant>,
+    court_degraded: bool,
+    court_want: bool,
+    court_inflight: bool,
+    court_gen: u64,
     /// Catch-up "while you were gone" digest lines (x-4e2d), set on attach after
     /// an absence; the next keypress dismisses it (like [`View::overlay`]).
     digest: Option<Vec<String>>,
@@ -2919,6 +2929,13 @@ impl View {
             yard_want: false,
             yard_inflight: false,
             yard_gen: 0,
+            court: None,
+            court_fold: None,
+            court_fold_at: None,
+            court_degraded: false,
+            court_want: false,
+            court_inflight: false,
+            court_gen: 0,
             digest: None,
             notice: None,
             row_stamp: None,
@@ -3368,6 +3385,122 @@ impl View {
         self.answers = Some(idx);
     }
 
+    /// (x-3cb3) The court panel's lines: load against the cap, the machine,
+    /// the census, the lane advisor's own answer, and the age of the reading.
+    ///
+    /// Three rules this render keeps, each closing a way a panel can lie:
+    /// the `read` line always shows the fold's age and says `stale` rather
+    /// than `unknown`; the attribution gap gets its own line and is never
+    /// folded into a count; and a refusal prints the advisor's own words
+    /// verbatim with no lane number beside them.
+    fn court_overlay_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        let Some(court) = self.court_fold.as_ref() else {
+            lines.push(if self.court_degraded {
+                "  fold failed - `fno doctor lanes` did not answer inside 10s".to_string()
+            } else {
+                "  reading the machine...".to_string()
+            });
+            return lines;
+        };
+
+        // load against the cap: the operator's own question, first.
+        match (
+            court.arm_num("spawn load", "load_1m"),
+            court.arm_num("spawn load", "ceiling"),
+        ) {
+            (Some(load), Some(ceiling)) => {
+                let status = court.arm_str("spawn load", "status").unwrap_or("unknown");
+                lines.push(format!("  load    {load:.1} / {ceiling:.1}   {status}"));
+            }
+            _ => {
+                let reason = court
+                    .arm("spawn load")
+                    .map_or("arm absent", |a| a.reason.as_str());
+                lines.push(format!("  load    unknown - {reason}"));
+            }
+        }
+
+        // the machine the lanes compete for, not the fleet alone.
+        match (
+            court.arm_num("whole-machine cpu", "busy_fraction"),
+            court.arm_num("whole-machine cpu", "capacity_cores"),
+        ) {
+            (Some(busy), Some(cores)) => lines.push(format!(
+                "  cpu     {:.0}% busy of {cores:.0} cores",
+                busy * 100.0
+            )),
+            _ => lines.push("  cpu     unknown".to_string()),
+        }
+        if let Some(free) = court.arm_num("memory", "available_gb") {
+            lines.push(format!("  memory  {free:.1} GB available"));
+        }
+
+        // the court itself.
+        let census = &court.census;
+        lines.push(format!(
+            "  court   {} kings · {} workers · {} tests ({} rows)",
+            count_or_unknown(census.kings),
+            count_or_unknown(census.workers),
+            count_or_unknown(census.tests),
+            count_or_unknown(census.roster_rows),
+        ));
+        if census.king_conflicts.is_some_and(|c| c > 0) {
+            lines.push(format!(
+                "  warn    {} scope(s) held by more than one crown",
+                census.king_conflicts.unwrap_or(0)
+            ));
+        }
+
+        // the advisor's answer, or the advisor's refusal in its own words.
+        match court.lane_count {
+            Some(count) => {
+                let cost = match (court.per_lane_cpu_cores, court.per_lane_mem_gb) {
+                    (Some(c), Some(g)) => format!(" · {c:.3} cores, {g:.2} GB per lane"),
+                    _ => String::new(),
+                };
+                lines.push(format!("  lanes   {count} more fit{cost}"));
+                if !court.cost_source.is_empty() {
+                    lines.push(format!("          {}", court.cost_source));
+                }
+            }
+            None => {
+                let reason = if court.refused_reason.is_empty() {
+                    "no lane number: the advisor refused without naming a reason"
+                } else {
+                    court.refused_reason.as_str()
+                };
+                lines.push(format!("  lanes   REFUSED - {reason}"));
+            }
+        }
+
+        if let Some(gap) = census.attribution_gap.as_ref() {
+            lines.push(format!("  gap     {gap}"));
+            lines.push("          fleet share is an undercount, not headroom".to_string());
+        }
+
+        // the age line, always. A stale reading says stale; it never says
+        // unknown, and it never silently passes itself off as fresh.
+        let age = self.court_fold_at.map_or_else(
+            || "age unknown".to_string(),
+            |t| {
+                let secs = t.elapsed().as_secs_f32();
+                if t.elapsed() > COURT_CACHE_TTL {
+                    format!("{secs:.1}s ago (stale, refreshing)")
+                } else {
+                    format!("{secs:.1}s ago")
+                }
+            },
+        );
+        let degraded = if self.court_degraded {
+            " · last refresh failed"
+        } else {
+            ""
+        };
+        lines.push(format!("  read    {age}{degraded}"));
+        lines
+    }
+
     /// Open the new-workspace name overlay modally (x-9e5e): clear any
     /// keyboard-opened overlay first. `create_keys` is routed AFTER
     /// selector/answers in `handle_stdin`, so a lingering selector would
@@ -3376,6 +3509,7 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.yard = None;
+        self.court = None;
         self.search = None;
         self.rename = None;
         self.move_pick = None;
@@ -3396,6 +3530,7 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.yard = None;
+        self.court = None;
         self.search = None;
         self.rename = None;
         self.create = None;
@@ -3419,6 +3554,7 @@ impl View {
         self.sel_hover_armed = false;
         self.answers = None;
         self.yard = None;
+        self.court = None;
         self.search = None;
         // A half-typed workspace name is dropped too (gemini review): the
         // confirm owns the bottom row, and resuming a hidden create overlay
@@ -3450,6 +3586,7 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.yard = None;
+        self.court = None;
         self.search = None;
         self.move_pick = None;
         self.attach_place = None;
@@ -3889,6 +4026,7 @@ impl View {
         self.menu_usurping_open()
             || self.answers.is_some()
             || self.yard.is_some()
+            || self.court.is_some()
             || self.peek.is_some()
             || self.digest.is_some()
     }
@@ -3922,6 +4060,7 @@ impl View {
             || self.nav.is_some()
             || self.answers.is_some()
             || self.yard.is_some()
+            || self.court.is_some()
             || self.digest.is_some()
     }
 
@@ -6842,6 +6981,24 @@ impl View {
                 &self.theme,
                 None,
             );
+        } else if self.court.is_some() {
+            // (x-3cb3) The court: what the machine is holding, and the cap
+            // that decides whether another lane fits. Read-only - every key
+            // closes it.
+            let lines = self.court_overlay_lines();
+            let chrome = chrome::Chrome::new("the court", Anchor::Center)
+                .footer("any key closes · prefix+C reopens");
+            draw_lines_overlay(
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                &lines,
+                &self.theme,
+                None,
+            );
         } else if let Some(picker) = &self.move_pick {
             // x-96e8 move picker: `move tab to:` / `move pane to:` + one
             // numbered line per candidate squad.
@@ -9541,6 +9698,21 @@ const NEEDS_CACHE_TTL: Duration = Duration::from_secs(5);
 /// parse for data that is nearly static (species and album history change
 /// on merge cadence, not keystroke cadence).
 const YARD_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// (x-3cb3) Fifteen seconds, not the yard's sixty. The yard renders identity,
+/// which does not move; this renders load, which does.
+///
+/// The floor is measured, not chosen: `fno doctor lanes --json` took 8.07s on
+/// this machine at 1-minute load 107. A TTL under the read's own cost means
+/// every open refetches and every reading is already stale on arrival, which
+/// is a busy loop wearing a cache's clothes. Fifteen seconds sits above that
+/// cost and below the horizon where load has moved enough to mislead.
+///
+/// A reading older than this still RENDERS, with its age and the word
+/// `stale` - never as `unknown`. An operator watching `unknown` every second
+/// learns nothing and reaches for `--force`, which is how a guard becomes a
+/// formality.
+const COURT_CACHE_TTL: Duration = Duration::from_secs(15);
 /// Default fold window: the last 24h (the fold also windows server-side).
 const NEEDS_WINDOW_SECS: u64 = 24 * 60 * 60;
 
@@ -10193,6 +10365,13 @@ fn yard_eye(a: &AgentRow, need: Option<NeedKind>) -> crate::sprites::Eye {
 /// NO sprite - a species with no reading is a guessed cat, and the yard does
 /// not guess. The hat reads the ROW's `crown_level` (the same wire value the
 /// sideline orders by), never a payload copy.
+/// (x-3cb3) One count, rendered so an unread number says so. `unknown` is
+/// printed ONLY where the read genuinely failed; a fabricated zero read as
+/// headroom is the failure this panel exists to prevent.
+fn count_or_unknown(value: Option<u32>) -> String {
+    value.map_or_else(|| "unknown".to_string(), |v| v.to_string())
+}
+
 fn yard_overlay_lines(
     crowd: &[(&str, crate::sprites::Eye, u32)],
     sel: usize,
@@ -11207,6 +11386,10 @@ async fn attach_and_run(
     let (yard_tx, mut yard_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<crate::yard_overlay::YardItem>>)>();
 
+    // (x-3cb3) The court fold leg, same shape as the yard's.
+    let (court_tx, mut court_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, Option<crate::court_overlay::Court>)>();
+
     // x-84d7: the Connections modal's read fold runs off the UI loop and reports
     // back here, tagged with the generation it was kicked under, so a slow `fno`
     // never blocks the modal and a result landing after a close/refresh is
@@ -11320,6 +11503,16 @@ async fn attach_and_run(
             let gen = view.yard_gen;
             tokio::spawn(async move {
                 let result = crate::yard_overlay::fold_now().await;
+                let _ = tx.send((gen, result));
+            });
+        }
+        if view.court_want && !view.court_inflight {
+            view.court_want = false;
+            view.court_inflight = true;
+            let tx = court_tx.clone();
+            let gen = view.court_gen;
+            tokio::spawn(async move {
+                let result = crate::court_overlay::fold_now().await;
                 let _ = tx.send((gen, result));
             });
         }
@@ -11758,6 +11951,27 @@ async fn attach_and_run(
                             view.yard_fold = Some(Vec::new());
                             view.yard_degraded = true;
                         }
+                    }
+                    if let Err(e) = compositor.draw(&view.compose()) {
+                        break Err(format!("draw: {e}"));
+                    }
+                }
+            }
+            Some((gen, result)) = court_rx.recv() => {
+                // (x-3cb3) The court fold landed. Same merge discipline as
+                // the yard's: gen-guarded, degraded-loud on None, and a
+                // FAILED fold never stamps court_fold_at, so the age line
+                // keeps describing the last real reading rather than the
+                // moment the failure arrived.
+                view.court_inflight = false;
+                if gen == view.court_gen && view.court.is_some() {
+                    match result {
+                        Some(court) => {
+                            view.court_fold = Some(court);
+                            view.court_degraded = false;
+                            view.court_fold_at = Some(Instant::now());
+                        }
+                        None => view.court_degraded = true,
                     }
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
@@ -12928,6 +13142,9 @@ async fn handle_stdin(
     if view.yard.is_some() {
         return yard_keys(view, &passthrough, sock_w).await;
     }
+    if view.court.is_some() {
+        return court_keys(view, &passthrough).await;
+    }
     if view.create.is_some() {
         return create_keys(view, &passthrough, sock_w).await;
     }
@@ -13113,6 +13330,26 @@ async fn dispatch_event(
                 view.yard_fold = None;
                 view.yard_degraded = false;
                 view.yard_want = true;
+            }
+        }
+        Event::OpenCourt => {
+            // (x-3cb3) Open the court. It ALWAYS opens: a fold that is
+            // pending, stale or failed renders its own line, never a blank
+            // panel. Within the TTL the cached reading is served with its
+            // age shown, which is what keeps a repaint off the slow read.
+            view.court = Some(Instant::now());
+            view.court_gen = view.court_gen.wrapping_add(1);
+            let fresh = view
+                .court_fold_at
+                .is_some_and(|t| t.elapsed() < COURT_CACHE_TTL);
+            if fresh {
+                view.court_degraded = false;
+            } else {
+                // The stale reading is KEPT so the panel can render it as
+                // stale while the refresh runs. Dropping it here is what
+                // would put `unknown` on screen.
+                view.court_degraded = false;
+                view.court_want = true;
             }
         }
         Event::TogglePanel => {
@@ -16982,6 +17219,16 @@ async fn answer_keys(
             }
             _ => {}
         }
+    }
+    Ok(StdinFlow::Continue)
+}
+
+/// (x-3cb3) Court-overlay key routing: the panel is read-only, so ANY key
+/// closes it and no byte leaks into a pane (the answer-overlay invariant).
+async fn court_keys(view: &mut View, bytes: &[u8]) -> Result<StdinFlow, String> {
+    if !bytes.is_empty() {
+        view.court = None;
+        view.court_gen = view.court_gen.wrapping_add(1);
     }
     Ok(StdinFlow::Continue)
 }

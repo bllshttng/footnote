@@ -19,6 +19,10 @@ mod glyph_tests;
 #[path = "client/tests/rename_tests.rs"]
 mod rename_tests;
 
+// The court panel's render family (x-3cb3).
+#[path = "client/tests/court_tests.rs"]
+mod court_tests;
+
 #[test]
 fn config_says_off_matches_only_trimmed_off() {
     // Bridges config.toml -> the env the interactive server latches
