@@ -1492,6 +1492,84 @@ fn close_pane_plain_lone_pane_still_removes_its_tab() {
     );
 }
 
+/// A live paneless claude row (the Drive tier): harness claude plus an
+/// attach id is exactly the shape the re-entry resolver owns.
+fn claude_row(name: &str, attach: &str) -> RegistryAgent {
+    let mut row = bg_row(name, "/tmp/seen", Some(attach));
+    row.harness = Some("claude".into());
+    row
+}
+
+#[tokio::test]
+async fn portal_ctl_claude_row_replies_the_landing_not_the_fallback() {
+    // AC1-HP marker: the control door on a LIVE paneless claude row. The
+    // join behind the reply has two refusal arms: (false, Some) means
+    // reach_portal ran and reported; (false, None) means it produced
+    // nothing and the fallback invented "no such agent: NAME" - the reply
+    // that sent a reader hunting a resolver that is not in this chain.
+    // The reply must be the reach's own verdict, and it must name the
+    // portal index it opened.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let row = claude_row("claude-row", "deadbee1");
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+
+    core.portal_ctl(
+        "claude-row",
+        1,
+        PanePlacement::default(),
+        Some(vec![row]),
+        tx,
+    );
+
+    match rx.await.expect("a reply") {
+        ServerMsg::Err { msg, .. } => {
+            panic!("the (false, None) fallback arm fired - reach_portal never reported: {msg}")
+        }
+        ServerMsg::Notice { text } => assert!(
+            text.contains("portal 1"),
+            "the landing must name the portal index the caller asked for: {text}"
+        ),
+        other => panic!("expected a Notice landing, got {other:?}"),
+    }
+    assert!(
+        core.portals.get(&1).is_some(),
+        "portal 1 holds the row's viewer"
+    );
+    if let Some(portal) = core.portals.get(&1) {
+        let pid = portal.seat;
+        core.reap_pane(pid); // don't leak the stand-in child
+    }
+}
+
+#[tokio::test]
+async fn portal_ctl_claude_row_with_a_refused_plan_names_the_reason() {
+    // The resolver's refusal must reach the operator verbatim, never
+    // collapse into the reach-never-ran fallback: (false, Some) is the
+    // honest arm - the reach ran and was refused by name.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let row = claude_row("claude-row", "deadbee1");
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+
+    core.portal_ctl(
+        "claude-row",
+        1,
+        PanePlacement::default(),
+        Some(vec![row]),
+        tx,
+    );
+
+    match rx.await.expect("a reply") {
+        ServerMsg::Err { msg, .. } => assert!(
+            msg.contains("account axis"),
+            "the resolver's refusal reaches the operator verbatim, never as the fallback: {msg}"
+        ),
+        other => panic!("expected an Err refusal, got {other:?}"),
+    }
+    assert!(core.portals.is_empty(), "no portal on a refused plan");
+}
+
 #[test]
 fn close_pane_stand_in_shell_still_removes_its_tab() {
     // The idle-shell stand-in must stay closable by hand: its own close
