@@ -1615,6 +1615,35 @@ fn resolve_identity_from(get: impl Fn(&str) -> Option<String>) -> (Option<String
     }
 }
 
+/// Harnesses whose sessions SHARE one host process. For these the durable pid a
+/// session resolves to is a multiplexer that hosts every session on the machine
+/// and outlives all of them, so its liveness says nothing about the session's.
+/// Membership is proved by MEASUREMENT, never by reading a name: run one
+/// session, walk to its harness ancestor, end the session, and check whether
+/// that pid is still alive.
+///
+///   codex: MEASURED 2026-09-03. `codex app-server --remote-control` pid 53566,
+///          up 9h20m, still answering for a session dead 5h, keeping a lease
+///          live 3h45m past its TTL.
+///
+/// The Python twin is `_SHARED_HOST_HARNESSES` in
+/// `cli/src/fno/claims/session_pid.py`; the classifier parity harness holds the
+/// two to one verdict.
+const SHARED_HOST_HARNESSES: &[&str] = &["codex"];
+
+/// True when `harness` forks a process per session, so its pid's death is the
+/// session's death.
+///
+/// False ONLY for a harness measured to share one host process. An unknown or
+/// absent harness returns true and keeps today's behavior: the hybrid arm exists
+/// to stop a peer stealing the claim of a suspended-but-alive session, and this
+/// predicate must never widen that theft to harnesses nobody measured. So the
+/// list is a deny-list, and adding to it costs a measurement.
+pub fn pid_dies_with_session(harness: Option<&str>) -> bool {
+    let name = harness.unwrap_or("").trim().to_ascii_lowercase();
+    !SHARED_HOST_HARNESSES.contains(&name.as_str())
+}
+
 /// Resolve the owning harness from the ambient process environment. `None` when
 /// no marker is set (a bare shell / daemon) - the claim then reads as unknown,
 /// never blocking dispatch on a missing tag.
