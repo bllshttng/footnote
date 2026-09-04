@@ -407,11 +407,9 @@ def test_dispatch_command_refuses_undeclared_without_naming_a_neighbour():
 def unseated(monkeypatch):
     """A harness whose spawn claim is not native, without depending on one.
 
-    Every rowed harness but deprecated gemini reads native today, so a test
-    that names a real unseated subject goes vacuous the day that harness earns
-    its arm. That has now happened three times (pi, opencode, agy). Patch the
-    claim instead: the subject under test is the refusal PATH, never which
-    harness happens to be waiting for a driver."""
+    Naming a real unseated subject goes vacuous the day that harness earns its
+    arm, which has now happened three times (pi, opencode, agy). The subject
+    under test is the refusal PATH, so patch the claim instead."""
     import fno.agents.harness_map as hm
 
     real = hm.spawn_state

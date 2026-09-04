@@ -40,15 +40,11 @@ KNOWN_HARNESSES: tuple[str, ...] = (
 
 # Every harness with a BUILT thread-spawn arm: opencode through its launch
 # seam, and cursor-agent, pi, grok and agy through the keeper lane. A name
-# joins on journey evidence, never on roster growth, and the lane table in
-# docs/architecture/thread-lanes.md carries the measurement behind each row.
-#
-# Membership answers "is there a seam arm". The capability row answers "is the
-# lane measured". They are different questions, which is why pi and agy sit
-# here while their HEADLESS lanes stay unmeasured and `_check_spawn_harness`
-# refuses those by stance. kimi is absent for the same reason: its ACP mint
-# lane is built and unit-tested, but the binary refuses every turn until its
-# provider is configured, so nothing measured stands behind a seat.
+# joins on journey evidence, never on roster growth; the measurement behind
+# each row is in docs/architecture/thread-lanes.md. Membership answers "is
+# there a seam arm", the row answers "is the lane measured", which is why pi
+# and agy sit here while their HEADLESS lanes stay unmeasured. kimi is absent
+# because its ACP lane refuses every turn until a provider is configured.
 SPAWN_HARNESSES: tuple[str, ...] = (
     "claude",
     "codex",
@@ -63,14 +59,10 @@ SPAWN_HARNESSES: tuple[str, ...] = (
 def unknown_thread_harness_message(name: str) -> str:
     """The one refusal every thread-substrate seam raises.
 
-    Both halves derive from the tuples in this module, so no seam can name a
-    harness the accept list has since admitted. The ROSTER, not the capability
-    table, decides the second sentence: the pane lane execs whatever is on
-    PATH, so a capability row is not what earns one. An unrecognized name gets
-    no such pointer, because nothing here knows the binary exists.
-
-    A missing thread lane is a statement about what fno has BUILT, never about
-    the harness: any harness can host a thread once its lane is measured
+    Both halves derive from this module's tuples, so no seam can name a
+    harness the accept list has since admitted. The ROSTER decides the second
+    sentence: the pane lane execs whatever is on PATH. A missing thread lane
+    says what fno has BUILT, never what the harness can do
     (docs/architecture/thread-lanes.md).
     """
     accepted = ", ".join(SPAWN_HARNESSES)
