@@ -3517,14 +3517,14 @@ def _raw_send(
     # A review verb on a keystroke lane is asked of the TABLE before it is
     # typed (x-a3e8): this branch used to paste whatever it was given and
     # return a delivery receipt.
-    reason = keystroke_review_refusal(
+    review_block = keystroke_review_refusal(
         name, getattr(entry, "harness", None) or "", stripped.split(maxsplit=1)[0]
     )
-    if reason:
+    if review_block:
         if check:
-            print(f"not-injectable: {reason}")
+            print(f"not-injectable: {review_block}")
             raise typer.Exit(code=1)
-        _refused(reason)
+        _refused(review_block)
 
     # --check stops here, one step short of the keystroke. Each lane is asked the
     # strongest question it can answer cheaply, and neither answer is a promise the
