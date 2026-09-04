@@ -760,6 +760,7 @@ def _codex_create_path(
     # stamp the event only, leaving the row - the surface consumers read -
     # without lineage).
     _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()
+    _report_unlinked_parent(_cx_session)
     new_entry = AgentEntry(
         name=name,
         cwd=str(cwd),
@@ -877,6 +878,35 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
     parent_cwd: Optional[str] = (os.environ.get("PWD") or os.getcwd()).strip() or None
 
     return identity.session_id, identity.harness, parent_cwd
+
+
+def _report_unlinked_parent(session_id: Optional[str]) -> None:
+    """Name an unrecorded parent edge in the spawn output.
+
+    A null ``spawned_by_session`` is sometimes CORRECT: markers from two
+    harness families attribute nothing, because an inherited foreign marker
+    would record a stranger as the parent for the life of that row. The defect
+    was that the null was silent at both ends - the spawning king never learned
+    its child is invisible to the orphan check meant to protect it. This line
+    is the whole fix for that side: say it when it happens, with the identity
+    resolution's own reason (its disposition and the markers it saw), so the
+    spawner reads WHY, not just that.
+    """
+    if session_id:
+        return
+    try:
+        from fno.claims.self_identity import resolve_self_identity
+
+        identity = resolve_self_identity()
+        markers = ",".join(m for m, _h, _v in identity.markers_present) or "no markers"
+        reason = f"identity disposition={identity.disposition}, markers={markers}"
+    except Exception:  # noqa: BLE001 - the notice never breaks the spawn
+        reason = "identity unreadable"
+    print(
+        f"spawn: parent edge NOT recorded ({reason}); this worker will not "
+        "appear in its spawner's orphan check",
+        file=sys.stderr,
+    )
 
 
 def _capture_spawn_trigger() -> Optional[str]:
@@ -1373,6 +1403,7 @@ def _lane_b_thread_spawn(
             )
 
         _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()
+        _report_unlinked_parent(_cx_session)
         new_entry = AgentEntry(
             name=name,
             cwd=str(cwd),
@@ -1933,6 +1964,7 @@ def _claude_create_path(
     # Best-effort: never raises, degrades to (None, None, None) when absent.
     # spawn_trigger was already popped before bg_create above (x-42c5 ordering fix).
     spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
+    _report_unlinked_parent(spawned_by_session)
 
     # Crown stamp (US9), same contract as the pane path: the grantor is the
     # spawning session captured just above, or "human" for a direct human spawn

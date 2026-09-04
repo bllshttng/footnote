@@ -7771,6 +7771,11 @@ where
                     "crown_level": e.crown_level,
                     "crown_scope": e.crown_scope,
                     "crown_grantor": e.crown_grantor,
+                    // The parent edge the orphan check keys on (same key as
+                    // Python's serialize_entry; registry-json has always had
+                    // it). Null is a real answer: this worker will not appear
+                    // in its spawner's orphan check.
+                    "spawned_by_session": e.spawned_by_session,
                     // How this session came to exist: "operator" for one a human
                     // started by hand, "spawn" for a footnote-created worker, null
                     // for a row nothing stamped. Emitted on BOTH serializers because

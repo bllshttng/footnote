@@ -42,6 +42,7 @@ from fno import paths
 from fno.agents.dispatch import (
     DispatchAskError,
     _capture_parent_edge,
+    _report_unlinked_parent,
     _capture_spawn_trigger,
     _touch_log_path,
     validate_spawn_name,
@@ -4422,6 +4423,7 @@ def dispatch_spawn_pane(
                 exit_code=1,
             )
         spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
+        _report_unlinked_parent(spawned_by_session)
         # spawn_trigger was already popped before the pane-run env snapshot above.
 
         # The receipt's two independent facts (see MuxSpawnResult.bound), plus
