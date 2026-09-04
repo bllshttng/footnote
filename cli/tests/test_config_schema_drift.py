@@ -46,7 +46,8 @@ def test_registry_is_complete_and_exact() -> None:
 
 def test_provider_outage_config_defaults_and_minima_are_fail_closed() -> None:
     defaults = RecoveryBlock()
-    assert defaults.watchdog == "off"
+    assert defaults.watchdog.enabled is False
+    assert defaults.watchdog.mode == "report"
     # The DEFAULT stays 2; the FLOOR is 1 - quorum=1 is an operator's positive
     # decision that a lone worker's outage is authority enough.
     assert defaults.provider_outage_quorum == 2
@@ -59,7 +60,11 @@ def test_provider_outage_config_defaults_and_minima_are_fail_closed() -> None:
     assert defaults.provider_outage_evidence_freshness_seconds == 600
     assert defaults.provider_outage_reset_grace_seconds == 120
     assert defaults.provider_health_marker_ttl_seconds == 120
-    RecoveryBlock(watchdog="handoff")
+    # The flat spelling every config written before the split carries.
+    legacy = RecoveryBlock(watchdog="handoff", watchdog_reap=True)
+    assert (legacy.watchdog.enabled, legacy.watchdog.mode) == (True, "handoff")
+    assert legacy.watchdog.reap is True
+    assert RecoveryBlock(watchdog="off").watchdog.enabled is False
 
     for field, value in {
         "provider_outage_quorum": 0,

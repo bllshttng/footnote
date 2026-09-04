@@ -1110,21 +1110,27 @@ def lane_armed(settings: Any) -> bool:
     alarm about a deliberate silence. A freshness reader that does not share
     the producer's own condition is measuring a different subsystem.
     """
-    try:
-        return bool(
-            getattr(settings.recovery, "watchdog", "off") in ("report", "wake", "handoff")
-            and settings.recovery.enabled
-            and settings.autonomy.enabled
-        )
-    except Exception:  # noqa: BLE001 - a partial settings stub is not armed
-        return False
+    return _armed(settings, None)
 
 
 def handoff_armed(settings: Any) -> bool:
     """Return true only for the explicit cross-provider action level."""
+    return _armed(settings, "handoff")
+
+
+def wake_armed(settings: Any) -> bool:
+    """Return true only for the level that may resume a stalled session."""
+    return _armed(settings, "wake")
+
+
+def _armed(settings: Any, mode: Optional[str]) -> bool:
+    """The lane's arming question, spelled once. `mode` None asks only whether
+    the lane runs at all; a mode asks for that exact depth."""
     try:
+        watchdog = settings.recovery.watchdog
         return bool(
-            getattr(settings.recovery, "watchdog", "off") == "handoff"
+            watchdog.enabled
+            and (mode is None or watchdog.mode == mode)
             and settings.recovery.enabled
             and settings.autonomy.enabled
         )
@@ -1604,15 +1610,13 @@ def _verdict_one(
             return Verdict(row.row_id, row.name, row.state, REAP,
                            reap_basis, "stop+rm", cotenants)
         if answer is REAP_UNKNOWN:
-            # HELD, not returned. Reap's non-answer used to return STALE here,
-            # above retire, so every row whose liveness probe stayed silent -
-            # 55 of 55 on the machine this was measured on, because a row
-            # carrying no pid and no heartbeat can only answer UNKNOWN - was
-            # reported instead of stopped, including rows whose node was done
-            # AND merged. Retire is strictly weaker (it runs `stop`, which
-            # `fno agents resume` undoes) and carries its own probe and state
-            # guards, so it inherits none of reap's protection by being asked
-            # first. The basis is returned below if retire also declines.
+            # HELD, not returned. Returning STALE here (above retire) reported
+            # every row whose liveness probe stayed silent instead of stopping
+            # it - 55 of 55 measured, because a row with no pid and no
+            # heartbeat can only answer UNKNOWN - including rows whose node was
+            # done AND merged. Retire is strictly weaker and carries its own
+            # probe and state guards, so it inherits none of reap's protection
+            # by being asked first. Returned below if retire also declines.
             reap_unknown_basis = reap_basis
 
     # retire: below a reap that ANSWERED yes, above one that did not answer, and
@@ -2261,20 +2265,25 @@ class _Unreadable:
     """A seam read that FAILED, which is not the same fact as one that
     answered empty.
 
-    Both seams below used to answer ``{}`` on any exception, so an unreadable
-    claims root and a node with no claim produced one value. `reap_decision`
-    documents that a read which raised is UNKNOWN, but with the exception
-    swallowed here it never saw one: the contract held only for the seams a
-    test injected. The sentinel travels to the wiring in `run_sweep`, which
-    raises on it, so the production path answers UNKNOWN with the read failure
-    in its basis. Retire meets the same raise through `_shipped_work_basis`,
-    which already treats a failed read as no marker and no stop.
+    Both seams below answered ``{}`` on any exception, so an unreadable claims
+    root and a node with no claim produced one value, and `reap_decision`'s
+    documented UNKNOWN-on-a-raise contract held only for injected test seams.
+    `run_sweep` raises on this sentinel so the production path answers UNKNOWN
+    with the failure in its basis; retire meets the same raise through
+    `_shipped_work_basis`, which is already no marker and no stop.
     """
 
     __slots__ = ("detail",)
 
     def __init__(self, detail: str) -> None:
         self.detail = detail
+
+
+def _answered(value: Any) -> Any:
+    """A failed seam read becomes the raise `reap_decision` reads as UNKNOWN."""
+    if isinstance(value, _Unreadable):
+        raise RuntimeError(value.detail)
+    return value
 
 
 def _claim_view(node: str) -> dict | _Unreadable:
@@ -2814,11 +2823,9 @@ def _production_route_policy(row: Row) -> tuple[list[str], dict[str, str]]:
 
     root = Path(row.cwd)
     index = _graph_index()
-    node = (
-        index.get(str(row.node), {})
-        if row.node and not isinstance(index, _Unreadable)
-        else {}
-    )
+    if isinstance(index, _Unreadable):
+        index = {}
+    node = index.get(str(row.node), {}) if row.node else {}
     pins = {
         key: str(node.get(key) or "")
         for key in ("provider", "harness", "model")
@@ -2988,22 +2995,13 @@ def run_sweep(
         def graph_fn() -> dict[str, dict]:
             return index
 
-    # The one place a seam's read FAILURE becomes a raise. `reap_decision`
-    # answers UNKNOWN on a raise and names the failure in its basis; retire's
-    # `_shipped_work_basis` answers no marker. Returning the sentinel through
-    # instead would read as "no claim" and "no node state", which is what the
-    # swallowed exception used to say.
+    # Passing the sentinel through instead would read as "no claim" and "no
+    # node state", which is exactly what the swallowed exception used to say.
     def claim_for(node: str) -> dict:
-        view = claim_fn(node)
-        if isinstance(view, _Unreadable):
-            raise RuntimeError(view.detail)
-        return view
+        return _answered(claim_fn(node))
 
     def node_state_for(node: str) -> Optional[dict]:
-        entries = graph_fn()
-        if isinstance(entries, _Unreadable):
-            raise RuntimeError(entries.detail)
-        return entries.get(node)
+        return _answered(graph_fn()).get(node)
     try:
         from fno.config import load_settings
 
@@ -3707,7 +3705,7 @@ def apply_verdict(
             return (
                 "frozen",
                 "reap classified but not executed: config.recovery."
-                "watchdog_reap is false. Reap deletes the worktree and a "
+                "watchdog.reap is false. Reap deletes the worktree and a "
                 "wrong one is unrecoverable, so it ships off. Turn it on to "
                 "execute, or stop and rm this row by hand",
             )
@@ -3738,7 +3736,7 @@ def _reap_execution_enabled() -> bool:
     try:
         from fno.config import load_settings
 
-        return bool(getattr(load_settings().recovery, "watchdog_reap", False))
+        return bool(load_settings().recovery.watchdog.reap)
     except Exception:  # noqa: BLE001 - unreadable config is never permission
         return False
 

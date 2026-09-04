@@ -2322,8 +2322,9 @@ class TestTickRecordsAndDeadline:
         settings.pr_watch.retries = 3
         settings.pr_watch.graphql_min_remaining = 200
         settings.recovery.enabled = True
-        settings.recovery.watchdog = "report"
-        settings.recovery.watchdog_mail_to = ""
+        settings.recovery.watchdog.enabled = True
+        settings.recovery.watchdog.mode = "report"
+        settings.recovery.watchdog.mail_to = ""
         settings.autonomy.enabled = True
         monkeypatch.setattr(prcli, "load_settings", lambda: settings)
         monkeypatch.setattr(
@@ -2388,8 +2389,9 @@ class TestTickRecordsAndDeadline:
         settings.pr_watch.retries = 3
         settings.pr_watch.graphql_min_remaining = 200
         settings.recovery.enabled = True
-        settings.recovery.watchdog = "wake"
-        settings.recovery.watchdog_mail_to = ""
+        settings.recovery.watchdog.enabled = True
+        settings.recovery.watchdog.mode = "wake"
+        settings.recovery.watchdog.mail_to = ""
         settings.autonomy.enabled = True
         monkeypatch.setattr(prcli, "load_settings", lambda: settings)
         monkeypatch.setattr(

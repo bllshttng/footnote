@@ -4444,9 +4444,7 @@ def _run_unfinished_report(
         try:
             from fno.config import load_settings
 
-            recipient = str(getattr(
-                load_settings().recovery, "watchdog_mail_to", "") or ""
-            )
+            recipient = str(load_settings().recovery.watchdog.mail_to or "")
         except Exception:  # noqa: BLE001 - config read miss means no mail
             recipient = ""
 
@@ -4541,7 +4539,7 @@ def cmd_watchdog(
         "--mail",
         help=(
             "Mail the digest to this handle (an agent name, short id, or "
-            "project:<slug>). Defaults to config.recovery.watchdog_mail_to. "
+            "project:<slug>). Defaults to config.recovery.watchdog.mail_to. "
             "Skipped when the non-leave verdict set is unchanged."
         ),
     ),
@@ -4786,9 +4784,7 @@ def cmd_watchdog(
         try:
             from fno.config import load_settings
 
-            recipient = str(getattr(
-                load_settings().recovery, "watchdog_mail_to", "") or ""
-            )
+            recipient = str(load_settings().recovery.watchdog.mail_to or "")
         except Exception:  # noqa: BLE001 - config read miss means no mail
             recipient = ""
     signature = ""

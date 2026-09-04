@@ -612,7 +612,8 @@ def test_provider_supervisor_runs_before_github_leg_and_exception_is_nonfatal(
     settings = SimpleNamespace(
         autonomy=SimpleNamespace(enabled=True),
         recovery=SimpleNamespace(
-            enabled=True, watchdog="handoff", watchdog_mail_to="",
+            enabled=True, watchdog=SimpleNamespace(
+                enabled=True, mode="handoff", mail_to="", reap=False),
         ),
         pr_watch=SimpleNamespace(
             enabled=True, interval_seconds=600, tick_timeout_seconds=500,

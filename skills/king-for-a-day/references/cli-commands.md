@@ -101,7 +101,7 @@ For a fleet-wide sweep, `fno agents watchdog` reads transcript truth and prints 
 
 It is a dry run by default. `--apply` executes the wake lane only, the one action that cannot destroy work.
 
-`--apply-all` adds reroute and reap. The reap lane has its own opt-in: `config.recovery.watchdog_reap`, false by default. An unreadable config reads the same as false. With reap off, `--apply-all` still runs wake and reroute and still reports the reap verdict as `frozen`. That verdict names a dead row. It does not clear it. Clear the row by hand with stop and rm, or set the config to arm the lane.
+`--apply-all` adds reroute and reap. The reap lane has its own opt-in: `config.recovery.watchdog.reap`, false by default. An unreadable config reads the same as false. With reap off, `--apply-all` still runs wake and reroute and still reports the reap verdict as `frozen`. That verdict names a dead row. It does not clear it. Clear the row by hand with stop and rm, or set the config to arm the lane.
 
 ## Delivery to a live session
 

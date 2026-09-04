@@ -2250,11 +2250,22 @@ def test_ac12_obs_sweep_file_never_invents_measured_provider_evidence(
     }
 
 
+
+def _wd(word: str) -> SimpleNamespace:
+    """The nested `recovery.watchdog` block, spelled from the legacy word a
+    test names. `off` is the disabled lane, not a mode."""
+    return SimpleNamespace(
+        enabled=word != "off",
+        mode="report" if word == "off" else word,
+        mail_to="",
+        reap=False,
+    )
+
 @pytest.mark.parametrize("mode", ["off", "report", "wake"])
 def test_ac12_obs_only_handoff_mode_arms_provider_migration(mode):
     settings = SimpleNamespace(
         autonomy=SimpleNamespace(enabled=True),
-        recovery=SimpleNamespace(enabled=True, watchdog=mode),
+        recovery=SimpleNamespace(enabled=True, watchdog=_wd(mode)),
     )
     assert watchdog.handoff_armed(settings) is False
 
@@ -2262,14 +2273,14 @@ def test_ac12_obs_only_handoff_mode_arms_provider_migration(mode):
 def test_ac12_obs_handoff_mode_obeys_master_vetoes():
     armed = SimpleNamespace(
         autonomy=SimpleNamespace(enabled=True),
-        recovery=SimpleNamespace(enabled=True, watchdog="handoff"),
+        recovery=SimpleNamespace(enabled=True, watchdog=_wd("handoff")),
     )
     assert watchdog.lane_armed(armed) is True
     assert watchdog.handoff_armed(armed) is True
     assert watchdog.handoff_armed(SimpleNamespace()) is False
     assert watchdog.handoff_armed(SimpleNamespace(
         autonomy=SimpleNamespace(enabled=False),
-        recovery=SimpleNamespace(enabled=True, watchdog="handoff"),
+        recovery=SimpleNamespace(enabled=True, watchdog=_wd("handoff")),
     )) is False
 
 
@@ -2755,7 +2766,7 @@ def test_ac5_hlth_node_pin_to_broken_route_refuses_automatic_movement(tmp_path):
 def test_ac12_obs_report_and_wake_never_call_provider_handoff(mode, tmp_path):
     settings = SimpleNamespace(
         autonomy=SimpleNamespace(enabled=True),
-        recovery=SimpleNamespace(enabled=True, watchdog=mode),
+        recovery=SimpleNamespace(enabled=True, watchdog=_wd(mode)),
     )
     called = []
     results = watchdog.supervise_provider_handoffs(
@@ -2781,7 +2792,7 @@ def test_ac12_obs_handoff_mode_requires_fresh_canary_then_runs_one_transaction(
 
     settings = SimpleNamespace(
         autonomy=SimpleNamespace(enabled=True),
-        recovery=SimpleNamespace(enabled=True, watchdog="handoff"),
+        recovery=SimpleNamespace(enabled=True, watchdog=_wd("handoff")),
     )
     candidate = RouteCandidate(
         record_id="codex-work", harness="codex", provider="openai",
@@ -2881,7 +2892,7 @@ def test_ac12_obs_terminal_decision_is_once_only(phase, replayed, expected, tmp_
 
     settings = SimpleNamespace(
         autonomy=SimpleNamespace(enabled=True),
-        recovery=SimpleNamespace(enabled=True, watchdog="handoff"),
+        recovery=SimpleNamespace(enabled=True, watchdog=_wd("handoff")),
     )
     candidate = RouteCandidate(
         record_id="codex-work", harness="codex", provider="openai",
@@ -2929,7 +2940,7 @@ def test_ac12_obs_enriched_handoff_transition_passes_event_schema():
     assert validate(event) is None
     assert watchdog.handoff_armed(SimpleNamespace(
         autonomy=SimpleNamespace(enabled=True),
-        recovery=SimpleNamespace(enabled=False, watchdog="handoff"),
+        recovery=SimpleNamespace(enabled=False, watchdog=_wd("handoff")),
     )) is False
 
 
@@ -3254,7 +3265,7 @@ def test_json_liveness_carries_watchdog_freshness(monkeypatch, tmp_path):
     monkeypatch.setattr(_install, "_launchctl_is_loaded", lambda: False)
     settings = SimpleNamespace(
         pr_watch=SimpleNamespace(enabled=True, interval_seconds=600),
-        recovery=SimpleNamespace(watchdog="report", enabled=True),
+        recovery=SimpleNamespace(watchdog=_wd("report"), enabled=True),
         autonomy=SimpleNamespace(enabled=True),
     )
     monkeypatch.setattr("fno.config.load_settings", lambda: settings)
@@ -3278,7 +3289,7 @@ def test_json_liveness_carries_watchdog_freshness(monkeypatch, tmp_path):
         "fno.config.load_settings",
         lambda: SimpleNamespace(
             pr_watch=settings.pr_watch,
-            recovery=SimpleNamespace(watchdog="off"),
+            recovery=SimpleNamespace(watchdog=_wd("off")),
         ),
     )
     assert "watchdog" not in _install.liveness_report_live()
@@ -4006,7 +4017,7 @@ def test_reap_ships_frozen_and_the_freeze_is_at_the_funnel(monkeypatch):
         v, lanes="all", cwd="/wt/solo", runner=never, reap_enabled=False
     )
     assert outcome == "frozen"
-    assert "watchdog_reap" in detail
+    assert "watchdog.reap" in detail
 
     # Armed, it reaches the mechanism (and stops there on the clean-tree gate).
     monkeypatch.setattr(watchdog, "worktree_refusal", lambda cwd: "1 unpushed commit(s)")
