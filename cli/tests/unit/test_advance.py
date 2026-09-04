@@ -2023,8 +2023,22 @@ def _dispatch_one_capture(monkeypatch, tmp_path):
     Its own node id, so the sibling advance leg's live dispatch:<id> reservation
     does not read as this launcher already dispatching."""
     import fno.dispatch as dispatch_mod
+    from fno.agents import harness_map
 
     captured: dict = {}
+    # The codex spelling is rendered from the shipped verb roster, which resolves
+    # through the plugin root - and a test tree has none: the roster reads empty
+    # and `/target` passes through unrewritten. `footnote_verbs` caches an empty
+    # read too, so test ORDER alone decided which spelling this fixture saw.
+    # Point the reader at the checkout, the way a real dispatch (which runs in
+    # the node's own repo) resolves one, and clear the cache so it reads THAT.
+    # The pointer write is neutralized with it: ~/.fno/plugin-root lands in the
+    # SHARED sandbox HOME, and would hand the real checkout to every later test
+    # in the worker - two claim tests measured that leak.
+    monkeypatch.setattr("fno.paths._persist_plugin_root", lambda _root: None)
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(Path(__file__).resolve().parents[3]))
+    harness_map.footnote_verbs.cache_clear()
+    assert "target" in harness_map.footnote_verbs(), "roster must read the checkout"
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(dispatch_mod, "_resolve_provider_id", lambda *a, **k: "ccm")
     monkeypatch.setattr(dispatch_mod, "_next_node", lambda project: DISPATCH_NODE)
