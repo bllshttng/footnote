@@ -3640,7 +3640,7 @@ pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
                     if owns_startup {
                         remove_startup_guard(path);
                     }
-                    Err(std::io::Error::new(e.kind(), format!("DBG-rebind: {e}")))
+                    Err(e)
                 }
             }
         }
@@ -3648,7 +3648,7 @@ pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
             if owns_startup {
                 remove_startup_guard(path);
             }
-            Err(std::io::Error::new(e.kind(), format!("DBG-initial: {e}")))
+            Err(e)
         }
     }
 }
@@ -3852,11 +3852,6 @@ pub(crate) fn probe_status(path: &Path) -> ProbeOutcome {
     }
 }
 
-/// Stop an unresponsive holder before takeover. Without this coordination, its
-/// later `SocketGuard` can unlink the replacement server's socket and sidecars.
-/// The pid sidecar is identity-checked before each signal. An unreadable
-/// identity refuses takeover, while a positive start-time mismatch proves the
-/// recorded holder exited and its pid was reused, so takeover is safe.
 /// Stop an unresponsive holder before takeover. Without this coordination, its
 /// later `SocketGuard` can unlink the replacement server's socket and sidecars.
 /// The pid sidecar is identity-checked before each signal. An unreadable

@@ -148,3 +148,41 @@ pub(crate) fn acquire_startup_guard(socket: &Path) -> std::io::Result<StartupGua
         }
     }
 }
+
+#[cfg(test)]
+mod reclaim_gone_tests {
+    use super::super::{pid_sidecar_path, reclaim_unresponsive_holder};
+
+    /// The fix under test: a pid sidecar that vanished between the caller's
+    /// exists() gate and reclaim's read means the holder already exited, so
+    /// reclaim must answer Ok (the no-holder takeover path) instead of
+    /// escaping bind_or_probe as ENOENT.
+    #[test]
+    fn reclaim_with_no_pid_sidecar_is_ok_not_enoent() {
+        let dir = std::env::temp_dir().join(format!("fno-reclaim-gone-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gone = reclaim_unresponsive_holder(&dir.join("missing.sock"));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(matches!(&gone, Ok(())), "gone holder must be Ok: {gone:?}");
+    }
+
+    /// Fail-closed is preserved: a sidecar that is PRESENT but unparseable
+    /// still refuses takeover with InvalidData instead of signaling blind.
+    #[test]
+    fn reclaim_with_garbage_pid_sidecar_still_refuses() {
+        let dir = std::env::temp_dir().join(format!("fno-reclaim-garbage-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("garbage.sock");
+        std::fs::write(pid_sidecar_path(&sock), "not-a-pid").unwrap();
+        let refused = reclaim_unresponsive_holder(&sock);
+        std::fs::remove_dir_all(&dir).unwrap();
+        match refused {
+            Err(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::InvalidData,
+                "garbage sidecar must refuse, got {e}"
+            ),
+            other => panic!("garbage sidecar must not pass: {other:?}"),
+        }
+    }
+}
