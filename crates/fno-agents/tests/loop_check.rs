@@ -7189,43 +7189,18 @@ fn done_pr_green_instead_of_awaiting_review_when_local_review_recovers_refusal()
 
 #[test]
 fn done_ends_unreviewed_not_awaiting_review_when_optional_app_refuses() {
-    // The old contract ALLOWED the stop with DoneAwaitingReview: a wait for a
-    // reviewer nobody owed (nothing required is configured here, so the
-    // wait's precondition was trivially met). An optional App's refusal is
-    // neither silence nor review. With the refusal unowed the terminal is the
-    // honest one - green but unreviewed, merge by hand - and the receipt
-    // names the runnable remedy instead of a recovery wait. (A repo with no
-    // optional lane configured additionally floors the local self-review,
-    // whose unattested reviewer BLOCKS the stop before this terminal.)
+    // Old terminal: DoneAwaitingReview, a wait for a reviewer nobody owed.
+    // Unowed, the loop ends DoneUnreviewed naming the remedy; a repo with no
+    // optional lane also floors the local self-review, whose unattested
+    // reviewer blocks the stop before this terminal is ever reached.
     let d = green_refusal_decision(true, false);
     assert_eq!(d.decision, "allow");
-    assert_eq!(
-        d.termination_reason.as_deref(),
-        Some("DoneUnreviewed"),
-        "an optional App refusal must not read as a wait: {}",
-        d.message
-    );
-    assert!(
-        d.message.contains("chatgpt-codex-connector"),
-        "{}",
-        d.message
-    );
-    assert!(d.message.contains("refused"), "{}", d.message);
-    // The remedy reaches the same line: run the review verb at HEAD, and the
-    // unowed absence is named without owning the next action.
-    assert!(
-        d.message.contains("run the review verb at HEAD"),
-        "{}",
-        d.message
-    );
-    assert!(
-        d.message.contains("not owed, still not responding"),
-        "{}",
-        d.message
-    );
-    // The terminal's own advice is the positive marker: the loop ends with
-    // the merge handed to a human, never with a recovery wait.
-    assert!(d.message.contains("merge by hand"), "{}", d.message);
+    assert_eq!(d.termination_reason.as_deref(), Some("DoneUnreviewed"));
+    assert!(d.message.contains("chatgpt-codex-connector"));
+    assert!(d.message.contains("refused"));
+    assert!(d.message.contains("run the review verb at HEAD"));
+    assert!(d.message.contains("not owed, still not responding"));
+    assert!(d.message.contains("merge by hand"));
 }
 
 /// x-0eaf AC12-INV (negative): the coverage path must not read the `attended`
