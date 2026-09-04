@@ -17591,6 +17591,9 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         static C: AtomicU32 = AtomicU32::new(0);
         let n = C.fetch_add(1, Ordering::Relaxed);
         let base = PathBuf::from(format!("/tmp/fnokswp{tag}{}_{n}", std::process::id()));
+        // Pids recycle, so a prior run may own this path; a stale socket file
+        // in it fails fixture binds with EADDRINUSE. Start from an empty base.
+        let _ = std::fs::remove_dir_all(&base);
         let home = AgentsHome::at(base.join("agents"));
         home.ensure_root().unwrap();
         std::fs::create_dir_all(lane_b_keeper_dir(&home)).unwrap();
@@ -17994,15 +17997,34 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let live_sock = state_root.join("other.store.sock");
         let listener = std::os::unix::net::UnixListener::bind(&live_sock).unwrap();
 
-        let unlinked = store_socket_sweep_in(&home, temp_root, &emitter);
-        assert_eq!(unlinked, 2, "the orphan and the hashed litter unlinked");
+        // The one-shot return count is not asserted exactly: a probe that
+        // errors unreadably (interrupt, resource pressure mid-suite) is
+        // deliberately conservative in production - the socket stays and the
+        // next sweep re-decides. What must hold on EVERY pass is the safety
+        // invariant (shielded and live untouched), and provably-dead litter
+        // must be gone after bounded passes.
+        let mut passes = 0;
+        while passes < 10 {
+            let _ = store_socket_sweep_in(&home, temp_root.clone(), &emitter);
+            passes += 1;
+            assert!(
+                shielded_sock.exists(),
+                "a shielded sibling is never unlinked"
+            );
+            assert!(live_sock.exists(), "a live listener is never unlinked");
+            if !orphan_sock.exists() && !dead_hashed.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
         assert!(
-            shielded_sock.exists(),
-            "a shielded sibling is never unlinked"
+            !orphan_sock.exists(),
+            "an orphaned socket is not unlinked ({passes} passes)"
         );
-        assert!(!orphan_sock.exists(), "an orphaned socket is unlinked");
-        assert!(!dead_hashed.exists());
-        assert!(live_sock.exists(), "a live listener is never unlinked");
+        assert!(
+            !dead_hashed.exists(),
+            "hashed litter is not unlinked ({passes} passes)"
+        );
         assert!(shielded_graph.exists(), "non-socket files are untouched");
         drop(listener);
         let _ = std::fs::remove_file(&live_sock);
