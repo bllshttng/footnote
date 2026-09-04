@@ -156,12 +156,7 @@ def test_garbage_stdout_is_unknown_not_a_crash(tmp_path: Path, monkeypatch) -> N
 def test_rust_reader_semantics_live_in_the_crate() -> None:
     """The semantic cases (split, terminal, unsafe scope, legacy shape) are
     pinned by loop_reign.rs's own tests; this file pins only the client."""
-    import subprocess
-    import sys
-
-    from pathlib import Path as _P
-
-    crate = _P(__file__).parents[3] / "crates" / "fno-agents" / "src" / "loop_reign.rs"
+    crate = Path(__file__).parents[3] / "crates" / "fno-agents" / "src" / "loop_reign.rs"
     assert crate.is_file(), f"the Rust reader moved: {crate}"
     text = crate.read_text(encoding="utf-8")
     for needle in (
@@ -170,6 +165,6 @@ def test_rust_reader_semantics_live_in_the_crate() -> None:
         "unsafe_scope_with_unreadable_registry",
         "terminal_crown_row_is_not_a_live_reign",
         "legacy_manifest_without_shape_reads_as_pass",
+        "never_falls_through_to_a_claude_prefix",
     ):
         assert needle in text, f"the Rust suite lost the {needle!r} case"
-    del subprocess, sys

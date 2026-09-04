@@ -64,17 +64,6 @@ pub struct ReignState {
     pub unknown_reason: Option<String>,
 }
 
-impl ReignState {
-    fn unknown(scope: Option<&str>, reason: String) -> Self {
-        ReignState {
-            crowned: None,
-            scope: scope.map(str::to_string),
-            unknown_reason: Some(reason),
-            ..Default::default()
-        }
-    }
-}
-
 /// Same unsafe-scope refusal as `king_manifest_path`: scope becomes a filename
 /// here, so two spellings of one scope must never select two files and no
 /// scope may escape the state root.
@@ -99,18 +88,34 @@ fn row_session(row: &RegistryEntry) -> Option<String> {
         .or_else(|| row.cc_session_id.clone())
 }
 
-/// Python `_find_by_session` with `harness=None`, the only form this reader's
-/// explicit-session callers use: exact id match first, then the claude 8-hex
-/// `short_id` prefix (a 32-bit jobId is a prefix of a claude session uuid).
-fn find_by_session<'a>(rows: &'a [RegistryEntry], sid: &str) -> Option<&'a RegistryEntry> {
-    rows.iter()
-        .find(|r| {
-            r.harness_session_id.as_deref() == Some(sid) || r.cc_session_id.as_deref() == Some(sid)
-        })
-        .or_else(|| {
-            rows.iter()
-                .find(|r| !r.short_id.is_empty() && sid.len() >= 8 && sid.starts_with(&r.short_id))
-        })
+/// Python `_find_by_session`, both of its forms. A known harness scopes the
+/// match to rows of that harness and to exact ids only; `None` (the explicit
+/// session form, and any harness Python could not resolve) keeps the original
+/// claude-shaped scan: exact id match first, then the claude 8-hex `short_id`
+/// prefix (a 32-bit jobId is a prefix of a claude session uuid). Without the
+/// scoping, a non-claude caller's uuid could fall through to an unrelated
+/// claude row's short_id prefix.
+fn find_by_session<'a>(
+    rows: &'a [RegistryEntry],
+    sid: &str,
+    harness: Option<&str>,
+) -> Option<&'a RegistryEntry> {
+    let exact = |r: &RegistryEntry| {
+        r.harness_session_id.as_deref() == Some(sid) || r.cc_session_id.as_deref() == Some(sid)
+    };
+    match harness {
+        Some(h) if h != "claude" => rows
+            .iter()
+            .find(|r| r.harness.as_deref() == Some(h) && exact(r)),
+        _ => rows.iter().find(|r| exact(r)).or_else(|| {
+            rows.iter().find(|r| {
+                r.harness.as_deref() == Some("claude")
+                    && !r.short_id.is_empty()
+                    && sid.len() >= 8
+                    && sid.starts_with(&r.short_id)
+            })
+        }),
+    }
 }
 
 /// `(manifest_session, shape)` from the fenced parser; `(None, None)` when the
@@ -194,6 +199,7 @@ pub fn reign_state(
     root: &Path,
     scope: Option<&str>,
     session: Option<&str>,
+    harness: Option<&str>,
     registry_path: &Path,
 ) -> ReignState {
     let rows = match load_rows(registry_path) {
@@ -218,7 +224,6 @@ pub fn reign_state(
                     Err(_) => reason = format!("{e}; unsafe scope {s:?}"),
                 }
             }
-            let _ = manifest_session;
             return ReignState {
                 crowned: None,
                 scope: scope.map(str::to_string),
@@ -246,7 +251,7 @@ pub fn reign_state(
                     ..Default::default()
                 };
             };
-            let Some(row) = find_by_session(&rows, sid) else {
+            let Some(row) = find_by_session(&rows, sid, harness) else {
                 return ReignState {
                     crowned: Some(false),
                     live: Some(false),
@@ -419,6 +424,7 @@ fn usage(verb: &str) -> String {
 pub fn run_reign_state(args: &[String]) -> i32 {
     let mut scope: Option<String> = None;
     let mut session: Option<String> = None;
+    let mut harness: Option<String> = None;
     let mut root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut registry: Option<PathBuf> = None;
     let mut i = 0;
@@ -430,6 +436,10 @@ pub fn run_reign_state(args: &[String]) -> i32 {
             }
             "--session" if i + 1 < args.len() => {
                 session = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--harness" if i + 1 < args.len() => {
+                harness = Some(args[i + 1].clone());
                 i += 2;
             }
             "--root" if i + 1 < args.len() => {
@@ -454,7 +464,13 @@ pub fn run_reign_state(args: &[String]) -> i32 {
     }
     let registry_path =
         registry.unwrap_or_else(|| crate::paths::AgentsHome::from_env().registry_json());
-    let state = reign_state(&root, scope.as_deref(), session.as_deref(), &registry_path);
+    let state = reign_state(
+        &root,
+        scope.as_deref(),
+        session.as_deref(),
+        harness.as_deref(),
+        &registry_path,
+    );
     match serde_json::to_string(&state) {
         Ok(json) => {
             println!("{json}");
@@ -574,7 +590,7 @@ mod tests {
         let sid = "aaaa1111-0000-4000-8000-000000000001";
         let reg = registry_file(&root, &[row("king", sid, Some("alpha"), AgentStatus::Busy)]);
         write_manifest(&root, "alpha", sid, "pass");
-        let state = reign_state(&root, None, Some(sid), &reg);
+        let state = reign_state(&root, None, Some(sid), None, &reg);
         assert_eq!(state.crowned, Some(true));
         assert_eq!(state.scope.as_deref(), Some("alpha"));
         assert_eq!(state.live, Some(true));
@@ -600,7 +616,7 @@ mod tests {
             "aaaa1111-0000-4000-8000-000000000001",
             "court",
         );
-        let state = reign_state(&root, Some("alpha"), None, &reg);
+        let state = reign_state(&root, Some("alpha"), None, None, &reg);
         assert_eq!(state.split, Some(true));
         assert_eq!(
             state.manifest_session.as_deref(),
@@ -617,7 +633,7 @@ mod tests {
         let root = tmp("unreadable");
         let bad = root.join("not-a-registry.json");
         fs::write(&bad, "{ this is not json").unwrap();
-        let state = reign_state(&root, Some("alpha"), None, &bad);
+        let state = reign_state(&root, Some("alpha"), None, None, &bad);
         assert_eq!(state.live, None);
         assert_eq!(state.crowned, None);
         assert_eq!(state.split, None);
@@ -630,7 +646,7 @@ mod tests {
         let root = tmp("unsafe");
         let bad = root.join("not-a-registry.json");
         fs::write(&bad, "{ this is not json").unwrap();
-        let state = reign_state(&root, Some("a/b"), None, &bad);
+        let state = reign_state(&root, Some("a/b"), None, None, &bad);
         assert_eq!(state.live, None);
         assert_eq!(state.split, None);
         let reason = state.unknown_reason.unwrap();
@@ -641,7 +657,7 @@ mod tests {
     fn missing_registry_file_reads_as_no_crown_not_unknown() {
         // Python load_registry: a missing file is empty, not an error.
         let root = tmp("missing");
-        let state = reign_state(&root, Some("alpha"), None, &root.join("absent.json"));
+        let state = reign_state(&root, Some("alpha"), None, None, &root.join("absent.json"));
         assert_eq!(state.crowned, Some(false));
         assert_eq!(state.live, Some(false));
         assert!(state
@@ -662,7 +678,7 @@ mod tests {
                 AgentStatus::Busy,
             )],
         );
-        let state = reign_state(&root, Some("alpha"), None, &reg);
+        let state = reign_state(&root, Some("alpha"), None, None, &reg);
         assert_eq!(state.crowned, Some(true));
         assert_eq!(state.split, None);
         assert_eq!(state.shape, None);
@@ -681,7 +697,7 @@ mod tests {
                 AgentStatus::Exited,
             )],
         );
-        let state = reign_state(&root, Some("alpha"), None, &reg);
+        let state = reign_state(&root, Some("alpha"), None, None, &reg);
         assert_eq!(state.crowned, Some(false));
         assert_eq!(state.live, Some(false));
         assert_eq!(state.split, None);
@@ -691,7 +707,7 @@ mod tests {
     fn caller_form_without_session_identity_is_not_a_crown() {
         let root = tmp("nosession");
         let reg = registry_file(&root, &[]);
-        let state = reign_state(&root, None, None, &reg);
+        let state = reign_state(&root, None, None, None, &reg);
         assert_eq!(state.crowned, Some(false));
         assert_eq!(state.live, Some(false));
         // The empty-registry caller form finds no row for the id.
@@ -699,6 +715,7 @@ mod tests {
             &root,
             None,
             Some("cccc3333-0000-4000-8000-000000000003"),
+            None,
             &reg,
         );
         assert_eq!(state.crowned, Some(false));
@@ -714,7 +731,7 @@ mod tests {
         let root = tmp("nocrown");
         let sid = "aaaa1111-0000-4000-8000-000000000001";
         let reg = registry_file(&root, &[row("worker", sid, None, AgentStatus::Busy)]);
-        let state = reign_state(&root, None, Some(sid), &reg);
+        let state = reign_state(&root, None, Some(sid), None, &reg);
         assert_eq!(state.crowned, Some(false));
         assert_eq!(state.live, Some(false));
         assert!(state.unknown_reason.unwrap().contains("row holds no crown"));
@@ -746,7 +763,7 @@ mod tests {
             "aaaa1111-0000-4000-8000-000000000001",
             "court",
         );
-        let state = reign_state(&root, Some("alpha"), None, &reg);
+        let state = reign_state(&root, Some("alpha"), None, None, &reg);
         assert_eq!(state.crowned, Some(true));
         assert!(state.unknown_reason.unwrap().contains("multiple live rows"));
         assert_eq!(state.shape.as_deref(), Some("court"));
@@ -772,8 +789,38 @@ mod tests {
              harness_session_id: dddd1111-0000-4000-8000-00000000000d\n---\n",
         )
         .unwrap();
-        let state = reign_state(&root, Some("legacy"), None, &reg);
+        let state = reign_state(&root, Some("legacy"), None, None, &reg);
         assert_eq!(state.shape.as_deref(), Some("pass"));
+    }
+
+    #[test]
+    fn a_known_non_claude_harness_never_falls_through_to_a_claude_prefix() {
+        let root = tmp("scoped");
+        // A claude row whose 8-hex short_id prefixes the codex caller's uuid.
+        let codex_sid = "abcd1234-0000-4000-8000-00000000000c";
+        let claude_row = serde_json::json!({
+            "name": "claude-worker",
+            "cwd": "/tmp",
+            "status": "busy",
+            "created_at": "2026-09-04T00:00:00Z",
+            "harness": "claude",
+            "short_id": "abcd1234",
+            "harness_session_id": "ffff0000-0000-4000-8000-00000000000f",
+        });
+        let reg = registry_file(&root, &[claude_row]);
+        // Harness scoped: no codex row carries the id, so no row matches even
+        // though the claude row's short_id prefixes it.
+        let state = reign_state(&root, None, Some(codex_sid), Some("codex"), &reg);
+        assert_eq!(state.crowned, Some(false));
+        assert!(state
+            .unknown_reason
+            .unwrap()
+            .contains("no registry row matches"));
+        // The claude-shaped scan (harness unknown) still finds it by prefix,
+        // which is the original reader's explicit-session behavior.
+        let state = reign_state(&root, None, Some(codex_sid), None, &reg);
+        assert_eq!(state.crowned, Some(false));
+        assert!(state.unknown_reason.unwrap().contains("row holds no crown"));
     }
 
     #[test]

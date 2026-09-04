@@ -395,11 +395,16 @@ def reign_state(
     from fno import paths
     from fno.rust_binary import resolve_binary
 
+    harness = None
     if scope is None and not session_id:
         from fno.agents.self_stamp import resolve_self_identity
 
         ident = resolve_self_identity()
         session_id = ident.session_id or ""
+        # An explicit session id reads claude-shaped (harness None), exactly
+        # like the Python reader this replaces; only the self-resolved form
+        # knows its harness, and it scopes the row scan with it.
+        harness = ident.harness or None
 
     root = state_root if state_root is not None else _owner_state_root(None)
     # The Rust reader joins ``.fno`` itself, so it wants the repo root; this
@@ -418,6 +423,8 @@ def reign_state(
         argv += ["--scope", scope]
     if session_id:
         argv += ["--session", session_id]
+    if harness:
+        argv += ["--harness", harness]
     try:
         argv += ["--registry", str(paths.agents_registry_path())]
         proc = subprocess.run(
