@@ -730,6 +730,39 @@ struct FootprintCausePayload {
     cpu_capacity_cores: f64,
     fleet_percent_capacity: f64,
     fleet_percent_measured_cpu: f64,
+    /// Footprint's own sentence naming what it could not attribute. Present
+    /// only when there IS a gap, which is also what drives its exit 4 under
+    /// `--cause-only`, so presence is the discriminator and absence means the
+    /// reading is complete.
+    ///
+    /// Not `capacity_verdict`: `--cause-only` deliberately spends no load
+    /// snapshot, so `capacity_verdict` is the constant `"unknown"` on every
+    /// cause payload, gap or no gap. Reading it here would refuse every
+    /// admission above the trigger.
+    #[serde(default)]
+    attribution_gap: Option<String>,
+}
+
+/// What footprint answered when the gate asked whose CPU this is.
+///
+/// Three answers rather than two, because a refusal that cannot say WHY sends
+/// its reader after the wrong cause. Measured 2026-09-04: the gate discarded a
+/// complete 3380-byte payload because the probe exited 4, then refused saying
+/// attribution was "unavailable" while footprint had in fact answered and
+/// named 21 unmapped bg-socket rows. An hour went into load averages and a
+/// spare pool that were never the point.
+///
+/// Admission is unchanged: `Incomplete` and `Unreadable` both refuse, because
+/// an undercounted share is still not evidence of headroom. Only the sentence
+/// differs, so the Python twin in `cli/src/fno/agents/spawn_gate.py` and this
+/// gate still agree about who gets in.
+enum FleetReading {
+    /// Every row attributed: the share decides admission.
+    Known(f64, f64),
+    /// Footprint answered and disclaimed its own answer. Carries its words.
+    Incomplete(String),
+    /// No usable answer at all.
+    Unreadable,
 }
 
 /// Footprint's attribution as numbers: `(fleet_cores, capacity_cores)`.
@@ -766,13 +799,24 @@ fn format_footprint_cause_json(raw: &str) -> Option<String> {
     {
         return None;
     }
-    Some(format!(
+    let line = format!(
         "spawn-gate: footprint attributes {:.2}/{:.2} cores ({:.1}% capacity, {:.1}% of measured CPU) to the fleet",
         payload.fleet_cpu_cores,
         payload.cpu_capacity_cores,
         payload.fleet_percent_capacity,
         payload.fleet_percent_measured_cpu,
-    ))
+    );
+    // A gapped reading is an UNDERCOUNT. Printing its share bare sends the
+    // reader hunting the unattributed remainder outside the fleet, which is
+    // the wrong-cause failure this evidence line exists to prevent. The
+    // Python twin drops the line entirely; naming the gap keeps the number
+    // and removes the claim that it is the whole answer.
+    Some(match payload.attribution_gap {
+        Some(gap) => format!(
+            "{line}, but could not attribute every row ({gap}), so that share is an undercount"
+        ),
+        None => line,
+    })
 }
 
 /// Wall-clock budget for the out-of-process footprint probe: the Python
@@ -785,8 +829,30 @@ fn footprint_cli_binary() -> Option<&'static str> {
         .find(|name| resolves_on_path(name))
 }
 
-fn fleet_cpu_reading() -> Option<(f64, f64)> {
-    footprint_cause_raw().and_then(|raw| parse_footprint_cause_json(&raw))
+fn fleet_cpu_reading() -> FleetReading {
+    match footprint_cause_raw() {
+        Some(raw) => classify_footprint_cause_json(&raw),
+        None => FleetReading::Unreadable,
+    }
+}
+
+/// Sort one payload into the three answers, the disclaimer first.
+///
+/// The gap sentence is read before the numbers on purpose: a payload can carry
+/// a perfectly finite share and still disclaim it, which is exactly the case
+/// that used to reach the governor as "unreadable". It is also the same field
+/// the Python twin keys on, so the two gates admit the same machines.
+fn classify_footprint_cause_json(raw: &str) -> FleetReading {
+    let Ok(payload) = serde_json::from_str::<FootprintCausePayload>(raw) else {
+        return FleetReading::Unreadable;
+    };
+    if let Some(gap) = payload.attribution_gap {
+        return FleetReading::Incomplete(gap);
+    }
+    match parse_footprint_cause_json(raw) {
+        Some((fleet, capacity)) => FleetReading::Known(fleet, capacity),
+        None => FleetReading::Unreadable,
+    }
 }
 
 fn footprint_cause_evidence() -> Option<String> {
@@ -812,11 +878,18 @@ fn footprint_cause_raw() -> Option<String> {
     let deadline = Instant::now() + FOOTPRINT_PROBE_BUDGET;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => {
+            // The exit code is not the discriminator; the payload is. Footprint
+            // exits non-zero to report its OWN verdict (3 capacity-over, 4
+            // unknown) while still writing a complete reading to stdout, so
+            // gating on `status.success()` threw away the answer in exactly the
+            // states the gate consults it about. Measured 2026-09-04: a 3380-byte
+            // payload naming 21 unmapped bg-socket rows was discarded because the
+            // probe exited 4. A genuinely failed run writes nothing parseable and
+            // still reaches `Unreadable` through the classifier.
+            Ok(Some(_)) => {
                 let output = child.wait_with_output().ok()?;
                 return Some(std::str::from_utf8(&output.stdout).ok()?.to_string());
             }
-            Ok(Some(_)) => return None,
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -898,15 +971,27 @@ fn check_load_ceiling(
 
     let trigger = max_load_per_cpu * cpus as f64;
     let (fleet, capacity) = match fleet_cpu_reading() {
-        Some(reading) => reading,
-        None => {
+        FleetReading::Known(fleet, capacity) => (fleet, capacity),
+        FleetReading::Incomplete(gap) => {
+            // Still a refusal: an undercounted share is not headroom. But the
+            // reason is footprint's own sentence, which names a fix, where
+            // "unavailable" named nothing and cost an hour of wrong hunting.
+            eprintln!(
+                "spawn-gate: 1-min load {load1:.1} is over the max_load_per_cpu trigger \
+                 {max_load_per_cpu} x {cpus} cpus = {trigger:.1} and footprint could not \
+                 attribute every row, so its fleet share is an undercount, not headroom: \
+                 {gap}; refusing to spawn (--force to bypass)"
+            );
+            return Err((EXIT_LOAD_REFUSED, true));
+        }
+        FleetReading::Unreadable => {
             eprintln!(
                 "spawn-gate: 1-min load {load1:.1} is over the max_load_per_cpu trigger \
                  {max_load_per_cpu} x {cpus} cpus = {trigger:.1} and fleet CPU attribution \
                  unavailable; refusing to spawn (--force to bypass)"
             );
-            // The attribution read just failed; the caller's probe reads the
-            // same instrument and would fail the same way one sample later.
+            // The attribution read produced nothing parseable; the caller's
+            // probe reads the same instrument and fails the same way.
             return Err((EXIT_LOAD_REFUSED, true));
         }
     };
@@ -1281,6 +1366,86 @@ MemAvailable:    8000000 kB\n";
             ),
             None
         );
+    }
+
+    /// A disclaimed answer is not a missing answer, and the refusal must say
+    /// which it got. The payload here is the real one measured on 2026-09-04,
+    /// trimmed to the fields the gate reads: footprint exited 4, wrote a
+    /// finite share, and named the rows it could not attribute.
+    #[test]
+    fn a_gapped_payload_reads_as_incomplete_and_carries_footprints_words() {
+        let raw = r#"{"fleet_cpu_cores":3.645,"cpu_capacity_cores":12,"fleet_percent_capacity":30.375,"fleet_percent_measured_cpu":45.4,"capacity_verdict":"unknown","attribution_gap":"14 pidless row(s) with no identity route (claude, codex); 21 bg-socket row(s) missing from the socket map"}"#;
+        match classify_footprint_cause_json(raw) {
+            FleetReading::Incomplete(gap) => {
+                assert!(gap.contains("21 bg-socket row(s)"), "{gap}");
+                assert!(gap.contains("14 pidless row(s)"), "{gap}");
+            }
+            FleetReading::Known(fleet, capacity) => {
+                panic!("an undercounted share must never decide admission: {fleet}/{capacity}")
+            }
+            FleetReading::Unreadable => {
+                panic!("footprint answered and named its gap; that is not unreadable")
+            }
+        }
+    }
+
+    /// The evidence line prints on the backstop refusal, the one branch that
+    /// never reads attribution. A gapped share printed bare there reads as the
+    /// fleet's whole cost and sends the reader after the remainder.
+    #[test]
+    fn the_evidence_line_disclaims_a_gapped_share() {
+        let gapped = r#"{"fleet_cpu_cores":2.92,"cpu_capacity_cores":12,"fleet_percent_capacity":24.3,"fleet_percent_measured_cpu":45.4,"attribution_gap":"21 bg-socket row(s) missing from the socket map"}"#;
+        let line = format_footprint_cause_json(gapped).expect("a gapped payload still formats");
+        assert!(line.contains("2.92/12.00 cores"), "{line}");
+        assert!(line.contains("21 bg-socket row(s)"), "{line}");
+        assert!(line.contains("undercount"), "{line}");
+    }
+
+    /// `capacity_verdict` is NOT the discriminator, and this is the test that
+    /// says so. `--cause-only` spends no load snapshot, so every cause payload
+    /// carries the constant `"unknown"` whether or not attribution was
+    /// complete. Keying on it refuses every admission above the load trigger
+    /// while the whole suite stays green, because no hand-written fixture ever
+    /// reproduces the shape the instrument actually emits.
+    #[test]
+    fn an_unknown_verdict_with_no_gap_sentence_still_decides_admission() {
+        let raw = r#"{"fleet_cpu_cores":1.0,"cpu_capacity_cores":12,"fleet_percent_capacity":8.3,"fleet_percent_measured_cpu":20.0,"capacity_verdict":"unknown"}"#;
+        match classify_footprint_cause_json(raw) {
+            FleetReading::Known(fleet, capacity) => assert_eq!((fleet, capacity), (1.0, 12.0)),
+            _ => panic!("a complete cause payload always says 'unknown'; it must still decide"),
+        }
+    }
+
+    /// The two ends of the range still work: a complete answer decides, and
+    /// junk is unreadable. Neither may become a zero share (x-e040).
+    #[test]
+    fn a_complete_payload_decides_and_junk_stays_unreadable() {
+        // The real clean shape: a verdict word of `unknown` (cause-only takes
+        // no load snapshot) and no `attribution_gap` key at all.
+        let complete = r#"{"fleet_cpu_cores":0.79,"cpu_capacity_cores":12,"fleet_percent_capacity":6.6,"fleet_percent_measured_cpu":17.3,"capacity_verdict":"unknown"}"#;
+        match classify_footprint_cause_json(complete) {
+            FleetReading::Known(fleet, capacity) => {
+                assert_eq!((fleet, capacity), (0.79, 12.0));
+            }
+            _ => panic!("a complete payload must decide admission"),
+        }
+
+        // No verdict field at all: the older payload shape still decides.
+        let legacy = r#"{"fleet_cpu_cores":0.79,"cpu_capacity_cores":12,"fleet_percent_capacity":6.6,"fleet_percent_measured_cpu":17.3}"#;
+        assert!(matches!(
+            classify_footprint_cause_json(legacy),
+            FleetReading::Known(_, _)
+        ));
+
+        for junk in ["{}", "not json", ""] {
+            assert!(
+                matches!(
+                    classify_footprint_cause_json(junk),
+                    FleetReading::Unreadable
+                ),
+                "{junk}"
+            );
+        }
     }
 
     #[test]

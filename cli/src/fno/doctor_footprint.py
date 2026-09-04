@@ -715,9 +715,10 @@ def _emit_result(
         elif leak == "unexplained":
             exit_code = EXIT_LEAK
     # A gapped reading answers, but it does not clear the gate: --cause-only
-    # keeps exit 4 (the Rust spawn gate takes stdout only on exit 0, so a
-    # gapped undercount can never be admitted as headroom without a Rust
-    # change). The measurement itself is printed either way.
+    # keeps exit 4 so a human and a shell caller both see the disclaimer. The
+    # measurement itself is printed either way, and both spawn gates now read
+    # the PAYLOAD rather than this exit code - they key on `attribution_gap`,
+    # which is the same condition set here.
     if reading.attribution_gap is not None and cause_only:
         exit_code = 4
     top_limit = 5 if cause_only else None
