@@ -2050,12 +2050,15 @@ def test_route_tuple_identical_across_launchers(iso, tmp_path, monkeypatch):
     _force_exhausted(monkeypatch, "ccm")
     _destination(monkeypatch, ("codex-acct", "codex", env))
     # The codex surface rewrites bare /target only for a verb in the shipped
-    # roster, and the roster resolves through FNO_REPO_ROOT, which `iso` points
-    # at this test's bare tmp dir: unreadable here by construction. Whether the
-    # read lands non-empty depends on a sibling test leaving the roster's cache
-    # warm (test_harness_map_roster clears it in a finally), which made this
-    # assertion an ordering flake. Pin the roster: the subject is cross-launcher
-    # identity, not cache warmth.
+    # roster. The roster resolves through resolve_plugin_script, which honors
+    # CLAUDE_PLUGIN_ROOT and CODEX_PLUGIN_ROOT ahead of FNO_REPO_ROOT; with no
+    # plugin-root var set (CI, and the hermetic sandbox, which scrubs them),
+    # it lands on FNO_REPO_ROOT, which `iso` points at this test's bare tmp
+    # dir: unreadable here by construction. Whether the read lands non-empty
+    # depends on a sibling test leaving the roster's cache warm
+    # (test_harness_map_roster clears it in a finally), which made this
+    # assertion an ordering flake. Pin the roster: the subject is
+    # cross-launcher identity, not cache warmth.
     monkeypatch.setattr(
         "fno.agents.harness_map.footnote_verbs", lambda: frozenset({"target"})
     )

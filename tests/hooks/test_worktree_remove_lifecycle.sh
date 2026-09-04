@@ -502,18 +502,101 @@ if grep -q "^STATUS" "$OUT_ABA"; then
 else
     pass "ABA reclaim backs off a lock it did not observe"
 fi
-if [[ -d "$LOCKDIR" ]]; then
-    pass "ABA fresh claim survives the reclaim attempt"
+# Positive marker for the exhausted-retry path: without it, an early
+# "another sweep is already running" exit would pass the STATUS check above
+# without the steal/restore logic ever running.
+if grep -q "could not acquire sweep lock after retries" "$OUT_ABA"; then
+    pass "ABA reclaimer exhausted retries against the fresh claim"
 else
-    fail "ABA fresh claim eaten" "the peer's mid-acquire lock directory is gone"
+    fail "ABA reclaimer left the retry path" "no exhausted-retries marker; the sweep exited some other way"
 fi
 if [[ -f "$SWAPDONE" ]]; then
     pass "ABA swap instrument ran"
 else
     fail "ABA swap instrument never ran" "the stub cat was never consulted; a green here would be vacuous"
 fi
-rm -f "$OUT_ABA"
+# The frozen pid-less claim is DEBRIS once the retry budget expires (a real
+# mid-acquire peer writes its pid in milliseconds), and the budget-expiry
+# reap must leave the next sweep a clean path: a wedge here is permanent.
+OUT_ABA_B=$(mktemp -t aba-b.XXXXXX)
+( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_ABA_B" 2>&1 )
+if grep -q "^STATUS" "$OUT_ABA_B"; then
+    pass "ABA debris does not wedge the next sweep"
+else
+    fail "ABA debris wedged the next sweep" "second sweep could not acquire: [$(cat "$OUT_ABA_B")]"
+fi
+rm -f "$OUT_ABA" "$OUT_ABA_B"
 rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE"
+
+# 5h3. The else arm: the path is re-taken before the restore, the moved copy
+# carries a LIVE stamp, and the reclaimer must LEAVE it (deleting a live
+# claim is the eat by another name). Staged with a stub `mv` that performs
+# the real steal and then plants a third party's claim on the path, and a
+# swap-in directory whose stamp names pid 1 (alive on every platform this
+# suite targets).
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare3.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$(cd "$COMMON" && pwd -P)/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+( exec true ) & DEAD=$!; wait "$DEAD" 2>/dev/null
+echo "$DEAD" > "$LOCKDIR/pid"
+STUBDIR=$(mktemp -d -t aba3-stub.XXXXXX)
+SWAPDONE="$STUBDIR/swap-done"
+MVDONE="$STUBDIR/mv-done"
+cat > "$STUBDIR/cat" <<EOF
+#!/usr/bin/env bash
+# One-time stale-pid answer, then the swap-in carries a LIVE stamp: this
+# test's own pid, same user, visible to kill -0. pid 1 would LIE here - as
+# root-owned launchd/systemd it answers EPERM to a user's kill -0 and reads
+# as dead.
+if [[ "\$1" == "$LOCKDIR/pid" && ! -e "$SWAPDONE" ]]; then
+    _out=\$(/bin/cat "\$@")
+    : > "$SWAPDONE"
+    rm -rf "$LOCKDIR"
+    mkdir "$LOCKDIR"
+    echo $$ > "$LOCKDIR/pid"
+    printf '%s' "\$_out"
+    exit 0
+fi
+exec /bin/cat "\$@"
+EOF
+cat > "$STUBDIR/mv" <<EOF
+#!/usr/bin/env bash
+# One-time: perform the real steal, then take the path with a third party's
+# claim so the restore finds the path occupied and the else arm is reached.
+if [[ "\$1" == "$LOCKDIR" && ! -e "$MVDONE" ]]; then
+    : > "$MVDONE"
+    /bin/mv "\$@"
+    mkdir "$LOCKDIR"
+    exit 0
+fi
+exec /bin/mv "\$@"
+EOF
+chmod +x "$STUBDIR/cat" "$STUBDIR/mv"
+OUT_ABA3=$(mktemp -t aba3.XXXXXX)
+( cd "$S" && PATH="$STUBDIR:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_ABA3" 2>&1 )
+if grep -q "^STATUS" "$OUT_ABA3"; then
+    fail "ABA3 live-claim copy eaten" "reclaimer proceeded over an unobserved live claim: [$(cat "$OUT_ABA3")]"
+else
+    pass "ABA3 reclaimer backs off a live-stamp claim"
+fi
+if ls "$LOCKDIR".stale.* >/dev/null 2>&1; then
+    pass "ABA3 live-stamp copy left in place"
+else
+    fail "ABA3 live-stamp copy deleted" "the else arm reaped a claim whose stamp names a live process"
+fi
+if [[ -f "$MVDONE" && -f "$SWAPDONE" ]]; then
+    pass "ABA3 instruments ran"
+else
+    fail "ABA3 instruments never ran" "the stubs were never consulted; a green here would be vacuous"
+fi
+rm -f "$OUT_ABA3"
+rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE" "$LOCKDIR".stale.* 2>/dev/null
 
 echo ""
 echo "worktree lifecycle: $PASS passed, $FAIL failed"
