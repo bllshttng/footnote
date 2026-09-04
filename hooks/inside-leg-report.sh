@@ -94,7 +94,13 @@ try:
     msg = (d.get("message") or "") if isinstance(d, dict) else ""
     event = (d.get("hook_event_name") or "") if isinstance(d, dict) else ""
     model = (d.get("to_model") or "") if isinstance(d, dict) else ""
-    eff = (d.get("effort") or {}).get("level") or "" if isinstance(d, dict) else ""
+    ev = d.get("effort") if isinstance(d, dict) else None
+    if isinstance(ev, str):
+        eff = ev
+    elif isinstance(ev, dict):
+        eff = ev.get("level") or ""
+    else:
+        eff = ""
 except Exception:
     sys.exit(0)
 if not sid:

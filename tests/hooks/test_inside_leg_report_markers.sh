@@ -173,5 +173,12 @@ report_via working '{"session_id":"rep-2","hook_event_name":"UserPromptSubmit"}'
 ! tail -n 1 "$REC" | grep -q -- '--effort' \
   && pass "T13 hook input without effort sends no --effort" || fail "T13 expected no --effort in report args"
 
+# T14: a payload whose effort is a bare STRING (not the {"level": ...} object)
+# still reports, with the string as the effort: the parse never aborts on the
+# shape, so the state report rides along instead of being skipped whole.
+report_via model '{"session_id":"rep-3","hook_event_name":"PostModelSwitch","to_model":"glm-5.3[1m]","effort":"high"}'
+tail -n 1 "$REC" | grep -q -- '--model glm-5.3\[1m\]' && tail -n 1 "$REC" | grep -q -- '--effort high' \
+  && pass "T14 string effort parses and rides the report" || fail "T14 expected --effort high from a string effort payload"
+
 printf '[inside-leg] %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

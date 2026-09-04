@@ -236,7 +236,7 @@ impl Default for Registry {
 /// Every session id one row answers to at the full-id tier: its own harness
 /// session id, the one optional related id (a fork's uuid addresses its row
 /// too - both stay valid forever), and predecessor ids (a succeeded session
-/// follows the row that answers as its successor, x-dfe7).
+/// follows the row that answers as its successor).
 fn entry_session_ids(e: &RegistryEntry) -> impl Iterator<Item = &str> {
     [
         e.harness_session_id.as_deref(),

@@ -7735,13 +7735,16 @@ where
                     "liveness": e.liveness,
                     "liveness_measured_at": e.liveness_measured_at,
                     // The harness's own title for the session, served
-                    // from the probe's fresh reading with the sweep's stored
-                    // last-seen value as fallback. Beside `name`, never in it:
-                    // the label is fno's, the title is the harness's.
+                    // from the probe's fresh reading; a probe that ANSWERED
+                    // None is trusted (the harness carries no title now, e.g.
+                    // a rotated transcript), and the sweep's stored last-seen
+                    // value stands only for a row the batch never measured.
+                    // Beside `name`, never in it: the label is fno's, the
+                    // title is the harness's.
                     "harness_title": truths
                         .get(&registry_truth_handle(e))
-                        .and_then(|t| t.harness_title.clone())
-                        .or_else(|| e.harness_title.clone()),
+                        .map(|t| t.harness_title.clone())
+                        .unwrap_or_else(|| e.harness_title.clone()),
                     "status": rendered_status,
                     // The reachability triple, from the same probe the rendered
                     // word above came from. `fno agents list` is where `peek` and
@@ -17262,6 +17265,51 @@ done
         assert_eq!(row["crown_level"], 1);
         assert_eq!(row["crown_scope"], "epic-x");
         assert_eq!(row["crown_grantor"], "king");
+
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn a_title_probe_that_answered_is_trusted_over_the_stored_baseline() {
+        // Served, never stored, applies to ABSENCE too: a probe that answered
+        // `harness_title: None` (a rotated transcript carries no agent-name
+        // record) must serve None, never the sweep's stale last-seen value;
+        // the stored baseline stands only for a row the batch never measured.
+        let home = short_home("title-serving");
+        seed_stream_row(&home, "worker-title", "abc12345");
+        state::update_registry(&home.registry_json(), |r| {
+            let e = &mut r.entries[0];
+            e.harness = Some("claude".into());
+            e.harness_session_id = Some("e6f78b98-e594-47ed-ad81-84f8a78b8bb7".into());
+            e.claude_session_uuid = Some("e6f78b98-e594-47ed-ad81-84f8a78b8bb7".into());
+            e.harness_title = Some("old-title".into());
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({}));
+        let uuid = "e6f78b98-e594-47ed-ad81-84f8a78b8bb7";
+
+        // The probe ANSWERED, and answered no title: serve absence.
+        let mut answered = probe_with_verdict("working", "alive").unwrap();
+        answered.harness_title = None;
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(move |h| (h == uuid).then(|| answered.clone())),
+        );
+        let row = &response.result().unwrap()["agents"][0];
+        assert!(
+            row["harness_title"].is_null(),
+            "a probe that answered None must serve None, got {row}"
+        );
+
+        // The probe never answered (unmeasured row): the stored baseline stands.
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_| None));
+        let row = &response.result().unwrap()["agents"][0];
+        assert_eq!(
+            row["harness_title"], "old-title",
+            "an unmeasured row is served the stored last-seen title"
+        );
 
         std::fs::remove_dir_all(home.root()).ok();
     }
