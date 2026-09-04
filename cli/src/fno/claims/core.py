@@ -223,6 +223,13 @@ def _resolve_pid_provenance(pid: Optional[int], ttl_ms: Optional[int]) -> str:
     landed on a chat app's app-server), or a defaulted transient subprocess
     pid - stamps "ambient", and the TTL stays the lease it claims to be.
 
+    The walk proves WHICH process the pid is. It cannot prove that process
+    dies when the session does, and under a harness whose sessions share one
+    host process it does not: the walk lands on a multiplexer that outlives
+    every session it hosts, both sides of the equality below hold, and the
+    stamp is earned by a walk that proved the wrong thing. So the harness the
+    same walk reports gates the stamp - see ``pid_dies_with_session``.
+
     ``ttl_ms`` gates the walk: provenance is only ever consulted on a TTL
     claim (PID-liveness claims never expire into the hybrid arm), so a
     PID-liveness acquire skips the process walk entirely. Like the harness
@@ -232,11 +239,17 @@ def _resolve_pid_provenance(pid: Optional[int], ttl_ms: Optional[int]) -> str:
     if pid is None or ttl_ms is None:
         return "ambient"
     try:
-        from .session_pid import resolve_session_pid
-
-        return (
-            "session-prover" if resolve_session_pid(from_pid=os.getpid()) == pid else "ambient"
+        from .session_pid import (
+            pid_dies_with_session,
+            resolve_session_harness,
+            resolve_session_pid,
         )
+
+        if resolve_session_pid(from_pid=os.getpid()) != pid:
+            return "ambient"
+        if not pid_dies_with_session(resolve_session_harness(from_pid=os.getpid())):
+            return "ambient"
+        return "session-prover"
     except Exception:  # noqa: BLE001 - an unprovable pid is ambient, never an error
         return "ambient"
 
@@ -1218,9 +1231,12 @@ def refresh_claim(
                 anchor_pid,
                 window,
                 # The anchor IS resolve_session_pid's answer for this process
-                # (see _reanchor_pid_for), so it carries the strongest
-                # provenance by construction - the one rebind that always can.
-                new_pid_provenance="session-prover",
+                # (see _reanchor_pid_for), so the equality half of the stamp
+                # holds by construction. The harness half does not: under a
+                # shared-host harness that same answer is a multiplexer, so
+                # hardcoding the stamp here would re-poison on every refresh
+                # what acquire had just stopped writing. Re-derive it.
+                new_pid_provenance=_resolve_pid_provenance(anchor_pid, window),
                 keep_acquired_at=True,
             )
         else:

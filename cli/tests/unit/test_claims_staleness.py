@@ -173,6 +173,63 @@ def test_classify_stale_ttl_expired_live_pid_legacy_claim():
     assert classify(claim) == ClaimState.STALE
 
 
+def test_classify_stale_ttl_expired_prover_pid_under_shared_host_harness():
+    """AC2 - THE SPECIMEN, 2026-09-03 on node:x-fa8b. A codex claim, expired
+    3h45m earlier, prover-stamped, whose recorded pid answered: `codex
+    app-server --remote-control`, up 9h20m, hosting every codex session on the
+    machine and outliving the one that filed this. session-prover proves the
+    pid called acquire. It never proves the pid dies when the session dies, and
+    under a shared-host harness it does not.
+
+    The record is built exactly as a PRE-FIX binary wrote it (the stamp is
+    still "session-prover"), because that is what makes this the retroactive
+    arm: the fix must reach records already on disk, not only future writers.
+
+    Asserted by NAME, both halves. `!= LIVE` would pass for a pid that merely
+    went missing."""
+    claim = _live_claim(
+        expires_at=now_ms() - 1000,
+        pid_provenance="session-prover",
+        harness="codex",
+    )
+    state, basis = classify_with_basis(claim)
+    assert state == ClaimState.STALE
+    assert basis == CAUSE_TTL_EXPIRED
+
+
+def test_classify_live_ttl_expired_prover_pid_under_per_session_harness():
+    """AC3 - the must-not-break twin, identical to AC2 in every field but the
+    harness. claude forks one process per session, so its live pid IS the live
+    session and a suspended-but-alive session must keep its claim. A fix that
+    stales this too is the over-reap, and it fails here rather than in
+    production."""
+    claim = _live_claim(
+        expires_at=now_ms() - 1000,
+        pid_provenance="session-prover",
+        harness="claude",
+    )
+    state, basis = classify_with_basis(claim)
+    assert state == ClaimState.LIVE
+    assert basis == CAUSE_LIVE
+
+
+@pytest.mark.parametrize("harness", [None, "unknown", "gemini", "opencode", "agy"])
+def test_classify_live_ttl_expired_prover_pid_unmeasured_harness_unchanged(harness):
+    """AC4-EDGE - the deny-list's blast radius, pinned. 1808 of 3404 claim
+    records on the filing machine carried no harness at all, including the
+    native daemon's own long-lived claims. An allow-list would have stripped
+    TTL extension from every one of them and let a peer reclaim a suspended
+    session's claim, which is the regression the hybrid arm exists to prevent.
+    So an unknown or absent harness keeps today's behavior, and adding a name
+    to the deny-list costs a measurement."""
+    claim = _live_claim(
+        expires_at=now_ms() - 1000,
+        pid_provenance="session-prover",
+        harness=harness,
+    )
+    assert classify(claim) == ClaimState.LIVE
+
+
 def _expired_prover_claim() -> Claim:
     """The hybrid-arm specimen shape: expired TTL, live local pid, prover-proven.
 

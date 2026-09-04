@@ -28,6 +28,7 @@ from typing import Optional
 import psutil
 
 from .hostid import is_same_machine
+from .session_pid import pid_dies_with_session
 from .types import Claim, ClaimState
 
 
@@ -236,7 +237,15 @@ def classify_with_basis(
         # The liveness reading is only load-bearing here for a prover-proven
         # pid; every other expired claim is STALE on the clock alone, so the
         # probe (a syscall per claim) is skipped on that path.
-        if claim.pid_provenance == "session-prover":
+        #
+        # The harness gate makes this true of RECORDS rather than of writers.
+        # A stamp is written by the process being judged, so a guard whose only
+        # evidence is that field is one field away from lying again - which is
+        # how a codex record, whose stamp meant "the app-server is up", once
+        # read LIVE 3h45m past its TTL. The record's own harness is independent
+        # evidence and is already on every record, so a claim written by a
+        # pre-fix binary gets the right verdict here too.
+        if claim.pid_provenance == "session-prover" and pid_dies_with_session(claim.harness):
             live, cause = _liveness_reading(claim)
             if live:
                 if pid_exclusive is False:
