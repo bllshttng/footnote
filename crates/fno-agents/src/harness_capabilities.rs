@@ -161,13 +161,20 @@ pub struct HarnessCapabilities {
     pub features: BTreeMap<String, FeatureClaim>,
 }
 
-/// One feature claim. Its only field is `state`; the vocabulary and the
-/// probe coupling are the contract.
+/// One feature claim: `state` is the claim, and `verbs` names the
+/// harness's own verbs that exercise it, measured. The vocabulary and
+/// the probe coupling are the contract.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeatureClaim {
     /// One of [`FEATURE_STATES`].
     pub state: String,
+    /// The harness's own verbs that exercise this feature, measured.
+    /// Absent means the claim has no verb surface (an fno-hosted lane
+    /// included), which the consuming lane states in its refusal
+    /// instead of implying one.
+    #[serde(default)]
+    pub verbs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1187,11 +1194,21 @@ mod tests {
         // agy reads `capable` (real on the harness, no fno arm) and gemini
         // `absent`; claude, codex and opencode are journey-proven native.
         for name in ["claude", "codex", "opencode", "pi", "cursor-agent", "grok"] {
-            let claim = contract.capabilities(name).unwrap().features.get("spawn").unwrap();
+            let claim = contract
+                .capabilities(name)
+                .unwrap()
+                .features
+                .get("spawn")
+                .unwrap();
             assert_eq!(claim.state, "native", "{name} is seated");
         }
         for name in ["agy", "gemini"] {
-            let claim = contract.capabilities(name).unwrap().features.get("spawn").unwrap();
+            let claim = contract
+                .capabilities(name)
+                .unwrap()
+                .features
+                .get("spawn")
+                .unwrap();
             assert_ne!(claim.state, "native", "{name} is unseated");
         }
         assert_eq!(claude.ready_marker, "live_prompt_box");
@@ -1216,6 +1233,35 @@ mod tests {
         assert_eq!(codex.session_binding.strategy, "rollout-fd-or-daemon");
         assert!(codex.session_binding.required);
         assert_eq!(codex.session_binding.timeout_ms, 60_000);
+    }
+
+    #[test]
+    fn feature_claims_carry_the_verbs_that_exercise_them() {
+        let contract = HarnessContract::packaged().unwrap();
+        let claude_review = contract
+            .capabilities("claude")
+            .unwrap()
+            .features
+            .get("review")
+            .unwrap();
+        assert_eq!(claude_review.state, "native");
+        assert_eq!(claude_review.verbs, ["/code-review"]);
+        let codex_review = contract
+            .capabilities("codex")
+            .unwrap()
+            .features
+            .get("review")
+            .unwrap();
+        assert!(codex_review.verbs.contains(&"/review".to_string()));
+        // A claim with no single verb surface stays empty rather than
+        // inheriting one: spawn is a lane fno arms, not a TUI verb.
+        let opencode_spawn = contract
+            .capabilities("opencode")
+            .unwrap()
+            .features
+            .get("spawn")
+            .unwrap();
+        assert!(opencode_spawn.verbs.is_empty());
     }
 
     #[test]

@@ -4,7 +4,7 @@
 # resync BOTH copies, not just the first:
 #   bash scripts/ci/check-harness-capabilities-fresh.sh --write
 # scripts/ci/check-harness-capabilities-fresh.sh fails CI when any copy differs.
-map_version = 17
+map_version = 18
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -46,6 +46,12 @@ loop_participation = "native"
 loop_extension = ""
 command_surface = "slash"
 slash_prefix = ""
+# The claude TUI's own slash verbs, measured 2026-09-04 against the
+# installed CLI's palette and the vendor docs. The verb normalizer skips
+# a leading-slash token naming one of these, so a native verb driven
+# through dispatch reaches the TUI verb instead of a footnote skill that
+# does not exist.
+native_verbs = ["/agents", "/code-review", "/compact", "/doctor", "/memory", "/model", "/rename", "/resume", "/status"]
 ready_marker = "live_prompt_box"
 ready_rule_ids = ["live_prompt_box", "osc_title_idle"]
 manifest_rules = [
@@ -132,6 +138,7 @@ status_pattern = 'Model:\s+(?P<model>\S+).*?(?:reasoning|effort)\s+(?P<effort>mi
 # native verb, and resume_cli renders it.
 [harness.claude.features.review]
 state = "native"
+verbs = ["/code-review"]
 
 [harness.claude.features.spawn]
 state = "native"
@@ -277,6 +284,7 @@ status_pattern = 'Model:\s+(?P<model>\S+).*?reasoning\s+(?P<effort>minimal|low|m
 # the reachability answer reads native.
 [harness.codex.features.review]
 state = "native"
+verbs = ["/code-review", "/review"]
 
 [harness.codex.features.spawn]
 state = "native"
@@ -307,6 +315,8 @@ route_on_pane = false
 loop_participation = "none"
 loop_extension = ""
 command_surface = "refused"
+# A deprecated harness with a refused command surface declares no native
+# verbs: there is no TUI palette left to measure.
 ready_marker = "unsupported"
 ready_rule_ids = []
 manifest_rules = []
@@ -400,6 +410,10 @@ loop_participation = "native"
 loop_extension = ""
 command_surface = "slash"
 slash_prefix = ""
+# The agy TUI's own slash verbs, measured 2026-09-04 from the vendor
+# reference's slash-command table (aliases folded into their canonical
+# name; argument-taking verbs listed by name).
+native_verbs = ["/add-dir", "/agents", "/artifact", "/btw", "/clear", "/config", "/context", "/copy", "/credits", "/diff", "/exit", "/fast", "/feedback", "/fork", "/help", "/hooks", "/keybindings", "/logout", "/mcp", "/model", "/open", "/permissions", "/planning", "/rename", "/resume", "/rewind", "/skills", "/statusline", "/tasks", "/title", "/usage"]
 ready_marker = "unsupported"
 ready_rule_ids = []
 manifest_rules = []
@@ -499,6 +513,10 @@ loop_participation = "extension"
 loop_extension = "cli/src/fno/setup/assets/opencode/footnote.js"
 command_surface = "slash"
 slash_prefix = "fno:"
+# The opencode TUI's own slash verbs, measured 2026-09-04 from the vendor
+# commands doc: five built-ins ship, and a custom command can override a
+# built-in by name.
+native_verbs = ["/help", "/init", "/redo", "/share", "/undo"]
 ready_marker = "unsupported"
 ready_rule_ids = []
 manifest_rules = [{ id = "permission_required", state = "blocked" }]
@@ -646,6 +664,10 @@ loop_participation = "extension"
 loop_extension = "cli/src/fno/setup/assets/pi/footnote.ts"
 command_surface = "slash"
 slash_prefix = ""
+# pi's in-TUI slash surface is composed at runtime from extensions, prompt
+# templates and skills; the vendor docs name /name as the built-in that
+# names a session. Measured 2026-09-04 from the vendor docs.
+native_verbs = ["/name"]
 # Read off a live pi TUI on 2026-08-28, not inherited: the status bar carries
 # the cost, the subscription tag, the context percentage and the compaction
 # tag, and it is the lowest-priority rule in manifests/pi.toml precisely
@@ -803,6 +825,10 @@ loop_participation = "extension"
 loop_extension = ""
 command_surface = "slash"
 slash_prefix = ""
+# The cursor-agent TUI's own slash verbs, measured 2026-09-04 from the
+# vendor slash-commands reference (aliases folded into their canonical
+# name).
+native_verbs = ["/about", "/ask", "/bedrock", "/clear", "/config", "/copy", "/copy-conversation-id", "/copy-request-id", "/debug", "/exit", "/feedback", "/fork", "/help", "/line-numbers", "/logs", "/max-mode", "/mcp", "/model", "/open", "/plan", "/plugin", "/quit", "/rename", "/resume", "/rewind", "/run-everything", "/sandbox", "/setup-terminal", "/shell", "/show-thinking", "/status-indicators", "/summarize", "/update", "/vim"]
 ready_marker = "idle_plan_build"
 ready_rule_ids = ["idle_plan_build"]
 manifest_rules = [{ id = "idle_plan_build", state = "idle" }]
@@ -1023,6 +1049,10 @@ loop_participation = "extension"
 loop_extension = ""
 command_surface = "slash"
 slash_prefix = ""
+# The grok TUI's own slash verbs, measured 2026-09-04 from the vendor
+# user guide's slash-command sections. Skill-provided verbs (/commit and
+# the like) are excluded: they ride enabled skills, not the harness.
+native_verbs = ["/always-approve", "/compact", "/hooks-add", "/hooks-list", "/hooks-remove", "/hooks-trust", "/hooks-untrust", "/model", "/new"]
 # Read off a live grok TUI (2026-09-02): the idle composer carries the status
 # bar `Shift+Tab:mode | Ctrl+x:shortcuts` and the footer
 # `Grok 4.6 (high) · always-approve`; while a turn runs the mode hint is

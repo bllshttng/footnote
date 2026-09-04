@@ -752,6 +752,28 @@ def test_thread_seat_is_derived_from_the_spawn_claim():
         )
 
 
+def test_native_verbs_roster_is_filled_from_measured_sources():
+    """A slash harness with a TUI palette declares its native verbs; the
+    normalizer needs them so a native verb typed at a worker is not rewritten
+    into a footnote skill that does not exist. gemini is refused (deprecated)
+    and so declares none; pi's surface is extension-composed and declares the
+    one built-in its docs name."""
+    assert capabilities("claude")["native_verbs"]
+    assert capabilities("agy")["native_verbs"]
+    assert capabilities("opencode")["native_verbs"]
+    assert capabilities("cursor-agent")["native_verbs"]
+    assert capabilities("grok")["native_verbs"]
+    assert capabilities("codex")["native_verbs"] == [
+        "/review",
+        "/code-review",
+        "/model",
+        "/status",
+        "/compact",
+    ]
+    assert capabilities("pi")["native_verbs"] == ["/name"]
+    assert capabilities("gemini").get("native_verbs") is None
+
+
 def test_explicit_thread_on_unbuilt_lane_refused_with_the_reason():
     """An explicit thread request where fno has no arm is a hard error naming
     the spawn state and the missing lane, never a silent ride onto a

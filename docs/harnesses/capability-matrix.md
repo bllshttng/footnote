@@ -3,7 +3,7 @@
      regenerate from crates/fno-agents/src/harness_capabilities.toml. -->
 # Harness capability matrix (features)
 
-What each harness can DO, rendered from the capability table (`map_version 17`). One row per supported harness - including roster entries with no capability row, which read unmeasured everywhere - and one column per feature key.
+What each harness can DO, rendered from the capability table (`map_version 18`). One row per supported harness - including roster entries with no capability row, which read unmeasured everywhere - and one column per feature key.
 
 | State | Meaning |
 |---|---|
