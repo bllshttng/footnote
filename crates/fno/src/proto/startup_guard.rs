@@ -35,16 +35,29 @@ fn startup_guard_live(pid: i32, recorded_start: Option<u64>) -> bool {
     recorded_start.is_none_or(|start| pid_start_time(pid as u32) == Some(start))
 }
 
+/// Sequence stamp for tmp names: unique per attempt within a process, where
+/// the clock's granularity is not. Two same-process racers that compute the
+/// same nanosecond stamp otherwise share one tmp name, and the loser's
+/// unconditional tmp cleanup then deletes the winner's tmp mid-create, whose
+/// hard_link then fails ENOENT and escaped the bind race as an error.
+static MARKER_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn create_startup_marker(marker: &Path) -> std::io::Result<()> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    let seq = MARKER_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = marker
         .file_name()
         .map(|value| value.to_string_lossy())
         .unwrap_or_else(|| std::borrow::Cow::Borrowed("mux-start"));
-    let tmp = marker.with_file_name(format!(".{name}.tmp.{}.{}", std::process::id(), stamp));
+    let tmp = marker.with_file_name(format!(
+        ".{name}.tmp.{}.{}.{}",
+        std::process::id(),
+        stamp,
+        seq
+    ));
     let result = (|| {
         let mut file = std::fs::OpenOptions::new()
             .create_new(true)
@@ -73,6 +86,17 @@ fn hold_start_marker_for_tests() {
         if let Ok(ms) = v.to_string_lossy().parse::<u64>() {
             std::thread::sleep(Duration::from_millis(ms));
         }
+    }
+}
+
+/// Remove the marker, tolerating only "already gone" (the owner's own exit
+/// or a peer's reclaim). Every other error propagates: a remove that keeps
+/// failing while the marker sits there would otherwise spin this loop hot
+/// forever, where the pre-module code surfaced a named error.
+fn remove_marker_gone_tolerant(marker: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(marker) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
     }
 }
 
@@ -107,7 +131,7 @@ pub(crate) fn acquire_startup_guard(socket: &Path) -> std::io::Result<StartupGua
                         // A peer reclaiming the same stale marker may have
                         // removed it first; NotFound there is their success,
                         // and the loop simply retries owning the path.
-                        let _ = std::fs::remove_file(&marker);
+                        remove_marker_gone_tolerant(&marker)?;
                         continue;
                     }
                     return Err(std::io::Error::new(
@@ -118,7 +142,7 @@ pub(crate) fn acquire_startup_guard(socket: &Path) -> std::io::Result<StartupGua
                 if startup_guard_live(pid, recorded_start) {
                     return Ok(StartupGuard::ExistingLive);
                 }
-                let _ = std::fs::remove_file(&marker);
+                remove_marker_gone_tolerant(&marker)?;
             }
             Err(e) => return Err(e),
         }

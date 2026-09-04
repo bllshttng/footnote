@@ -319,8 +319,11 @@ fn proto_startup_marker_removed_mid_acquire_is_a_retry_not_an_error() {
         std::thread::sleep(Duration::from_millis(250));
         drop(listener);
         let _ = std::fs::remove_file(&holder_sock);
-        let _ = std::fs::remove_file(holder_sock.with_extension("start"));
+        let _ = std::fs::remove_file(fno::proto::startup_sidecar_path(&holder_sock));
     });
+    // The seam below is process-global env, so this test assumes the serial
+    // run the CI contract already pins (--test-threads=1); a parallel run of
+    // this binary would race the env read inside other tests' servers.
     std::env::set_var("FNO_TEST_MARKER_HOLD_MS", "400");
     let outcome = bind_or_probe(&sock);
     std::env::remove_var("FNO_TEST_MARKER_HOLD_MS");

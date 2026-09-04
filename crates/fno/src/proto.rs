@@ -3640,7 +3640,7 @@ pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
                     if owns_startup {
                         remove_startup_guard(path);
                     }
-                    Err(e)
+                    Err(std::io::Error::new(e.kind(), format!("DBG-rebind: {e}")))
                 }
             }
         }
@@ -3648,7 +3648,7 @@ pub fn bind_or_probe(path: &Path) -> std::io::Result<BindOutcome> {
             if owns_startup {
                 remove_startup_guard(path);
             }
-            Err(e)
+            Err(std::io::Error::new(e.kind(), format!("DBG-initial: {e}")))
         }
     }
 }
@@ -3857,17 +3857,29 @@ pub(crate) fn probe_status(path: &Path) -> ProbeOutcome {
 /// The pid sidecar is identity-checked before each signal. An unreadable
 /// identity refuses takeover, while a positive start-time mismatch proves the
 /// recorded holder exited and its pid was reused, so takeover is safe.
+/// Stop an unresponsive holder before takeover. Without this coordination, its
+/// later `SocketGuard` can unlink the replacement server's socket and sidecars.
+/// The pid sidecar is identity-checked before each signal. An unreadable
+/// identity refuses takeover, while a positive start-time mismatch proves the
+/// recorded holder exited and its pid was reused, so takeover is safe.
+/// A sidecar that vanished between the caller's exists() gate and this read
+/// means the holder exited in that gap: there is nothing left to terminate,
+/// so Ok sends the caller down the no-holder takeover path.
 fn reclaim_unresponsive_holder(path: &Path) -> std::io::Result<()> {
     let pid_path = pid_sidecar_path(path);
-    let raw = std::fs::read_to_string(&pid_path).map_err(|e| {
-        std::io::Error::new(
-            e.kind(),
-            format!(
-                "cannot take over unresponsive socket: read {}: {e}",
-                pid_path.display()
-            ),
-        )
-    })?;
+    let raw = match std::fs::read_to_string(&pid_path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "cannot take over unresponsive socket: read {}: {e}",
+                    pid_path.display()
+                ),
+            ))
+        }
+    };
     let (pid, recorded_start) = parse_pid_sidecar(&raw).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
