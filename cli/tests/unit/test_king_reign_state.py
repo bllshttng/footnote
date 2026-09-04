@@ -206,3 +206,43 @@ def test_set_manifest_shape_refuses_without_manifest(
         set_manifest_shape("alpha", "court", state_root=tmp_path / ".fno")
     with pytest.raises(ValueError, match="pass or court"):
         set_manifest_shape("alpha", "siege", state_root=tmp_path / ".fno")
+
+
+def test_unsafe_scope_with_unreadable_registry_degrades_not_raises(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A crash on this branch would replace the named reason with a different
+    error; the reader answers unknown, never escapes (found in review)."""
+    from fno.king.state import reign_state
+
+    use_tmpdir(monkeypatch, tmp_path)
+
+    def _boom():
+        raise OSError("disk on fire")
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", _boom)
+    state = reign_state(scope="a/b")
+    assert state.live is None
+    assert state.split is None
+    assert "unsafe scope" in state.unknown_reason
+
+
+def test_shape_insert_lands_inside_the_frontmatter(tmp_path: Path) -> None:
+    """A pre-change manifest has no shape line; the inserted line must land
+    after the opening fence or every fenced parser misses it (found in
+    review)."""
+    from fno.king.state import king_manifest_path, parse_manifest, set_manifest_shape
+
+    root = tmp_path / ".fno"
+    path = king_manifest_path("legacy", state_root=root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\nscope: legacy\nharness_session_id: "
+        "dddd1111-0000-4000-8000-00000000000d\n---\n",
+        encoding="utf-8",
+    )
+    set_manifest_shape("legacy", "court", state_root=root)
+    lines = path.read_text().splitlines()
+    assert lines[0] == "---"
+    assert lines[1] == "shape: court"
+    assert parse_manifest(path)["shape"] == "court"

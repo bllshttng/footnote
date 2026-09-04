@@ -390,9 +390,17 @@ def reign_state(
             shape = None
             reason = f"registry unreadable: {exc}"
             if scope:
-                manifest_session, shape = _read_manifest_identity(
-                    king_manifest_path(scope, state_root=root)
-                )
+                try:
+                    manifest_session, shape = _read_manifest_identity(
+                        king_manifest_path(scope, state_root=root)
+                    )
+                except ValueError:
+                    # An unsafe scope must degrade the manifest side to
+                    # unknown, not escape this reader: every other path guards
+                    # king_manifest_path, and this branch answers "registry
+                    # unreadable" - raising a different error here would
+                    # replace the named reason with a crash.
+                    reason = f"registry unreadable: {exc}; unsafe scope {scope!r}"
             return ReignState(
                 crowned=None,
                 scope=scope,
@@ -588,9 +596,17 @@ def set_manifest_shape(
             else:
                 out.append(line)
         if not seen:
-            # Insert beside the scope line, where a reader scanning the
-            # frontmatter expects the crown's own fields.
-            out = [f"shape: {shape}"] + out
+            # Insert just after the opening fence, where a reader scanning the
+            # frontmatter expects the crown's own fields. Prepending to the
+            # file would land the line ABOVE the `---`, readable to this
+            # module's unfenced parser but invisible to any fenced one, and
+            # every manifest written before the field existed hits this branch.
+            for index, line in enumerate(out):
+                if line.strip() == "---":
+                    out.insert(index + 1, f"shape: {shape}")
+                    break
+            else:
+                out = [f"shape: {shape}"] + out
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
         os.replace(str(tmp), str(path))

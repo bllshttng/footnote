@@ -42,6 +42,7 @@ from fno import paths
 from fno.agents.dispatch import (
     DispatchAskError,
     _capture_parent_edge,
+    _reign_typed_message,
     _report_unlinked_parent,
     _capture_spawn_trigger,
     _touch_log_path,
@@ -3717,6 +3718,13 @@ def dispatch_spawn_pane(
         if grant_problem is not None:
             raise DispatchAskError(f"--crown: {grant_problem}", exit_code=2)
 
+    # x-7b36 change 11, the pane half: `pane` is the DEFAULT substrate, so a
+    # crowned spawn that only typed the verb on the bg lane left the common
+    # case improvising the ritual by hand. Same helper, same receipt line.
+    message, reign_typed = _reign_typed_message(
+        message, crown_level, crown_scope, revive=False
+    )
+
     # Launch-time headroom picking (x-7d45). `pane` is the DEFAULT substrate and
     # `cmd_spawn` routes it straight here, never through `dispatch_spawn` - so a
     # picker wired only there would cover bg/headless and leave every default
@@ -4948,6 +4956,14 @@ def dispatch_spawn_pane(
                 print(
                     f"spawn: crown over {_declined_scope!r} recorded, but the king "
                     f"loop manifest was NOT armed{why}",
+                    file=sys.stderr,
+                )
+            if _declined_scope and not crown_declined:
+                # No NOT-typed case on this lane: typing below is unconditional
+                # when a crown is carried (no revive path here), so the
+                # unreachable else would be dead code pretending to be a guard.
+                print(
+                    f"spawn: crown over {_declined_scope!r} recorded; reign typed",
                     file=sys.stderr,
                 )
             # Birth (x-8cd5 Wave 6): the row is written, so the pane worker now
