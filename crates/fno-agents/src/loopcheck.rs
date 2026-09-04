@@ -11246,20 +11246,9 @@ fn run_bounded(
     cwd: &Path,
     timeout: std::time::Duration,
 ) -> BoundedRun {
-    use std::os::unix::process::CommandExt;
-
-    let spawned = Command::new(fno_bin)
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn();
-
-    let mut child = match spawned {
+    let mut child = match crate::bounded_spawn::spawn_bounded(fno_bin, args, cwd) {
         Ok(c) => c,
-        Err(e) => return BoundedRun::SpawnFailed(e.kind()),
+        Err(kind) => return BoundedRun::SpawnFailed(kind),
     };
     let pgid = child.id() as i32;
 
@@ -11567,7 +11556,7 @@ pub(crate) fn bounded_read(
         BoundedRun::SpawnFailed(kind) => Err(GhReadError::unrunnable_spawn(
             read_name,
             kind,
-            "spawn failed",
+            &format!("spawn failed ({kind:?})"),
         )),
         BoundedRun::WaitFailed => Err(GhReadError::unrunnable(read_name, "wait failed")),
     }
@@ -11697,8 +11686,12 @@ pub(crate) fn git_bounded(git_bin: &str, args: &[&str], cwd: &Path) -> Option<Bo
             log_bounded_read_error("git", &error);
             None
         }
-        BoundedRun::SpawnFailed(_) => {
-            let error = GhReadError::unrunnable(&read_name, "spawn failed");
+        BoundedRun::SpawnFailed(kind) => {
+            let error = GhReadError::unrunnable_spawn(
+                &read_name,
+                kind,
+                &format!("spawn failed ({kind:?})"),
+            );
             log_bounded_read_error("git", &error);
             None
         }
