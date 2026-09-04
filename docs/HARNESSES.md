@@ -20,6 +20,8 @@ footnote runs as a host runtime on several AI coding CLIs. This is the public su
 
 Other CLIs (Cursor's GUI editor, GitHub Copilot Agents, Kiro, Qoder, Rovo Dev, Trae) are out of scope for footnote orchestration. For a new harness that enters scope, run `fno doctor harness <name> --live` and record its positive markers before adding a capability row; the runnable rubric is the evidence gate, not this summary.
 
+What each CLI can DO - a review command, a spawn arm, rpc, plugins, MCP - is the features dimension of the capability table, rendered per harness in [docs/harnesses/capability-matrix.md](harnesses/capability-matrix.md). That matrix is generated; never edit it by hand.
+
 ## What this means in practice
 
 - **Skills are portable markdown** and work on every CLI in scope.

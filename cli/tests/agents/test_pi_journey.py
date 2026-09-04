@@ -104,16 +104,16 @@ def test_pi_is_registered_at_every_seam_a_spawn_reads():
 
     from fno.agents.harness_map import capabilities
 
-    # The bit and the roster now answer the SAME question, and both answers
-    # are asserted. The bit backs dispatch-resolve: pi's keeper-hosted thread
-    # lane is journey-proven (test_thread_keeper_journey.py), so resolving
-    # `--substrate thread` is honest. SPAWN_HARNESSES backs the dispatch_spawn
-    # seam, whose pi arm shipped - the spawn journey
-    # (test_pi_spawn_journey.py) enters through the public surface the arm
-    # serves.
-    assert capabilities("pi")["thread"] is True, (
-        "the capability bit must agree with the journey: a false bit refuses a "
-        "restart-survival the keeper lane has already proven"
+    # The spawn claim and the roster now answer the SAME question, and both
+    # answers are asserted. The claim backs dispatch-resolve: pi's
+    # keeper-hosted thread lane is journey-proven
+    # (test_thread_keeper_journey.py), so resolving `--substrate thread` is
+    # honest. SPAWN_HARNESSES backs the dispatch_spawn seam, whose pi arm
+    # shipped - the spawn journey (test_pi_spawn_journey.py) enters through
+    # the public surface the arm serves.
+    assert capabilities("pi")["features"]["spawn"]["state"] == "native", (
+        "the spawn claim must agree with the journey: an unmeasured or capable "
+        "claim refuses a restart-survival the keeper lane has already proven"
     )
 
 

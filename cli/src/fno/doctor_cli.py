@@ -13,6 +13,7 @@ from fno.bundle import bundle_app
 from fno.codemap_cli import app as codemap_app
 from fno.doctor import doctor_command, plugin_file_command
 from fno.doctor_bash_census import bash_census_command
+from fno.paths import resolve_plugin_script
 from fno.agents.harness_probe import harness_probe_command
 from fno.doctor_footprint import footprint_command
 from fno.doctor_lanes import lanes_command
@@ -69,6 +70,28 @@ doctor_app.command("bash-census", hidden=True)(bash_census_command)
 # convention; `fno help doctor --all`.
 doctor_app.command("lanes", hidden=True)(lanes_command)
 doctor_app.command("harness", hidden=True)(harness_probe_command)
+
+
+# `doctor harness-matrix` renders the features matrix doc from the table
+# (x-a3e8). Hidden per the new-verb convention; the freshness gate is the
+# tripwire, this verb is the regenerator. The renderer is the diagnostics
+# script the gate also calls, so the render lives in one place outside the
+# runtime package.
+@doctor_app.command("harness-matrix", hidden=True)
+def harness_matrix_command(
+    write: bool = typer.Option(
+        False, "--write", help="Write docs/harnesses/capability-matrix.md from the table."
+    ),
+) -> None:
+    """Render the features capability matrix from the capability table."""
+    import subprocess
+    import sys
+
+    script = resolve_plugin_script("scripts/diagnostics/render-harness-matrix.py")
+    argv = [sys.executable, str(script)]
+    if write:
+        argv.append("--write")
+    raise SystemExit(subprocess.call(argv))
 doctor_app.command("plugin-file", hidden=True)(plugin_file_command)
 # `doctor route` is the reachability read: what this installation's declared
 # routing inventory can actually reach (absorbs the old "no surface answers

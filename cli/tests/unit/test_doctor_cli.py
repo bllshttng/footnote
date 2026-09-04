@@ -23,6 +23,7 @@ def test_doctor_lists_direct_actions() -> None:
         "event",
         "footprint",
         "harness",
+        "harness-matrix",
         "lanes",
         "lint",
         "observer",

@@ -16,8 +16,9 @@ def test_cursor_agent_capability_contract_is_pty_hosted_and_callee_minted():
     # TRUE behind the live keeper journey (journey wk-cursor,
     # cli/scripts/smoke/cursor-agent-keeper-journey.py, first green
     # 2026-09-01): the keeper hosts the TUI across supervisor death and a
-    # fresh turn recalls a prior turn's codeword.
-    assert caps["thread"] is True
+    # fresh turn recalls a prior turn's codeword. The seat derives from the
+    # spawn claim, which carries that journey.
+    assert caps["features"]["spawn"]["state"] == "native"
     assert caps["ready_marker"] == "idle_plan_build"
     assert caps["ready_rule_ids"] == ["idle_plan_build"]
     assert caps["send_keys_enter_delay_ms"] == 0
@@ -148,7 +149,9 @@ def test_cursor_agent_thread_dispatch_resolves_on_the_journey_backed_bit():
     )
 
     assert thread_lane("cursor-agent") == "keeper"
-    assert capabilities("cursor-agent")["thread"] is True
+    from fno.agents.harness_map import thread_seatable
+
+    assert thread_seatable("cursor-agent") is True
     resolved = resolve_dispatch(
         harness="cursor-agent",
         substrate="thread",

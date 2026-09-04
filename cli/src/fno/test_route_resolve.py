@@ -227,15 +227,17 @@ def test_substrate_filter_empties_the_set_with_a_named_reason():
     """AC9-EDGE: a thread substrate no declared row supports records
     constrained-empty rather than cancelling silently.
 
-    Reads opencode, whose thread bit is False. This test named codex until
-    codex gained a verified thread lane; the edge case is about a harness
-    without one, so it follows the capability rather than the harness name.
+    Reads gemini, whose spawn claim is absent and whose command surface is
+    refused for good. This test named codex until codex gained a verified
+    thread lane, then opencode until its spawn claim measured native; the
+    edge case is about a harness without a seat, so it follows the
+    capability rather than the harness name.
     """
     inv = _inv([
-        {"name": "oc-x", "harness": "opencode", "model": "oc-big", "band": "high"},
+        {"name": "gem-x", "harness": "gemini", "model": "gm-big", "band": "high"},
     ])
     candidate, chain = rr.resolve_grid(
-        "high", "p1", {"opencode": "ok"}, substrate="thread", inventory=inv
+        "high", "p1", {"gemini": "ok"}, substrate="thread", inventory=inv
     )
     assert candidate is None
     assert chain[-1] == "grid=constrained-empty"

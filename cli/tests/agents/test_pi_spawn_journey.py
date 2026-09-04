@@ -1,7 +1,7 @@
 """The spawn-seam journey (x-43bd): the PUBLIC surface reaches pi's
 keeper-hosted thread lane, and the loop extension stops it.
 
-This is the bar pi's caps row set when it flipped ``thread = true``: "when
+This is the bar pi's row set when it claimed ``native``: "when
 that arm ships it brings its own journey for the lanes it opens." The
 restart journey (wk-x61bc, test_thread_keeper_journey.py) drove
 ``_lane_b_thread_spawn`` directly, which is exactly why the spawn seam

@@ -93,7 +93,9 @@ def test_map_covers_current_surface_once():
     # (make_context execs the binary before Click resolves them), so the
     # uncollapsed inventory carries all three under `agents` too, not just
     # their own-surface rows: 562 -> 565.
-    assert len(mapped) == 565, (
+    # x-a3e8 allocates `doctor harness-matrix`, the matrix regenerator:
+    # counted from the merged file, 565 -> 566.
+    assert len(mapped) == 566, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

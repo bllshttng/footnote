@@ -1,7 +1,7 @@
 """The spawn-seam journey for grok (x-fd31): the PUBLIC surface reaches
 grok's keeper-hosted thread lane.
 
-The bar is the one pi's caps row set when it flipped ``thread = true``: the
+The bar is the one pi's row set when it claimed ``native``: the
 arm brings its own journey for the lane it opens. This journey enters
 through ``fno agents spawn -H grok --substrate thread`` and proves, with
 positive markers only:

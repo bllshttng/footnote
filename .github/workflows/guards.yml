@@ -229,6 +229,11 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check-harness-capabilities-fresh.sh
 
+      - name: Harness capability matrix fresh (generated doc, never hand-edited)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-harness-capability-matrix-fresh.sh
+
       - name: Run harness-capabilities freshness test harness
         if: ${{ !cancelled() }}
         timeout-minutes: 5

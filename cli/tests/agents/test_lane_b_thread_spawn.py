@@ -90,17 +90,19 @@ def lane_b_home(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_partial_lane_thread_dispatch_still_refuses_at_the_gate(lane_b_home) -> None:
-    """agy's `thread` capability row stays false until its own journey passes,
-    so resolve_dispatch refuses the thread substrate - the keeper lane built
+    """agy's spawn claim reads `capable` until its own journey passes, so
+    resolve_dispatch refuses the thread substrate - the keeper lane built
     here is not reachable through the public dispatch surface without one."""
-    assert capabilities("agy")["thread"] is False
+    from fno.agents.harness_map import spawn_state
+
+    assert spawn_state("agy") == "capable"
     with pytest.raises(DispatchResolveError) as exc_info:
         resolve_dispatch(harness="agy", substrate="thread")
     assert "substrate 'thread' is unsupported on harness 'agy'" in str(exc_info.value)
 
 
 def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit(monkeypatch) -> None:
-    """pi's `thread` row is true behind its passing restart journey
+    """pi's spawn claim reads native behind its passing restart journey
     (test_thread_keeper_journey.py), so a one-shot dispatch resolves onto the
     lane this file builds. The autonomous `/target` template resolves too
     since x-43bd shipped pi's loop extension - the loop gate that used to
@@ -109,7 +111,9 @@ def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit(monkeypatch) -> N
     import fno.agents.harness_map as harness_map
 
     monkeypatch.setattr(harness_map, "_loop_extension_installed", lambda h: True)
-    assert capabilities("pi")["thread"] is True
+    from fno.agents.harness_map import thread_seatable
+
+    assert thread_seatable("pi") is True
     resolved = resolve_dispatch(harness="pi", substrate="thread", command="pi --version")
     assert resolved["substrate"] == "thread"
     assert resolved["thread"] is True
