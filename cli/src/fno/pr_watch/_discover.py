@@ -294,8 +294,7 @@ def read_pr_state(
     to bound each leg separately, so one candidate could spend twice the
     declared number and walk past a tick deadline that is only checked
     between candidates. One residual: a rate-limited merge-state read adds
-    ``_rest._REASON_DIAGNOSTIC_TIMEOUT_S`` to decorate its own error, and that
-    branch is only reached by a response that returns fast.
+    ``_rest._REASON_DIAGNOSTIC_TIMEOUT_S`` to decorate its own fast error.
 
     Raises ``ReconcileError`` on any gh failure (non-zero returncode, timeout,
     parse failure, missing binary) and on a budget that the merge-state leg

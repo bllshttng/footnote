@@ -2526,6 +2526,7 @@ class TestTickRecordsAndDeadline:
         every leg failure into a warning on this same logger, so when the loop
         is not reached these lines name the reason."""
         import logging
+        from types import SimpleNamespace
         from unittest.mock import MagicMock
 
         from fno.agents import watchdog
@@ -2549,13 +2550,17 @@ class TestTickRecordsAndDeadline:
         settings.pr_watch.max_age_days = 30
         settings.pr_watch.retries = 3
         settings.pr_watch.graphql_min_remaining = 200
-        settings.recovery.enabled = True
-        # wake, not report: the recovery-root loop is inside the wake branch,
-        # so a report-mode fixture would make every assertion here pass on an
-        # empty list for the wrong reason.
-        settings.recovery.watchdog = "wake"
-        settings.recovery.watchdog_mail_to = ""
-        settings.autonomy.enabled = True
+        # The two sections the arming gate reads are REAL objects, not mock
+        # attributes. A MagicMock answers every attribute truthily, so the
+        # gate's own `except Exception: return False` could never be observed
+        # here - and on CI something upstream still made it answer False,
+        # which silently skipped the lane these tests live inside. An explicit
+        # shape either satisfies the gate or fails loudly naming the field.
+        # wake, not report: the recovery-root loop is inside the wake branch.
+        settings.recovery = SimpleNamespace(
+            enabled=True, watchdog="wake", watchdog_mail_to=""
+        )
+        settings.autonomy = SimpleNamespace(enabled=True)
         monkeypatch.setattr(prcli, "load_settings", lambda: settings)
         monkeypatch.setattr(
             "fno.pr_watch._dispatch.tick", lambda **kw: TickResult(open_prs=0, acted=0)
