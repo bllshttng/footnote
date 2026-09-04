@@ -2653,8 +2653,8 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         let harness_session_gone = store_hits.as_ref().map(|m| m.is_empty());
         let transcript_fresh = if !is_live && past_grace {
             // The stamped-contradiction arm resolves the transcript through the
-            // shared rule (PR 1442's): the harness store first, the `log_path`
-            // fallback only for a row already condemned.
+            // shared rule: the harness store first, the `log_path` fallback
+            // only for a row already condemned.
             transcript_fresh_probe(
                 crate::gc::row_transcript(
                     store_hits.as_deref(),
