@@ -7223,7 +7223,9 @@ fn done_ends_unreviewed_not_awaiting_review_when_optional_app_refuses() {
         "{}",
         d.message
     );
-    assert!(!d.message.contains("DoneAwaitingReview"), "{}", d.message);
+    // The terminal's own advice is the positive marker: the loop ends with
+    // the merge handed to a human, never with a recovery wait.
+    assert!(d.message.contains("merge by hand"), "{}", d.message);
 }
 
 /// x-0eaf AC12-INV (negative): the coverage path must not read the `attended`
