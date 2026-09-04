@@ -701,18 +701,26 @@ def test_spawn_worker_argv_with_cwd(monkeypatch):
 
 
 def test_spawn_worker_threads_model_and_provider(monkeypatch):
-    """A per-node/dispatch pin reaches the spawn cmd as --model / --provider."""
+    """A per-node/dispatch pin reaches the spawn cmd as --model / --provider.
+
+    The receipt is the CODEX one. `provider` is the harness axis, so it now
+    pins the resolver too, and a codex spawn returning a head-8 short id is
+    refused by shape. Under the old two-source split the resolver still read
+    claude here, which is precisely how a codex launch got past that guard.
+    """
     captured = {}
 
     def fake_run(cmd, **kw):
         captured["cmd"] = cmd
-        return _FakeProc(0, _RECEIPT)
+        return _FakeProc(0, _CODEX_THREAD_RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker("ab-2222aaaa", "/w", model="glm-4.7", provider="codex")
     cmd = captured["cmd"]
     assert cmd[cmd.index("--harness") + 1] == "codex"
     assert cmd[cmd.index("--model") + 1] == "glm-4.7"
+    # The pair the split used to break: a codex launch gets the codex spelling.
+    assert cmd[-1].startswith("$fno:target")
 
 
 def test_spawn_worker_default_provider_claude(monkeypatch):
