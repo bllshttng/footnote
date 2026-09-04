@@ -140,19 +140,80 @@ def _model_switch_check(row: dict, match: Optional[re.Match[str]]) -> tuple[bool
 _DECLARED_CHECKS["model_switch_strategy"] = _model_switch_check
 
 
-def _behavioral_field(field: str, harness: str, decl: dict, *, live: bool) -> FieldReport:
+def _feature_check(key: str) -> Callable[[dict, Optional["re.Match[str]"]], tuple[bool, str]]:
+    """The comparison rule for a declared FEATURE key (x-a3e8): the
+    authority's output says whether the harness has the surface, the row's
+    ``features.<key>.state`` says what fno recorded. ``unmeasured`` is not a
+    claim, so it can never be contradicted - the authority's answer is
+    evidence to record, reported as agreement-with-evidence, and the row is
+    what a later edit fills in."""
+    def check(row: dict, match: Optional[re.Match[str]]) -> tuple[bool, str]:
+        claim = row.get("features") or {}
+        state = (
+            claim.get(key, {}).get("state", "unmeasured")
+            if isinstance(claim, dict)
+            else "unmeasured"
+        )
+        if match:
+            if state == "native":
+                return True, "the row reads native and the authority declares the surface"
+            if state == "unmeasured":
+                return True, (
+                    "the row is unmeasured, so there is no claim to contradict; "
+                    "the authority declares the surface, and that answer is the "
+                    "row's to record"
+                )
+            return False, (
+                f"the authority declares the surface but the row reads {state}"
+            )
+        if state == "native" or state == "capable":
+            return False, (
+                f"the row reads {state} but the authority declares no surface"
+            )
+        note = (
+            "; record that absence in the row" if state == "unmeasured" else ""
+        )
+        return True, f"no declared surface and the row reads {state}{note}"
+
+    return check
+
+
+#: One rule per declared feature key, built from the same factory - the
+#: closed key set is the iteration source, and a key added to the table
+#: without a rule reports UNDECLARED until this loop learns it.
+_FEATURE_KEYS = (
+    "rpc", "server", "plugins", "hooks",
+    "skills_dir", "subagent_dispatch", "mcp", "acp",
+)
+for _key in _FEATURE_KEYS:
+    _DECLARED_CHECKS[f"features.{_key}"] = _feature_check(_key)
+
+
+def _behavioral_field(
+    field: str, harness: str, decl: dict, *, live: bool, row: Optional[dict] = None
+) -> FieldReport:
     """Behavioral probes spawn a scratch session; nothing runs unless live."""
+    claimed = ""
+    if isinstance(row, dict):
+        claim = row.get("features") or {}
+        state = (
+            claim.get(field.removeprefix("features."), {}).get("state")
+            if isinstance(claim, dict)
+            else None
+        )
+        if state:
+            claimed = f"; the row declares {state}"
     if not live:
         return FieldReport(
             field, "behavioral", "UNKNOWN",
             "behavioral probe needs --live (a scratch session is spawned); "
-            "read-only run spawns nothing",
+            f"read-only run spawns nothing{claimed}",
         )
     runner = _store_instrument(harness)
     if runner is None:
         return FieldReport(
             field, "behavioral", "UNKNOWN",
-            "no vendor-store instrument implemented for this harness",
+            f"no vendor-store instrument implemented for this harness{claimed}",
         )
     marker = runner(harness, field)
     if marker:
@@ -204,7 +265,9 @@ def probe_harness(
         elif kind == "declared":
             fields.append(_declared_field(field, harness, row, decl))
         elif kind == "behavioral":
-            fields.append(_behavioral_field(field, harness, decl, live=live))
+            fields.append(
+                _behavioral_field(field, harness, decl, live=live, row=row)
+            )
     disagreements = [f for f in fields if f.verdict == "DISAGREES"]
     stanza = _write_stanza(harness, disagreements) if write else None
     return {
