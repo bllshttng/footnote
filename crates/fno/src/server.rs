@@ -15905,6 +15905,10 @@ async fn serve(
             let mut last_uuids: Vec<(String, Option<String>)> = Vec::new();
             let mut last_tails: HashMap<String, String> = HashMap::new();
             let mut last_truth = Instant::now();
+            // (x-1ab9 task 6.1) Logged ONCE on the first daemon miss, never per
+            // tick: the fallback is a fact about the environment, and a fleet
+            // with no daemon must not pay one line per second for it.
+            let mut fallback_logged = false;
             // (v48) Launch order for AgentTruth probes, so an out-of-order
             // completion cannot clobber a fresher result (see CoreMsg::AgentTruth).
             let mut truth_probe_seq: u64 = 0;
@@ -15972,7 +15976,31 @@ async fn serve(
                         }
                     });
                 }
-                let (reg_stamp, reg_raw) = scan(reg_path.clone(), state.reg_stamp()).await;
+                // (x-1ab9 task 6.1) The registry leg subscribes to the daemon
+                // when its socket answers (AC12): rows are SERVED, the stamp
+                // domain is the same (mtime, len) the file scan gated with, and
+                // an unchanged answer costs one stat server-side and one small
+                // frame here - no file read on either side. When nothing
+                // answers, the file scan below stands (AC13, the supported
+                // no-daemon shape), logged once.
+                let (reg_stamp, reg_raw) = match agents_view::watch_registry(
+                    state.reg_stamp(),
+                    &agents_view::supervisor_sock_path(),
+                )
+                .await
+                {
+                    Ok(answer) => answer,
+                    Err(_) => {
+                        if !fallback_logged {
+                            fallback_logged = true;
+                            eprintln!(
+                                "fno mux: no agent daemon answering at {}; reading the registry file directly (degraded fallback)",
+                                agents_view::supervisor_sock_path().display()
+                            );
+                        }
+                        scan(reg_path.clone(), state.reg_stamp()).await
+                    }
+                };
                 let (roster_stamp, roster_raw) =
                     scan(roster_path.clone(), state.roster_stamp()).await;
                 // (x-c914) Each registered isolated account's roster.json, folded

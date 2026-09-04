@@ -4628,6 +4628,9 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
         Some("stop") => handle_stop(ctx, req).await,
         Some("rm") => handle_rm(ctx, req).await,
         Some("list") => run_blocking(ctx, req, handle_list).await,
+        // (x-1ab9 task 6.1) The subscription verb: version-gated full document,
+        // so a subscriber pays a stat per idle tick and a read per write.
+        Some("watch") => run_blocking(ctx, req, handle_watch).await,
         // status reads the in-memory drive table for the active-drives count, so
         // it stays on the async runtime rather than the blocking pool.
         Some("status") => handle_status(ctx, req).await,
@@ -10589,6 +10592,63 @@ fn run_reconcile_sweep(
 }
 
 /// The agent.rename route. state.rs owns the grammar and the transaction.
+/// `agent.watch` (x-1ab9 task 6.1): the subscription face of the registry.
+///
+/// `{"since": {"mtime_nanos", "len"} | null}` in; one answer out. The first
+/// call (`since` absent) serves the FULL document - connect, payload. Later
+/// calls serve the full document again only when the registry's (mtime, len)
+/// stamp moved - which is exactly what any write (the sweep, `agent.report`,
+/// spawn, rm, a Python-side CLI verb) does to the file - and a bare version
+/// echo when it did not, so a polling reader costs one stat per tick instead
+/// of one file read. The caller keeps its read off the file entirely: the
+/// daemon is the reader now, the served rows are the served facts.
+fn handle_watch(ctx: &Ctx, req: &Request) -> Response {
+    let since = req.params.get("since").and_then(|v| {
+        let mtime = v.get("mtime_nanos")?.as_i64()?;
+        let len = v.get("len")?.as_u64()?;
+        Some((mtime, len))
+    });
+    let path = ctx.home.registry_json();
+    let meta = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        // A vanished registry is a legitimate empty answer, not an error: the
+        // watcher clears (the same contract the file reader's vanish arm has).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Response::ok(
+                req.id,
+                json!({"version": Value::Null, "doc": {"agents": []}}),
+            );
+        }
+        Err(e) => {
+            return registry_read_failed(req.id, state::StateError::Io(e));
+        }
+    };
+    let mtime_nanos = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0);
+    let len = meta.len();
+    let version = json!({"mtime_nanos": mtime_nanos, "len": len});
+    let unchanged = matches!(&since, Some((m, l)) if *m == mtime_nanos && *l == len);
+    if unchanged {
+        return Response::ok(req.id, json!({"version": version, "doc": null}));
+    }
+    let registry = match load_registry_asserted(&path) {
+        Ok(r) => r,
+        Err(e) => return registry_read_failed(req.id, e),
+    };
+    match serde_json::to_value(&registry) {
+        Ok(doc) => Response::ok(req.id, json!({"version": version, "doc": doc})),
+        Err(e) => Response::err(
+            req.id,
+            ErrorCode::Internal,
+            format!("watch: registry serialize failed: {e}"),
+        ),
+    }
+}
+
 fn handle_rename(ctx: &Ctx, req: &Request) -> Response {
     state::rename_response(&ctx.home.registry_json(), req)
 }
@@ -19615,6 +19675,52 @@ done
     ///
     /// `include_str!` is compile-time, so deleting or moving the contract file
     /// breaks the build rather than silently disarming the check.
+    #[test]
+    fn watch_serves_on_connect_and_only_on_change() {
+        // (x-1ab9 task 6.1, AC12-HP) The subscription contract: connect serves
+        // the full document; the same (mtime, len) version answers "unchanged"
+        // without a document; any write moves the stamp and the SAME `since`
+        // then serves fresh rows. One stat per idle tick is the whole cost.
+        let home = short_home("watch-connect");
+        seed_stream_row(&home, "w1", "abc12345");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+
+        let resp = handle_watch(&ctx, &Request::new(1, "agent.watch", json!({})));
+        let first = resp.result().unwrap();
+        assert_eq!(first["doc"]["agents"].as_array().unwrap().len(), 1);
+        let version = first["version"].clone();
+
+        let resp = handle_watch(
+            &ctx,
+            &Request::new(2, "agent.watch", json!({"since": version})),
+        );
+        let again = resp.result().unwrap();
+        assert!(
+            again["doc"].is_null(),
+            "unchanged version serves no document"
+        );
+        assert_eq!(again["version"], version);
+
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries[0].status = AgentStatus::Exited;
+        })
+        .unwrap();
+        let resp = handle_watch(
+            &ctx,
+            &Request::new(3, "agent.watch", json!({"since": version})),
+        );
+        let after = resp.result().unwrap();
+        assert_ne!(after["version"], version, "a write moves the stamp");
+        let doc = after["doc"]["agents"].as_array().unwrap();
+        assert_eq!(doc.len(), 1);
+        assert_eq!(
+            doc[0]["status"],
+            json!("exited"),
+            "rows are the fresh write"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
     #[test]
     fn list_row_key_set_matches_shared_contract() {
         const CONTRACT: &str = include_str!(concat!(

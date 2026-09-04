@@ -2247,8 +2247,115 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
 /// The tolerant reader on its own, for every caller that renders or resolves
 /// rather than guards: same rows, count discarded. One body behind both forms
 /// so the two readers cannot drift.
+///
+/// (x-1ab9 task 6.1) This file reader is the DEGRADED PATH, not a second
+/// authority. When the fno-agents daemon's socket answers, the mux subscribes
+/// through `agent.watch` and gets the rows SERVED (fresh from the sweep's
+/// own writes, one stat per idle tick); this parser then only decodes what
+/// the daemon delivered. Reading `registry.json` directly is what survives
+/// when no daemon is running - a plain `fno mux` with no fleet is a supported
+/// shape - and the server logs one line naming that fallback when it fires.
 pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
     derive_rows_counted(raw, now_secs).map(|(rows, _)| rows)
+}
+
+/// (x-1ab9 task 6.1) The fno-agents daemon's supervisor socket, resolved the
+/// same way [`registry_path`] resolves the registry home (`FNO_AGENTS_HOME` >
+/// `$HOME/.fno/agents`): the two live side by side under one agents home.
+pub fn supervisor_sock_path() -> PathBuf {
+    if let Some(v) = std::env::var_os("FNO_AGENTS_HOME") {
+        return PathBuf::from(v).join("supervisor.sock");
+    }
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join(".fno").join("agents").join("supervisor.sock")
+}
+
+/// (x-1ab9 task 6.1) One `agent.watch` round trip against the daemon, if one
+/// answers. The registry's (mtime, len) stamp is the subscription version: it
+/// travels out as `since` and back beside the document, so the caller's
+/// cached stamp gates on the daemon's answer exactly as it gated on its own
+/// file stat.
+///
+/// - `Ok((Some(stamp), Some(raw)))` - the daemon served the document.
+/// - `Ok((None, None))` - the daemon answered "unchanged": the version
+///   matches `since`, nothing was read or parsed server-side.
+/// - `Ok((None, Some(raw)))` - a vanished registry: version null with an
+///   empty document, so the caller's vanish arm clears the rows.
+/// - `Err(_)` - no daemon (refused/absent socket), transport fault, or the
+///   round-trip bound exceeded. The caller falls back to the file scan.
+pub async fn watch_registry(
+    since: Option<(std::time::SystemTime, u64)>,
+    sock: &std::path::Path,
+) -> Result<(Option<(std::time::SystemTime, u64)>, Option<String>), String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    async fn round(
+        since: Option<(std::time::SystemTime, u64)>,
+        sock: &std::path::Path,
+    ) -> Result<(Option<(std::time::SystemTime, u64)>, Option<String>), String> {
+        let since_v = match since {
+            Some((t, len)) => {
+                let nanos = t
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0);
+                serde_json::json!({"mtime_nanos": nanos, "len": len})
+            }
+            None => serde_json::Value::Null,
+        };
+        let req = serde_json::json!({
+            "id": 1u64,
+            "method": "agent.watch",
+            "params": {"since": since_v},
+        });
+        let mut frame = req.to_string();
+        frame.push('\n');
+        let mut conn = tokio::net::UnixStream::connect(sock)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        conn.write_all(frame.as_bytes())
+            .await
+            .map_err(|e| format!("write: {e}"))?;
+        let mut reader = BufReader::new(conn);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
+        let resp: serde_json::Value =
+            serde_json::from_str(line.trim()).map_err(|e| format!("decode: {e}"))?;
+        if let Some(err) = resp.get("error") {
+            return Err(format!("agent.watch error: {err}"));
+        }
+        let result = resp
+            .get("result")
+            .ok_or_else(|| "agent.watch: answer carried neither result nor error".to_string())?;
+        // Version -> stamp: the same (mtime, len) domain the file scan gates
+        // with, so a served answer and a scanned answer are interchangeable
+        // downstream without the reader knowing which one produced it.
+        let stamp = result.get("version").and_then(|v| {
+            let nanos = v.get("mtime_nanos")?.as_i64()?; // null version -> None
+            let len = v.get("len")?.as_u64()?;
+            Some((
+                std::time::UNIX_EPOCH + std::time::Duration::from_nanos(nanos.max(0) as u64),
+                len,
+            ))
+        });
+        let doc = result.get("doc").filter(|d| !d.is_null());
+        let raw = match doc {
+            Some(d) => Some(serde_json::to_string(d).map_err(|e| e.to_string())?),
+            None => None,
+        };
+        Ok((stamp, raw))
+    }
+
+    // Bound the WHOLE round trip: an unchanged answer is one stat server-side,
+    // but a wedged daemon must degrade this tick, not stall the scan loop.
+    tokio::time::timeout(std::time::Duration::from_secs(2), round(since, sock))
+        .await
+        .map_err(|_| "agent.watch: round trip exceeded 2s".to_string())?
 }
 
 /// Union the fno registry rows with claude's roster (x-0a2e). Pure so the

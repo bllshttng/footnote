@@ -153,3 +153,63 @@ fn now_stamp(age: u64) -> String {
         _ => unreachable!("only these three ages are used"),
     }
 }
+
+#[tokio::test]
+async fn watch_registry_decodes_a_served_document_and_the_unchanged_answer() {
+    // (x-1ab9 task 6.1) A fake daemon: one accept, one framed answer per
+    // connection. The served case returns the version as a stamp (the same
+    // (mtime, len) domain the file scan gates with) plus the document;
+    // the unchanged case (doc null) returns the stamp with no document.
+    let dir = std::env::temp_dir().join(format!("fno-watch-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sock_path = dir.join("supervisor.sock");
+    let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+    let server = tokio::spawn(async move {
+        use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
+        for answer in [
+            r#"{"id":1,"result":{"version":{"mtime_nanos":123,"len":4},"doc":{"schema_version":6,"agents":[{"name":"served-row","cwd":"/w"}]}}}"#,
+            r#"{"id":1,"result":{"version":{"mtime_nanos":123,"len":4},"doc":null}}"#,
+        ] {
+            let (conn, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(conn);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            reader.get_mut().write_all(answer.as_bytes()).await.unwrap();
+            reader.get_mut().write_all(b"\n").await.unwrap();
+        }
+    });
+    // Give the accept loop a moment to start; the client has its own bound.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let (stamp, raw) = watch_registry(None, &sock_path).await.unwrap();
+    let raw = raw.expect("first answer serves the document");
+    assert!(raw.contains("served-row"), "{raw}");
+    let stamp = stamp.expect("a served answer carries its version");
+    let (t, len) = stamp;
+    assert_eq!(
+        t.duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as i64,
+        123
+    );
+    assert_eq!(len, 4);
+
+    let (stamp2, raw2) = watch_registry(None, &sock_path).await.unwrap();
+    assert!(raw2.is_none(), "a null doc is the unchanged answer");
+    assert!(stamp2.is_some());
+
+    server.await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn watch_registry_fails_closed_when_nothing_listens() {
+    // A missing socket is an Err, which the scan loop reads as "fall back to
+    // the file reader" (AC13) - never as an empty roster.
+    let missing = std::env::temp_dir().join(format!("fno-watch-absent-{}", std::process::id()));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let answer = rt.block_on(watch_registry(None, &missing));
+    assert!(answer.is_err(), "absent socket must Err");
+}
