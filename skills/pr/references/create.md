@@ -233,6 +233,25 @@ EOF
 # The quoted heredoc above is a literal template (bracket placeholders, no
 # expansion) - $CLOSURE_TRAILER never belongs inside it. Append it as its own
 # paragraph afterward, with a real (unquoted) variable expansion instead.
+
+# The reviewed-at line: the one claim a worker appends to the body, and only
+# this verb authors it. It prints the line only when the local ledger holds a
+# clean `pass` attestation pinned to exactly this branch and HEAD, so a PR
+# that arrives unreviewed opens with no Review section at all - the merge
+# gate reads the ledger, never this line. Idempotent like the trailer: a
+# re-run over a body already carrying `## Review` adds no second one.
+REVIEW_LINE="$(fno-agents review-summary \
+  --events .fno/events.jsonl \
+  --branch "$(git rev-parse --abbrev-ref HEAD)" \
+  --head "$(git rev-parse HEAD)" 2>/dev/null || true)"
+if [[ -n "$REVIEW_LINE" && "$BODY" != *"## Review"* ]]; then
+  BODY="${BODY}
+
+## Review
+
+${REVIEW_LINE}"
+fi
+
 if [[ -n "${CLOSURE_TRAILER:-}" ]]; then
   BODY="${BODY}
 
