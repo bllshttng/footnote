@@ -426,6 +426,10 @@ conflict_resolution = "opus"
 # Post-failure remediation policy for auto-merge.
 remediation = "attempt"
 
+[auto_heal]
+# Arm the pr-watch tick's heal phase: run the CI heal drive loop (pr-heal --all --apply, in Rust) over every red open PR each tick. Default false until the loop is measured on real PRs.
+enabled = false
+
 [pr_watch]
 # Enable the global PR-state watcher daemon.
 enabled = false

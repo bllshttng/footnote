@@ -169,6 +169,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `auto_merge.require_checks_pass` | bool | `true` | advanced | Require CI green before auto-merge. |
 | `auto_merge.conflict_resolution` | str | `opus` | never | Conflict-resolution agent for auto-merge rebases. |
 | `auto_merge.remediation` | str | `attempt` | never | Post-failure remediation policy for auto-merge. |
+| `auto_heal.enabled` | bool | `false` | advanced | Arm the pr-watch tick's heal phase: run the CI heal drive loop (pr-heal --all --apply, in Rust) over every red open PR each tick. Default false until the loop is measured on real PRs. |
 | `pr_watch.enabled` | bool | `false` | advanced | Enable the global PR-state watcher daemon. |
 | `pr_watch.interval_seconds` | int | `600` | never | PR-watcher poll interval (seconds). |
 | `pr_watch.retries` | int | `3` | never | PR-watcher consecutive-failure park threshold. |

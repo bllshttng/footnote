@@ -602,6 +602,8 @@ FIELD_META: dict[str, Meta] = {
     "king.wake_ceiling": Meta("advanced", "Wakes allowed per scope per ROLLING 24h (default 32, ~1.5x the worst measured day). Never a lifetime constant: a lifetime cap strands a long-lived reign."),
     "king.wake_debounce_seconds": Meta("advanced", "Minimum gap between billed wakes (default 900): a king woken inside the window is still working under its own in-session arm."),
     "king.wake_backstop_seconds": Meta("advanced", "Timer-backstop interval (default 1800). An approximation of the mail and board-change triggers, kept so a missed event cannot strand a scope forever; the interval is a policy choice, not a measurement."),
+    # --- config.auto_heal.* (the pr-watch tick's heal drive loop; default off) ---
+    "auto_heal.enabled": Meta("advanced", "Arm the pr-watch tick's heal phase: run the CI heal drive loop (pr-heal --all --apply, in Rust) over every red open PR each tick. Default false until the loop is measured on real PRs."),
     # --- config.accounts.* (account rotation; managed by `fno config accounts`) ---
     "accounts.active": Meta("never", "Name of the account record currently active for provider rotation."),
     "accounts.auto_switch": Meta("never", "Swap to a failover account automatically when the active one is locked out."),

@@ -4521,6 +4521,20 @@ class KingBlock(BaseModel):
     wake_backstop_seconds: int = 1800
 
 
+class AutoHealBlock(BaseModel):
+    """The pr-watch tick's heal phase (nested under 'auto_heal').
+
+    ``enabled`` arms the phase that runs the CI heal drive loop
+    (``fno do pr heal --all --apply`` in Rust) once per tick. Default false
+    until the loop is measured on real PRs: an arm that pushes to branches
+    is opt-in by design, like every other acting phase on the tick.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+
+
 class PreflightBlock(BaseModel):
     """Local preflight policy (nested under 'config.preflight').
 
@@ -4588,6 +4602,7 @@ class ConfigBlock(BaseModel):
     active_backlog: ActiveBacklogConfig = Field(default_factory=ActiveBacklogConfig)
     parallel: ParallelBlock = Field(default_factory=ParallelBlock)
     auto_merge: AutoMergeBlock = Field(default_factory=AutoMergeBlock)
+    auto_heal: AutoHealBlock = Field(default_factory=AutoHealBlock)
     pr_watch: PrWatchBlock = Field(default_factory=PrWatchBlock)
     groom: GroomBlock = Field(default_factory=GroomBlock)
     restart: RestartBlock = Field(default_factory=RestartBlock)

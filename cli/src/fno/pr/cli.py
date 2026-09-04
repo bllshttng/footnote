@@ -382,9 +382,10 @@ def logs(
     help=(
         "Classify a red check by signature, apply the mechanical fix, push "
         "once. Dry run unless --apply. --playbook prints the signature table; "
-        "--all reports every red open PR (report-only). Exit 0 nothing red, "
-        "1 escalations remain, 2 a run is in flight, 3 wrong branch or dirty "
-        "tree, 4 read error, 127 binary missing."
+        "--all reports every red open PR; --all --apply drives them (each "
+        "from its own worktree, behind four refusals, one pr_heal_tick row). "
+        "Exit 0 nothing red, 1 escalations remain, 2 a run is in flight, "
+        "3 wrong branch or dirty tree, 4 read error, 127 binary missing."
     ),
 )
 def heal(
@@ -392,6 +393,9 @@ def heal(
     apply: bool = typer.Option(False, "--apply", help="Fix, commit, push once."),
     all_prs: bool = typer.Option(False, "--all", "-A", help="Report every red open PR."),
     playbook: bool = typer.Option(False, "--playbook", help="Print the signature table."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="With --all --apply: rehearse, change nothing."
+    ),
 ) -> None:
     import subprocess
 
@@ -417,6 +421,8 @@ def heal(
         argv.append("--all")
     if playbook:
         argv.append("--playbook")
+    if dry_run:
+        argv.append("--dry-run")
     result = subprocess.run(argv, check=False)
     raise typer.Exit(code=propagate_returncode(result.returncode))
 
