@@ -466,3 +466,16 @@ class TestCachedNegativeNamesItsInput:
         assert _reviews._instant("not-a-timestamp") is None
         assert _reviews._is_after("zzz", "aaa", None) is True
         assert _reviews._is_after("aaa", "zzz", None) is False
+
+
+def test_review_state_matches_the_shared_table():
+    """One oracle, two readers: the Rust review_state test walks the SAME
+    file, so the two derivations cannot drift on which refusals name the
+    state (the optional_apps_default.json pattern)."""
+    golden = json.loads(
+        (Path(__file__).resolve().parents[1] / "config" / "review_state_table.json").read_text()
+    )
+    assert golden["rows"], "a golden nothing reads is a green control aimed at nothing"
+    for row in golden["rows"]:
+        state = _reviews._derive_review_state("covered", row["verdicts"], set(), False)
+        assert state == row["expected_state"], f"row {row['name']} diverged: {state}"

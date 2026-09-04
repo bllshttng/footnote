@@ -743,6 +743,9 @@ def _derive_review_state(
     ``github_approval_satisfies`` defaults False (today's semantics) so the
     pre-flag call sites and rows stay unchanged; the shaper resolves the
     config flag and passes it.
+    A refusal names the state only when the verdict was OWED: the required
+    key mirrors the Rust producer's bit, and a missing key (every row
+    emitted before the field existed) reads required.
     """
     chain = chain or set()
     if coverage == "unknown":
@@ -766,7 +769,10 @@ def _derive_review_state(
         for verdict in verdicts
     ):
         return "reviewed"
-    if any(verdict.get("verdict") == "refused" for verdict in verdicts):
+    if any(
+        verdict.get("verdict") == "refused" and verdict.get("required", True)
+        for verdict in verdicts
+    ):
         return "reviewer_refused"
     return "unreviewed"
 
