@@ -1282,24 +1282,16 @@ def _launch_harness_axis(launch: str, node_cwd: Optional[str] = None) -> Optiona
     """The harness ``launch`` names, or None when nothing can answer.
 
     An ACCOUNT RECORD (ccm, ccr) is a real binary but not a harness, so it
-    answers through its registry row. None means unverifiable: it pins nothing
-    and triggers no disagreement refusal.
+    answers through its registry row. None means unverifiable: pins nothing.
     """
     if not launch:
         return None
+    from fno.adapters.providers.loader import record_harness
     from fno.agents import harness_map
 
     if harness_map.is_declared(launch):
         return launch
-    try:
-        from fno.adapters.providers.loader import load_providers
-
-        rec = load_providers(
-            repo_root=Path(node_cwd) if node_cwd else None
-        ).by_id.get(launch)
-        return (getattr(rec, "harness", "") or "").strip() or None
-    except Exception:  # noqa: BLE001 - an unreadable registry verifies nothing
-        return None
+    return record_harness(launch, Path(node_cwd) if node_cwd else None)
 
 
 def _spawn_worker(
@@ -1362,8 +1354,8 @@ def _spawn_worker(
     # --provider selects the account/record (or a bare kind like "claude"); a
     # per-node or dispatch-time pin overrides the claude default. Layer-separate
     # from `harness` (the record's cli, which drives the resolver's substrate).
-    # NOT the launch harness. Deciding it here, one rung before the resolver,
-    # is what let an unpinned dispatch launch claude carrying codex syntax.
+    # NOT the launch harness: defaulting it here, one rung before the
+    # resolver, launched claude carrying codex syntax.
     launch = (provider or "").strip()
 
     # Capacity-grid deferral receiving end: the automatic dispatch callers pass
@@ -1425,7 +1417,7 @@ def _spawn_worker(
     )
 
     # One axis: `provider` is the harness under an older spelling, so it must
-    # reach the resolver too or the command follows the stage table instead.
+    # reach the resolver too, or the command follows the stage table instead.
     launch_axis = _launch_harness_axis(launch, node_cwd)
     node_verb = (verb or "").strip() or None
     resolve_kwargs: dict = {
@@ -1450,8 +1442,7 @@ def _spawn_worker(
     target_cmd = resolved["command"]
     spawn_env = resolved.get("env") or {}
 
-    # An account record keeps its alias; everything else takes the resolver's
-    # answer, which already owns the builtin claude fallback.
+    # An account record keeps its alias; the resolver owns the claude fallback.
     prov = launch or resolved["harness"]
     if launch_axis and launch_axis != resolved["harness"]:
         raise SpawnError(
@@ -1539,34 +1530,6 @@ def _spawn_worker(
             f"{(stderr or proc.stdout or '').strip()[:200]}"
         )
 
-    def _receipt(short_id: str) -> str:
-        """One ``dispatch_spawned`` row per launch, then the identity back.
-
-        Here because the spawner alone knows the resolved argv; the callers'
-        ``advance_dispatched`` rows left the four dispatch doors
-        indistinguishable. Best-effort: never wedge a launch that happened.
-        """
-        _emit(
-            EVENT_SPAWNED,
-            {
-                "node_id": node_id,
-                "short_id": short_id,
-                "agent_name": agent_name,
-                "harness": prov,
-                "vendor": vendor or "",
-                "model": model or "",
-                "account": dispatch_account or "",
-                "substrate": substrate,
-                "command": target_cmd,
-                "cwd": node_cwd or "",
-                "caller": caller,
-                "grid": grid_why or "",
-                "decision": "; ".join(resolved.get("decision") or []),
-            },
-            events_path if events_path is not None else _events_path(None),
-        )
-        return short_id
-
     # Receipt shape is substrate-dependent (mirrors dispatch-node.sh). A `bg`
     # spawn lands a DETACHED thread and returns a compact JSON receipt whose
     # launch identity we require as launch proof: {"name", "short_id", ...} for
@@ -1578,26 +1541,49 @@ def _spawn_worker(
     # thread, no id - so the clean exit IS the proof and we skip the
     # requirement (else the parse below would raise SpawnError, release the
     # reservation, and redispatch a node whose headless worker already ran).
-    if substrate != "thread":
-        return _receipt("headless")
-    # Keep scanning past a line that merely MENTIONS an id field but is not the
-    # JSON receipt (banner/log noise) - only stop once an id actually parses.
-    launch_identity = _spawn_receipt_identity(proc.stdout)
-    if not launch_identity:
-        raise SpawnError(
-            f"fno agents spawn exit 0 but no launch-identity receipt: "
-            f"{(proc.stdout or proc.stderr or '').strip()[:200]}"
-        )
-    # A bare 8-hex id aimed at codex is a 65.5-second timestamp bucket, not an
-    # address: refuse by shape instead of binding a duplicate worker to the
-    # wrong session (ruling d-513d9d22, harness_identity.is_unsafe_short_address).
-    resolved_harness = (resolved.get("harness") or "").strip()
-    if is_unsafe_short_address(launch_identity, resolved_harness or None):
-        raise SpawnError(
-            f"fno agents spawn receipt carries a codex head-8 launch "
-            f"identity ({launch_identity}): {CODEX_SHORT_ADDRESS_RULE}"
-        )
-    return _receipt(launch_identity)
+    launch_identity = "headless"
+    if substrate == "thread":
+        # Keep scanning past a line that merely MENTIONS an id field but is
+        # not the JSON receipt - stop once an id actually parses.
+        launch_identity = _spawn_receipt_identity(proc.stdout)
+        if not launch_identity:
+            raise SpawnError(
+                f"fno agents spawn exit 0 but no launch-identity receipt: "
+                f"{(proc.stdout or proc.stderr or '').strip()[:200]}"
+            )
+        # A bare 8-hex id aimed at codex is a 65.5-second timestamp bucket,
+        # not an address: refuse by shape instead of binding a worker to the
+        # wrong session (ruling d-513d9d22, is_unsafe_short_address).
+        if is_unsafe_short_address(
+            launch_identity, (resolved.get("harness") or "").strip() or None
+        ):
+            raise SpawnError(
+                f"fno agents spawn receipt carries a codex head-8 launch "
+                f"identity ({launch_identity}): {CODEX_SHORT_ADDRESS_RULE}"
+            )
+    # One row per launch: only the spawner knows the resolved argv, and the
+    # callers' advance_dispatched rows left the four doors indistinguishable.
+    # After the guards, so a receipt is proof of a launch.
+    _emit(
+        EVENT_SPAWNED,
+        {
+            "node_id": node_id,
+            "short_id": launch_identity,
+            "agent_name": agent_name,
+            "harness": prov,
+            "vendor": vendor or "",
+            "model": model or "",
+            "account": dispatch_account or "",
+            "substrate": substrate,
+            "command": target_cmd,
+            "cwd": node_cwd or "",
+            "caller": caller,
+            "grid": grid_why or "",
+            "decision": "; ".join(resolved.get("decision") or []),
+        },
+        events_path if events_path is not None else _events_path(None),
+    )
+    return launch_identity
 
 
 # ---------------------------------------------------------------------------
@@ -1679,11 +1665,6 @@ def _base_project_id(canonical_root: Path) -> str:
         pass
     return canonical_root.name
 
-
-# The non-claude harness kinds (KNOWN_PROVIDERS minus claude). Any other provider
-# value - a claude ACCOUNT record (ccm/ccr), z.ai/glm, an empty/None - runs under
-# the claude harness, so it maps to claude for the worktree-native decision.
-_NON_CLAUDE_HARNESSES = frozenset({"codex", "gemini", "agy", "opencode"})
 
 
 def _grid_lane_for(
@@ -1769,17 +1750,13 @@ def _grid_lane_for(
 
 
 def _lane_harness(eff_provider: Optional[str]) -> str:
-    """Resolve a lane's dispatch provider to its worktree harness.
+    """Resolve a lane's dispatch provider to the harness the worker will run.
 
-    The worktree-native decision only cares whether the worker runs under claude:
-    an explicit non-claude harness (codex/gemini/agy/opencode) keeps its own
-    harness (-> external base); everything else - claude, a claude account record
-    (ccm/ccr), an empty/None provider - resolves to claude (-> harness-native),
-    so the worktree lands where the worker actually runs. `_spawn_worker` reads
-    the same axis through `_launch_harness_axis` plus the resolver's own claude
-    fallback, and refuses a spawn where the two answers disagree.
+    One leg, shared with the spawn seam: a hardcoded non-claude set here was a
+    second answer to `_spawn_worker`'s question, and it read every undeclared
+    harness as claude.
     """
-    return eff_provider if (eff_provider and eff_provider in _NON_CLAUDE_HARNESSES) else "claude"
+    return _launch_harness_axis((eff_provider or "").strip()) or "claude"
 
 
 def _run_setup_worktree(worktree: Path, canonical_root: Path) -> None:
@@ -1819,10 +1796,9 @@ def _ensure_lane_worktree(
     without touching the others (Failure Modes: Errors).
 
     ``harness`` is the lane worker's dispatch harness (the node's provider,
-    defaulting to claude the way `_spawn_worker` resolves the same axis):
-    claude lands the lane harness-native at `<repo>/.claude/worktrees/`,
-    a non-claude harness at the external base. A `never` project returns the repo
-    root (guarded below) regardless of the harness.
+    defaulting to claude): claude lands the lane harness-native at
+    `<repo>/.claude/worktrees/`, a non-claude harness at the external base. A
+    `never` project returns the repo root (guarded below) whatever the harness.
     """
     # Deliberately the PRE-FOLD spelling. `fno_py_cmd()` resolves the INSTALLED
     # fno-py off PATH, not this source, and the shim only forwards old to new.

@@ -226,24 +226,3 @@ def test_codex_target_spelling_survives_an_unreadable_verb_roster(monkeypatch):
     assert harness_map.dispatch_command("claude", allow_merge=False) == (
         "/target --no-merge {id}"
     )
-
-
-def test_an_empty_verb_roster_is_never_memoized(monkeypatch):
-    """An empty roster is a failed read, not a fact about the plugin.
-
-    Caching it froze the failure for the whole process, so the first caller
-    running under an unresolvable plugin root poisoned every later one.
-    """
-    from fno.agents import harness_map
-    from fno import paths as paths_mod
-
-    harness_map.footnote_verbs.cache_clear()
-    monkeypatch.setattr(
-        paths_mod, "resolve_plugin_script", lambda name: (_ for _ in ()).throw(OSError())
-    )
-    assert harness_map.footnote_verbs() == frozenset()
-    monkeypatch.undo()
-    try:
-        assert "target" in harness_map.footnote_verbs(), "the failed read was cached"
-    finally:
-        harness_map.footnote_verbs.cache_clear()

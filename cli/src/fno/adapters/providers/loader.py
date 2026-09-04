@@ -486,6 +486,19 @@ def known_account_ids(repo_root: Path | None = None) -> set[str]:
     return ids
 
 
+def record_harness(record_id: str, repo_root: Path | None = None) -> str | None:
+    """The harness ``record_id``'s account record runs on, or None.
+
+    None is "the registry could not answer": no such record, no harness field,
+    or an unreadable config. Callers decide what unknown means; the read is one leg.
+    """
+    try:
+        rec = load_providers(repo_root=repo_root).by_id.get(record_id)
+    except Exception:  # noqa: BLE001 - an unreadable registry answers nothing
+        return None
+    return (getattr(rec, "harness", "") or "").strip() or None
+
+
 def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
     """Read config.providers.combos from project-local and global settings.
 

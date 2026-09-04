@@ -585,33 +585,22 @@ def doctor_cmd(
     from fno.setup.doctor import run_doctor
 
     rc = run_doctor()
-    # Open Question 1: bare doctor carries a one-line post-merge summary so the
-    # gap is visible without remembering the flag. Best-effort; never crashes
-    # the diagnostic.
-    try:
-        typer.echo(post_merge_readiness(_repo_root()).summary_line())
-    except Exception:  # noqa: BLE001 - the summary is advisory, not the command
-        pass
-    try:
-        _report_gates()
-    except Exception:  # noqa: BLE001 - a report, not the diagnostic itself
-        pass
-    try:
-        _report_state_roots()
-    except Exception:  # noqa: BLE001 - a report, not the diagnostic itself
-        pass
-    try:
-        _report_deprecated_auto_merge()
-    except Exception:  # noqa: BLE001 - advisory, same wrap as the three above
-        pass
-    try:
-        _report_deprecated_dispatch_harness()
-    except Exception:  # noqa: BLE001 - advisory, same wrap as the three above
-        pass
-    try:
-        _report_band_routing()
-    except Exception:  # noqa: BLE001 - advisory, same wrap as the four above
-        pass
+    # Every report is advisory and best-effort: one that fails never crashes
+    # the diagnostic. The post-merge line runs first so bare doctor shows the
+    # gap without remembering the flag (Open Question 1). One wrapper, so the
+    # next report is a name in this tuple rather than a sixth copy of it.
+    for report in (
+        lambda: typer.echo(post_merge_readiness(_repo_root()).summary_line()),
+        _report_gates,
+        _report_state_roots,
+        _report_deprecated_auto_merge,
+        _report_deprecated_dispatch_harness,
+        _report_band_routing,
+    ):
+        try:
+            report()
+        except Exception:  # noqa: BLE001 - a report, not the diagnostic itself
+            pass
     raise typer.Exit(rc)
 
 
@@ -802,37 +791,34 @@ def _report_band_routing() -> None:
     """Say when difficulty bands are routing nothing, and why.
 
     The grid is config-first: with no declared rows it records
-    ``grid=no-inventory-declared`` and picks nothing, so a band is computed
-    correctly and never consulted. ``model_routing.roles`` is a DIFFERENT axis,
-    and having it set is what makes that read as already on. Advisory only,
-    wrapped by the caller like its sibling reports.
+    ``grid=no-inventory-declared``, so a band is computed correctly and never
+    consulted. ``model_routing.roles`` is a DIFFERENT axis; having it set is
+    what makes that read as already on.
     """
     from fno import route_resolve
+    from fno.config import load_settings
 
     inventory = route_resolve.resolve_inventory()
     if inventory.declared:
         return
-    names = ", ".join(sorted(inventory.rows)) or "none"
-    line = (
+    try:
+        roles = getattr(getattr(load_settings(), "model_routing", None), "roles", None)
+    except Exception:  # noqa: BLE001 - the note is a hint on top of the line
+        roles = None
+    typer.echo(
         "band routing inactive: config.routing.models is undeclared, so "
         "difficulty bands never pick a lane.\n"
-        f"      The built-in rows keep a tier request answerable: {names}\n"
+        f"      The built-in rows keep a tier request answerable: "
+        f"{', '.join(sorted(inventory.rows)) or 'none'}\n"
         "      Declare [[routing.models]] rows to activate "
         "(docs/architecture/role-based-model-routing.md)"
-    )
-    roles: dict = {}
-    try:
-        from fno.config import load_settings
-
-        roles = getattr(getattr(load_settings(), "model_routing", None), "roles", None) or {}
-    except Exception:  # noqa: BLE001 - the note is a hint on top of the line
-        pass
-    if roles:
-        line += (
+        + (
             "\n      Note: model_routing.roles is set, but it routes by ROLE, "
             "not by band."
+            if roles
+            else ""
         )
-    typer.echo(line)
+    )
 
 
 @app.command("active-backlog")
