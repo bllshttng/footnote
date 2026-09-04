@@ -98,7 +98,7 @@ def test_map_covers_current_surface_once():
     # This branch adds `agents king cancel`, the isolated cancellation
     # control: counted from the merged file, 566 -> 567, and `agents king
     # shape` (reign) lands on the same count: 567 total from 565.
-    assert len(mapped) == 567, (
+    assert len(mapped) == 568, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
