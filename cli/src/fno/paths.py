@@ -228,8 +228,7 @@ def resolve_canonical_repo_root() -> Path:
 
 
 def space_slug(canonical_root: Path) -> str:
-    """``<basename>-<first 8 hex of sha256(path)>``; mirrored byte for byte
-    in ``fno-agents::paths`` (golden-value tests pin the format)."""
+    """``<basename>-<first 8 hex of sha256(path)>``; mirrored byte for byte in ``fno-agents::paths``."""
     digest = hashlib.sha256(str(canonical_root).encode("utf-8")).hexdigest()[:8]
     return f"{canonical_root.name}-{digest}"
 
@@ -267,8 +266,7 @@ def space_dir(project_root: Optional[Path] = None) -> Path:
 
 
 def worktree_space_dir(project_root: Optional[Path] = None) -> Path:
-    """The session-keyed slice: ``<space>/worktrees/<name>/`` from a linked
-    worktree, the space root from canonical."""
+    """The session-keyed slice: ``<space>/worktrees/<name>/``, or the space root from canonical."""
     root = project_root or resolve_repo_root()
     if root.resolve() != _canonical_for(root):
         return _guard_state_path(space_dir(root) / "worktrees" / root.name)
@@ -281,8 +279,7 @@ def target_state_path(project_root: Optional[Path] = None) -> Path:
 
 
 def target_state_path_or_legacy(project_root: Optional[Path] = None) -> Path:
-    """``target_state_path``, falling back to the pre-space checkout manifest
-    when the session predates the move or the space root cannot resolve."""
+    """``target_state_path``, falling back to the pre-space checkout manifest."""
     try:
         space = target_state_path(project_root)
         if space.exists():

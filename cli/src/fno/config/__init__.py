@@ -1,9 +1,8 @@
 """Pydantic settings schema for the fno CLI.
 
-Settings are DEEP-MERGED across every candidate file that exists, with
-higher-priority files overriding lower-priority ones key-by-key (nested
-dicts merge recursively; scalars and lists replace wholesale). Candidate
-priority, highest first:
+Settings are DEEP-MERGED across every candidate file that exists, higher
+priority overriding lower key-by-key (nested dicts merge recursively,
+scalars and lists replace wholesale). Candidate priority, highest first:
   1. $FNO_CONFIG env var (explicit path; when set, the ONLY candidate)
   2. <worktree_root>/.fno/settings.yaml  (project-local to this checkout)
   3. <canonical_root>/.fno/settings.yaml  (the main checkout's config,

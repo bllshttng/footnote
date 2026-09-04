@@ -150,8 +150,7 @@ def claims_root_for(key: str) -> Path | None:
 def claims_dir(root: Path | None = None) -> Path:
     """Return the claims directory under the given root.
 
-    Claims are cross-worktree coordination state. Resolution order for the
-    base dir:
+    Cross-worktree coordination state. Resolution order for the base dir:
 
       1. explicit ``root`` argument (per-root claims, e.g. walker singleton),
       2. ``$FNO_CLAIMS_ROOT`` env var (global node claims),
