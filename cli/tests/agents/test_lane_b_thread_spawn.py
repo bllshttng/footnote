@@ -89,16 +89,36 @@ def lane_b_home(tmp_path, monkeypatch):
 # AC4-ERR: the public dispatch surface still refuses
 # ---------------------------------------------------------------------------
 
-def test_partial_lane_thread_dispatch_still_refuses_at_the_gate(lane_b_home) -> None:
-    """agy's spawn claim reads `capable` until its own journey passes, so
-    resolve_dispatch refuses the thread substrate - the keeper lane built
-    here is not reachable through the public dispatch surface without one."""
-    from fno.agents.harness_map import spawn_state
+def test_agy_thread_dispatch_resolves_on_the_journey_backed_seat(lane_b_home) -> None:
+    """agy's spawn claim reads native behind its own journey
+    (test_agy_spawn_journey.py), so the keeper lane built here IS reachable
+    through the public dispatch surface. agy participates in the loop
+    natively (a Stop handler in its own hooks.json), so unlike pi it needs no
+    installed extension for the autonomous `/target` template to resolve."""
+    from fno.agents.harness_map import spawn_state, thread_seatable
 
-    assert spawn_state("agy") == "capable"
+    assert spawn_state("agy") == "native"
+    assert thread_seatable("agy") is True
+    resolved = resolve_dispatch(harness="agy", substrate="thread", command="agy --version")
+    assert resolved["substrate"] == "thread"
+    assert resolved["thread"] is True
+    resolved_loop = resolve_dispatch(harness="agy", substrate="thread")
+    assert resolved_loop["substrate"] == "thread"
+    assert resolved_loop["loop_participation"] == "native"
+
+
+def test_gemini_thread_dispatch_still_refuses_at_the_gate(lane_b_home) -> None:
+    """The refusal this file used to assert through agy still has a subject.
+    gemini carries a capability row and no seat, so nothing resolves onto a
+    keeper lane nobody built for it. Its DEPRECATION gate fires before the
+    substrate gate, so that is the message asserted - the point is that the
+    row alone never buys the lane."""
+    from fno.agents.harness_map import thread_seatable
+
+    assert thread_seatable("gemini") is False
     with pytest.raises(DispatchResolveError) as exc_info:
-        resolve_dispatch(harness="agy", substrate="thread")
-    assert "substrate 'thread' is unsupported on harness 'agy'" in str(exc_info.value)
+        resolve_dispatch(harness="gemini", substrate="thread")
+    assert "no maintained footnote dispatch lane" in str(exc_info.value)
 
 
 def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit(monkeypatch) -> None:
@@ -123,18 +143,23 @@ def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit(monkeypatch) -> N
 
 
 def test_lane_b_spawn_wiring_names_every_wired_keeper_harness() -> None:
-    """The public dispatch_spawn body reaches the keeper entry point through
-    the wired arms - cursor-agent (callee-minted), pi (caller-assigned,
-    x-43bd) and grok (caller-assigned, x-fd31) - and this keeps any wiring
-    from being dropped by accident. (pi's half inverts the pre-arm guard,
-    which asserted the public body did NOT reference the driver while the
-    arm was unbuilt.)
+    """The public dispatch_spawn body reaches the keeper entry point, and the
+    table it dispatches through carries every wired arm - cursor-agent
+    (callee-minted), pi and grok (caller-assigned) and agy (callee-minted) -
+    so no wiring is dropped by accident. Each row is asserted through the
+    field that makes it a real arm rather than a stub: the refusal an
+    operator reads when the lane has no one-shot form.
     """
+    from fno.agents.harness_map import known_harnesses
+    from fno.agents.keeper_thread import keeper_arm
+
     source = inspect.getsource(dispatch_mod.dispatch_spawn)
-    assert "_lane_b_thread_spawn" in source
-    assert 'harness="cursor-agent"' in source
-    assert 'harness="pi"' in source
-    assert 'harness="grok"' in source
+    assert "keeper_thread_spawn" in source
+    rowed = {h for h in known_harnesses() if keeper_arm(h) is not None}
+    assert rowed == {"cursor-agent", "pi", "grok", "agy"}
+    for harness in sorted(rowed):
+        arm = keeper_arm(harness)
+        assert arm and arm.get("once_refusal"), f"{harness} declares no one-shot refusal"
 
 
 # ---------------------------------------------------------------------------
@@ -849,3 +874,262 @@ def test_lane_b_cursor_agent_refuses_a_truncated_resume_id(lane_b_home) -> None:
     assert "74db359a" in message
     assert "8 hex characters" in message
     assert "an fno session handle, not a chat id" in message
+
+
+# ---------------------------------------------------------------------------
+# agy: the second callee-minted keeper harness
+# ---------------------------------------------------------------------------
+
+def test_lane_b_agy_mints_through_a_print_mode_turn(lane_b_home, monkeypatch) -> None:
+    """agy's id is CALLEE-minted: the print-mode envelope returns it before
+    launch, and it is never fno's uuid4."""
+    _fake_keeper(monkeypatch, lane_b_home)
+    minted = "c5661b28-bcba-4690-8b2e-4a4a88541e8c"
+
+    from fno.agents.harnesses import agy
+
+    monkeypatch.setattr(agy, "create_conversation", lambda cwd, **kw: minted)
+    receipt = _lane_b_thread_spawn(name="wk-agy", harness="agy", cwd=lane_b_home)
+
+    assert receipt["session_id"] == minted
+    row = next(e for e in load_registry() if e.name == "wk-agy")
+    assert row.harness == "agy"
+    assert row.harness_session_id == minted
+
+
+def test_lane_b_agy_keeper_argv_matches_the_pane_lane_completion(
+    lane_b_home, monkeypatch
+) -> None:
+    """The keeper tail is the declared `--conversation` form plus the axes
+    build_pane_argv's agy arm appends. The two lanes host the same TUI, so a
+    disagreement here is a worker that launches differently depending on which
+    substrate asked for it."""
+    recorded = _fake_keeper(monkeypatch, lane_b_home)
+    minted = "3b0a7e21-4c55-4f0e-9a2c-8de1f4a90b77"
+
+    from fno.agents import dispatch as d
+
+    monkeypatch.setattr(
+        d, "_mint_thread_session_id", lambda harness, cwd, requested=None: minted
+    )
+    _lane_b_thread_spawn(
+        name="wk-agy-argv",
+        harness="agy",
+        cwd=lane_b_home,
+        model="gemini-3-pro",
+        effort="high",
+    )
+    argv = list(recorded["argv"])  # type: ignore[arg-type]
+    tail = argv[argv.index("--") + 1 :]
+    assert tail[:3] == ["agy", "--conversation", minted]
+    # An unattended keeper has nobody to answer a tool approval, so the bypass
+    # is not optional here.
+    assert "--dangerously-skip-permissions" in tail
+    assert tail[tail.index("--effort") + 1] == "high"
+    assert tail[tail.index("--model") + 1] == "gemini-3-pro"
+    assert "--add-dir" in tail, "the computed state-root grant rides the keeper argv"
+    assert "-p" not in tail and "--print" not in tail, (
+        "print mode exits after one turn; a keeper thread must host the TUI"
+    )
+    assert argv[argv.index("--pane-key") + 1] == minted
+
+
+def test_lane_b_agy_trusts_the_cwd_before_the_keeper_launches(
+    lane_b_home, monkeypatch
+) -> None:
+    """A folder agy does not trust puts a modal in front of the composer, and
+    the keeper has nobody to answer it. The upsert runs on the launch path, not
+    only inside the mint, so a caller-supplied resume id gets it too."""
+    _fake_keeper(monkeypatch, lane_b_home)
+    trusted: list = []
+
+    from fno.agents import mux_spawn
+
+    monkeypatch.setattr(
+        mux_spawn, "_ensure_agy_folder_trusted", lambda cwd: trusted.append(cwd) or True
+    )
+    _lane_b_thread_spawn(
+        name="wk-agy-trust",
+        harness="agy",
+        cwd=lane_b_home,
+        resume_session_id="8e2c0b41-19a7-4c3d-b0f5-6d7e2a3b9c10",
+    )
+    assert lane_b_home in trusted
+
+
+def test_lane_b_agy_refuses_a_truncated_resume_id(lane_b_home) -> None:
+    """agy resumes by EXACT id, so a partial one silently opens a different
+    conversation under a name fno believes is occupied."""
+    with pytest.raises(DispatchAskError) as caught:
+        _mint_thread_session_id("agy", lane_b_home, requested="c5661b28")
+    assert "c5661b28" in str(caught.value)
+    assert "not a full UUID" in str(caught.value)
+
+
+def test_agy_is_a_keeper_lane_harness() -> None:
+    """The row's resume forms make agy a keeper-lane harness (interactive
+    attach unsupported, resume supported), the lane pi, grok and cursor-agent
+    resolve onto."""
+    assert thread_lane("agy") == "keeper"
+
+
+# ---------------------------------------------------------------------------
+# The seed submit's modal answer must not desync the frame decoder
+# ---------------------------------------------------------------------------
+
+def _serve_frames(sock_path: Path, chunks: list[bytes]) -> threading.Thread:
+    """A fake keeper: accept one connection, write ``chunks`` in order, record
+    every Input frame the client sends, and ECHO each one back the way a real
+    TUI repaints a submitted line - that repaint is the seed's landing proof.
+    """
+    received: list[bytes] = []
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(1)
+
+    def _run() -> None:
+        conn, _ = server.accept()
+        try:
+            for chunk in chunks:
+                conn.sendall(chunk)
+                time.sleep(0.15)
+            deadline = time.monotonic() + 10
+            conn.settimeout(0.3)
+            pending = bytearray()
+            while time.monotonic() < deadline:
+                try:
+                    data = conn.recv(65536)
+                except socket.timeout:
+                    continue
+                if not data:
+                    break
+                received.append(data)
+                pending.extend(data)
+                while len(pending) >= 5:
+                    length = int.from_bytes(pending[1:5], "little")
+                    if len(pending) < 5 + length:
+                        break
+                    payload = bytes(pending[5 : 5 + length])
+                    del pending[: 5 + length]
+                    if payload != b"\r":
+                        conn.sendall(_frame(1, payload))
+        finally:
+            conn.close()
+            server.close()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.received = received  # type: ignore[attr-defined]
+    return thread
+
+
+def _frame(tag: int, payload: bytes) -> bytes:
+    return bytes([tag]) + len(payload).to_bytes(4, "little") + payload
+
+
+def test_answering_a_modal_keeps_the_frame_decoder_in_sync() -> None:
+    """The modal answer must not drop either buffer.
+
+    `raw_pending` can hold the HEAD of a partial frame. Clearing it makes the
+    next recv parse a tag and length out of mid-payload, and one garbage length
+    over the 1 MiB cap breaks the decode loop for good - a wedge that reads
+    exactly like a TUI that never painted its composer. `text` matters for a
+    quieter reason: agy repaints the composer right behind the trust dialog, so
+    the marker can arrive in the SAME recv as the modal.
+
+    The stream here is split mid-frame on purpose: the modal frame's payload is
+    delivered in two writes, and the composer marker rides the second.
+    """
+    from fno.agents.dispatch import _keeper_seed_submit
+
+    # AF_UNIX caps sun_path at 104 bytes and the pytest basetemp does not fit,
+    # the same short-path move the keeper spawn itself makes.
+    short = Path(tempfile.mkdtemp(prefix="fnok-"))
+    sock_path = short / "k.sock"
+    modal = _frame(1, b"Do you trust the contents of this project?\n")
+    ready = _frame(1, b"? for shortcuts")
+    # The split point is the whole point: the modal frame arrives COMPLETE (so
+    # the regex matches and the answer fires) carrying the first three bytes of
+    # the NEXT frame behind it. Those three bytes are what `raw_pending` holds
+    # when the answer fires, and dropping them makes the marker's tail parse as
+    # a header. A split inside the modal frame instead would leave the buffer
+    # empty at that moment and the bug would be a no-op - which is how this
+    # test first passed against the defect it exists to catch.
+    server = _serve_frames(sock_path, [modal + ready[:3], ready[3:]])
+
+    _keeper_seed_submit(
+        name="wk-modal",
+        session_id="7a64a981-b33c-4e94-861f-bb66a13c9f01",
+        sock=sock_path,
+        message="hello",
+        ready_marker=b"? for shortcuts",
+        clear_modal=(r"trust (?:this )?folder|do you trust", b"\r"),
+    )
+    server.join(timeout=10)
+
+    shutil.rmtree(short, ignore_errors=True)
+    sent = b"".join(server.received)  # type: ignore[attr-defined]
+    # The modal answer AND the seed both landed: a decoder that desynced on the
+    # partial frame would never have seen the marker and would have raised.
+    assert sent.count(_frame(1, b"\r")) >= 1, "the modal was never answered"
+    assert b"hello" in sent, "the seed never reached the composer"
+
+
+def test_a_callee_minted_row_with_no_mint_is_refused_not_fabricated(monkeypatch) -> None:
+    """The fallback for a row fno has no mint for is its own UUIDv4, and a
+    callee-minted harness never adopts one: the keeper would launch on an id
+    the harness does not know, and Identify would read that fabricated id back
+    off the argv and report it as truth. grok stands in for the next row to
+    declare the strategy before its mint is written."""
+    import fno.agents.harness_map as harness_map
+    from fno.agents.keeper_thread import mint_session_id
+
+    real = harness_map.capabilities
+    monkeypatch.setattr(
+        harness_map,
+        "capabilities",
+        lambda h: {**real(h), "session_binding": {"strategy": "callee-minted-read-back"}},
+    )
+    with pytest.raises(DispatchAskError) as caught:
+        mint_session_id("grok", Path("/tmp"), None)
+    assert "callee-minted-read-back" in str(caught.value)
+    assert "never adopts" in str(caught.value)
+    # The measured rows are unaffected: grok really declares caller-assigned.
+    monkeypatch.undo()
+    assert mint_session_id("grok", Path("/tmp"), "abc") == "abc"
+
+
+def test_a_modal_arriving_with_the_marker_is_still_answered() -> None:
+    """One repaint can deliver the composer paint and the dialog over it.
+
+    The marker is then already in the buffer when the modal matches, so a loop
+    that tests the marker FIRST breaks out with the dialog unanswered. The seed
+    goes to a TUI showing the modal: its submit CR answers the dialog, the
+    payload is swallowed, and the spawn returns a live registry row with no
+    orders. The modal check runs first for exactly this stream.
+    """
+    from fno.agents.dispatch import _keeper_seed_submit
+
+    short = Path(tempfile.mkdtemp(prefix="fnok-"))
+    sock_path = short / "k.sock"
+    modal = _frame(1, b"Do you trust the contents of this project?\n")
+    ready = _frame(1, b"? for shortcuts")
+    # ONE chunk, both complete: the marker is matchable the first time the loop
+    # looks, which is what makes the ordering load-bearing.
+    server = _serve_frames(sock_path, [ready + modal])
+
+    _keeper_seed_submit(
+        name="wk-modal-same-recv",
+        session_id="0d1a5c33-6b90-4d02-9f77-2a1c5e88b410",
+        sock=sock_path,
+        message="hello",
+        ready_marker=b"? for shortcuts",
+        clear_modal=(r"trust (?:this )?folder|do you trust", b"\r"),
+    )
+    server.join(timeout=10)
+
+    shutil.rmtree(short, ignore_errors=True)
+    sent = b"".join(server.received)  # type: ignore[attr-defined]
+    answer = sent.index(_frame(1, b"\r"))
+    assert b"hello" in sent, "the seed never reached the composer"
+    assert answer < sent.index(b"hello"), "the seed was pasted before the modal was answered"

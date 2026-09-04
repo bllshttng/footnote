@@ -5559,15 +5559,12 @@ def cmd_dispatch_lanes(
             if not harness:
                 raise DispatchFlagError("--harness must not be empty")
             from fno.harness_names import SPAWN_HARNESSES
+            from fno.harness_names import unknown_thread_harness_message
 
             if harness not in SPAWN_HARNESSES:
-                accepted = ", ".join(SPAWN_HARNESSES)
-                raise DispatchFlagError(
-                    f"unknown harness {harness!r} on the thread substrate "
-                    f"(--harness names the CLI BINARY); accepted here: {accepted}.\n"
-                    "agy and gemini launch on --substrate pane only.\n"
-                    "If you meant a model VENDOR, that is -P/--provider."
-                )
+                # The builder the spawn seam raises, rendered from the tuples
+                # beside it - so this seam needs no capability-table read.
+                raise DispatchFlagError(unknown_thread_harness_message(harness))
         if provider is not None:
             provider = provider.strip()
             if not provider:

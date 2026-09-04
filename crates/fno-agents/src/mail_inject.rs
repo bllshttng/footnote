@@ -691,6 +691,12 @@ fn resolve_keeper_confirm(target: &KeeperTarget, session: &str, pi_root: &Path) 
         // transcript to grep. Its TUI repaints the submitted turn, which the
         // pty variant confirms against.
         "cursor-agent" => KeeperConfirm::Pty,
+        // agy keeps its conversations in a sqlite db under
+        // ~/.gemini/antigravity-cli/conversations, not a greppable per-turn
+        // transcript, so there is nothing to tail. Its TUI repaints the
+        // submitted turn, which the pty variant confirms against - the same
+        // answer cursor-agent gets for the same reason.
+        "agy" => KeeperConfirm::Pty,
         "pi" => match crate::pi::lookup_sessions_under(pi_root, &target.cwd, session) {
             crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
                 baseline: transcript_len(&file),

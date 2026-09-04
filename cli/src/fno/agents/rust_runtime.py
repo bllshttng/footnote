@@ -558,7 +558,7 @@ def _is_keeper_thread_spawn(verb: str, args: Sequence[str]) -> bool:
 
     The Rust client's thread match handles claude/codex/opencode and refuses
     every other name, while the keeper arms (``_lane_b_thread_spawn``: pi,
-    cursor-agent, grok) live only in the Python dispatch. Without this
+    cursor-agent, grok, agy) live only in the Python dispatch. Without this
     carve-out an installed binary answers a working lane with "fno has not
     built this harness's keeper lane spawn arm yet". The substrate scan
     mirrors :func:`_is_pane_substrate_spawn` (absent = pane; the headless
@@ -641,7 +641,7 @@ def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
 #: "fno has not built this harness's keeper lane spawn arm yet" - a false
 #: statement the moment the Python arm ships. Kept in sync with the rows by
 #: a parity test, like the client.rs verb list.
-_KEEPER_THREAD_HARNESSES = ("pi", "cursor-agent", "grok")
+_KEEPER_THREAD_HARNESSES = ("pi", "cursor-agent", "grok", "agy")
 
 
 def _has_flag(

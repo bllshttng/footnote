@@ -19,6 +19,7 @@ Acceptance criteria (operator-locked):
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -517,41 +518,78 @@ def test_spawn_thread_refusal_names_axis_and_actual_accept_set(workdir) -> None:
     assert "agy" not in result.output
 
     # A DECLARED pane-only harness keeps the accept-set message (x-8f7f).
-    # pi joined SPAWN_HARNESSES in x-43bd, so the declared pane-only name
-    # asserted here is agy, the harness the message itself names.
+    # agy joined SPAWN_HARNESSES in x-d145, so the declared pane-only name
+    # asserted here is gemini: it carries a capability row (so it passes the
+    # undeclared arm above) and stays out of the tuple.
     declared = _make_runner().invoke(
         agents_app,
         [
-            "spawn", "--name", "fooagent2", "--harness", "agy",
+            "spawn", "--name", "fooagent2", "--harness", "gemini",
             "--substrate", "thread", "hello",
         ],
     )
     assert declared.exit_code == 2
     assert (
-        "unknown harness 'agy' on the thread substrate (--harness names the "
+        "unknown harness 'gemini' on the thread substrate (--harness names the "
         f"CLI BINARY); accepted here: {', '.join(SPAWN_HARNESSES)}."
     ) in declared.output
-    assert "agy and gemini launch on --substrate pane only." in declared.output
+    # The pane sentence derives from the tuple now, so it names the refused
+    # harness and can never contradict the accept list beside it.
+    assert "gemini has no measured thread lane yet; use --substrate pane." in declared.output
 
 
 def test_spawn_thread_refusal_renders_from_accept_set(monkeypatch) -> None:
     from fno.agents import dispatch
 
+    from fno import harness_names
+
     dispatch._check_spawn_harness("opencode")
+    # Patch the ONE tuple the message builder reads. dispatch's own import is a
+    # second binding of the same names, and patching it would prove nothing
+    # about where the rendered text comes from.
     monkeypatch.setattr(
-        dispatch, "SPAWN_HARNESSES", (*dispatch.SPAWN_HARNESSES, "future")
+        harness_names, "SPAWN_HARNESSES", (*harness_names.SPAWN_HARNESSES, "future")
     )
 
     with pytest.raises(dispatch.DispatchAskError) as caught:
         # A DECLARED harness outside SPAWN_HARNESSES renders the accept set;
         # an undeclared name takes the undeclared arm instead, so the set is
-        # asserted through a declared pane-only harness (agy; pi joined the
-        # set in x-43bd).
-        dispatch._check_spawn_harness("agy")
+        # asserted through a declared pane-only harness (gemini; pi joined the
+        # set in x-43bd and agy in x-d145).
+        dispatch._check_spawn_harness("gemini")
 
-    expected = ", ".join((*dispatch.SPAWN_HARNESSES,))
+    expected = ", ".join(harness_names.SPAWN_HARNESSES)
     assert f"accepted here: {expected}" in str(caught.value)
     assert expected.endswith("future"), "the monkeypatched name must be rendered"
+    # The pane sentence derives too: it names the refused harness, never a
+    # hardcoded roster that the tuple can outgrow.
+    assert "gemini has no measured thread lane yet; use --substrate pane." in str(caught.value)
+
+
+def test_thread_refusal_is_one_message_across_both_seams(monkeypatch) -> None:
+    """The spawn seam and the dispatch-lanes seam raise the SAME text.
+
+    Two files used to render the accept set from the tuple and then hardcode
+    the same pane-only sentence beside it, so one could name a harness the
+    other had since admitted - and did.
+    """
+    from typer.testing import CliRunner
+
+    from fno.agents import dispatch
+    from fno.backlog import advance
+    from fno.graph import cli as graph_cli
+
+    with pytest.raises(dispatch.DispatchAskError) as caught:
+        dispatch._check_spawn_harness("gemini")
+
+    monkeypatch.setattr(advance, "dispatch_lanes", lambda *a, **k: [])
+    lanes = CliRunner().invoke(
+        graph_cli.cli, ["dispatch-lanes", "--harness", "gemini", "--max", "1"]
+    )
+
+    assert lanes.exit_code == 2
+    for line in str(caught.value).splitlines():
+        assert line in lanes.output
 
 
 def test_spawn_pi_thread_passes_the_seam_and_headless_refuses_unmeasured() -> None:
@@ -632,6 +670,125 @@ def test_spawn_pi_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) -> 
     assert seed["sock"] == "/tmp/does-not-matter.sock"
     assert seed["message"].startswith("hello")
     assert seed["ready_marker"] == b"(sub)"
+
+
+def test_spawn_agy_thread_passes_the_seam_and_headless_refuses_unmeasured() -> None:
+    """agy passes on thread (its keeper lane is journey-proven) and refuses on
+    headless. The refusal cannot come from the seam here: agy's
+    state_root_grant records the write-access MECHANISM per lane
+    (--add-dir on all three), never whether a lane has been run, so the
+    unmeasured-stance check passes for headless too. dispatch_spawn states it
+    instead, and the message must name the lane rather than call agy
+    pane-only."""
+    from fno.agents import dispatch
+
+    # Positive marker: the accepted name RETURNS rather than raising.
+    dispatch._check_spawn_harness("agy", headless=False)
+    dispatch._check_spawn_harness("agy")
+
+
+def test_spawn_agy_headless_refuses_by_name(workdir, monkeypatch) -> None:
+    from fno.agents import dispatch
+
+    monkeypatch.setattr(
+        dispatch,
+        "_lane_b_thread_spawn",
+        lambda **kw: pytest.fail("headless must never reach the keeper lane"),
+    )
+    with pytest.raises(dispatch.DispatchAskError) as caught:
+        dispatch.dispatch_spawn(
+            name="wkagyh", message="hello", harness="agy", cwd=workdir, headless=True
+        )
+    message = str(caught.value)
+    assert "unmeasured" in message
+    assert "--substrate thread" in message
+    assert "no measured thread lane" not in message, (
+        "the merged measurement disproved that sentence for agy"
+    )
+
+
+def test_a_keeper_lane_refuses_the_permission_axis_it_does_not_carry() -> None:
+    """The permission axis is an axis like any other. pi's lane driver takes no
+    permission mode, so passing one used to be dropped in silence - a security-
+    adjacent surprise, and a flat contradiction of the row's own claim that
+    every axis it does not carry is refused BY NAME."""
+    from fno.agents import dispatch
+    from fno.agents.keeper_thread import LAUNCH_AXES, keeper_arm
+
+    assert ("--permission-mode", "permission_mode") in LAUNCH_AXES
+    assert "permission_mode" not in keeper_arm("pi")["carries"]
+    for harness in ("cursor-agent", "grok", "agy"):
+        assert "permission_mode" in keeper_arm(harness)["carries"], harness
+
+    with pytest.raises(dispatch.DispatchAskError) as caught:
+        dispatch.dispatch_spawn(
+            name="wkpiperm",
+            message="hello",
+            harness="pi",
+            cwd=Path("/tmp"),
+            permission_mode="yolo",
+        )
+    assert "--permission-mode is not supported on the pi thread lane" in str(
+        caught.value
+    )
+
+
+def test_spawn_agy_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) -> None:
+    """`dispatch_spawn -H agy --substrate thread` reaches
+    `_lane_b_thread_spawn` and returns its minted conversation id - the
+    refusal text `unknown harness 'agy' on the thread substrate` never
+    renders. The seed rides the keeper paste, keyed to that id and agy's own
+    composer-ready marker."""
+    from fno.agents import dispatch
+
+    calls: list[dict] = []
+    seeds: list[dict] = []
+
+    def _fake_lane_b(**kwargs):
+        calls.append(kwargs)
+        return {
+            "name": kwargs["name"],
+            "harness": kwargs["harness"],
+            "session_id": "c5661b28-bcba-4690-8b2e-4a4a88541e8c",
+            "keeper_socket": "/tmp/does-not-matter.sock",
+            "keeper_pid": 1,
+            "child_pid": 2,
+            "argv": ["agy"],
+        }
+
+    def _fake_seed(*, name, session_id, sock, message, ready_marker, clear_modal):
+        seeds.append(
+            {
+                "session_id": session_id,
+                "message": message,
+                "marker": ready_marker,
+                "modal": clear_modal,
+            }
+        )
+
+    monkeypatch.setattr(dispatch, "_lane_b_thread_spawn", _fake_lane_b)
+    monkeypatch.setattr(dispatch, "_keeper_seed_submit", _fake_seed)
+
+    result = dispatch.dispatch_spawn(
+        name="wkagy", message="hello", harness="agy", cwd=workdir, model="gemini-3-pro"
+    )
+
+    assert result.kind == "created"
+    assert result.provider == "agy"
+    assert result.short_id == "c5661b28-bcba-4690-8b2e-4a4a88541e8c"
+    assert len(calls) == 1, "the agy branch must drive the keeper lane exactly once"
+    assert calls[0]["harness"] == "agy"
+    assert calls[0]["model"] == "gemini-3-pro", "the model axis rides the lane"
+    assert len(seeds) == 1, f"exactly one seed paste, got {seeds!r}"
+    assert seeds[0]["session_id"] == "c5661b28-bcba-4690-8b2e-4a4a88541e8c"
+    assert seeds[0]["message"].startswith("hello")
+    assert seeds[0]["marker"] == b"? for shortcuts"
+    # A keeper has nobody to answer agy's folder-trust modal, and a TUI behind
+    # one runs nothing while holding a live row, so the seed carries the answer.
+    assert seeds[0]["modal"] is not None
+    pattern, keys = seeds[0]["modal"]
+    assert re.search(pattern, "Do you trust the contents of this project?", re.I)
+    assert keys == b"\r"
 
 
 def test_spawn_seam_refuses_an_absent_stance(monkeypatch) -> None:

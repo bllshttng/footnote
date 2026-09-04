@@ -38,33 +38,13 @@ KNOWN_HARNESSES: tuple[str, ...] = (
     "grok",
 )
 
-# Thread/headless accepts opencode through its launch seam, and the
-# keeper-hosted lanes: cursor-agent through `create-chat`'s callee-minted
-# chat id, pi through the caller-assigned id the restart journey proved.
-# agy and gemini are pane-only and stay out of this tuple.
-#
-# pi joins on journey evidence, not roster growth: its keeper-hosted thread
-# lane survived a double SIGKILL (journey wk-x61bc,
-# cli/tests/agents/test_thread_keeper_journey.py, first green 2026-09-01 on pi
-# 0.84.2), and the spawn arm shipped behind that evidence
-# (`dispatch_spawn`'s pi branch drives `_lane_b_thread_spawn`). pi's HEADLESS
-# lane is a different story: nothing has run it, its state_root_grant row
-# reads `unmeasured`, and `_check_spawn_harness` refuses that lane by stance
-# rather than by absence from this tuple. The membership answers "is there a
-# seam arm"; the row answers "is the lane measured".
-#
-# cursor-agent joins the same way (x-61bc's generic thread lane): the
-# dispatch_spawn arm mints the chat id through `create-chat`, hosts the TUI
-# under `fno-agents-worker --keeper`, and the journey backs it. Its `thread`
-# row reads true behind that same journey.
-#
-# grok joins the same keeper lane (x-fd31): the dispatch_spawn arm mints the
-# caller-assigned `--session-id` uuid, hosts the TUI under
-# `fno-agents-worker --keeper`, and the live measurement (create, SIGKILL,
-# `--resume` recall) backs the row. kimi is deliberately ABSENT: its ACP
-# mint lane is built and unit-tested, but the binary refuses every turn
-# until its provider is configured (the operator's who-pays axis), so no
-# row and no SPAWN_HARNESSES seat can stand behind an unmeasured lane.
+# Every harness with a BUILT thread-spawn arm: opencode through its launch
+# seam, and cursor-agent, pi, grok and agy through the keeper lane. A name
+# joins on journey evidence, never on roster growth; the measurement behind
+# each row is in docs/architecture/thread-lanes.md. Membership answers "is
+# there a seam arm", the row answers "is the lane measured", which is why pi
+# and agy sit here while their HEADLESS lanes stay unmeasured. kimi is absent
+# because its ACP lane refuses every turn until a provider is configured.
 SPAWN_HARNESSES: tuple[str, ...] = (
     "claude",
     "codex",
@@ -72,4 +52,25 @@ SPAWN_HARNESSES: tuple[str, ...] = (
     "cursor-agent",
     "pi",
     "grok",
+    "agy",
 )
+
+
+def unknown_thread_harness_message(name: str) -> str:
+    """The one refusal every thread-substrate seam raises.
+
+    Both halves derive from this module's tuples, so no seam can name a
+    harness the accept list has since admitted. The ROSTER decides the second
+    sentence: the pane lane execs whatever is on PATH. A missing thread lane
+    says what fno has BUILT, never what the harness can do
+    (docs/architecture/thread-lanes.md).
+    """
+    accepted = ", ".join(SPAWN_HARNESSES)
+    lines = [
+        f"unknown harness {name!r} on the thread substrate (--harness names "
+        f"the CLI BINARY); accepted here: {accepted}.",
+    ]
+    if name in KNOWN_HARNESSES:
+        lines.append(f"{name} has no measured thread lane yet; use --substrate pane.")
+    lines.append("If you meant a model VENDOR, that is -P/--provider.")
+    return "\n".join(lines)

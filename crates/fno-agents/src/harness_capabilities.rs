@@ -150,6 +150,11 @@ pub struct HarnessCapabilities {
     pub permission_response: BTreeMap<String, PermissionResponse>,
     pub resume_strategy: ResumeStrategy,
     pub model_switch_strategy: ModelSwitchStrategy,
+    /// The keeper-lane spawn arm, absent on a harness with no keeper lane.
+    /// One row replaces four hand-written copies of the same spawn block; the
+    /// fields are documented in docs/architecture/thread-lanes.md.
+    #[serde(default)]
+    pub keeper: Option<KeeperArm>,
     /// What this harness can DO, keyed by [`FEATURE_KEYS`] (x-a3e8) - a second
     /// dimension beside the pane mechanics, not a rewrite of them. A key
     /// ABSENT here reads `unmeasured`, which is legal and renders as a
@@ -159,6 +164,44 @@ pub struct HarnessCapabilities {
     /// [`HarnessContract::validate`].
     #[serde(default)]
     pub features: BTreeMap<String, FeatureClaim>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeeperArm {
+    /// Why this lane has no one-shot form, in the sentence the operator sees.
+    pub once_refusal: String,
+    /// The launch axes this lane has a measured spelling for. Every other
+    /// axis is refused BY NAME, so one list answers both questions.
+    pub carries: Vec<String>,
+    /// This TUI's own composer-idle paint; empty keeps the seed default.
+    #[serde(default)]
+    pub ready_marker: String,
+    #[serde(default)]
+    pub resume_refusal: String,
+    #[serde(default)]
+    pub headless_refusal: String,
+    /// Refuse `--once` and headless with ONE message, where they name the
+    /// same absent lane.
+    #[serde(default)]
+    pub once_and_headless_together: bool,
+    /// The never-prompt flag, appended under `--yolo` - or always, where an
+    /// unattended keeper has nobody to answer a first approval.
+    #[serde(default)]
+    pub bypass_flag: String,
+    #[serde(default)]
+    pub bypass_always: bool,
+    #[serde(default)]
+    pub takes_model: bool,
+    #[serde(default)]
+    pub takes_effort: bool,
+    #[serde(default)]
+    pub takes_add_dir: bool,
+    /// `[regex, keys]` for a TUI that paints a blocking modal before its
+    /// composer. A TUI behind an unanswered modal runs nothing while holding
+    /// a live registry row.
+    #[serde(default)]
+    pub clear_modal: Vec<String>,
 }
 
 /// One feature claim: `state` is the claim, and `verbs` names the
@@ -975,6 +1018,20 @@ pub fn render_session_argv_with_ids(
 mod tests {
     use super::*;
 
+    /// Every harness whose spawn claim reads `native`: fno's own launch arm is
+    /// wired and journey-proven for each. agy joined when its keeper arm
+    /// shipped with cli/tests/agents/test_agy_spawn_journey.py. gemini stays
+    /// `absent`, which is what keeps the unseated leg from being vacuous.
+    const SEATED: &[&str] = &[
+        "claude",
+        "codex",
+        "opencode",
+        "pi",
+        "cursor-agent",
+        "grok",
+        "agy",
+    ];
+
     #[test]
     fn packaged_contract_is_complete_for_every_harness() {
         let contract = HarnessContract::packaged().unwrap();
@@ -1189,11 +1246,9 @@ mod tests {
         let claude = contract.capabilities("claude").unwrap();
         let codex = contract.capabilities("codex").unwrap();
         let opencode = contract.capabilities("opencode").unwrap();
-        // The thread seat derives from the features dimension: spawn reads
-        // `native` where fno's own launch arm is wired and journey-proven.
-        // agy reads `capable` (real on the harness, no fno arm) and gemini
-        // `absent`; claude, codex and opencode are journey-proven native.
-        for name in ["claude", "codex", "opencode", "pi", "cursor-agent", "grok"] {
+        // The thread seat derives from the features dimension, never a stored
+        // bit; SEATED names who has one and why.
+        for name in SEATED {
             let claim = contract
                 .capabilities(name)
                 .unwrap()
@@ -1202,15 +1257,13 @@ mod tests {
                 .unwrap();
             assert_eq!(claim.state, "native", "{name} is seated");
         }
-        for name in ["agy", "gemini"] {
-            let claim = contract
-                .capabilities(name)
-                .unwrap()
-                .features
-                .get("spawn")
-                .unwrap();
-            assert_ne!(claim.state, "native", "{name} is unseated");
-        }
+        let gemini = contract
+            .capabilities("gemini")
+            .unwrap()
+            .features
+            .get("spawn")
+            .unwrap();
+        assert_ne!(gemini.state, "native", "gemini is unseated");
         assert_eq!(claude.ready_marker, "live_prompt_box");
         assert_eq!(codex.ready_marker, "idle_prompt");
         assert_eq!(claude.send_keys_enter_delay_ms, 800);
@@ -1527,11 +1580,12 @@ mod tests {
                 .map(|claim| claim.state.as_str())
                 .unwrap_or("unmeasured")
         };
-        for harness in ["claude", "codex", "opencode", "pi", "cursor-agent", "grok"] {
+        for harness in SEATED {
             assert_eq!(state(harness, "spawn"), "native", "{harness}");
         }
-        assert_eq!(state("agy", "spawn"), "capable");
         assert_eq!(state("gemini", "spawn"), "absent");
+        // The middle rung, kept asserted: real on the harness, no fno arm.
+        assert_eq!(state("gemini", "subagent_dispatch"), "capable");
         assert_eq!(state("claude", "review"), "native");
         assert_eq!(state("codex", "review"), "native");
         assert_eq!(state("claude", "mcp"), "unmeasured");
@@ -1592,7 +1646,7 @@ mod tests {
 
     #[test]
     fn a_row_without_a_features_table_loads_with_no_refusal() {
-        let stanza = "[harness.agy.features.spawn]\nstate = \"capable\"\n";
+        let stanza = "[harness.agy.features.spawn]\nstate = \"native\"\n";
         let stripped = CAPABILITY_TOML.replacen(stanza, "", 1);
         let contract = HarnessContract::parse(&stripped).unwrap();
         assert!(contract.capabilities("agy").unwrap().features.is_empty());

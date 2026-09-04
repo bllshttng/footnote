@@ -2031,8 +2031,27 @@ def _dispatch_one_capture(monkeypatch, tmp_path):
     Its own node id, so the sibling advance leg's live dispatch:<id> reservation
     does not read as this launcher already dispatching."""
     import fno.dispatch as dispatch_mod
+    from fno.agents import harness_map
 
     captured: dict = {}
+    # The codex spelling is rendered from the shipped verb roster, which resolves
+    # through the plugin root - and a test tree has none: the roster reads empty
+    # and `/target` passes through unrewritten. `footnote_verbs` caches an empty
+    # read too, so test ORDER alone decided which spelling this fixture saw.
+    # Point the reader at the checkout, the way a real dispatch (which runs in
+    # the node's own repo) resolves one, and clear the cache so it reads THAT.
+    # The pointer write is neutralized with it: ~/.fno/plugin-root lands in the
+    # SHARED sandbox HOME, and would hand the real checkout to every later test
+    # in the worker - two claim tests measured that leak.
+    monkeypatch.setattr("fno.paths._persist_plugin_root", lambda _root: None)
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(Path(__file__).resolve().parents[3]))
+    # Clear the CACHE, not the alias: `footnote_verbs.cache_clear` is a
+    # function attribute, so a sibling test that monkeypatches the name in this
+    # xdist worker leaves this line raising AttributeError instead of failing
+    # on the roster it meant to assert. `_shipped_verbs` is what holds the
+    # cache and nothing patches it.
+    harness_map._shipped_verbs.cache_clear()
+    assert "target" in harness_map.footnote_verbs(), "roster must read the checkout"
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(dispatch_mod, "_resolve_provider_id", lambda *a, **k: "ccm")
     monkeypatch.setattr(dispatch_mod, "_next_node", lambda project: DISPATCH_NODE)
@@ -2046,7 +2065,13 @@ def _dispatch_one_capture(monkeypatch, tmp_path):
         # worker actually bound a session, not just whether a pane was created.
         lambda **kw: captured.update(kw) or SimpleNamespace(pane_id="p1", bound=True),
     )
-    verdict = dispatch_mod._dispatch_one(session="s", node=None, project=None)
+    try:
+        verdict = dispatch_mod._dispatch_one(session="s", node=None, project=None)
+    finally:
+        # Warm for the call, cold afterwards. monkeypatch restores the env at
+        # teardown but not the cache behind it, and leaving the real checkout
+        # roster warm hands it to every later test in this xdist worker.
+        harness_map._shipped_verbs.cache_clear()
     return verdict, captured
 
 

@@ -56,6 +56,8 @@ from fno.agents.context import EventContext, build_context
 from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
+from fno.agents.keeper_thread import complete_launch_argv, mint_session_id
+from fno.harness_names import unknown_thread_harness_message
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.reachability import mux_ref_names_a_pane
 from fno.agents.registry import (
@@ -487,12 +489,11 @@ def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
             "If you meant a model VENDOR, that is -P/--provider.",
             exit_code=2,
         )
-    accepted = ", ".join(SPAWN_HARNESSES)
+    # One builder, shared with the `dispatch-lanes` seam (x-d145): the pane
+    # sentence derives from the tuple here too, so neither seam can name a
+    # harness the other has since admitted.
     raise DispatchAskError(
-        f"unknown harness {name!r} on the thread substrate (--harness names "
-        f"the CLI BINARY); accepted here: {accepted}.\n"
-        "agy and gemini launch on --substrate pane only.\n"
-        "If you meant a model VENDOR, that is -P/--provider.",
+        unknown_thread_harness_message(name),
         exit_code=2,
     )
 
@@ -1177,38 +1178,12 @@ def _mint_thread_session_id(
 ) -> str:
     """The harness session id a keeper thread launches on, fixed BEFORE launch.
 
-    Two shapes, declared by the row's ``session_binding.strategy``:
-    caller-assigned (pi, the default) - fno mints a UUIDv4 and the harness
-    adopts it. ``callee-minted-read-back`` (cursor-agent) - only the harness
-    mints, so fno runs ``create-chat``, reads the one id line, and kills the
-    helper (it never exits on its own). Either way the id exists before any
-    worker starts and rides the registry row from birth. A caller-requested id
-    (``spawn --resume``) skips the mint and validates instead, because a
-    truncated or bare id is a picker or a rival chat, never a resume.
+    The per-harness shapes live in :func:`fno.agents.keeper_thread.
+    mint_session_id`; the caller-assigned default is here because a UUIDv4 is
+    not a harness fact.
     """
-    if requested is not None:
-        if harness == "cursor-agent":
-            from fno.agents.harnesses.cursor_agent import (
-                CursorAgentSessionError,
-                _require_chat_id,
-            )
-
-            try:
-                return _require_chat_id(requested)
-            except CursorAgentSessionError as exc:
-                raise DispatchAskError(str(exc), exit_code=2) from exc
-        return requested
-    if harness == "cursor-agent":
-        from fno.agents.harnesses.cursor_agent import (
-            CursorAgentSessionError,
-            create_chat,
-        )
-
-        try:
-            return create_chat(cwd)
-        except CursorAgentSessionError as exc:
-            raise DispatchAskError(str(exc), exit_code=2) from exc
-    return str(uuid.uuid4())
+    minted = mint_session_id(harness, cwd, requested)
+    return minted if minted is not None else str(uuid.uuid4())
 
 
 def _keeper_pid_start_time(pid: int) -> Optional[int]:
@@ -1312,63 +1287,16 @@ def _lane_b_thread_spawn(
                 f"argv: {exc}",
                 exit_code=2,
             ) from exc
-        if harness == "cursor-agent":
-            # The pane lane's build_pane_argv appends the same completion. The
-            # declared form already carries --trust (an untrusted cwd refuses
-            # with Workspace Trust Required and fno always spawns into a fresh
-            # worktree); what rides here is the rest of the launch axes: the
-            # bypass, the one model axis, and the state-root grant the row's
-            # argv-add-dir cell declares.
-            from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
-            from fno.agents.mux_spawn import permission_pane_tokens
-
-            if permission_mode:
-                argv = [*argv, *permission_pane_tokens("cursor-agent", permission_mode)]
-            elif yolo:
-                argv = [*argv, "--force"]
-            if model:
-                argv = [*argv, "--model", model]
-            argv = [
-                *argv,
-                *add_dir_tokens(
-                    "cursor-agent",
-                    add_dir,
-                    worker_writable_dirs(cwd),
-                    unsupported=lambda flag: (_ for _ in ()).throw(
-                        DispatchAskError(
-                            f"{flag} is not supported on the cursor-agent "
-                            "thread lane",
-                            exit_code=2,
-                        )
-                    ),
-                ),
-            ]
-        elif harness == "pi":
-            # Provider AND model, both, always: bare pi defaults to provider
-            # google (credentials_not_configured here) and `--provider
-            # openai-codex` without `--model` falls to a Bedrock model - the
-            # x-c198 trap. The pane lane's build_pane_argv has always appended
-            # this pair; the keeper hosts the same TUI and needs the same
-            # completion or the thread comes up unable to answer a prompt.
-            from fno.agents.harnesses.pi import pi_model, pi_provider
-
-            argv = [*argv, "--provider", pi_provider(), "--model", pi_model()]
-        elif harness == "grok":
-            # The axes the row's arms append on the pane lane: the bypass,
-            # the one model axis and the effort axis. The declared form
-            # carries only `--session-id`; the keeper hosts the same TUI the
-            # pane does, so the completion must match build_pane_argv's grok
-            # arm or the two lanes disagree about how the worker launches.
-            from fno.agents.mux_spawn import permission_pane_tokens
-
-            if permission_mode:
-                argv = [*argv, *permission_pane_tokens("grok", permission_mode)]
-            elif yolo:
-                argv = [*argv, "--always-approve"]
-            if model:
-                argv = [*argv, "--model", model]
-            if effort:
-                argv = [*argv, "--reasoning-effort", effort]
+        argv = complete_launch_argv(
+            harness,
+            argv,
+            cwd=cwd,
+            model=model,
+            yolo=yolo,
+            permission_mode=permission_mode,
+            add_dir=add_dir,
+            effort=effort,
+        )
 
         sock = _lane_b_keeper_socket(name)
         log_path = paths.state_dir() / "agents" / name / "keeper.log"
@@ -1527,6 +1455,7 @@ def _keeper_seed_submit(
     sock: Path,
     message: str,
     ready_marker: bytes = b"Plan, search, build anything",
+    clear_modal: Optional[tuple[str, bytes]] = None,
 ) -> None:
     """Deliver a thread spawn's seed to its keeper-hosted TUI.
 
@@ -1548,6 +1477,10 @@ def _keeper_seed_submit(
     per-harness: cursor-agent's status line reads "Plan, search, build
     anything"; pi's subscription tag renders only once its model session is
     wired (the same marker the journeys wait on).
+
+    ``clear_modal`` is ``(regex, keys)`` for a TUI that can paint a blocking
+    modal BEFORE its composer, which a keeper has nobody to answer
+    (docs/architecture/thread-lanes.md).
     """
     import socket as _socket
     import time as _time
@@ -1588,7 +1521,22 @@ def _keeper_seed_submit(
         deadline = _time.monotonic() + 60.0
         flip = False
         last_nudge = 0.0
+        modal_answered = False
         while _time.monotonic() < deadline:
+            # Modal BEFORE marker: one repaint can deliver the composer paint
+            # and the dialog over it in a single recv, and breaking there pastes
+            # the seed into a TUI still showing the dialog.
+            if clear_modal is not None and not modal_answered:
+                pattern, keys = clear_modal
+                if re.search(pattern, bytes(text).decode("utf-8", "replace"), re.I):
+                    # Answer ONCE and clear NEITHER buffer: `raw_pending` can
+                    # hold the head of a partial frame, and `text` a marker only
+                    # a later repaint paints again. Regression tests are in
+                    # test_lane_b_thread_spawn.py.
+                    conn.sendall(frame(tag_input, keys))
+                    modal_answered = True
+                    _time.sleep(0.5)
+                    continue
             if ready_marker in bytes(text):
                 break
             now = _time.monotonic()
@@ -1614,10 +1562,11 @@ def _keeper_seed_submit(
             _decode_frames(decoded)
             text.extend(_strip_ansi(bytes(decoded)))
         else:
+            answered = " A blocking modal was answered and the composer still never painted." if modal_answered else ""
             raise DispatchAskError(
                 f"keeper thread for {name!r} never painted its idle composer "
-                f"within 60s; the seed was not delivered. Inspect with "
-                f"'fno agents peek {name}' and send the prompt by mail.",
+                f"within 60s; the seed was not delivered.{answered} Inspect "
+                f"with 'fno agents peek {name}' and send the prompt by mail.",
                 exit_code=1,
             )
 
@@ -2951,236 +2900,28 @@ def dispatch_spawn(
             effective_message=effective_message,
         )
 
-    # 3b-2. cursor-agent threads are keeper-hosted lane B (x-61bc's generic
-    # thread lane). The harness has no daemon and no bidirectional transport:
-    # the keeper holds the TUI's pty so the thread survives supervisor death,
-    # and the chat id is minted by `create-chat` (callee-minted-read-back)
-    # before the child launches. The pane stays the attended substrate; the
-    # thread lane is the dispatch one.
-    if harness == "cursor-agent":
-        if once or headless:
-            raise DispatchAskError(
-                "cursor-agent has no headless lane: --print is output-only "
-                "(no --input-format, no rpc), so there is no one-shot form. "
-                "Use the thread substrate for a persistent worker or "
-                "--substrate pane for an attended one.",
-                exit_code=2,
-            )
-        unsupported = next(
-            (
-                flag
-                for flag, value in (
-                    ("--role", launch_role),
-                    ("--agent", agent),
-                    ("--tools", tools),
-                    ("--deny-tools", deny_tools),
-                    ("--effort", effort),
-                )
-                if value
-            ),
-            None,
-        )
-        if unsupported is not None:
-            raise DispatchAskError(
-                f"{unsupported} is not supported on the cursor-agent thread "
-                "lane; drop it or use --substrate pane",
-                exit_code=2,
-            )
-        receipt = _lane_b_thread_spawn(
-            name=name,
-            harness="cursor-agent",
-            cwd=cwd,
-            model=model,
-            yolo=yolo,
-            permission_mode=permission_mode,
-            add_dir=add_dir,
-            resume_session_id=resume_session_id,
-            lock_timeout=lock_timeout,
-        )
-        session_id = receipt["session_id"]
-        if message.strip():
-            _keeper_seed_submit(
-                name=name,
-                session_id=session_id,
-                sock=Path(receipt["keeper_socket"]),
-                message=message,
-            )
-        _emit_ev(
-            "agent_ask_done",
-            stage="dispatch",
-            name=name,
-            provider="cursor-agent",
-            substrate="thread",
-        )
-        return SpawnResult(
-            kind="created",
-            name=name,
-            provider="cursor-agent",
-            short_id=session_id,
-            effective_message=effective_message,
-        )
+    # 3b-2. The keeper-lane thread spawns (cursor-agent, pi, grok, agy), one
+    # row each in the capability contract's `[harness.<name>.keeper]`.
+    from fno.agents.keeper_thread import keeper_thread_spawn
 
-    # 3b-3. pi thread spawns are hosted by the keeper lane (x-43bd), the
-    # same lane the restart journey proved (wk-x61bc). pi's headless lane
-    # never reached this point: _check_spawn_harness refused the unmeasured
-    # stance above. The lane driver mints the caller-assigned session id and
-    # appends pi's provider/model pair itself, so every option that would
-    # ride another lane's argv is refused by name rather than silently
-    # dropped.
-    if harness == "pi" and not headless:
-        unsupported = next(
-            (
-                flag
-                for flag, value in (
-                    ("--model", model),
-                    ("--yolo", yolo),
-                    ("--role", launch_role),
-                    ("--add-dir", add_dir),
-                    ("--agent", agent),
-                    ("--tools", tools),
-                    ("--deny-tools", deny_tools),
-                    ("--effort", effort),
-                )
-                if value
-            ),
-            None,
-        )
-        if unsupported is not None:
-            raise DispatchAskError(
-                f"{unsupported} is not supported on the pi thread lane; "
-                "drop it or use --substrate pane",
-                exit_code=2,
-            )
-        if resume_session_id:
-            raise DispatchAskError(
-                f"--resume {resume_session_id} is not supported on the pi "
-                "thread lane yet; the keeper row resumes by name (fno agents "
-                "ask/resume <name>). Refusing rather than silently spawning "
-                "a fresh session.",
-                exit_code=2,
-            )
-        if once:
-            raise DispatchAskError(
-                "--once is not supported on the pi thread lane (it is "
-                "persistent); pi has no one-shot lane - its headless stance "
-                "is unmeasured",
-                exit_code=2,
-            )
-        receipt = _lane_b_thread_spawn(
-            name=name,
-            harness="pi",
-            cwd=cwd,
-            lock_timeout=lock_timeout,
-        )
-        session_id = receipt["session_id"]
-        if message.strip():
-            # The seed rides the same keeper paste the cursor lane uses: the
-            # pi status bar's subscription tag is the composer-ready marker,
-            # and the repaint of the submitted line is the landing proof.
-            _keeper_seed_submit(
-                name=name,
-                session_id=session_id,
-                sock=Path(receipt["keeper_socket"]),
-                message=message,
-                ready_marker=b"(sub)",
-            )
-        _emit_ev(
-            "agent_ask_done",
-            stage="dispatch",
-            name=name,
-            provider="pi",
-            substrate="thread",
-        )
-        return SpawnResult(
-            kind="created",
-            name=name,
-            provider="pi",
-            short_id=session_id,
-            effective_message=effective_message,
-        )
-
-    # 3b-4. grok thread spawns ride the same keeper lane (x-fd31). The
-    # measurement behind the row: `--session-id` adopts the caller-assigned
-    # uuid, `--resume` on a fresh process recalls a prior turn across a
-    # SIGKILL. Model, effort and the permission axis are carried; everything
-    # else the lane has no measured spelling for is refused by name, the
-    # pi branch's posture.
-    if harness == "grok" and not headless:
-        unsupported = next(
-            (
-                flag
-                for flag, value in (
-                    ("--role", launch_role),
-                    ("--agent", agent),
-                    ("--tools", tools),
-                    ("--deny-tools", deny_tools),
-                    ("--add-dir", add_dir),
-                )
-                if value
-            ),
-            None,
-        )
-        if unsupported is not None:
-            raise DispatchAskError(
-                f"{unsupported} is not supported on the grok thread lane; "
-                "drop it or use --substrate pane",
-                exit_code=2,
-            )
-        if once:
-            raise DispatchAskError(
-                "--once is not supported on the grok thread lane (it is "
-                "persistent); grok has no one-shot lane - its headless "
-                "stance is unmeasured",
-                exit_code=2,
-            )
-        if resume_session_id:
-            # `--session-id` on an id that already exists is a grok REFUSAL
-            # ("must not already exist"), never a resume; rendering the
-            # create form with a used id would fail the spawn with grok's
-            # flag error instead of fno's posture. Same stance as pi.
-            raise DispatchAskError(
-                f"--resume {resume_session_id} is not supported on the grok "
-                "thread lane yet; the keeper row resumes by name (fno agents "
-                "ask/resume <name>). Refusing rather than spawning a fresh "
-                "session.",
-                exit_code=2,
-            )
-        receipt = _lane_b_thread_spawn(
-            name=name,
-            harness="grok",
-            cwd=cwd,
-            model=model,
-            yolo=yolo,
-            permission_mode=permission_mode,
-            effort=effort,
-            lock_timeout=lock_timeout,
-        )
-        session_id = receipt["session_id"]
-        if message.strip():
-            # The seed rides the keeper paste; the status bar's mode hint is
-            # the composer-ready marker (the row's idle marker, measured
-            # 2026-09-02).
-            _keeper_seed_submit(
-                name=name,
-                session_id=session_id,
-                sock=Path(receipt["keeper_socket"]),
-                message=message,
-                ready_marker=b"Shift+Tab:mode",
-            )
-        _emit_ev(
-            "agent_ask_done",
-            stage="dispatch",
-            name=name,
-            provider="grok",
-            substrate="thread",
-        )
-        return SpawnResult(
-            kind="created",
-            name=name,
-            provider="grok",
-            short_id=session_id,
-            effective_message=effective_message,
-        )
+    keeper_result = keeper_thread_spawn(
+        harness=harness,
+        name=name,
+        message=message,
+        effective_message=effective_message,
+        cwd=cwd,
+        headless=headless,
+        once=once,
+        options={
+            "model": model, "yolo": yolo, "effort": effort, "add_dir": add_dir,
+            "launch_role": launch_role, "agent": agent, "tools": tools,
+            "deny_tools": deny_tools, "permission_mode": permission_mode,
+            "resume_session_id": resume_session_id,
+        },
+        lock_timeout=lock_timeout,
+    )
+    if keeper_result is not None:
+        return keeper_result
 
     registry_path = paths.agents_registry_path()
 
