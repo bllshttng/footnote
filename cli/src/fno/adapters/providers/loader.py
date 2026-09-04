@@ -489,13 +489,13 @@ def known_account_ids(repo_root: Path | None = None) -> set[str]:
 def record_harness(record_id: str, repo_root: Path | None = None) -> str | None:
     """The harness ``record_id``'s account record runs on, or None.
 
-    None is "the registry could not answer": no such record, no harness field,
-    or an unreadable config. Callers decide what unknown means; the read is one leg.
+    None means the registry ANSWERED and had nothing: no such record, or one
+    with no harness field. An unreadable config RAISES, because merging the two
+    let a config typo silently disarm the spawn seam's one-axis guard. A quota
+    probe may keep probing on a broken config; the seam may not. Each caller
+    wraps to its own posture.
     """
-    try:
-        rec = load_providers(repo_root=repo_root).by_id.get(record_id)
-    except Exception:  # noqa: BLE001 - an unreadable registry answers nothing
-        return None
+    rec = load_providers(repo_root=repo_root).by_id.get(record_id)
     return (getattr(rec, "harness", "") or "").strip() or None
 
 
