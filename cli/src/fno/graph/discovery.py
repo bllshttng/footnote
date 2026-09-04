@@ -245,14 +245,16 @@ def assess(
     candidates_list = list(cands)
     pr_number = node.get("pr_number")
     has_pr = isinstance(pr_number, int) and not isinstance(pr_number, bool)
-    if has_pr and (
-        node.get("status") == "done"
-        or node.get("completed_at")
-        or node.get("merged_at")
-        or node.get("pr_merged") is True
-        or (pr_state is not None and pr_state(pr_number))
-    ):
-        return Assessment("satisfied", [f"PR#{pr_number}"], "merged PR recorded on node")
+    if isinstance(pr_number, int) and not isinstance(pr_number, bool):
+        has_pr = True
+        if (
+            node.get("status") == "done"
+            or node.get("completed_at")
+            or node.get("merged_at")
+            or node.get("pr_merged") is True
+            or (pr_state is not None and pr_state(pr_number))
+        ):
+            return Assessment("satisfied", [f"PR#{pr_number}"], "merged PR recorded on node")
 
     file_evidence = _file_evidence(node)
     if file_evidence and (node.get("status") == "done" or has_pr):

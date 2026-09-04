@@ -37,8 +37,11 @@ def test_unverified_pr_number_does_not_satisfy_deferred_row():
     assert assess(node, []).verdict != "satisfied"
 
 
-def test_file_evidence_surviving_deferral_satisfies():
-    node = _node(pr_number=7, details="the work lives in cli/src/fno/graph/discovery.py")
+def test_file_evidence_surviving_deferral_satisfies(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "work").mkdir()
+    (tmp_path / "work" / "out.txt").write_text("delivered")
+    node = _node(pr_number=7, details="the work lives in work/out.txt")
     verdict = assess(node, [], pr_state=lambda n: False)
     assert verdict.verdict == "satisfied"
     assert verdict.evidence
