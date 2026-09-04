@@ -188,9 +188,9 @@ def resolve_thread_viewport(
 
     if invoke(["mux", "thread", "--session", session, thread_id], 30).returncode:
         raise RetaskTransportError("thread_view_unavailable")
-    # The pane opened above stays open even when the join below misses, and its
-    # name stamping can lag the open by a beat, so the join retries before
-    # giving up and the miss names the opened pane rather than the row's ref.
+    # The pane opened above stays open on a join miss, and its name stamping
+    # can lag the open, so the join retries before giving up; the miss names
+    # the opened pane rather than the row's ref.
     for _ in range(3):
         try:
             panes = invoke(["mux", "pane", "ls", "--session", session, "--json"], 10)
@@ -279,10 +279,9 @@ def detect_retask(
         mux is not None or not isinstance(thread_id, str) or not thread_id.strip()
     ):
         return {"outcome": "refused", "reason": "worker_has_no_thread_ref"}
-    mux_ref = None
-    if substrate == "pane":
-        assert mux is not None
-        mux_ref = {"session": mux["session"], "pane_id": mux["pane_id"]}
+    mux_ref = (
+        {"session": mux["session"], "pane_id": mux["pane_id"]} if substrate == "pane" else None
+    )
     if not entry.harness_session_id:
         return {"outcome": "refused", "reason": "worker_has_no_session_id"}
 

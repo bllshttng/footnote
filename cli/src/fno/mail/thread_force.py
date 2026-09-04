@@ -56,10 +56,7 @@ def send_by_thread_identity(name: str, *, message: str, from_name, harness, styl
     entry = resolve_pane_entry(None, None, name)
     if entry is None:
         return False
-    session = next(
-        (getattr(entry, field, None) for field in ("harness_session_id", "fno_id", "session_id")),
-        None,
-    )
+    session = next((getattr(entry, f, None) for f in ("harness_session_id", "fno_id", "session_id")), None)
     if not session or mail_cli._self_recipient(name, resolved_session_id=session):
         return False
     mail_cli._name_lane_send(message, from_name=from_name, resolved=None, token=None, recipient=canonical_handle(session), provider=getattr(entry, "harness", None) or harness, style_exception=style_exception, force=True, origin=origin)

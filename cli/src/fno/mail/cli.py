@@ -2139,11 +2139,7 @@ def _forced_pane_send(
             file=sys.stderr,
         )
     corr = f" re:{reply_to}" if reply_to else ""
-    label = (
-        f"thread viewport {mux_session}:{pane_id}"
-        if thread_viewport
-        else f"pane {pane_id}"
-    )
+    label = f"thread viewport {mux_session}:{pane_id}" if thread_viewport else f"pane {pane_id}"
     print(f"typed ({label}) to {recipient} id:{msg_id}{corr}")
     return True
 
