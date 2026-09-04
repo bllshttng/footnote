@@ -77,7 +77,12 @@ The process can still be alive, and relaunching opens a second writer on one tra
 A recorded route that cannot be read refuses rather than relaunching on the default account.
 A row that records no route refuses for the same reason.
 That silent fallback is what produced a session that looked alive and ate every turn.
-A mux row relaunches on its recorded session via `fno mux pane run`, the one-verb form of the manual recovery.
+
+A mux row relaunches on its recorded session via `fno agents resume <name>`. `--print-command` prints the same `fno mux pane run` line a human can paste.
+
+The relaunched pane boots wearing the row's identity. An env(1) assignment run past the `--` fence carries FNO_AGENT_SELF, so the mux titles the pane by the worker name. The session-start restamp re-points `harness_session_id` and heals the row's pane ref from FNO_SESSION and FNO_PANE in the worker's own env.
+
+A row that shares a recycled pane id with another row no longer loses the bind to an exited row. The render join prefers the live row, and the loser still renders paneless in the watch-only appendix.
 
 ## Reading a suspect pane
 

@@ -52,6 +52,7 @@ use crate::vt::BlockJumpOutcome;
 use crate::vt::{self, frame_text, Modes};
 
 mod agent_actions;
+mod agent_rows_join;
 
 use self::agent_actions::{
     run_agent_action, run_agent_rename, run_mail_send, run_reap, run_reentry_plan,
@@ -10859,20 +10860,17 @@ impl Core {
         for squad in &self.session.squads {
             for tab in &squad.tabs {
                 for pid in tree::leaves(&tab.root) {
-                    // The registry entry hosting this pane, if any: a
-                    // same-session mux match, else a watch-only row the attach
-                    // map reconciled onto this pane (x-0090). First match wins.
-                    let matched = self.agents.iter().position(|a| match &a.mux {
-                        Some((sess, pane)) => sess == &self.session_name && *pane == pid,
-                        None => {
-                            a.attach_id
-                                .as_deref()
-                                .and_then(|id| self.attached.get(id))
-                                .copied()
-                                == Some(pid)
-                                || self.worker_pane_for_agent(a) == Some(pid)
-                        }
-                    });
+                    // The registry entry hosting this pane, if any: the join
+                    // lives in agent_rows_join (extracted from this
+                    // budget-capped file); its module doc carries the
+                    // recycled-pane-id rationale and the total order.
+                    let matched = agent_rows_join::bind_agent_to_pane(
+                        &self.agents,
+                        &self.session_name,
+                        pid,
+                        &self.attached,
+                        &|a| self.worker_pane_for_agent(a),
+                    );
                     // One lookup: liveness AND the bare-pane label read the same
                     // entry (a tree leaf reaped from `panes` is dying, so it
                     // forces `exited` - the fact-beats-report rule the old join
@@ -24691,6 +24689,7 @@ mod tests {
         assert_eq!(hits, 1, "the merged agent renders exactly once");
     }
 
+    #[test]
     #[test]
     fn card_ready_gate_only_passes_ready_cards() {
         // x-a496 (codex peer review): a targeted dispatch only proceeds for a
