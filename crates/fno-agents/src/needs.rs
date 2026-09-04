@@ -863,19 +863,20 @@ fn scan_claim_ages(dir: &Path) -> Vec<ClaimAge> {
     out
 }
 
-/// The `fno-agents needs` verb. Read-only; exits 0 on empty/corrupt input (only
-/// a usage error exits 2), so the overlay caller never sees a failure it must
-/// handle beyond a nonzero exit.
 /// The whole needs fold over explicit sources: events read + fold + the three
 /// non-event legs (carveout age, stale claims, refused workers) + liveness
 /// stamp. Shared by the `needs` verb and the king board's in-process needs
 /// read, so the two surfaces cannot drift (the king board is why this is `pub`).
+/// `cwd` anchors the carveout leg: the verb passes the process cwd it inherits,
+/// the board passes its own resolved cwd (the process cwd is not guaranteed to
+/// be the project for an in-process caller).
 pub fn collect_needs_items(
     home: &AgentsHome,
     event_paths: &[PathBuf],
     ledger_path: &Path,
     since: u64,
     fires_floor: u64,
+    cwd: &Path,
 ) -> Vec<NeedItem> {
     let mut events_raw = String::new();
     for p in event_paths {
@@ -897,8 +898,7 @@ pub fn collect_needs_items(
     // canonical checkout's `.fno/` (`resolve_carveout_root` on the write
     // side); a worktree only sees it through a skip-if-missing symlink, so
     // read the canonical path directly and fall back to cwd outside a repo.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let carveouts_path = crate::paths::canonical_repo_root(&cwd)
+    let carveouts_path = crate::paths::canonical_repo_root(cwd)
         .map(|r| r.join(".fno").join("carveouts.jsonl"))
         .unwrap_or_else(|| PathBuf::from(".fno").join("carveouts.jsonl"));
     let carveouts_raw = std::fs::read_to_string(&carveouts_path).unwrap_or_default();
@@ -916,6 +916,9 @@ pub fn collect_needs_items(
     stamp_liveness(items)
 }
 
+/// The `fno-agents needs` verb. Read-only; exits 0 on empty/corrupt input (only
+/// a usage error exits 2), so the overlay caller never sees a failure it must
+/// handle beyond a nonzero exit.
 pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
     let args = match parse_args(rest) {
         Ok(a) => a,
@@ -954,7 +957,14 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
     let since = args
         .since_epoch
         .unwrap_or_else(|| now_secs().saturating_sub(DEFAULT_WINDOW_SECS));
-    let items = collect_needs_items(home, &event_paths, &ledger_path, since, args.fires_floor);
+    let items = collect_needs_items(
+        home,
+        &event_paths,
+        &ledger_path,
+        since,
+        args.fires_floor,
+        &cwd,
+    );
 
     if args.json {
         println!(

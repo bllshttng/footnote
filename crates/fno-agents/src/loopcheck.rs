@@ -12880,11 +12880,6 @@ fn row_identity(queue: &str, row: &Value) -> String {
     format!("{queue}:{}", id.trim_matches('"'))
 }
 
-pub(crate) fn parse_king_board(stdout: &str) -> Option<KingBoard> {
-    let value: Value = serde_json::from_str(stdout).ok()?;
-    parse_king_board_value(&value)
-}
-
 /// The value-level parser: the in-process collector hands its payload over as
 /// a `Value`, so the stop gate reads the board without a serialize/parse
 /// round trip.
@@ -12955,7 +12950,7 @@ pub(crate) fn read_king_board(
     };
     let payload = crate::king_board::read_board(&opts);
     parse_king_board_value(&payload).ok_or_else(|| {
-        "unparseable board payload: the collector returned a shape parse_king_board cannot read"
+        "unparseable board payload: the collector returned a shape parse_king_board_value cannot read"
             .to_string()
     })
 }

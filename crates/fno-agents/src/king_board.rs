@@ -11,18 +11,20 @@
 //! `read_defaulted_opts(path, false, false)` the keeper's `read_strict` runs)
 //! feeds undispatched, claimed-node lookups, PR binding, and crown scope. The
 //! claims merge is a directory scan. `needs` folds in-process over the same
-//! sources `fno agents needs` reads. Exactly three subprocesses remain: `gh pr
-//! list` (a real network boundary), `fno backlog ready` (its selection logic
-//! lives inline in the typer command with no function behind it; re-typing the
-//! filter chain here would drift from `next`'s), and `fno inbox outstanding`
-//! (measured 2026-09-04: 1.12s wall at load 52, far under its 10s bar - the
-//! plan's change 2 keeps it and records the measurement).
+//! sources `fno agents needs` reads. Three source reads stay subprocesses: `gh
+//! pr list` (a real network boundary), `fno backlog ready` (its selection
+//! logic lives inline in the typer command with no function behind it;
+//! re-typing the filter chain here would drift from `next`'s), and `fno inbox
+//! outstanding` (measured 2026-09-04: 1.12s wall at load 52, far under its
+//! 10s bar - the plan's change 2 keeps it and records the measurement). The
+//! batched truth probe is a fourth spawn: one interpreter per holder it
+//! measures, when any holder exists.
 //!
 //! Output keeps the Python JSON shape: `actionable`, `unreadable`, `queues`
 //! (same names, same order, same row dicts), `warnings`, `exit_code` - plus a
 //! per-source `sources` map carrying `ok`/`truncated` that the plan's
-//! done-probe reads. `parse_king_board` in loopcheck.rs ignores the extra key,
-//! so every existing reader is unchanged.
+//! done-probe reads. `parse_king_board_value` in loopcheck.rs ignores the
+//! extra key, so every existing reader is unchanged.
 
 use crate::graph_store;
 use serde_json::{json, Map, Value};
@@ -448,7 +450,7 @@ fn decode_key(filename: &str) -> String {
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() + 1 && i + 2 < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
             let hex = |b: u8| -> Option<u8> {
                 match b {
                     b'0'..=b'9' => Some(b - b'0'),
@@ -704,7 +706,7 @@ fn parse_lane(path: &Path) -> Result<Vec<LaneItem>, String> {
         Err(e) => return Err(format!("cannot read operator lane {}: {e}", path.display())),
     };
     let item_re = regex::Regex::new(r"^- \[( |x|X)\] (.*)$").expect("static regex");
-    let body = format!("[a-z][a-z0-9]{{0,7}}-[0-9a-f]{{4,8}}");
+    let body = "[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}";
     let suffix_re = regex::Regex::new(&format!(
         r"->\s*(?:(?P<node>{body})|parked:\s*(?P<reason>\S.*?))\s*$"
     ))
@@ -772,7 +774,7 @@ fn branch_node_ids(head_ref: &str) -> Vec<String> {
         let mut k = hex_start;
         while k < b.len()
             && k - hex_start < 8
-            && (b[k].is_ascii_digit() || b[k].is_ascii_hexdigit())
+            && (b[k].is_ascii_digit() || (b'a'..=b'f').contains(&b[k]))
         {
             k += 1;
         }
@@ -2165,149 +2167,167 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // slices were derived above in the reference's order.
     let entries_ref = entries.as_deref();
     let cwd_for_threads = cwd.clone();
-    let (prs, pr_nodes, pr_warnings, prs_truncated, ready, outstanding, needs, holder_activity) =
-        std::thread::scope(|s| {
-            let t_prs = s_prs.map(|slice| {
-                let cwd = cwd_for_threads.clone();
-                s.spawn(move || {
-                    let (prs, pr_nodes, w) = read_prs(&cwd, slice, opts.max_pr_reads, entries_ref);
-                    let truncated = w.iter().any(|x| x.contains("hit its"));
-                    (prs, pr_nodes, w, truncated)
-                })
-            });
-            let t_ready = s_ready.map(|slice| {
-                let cwd = cwd_for_threads.clone();
-                s.spawn(move || {
-                    let mut cmd = fno_py_cmd();
-                    cmd.extend(
-                        ["backlog", "ready", "--json", "-A"]
-                            .iter()
-                            .map(|s| s.to_string()),
-                    );
-                    run_json(cmd, &cwd, slice)
-                })
-            });
-            let t_outstanding = s_outstanding.map(|slice| {
-                let cwd = cwd_for_threads.clone();
-                s.spawn(move || {
-                    let mut cmd = fno_py_cmd();
-                    cmd.extend(
-                        ["inbox", "outstanding", "--json"]
-                            .iter()
-                            .map(|s| s.to_string()),
-                    );
-                    run_json(cmd, &cwd, slice)
-                })
-            });
-            // ONE batched truth probe for every holder the king cares about (the
-            // single-transcript-reader constraint; a probe per holder would pay
-            // one interpreter cold start each).
-            let t_truth = if holders.is_empty() {
-                None
-            } else {
-                let tokens: Vec<String> = holders
-                    .iter()
-                    .map(|h| {
-                        h.split_once(':')
-                            .map(|(_, t)| t.to_string())
-                            .unwrap_or_else(|| h.clone())
-                    })
-                    .collect();
-                Some(s.spawn(move || crate::claude_ask::family1_truth_probe_many(&tokens)))
-            };
-            // The needs fold rides a thread too: in-process, but its
-            // refused-worker leg batch probes the whole registry and measured
-            // ~7s on a busy fleet, which no longer sits on the critical path.
-            let t_needs = s_needs.map(|_slice| {
-                let cwd = cwd_for_threads.clone();
-                s.spawn(move || {
-                    let home = crate::paths::AgentsHome::from_env();
-                    let (mut event_paths, default_ledger) = default_needs_sources(&home);
-                    // The canonical checkout's journal, exactly as `run_needs`
-                    // adds it: a question asked from a worktree writes the
-                    // CANONICAL .fno/events.jsonl, never the worktree's. The
-                    // project journal anchors on the BOARD's cwd (the caller's
-                    // --cwd for an in-process reader), never the process cwd.
-                    event_paths[0] = cwd.join(".fno").join("events.jsonl");
-                    if let Some(root) = crate::paths::canonical_repo_root(&cwd) {
-                        let canonical_events = root.join(".fno").join("events.jsonl");
-                        let cwd_events = cwd.join(".fno").join("events.jsonl");
-                        if canonical_events != cwd_events
-                            && !event_paths.contains(&canonical_events)
-                        {
-                            event_paths.push(canonical_events);
-                        }
-                    }
-                    let since = now_secs_board().saturating_sub(crate::needs::DEFAULT_WINDOW_SECS);
-                    crate::needs::collect_needs_items(
-                        &home,
-                        &event_paths,
-                        &default_ledger,
-                        since,
-                        crate::needs::DEFAULT_FIRES_FLOOR,
-                    )
-                })
-            });
-
-            let (prs, pr_nodes, pr_warnings, prs_truncated) = match t_prs {
-                None => {
-                    let err = budget.spent_error();
-                    (
-                        SourceRead::err(err.clone()),
-                        SourceRead::err(err),
-                        Vec::new(),
-                        true,
-                    )
-                }
-                Some(h) => h.join().unwrap_or_else(|_| {
-                    (
-                        SourceRead::err("prs: reader panicked"),
-                        SourceRead::err("undriven_pr: reader panicked"),
-                        Vec::new(),
-                        false,
-                    )
-                }),
-            };
-            let ready = match t_ready {
-                None => SourceRead::err(budget.spent_error()),
-                Some(h) => h
-                    .join()
-                    .unwrap_or(SourceRead::err("ready: reader panicked")),
-            };
-            let outstanding = match t_outstanding {
-                None => SourceRead::err(budget.spent_error()),
-                Some(h) => h
-                    .join()
-                    .unwrap_or(SourceRead::err("outstanding: reader panicked")),
-            };
-            let outstanding = if outstanding.is_ok() {
-                SourceRead::ok(outstanding.payload.unwrap_or(json!({})))
-            } else {
-                outstanding
-            };
-            let needs = match t_needs {
-                None => SourceRead::err(budget.spent_error()),
-                Some(h) => SourceRead::ok(
-                    h.join()
-                        .map(|items| serde_json::to_value(&items).unwrap_or(json!([])))
-                        .unwrap_or(json!([])),
-                ),
-            };
-            let holder_activity: HashMap<String, crate::claude_ask::TruthProbe> = match t_truth {
-                None => HashMap::new(),
-                Some(h) => h.join().unwrap_or_default(),
-            };
-            (
-                prs,
-                pr_nodes,
-                pr_warnings,
-                prs_truncated,
-                ready,
-                outstanding,
-                needs,
-                holder_activity,
-            )
+    let (
+        prs,
+        pr_nodes,
+        pr_warnings,
+        prs_truncated,
+        ready,
+        outstanding,
+        needs,
+        holder_activity,
+        truth_panicked,
+    ) = std::thread::scope(|s| {
+        let t_prs = s_prs.map(|slice| {
+            let cwd = cwd_for_threads.clone();
+            s.spawn(move || {
+                let (prs, pr_nodes, w) = read_prs(&cwd, slice, opts.max_pr_reads, entries_ref);
+                let truncated = w.iter().any(|x| x.contains("hit its"));
+                (prs, pr_nodes, w, truncated)
+            })
         });
+        let t_ready = s_ready.map(|slice| {
+            let cwd = cwd_for_threads.clone();
+            s.spawn(move || {
+                let mut cmd = fno_py_cmd();
+                cmd.extend(
+                    ["backlog", "ready", "--json", "-A"]
+                        .iter()
+                        .map(|s| s.to_string()),
+                );
+                run_json(cmd, &cwd, slice)
+            })
+        });
+        let t_outstanding = s_outstanding.map(|slice| {
+            let cwd = cwd_for_threads.clone();
+            s.spawn(move || {
+                let mut cmd = fno_py_cmd();
+                cmd.extend(
+                    ["inbox", "outstanding", "--json"]
+                        .iter()
+                        .map(|s| s.to_string()),
+                );
+                run_json(cmd, &cwd, slice)
+            })
+        });
+        // ONE batched truth probe for every holder the king cares about (the
+        // single-transcript-reader constraint; a probe per holder would pay
+        // one interpreter cold start each).
+        let t_truth = if holders.is_empty() {
+            None
+        } else {
+            let tokens: Vec<String> = holders
+                .iter()
+                .map(|h| {
+                    h.split_once(':')
+                        .map(|(_, t)| t.to_string())
+                        .unwrap_or_else(|| h.clone())
+                })
+                .collect();
+            Some(s.spawn(move || crate::claude_ask::family1_truth_probe_many(&tokens)))
+        };
+        // The needs fold rides a thread too: in-process, but its
+        // refused-worker leg batch probes the whole registry and measured
+        // ~7s on a busy fleet, which no longer sits on the critical path.
+        let t_needs = s_needs.map(|_slice| {
+            let cwd = cwd_for_threads.clone();
+            s.spawn(move || {
+                let home = crate::paths::AgentsHome::from_env();
+                let (mut event_paths, default_ledger) = default_needs_sources(&home);
+                // The canonical checkout's journal, exactly as `run_needs`
+                // adds it: a question asked from a worktree writes the
+                // CANONICAL .fno/events.jsonl, never the worktree's. The
+                // project journal anchors on the BOARD's cwd (the caller's
+                // --cwd for an in-process reader), never the process cwd.
+                event_paths[0] = cwd.join(".fno").join("events.jsonl");
+                if let Some(root) = crate::paths::canonical_repo_root(&cwd) {
+                    let canonical_events = root.join(".fno").join("events.jsonl");
+                    let cwd_events = cwd.join(".fno").join("events.jsonl");
+                    if canonical_events != cwd_events && !event_paths.contains(&canonical_events) {
+                        event_paths.push(canonical_events);
+                    }
+                }
+                let since = now_secs_board().saturating_sub(crate::needs::DEFAULT_WINDOW_SECS);
+                crate::needs::collect_needs_items(
+                    &home,
+                    &event_paths,
+                    &default_ledger,
+                    since,
+                    crate::needs::DEFAULT_FIRES_FLOOR,
+                    &cwd,
+                )
+            })
+        });
+
+        let (prs, pr_nodes, pr_warnings, prs_truncated) = match t_prs {
+            None => {
+                let err = budget.spent_error();
+                (
+                    SourceRead::err(err.clone()),
+                    SourceRead::err(err),
+                    Vec::new(),
+                    true,
+                )
+            }
+            Some(h) => h.join().unwrap_or_else(|_| {
+                (
+                    SourceRead::err("prs: reader panicked"),
+                    SourceRead::err("undriven_pr: reader panicked"),
+                    Vec::new(),
+                    false,
+                )
+            }),
+        };
+        let ready = match t_ready {
+            None => SourceRead::err(budget.spent_error()),
+            Some(h) => h
+                .join()
+                .unwrap_or(SourceRead::err("ready: reader panicked")),
+        };
+        let outstanding = match t_outstanding {
+            None => SourceRead::err(budget.spent_error()),
+            Some(h) => h
+                .join()
+                .unwrap_or(SourceRead::err("outstanding: reader panicked")),
+        };
+        let outstanding = if outstanding.is_ok() {
+            SourceRead::ok(outstanding.payload.unwrap_or(json!({})))
+        } else {
+            outstanding
+        };
+        let needs = match t_needs {
+            None => SourceRead::err(budget.spent_error()),
+            // A panicked fold must read UNREADABLE, never ok-empty: an
+            // empty needs stream and a stream that never answered are
+            // different boards, and the queue's loudness is the only
+            // place the difference survives.
+            Some(h) => h
+                .join()
+                .map(|items| SourceRead::ok(serde_json::to_value(&items).unwrap_or(json!([]))))
+                .unwrap_or_else(|_| SourceRead::err("needs: reader panicked")),
+        };
+        let (holder_activity, truth_panicked): (
+            HashMap<String, crate::claude_ask::TruthProbe>,
+            bool,
+        ) = match t_truth {
+            None => (HashMap::new(), false),
+            Some(h) => match h.join() {
+                Ok(map) => (map, false),
+                Err(_) => (HashMap::new(), true),
+            },
+        };
+        (
+            prs,
+            pr_nodes,
+            pr_warnings,
+            prs_truncated,
+            ready,
+            outstanding,
+            needs,
+            holder_activity,
+            truth_panicked,
+        )
+    });
     warnings.extend(pr_warnings);
     let prs_truncated = prs_truncated || !prs.is_ok();
     mark(&mut sources, "prs", &prs, prs_truncated);
@@ -2315,7 +2335,11 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     mark(&mut sources, "outstanding", &outstanding, false);
     sources.insert(
         "holder_activity".to_string(),
-        json!({"ok": true, "truncated": false, "error": ""}),
+        json!({
+            "ok": !truth_panicked,
+            "truncated": false,
+            "error": if truth_panicked { "truth probe: reader panicked" } else { "" },
+        }),
     );
 
     // Lane: a file read; there is no verb behind it.
@@ -2648,6 +2672,9 @@ mod tests {
             branch_node_ids("x-5b667-fixes-x-5b66"),
             vec!["x-5b667".to_string(), "x-5b66".to_string()]
         );
+        // Uppercase is not id body ([0-9a-f], not [0-9a-fA-F]): the hex run
+        // stops at 'E', so "x-abcd" binds and the tail never reads as id.
+        assert_eq!(branch_node_ids("x-abcd-EF12"), vec!["x-abcd".to_string()]);
         assert!(branch_node_ids("main").is_empty());
     }
 
