@@ -97,7 +97,9 @@ def test_map_covers_current_surface_once():
     # counted from the merged file, 565 -> 566.
     # This branch adds `agents king cancel`, the isolated cancellation
     # control: counted from the merged file, 566 -> 567.
-    assert len(mapped) == 567, (
+    # The two-lane discovery branch allocates `backlog discover`, the hidden
+    # discovery worklist read: counted from the merged file, 567 -> 568.
+    assert len(mapped) == 568, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

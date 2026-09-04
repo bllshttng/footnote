@@ -1586,33 +1586,38 @@ def _fold_candidates(
     *, title: str, details: Optional[str], difficulty: str, entries: list[dict]
 ) -> tuple[list[dict], str]:
     """Find live filing siblings before the node-ID mint boundary."""
-    from fno.graph import relatedness
+    from fno.graph import discovery, relatedness
 
     candidates, source = relatedness.filing_candidates(entries, _relatedness_path())
-    incoming = {
-        "id": "__incoming__",
-        "title": title,
-        "details": details,
-        "difficulty": difficulty,
-        "domain": "code",
-    }
-    ranked = relatedness.similar_nodes(incoming, candidates, k=5)
+    ranked = discovery.candidates(
+        title,
+        details or "",
+        entries=candidates,
+        graph_path=_graph_path(),
+        limit=5,
+    )
     by_id = {entry.get("id"): entry for entry in candidates}
     out: list[dict] = []
-    for node_id, score, reason in ranked:
-        node = by_id.get(node_id)
+    for candidate in ranked:
+        node = by_id.get(candidate.node_id)
         if node is None:
             continue
+        reason = candidate.reason
+        if candidate.lanes == frozenset({"fts"}):
+            reason = f"fts-only: {reason or 'full-text match'}"
         out.append(
             {
-                "id": node_id,
+                "id": candidate.node_id,
                 "title": node.get("title"),
                 "status": node.get("status"),
-                "holder": _live_worker(node_id),
-                "score": score,
+                "holder": _live_worker(candidate.node_id),
+                "score": candidate.score,
                 "evidence": reason,
+                "lanes": sorted(candidate.lanes),
             }
         )
+    if ranked.degraded and ranked.warning:
+        source = f"{source}; degraded: {ranked.warning}"
     # A live plan surface is an independent fold signal when the filing names
     # one of the same files. The claim holder comes from the lockfile, not the
     # graph snapshot's stale locked_by field.
@@ -14814,6 +14819,156 @@ def cmd_find(
 # -- new --
 
 
+@cli.command("discover", hidden=True)
+def cmd_discover(
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        "-L",
+        min=1,
+        help="Max candidate matches retained for each expired node.",
+    ),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit a JSON worklist."),
+) -> None:
+    """Review expired deferred nodes without changing backlog state.
+
+    The output is a ranked worklist for a human.  It never closes, undefers,
+    or otherwise writes a node.
+    """
+    from collections import Counter
+
+    from fno.graph import discovery, relatedness
+    from fno.graph.store import read_graph
+
+    graph_path = _graph_path()
+    before = graph_path.read_bytes()
+    entries = read_graph(graph_path)
+    expired = [
+        entry
+        for entry in entries
+        if entry.get("status") == "deferred" and entry.get("deferred_kind") == "expired"
+    ]
+    excluded_by_kind = sum(
+        1
+        for entry in entries
+        if entry.get("status") == "deferred" and entry.get("deferred_kind") != "expired"
+    )
+    token_cache = {
+        entry["id"]: relatedness._tokens(entry)
+        for entry in entries
+        if isinstance(entry.get("id"), str)
+    }
+
+    worklist: list[dict[str, Any]] = []
+    degraded_warnings: list[str] = []
+    pr_merged_cache: dict[int, bool] = {}
+
+    def _pr_merged(number: int) -> bool:
+        """gh-verified merge state; deferral clears every node-side completion field."""
+        if number not in pr_merged_cache:
+            from fno.pr._verify import _gh_api_json
+
+            row = _gh_api_json(
+                ["repos/{owner}/{repo}/pulls/" + str(number), "--jq", ".merged"],
+                cwd=".",
+            )
+            pr_merged_cache[number] = row is True
+        return pr_merged_cache[number]
+
+    for entry in expired:
+        result = discovery.candidates(
+            str(entry.get("title") or ""),
+            str(entry.get("details") or ""),
+            entries=entries,
+            graph_path=graph_path,
+            exclude_id=entry.get("id") if isinstance(entry.get("id"), str) else None,
+            limit=limit,
+            token_cache=token_cache,
+            domain=str(entry.get("domain") or "code"),
+        )
+        if result.degraded and result.warning and result.warning not in degraded_warnings:
+            degraded_warnings.append(result.warning)
+        assessment = discovery.assess(entry, result, pr_state=_pr_merged)
+        worklist.append(
+            {
+                "id": entry.get("id"),
+                "title": entry.get("title"),
+                **assessment.as_dict(),
+                "candidates": [candidate.as_dict() for candidate in result],
+            }
+        )
+
+    # The highest measured candidate score is the worklist rank.  Ties break
+    # on id so a batch is reproducible across runs.
+    worklist.sort(
+        key=lambda row: (
+            -(row["candidates"][0]["score"] if row["candidates"] else 0.0),
+            str(row.get("id") or ""),
+        )
+    )
+    if worklist and all(row["candidates"] for row in worklist):
+        message = (
+            "failed instrument: every expired node matched a candidate; "
+            "refusing to report an all-match worklist"
+        )
+        typer.echo(message, err=True)
+        raise typer.Exit(code=2)
+
+    positive: dict[str, Any] | None = None
+    if worklist and all(not row["candidates"] for row in worklist):
+        control_query = str(expired[0].get("title") or expired[0].get("id") or "")
+        positive = discovery.positive_control(
+            control_query, graph_path=graph_path, entries=entries
+        )
+        if not positive["matches"]:
+            typer.echo(
+                "failed instrument: the positive control matched nothing, so "
+                "the all-empty worklist is not trusted",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+    after = graph_path.read_bytes()
+    if after != before:
+        typer.echo(
+            "failed instrument: graph bytes changed during read-only discovery",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    report = {
+        "population": "deferred_kind=expired",
+        "assessed": len(expired),
+        "excluded_by_kind": excluded_by_kind,
+        "verdicts": dict(Counter(row["verdict"] for row in worklist)),
+        "degraded": bool(degraded_warnings),
+        "warnings": degraded_warnings,
+        "positive_control": positive,
+        "worklist": worklist,
+    }
+    if json_output:
+        typer.echo(json.dumps(report, indent=2))
+        return
+
+    typer.echo(
+        f"discover: assessed={report['assessed']} "
+        f"excluded-by-kind={report['excluded_by_kind']}"
+    )
+    for row in worklist:
+        evidence = ", ".join(row["evidence"]) or row["reason"]
+        typer.echo(f"{row['id']}\t{row['verdict']}\t{evidence}")
+    if positive is not None:
+        typer.echo(
+            f"positive control: {positive['query']!r} -> "
+            f"{', '.join(positive['matches']) or 'no matches'} ({positive['lane']})"
+        )
+    for warning in degraded_warnings:
+        typer.echo(f"degraded: {warning}", err=True)
+
+
+# -- new --
+
+
 @cli.command(
     "new",
     hidden=True,
@@ -15662,6 +15817,7 @@ _FOOTNOTE_OWNED_VERBS = frozenset(
         # replays the post-publish views after a native (mux) store write;
         # renders only, never a graph write
         "render-views",
+        "discover",
         # demand reads encounters and writes nothing
         "demand",
         # completion works on any backend by design (task 4.1)

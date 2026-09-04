@@ -105,7 +105,7 @@ KNOWN_COMMANDS: dict[str, frozenset[str]] = {
         "bases", "backfill-deferred-kind", "batch", "board", "capture", "carveout",
         "collisions", "cost",
         "decide", "decide-reindex", "decide-retract", "decisions", "decompose", "defer",
-        "demand", "dispatch-lanes", "done", "encounter", "epic", "find", "get", "groom",
+        "demand", "dispatch-lanes", "discover", "done", "encounter", "epic", "find", "get", "groom",
         "idea", "intake", "join", "lane-fill", "lanes", "maintain", "migrate-difficulty",
         "migrate-priorities", "migrate-updated-at", "new",
         "next", "note", "pick", "project-root", "provenance", "queue", "queued",
