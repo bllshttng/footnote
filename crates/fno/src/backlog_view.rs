@@ -50,7 +50,10 @@ pub fn done_session_ids_from(raw: &str) -> HashSet<(String, String)> {
         return done;
     };
     for node in entries {
-        let is_done = matches!(node.get("status").and_then(|v| v.as_str()), Some("done"))
+        // The same `_status` pre-rename tolerance `node_status` gives the
+        // sideline reader, so an unrewritten document classifies the same.
+        let status = node_status(node).unwrap_or_default();
+        let is_done = status == "done"
             || matches!(
                 node.get("merge_status").and_then(|v| v.as_str()),
                 Some("merged")
@@ -1104,13 +1107,14 @@ mod tests {
             r#"{"id":"a","status":"done","sessions":[{"harness":"codex","session_id":"s1"}]},
                {"id":"b","status":"in_review","merge_status":"merged","sessions":[{"harness":"claude","session_id":"s2"}]},
                {"id":"c","status":"ready","completed_at":"2026-09-01","sessions":[{"harness":"agy","session_id":"s3"}]},
-               {"id":"d","status":"ready","sessions":[{"harness":"codex","session_id":"s4"}]}"#,
+               {"id":"d","status":"ready","sessions":[{"harness":"codex","session_id":"s4"}]},
+               {"id":"e","_status":"done","sessions":[{"harness":"agy","session_id":"s5"}]}"#,
         );
         let done = done_session_ids_from(&doc);
         assert_eq!(
             done.len(),
-            3,
-            "done+merged+completed contribute; ready does not"
+            4,
+            "done+merged+completed+_status contribute; ready does not"
         );
         for pair in [("codex", "s1"), ("claude", "s2"), ("agy", "s3")] {
             assert!(
@@ -1119,6 +1123,7 @@ mod tests {
             );
         }
         assert!(!done.contains(&("codex".into(), "s4".into())));
+        assert!(done.contains(&("agy".into(), "s5".into())));
     }
 
     #[test]

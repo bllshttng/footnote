@@ -9140,9 +9140,10 @@ impl Core {
                     // registry retires nothing (fail-safe, x-5f7f's rule). A
                     // FRESH death still tombstones once below - retention is
                     // bounded at one restart cycle, not forever.
-                    let forgotten = known_attach_ids
-                        .as_ref()
-                        .is_some_and(|ids| !ids.contains(&m.attach_id));
+                    let forgotten = !m.attach_id.is_empty()
+                        && known_attach_ids
+                            .as_ref()
+                            .is_some_and(|ids| !ids.contains(&m.attach_id));
                     if forgotten {
                         retired_members_total += 1;
                         done_bindings.insert(m.attach_id.clone());
