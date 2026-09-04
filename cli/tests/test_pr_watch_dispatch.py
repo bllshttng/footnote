@@ -2551,43 +2551,23 @@ class TestTickRecordsAndDeadline:
         settings.pr_watch.max_age_days = 30
         settings.pr_watch.retries = 3
         settings.pr_watch.graphql_min_remaining = 200
-        # The two sections the arming gate reads are REAL objects, not mock
-        # attributes. A MagicMock answers every attribute truthily, so the
-        # gate's own `except Exception: return False` could never be observed
-        # here - and on CI something upstream still made it answer False,
-        # which silently skipped the lane these tests live inside. An explicit
-        # shape either satisfies the gate or fails loudly naming the field.
-        # wake, not report: the recovery-root loop is inside the wake branch.
-        class _Recording:
-            """Records every attribute read into the trace.
-
-            Two CI anomalies survive every explanation so far: lane_armed
-            answers False against fields that all satisfy it, and the tick
-            raises "'str' object has no attribute 'mail_to'" where the only
-            statements are a getattr with a default and a patched call. Both
-            are claims about attribute reads, so record the reads.
-            """
-
-            def __init__(self, **fields):
-                object.__setattr__(self, "_fields", fields)
-
-            def __getattr__(self, name):
-                fields = object.__getattribute__(self, "_fields")
-                if name in fields:
-                    lines.append(f"attr:{name}={fields[name]!r}")
-                    return fields[name]
-                lines.append(f"attr:{name}=<MISSING>")
-                raise AttributeError(
-                    f"{type(self).__name__!r} object has no attribute {name!r}"
-                )
-
-        settings.recovery = _Recording(
-            enabled=True, watchdog="wake", watchdog_mail_to=""
+        # The sections the arming gate reads are REAL objects, not mock
+        # attributes. A MagicMock answers every attribute truthily, which hid
+        # a shape change: `recovery.watchdog` became a nested object with
+        # `enabled`, `mode` and `mail_to`, and a fixture still setting it to
+        # the string "wake" left `_armed` catching an AttributeError and
+        # answering False. That silently skipped the lane these tests live
+        # inside, so one failed and the other passed on an empty scan.
+        # An explicit shape satisfies the gate, or fails naming the field.
+        # mode wake, not report: the loop under test is in the wake branch.
+        settings.recovery = SimpleNamespace(
+            enabled=True,
+            watchdog=SimpleNamespace(enabled=True, mode="wake", mail_to=""),
         )
-        settings.autonomy = _Recording(enabled=True)
+        settings.autonomy = SimpleNamespace(enabled=True)
         monkeypatch.setattr(prcli, "load_settings", lambda: settings)
-        # Prove the patch took. Every diagnosis so far ASSUMED the tick reads
-        # this object, and the CI trace says the gate saw something else.
+        # The tick must read THIS object; a patch that silently missed would
+        # send every assertion below against real config.
         assert prcli.load_settings() is settings
         monkeypatch.setattr(
             "fno.pr_watch._dispatch.tick", lambda **kw: TickResult(open_prs=0, acted=0)
@@ -2618,26 +2598,18 @@ class TestTickRecordsAndDeadline:
             lines.append(f"stage:{name}")
             return value
 
-        # The arming gate is scaffolding here, not the subject: these tests
-        # are about the recovery-root budget INSIDE the lane. Reading it off
-        # MagicMock truthiness made the whole suite depend on a gate that
-        # answered True locally and False on CI, which skipped the lane and
-        # left both tests reading an empty scan for a reason neither names.
-        # `lane_armed` keeps its own direct coverage in test_agents_watchdog.
-        # The real verdict still goes in the trace, so the divergence stays
-        # visible rather than being papered over.
+        def _stage_armed(armed):
+            """One call to the real gate, recorded and returned."""
+            return _stage(f"lane_armed={armed}", armed)
+
+        # The gate is NOT forced. With the right shape it arms on its own, and
+        # forcing it would hide the next shape change exactly as MagicMock hid
+        # this one. The stage marker records what it decided.
         real_lane_armed = watchdog.lane_armed
         monkeypatch.setattr(
             watchdog,
             "lane_armed",
-            lambda s: _stage(
-                f"lane_armed(real)={real_lane_armed(s)} forced=True "
-                f"type={type(s).__name__} mine={s is settings} "
-                f"rec={type(getattr(s, 'recovery', None)).__name__} "
-                f"auto={getattr(getattr(s, 'autonomy', None), 'enabled', '<none>')!r} "
-                f"wd={getattr(getattr(s, 'recovery', None), 'watchdog', '<none>')!r}",
-                True,
-            ),
+            lambda s: _stage_armed(real_lane_armed(s)),
         )
         monkeypatch.setattr(
             uw,
