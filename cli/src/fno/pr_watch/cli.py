@@ -391,6 +391,9 @@ def tick() -> None:
                         _fleet_refused += 1
                     _emit_event(event_type, data)
 
+                # Local import: the watchdog package pulls the harness layer.
+                from fno.agents.watchdog import handoff_armed as _wd_handoff
+
                 _fleet_candidates = run_recovery_sweep(
                     settings.recovery,
                     emit=emit_recovery,
@@ -399,7 +402,7 @@ def tick() -> None:
                     # "report" and "wake" still need it: neither mode arms the
                     # supervisor, so gating this on "off" alone would silently
                     # drop the old safety net the moment either is turned on.
-                    provider_failover=(settings.recovery.watchdog != "handoff"),
+                    provider_failover=not _wd_handoff(settings),
                 )
                 _fleet_swept = True
                 typer.echo(f"recovery sweep: candidates={_fleet_candidates}")
@@ -447,6 +450,7 @@ def tick() -> None:
         # Imported here, not at module scope: the watchdog package pulls the
         # harness layer and this module is on the launchd hot path.
         from fno.agents.watchdog import lane_armed as _wd_lane_armed
+        from fno.agents.watchdog import wake_armed as _wd_wake_armed
 
         # Fleet watchdog, same cadence, same non-fatal wrap. The REPORT is
         # the unfinished-work snapshot (the operator's outcome question);
@@ -480,9 +484,7 @@ def tick() -> None:
                     now_s=now,
                     deadline_monotonic=time.monotonic() + max(0.0, budget),
                 )
-                mail_to = str(getattr(
-                    settings.recovery, "watchdog_mail_to", ""
-                ) or "")
+                mail_to = str(settings.recovery.watchdog.mail_to or "")
                 _uw.publish_report(
                     snapshot,
                     source="tick",
@@ -562,7 +564,7 @@ def tick() -> None:
                 # separate from the report's event stream.
                 acted = 0
                 recoverable_results = []
-                if settings.recovery.watchdog == "wake":
+                if _wd_wake_armed(settings):
                     # Recompute the budget AFTER the report: budgeting both
                     # halves off the same pre-report clock lets the wake lane
                     # spend the whole remaining deadline and SIGALRM every
@@ -866,7 +868,7 @@ def tick() -> None:
                 # "report" mode still classifies (so counts stay honest) but
                 # never pushes or files - the same wake vs report split the
                 # fleet watchdog leg above draws at apply_verdict.
-                wake = settings.recovery.watchdog == "wake"
+                wake = _wd_wake_armed(settings)
                 stranded_n = unknown_n = acted_n = failed_n = roots_done = 0
                 for root in _catchup_roots():
                     # Re-check per root, not just once before the loop: a

@@ -208,6 +208,40 @@ pub struct GcRow {
 /// terminal-or-dead question the policy will rule on, and two local spellings
 /// of one set is how they drifted apart the first time (Orphaned joined the
 /// policy's set while the sweep's copy kept the old three).
+/// A stamped row whose STORED STATUS still reads live-ish while the liveness
+/// ladder answers `Unknown`: the contradiction the policy has to rule on.
+fn is_stamped_contradiction(row: &GcRow) -> bool {
+    row.exited_at.is_some()
+        && row.probe == RowLiveness::Unknown
+        && matches!(
+            row.status,
+            AgentStatus::Live
+                | AgentStatus::Ready
+                | AgentStatus::Idle
+                | AgentStatus::Busy
+                | AgentStatus::Spawning
+        )
+}
+
+/// One reading breaks that tie: a transcript POSITIVELY stale for the whole
+/// window. `status` is a snapshot nothing updates at exit and `exited_at` is a
+/// write only an exit produces, so neither can settle the other. `None` never
+/// grants permission; an unread transcript is not a stale one.
+fn stamp_is_corroborated(row: &GcRow) -> bool {
+    is_stamped_contradiction(row) && row.transcript_fresh == Some(false)
+}
+
+/// Whether the policy will treat this row as terminal, spelled ONCE.
+///
+/// The sweep gates its worktree probe on this same question, and a probe gate
+/// narrower than the policy strands exactly the rows the policy would remove:
+/// `worktree_clean` stays `None`, the fail-closed arm keeps the row, and it is
+/// reported as a worktree problem when the probe never ran. Two local spellings
+/// is how they drifted the first time.
+pub fn treated_as_terminal(row: &GcRow) -> bool {
+    status_is_terminal(row.status) || row.pid_confirmed_dead || stamp_is_corroborated(row)
+}
+
 pub fn status_is_terminal(status: AgentStatus) -> bool {
     matches!(
         status,
@@ -304,23 +338,22 @@ fn gc_decide(row: &GcRow, now: i64, grace_secs: i64) -> (GcAction, Option<KeepRe
         }
         return apply_worktree_guard(row, GcAction::ReapDormant);
     }
+    // The same positive done reading, for a row no pid can vouch for. A thread
+    // row owns no pid by design, so a restarted daemon reads it as not live and
+    // `NotTerminal` held it forever. `dormant_done` is true only when a tail
+    // read said `done` on a row already idle past grace.
+    if row.dormant_done {
+        return apply_worktree_guard(row, GcAction::ReapDormant);
+    }
     // The same consult for a row the process surface cannot vouch for (no
     // live socket, no pid) whose STORED STATUS still reads live-ish: the
     // status field is a constant in practice, so `NotTerminal` is exactly
     // the blanket this group exists to break open. A stamped row the ladder
     // answers Unknown on keeps - named as the contradiction it is - instead
     // of silently resolving in favour of the status field.
-    if row.exited_at.is_some()
-        && row.probe == RowLiveness::Unknown
-        && matches!(
-            row.status,
-            AgentStatus::Live
-                | AgentStatus::Ready
-                | AgentStatus::Idle
-                | AgentStatus::Busy
-                | AgentStatus::Spawning
-        )
-    {
+    let stamped_contradiction = is_stamped_contradiction(row);
+    let stamp_corroborated = stamp_is_corroborated(row);
+    if stamped_contradiction && !stamp_corroborated {
         return (GcAction::Keep, Some(KeepReason::Contradicted));
     }
     // Reap condition #1: terminal status OR a confirmed-dead pid. A non-terminal
@@ -333,8 +366,7 @@ fn gc_decide(row: &GcRow, now: i64, grace_secs: i64) -> (GcAction, Option<KeepRe
     // path as `Exited`. Before this, an Orphaned row with no pid never got an
     // `exited_at` stamp, never entered the grace path, and the backstop (which
     // hangs off `exited_at`) never fired: Orphaned rows were immortal.
-    let terminal_or_dead = status_is_terminal(row.status) || row.pid_confirmed_dead;
-    if !terminal_or_dead {
+    if !treated_as_terminal(row) {
         return (GcAction::Keep, Some(KeepReason::NotTerminal));
     }
     match row.exited_at {
@@ -1313,12 +1345,19 @@ mod tests {
         // the row through its stored status instead, names the contradiction,
         // and still reaps nothing. A positively-alive answer falls through to
         // the ordinary non-terminal keep.
+        //
+        // `transcript_fresh` is explicitly UNREAD here. Once a transcript
+        // positively stale for the whole window corroborates the stamp, the
+        // contradiction is resolved and the row reaps - see
+        // `ac3_hp_a_stamp_a_stale_transcript_corroborates_is_terminal`. This
+        // test is about the rows where nothing corroborated it.
         let mut row = GcRow {
             status: AgentStatus::Live,
             is_live: false,
             pid_confirmed_dead: false,
             exited_at: Some(NOW - 10 * 86_400),
             probe: RowLiveness::Unknown,
+            transcript_fresh: None,
             ..reapable()
         };
         assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
@@ -1332,9 +1371,12 @@ mod tests {
         assert_eq!(keep_reason(&row, NOW, GRACE), Some(KeepReason::NotTerminal));
 
         // A terminal status never takes this arm: exited rows age through
-        // grace and corroboration exactly as before.
+        // grace and corroboration exactly as before - the stale transcript
+        // being the corroboration, which is why this is a `Reap` and not the
+        // absolute-age backstop.
         row.status = AgentStatus::Exited;
         row.probe = RowLiveness::Unknown;
+        row.transcript_fresh = Some(false);
         assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
     }
 
@@ -1386,6 +1428,132 @@ mod tests {
             for b in &all[i + 1..] {
                 assert_ne!(a.as_str(), b.as_str());
             }
+        }
+    }
+
+    /// A pid-less thread row the daemon no longer hosts after a restart: not
+    /// live, no pid to confirm dead, a stored status that still reads live-ish,
+    /// and no worktree. `NotTerminal` held 28 of 58 of these forever.
+    fn thread_row() -> GcRow {
+        GcRow {
+            status: AgentStatus::Live,
+            is_live: false,
+            pid_confirmed_dead: false,
+            owns_worktree: false,
+            exited_at: None,
+            liveness_surface: true,
+            transcript_fresh: None,
+            harness_session_gone: None,
+            dormant_done: false,
+            worktree_clean: None,
+            probe: RowLiveness::Unknown,
+        }
+    }
+
+    #[test]
+    fn ac1_hp_a_non_live_row_with_a_done_tail_leaves_as_dormant() {
+        let row = GcRow {
+            dormant_done: true,
+            ..thread_row()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::ReapDormant);
+    }
+
+    #[test]
+    fn ac2_edge_a_non_live_row_whose_tail_did_not_say_done_is_kept() {
+        // The tail read `stalled`, or there was no transcript to read: both
+        // land here, and neither is a positive marker.
+        assert_eq!(gc_action(&thread_row(), NOW, GRACE), GcAction::Keep);
+        assert_eq!(
+            keep_reason(&thread_row(), NOW, GRACE),
+            Some(KeepReason::NotTerminal)
+        );
+    }
+
+    #[test]
+    fn ac2_edge_an_unprobed_worktree_holds_a_done_tail_fail_closed() {
+        // The shape a MISSED probe produces, kept as its own test because the
+        // sweep's probe gate is computed a pass earlier than `dormant_done`:
+        // when the caller does not probe on this arm, every worktree-owning
+        // row the arm exists for lands here instead of leaving.
+        let row = GcRow {
+            dormant_done: true,
+            owns_worktree: true,
+            worktree_clean: None,
+            ..thread_row()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+        assert_eq!(
+            keep_reason(&row, NOW, GRACE),
+            Some(KeepReason::WorktreeUnprobed)
+        );
+    }
+
+    #[test]
+    fn ac2_edge_a_done_tail_never_walks_past_the_worktree_guard() {
+        let row = GcRow {
+            dormant_done: true,
+            owns_worktree: true,
+            worktree_clean: Some(false),
+            ..thread_row()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+        assert_eq!(
+            keep_reason(&row, NOW, GRACE),
+            Some(KeepReason::WorktreeDirty)
+        );
+    }
+
+    /// The `t-579e-discovery-pass` shape, kept as `Contradicted` for three
+    /// straight days: an exit stamp past grace, a silent ladder, and a stored
+    /// status that still reads live.
+    fn contradicted_row() -> GcRow {
+        GcRow {
+            exited_at: Some(NOW - GRACE - 1),
+            ..thread_row()
+        }
+    }
+
+    #[test]
+    fn ac3_hp_a_stamp_a_stale_transcript_corroborates_is_terminal() {
+        let row = GcRow {
+            transcript_fresh: Some(false),
+            ..contradicted_row()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    #[test]
+    fn the_probe_gate_and_the_policy_ask_the_same_terminal_question() {
+        // The sweep gates its worktree probe on `treated_as_terminal`. A row
+        // this answers false for is never probed, so `worktree_clean` stays
+        // `None` and the fail-closed arm keeps it - stuck, and reported as a
+        // worktree problem. It must be true for every shape the policy reaps.
+        let corroborated = GcRow {
+            transcript_fresh: Some(false),
+            ..contradicted_row()
+        };
+        assert!(treated_as_terminal(&corroborated));
+        assert_eq!(gc_action(&corroborated, NOW, GRACE), GcAction::Reap);
+        assert!(!treated_as_terminal(&contradicted_row()));
+    }
+
+    #[test]
+    fn ac3_hp_an_uncorroborated_stamp_stays_contradicted() {
+        // `None` is "could not read", not "stale", and never grants
+        // permission; `Some(true)` positively says the session is still being
+        // written to, which resolves the contradiction the other way.
+        for fresh in [None, Some(true)] {
+            let row = GcRow {
+                transcript_fresh: fresh,
+                ..contradicted_row()
+            };
+            assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep, "{fresh:?}");
+            assert_eq!(
+                keep_reason(&row, NOW, GRACE),
+                Some(KeepReason::Contradicted),
+                "{fresh:?}"
+            );
         }
     }
 }

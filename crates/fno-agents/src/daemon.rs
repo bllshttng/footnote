@@ -615,7 +615,12 @@ pub struct GcSummary {
     /// silently: the same zero-named-rows failure `kept_live` was added for,
     /// one arm over. Reported like `kept_live` because an ordinary keep is
     /// still a keep.
-    pub kept_not_terminal: Vec<String>,
+    ///
+    /// `(id, tail)`: the second half is what the tail probe read for the row,
+    /// because "died mid-turn" and "no transcript to read" are the same word
+    /// otherwise, and an operator cannot act on a bare name. Same shape as
+    /// `kept_dirty` so the id stays a clean name in the JSON.
+    pub kept_not_terminal: Vec<(String, String)>,
     /// Rows that read live AND carry an `exited_at` while the shared liveness
     /// ladder (x-5d96) answers `Unknown`. Before this field the sweep resolved
     /// that contradiction silently by dropping the stamp; now the row is
@@ -2653,18 +2658,30 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         // session id.
         // ONE store lookup answers both the existence question (gone?) and
         // the freshness question (newest match's mtime) for this row.
-        let store_hits = if !is_live && terminal_or_dead && past_grace {
+        // `terminal_or_dead` is deliberately not in this gate: the row shape
+        // that needs the transcript most is the one whose status disagrees
+        // with its exit stamp, and that gate read the status field.
+        let store_hits = if !is_live && past_grace {
             store_matches(e)
         } else {
             None
         };
         let harness_session_gone = store_hits.as_ref().map(|m| m.is_empty());
-        let transcript_fresh = if !is_live && terminal_or_dead && past_grace {
+        let transcript_fresh = if !is_live && past_grace {
             let harness_path = store_hits.as_deref().and_then(newest_by_mtime);
+            // The `log_path` fallback stays available only to rows a terminal
+            // status or a dead pid already condemned. The stamped-contradiction
+            // arm reads staleness ONLY from the session's own harness store,
+            // because a store lookup can come back empty for two reasons: the
+            // session ended, or the lookup was aimed at the wrong tree. That
+            // second one is real - a codex child that inherited a claude pane's
+            // CLAUDE_CONFIG_DIR is looked for under `<config_dir>/projects`,
+            // where codex never writes - and a stale `log_path` copy nobody
+            // updates would then read as positively stale for a LIVE session.
             match harness_path
                 .as_deref()
                 .and_then(|p| p.to_str())
-                .or_else(|| e.log_path.as_deref())
+                .or_else(|| terminal_or_dead.then_some(e.log_path.as_deref()).flatten())
             {
                 Some(path) => transcript_fresh_probe(Some(path), now, grace_secs),
                 None => None,
@@ -2692,7 +2709,12 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         // shortfall. Removing it means every escalated row is judged this
         // sweep, and the count spent is reported.
         let mut dormant_handle = None;
-        if is_live {
+        // A thread row owns no pid by design, so a restarted daemon reads it as
+        // not live and never probed its tail - the one reading that can say the
+        // work is over. A one-shot ask is excluded by name, not by shape: since
+        // v9 it carries the claude jobId in `short_id`, so the pid-less test
+        // alone would pull it into an eviction route it never used before.
+        if is_live || (e.pid.is_none() && !e.short_id.is_empty() && !e.is_one_shot_ask()) {
             // The idle gate's transcript read comes from the same store index
             // (in memory after the first build), never a fresh walk.
             let transcript = store_matches(e)
@@ -2755,8 +2777,12 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         // never opens for the worktree-owning rows it was ordered for.
         let past_backstop = matches!(exited_at,
             Some(t) if now.saturating_sub(t) > crate::gc::backstop_horizon_secs(grace_secs));
+        // `treated_as_terminal`, never a local copy: a stamped row a stale
+        // transcript corroborates is terminal to the POLICY while its status
+        // field and pid still say otherwise, and gating the probe on the
+        // narrow question stranded exactly the rows the policy would remove.
         let needs_probe = !is_live
-            && terminal_or_dead
+            && crate::gc::treated_as_terminal(&row)
             && past_grace
             && owns_worktree
             && (crate::gc::removal_is_corroborated(&row) || past_backstop);
@@ -2805,8 +2831,15 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         // Only a POSITIVE `done` reading evicts. A handle the batch could not
         // answer for is absent from the map and stays `false`, exactly as an
         // unanswered per-row probe did: staleness never reaps.
-        if let Some(handle) = dormant_handle {
-            row.dormant_done = tails.get(&handle).map(|s| s == "done").unwrap_or(false);
+        let tail_state = dormant_handle.as_ref().and_then(|h| tails.get(h)).cloned();
+        row.dormant_done = tail_state.as_deref() == Some("done");
+        // The probe condition mirrors the removal condition, and pass one
+        // cannot see this one: `dormant_done` is known only after the tail read
+        // above. Without this, a worktree-owning row the dormant arm earns a
+        // removal for fails closed into `Keep(WorktreeUnprobed)` - stuck, and
+        // named as a worktree problem when the probe never ran.
+        if row.dormant_done && row.owns_worktree && row.worktree_clean.is_none() {
+            row.worktree_clean = worktree_clean_probe(&e.cwd);
         }
         match crate::gc::gc_action(&row, now, grace_secs) {
             crate::gc::GcAction::Reap => {
@@ -2888,7 +2921,13 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
                         // pass names every row it held and the gate that held
                         // it.
                         Some(crate::gc::KeepReason::NotTerminal) => {
-                            summary.kept_not_terminal.push(id);
+                            summary.kept_not_terminal.push((
+                                id,
+                                match tail_state {
+                                    Some(state) => format!("tail: {state}"),
+                                    None => "no tail read".to_string(),
+                                },
+                            ));
                         }
                         Some(crate::gc::KeepReason::Contradicted) => {
                             summary.kept_contradicted.push(id);
@@ -13484,7 +13523,11 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         // ladder, the surface-less rows keep as not-terminal - each named.
         assert_eq!(summary.kept_live, vec!["truth-live".to_string()]);
         assert_eq!(
-            summary.kept_not_terminal,
+            summary
+                .kept_not_terminal
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>(),
             vec![
                 "idle-a".to_string(),
                 "idle-b".to_string(),
@@ -13500,7 +13543,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let named: std::collections::BTreeSet<String> = summary
             .kept_live
             .iter()
-            .chain(summary.kept_not_terminal.iter())
+            .chain(summary.kept_not_terminal.iter().map(|(id, _)| id))
             .chain(summary.kept_contradicted.iter())
             .chain(summary.cleared_contradiction.iter())
             .chain(summary.kept_uncorroborated.iter())
@@ -14324,253 +14367,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert!(reg.entries.iter().all(|e| e.name != "orph"));
     }
-
-    /// x-0d93: the dormant gate spends ONE subprocess per sweep, not one per
-    /// idle row, and no row is dropped by a cap.
-    ///
-    /// `DORMANT_PROBE_CAP` used to stop the sweep at 8 probes, judging an
-    /// arbitrary first eight of a large roster and reporting nothing about the
-    /// rest - a silent truncation living in production. Batching removed the
-    /// reason it existed, so all 40 rows here are judged in one sweep and the
-    /// spend is reported on the summary.
-    #[test]
-    fn gc_dormant_gate_batches_every_idle_row_into_one_call_with_no_cap() {
-        let home = tmp_home("gc-dormant-batch");
-        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-        let idle_since = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
-        let rows = 40;
-        state::update_registry(&home.registry_json(), |r| {
-            for i in 0..rows {
-                let mut row = ask_row(&format!("bg-idle-{i:02}"), None);
-                row.status = AgentStatus::Live;
-                row.short_id = format!("idle{i:02}");
-                row.last_message_at = Some(idle_since.clone());
-                row.pid = Some(std::process::id());
-                r.entries.push(row);
-            }
-        })
-        .unwrap();
-
-        let calls = std::cell::RefCell::new(Vec::new());
-        let summary = gc_sweep_impl(
-            &home,
-            &emitter,
-            &|_| Duration::from_secs(3600),
-            false,
-            7,
-            &|handles: &[String]| {
-                calls.borrow_mut().push(handles.to_vec());
-                // Every row answers "working": alive, so none may be evicted.
-                handles
-                    .iter()
-                    .map(|h| (h.clone(), "working".to_string()))
-                    .collect()
-            },
-            &|_| None,
-            &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-            &|_| None,
-        );
-
-        let calls = calls.into_inner();
-        assert_eq!(calls.len(), 1, "one sweep, one truth subprocess");
-        assert_eq!(calls[0].len(), rows, "no row is dropped by a cap");
-        assert_eq!(summary.dormant_probes_escalated, rows);
-        assert!(
-            summary.reaped_dormant.is_empty() && summary.reaped.is_empty(),
-            "a working tail is not a done tail"
-        );
-        let reg = state::load_registry(&home.registry_json()).unwrap();
-        assert_eq!(reg.entries.len(), rows);
-    }
-
-    /// STALENESS MUST NEVER REAP, pinned. A row can be quiet for hours and
-    /// still be alive - a worker waiting on CI is the ordinary case.
-    ///
-    /// Two ways the sweep could get this wrong, both asserted: a `working`
-    /// tail must keep the row, and a row the probe could not answer for at all
-    /// must keep it too. Only the probe's POSITIVE `done` reading evicts, and
-    /// an unanswered handle is an absence, never a death sentence.
-    #[test]
-    fn gc_dormant_gate_never_reaps_a_quiet_row_the_probe_did_not_call_done() {
-        let home = tmp_home("gc-dormant-noreap");
-        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let (y, mo, d, h, mi, s) = civil(now - 6 * 3600);
-        let quiet_since = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
-        state::update_registry(&home.registry_json(), |r| {
-            for (name, short) in [("bg-on-ci", "onci"), ("bg-mute", "mute")] {
-                let mut row = ask_row(name, None);
-                row.status = AgentStatus::Live;
-                row.short_id = short.into();
-                row.last_message_at = Some(quiet_since.clone());
-                row.pid = Some(std::process::id());
-                r.entries.push(row);
-            }
-        })
-        .unwrap();
-
-        let summary = gc_sweep_impl(
-            &home,
-            &emitter,
-            &|_| Duration::from_secs(3600),
-            false,
-            7,
-            // "onci" answers working. "mute" is absent from the map entirely:
-            // the batch could not answer for it.
-            &tails_for(|handle| (handle == "onci").then(|| "working".to_string())),
-            &|_| None,
-            &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-            &|_| None,
-        );
-
-        assert_eq!(summary.dormant_probes_escalated, 2, "both were asked");
-        assert!(summary.reaped_dormant.is_empty());
-        assert!(summary.reaped.is_empty());
-        let reg = state::load_registry(&home.registry_json()).unwrap();
-        assert!(
-            reg.entries.iter().any(|e| e.name == "bg-on-ci"),
-            "six hours of quiet with a working tail is alive, not gone"
-        );
-        assert!(
-            reg.entries.iter().any(|e| e.name == "bg-mute"),
-            "an unanswered probe is an absence; it must never evict"
-        );
-    }
-
-    /// A live row whose transcript is ADVANCING costs no probe, and the reason
-    /// is `row_idle_secs`, not a stat gate.
-    ///
-    /// x-0d93 planned a transcript-size gate in front of the dormant probe:
-    /// grown since the last sweep -> skip. This test is why that gate is not
-    /// here. The dormant gate only opens when `idle > grace`, and `idle` is
-    /// `now - max(last_message_at, transcript mtime)`. So the gate opening
-    /// ALREADY proves the transcript has not been touched for over an hour
-    /// (the default grace), while sweeps run every 5 seconds. A row whose
-    /// transcript grew since the last sweep has an mtime seconds old and never
-    /// reaches the probe at all.
-    ///
-    /// The `stat_records` map is passed EMPTY here, which is the cold-sweep
-    /// input a size gate would have to escalate on. The row is still not
-    /// probed. Nothing a size comparison could add is reachable, and a guard
-    /// whose skip arm cannot fire is decoration.
-    #[test]
-    fn a_live_row_with_a_growing_transcript_is_never_probed_by_the_dormant_gate() {
-        let home = tmp_home("gc-advancing");
-        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let transcript = home.root().join("advancing.jsonl");
-        std::fs::write(&transcript, b"{\"type\":\"assistant\"}\n").unwrap();
-
-        // `last_message_at` two hours stale against a 1h grace: on that field
-        // alone this row is long idle and the gate would open.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-        state::update_registry(&home.registry_json(), |r| {
-            let mut row = ask_row("bg-advancing", None);
-            row.status = AgentStatus::Live;
-            row.short_id = "bgadv".into();
-            row.last_message_at = Some(format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z"));
-            row.pid = Some(std::process::id());
-            r.entries.push(row);
-        })
-        .unwrap();
-
-        let asked = std::cell::RefCell::new(Vec::new());
-        let summary = gc_sweep_impl(
-            &home,
-            &emitter,
-            &|_| Duration::from_secs(3600),
-            false,
-            7,
-            &|handles: &[String]| {
-                asked.borrow_mut().extend(handles.iter().cloned());
-                std::collections::HashMap::new()
-            },
-            // The transcript written a moment ago IS this row's newest match.
-            &|_| Some(vec![transcript.clone()]),
-            &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-            &|_| None,
-        );
-
-        assert!(
-            asked.into_inner().is_empty(),
-            "a fresh transcript mtime closes the dormant gate before any probe is considered"
-        );
-        assert_eq!(summary.dormant_probes_escalated, 0);
-        assert!(summary.reaped_dormant.is_empty());
-    }
-
-    /// AC7 end-to-end: a LIVE row idle past grace whose tail reads done leaves
-    /// as a dormant reap (resumable: true in the event); one whose tail reads
-    /// anything else stays. The credential-dead worker is the second case.
-    #[test]
-    fn gc_sweep_live_done_row_leaves_as_dormant_and_other_tails_stay() {
-        let home = tmp_home("gc-dormant");
-        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
-        let idle_since = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
-        // Live rows: our own pid, bare-existence live (the fixture pattern the
-        // keeps_live test uses), idle two hours against a 1h grace.
-        state::update_registry(&home.registry_json(), |r| {
-            let mut done = ask_row("bg-done", None);
-            done.status = AgentStatus::Live;
-            done.short_id = "bgdone".into();
-            done.last_message_at = Some(idle_since.clone());
-            done.pid = Some(std::process::id());
-            r.entries.push(done);
-            let mut watching = ask_row("bg-watch", None);
-            watching.status = AgentStatus::Live;
-            watching.short_id = "bgwatch".into();
-            watching.last_message_at = Some(idle_since.clone());
-            watching.pid = Some(std::process::id());
-            r.entries.push(watching);
-        })
-        .unwrap();
-
-        let summary = gc_sweep_impl(
-            &home,
-            &emitter,
-            &|_| Duration::from_secs(3600),
-            false,
-            7,
-            &tails_for(|handle| match handle {
-                "bgdone" => Some("done".to_string()),
-                _ => Some("watching".to_string()), // the credential-dead shape
-            }),
-            &|_| None,
-            &live_row_liveness, // x-5d96: injectable so tests stage the ladder
-            &|_| None,
-        );
-
-        assert_eq!(summary.reaped_dormant, vec!["bgdone".to_string()]);
-        assert!(summary.reaped.is_empty(), "a finished turn is not a death");
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
-        assert!(
-            events.contains("\"resumable\":true"),
-            "the dormant reap must record resumability for the dormant distinction"
-        );
-        // POSITIVE MARKER: only the done row left the registry.
-        let reg = state::load_registry(&home.registry_json()).unwrap();
-        assert!(reg.entries.iter().all(|e| e.name != "bg-done"));
-        assert!(
-            reg.entries.iter().any(|e| e.name == "bg-watch"),
-            "a live row whose tail is not done stays, whatever its idle age"
-        );
-    }
+    mod gc_dormant_tests;
 
     /// AC6: a reaped row whose harness session refuses removal keeps the
     /// refusal in the report (surfaced, never swallowed), and the registry reap

@@ -71,6 +71,12 @@ So the `stale` verdict's remedy splits on one fact. When the job row survives, t
 
 One more trap deserves its name: `sessionIdTaken`. A worker launches `--resume` against an id a live conversation already holds. The latch fires. The worker dies with "session ID already belongs to another conversation" and the next respawn starts under a fresh id, silently breaking the binding. Record the fork on the row (the related id) before retrying anything.
 
+## Which reading removes a registry row
+
+Three readings remove a row, and every one of them is something POSITIVELY read: a transcript tail that classifies `done` on a row already idle past grace (it leaves as a dormant reap, and `fno agents resume <handle>` undoes it), a pid confirmed dead, or an exit stamp corroborated by a transcript positively stale for the whole window. Nothing else does. Silence removes nothing, an unreadable store removes nothing, and age alone removes nothing short of the absolute-age backstop, which is many multiples of the grace window and reports itself separately so the bypass is visible. This asymmetry is deliberate: a silent liveness ladder is also what a timeout produces, and a machine under load produces those freely, so a reaper that treated an absence as death would delete live sessions exactly when the fleet is busiest.
+
+The corollary is the bug this section was written after. A worker that dies badly is loud, and the reaper was built for it; a worker that finishes CLEANLY writes `exited_at`, contradicts a `status` field nothing updates at exit, and was kept forever. A conflict between a stale snapshot and a written fact is not ambiguity, but resolving it still needs a third, independent reading, which is what the transcript is for. `fno agents reap` and the watchdog's retire lane are separate instruments, and neither one's counter says anything about the other.
+
 ## Retire: the slot a finished worker never gives back
 
 A worker that finishes its deliverable and never exits holds a live slot against `config.agents.max_live` forever. Measured 2026-08-19: four blueprint workers had each mailed a finished plan and each still held a slot at 30 of 30. A build spawn queued 91 seconds waiting for one of them.
@@ -103,7 +109,7 @@ A bus-only row stays bus-only. Every row is eligible for `wake`, because a wake 
 
 ## Cadence
 
-`config.recovery.watchdog` rides the pr_watch tick. Its modes are `off`, `report`, `wake`, and `handoff`. `off` is the default. `report` classifies and emits. `wake` also applies the wake lane. `handoff` permits a positively proved cross-provider transaction. `config.autonomy.enabled` and `config.recovery.enabled` veto every mode. Neither `wake` nor manual `--apply-all` grants handoff authority. No tick value reaps or performs the legacy reroute. Every completed sweep writes the exact provider-outage report to `~/.fno/watchdog-sweep.json`. An absent or unreadable provider instrument is stamped `unknown`, never as an empty measured breaker set.
+`config.recovery.watchdog` rides the pr_watch tick. `enabled` says whether the lane runs at all and is false by default; `mode` says how far an enabled lane goes and is `report`, `wake`, or `handoff`. A config written with the old flat string still parses: `off` becomes `enabled = false`, and any other word becomes `enabled = true` with that mode. `report` classifies and emits. `wake` also applies the wake lane. `handoff` permits a positively proved cross-provider transaction. `config.autonomy.enabled` and `config.recovery.enabled` veto every mode. Neither `wake` nor manual `--apply-all` grants handoff authority. No tick value reaps or performs the legacy reroute. Every completed sweep writes the exact provider-outage report to `~/.fno/watchdog-sweep.json`. An absent or unreadable provider instrument is stamped `unknown`, never as an empty measured breaker set.
 
 ## Provider-wide outages and handoff
 
@@ -115,9 +121,9 @@ In `handoff` mode, the destination must carry explicit provider, account, and mo
 
 Breaker transitions, terminal handoff transitions, and count-bearing refusals are schema-backed daemon events. When a transaction newly commits or parks, one daemon-authored node decision is recorded. Observations, canary proof, intermediate phases, refusals, contention, and terminal replay record no decision.
 
-Manual inspection remains `fno agents watchdog --json`. The base command is a dry run. `--apply` applies wake only. `--apply-all` applies the existing manual wake, reap, and reroute lanes. None can authorize a provider handoff. To enable installed-cadence migration, set `recovery.watchdog = "handoff"` and keep both master switches enabled. There is intentionally no manual handoff command. Migration tests must not run against a live node.
+Manual inspection remains `fno agents watchdog --json`. The base command is a dry run. `--apply` applies wake only. `--apply-all` applies the existing manual wake, reap, and reroute lanes. None can authorize a provider handoff. To enable installed-cadence migration, set `recovery.watchdog.enabled = true` and `recovery.watchdog.mode = "handoff"` and keep both master switches enabled. There is intentionally no manual handoff command. Migration tests must not run against a live node.
 
-Reap ships OFF and the other three lanes ship on, because only reap is unrecoverable. A human who disagrees with a wake, a reroute or a ghost can undo it. Reap runs `stop` then `rm`, and `rm` deletes the worktree. A wrong one takes work that lived only on that machine. `config.recovery.watchdog_reap` arms it, default false. The freeze sits in `apply_verdict`, not in the `--apply-all` flag. A guard on one of several reachable paths reads as protection while the others stay open. Classification is unaffected. Reap verdicts are still computed, reported, and mailed. Only the action waits.
+Reap ships OFF and the other three lanes ship on, because only reap is unrecoverable. A human who disagrees with a wake, a reroute or a ghost can undo it. Reap runs `stop` then `rm`, and `rm` deletes the worktree. A wrong one takes work that lived only on that machine. `config.recovery.watchdog.reap` arms it, default false. The freeze sits in `apply_verdict`, not in the `--apply-all` flag. A guard on one of several reachable paths reads as protection while the others stay open. Classification is unaffected. Reap verdicts are still computed, reported, and mailed. Only the action waits.
 
 One predicate decides every reap, and it answers yes, no, or UNKNOWN. Eight review findings across three rounds turned out to be one defect wearing eight costumes. Each was a reading about one thing used as a verdict about another. Three of them read an ABSENCE as a positive answer. A missing transcript meant "finished". An unmapped state spelling meant "no lane". A raised schema error meant "event written". Fixing those where they were found converged on nothing, because the shape was the bug rather than the sites. So `reap_decision` takes the three positive markers a reap needs. Everything else is UNKNOWN, and UNKNOWN never reaps. That covers a read that raised, a read that returned nothing, and a reading this code does not recognise. A new spelling or an unreadable store cannot produce the marker, so it cannot reach the delete. The worst case is a row a human looks at.
 
@@ -165,7 +171,7 @@ The most common way to read zero rows is the enumeration budget, not a broken bi
 
 ## Push, not pull
 
-A verdict the king has to remember to fetch goes unread. When `config.recovery.watchdog_mail_to` names a handle (or `--mail <handle>` is passed), the sweep mails a one-screen digest of the non-leave verdicts with their basis strings. The digest is gated on change. The signature of the non-leave set rides in the sweep file, and an unchanged signature sends nothing. A row stuck for a day reads once, not on every tick. A `project:<slug>` recipient addresses the project mailbox instead of one agent.
+A verdict the king has to remember to fetch goes unread. When `config.recovery.watchdog.mail_to` names a handle (or `--mail <handle>` is passed), the sweep mails a one-screen digest of the non-leave verdicts with their basis strings. The digest is gated on change. The signature of the non-leave set rides in the sweep file, and an unchanged signature sends nothing. A row stuck for a day reads once, not on every tick. A `project:<slug>` recipient addresses the project mailbox instead of one agent.
 
 ## Two row sources, one truth
 

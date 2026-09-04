@@ -1110,21 +1110,27 @@ def lane_armed(settings: Any) -> bool:
     alarm about a deliberate silence. A freshness reader that does not share
     the producer's own condition is measuring a different subsystem.
     """
-    try:
-        return bool(
-            getattr(settings.recovery, "watchdog", "off") in ("report", "wake", "handoff")
-            and settings.recovery.enabled
-            and settings.autonomy.enabled
-        )
-    except Exception:  # noqa: BLE001 - a partial settings stub is not armed
-        return False
+    return _armed(settings, None)
 
 
 def handoff_armed(settings: Any) -> bool:
     """Return true only for the explicit cross-provider action level."""
+    return _armed(settings, "handoff")
+
+
+def wake_armed(settings: Any) -> bool:
+    """Return true only for the level that may resume a stalled session."""
+    return _armed(settings, "wake")
+
+
+def _armed(settings: Any, mode: Optional[str]) -> bool:
+    """The lane's arming question, spelled once. `mode` None asks only whether
+    the lane runs at all; a mode asks for that exact depth."""
     try:
+        watchdog = settings.recovery.watchdog
         return bool(
-            getattr(settings.recovery, "watchdog", "off") == "handoff"
+            watchdog.enabled
+            and (mode is None or watchdog.mode == mode)
             and settings.recovery.enabled
             and settings.autonomy.enabled
         )
@@ -1587,6 +1593,7 @@ def _verdict_one(
         window, reset_epoch, stamp = rate_limit_window(facts.records, now_s)
 
     reap_basis = ""
+    reap_unknown_basis = ""
     if row.node:
         answer, reap_basis = reap_decision(
             row,
@@ -1603,17 +1610,19 @@ def _verdict_one(
             return Verdict(row.row_id, row.name, row.state, REAP,
                            reap_basis, "stop+rm", cotenants)
         if answer is REAP_UNKNOWN:
-            # Not "leave": leave says the row was read and is healthy. This
-            # says the read did not answer, which is a different fact and a
-            # human's to resolve.
-            return Verdict(row.row_id, row.name, row.state, STALE,
-                           reap_basis, "report")
+            # HELD, not returned. A row with no pid and no heartbeat can only
+            # answer UNKNOWN, so returning STALE here reported the whole fleet
+            # instead of stopping it. Retire is weaker and carries its own probe
+            # and state guards, so it inherits none of reap's protection by
+            # answering first. Returned below if retire also declines.
+            reap_unknown_basis = reap_basis
 
-    # retire: below reap, and reachable whether or not the row carries a node -
-    # a blueprint worker's row routinely has none, and it is the population this
-    # lane was built for. It runs before reap's LEAVE return so a row reap
-    # declines on its own (stricter) preconditions can still be stopped by this
-    # (weaker, non-destructive) one.
+    # retire: below a reap that ANSWERED yes, above one that did not answer, and
+    # reachable whether or not the row carries a node - a blueprint worker's row
+    # routinely has none, and it is the population this lane was built for. It
+    # runs before reap's LEAVE return so a row reap declines on its own
+    # (stricter) preconditions can still be stopped by this (weaker,
+    # non-destructive) one.
     retire_yes, retire_basis = retire_decision(
         row,
         facts=facts,
@@ -1626,8 +1635,19 @@ def _verdict_one(
         node_state_for=node_state_for,
     )
     if retire_yes:
+        # The held non-answer rides along: this row is about to be STOPPED, and
+        # dropping it would hide the unread reap in the one case that acts.
+        if reap_unknown_basis:
+            retire_basis += f" (reap did not answer: {reap_unknown_basis})"
         return Verdict(row.row_id, row.name, row.state, RETIRE,
                        retire_basis, "stop")
+
+    if reap_unknown_basis:
+        # Not "leave": leave says the row was read and is healthy. This says
+        # the read did not answer, which is a different fact and a human's to
+        # resolve.
+        return Verdict(row.row_id, row.name, row.state, STALE,
+                       reap_unknown_basis, "report")
 
     if reap_basis:
         return Verdict(row.row_id, row.name, row.state, LEAVE,
@@ -2243,24 +2263,45 @@ def _is_linked_worktree(cwd: str) -> bool:
         return False
 
 
-def _claim_view(node: str) -> dict:
+class _Unreadable:
+    """A seam read that FAILED, which is not the fact an empty answer states.
+
+    Both seams answered ``{}`` on any exception, so an unreadable claims root
+    and a node with no claim produced one value, and `reap_decision`'s
+    UNKNOWN-on-a-raise contract held only for injected test seams.
+    """
+
+    __slots__ = ("detail",)
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+
+
+def _answered(value: Any) -> Any:
+    """A failed seam read becomes the raise `reap_decision` reads as UNKNOWN."""
+    if isinstance(value, _Unreadable):
+        raise RuntimeError(value.detail)
+    return value
+
+
+def _claim_view(node: str) -> dict | _Unreadable:
     from fno.claims.core import claim_status
     from fno.claims.io import claims_root_for
 
     key = f"node:{node}"
     try:
         return claim_status(key, root=claims_root_for(key))
-    except Exception:  # noqa: BLE001 - an unreadable claim condemns nothing
-        return {}
+    except Exception as exc:  # noqa: BLE001 - an unreadable claim condemns nothing
+        return _Unreadable(f"claims root unreadable ({exc!r})")
 
 
-def _graph_index() -> dict[str, dict]:
+def _graph_index() -> dict[str, dict] | _Unreadable:
     from fno.graph.load import load_graph
 
     try:
         entries = load_graph()
-    except Exception:  # noqa: BLE001 - graph miss degrades to "no node state"
-        return {}
+    except Exception as exc:  # noqa: BLE001 - a graph miss is never node state
+        return _Unreadable(f"graph unreadable ({exc!r})")
     return {
         str(e.get("id")): e for e in entries if isinstance(e, dict) and e.get("id")
     }
@@ -2779,7 +2820,10 @@ def _production_route_policy(row: Row) -> tuple[list[str], dict[str, str]]:
     from fno.agents.dispatch_target import resolve_dispatch_target
 
     root = Path(row.cwd)
-    node = _graph_index().get(str(row.node), {}) if row.node else {}
+    index = _graph_index()
+    if isinstance(index, _Unreadable):
+        index = {}
+    node = index.get(str(row.node), {}) if row.node else {}
     pins = {
         key: str(node.get(key) or "")
         for key in ("provider", "harness", "model")
@@ -2878,8 +2922,8 @@ def run_sweep(
     now_s: Optional[float] = None,
     rows_provider: Optional[Callable[[], tuple[list[Row], list[str]]]] = None,
     transcript_fn: Optional[Callable[[str], Optional[TailFacts]]] = None,
-    claim_fn: Optional[Callable[[str], dict]] = None,
-    graph_fn: Optional[Callable[[], dict[str, dict]]] = None,
+    claim_fn: Optional[Callable[[str], dict | _Unreadable]] = None,
+    graph_fn: Optional[Callable[[], dict[str, dict] | _Unreadable]] = None,
     provider_outage_fn: Optional[Callable[[], dict[str, Any]]] = None,
     roster_timeout: Optional[float] = None,
 ) -> tuple[dict, list[Row]]:
@@ -2946,8 +2990,23 @@ def run_sweep(
     if graph_fn is None:
         index = _graph_index()
 
-        def graph_fn() -> dict[str, dict]:
+        def graph_fn() -> dict[str, dict] | _Unreadable:
             return index
+
+    # Passing the sentinel through instead would read as "no claim" and "no
+    # node state", which is exactly what the swallowed exception used to say.
+    def claim_for(node: str) -> dict:
+        return _answered(claim_fn(node))
+
+    def node_state_for(node: str) -> Optional[dict]:
+        return _answered(graph_fn()).get(node)
+
+    # ONE graph read serves every row, so one failed read turns the whole fleet
+    # STALE. The per-row verdicts stay honest; this names the single cause once
+    # instead of leaving it to be inferred from N identical bases.
+    graph_state = graph_fn()
+    if isinstance(graph_state, _Unreadable):
+        warnings = [*warnings, f"graph unreadable for every row: {graph_state.detail}"]
     try:
         from fno.config import load_settings
 
@@ -2957,8 +3016,8 @@ def run_sweep(
     vs = verdicts(
         rows,
         transcript_for=transcript_fn,
-        claim_for=claim_fn,
-        node_state_for=lambda node: graph_fn().get(node),
+        claim_for=claim_for,
+        node_state_for=node_state_for,
         now_s=now_s,
         quiet_after_s=quiet_after_s,
         provider_outages=provider_outages,
@@ -3651,7 +3710,7 @@ def apply_verdict(
             return (
                 "frozen",
                 "reap classified but not executed: config.recovery."
-                "watchdog_reap is false. Reap deletes the worktree and a "
+                "watchdog.reap is false. Reap deletes the worktree and a "
                 "wrong one is unrecoverable, so it ships off. Turn it on to "
                 "execute, or stop and rm this row by hand",
             )
@@ -3682,7 +3741,7 @@ def _reap_execution_enabled() -> bool:
     try:
         from fno.config import load_settings
 
-        return bool(getattr(load_settings().recovery, "watchdog_reap", False))
+        return bool(load_settings().recovery.watchdog.reap)
     except Exception:  # noqa: BLE001 - unreadable config is never permission
         return False
 

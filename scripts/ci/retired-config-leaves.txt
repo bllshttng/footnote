@@ -7,3 +7,5 @@
 # carveout and does not ride this gate PR. Zero active entries puts the config
 # scan in dormant mode. Re-register the line verbatim when the removal lands.
 # review.github_apps|deleted|use one-shot review evidence
+recovery.watchdog_mail_to|deleted|use recovery.watchdog.mail_to
+recovery.watchdog_reap|deleted|use recovery.watchdog.reap

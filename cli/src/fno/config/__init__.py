@@ -60,6 +60,8 @@ from pydantic import ValidationError as _PydValidationError
 # here so every existing `from fno.config import read_config_flat` (etc.) caller
 # keeps working unchanged. The redundant `X as X` aliases are the explicit-reexport
 # idiom mypy's --no-implicit-reexport requires (these names used to be defined here).
+from fno.config import _watchdog
+from fno.config._watchdog import WatchdogBlock
 from fno.config_io import _apply_search_ceiling as _apply_search_ceiling
 from fno.config_io import _deep_merge as _deep_merge
 from fno.config_io import _global_settings_path as _global_settings_path
@@ -3372,29 +3374,8 @@ class RecoveryBlock(BaseModel):
         surfaces instead of looping forever. Close notifications are once-only,
         tracked separately.
     watchdog:
-        The external fleet watchdog lane riding the same tick (x-55c3):
-        ``off`` (default) is a no-op, ``report`` publishes the
-        unfinished-work report (in_progress nodes with free claims, done
-        branches ahead of ``origin/main``, dirty ownerless worktrees, and
-        ownerless PRs older than 24h; every finding names its clearing
-        verb), ``wake`` additionally resumes positively stalled sessions.
-        No tick value ever reaps or reroutes: those stop a session and stay
-        behind an operator running ``fno agents watchdog --apply-all`` by
-        hand.
-    watchdog_mail_to:
-        Mail handle the unfinished-work digest is pushed to (agent name,
-        short id, or ``project:<slug>``). Empty (default) mails nobody. A
-        digest is sent only when the finding set changed since the previous
-        sweep, so a finding stuck for a day reads once, not every tick.
-    watchdog_reap:
-        Whether ``--apply-all`` may execute the REAP lane (default ``false``).
-        Wake, reroute and ghost are recoverable; reap runs ``stop`` then
-        ``rm``, which deletes the session's WORKTREE, and work that lives
-        only on that machine is gone with it. Off by default is not a
-        statement about the classifier's accuracy: it is that a wrong reap
-        cannot be undone and a wrong wake can. Classification is unaffected -
-        reap verdicts are still computed, reported and mailed, they just do
-        not execute until an operator turns this on.
+        The fleet watchdog lane, as a nested block. See
+        :mod:`fno.config._watchdog`.
     retire_grace_s:
         How long a finished worker stays parked before ``--apply-all`` stops
         it (default 900). A worker that declares itself done and never exits
@@ -3411,10 +3392,14 @@ class RecoveryBlock(BaseModel):
     enabled: bool = True
     idle_threshold_seconds: int = Field(default=900, gt=0)
     max_nudges: int = Field(default=3, ge=1)
-    watchdog: Literal["off", "report", "wake", "handoff"] = "off"
-    watchdog_mail_to: str = ""
-    watchdog_reap: bool = False
+    watchdog: WatchdogBlock = Field(default_factory=WatchdogBlock)
     startup_destructive: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_watchdog(cls, data: object) -> object:
+        return _watchdog.coerce_legacy(data)
+
     retire_grace_s: int = Field(default=900, ge=0)
     provider_outage_quorum: int = Field(default=2, ge=1)
     provider_outage_fup_window_seconds: int = Field(default=300, ge=300)

@@ -89,10 +89,24 @@ def test_runnable_form_in_a_python_string_fails(repo: Path) -> None:
     assert "cli/src/fno/new.py" in result.stderr
 
 
-def test_retired_config_key_in_caller_surface_fails(repo: Path) -> None:
+def _register_leaf(repo: Path, leaf: str) -> None:
+    """Register one leaf AND aim the canary at it.
+
+    The gate refuses a scan whose canary names a leaf nobody registered, so a
+    test that writes only the registry inherits whichever leaf the repo happens
+    to carry. That coupling broke the moment the repo registered a different
+    one. Both files move together here.
+    """
     (repo / "scripts/ci/retired-config-leaves.txt").write_text(
-        "review.github_apps|deleted|use one-shot review evidence\n"
+        f"{leaf}|deleted|use one-shot review evidence\n"
     )
+    (repo / "scripts/ci/fixtures/retired-config-leaf-canary.py").write_text(
+        f'CONFIG_LEAF_CANARY = "{leaf}"  # retired-config-ok: scanner control only\n'
+    )
+
+
+def test_retired_config_key_in_caller_surface_fails(repo: Path) -> None:
+    _register_leaf(repo, "review.github_apps")
     _add(repo, "cli/src/fno/config.py", 'HELP = "set review.github_apps"\n')
     result = _run(repo)
     assert result.returncode == 1
@@ -100,9 +114,7 @@ def test_retired_config_key_in_caller_surface_fails(repo: Path) -> None:
 
 
 def test_retired_config_key_in_nested_toml_fails(repo: Path) -> None:
-    (repo / "scripts/ci/retired-config-leaves.txt").write_text(
-        "review.github_apps|deleted|use one-shot review evidence\n"
-    )
+    _register_leaf(repo, "review.github_apps")
     _add(repo, "docs/config.toml", "[review]\ngithub_apps = []\n")
     result = _run(repo)
     assert result.returncode == 1
