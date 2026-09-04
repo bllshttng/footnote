@@ -1067,6 +1067,30 @@ def test_answering_a_modal_keeps_the_frame_decoder_in_sync() -> None:
     assert b"hello" in sent, "the seed never reached the composer"
 
 
+def test_a_callee_minted_row_with_no_mint_is_refused_not_fabricated(monkeypatch) -> None:
+    """The fallback for a row fno has no mint for is its own UUIDv4, and a
+    callee-minted harness never adopts one: the keeper would launch on an id
+    the harness does not know, and Identify would read that fabricated id back
+    off the argv and report it as truth. grok stands in for the next row to
+    declare the strategy before its mint is written."""
+    import fno.agents.harness_map as harness_map
+    from fno.agents.keeper_thread import mint_session_id
+
+    real = harness_map.capabilities
+    monkeypatch.setattr(
+        harness_map,
+        "capabilities",
+        lambda h: {**real(h), "session_binding": {"strategy": "callee-minted-read-back"}},
+    )
+    with pytest.raises(DispatchAskError) as caught:
+        mint_session_id("grok", Path("/tmp"), None)
+    assert "callee-minted-read-back" in str(caught.value)
+    assert "never adopts" in str(caught.value)
+    # The measured rows are unaffected: grok really declares caller-assigned.
+    monkeypatch.undo()
+    assert mint_session_id("grok", Path("/tmp"), "abc") == "abc"
+
+
 def test_a_modal_arriving_with_the_marker_is_still_answered() -> None:
     """One repaint can deliver the composer paint and the dialog over it.
 
