@@ -1458,25 +1458,6 @@ pub(crate) fn index_tree(
     Ok(out)
 }
 
-/// The most recently written of the store's matches, for the freshness probe.
-/// Newest, not first: a session can leave stubs in other project dirs, and a
-/// stub whose creation post-dates the real transcript's last turn must not
-/// read as the fresher one is stale (a misread there only KEEPS a row, the
-/// fail-safe direction).
-fn newest_by_mtime(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
-    paths
-        .iter()
-        .max_by_key(|p| {
-            std::fs::metadata(p)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-        })
-        .cloned()
-}
-
 /// Harness-session cascades per sweep: bounded so one sweep cannot turn into an
 /// unbounded subprocess farm; the remainder is candidates on the next tick.
 const CASCADE_CAP: usize = 10;
@@ -2668,24 +2649,20 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         };
         let harness_session_gone = store_hits.as_ref().map(|m| m.is_empty());
         let transcript_fresh = if !is_live && past_grace {
-            let harness_path = store_hits.as_deref().and_then(newest_by_mtime);
-            // The `log_path` fallback stays available only to rows a terminal
-            // status or a dead pid already condemned. The stamped-contradiction
-            // arm reads staleness ONLY from the session's own harness store,
-            // because a store lookup can come back empty for two reasons: the
-            // session ended, or the lookup was aimed at the wrong tree. That
-            // second one is real - a codex child that inherited a claude pane's
-            // CLAUDE_CONFIG_DIR is looked for under `<config_dir>/projects`,
-            // where codex never writes - and a stale `log_path` copy nobody
-            // updates would then read as positively stale for a LIVE session.
-            match harness_path
+            // The stamped-contradiction arm resolves the transcript through the
+            // shared rule (PR 1442's): the harness store first, the `log_path`
+            // fallback only for a row already condemned.
+            transcript_fresh_probe(
+                crate::gc::row_transcript(
+                    store_hits.as_deref(),
+                    e.log_path.as_deref(),
+                    terminal_or_dead,
+                )
                 .as_deref()
-                .and_then(|p| p.to_str())
-                .or_else(|| terminal_or_dead.then_some(e.log_path.as_deref()).flatten())
-            {
-                Some(path) => transcript_fresh_probe(Some(path), now, grace_secs),
-                None => None,
-            }
+                .and_then(|p| p.to_str()),
+                now,
+                grace_secs,
+            )
         } else {
             None
         };
@@ -2716,10 +2693,15 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         // alone would pull it into an eviction route it never used before.
         if is_live || (e.pid.is_none() && !e.short_id.is_empty() && !e.is_one_shot_ask()) {
             // The idle gate's transcript read comes from the same store index
-            // (in memory after the first build), never a fresh walk.
-            let transcript = store_matches(e)
-                .and_then(|m| newest_by_mtime(&m))
-                .or_else(|| e.log_path.as_deref().map(std::path::PathBuf::from));
+            // (in memory after the first build), never a fresh walk, through the
+            // same shared rule the contradiction arm uses - the unconditional
+            // `log_path` fallback read a 0-byte wrapper log for 21 claude rows
+            // that have the real transcript in their own store.
+            let transcript = crate::gc::row_transcript(
+                store_matches(e).as_deref(),
+                e.log_path.as_deref(),
+                terminal_or_dead,
+            );
             // `row_idle_secs` folds the transcript's mtime into `idle`, so this
             // gate opening already proves the transcript has been untouched for
             // longer than grace - an hour by default, against a sweep every

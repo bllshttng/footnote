@@ -449,6 +449,47 @@ pub(crate) fn row_handle(e: &crate::state::RegistryEntry) -> String {
     }
 }
 
+/// The most recently written of the store's matches, for the freshness probe.
+/// Newest, not first: a session can leave stubs in other project dirs, and a
+/// stub whose creation post-dates the real transcript's last turn must not
+/// read as the fresher one is stale (a misread there only KEEPS a row, the
+/// fail-safe direction).
+fn newest_by_mtime(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    paths
+        .iter()
+        .max_by_key(|p| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        })
+        .cloned()
+}
+
+/// The row's transcript, resolved through its OWN harness store (keyed on
+/// `harness_session_id`) and only then through the stored `log_path`.
+///
+/// The `log_path` fallback stays available only to rows a terminal status or a
+/// dead pid already condemned. A store lookup can come back empty for two
+/// reasons - the session ended, or the lookup was aimed at the wrong tree - and
+/// a stale `log_path` copy nobody updates would read as positively stale for a
+/// LIVE session. For 21 claude rows measured 2026-09-04 that path is a 0-byte
+/// wrapper log under `agents/logs/` whose mtime is spawn time, not activity.
+pub(crate) fn row_transcript(
+    store_hits: Option<&[std::path::PathBuf]>,
+    log_path: Option<&str>,
+    terminal_or_dead: bool,
+) -> Option<std::path::PathBuf> {
+    store_hits.and_then(newest_by_mtime).or_else(|| {
+        terminal_or_dead
+            .then_some(log_path)
+            .flatten()
+            .map(std::path::PathBuf::from)
+    })
+}
+
 /// Decide the GC action for one row. Pure: no clock, no I/O.
 ///
 /// The reap condition is all three of: (1) terminal status OR pid confirmed dead
