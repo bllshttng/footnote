@@ -91,17 +91,10 @@ _TARGET_FAMILY = _carrier_vocab()[0]
 
 
 @cache
-def footnote_verbs() -> frozenset:
-    """The shipped footnote verb roster: every ``skills/<name>/SKILL.md`` and
-    every ``commands/<name>.md`` the plugin ships.
-
-    Read from the shipped plugin surface, never a retyped literal: a literal
-    copy goes stale the first time a verb ships, and the failure is silent -
-    the new verb simply stops normalizing on codex and nothing notices.
-    Cached once per process. Empty on any resolution or read failure, which
-    on the codex surface leaves every bare ``/verb`` literal - pass-through is
-    the safe direction - while the plugin-qualified ``/fno:verb`` spelling
-    keeps working, since its namespace alone proves it is a footnote verb."""
+def _shipped_verbs() -> frozenset:
+    """One read of the shipped plugin surface. Cached; see `footnote_verbs`,
+    which is the caller every consumer uses, and which declines to KEEP an
+    empty answer."""
     from fno.paths import resolve_plugin_script
 
     verbs: set[str] = set()
@@ -116,6 +109,36 @@ def footnote_verbs() -> frozenset:
     except OSError:
         pass
     return frozenset(verbs)
+
+
+def footnote_verbs() -> frozenset:
+    """The shipped footnote verb roster: every ``skills/<name>/SKILL.md`` and
+    every ``commands/<name>.md`` the plugin ships.
+
+    Read from the shipped plugin surface, never a retyped literal: a literal
+    copy goes stale the first time a verb ships, and the failure is silent -
+    the new verb simply stops normalizing on codex and nothing notices.
+
+    Empty on any resolution or read failure, which on the codex surface leaves
+    every bare ``/verb`` literal - pass-through is the safe direction - while
+    the plugin-qualified ``/fno:verb`` spelling keeps working, since its
+    namespace alone proves it is a footnote verb.
+
+    A non-empty answer is cached for the process; an EMPTY one is not. An
+    empty roster does not mean footnote ships no verbs, it means the plugin
+    surface did not resolve, and that condition is transient: the resolver
+    reads an env hint, then a package-relative path, then a persisted pointer,
+    so a caller whose cwd or environment moves resolves it on the next call.
+    Caching the failure froze the degraded answer for the whole process, and
+    the degradation is silent - a codex worker gets `/target`, which codex
+    reads as prose rather than a verb, so the dispatch quietly does nothing."""
+    verbs = _shipped_verbs()
+    if not verbs:
+        _shipped_verbs.cache_clear()
+    return verbs
+
+
+footnote_verbs.cache_clear = _shipped_verbs.cache_clear  # type: ignore[attr-defined]
 
 
 def normalize_legacy_no_merge(command: str) -> str:

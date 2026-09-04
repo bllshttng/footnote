@@ -2565,6 +2565,18 @@ class TestTickRecordsAndDeadline:
                 "counts": {}, "findings": [], "warnings": []
             },
         )
+        # The roster legs run BEFORE the recovery-root loop and were the only
+        # unpatched real calls left in this fixture. `fleet_rows` needs a live
+        # daemon, so on CI it raises, the tick's own handler swallows it as
+        # "watchdog sweep failed", and the loop under test is never reached.
+        # Both tests then read an empty `scanned` - one as a false failure, the
+        # other as a false pass.
+        monkeypatch.setattr(watchdog, "fleet_rows", lambda **kw: ([], []))
+        monkeypatch.setattr(
+            watchdog, "measure_provider_outages", lambda rows, *, now_s: {"breakers": []}
+        )
+        monkeypatch.setattr(watchdog, "_last_events_signature", lambda: "")
+        monkeypatch.setattr(watchdog, "supervise_provider_handoffs", lambda *a, **kw: [])
         monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: ({"verdicts": [], "counts": {}, "warnings": []}, []))
         monkeypatch.setattr(watchdog, "_last_recovery_events_signature", lambda: "")
         monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: None)
@@ -2597,17 +2609,20 @@ class TestTickRecordsAndDeadline:
         return scanned
 
     def test_recovery_root_loop_stops_when_the_tick_budget_runs_out(
-        self, monkeypatch, tmp_path
+        self, monkeypatch, tmp_path, caplog
     ):
         """Measured 2026-09-02 at 0.8s per root over 18 roots. The stranded
         sweep already re-checks per root; this leg had no check at all, so a
         multi-root tick walked past the deadline and SIGALRM killed every leg
         behind it."""
+        import logging
+
         import typer
         from typer.testing import CliRunner
 
         from fno.pr_watch import cli as prcli
 
+        caplog.set_level(logging.INFO, logger="fno.pr_watch.cli")
         roots = [tmp_path / "a", tmp_path / "b", tmp_path / "c"]
         for root in roots:
             root.mkdir()
@@ -2623,6 +2638,13 @@ class TestTickRecordsAndDeadline:
         result = CliRunner().invoke(app, [])
 
         assert result.exit_code == 0, result.output
+        # The positive marker first. `scanned == []` is an ABSENCE, and a tick
+        # that never reached this loop produces the same empty list - which is
+        # exactly what an unpatched roster leg did until the fixture above
+        # closed it. Assert the break actually fired before trusting the zero.
+        assert "Codex recovery scan stopped after 0 root(s)" in caplog.text, (
+            "the loop never reached its budget check"
+        )
         assert scanned == [], "the loop scanned a root it had no budget for"
 
     def test_recovery_root_loop_scans_every_root_when_the_budget_holds(
