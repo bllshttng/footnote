@@ -22,7 +22,7 @@ use crate::AgentStatus;
 use std::time::Duration;
 
 use crate::daemon::{
-    batched_row_truths, cascade_harness_session_with, gc_sweep_impl_with_node_cascade,
+    batched_row_states, cascade_harness_session_with, gc_sweep_impl_with_node_cascade,
     live_liveness_prober, live_truth_tail_states, reap_node_session, registry_entries, GcSummary,
     HarnessStoreIndex,
 };
@@ -568,7 +568,7 @@ pub fn gc_sweep(
     let store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let truth = registry_entries(home).map_or_else(std::collections::HashMap::new, |entries| {
-        batched_row_truths(&entries, &live_truth_tail_states)
+        batched_row_states(&entries, &live_truth_tail_states)
     });
     let prober = live_liveness_prober(truth);
     gc_sweep_impl_with_node_cascade(
@@ -602,7 +602,7 @@ pub fn gc_sweep_dry_run(
     let store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let truth = registry_entries(home).map_or_else(std::collections::HashMap::new, |entries| {
-        batched_row_truths(&entries, &live_truth_tail_states)
+        batched_row_states(&entries, &live_truth_tail_states)
     });
     let prober = live_liveness_prober(truth);
     gc_sweep_impl_with_node_cascade(

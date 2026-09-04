@@ -133,6 +133,12 @@ pub struct TruthProbe {
     pub last_event_at: Option<String>,
     pub last_message: Option<String>,
     pub observed_model: serde_json::Value,
+    /// The title the HARNESS carries for this session (claude's Ctrl+R
+    /// agent-name record; codex/opencode's index title), read Python-side by
+    /// the same probe so the list emitter never grows a second title reader.
+    /// `None` = the harness carries none or the probe predates the field:
+    /// absence renders as absence, never as the row's label.
+    pub harness_title: Option<String>,
 }
 
 fn family1_truth_command(handle: &str) -> std::process::Command {
@@ -522,6 +528,8 @@ fn build_truth_probe(parsed: Option<&serde_json::Value>, state: &str) -> TruthPr
         observed_model: parsed
             .and_then(|value| value.get("observed_model").cloned())
             .unwrap_or(serde_json::Value::Null),
+        harness_title: parsed
+            .and_then(|value| value.get("harness_title")?.as_str().map(str::to_owned)),
     }
 }
 

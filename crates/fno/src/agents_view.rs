@@ -158,6 +158,11 @@ pub struct RegistryAgent {
     /// pair): the render can say "probe older than N s" instead of a bare
     /// unmeasured glyph.
     pub liveness_age_s: Option<u64>,
+    /// (x-1ab9) The LAST title the harness reported for this session
+    /// (claude's Ctrl+R agent-name record), stored by the daemon sweep. The
+    /// render joins it into the subline when it differs from the label; the
+    /// row's `name` is never rewritten from it.
+    pub harness_title: Option<String>,
 }
 
 /// See [`RegistryAgent::liveness`]. `Alive`/`Dead` are confident reads;
@@ -1874,6 +1879,10 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             )
         });
         let liveness_age_s = measured_at.and_then(|t| now_secs.checked_sub(t));
+        let harness_title = row
+            .get("harness_title")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let mux = row.get("mux").and_then(|m| {
             Some((
                 m.get("session")?.as_str()?.to_string(),
@@ -2226,6 +2235,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             spawned_by_session,
             liveness,
             liveness_age_s,
+            harness_title,
         });
     }
     // Stable order so row-set equality (the change gate) and the rendered
@@ -2332,6 +2342,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             spawned_by_session: None,
             liveness: Liveness::Alive,
             liveness_age_s: None,
+            harness_title: None,
         });
     }
     drop(reg_ids); // release the borrow of `out` before extending it
@@ -2390,6 +2401,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             spawned_by_session: r.harness_session_id.clone(),
             liveness: Liveness::Alive,
             liveness_age_s: None,
+            harness_title: r.harness_title.clone(),
         });
     }
     out.extend(parked);
@@ -4525,6 +4537,7 @@ config_dir = "~/.claude-alt"
             },
             harness: Some("claude".to_string()),
             liveness_age_s: None,
+            harness_title: None,
         }
     }
 

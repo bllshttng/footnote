@@ -2376,21 +2376,16 @@ pub(crate) fn registry_entries(home: &AgentsHome) -> Option<Vec<state::RegistryE
         .map(|r| r.entries)
 }
 
-/// Precompute the truth rung for every claude row in ONE batched call
-/// (`family1_truth_probe_many`'s seam), so the ladder never launches a serial
-/// per-row `fno agents truth` subprocess inside the sweep - N rows would
-/// otherwise hold the GC worker for roughly N probe timeouts. Keyed by the
-/// handle asked for (the row's claude uuid), so the prober's lookup is a map
-/// get. Every row qualifies, not only stamped ones: the ladder's `is_live`
-/// vote (x-91f3) reads the truth rung for unstamped rows too, and a
-/// stamped-only batch leaves the transcript - the one marker a pid-less,
-/// unstamped claude row can carry - permanently silent for that vote. An
-/// empty candidate set spends nothing.
-pub(crate) fn batched_row_truths(
-    entries: &[state::RegistryEntry],
-    truth_tail_states: &dyn Fn(&[String]) -> std::collections::HashMap<String, String>,
-) -> std::collections::HashMap<String, String> {
-    let handles: Vec<String> = entries
+/// The claude-uuid candidate handles for the sweep's ONE truth batch: the
+/// ladder never launches a serial per-row `fno agents truth` subprocess
+/// inside the sweep - N rows would otherwise hold the GC worker for roughly
+/// N probe timeouts. Every row qualifies, not only stamped ones: the
+/// ladder's `is_live` vote (x-91f3) reads the truth rung for unstamped rows
+/// too, and a stamped-only batch leaves the transcript - the one marker a
+/// pid-less, unstamped claude row can carry - permanently silent for that
+/// vote. An empty candidate set spends nothing.
+pub(crate) fn row_truth_handles(entries: &[state::RegistryEntry]) -> Vec<String> {
+    entries
         .iter()
         .filter_map(|e| {
             e.claude_session_uuid
@@ -2399,11 +2394,100 @@ pub(crate) fn batched_row_truths(
                 .filter(|u| !u.is_empty())
                 .map(String::from)
         })
-        .collect();
+        .collect()
+}
+
+/// The batch over [`row_truth_handles`] as the reconcile sweep runs it,
+/// returning the FULL probes, not a lowered state string: one batch feeds
+/// both the liveness ladder and the title detector, and a second subprocess
+/// for titles would be the same cold start paid twice per sweep.
+pub(crate) fn batched_row_probes(
+    entries: &[state::RegistryEntry],
+    truth_tail_probes: &dyn Fn(
+        &[String],
+    )
+        -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>,
+) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe> {
+    let handles = row_truth_handles(entries);
+    if handles.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    truth_tail_probes(&handles)
+}
+
+/// The batch as the gc path runs it, lowered to the state string the
+/// liveness ladder's truth rung reads.
+pub(crate) fn batched_row_states(
+    entries: &[state::RegistryEntry],
+    truth_tail_states: &dyn Fn(&[String]) -> std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    let handles = row_truth_handles(entries);
     if handles.is_empty() {
         return std::collections::HashMap::new();
     }
     truth_tail_states(&handles)
+}
+
+/// (x-1ab9) The title diff the sweep's `agent_renamed` emits are built from:
+/// one entry per row whose last-seen `harness_title` differs from the batch's
+/// reading. The tuple is `(name, harness_session_id, from, to)` - the event
+/// payload's shape, with `from` `None` on first observation. Rows without a
+/// harness session id are skipped: the event names identity (law
+/// d-e952ed19), and an identity-less rename has no addressee. The row's
+/// `name` is never written from any of this: the label is fno's, the title
+/// is the harness's.
+pub(crate) fn title_changes(
+    entries: &[state::RegistryEntry],
+    titles: &std::collections::HashMap<String, Option<String>>,
+) -> Vec<(String, Option<String>, Option<String>, String)> {
+    entries
+        .iter()
+        .filter_map(|e| {
+            let uuid = e.claude_session_uuid.as_deref()?;
+            let sid = e.harness_session_id.clone().filter(|s| !s.is_empty())?;
+            let new_title = titles.get(uuid)?.clone()?;
+            let from = e.harness_title.clone();
+            if from.as_deref() == Some(new_title.as_str()) {
+                return None;
+            }
+            Some((e.name.clone(), Some(sid), from, new_title))
+        })
+        .collect()
+}
+
+/// (x-1ab9) Apply the batch's title readings to the registry under the
+/// caller's lock. Keyed by identity (law d-e952ed19) read off the snapshot
+/// the batch planned from, so a row replaced under the same label between
+/// snapshot and locked write cannot receive the first row's title. The
+/// stored value is the DIFF BASELINE the next sweep compares against; every
+/// reader is served the probe's fresh reading with this as fallback.
+pub(crate) fn apply_title_changes(
+    r: &mut state::Registry,
+    entries: &[state::RegistryEntry],
+    titles: &std::collections::HashMap<String, Option<String>>,
+) {
+    for (uuid, new_title) in titles {
+        let Some(new_title) = new_title else {
+            continue;
+        };
+        let Some(e0) = entries
+            .iter()
+            .find(|e| e.claude_session_uuid.as_deref() == Some(uuid.as_str()))
+        else {
+            continue;
+        };
+        let (harness, sid) = state::registry_write_key(e0);
+        let keyed = sid
+            .as_deref()
+            .and_then(|sid| r.find_by_session_mut(&harness, sid));
+        let target = match keyed {
+            Some(e) => Some(e),
+            None => r.find_mut(&e0.name),
+        };
+        if let Some(e) = target {
+            e.harness_title = Some(new_title.clone());
+        }
+    }
 }
 
 /// The shared liveness ladder as production runs it (x-5d96): the reader
@@ -7647,6 +7731,14 @@ where
                     // reads its age honestly when it is not.
                     "liveness": e.liveness,
                     "liveness_measured_at": e.liveness_measured_at,
+                    // (x-1ab9) The harness's own title for the session, served
+                    // from the probe's fresh reading with the sweep's stored
+                    // last-seen value as fallback. Beside `name`, never in it:
+                    // the label is fno's, the title is the harness's.
+                    "harness_title": truths
+                        .get(&registry_truth_handle(e))
+                        .and_then(|t| t.harness_title.clone())
+                        .or_else(|| e.harness_title.clone()),
                     "status": rendered_status,
                     // The reachability triple, from the same probe the rendered
                     // word above came from. `fno agents list` is where `peek` and
@@ -10331,7 +10423,25 @@ fn run_reconcile_sweep(
             .map(Path::new)
             .is_some_and(Path::is_file)
     };
-    let truth = batched_row_truths(&entries, &live_truth_tail_states);
+    let probes = batched_row_probes(&entries, &crate::claude_ask::family1_truth_probe_many);
+    // One batch feeds both consumers: the ladder's truth rung reads states,
+    // the title detector reads titles. The probes are keyed by the row's
+    // claude uuid (the handle the batch asked for), which is also the map
+    // key the row lookup below uses.
+    let truth: std::collections::HashMap<String, String> = probes
+        .iter()
+        .map(|(h, p)| (h.clone(), p.state.clone()))
+        .collect();
+    let titles: std::collections::HashMap<String, Option<String>> = probes
+        .into_iter()
+        .map(|(h, p)| (h, p.harness_title))
+        .collect();
+    // (x-1ab9) Title diff, computed off the SAME snapshot the write below
+    // applies to: the harness's own name for the session against the row's
+    // last-seen value. `name` is NEVER written from it - the label is fno's,
+    // the title is the harness's - and the emit rides the successful write,
+    // so a failed write never announces a rename it did not persist.
+    let renames = title_changes(&entries, &titles);
     let prober = live_liveness_prober(truth);
     // (x-1ab9) The sweep budget starts HERE, after the truth batch and the
     // roster load: those reads serve every verb, and charging them to the
@@ -10391,12 +10501,33 @@ fn run_reconcile_sweep(
                 apply_reconcile_change(e, ch.new_status, ch.new_liveness, &now);
             }
         }
+        // (x-1ab9) Apply the batch's title readings in the SAME lock window:
+        // the row's stored title is the diff baseline the next sweep compares
+        // against, so a row the reconcile changes never skipped lost its
+        // rename.
+        apply_title_changes(r, &entries, &titles);
     }) {
         let _ = emitter.emit("reconcile_error", &json!({"error": err.to_string()}));
         return Err(format!(
             "reconcile computed {} change(s) but the registry write failed: {err}",
             changes.len()
         ));
+    }
+
+    // (x-1ab9) The renames ride the SUCCESSFUL write: each event names the
+    // row whose stored title the write just advanced, so events.jsonl never
+    // announces a rename the registry does not carry, and a failed write
+    // (the early return above) never announces one either.
+    for (name, sid, from, to) in &renames {
+        let _ = emitter.emit(
+            "agent_renamed",
+            &json!({
+                "name": name,
+                "harness_session_id": sid,
+                "from": from,
+                "to": to,
+            }),
+        );
     }
 
     // Roster-progress refresh (x-cdc7 SECOND HALF): the same per-tick set the
@@ -10761,21 +10892,47 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
         }
     };
     // Validate against the wire vocabulary; keep the label for the event payload
-    // and map to the typed enum for storage.
+    // and map to the typed enum for storage. (x-1ab9) `model` is the
+    // PostModelSwitch posture: no inside-leg transition, the report only
+    // diffs the row's SERVED model/effort axes, and it must carry at least
+    // one of them.
     let state_label = match req.params.get("state").and_then(|v| v.as_str()) {
-        Some(s @ ("working" | "blocked" | "done")) => s.to_string(),
+        Some(s @ ("working" | "blocked" | "done" | "model")) => s.to_string(),
         _ => {
             return Response::err(
                 req.id,
                 ErrorCode::InvalidParams,
-                "`state` must be working|blocked|done",
+                "`state` must be working|blocked|done|model",
             )
         }
     };
+    let model_only = state_label == "model";
+    let model = req
+        .params
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let effort = req
+        .params
+        .get("effort")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if model_only && model.is_none() && effort.is_none() {
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidParams,
+            "state=model requires `model` or `effort`",
+        );
+    }
     let state = match state_label.as_str() {
-        "working" => state::InsideLegState::Working,
-        "blocked" => state::InsideLegState::Blocked,
-        _ => state::InsideLegState::Done,
+        "working" => Some(state::InsideLegState::Working),
+        "blocked" => Some(state::InsideLegState::Blocked),
+        "done" => Some(state::InsideLegState::Done),
+        _ => None,
     };
     let reason = req
         .params
@@ -10786,13 +10943,14 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
 
     // Build the report once; a clone moves into the locked store path, the
     // original is reused for the early-push buffer when no row exists yet.
-    let report = state::InsideLegReport {
+    // `None` under the model posture: there is no transition to store.
+    let report = state.map(|state| state::InsideLegReport {
         state,
         seq,
         reason,
         received_at: now_rfc3339_like(),
         ttl_ms,
-    };
+    });
     let report_for_store = report.clone();
 
     // The store/drop decision is made UNDER the registry flock so two concurrent
@@ -10807,6 +10965,13 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
     // UNDER the flock from prev-vs-new state; fired AFTER the write so a slow
     // notifier can never stall ingestion.
     let mut notify: Option<(String, String, bool)> = None;
+    // (x-1ab9) The row's label, captured under the flock for the axis-change
+    // events emitted after the write.
+    let mut entry_name: Option<String> = None;
+    // (x-1ab9) Served-axis change records captured under the flock, emitted
+    // after the write: (kind, from, to). `requested_*` are never touched -
+    // they stay the spawn request, which is the provenance.
+    let mut axis_changes: Vec<(&str, Option<String>, String)> = Vec::new();
     if let Err(e) = state::update_registry(&ctx.home.registry_json(), |r| {
         // Match by the pinned session id (fast path). If nothing holds it, a
         // `claude --bg` row may still be waiting for its uuid: backfill it by
@@ -10831,30 +10996,40 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
             return;
         };
         let entry = &mut r.entries[idx];
-        if let Some(prev) = &entry.inside_leg {
-            if seq <= prev.seq {
-                outcome = Outcome::StaleSeq { last: prev.seq };
-                return;
+        entry_name = Some(entry.name.clone());
+        if let Some(rep) = &report_for_store {
+            if let Some(prev) = &entry.inside_leg {
+                if seq <= prev.seq {
+                    outcome = Outcome::StaleSeq { last: prev.seq };
+                    return;
+                }
+            }
+            let prev_state = entry.inside_leg.as_ref().map(|r| r.state);
+            if state::enters(prev_state, rep.state, state::InsideLegState::Blocked) {
+                let body = rep.reason.clone().unwrap_or_else(|| state_label.clone());
+                notify = Some((entry.name.clone(), body, false));
+            } else if state::enters(prev_state, rep.state, state::InsideLegState::Done) {
+                let body = rep.reason.clone().unwrap_or_else(|| state_label.clone());
+                notify = Some((entry.name.clone(), body, true));
+            }
+            entry.inside_leg = Some(rep.clone());
+            // Capability flip: the hook now owns this row's signal; a stale
+            // scrape verdict must never shadow it (per-capability arbitration).
+            entry.screen_state = None;
+        }
+        if let Some(m) = &model {
+            if entry.model.as_deref() != Some(m.as_str()) {
+                axis_changes.push(("agent_model_changed", entry.model.clone(), m.clone()));
+                entry.model = Some(m.clone());
+                entry.model_basis = Some("verified".to_string());
             }
         }
-        let prev_state = entry.inside_leg.as_ref().map(|r| r.state);
-        if state::enters(prev_state, state, state::InsideLegState::Blocked) {
-            let body = report_for_store
-                .reason
-                .clone()
-                .unwrap_or_else(|| state_label.clone());
-            notify = Some((entry.name.clone(), body, false));
-        } else if state::enters(prev_state, state, state::InsideLegState::Done) {
-            let body = report_for_store
-                .reason
-                .clone()
-                .unwrap_or_else(|| state_label.clone());
-            notify = Some((entry.name.clone(), body, true));
+        if let Some(eff) = &effort {
+            if entry.effort.as_deref() != Some(eff.as_str()) {
+                axis_changes.push(("agent_effort_changed", entry.effort.clone(), eff.clone()));
+                entry.effort = Some(eff.clone());
+            }
         }
-        entry.inside_leg = Some(report_for_store);
-        // Capability flip: the hook now owns this row's signal; a stale
-        // scrape verdict must never shadow it (per-capability arbitration).
-        entry.screen_state = None;
         outcome = Outcome::Stored;
     }) {
         return Response::err(
@@ -10870,6 +11045,19 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
                 "inside_leg_report",
                 &json!({"session_id": session_id, "seq": seq, "state": state_label}),
             );
+            // (x-1ab9) One event per served-axis change, emitted only after
+            // the write landed.
+            for (kind, from, to) in &axis_changes {
+                let _ = ctx.emitter.emit(
+                    kind,
+                    &json!({
+                        "name": entry_name,
+                        "harness_session_id": session_id,
+                        "from": from,
+                        "to": to,
+                    }),
+                );
+            }
             if let Some((title, body, is_done)) = notify {
                 let want = if is_done {
                     ctx.opts.notify_on_done
@@ -10897,13 +11085,18 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
         // instead of dropping it; the spawn path flushes it onto the row at
         // creation. Still fire-and-forget: every branch returns `ok`. The lock is
         // scoped to the buffer op (released before the emit) via `.map(..).ok()`;
-        // a poisoned lock -> `None` -> the old hard-drop degrade.
+        // a poisoned lock -> `None` -> the old hard-drop degrade. (x-1ab9) A
+        // model-posture report has no transition to buffer: an unknown session
+        // is a plain drop.
         Outcome::Unknown => {
-            let buffered = ctx
-                .pending_inside_leg
-                .lock()
-                .map(|mut buf| buffer_pending_report(&mut buf, &session_id, report))
-                .ok();
+            let buffered = report
+                .map(|rep| {
+                    ctx.pending_inside_leg
+                        .lock()
+                        .map(|mut buf| buffer_pending_report(&mut buf, &session_id, rep))
+                        .ok()
+                })
+                .flatten();
             match buffered {
                 Some(BufferOutcome::Buffered) => {
                     let _ = ctx.emitter.emit(
@@ -13552,7 +13745,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         // are the truth rung and the heartbeat rung, the markers pid-less
         // rows are judged by.
         let entries = state::load_registry(&home.registry_json()).unwrap().entries;
-        let truth = batched_row_truths(&entries, &|handles: &[String]| {
+        let truth = batched_row_states(&entries, &|handles: &[String]| {
             handles
                 .iter()
                 .filter(|h| h.as_str() == "truth-live-sess")
@@ -13645,7 +13838,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             seen.borrow_mut().push(handles.to_vec());
             std::collections::HashMap::new()
         };
-        batched_row_truths(&[stamped, unstamped], &capture);
+        batched_row_states(&[stamped, unstamped], &capture);
         assert_eq!(
             seen.borrow().len(),
             1,
@@ -13658,7 +13851,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             vec!["stamped-uuid".to_string(), "unstamped-uuid".to_string()]
         );
         seen.borrow_mut().clear();
-        batched_row_truths(&[bare], &capture);
+        batched_row_states(&[bare], &capture);
         assert!(
             seen.borrow().is_empty(),
             "an empty candidate set spends nothing"
@@ -15963,6 +16156,72 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         }
     }
 
+    fn claude_row(name: &str, uuid: &str, sid: &str) -> RegistryEntry {
+        let mut e = rentry(name, AgentStatus::Idle, None);
+        e.harness = Some("claude".into());
+        e.claude_session_uuid = Some(uuid.into());
+        e.harness_session_id = Some(sid.into());
+        e
+    }
+
+    #[test]
+    fn a_ctrl_r_rename_emits_once_and_never_touches_the_label() {
+        // (x-1ab9 task 5.1, AC10-HP) The sweep diffs the harness's title
+        // against the row's last-seen value: first observation emits with
+        // `from: null`, a repeat reads NO change, and the row's `name` is
+        // never written from a title.
+        let row = claude_row("w1", "uuid-1", "sid-1");
+        let mut titles = std::collections::HashMap::new();
+        titles.insert("uuid-1".to_string(), Some("renamed-by-ctrl-r".to_string()));
+
+        let renames = title_changes(&[row.clone()], &titles);
+        assert_eq!(
+            renames,
+            vec![(
+                "w1".to_string(),
+                Some("sid-1".to_string()),
+                None,
+                "renamed-by-ctrl-r".to_string()
+            )]
+        );
+
+        let mut reg = state::Registry::default();
+        reg.entries.push(row);
+        let snapshot = reg.entries.clone();
+        apply_title_changes(&mut reg, &snapshot, &titles);
+        let stored = &reg.entries[0];
+        assert_eq!(stored.harness_title.as_deref(), Some("renamed-by-ctrl-r"));
+        assert_eq!(stored.name, "w1", "the label is never rewritten");
+
+        // The next sweep sees the same title as no change: one emit, ever.
+        let stored_row = stored.clone();
+        assert!(
+            title_changes(&[stored_row], &titles).is_empty(),
+            "a settled title must not re-emit"
+        );
+    }
+
+    #[test]
+    fn rename_emits_ride_the_successful_write() {
+        // The emit loop sits AFTER the write-failure return inside
+        // `run_reconcile_sweep`, so a failed write never announces a rename
+        // it did not persist. Structural, so pin it like the budget clock.
+        let src = include_str!("daemon.rs");
+        let sweep = src
+            .split("fn run_reconcile_sweep(")
+            .nth(1)
+            .expect("run_reconcile_sweep exists");
+        let write = sweep
+            .find("apply_title_changes(r, &entries, &titles)")
+            .expect("title write");
+        let fail = sweep.find("registry write failed").expect("failure return");
+        let emit = sweep.find("\"agent_renamed\"").expect("rename emit");
+        assert!(
+            write < fail && fail < emit,
+            "a failed write must return before any rename is emitted"
+        );
+    }
+
     #[test]
     fn reconcile_budget_starts_after_truth_batch() {
         // (x-1ab9 task 4.1) The sweep's clock must start at plan_reconcile,
@@ -15980,7 +16239,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             .find("let start = Instant::now();")
             .expect("clock line");
         let truth = sweep
-            .find("batched_row_truths(&entries")
+            .find("batched_row_probes(&entries")
             .expect("truth batch call");
         let roster = sweep
             .find("ClaudeRoster::load_default()")
@@ -18209,6 +18468,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             last_event_at: None,
             last_message: None,
             observed_model: Value::Null,
+            harness_title: None,
         })
     }
 
@@ -18910,6 +19170,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 "Still growing (101 lines, 26 percent through the pytest run)".into(),
             ),
             observed_model: Value::Null,
+            harness_title: None,
         })
     }
 
@@ -18994,6 +19255,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             last_event_at: None,
             last_message: None,
             observed_model,
+            harness_title: None,
         })
     }
 
@@ -19691,6 +19953,7 @@ done
                     observed_model: json!({
                         "kind": "observed", "model": "glm-5.2", "samples": 300
                     }),
+                    harness_title: None,
                 })
             }),
         );

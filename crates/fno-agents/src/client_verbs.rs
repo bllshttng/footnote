@@ -4581,6 +4581,8 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
     let mut state: Option<String> = None;
     let mut reason: Option<String> = None;
     let mut ttl_ms: Option<u64> = None;
+    let mut model: Option<String> = None;
+    let mut effort: Option<String> = None;
 
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
@@ -4588,6 +4590,9 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
             "--session-id" => session_id = it.next(),
             "--state" => state = it.next(),
             "--reason" => reason = it.next(),
+            // (x-1ab9) The served model/effort axes, passed through verbatim.
+            "--model" => model = it.next(),
+            "--effort" => effort = it.next(),
             "--seq" => {
                 seq = Some(
                     it.next()
@@ -4615,7 +4620,9 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
         Some("working") => "working",
         Some("blocked") => "blocked",
         Some("done") => "done",
-        _ => return Err("report needs --state working|blocked|done".into()),
+        // (x-1ab9) The PostModelSwitch posture: no inside-leg transition.
+        Some("model") => "model",
+        _ => return Err("report needs --state working|blocked|done|model".into()),
     };
 
     let mut params = serde_json::Map::new();
@@ -4627,6 +4634,12 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
     }
     if let Some(t) = ttl_ms {
         params.insert("ttl_ms".into(), Value::Number(t.into()));
+    }
+    if let Some(m) = model {
+        params.insert("model".into(), Value::String(m));
+    }
+    if let Some(e) = effort {
+        params.insert("effort".into(), Value::String(e));
     }
     Ok(Value::Object(params))
 }

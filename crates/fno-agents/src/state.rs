@@ -650,6 +650,14 @@ pub struct RegistryEntry {
     pub liveness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_measured_at: Option<String>,
+    /// (x-1ab9) The LAST title the harness reported for this session (claude's
+    /// Ctrl+R agent-name record; codex/opencode's index title), kept ONLY as
+    /// the diff baseline the sweep's `agent_renamed` emit compares against.
+    /// The row's `name` is never written from it: the label is fno's, the
+    /// title is the harness's, and every reader is served the probe's fresh
+    /// reading with this stored value as fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_title: Option<String>,
     pub cwd: String,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` as
     /// `project_root: str = ""` (ab-b946b59c; see `short_id`): default on read,

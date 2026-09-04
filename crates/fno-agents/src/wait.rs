@@ -365,6 +365,7 @@ mod tests {
             last_event_at: None,
             last_message: None,
             observed_model: Value::Null,
+            harness_title: None,
         }
     }
 

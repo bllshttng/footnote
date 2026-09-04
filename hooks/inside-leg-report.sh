@@ -73,7 +73,7 @@ source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 
 STATE="${1:-working}"
 case "$STATE" in
-  working | blocked | done) ;;
+  working | blocked | done | model) ;;
   *) STATE="working" ;;
 esac
 
@@ -93,31 +93,43 @@ try:
     sid = d.get("session_id") or "" if isinstance(d, dict) else ""
     msg = (d.get("message") or "") if isinstance(d, dict) else ""
     event = (d.get("hook_event_name") or "") if isinstance(d, dict) else ""
+    model = (d.get("to_model") or "") if isinstance(d, dict) else ""
+    eff = (d.get("effort") or {}).get("level") or "" if isinstance(d, dict) else ""
 except Exception:
     sys.exit(0)
 if not sid:
     sys.exit(0)
 msg = msg.replace("\t", " ").replace("\n", " ")
 event = event.replace("\t", " ").replace("\n", " ")
-print(f"{sid}\t{time.monotonic_ns()}\t{msg}\t{event}")
+model = model.replace("\t", " ").replace("\n", " ")
+eff = eff.replace("\t", " ").replace("\n", " ")
+print(f"{sid}\t{time.monotonic_ns()}\t{msg}\t{event}\t{model}\t{eff}")
 ' <<<"$INPUT" 2>/dev/null) || PARSED=""
 
 # Keep marker emission INDEPENDENT of the parse: on a malformed/empty payload (or
 # no python3) SESSION_ID stays empty and the pane host still emits via the
 # presence-gate degrade. Only the state report (which needs both fields) is
-# skipped, below. A clean parse yields "<session_id>\t<seq>\t<message>\t<event>";
-# message is empty for every event that doesn't carry one (all but Notification).
+# skipped, below. A clean parse yields
+# "<session_id>\t<seq>\t<message>\t<event>\t<model>\t<effort>";
+# message is empty for every event that doesn't carry one (all but Notification),
+# model/effort only arrive on PostModelSwitch / effort-carrying inputs (x-1ab9).
 SESSION_ID=""
 SEQ=""
 MESSAGE=""
 HOOK_EVENT=""
+MODEL=""
+EFFORT=""
 if [[ "$PARSED" == *$'\t'* ]]; then
   SESSION_ID="${PARSED%%$'\t'*}"
   REST="${PARSED#*$'\t'}"
   SEQ="${REST%%$'\t'*}"
   REST="${REST#*$'\t'}"
   MESSAGE="${REST%%$'\t'*}"
-  HOOK_EVENT="${REST#*$'\t'}"
+  REST="${REST#*$'\t'}"
+  HOOK_EVENT="${REST%%$'\t'*}"
+  REST="${REST#*$'\t'}"
+  MODEL="${REST%%$'\t'*}"
+  EFFORT="${REST#*$'\t'}"
 fi
 
 # Turn boundary -> OSC 133 marker, mux panes only, and only from THE pane host.
@@ -298,6 +310,11 @@ fi
 # notification with no further plumbing.
 REPORT_ARGS=(--session-id "$SESSION_ID" --seq "$SEQ" --state "$STATE")
 [[ -n "$MESSAGE" ]] && REPORT_ARGS+=(--reason "$MESSAGE")
+# (x-1ab9) PostModelSwitch carries the harness-side model; every hook input
+# may carry an effort level. Optional params: the daemon diffs them against
+# the row and only stamps + emits on a real change.
+[[ -n "$MODEL" ]] && REPORT_ARGS+=(--model "$MODEL")
+[[ -n "$EFFORT" ]] && REPORT_ARGS+=(--effort "$EFFORT")
 
 if with_timeout 2 "$BIN" report "${REPORT_ARGS[@]}" >/dev/null 2>&1; then
   mark_reported

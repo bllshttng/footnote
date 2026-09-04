@@ -4290,6 +4290,7 @@ def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:
             "last_message",
             "session_id",
             "observed_model",
+            "harness_title",
         )
     }
     payload["reachability"] = reach.verdict

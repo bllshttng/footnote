@@ -10940,6 +10940,7 @@ impl Core {
                                 dnd: a.dnd,
                                 unmeasured,
                                 liveness_age_s: a.liveness_age_s,
+                                harness_title: a.harness_title.clone(),
                                 answerable: if exited { None } else { a.answerable.clone() },
                                 // A pane-hosted row focuses its pane; the attach
                                 // target never rides it (wire contract).
@@ -10951,7 +10952,7 @@ impl Core {
                                 // sideline can flag a foreign-cwd join.
                                 cwd_base: cwd_basename(&a.cwd),
                                 tombstone: false,
-                                subline: self.compose_subline(&a.cwd),
+                                subline: subline_with_title(a, self.compose_subline(&a.cwd)),
                                 // Structural roster-dir tag wins (Locked
                                 // Decision 6); else this pane's birth account.
                                 account: a
@@ -11011,6 +11012,7 @@ impl Core {
                                 dnd: false,
                                 unmeasured: false,
                                 liveness_age_s: None,
+                                harness_title: None,
                                 answerable: None,
                                 attach_id: None,
                                 external: false,
@@ -11105,6 +11107,7 @@ impl Core {
                         dnd: a.dnd,
                         unmeasured: false,
                         liveness_age_s: None,
+                        harness_title: a.harness_title.clone(),
                         answerable: None,
                         attach_id: None,
                         external: a.external,
@@ -11112,7 +11115,7 @@ impl Core {
                         seen: self.seen.contains(pane),
                         cwd_base: cwd_basename(&a.cwd),
                         tombstone: false,
-                        subline: self.compose_subline(&a.cwd),
+                        subline: subline_with_title(a, self.compose_subline(&a.cwd)),
                         account: a.account.clone(),
                         updated_at: a.updated_at,
                         pr: pr_from_name(&a.name)
@@ -11162,6 +11165,7 @@ impl Core {
                         dnd: a.dnd,
                         unmeasured: a.liveness == agents_view::Liveness::Unmeasured,
                         liveness_age_s: a.liveness_age_s,
+                        harness_title: a.harness_title.clone(),
                         answerable: if a.exited { None } else { a.answerable.clone() },
                         attach_id: if a.exited { None } else { a.attach_id.clone() },
                         external: a.external,
@@ -11171,7 +11175,7 @@ impl Core {
                         seen: false,
                         cwd_base,
                         tombstone: false,
-                        subline: self.compose_subline(&a.cwd),
+                        subline: subline_with_title(a, self.compose_subline(&a.cwd)),
                         // The structural roster-dir tag: an isolated-account
                         // foreign row carries its source account here (piece 3).
                         account: a.account.clone(),
@@ -11232,6 +11236,7 @@ impl Core {
                     dnd: false,
                     unmeasured: false,
                     liveness_age_s: None,
+                    harness_title: None,
                     answerable: None,
                     // Carried so the client can DismissMember; exited: true keeps
                     // it out of the attach catalog gate (attach_id + !exited).
@@ -11313,6 +11318,7 @@ impl Core {
                 dnd: false,
                 unmeasured: false,
                 liveness_age_s: None,
+                harness_title: None,
                 answerable: None,
                 // Carried on an exited row so the client can send RemoveExternal;
                 // on a live-ish row it is the StopExternal target. Either way the
@@ -15603,6 +15609,22 @@ fn subline_from(branch: Option<&str>, cwd: &str) -> Option<String> {
     }
 }
 
+/// (x-1ab9) The harness's own title for the session joins the subline when it
+/// differs from the row's label: the sideline keeps showing fno's label as the
+/// row name (a Ctrl+R rename never rewrites it), and the title rides the same
+/// dim slot so the rename is visible where the worker works.
+fn subline_with_title(a: &agents_view::RegistryAgent, base: Option<String>) -> Option<String> {
+    match a.harness_title.as_deref().filter(|t| *t != a.name) {
+        Some(t) => Some(match base {
+            Some(b) => format!("{t} · {b}"),
+            None => t.to_string(),
+        }),
+        // No title, or the title already equals the label: the base subline
+        // stands alone rather than a filter swallowing the whole slot.
+        None => base,
+    }
+}
+
 /// (x-6851 US3) The cwd basename carried on EVERY agent row (not just orphans),
 /// so the sideline can flag a foreign-cwd join client-side by comparing it to
 /// the squad's project basename. `None` for an empty cwd (no subline is
@@ -18530,6 +18552,7 @@ mod tests {
             predecessor_session_ids: Vec::new(),
             related_session_id: None,
             forked_from_session_id: None,
+            harness_title: None,
             name: name.into(),
             cwd: "/w".into(),
             exited: true,
@@ -24941,6 +24964,37 @@ mod tests {
     }
 
     #[test]
+    fn subline_with_title_joins_the_harness_title_beside_the_label() {
+        // (x-1ab9 AC10-HP) A row whose harness title differs from its label
+        // renders the title in the subline slot, joined onto the branch
+        // subline; a title that EQUALS the label renders nothing (the label
+        // already says it), and no title falls back to the base subline.
+        let mut a = bg_row("w1", "/tmp/repos/footnote", Some("j1"));
+        a.harness_title = Some("king-title".into());
+        assert_eq!(
+            subline_with_title(&a, Some("main · footnote".into())),
+            Some("king-title · main · footnote".into())
+        );
+        assert_eq!(
+            subline_with_title(&a, None),
+            Some("king-title".into()),
+            "no base subline -> title alone"
+        );
+        a.harness_title = Some("w1".into());
+        assert_eq!(
+            subline_with_title(&a, Some("main · footnote".into())),
+            Some("main · footnote".into()),
+            "title == label -> base subline untouched"
+        );
+        a.harness_title = None;
+        assert_eq!(
+            subline_with_title(&a, None),
+            None,
+            "no title, no base -> none"
+        );
+    }
+
+    #[test]
     fn agent_rows_join_tail_from_session_map_and_leave_others_empty() {
         // (x-b186 AC2-HP / AC4-ERR) The tail joins on the row's claude session
         // uuid. Data honesty is the point: a row with no uuid, or a uuid with no
@@ -25203,7 +25257,7 @@ mod tests {
                 session_id: None,
                 harness_session_id: None,
                 predecessor_session_ids: Vec::new(),
-            related_session_id: None,
+                related_session_id: None,
                 forked_from_session_id: None,
                 exited: true,
                 ..bg_row("tgt-x-ddd", "/w", Some("deadbee2"))
@@ -25212,7 +25266,7 @@ mod tests {
                 session_id: None,
                 harness_session_id: None,
                 predecessor_session_ids: Vec::new(),
-            related_session_id: None,
+                related_session_id: None,
                 forked_from_session_id: None,
                 mux: Some(("test".into(), 5)),
                 ..bg_row("tgt-x-ddd", "/w", Some("deadbee3"))

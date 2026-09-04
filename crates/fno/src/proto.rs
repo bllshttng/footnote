@@ -1245,6 +1245,13 @@ pub struct AgentRow {
     /// wire-tolerant (defaults None, nothing renders).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_age_s: Option<u64>,
+    /// (v67, x-1ab9) The last title the harness reported for this session
+    /// (claude's Ctrl+R agent-name record), from the registry row. The render
+    /// joins it into the subline when it differs from the label; `name` is
+    /// never rewritten from it. `#[serde(default)]` keeps a v66 reader
+    /// wire-tolerant (defaults None, nothing renders).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_title: Option<String>,
     /// (v9, x-c929) The answerable-prompt payload when this row is `blocked` on
     /// a numbered menu a manifest `[rule.answer]` grammar could enumerate;
     /// `None` for any other state or a focus-only blocked prompt. A structural
@@ -4287,7 +4294,10 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 66);
+        // The registry-keyed identity pair (StopAgent/RemoveAgent carry
+        // `harness_session_id`; AgentRow carries `liveness_age_s`) bumps it
+        // 66 -> 67.
+        assert_eq!(PROTO_VERSION, 67);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4602,6 +4612,7 @@ mod tests {
                         dnd: false,
                         unmeasured: false,
                         liveness_age_s: None,
+                        harness_title: None,
                         answerable: Some(AnswerablePrompt {
                             prompt: "Do you want to proceed?".into(),
                             options: vec![
@@ -4655,6 +4666,7 @@ mod tests {
                         dnd: false,
                         unmeasured: false,
                         liveness_age_s: None,
+                        harness_title: None,
                         answerable: None,
                         attach_id: None,
                         external: false,
