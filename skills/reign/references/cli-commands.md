@@ -1,3 +1,4 @@
+<!-- style-exception: canonical court prose predates the style rules; bundled into skills/reign verbatim -->
 # CLI commands: what the crown reaches for
 
 Curated for the crown: the verbs an adjudicator actually uses, each with the one gotcha that makes it non-obvious.

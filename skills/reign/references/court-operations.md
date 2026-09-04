@@ -1,3 +1,4 @@
+<!-- style-exception: canonical court prose predates the style rules; bundled into skills/reign verbatim -->
 # Court operations
 
 The operations manual for [court mode](../SKILL.md#court-mode-reign-over-the-wave).
