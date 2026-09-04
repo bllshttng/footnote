@@ -7,6 +7,10 @@ use crate::vt::frame_text;
 #[path = "client/tests/nav_tests.rs"]
 mod nav_tests;
 
+// The x-9fd0 portal-placement-picker family lives in its own module too.
+#[path = "client/tests/portal_pick_tests.rs"]
+mod portal_pick_tests;
+
 // The status-glyph family joined the nav family. The rename-overlay family
 // (tab, squad, agent targets) lives in its own module too.
 #[path = "client/tests/glyph_tests.rs"]
@@ -3645,13 +3649,23 @@ async fn right_arrow_toggles_a_workspace_caret() {
         "`l` sets the explicit Expanded view"
     );
 
-    // A non-workspace row notices rather than toggling something else.
+    // An agent row REACHES, it does not toggle (x-9fd0): Right takes the same
+    // row_action path Enter takes, so a live paneless row goes through portal
+    // 0 instead of the old "only a workspace row has a caret" refusal - that
+    // refusal was the dead-keybind shape, a losing case that only beeped.
     view.selector = Some(1); // an agent row
-    view.notice = None;
+    buf.clear();
     selector_keys(&mut view, &[0x1b, b'[', b'C'], &mut buf)
         .await
         .unwrap();
-    assert!(view.notice.is_some(), "Right off a workspace row says why");
+    assert_eq!(view.selector, None, "Right on an agent row reaches");
+    let mut cur = std::io::Cursor::new(&buf);
+    match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+        ClientMsg::Command(Command::AttachAgent { placement, .. }) => {
+            assert_eq!(placement.portal_target(), Some(0));
+        }
+        other => panic!("expected the portal reach, got {other:?}"),
+    }
     crate::view_store::clear_test_path();
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -12450,34 +12464,6 @@ async fn selector_enter_reaches_bg_agent_thread_pane() {
         ClientMsg::Command(Command::AttachAgent { id, placement }) => {
             assert_eq!(id, "c19cd2c3");
             assert_eq!(placement.portal_target(), Some(0), "drives portal 0");
-            assert!(placement.split.is_none() && !placement.here && placement.at.is_none());
-        }
-        other => panic!("expected AttachAgent, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn selector_shift_p_asks_the_server_for_a_new_portal() {
-    // (x-8f9d) `P` opens ANOTHER portal beside the one Enter uses, so two
-    // threads sit side by side. It names no index: the client must not
-    // choose one, or two clients pick the same number and the second
-    // reach repoints the first one's new portal.
-    let mut v = unified_rows_view();
-    v.selector = Some(8); // bg-claude
-    let mut buf: Vec<u8> = Vec::new();
-    selector_keys(&mut v, b"P", &mut buf).await.unwrap();
-    assert_eq!(v.selector, None, "the reach closes the selector");
-    assert!(v.attach_place.is_none(), "no placement dialog on a reach");
-    let mut cur = std::io::Cursor::new(&buf);
-    match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
-        ClientMsg::Command(Command::AttachAgent { id, placement }) => {
-            assert_eq!(id, "c19cd2c3");
-            assert!(placement.portal_new, "asks the server to allocate");
-            assert_eq!(
-                placement.portal, None,
-                "and names no index of its own - that is the whole point"
-            );
-            assert!(placement.wants_portal(), "still routes as a portal reach");
             assert!(placement.split.is_none() && !placement.here && placement.at.is_none());
         }
         other => panic!("expected AttachAgent, got {other:?}"),
