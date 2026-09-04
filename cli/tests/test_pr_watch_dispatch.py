@@ -1915,6 +1915,36 @@ class TestReadPrStateBudget:
         assert "budget" in str(exc.value).lower()
         assert launched == [], "gh pr view ran with no budget left to bound it"
 
+    def test_a_sliver_of_budget_refuses_the_second_leg_too(self, tmp_path, monkeypatch):
+        """A floor, not a zero check. A remaining budget under what the leg
+        costs spawns a gh process certain to time out, spending the deadline
+        to learn nothing."""
+        from fno.graph._reconcile import ReconcileError
+        from fno.pr_watch import _discover
+        from fno.pr_watch._discover import REVIEWS_LEG_FLOOR_S, read_pr_state
+
+        clock = [100.0]
+        monkeypatch.setattr(_discover.time, "monotonic", lambda: clock[0])
+        launched = []
+
+        def runner(cmd, **kw):
+            cmd_str = " ".join(str(c) for c in cmd)
+            if "comments" in cmd_str:
+                launched.append(cmd_str)
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout=self._view_stdout(), stderr=""
+                )
+            # Leaves a positive sliver, strictly under the floor.
+            clock[0] += 10.0 - (REVIEWS_LEG_FLOOR_S / 2)
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=self._info_stdout(), stderr=""
+            )
+
+        with pytest.raises(ReconcileError):
+            read_pr_state(self._cand(tmp_path), reviewers=[], runner=runner, timeout_s=10.0)
+
+        assert launched == [], "gh pr view ran on a budget it cannot finish in"
+
     def test_the_default_path_still_reads(self, tmp_path):
         """A fast merge leg leaves nearly the whole default budget, so the
         ordinary case keeps working and is only capped in total."""

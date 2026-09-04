@@ -43,6 +43,13 @@ log = logging.getLogger(__name__)
 MAX_EXACT_TERMINAL_READS = 3
 EXACT_TERMINAL_READ_TIMEOUT_S = 5.0
 
+#: Under this much budget left, `read_pr_state` does not start its reviews
+#: leg. A floor, not a zero check: a sliver spawns a gh process that is
+#: certain to time out, which spends the deadline to learn nothing. The
+#: number is the leg's own measured cost, 1.42s mean over eight real open PRs
+#: on 2026-09-03, rounded down so a faster-than-mean read is never refused.
+REVIEWS_LEG_FLOOR_S = 1.0
+
 
 @dataclass(frozen=True)
 class PrCandidate:
@@ -310,10 +317,11 @@ def read_pr_state(
     )
 
     remaining = timeout_s - (time.monotonic() - started)
-    if remaining <= 0:
+    if remaining < REVIEWS_LEG_FLOOR_S:
         raise ReconcileError(
-            f"read_pr_state #{candidate.pr_number} spent its {timeout_s:.1f}s budget "
-            "on the merge-state read; the reviews read was not started"
+            f"read_pr_state #{candidate.pr_number} left {remaining:.2f}s of its "
+            f"{timeout_s:.1f}s budget after the merge-state read, under the "
+            f"{REVIEWS_LEG_FLOOR_S:.1f}s the reviews read costs; it was not started"
         )
 
     # Step 2: Get reviews + comments + PR metadata for latest_review_ts and opened_at.
