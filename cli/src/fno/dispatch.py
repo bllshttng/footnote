@@ -106,6 +106,15 @@ def cmd_resolve(
     brief: Optional[str] = typer.Option(
         None, "--brief", help="Node dispatch brief; returned in env.TARGET_BRIEF (never the command line). Capped at 8 KB."
     ),
+    merge_posture: Optional[str] = typer.Option(
+        None,
+        "--merge-posture",
+        help=(
+            "no-merge|allow|from-config (x-8151): the resolver owns the "
+            "--no-merge carrier. from-config reads config.auto_merge.grant "
+            "from this cwd (errors degrade to no-merge)."
+        ),
+    ),
     trigger: str = typer.Option(
         "autonomous", "--trigger", help="autonomous (fire-and-forget) | attended. Autonomous never resolves pane."
     ),
@@ -167,6 +176,7 @@ def cmd_resolve(
             command=command,
             verb=verb,
             brief=brief,
+            merge_posture=merge_posture,
             trigger=trigger,
         )
 
@@ -246,6 +256,26 @@ def cmd_capabilities(
         typer.echo(f"dispatch capabilities: {exc}", err=True)
         raise typer.Exit(code=2)
     typer.echo(json.dumps(out, separators=(",", ":") if json_output else None, indent=None if json_output else 2))
+
+
+@dispatch_app.command("family")
+def cmd_family(
+    message: str = typer.Option(
+        ...,
+        "--message",
+        "-m",
+        help="The payload whose FIRST token is tested for /target-family membership.",
+    ),
+) -> None:
+    """Is this message a /target-family command? Prints ``family`` or
+    ``other``, exit 0 either way - the same nothing-at-runtime contract as
+    ``dispatch resolve``. The vocabulary is the canonical merge_posture table;
+    this verb is its only shell-readable surface, so the shell scripts ask
+    instead of carrying hand-copied pattern lists (the copies drifted)."""
+    from fno.agents.harness_map import is_target_family
+
+    typer.echo("family" if is_target_family(message) else "other")
+    raise typer.Exit(code=0)
 
 
 def _autonomous_route_for(

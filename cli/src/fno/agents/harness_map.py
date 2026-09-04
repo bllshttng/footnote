@@ -64,14 +64,30 @@ _SLASH, _CODEX_SKILL, _REFUSED = "slash", "codex-skill", "refused"
 # being a control input): the flag is the deterministic carrier that survives
 # `fno do target start` resolving its argument to a bare node id, and unlike the
 # token it cannot be manufactured by prose an LLM wrote into a brief.
-_AUTONOMOUS_COMMAND = "/target --no-merge {id}"
+_AUTONOMOUS_COMMAND = AUTONOMOUS_COMMAND = "/target --no-merge {id}"
 _AUTONOMOUS_COMMAND_MERGE = "/target {id}"
 
-# The /target-family first tokens (the per-harness spellings normalize_command
-# emits). The refusal carrier's vocabulary is scoped to these: rewriting the
-# args of another slash verb would mutate its instruction text, and prose is
-# not a control input (x-9d11).
-_TARGET_FAMILY = ("/target", "/fno:target", "$fno:target")
+
+@cache
+def _carrier_vocab() -> tuple[tuple[str, ...], str, str]:
+    """The carrier vocabulary from the ONE canonical merge_posture table
+    (x-8151): authored in the Rust tree, shipped here as generated package
+    data. The Rust engine and these readers cannot drift."""
+    import tomllib
+    from importlib.resources import files
+
+    table = tomllib.loads(
+        files("fno.agents").joinpath("merge_posture.toml").read_text(encoding="utf-8")
+    )
+    return (
+        tuple(table["target_family"]["spellings"]),
+        str(table["carrier"]["flag"]),
+        str(table["carrier"]["legacy_token"]),
+    )
+
+
+_TARGET_FAMILY = _carrier_vocab()[0]
+
 
 
 @cache
@@ -112,13 +128,14 @@ def normalize_legacy_no_merge(command: str) -> str:
     free text (``/target fix the no-merge carrier bug`` is a real feature
     description), and rewriting the word anywhere would mutate prompt text the
     operator typed and arm a refusal from prose (round 10)."""
+    _spellings, flag, legacy = _carrier_vocab()
     parts = command.split()
     if not parts or parts[0] not in _TARGET_FAMILY:
         return command
-    if len(parts) >= 2 and parts[1] == "no-merge":
-        parts[1] = "--no-merge"
-    elif len(parts) >= 3 and parts[-1] == "no-merge":
-        parts[-1] = "--no-merge"
+    if len(parts) >= 2 and parts[1] == legacy:
+        parts[1] = flag
+    elif len(parts) >= 3 and parts[-1] == legacy:
+        parts[-1] = flag
     else:
         return command
     return " ".join(parts)
@@ -136,6 +153,20 @@ def is_target_family(message: str) -> bool:
     return bool(tokens) and tokens[0] in _TARGET_FAMILY
 
 
+def inject_no_merge_into_command(command: str) -> str:
+    """Insert the ``--no-merge`` flag into a /target-family command, right
+    after the verb token. Skipped when a standalone flag is already present
+    (word-padded, so ``--no-merge-guard`` never counts). Non-family commands
+    pass through untouched: a prose brief carries its posture in prose (x-9d11)."""
+    _spellings, flag, _legacy = _carrier_vocab()
+    if not is_target_family(command):
+        return command
+    if f" {flag} " in f" {command} ":
+        return command
+    parts = command.split()
+    return " ".join([parts[0], flag, *parts[1:]])
+
+
 def message_carries_no_merge(message: str) -> bool:
     """True when a /target-family message carries the ``--no-merge`` flag.
 
@@ -143,7 +174,39 @@ def message_carries_no_merge(message: str) -> bool:
     the flag arms no env carrier, and neither does prose. The word-padded
     match is too: ``--no-merge-guard`` (a different flag) is not the carrier
     (round 8, angle A)."""
-    return is_target_family(message) and " --no-merge " in f" {message} "
+    _spellings, flag, _legacy = _carrier_vocab()
+    return is_target_family(message) and f" {flag} " in f" {message} "
+
+
+def apply_merge_posture_env(message: str, *, note_stream=None) -> str | None:
+    """Set or clear ``TARGET_NO_MERGE`` in ``os.environ`` from the message,
+    and return the prior value (so a caller restoring the process env captured
+    it BEFORE the mutation). Flag arms; a family bare token outside flag
+    position neither arms nor clears (round 11); a family message with no token
+    clears an inherited carrier loudly (round 8); non-family clears NOTHING (a
+    leak errs toward refusing merges, the safe side). The binary's spawn lane
+    answers from the same table."""
+    import os
+    import sys
+
+    _spellings, flag, legacy = _carrier_vocab()
+    if note_stream is None:
+        note_stream = sys.stderr
+    prior = os.environ.get("TARGET_NO_MERGE")
+    if message_carries_no_merge(message):
+        os.environ["TARGET_NO_MERGE"] = "1"
+    elif is_target_family(message) and f" {legacy} " in f" {message} ":
+        pass
+    elif is_target_family(message):
+        if prior:
+            print(
+                "fno agents spawn: inherited TARGET_NO_MERGE cleared; the "
+                "/target-family message carries no --no-merge flag and the "
+                "message is authoritative",
+                file=note_stream,
+            )
+        os.environ.pop("TARGET_NO_MERGE", None)
+    return prior
 
 
 def _refused_reason(harness: str) -> str:
@@ -1006,6 +1069,7 @@ def resolve_dispatch(
     command: Optional[str] = None,
     verb: Optional[str] = None,
     brief: Optional[str] = None,
+    merge_posture: Optional[str] = None,
     trigger: str = "autonomous",
     settings: object = None,
     dispatch_cfg: Optional[Mapping[str, object]] = None,
@@ -1033,6 +1097,12 @@ def resolve_dispatch(
     once, else an error); when absent the template is returned literally (a bare
     ``--harness`` resolution just wants the harness/substrate decision).
 
+    ``merge_posture`` (x-8151): ``no-merge`` injects the flag into a
+    /target-family command missing it; ``allow`` overrides the builtin rung's
+    config read (an explicit template is never edited - a refusal it carries
+    wins); ``from-config`` resolves ``config.auto_merge.grant``, errors
+    degrading to no-merge.
+
     Raises :class:`DispatchResolveError` on: an unknown harness (naming the map),
     an explicit ``thread`` on a harness without that lane (pointing at ``headless``), an
     unsupported autonomous ``pane``, an unknown trigger or substrate, or an
@@ -1049,6 +1119,15 @@ def resolve_dispatch(
         raise DispatchResolveError(
             f"unknown dispatch trigger {trigger!r}; valid: autonomous, attended"
         )
+    posture: Optional[str] = merge_posture
+    if posture is not None:
+        if posture == "from-config":
+            posture = "allow" if cfg.get("auto_merge") is True else "no-merge"
+            decision.append(f"merge-posture=from-config({posture})")
+        elif posture not in ("no-merge", "allow"):
+            raise DispatchResolveError(
+                f"unknown merge posture {merge_posture!r}; valid: no-merge, allow"
+            )
 
     # 1. harness. An explicit flag is distinguished by ``is not None`` (present
     # vs omitted), NOT truthiness: an empty explicit ``--harness ""`` (e.g. a
@@ -1163,7 +1242,7 @@ def resolve_dispatch(
         # `dispatch_verb` already spells out what to run, and silently editing
         # a caller's own template would be the surprising read.
         _cmd = cfg.get("command")
-        _allow_merge = cfg.get("auto_merge") is True
+        _allow_merge = cfg.get("auto_merge") is True or posture == "allow"
         template = (
             _cmd if isinstance(_cmd, str) and _cmd
             else dispatch_command(chosen_harness, allow_merge=_allow_merge)
@@ -1226,6 +1305,13 @@ def resolve_dispatch(
     if normalized != resolved_command:
         resolved_command = normalized
         decision.append("command=legacy-no-merge->--no-merge")
+    # x-8151: a no-merge posture injects after the legacy rewrite, on EVERY
+    # rung. allow never edits a template: a refusal it carries wins.
+    if posture == "no-merge":
+        injected = inject_no_merge_into_command(resolved_command)
+        if injected != resolved_command:
+            resolved_command = injected
+            decision.append("merge-posture=no-merge(injected)")
     env: dict[str, str] = {}
     if message_carries_no_merge(resolved_command):
         env["TARGET_NO_MERGE"] = "1"

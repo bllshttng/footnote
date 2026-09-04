@@ -1,0 +1,31 @@
+# merge_posture.toml - the merge-refusal carrier's ONE vocabulary table.
+#
+# Canonical home: this file (the Rust tree owns it, exactly like
+# harness_capabilities.toml). `crates/fno-agents/build.rs` produces the byte
+# copy at `cli/src/fno/agents/merge_posture.toml` (loaded as Python package
+# data) on every build, and
+# `scripts/ci/check-merge-posture-fresh.sh` trips on a hand-edited copy.
+# Rust `include_str!`s THIS file (fno_agents::merge_posture); Python reads the
+# copy table-driven (fno.agents.harness_map) - no subprocess, no daemon, no
+# drift. The engine semantics (arm/hold/clear, word-padded flag matching,
+# position-scoped legacy rewrite) live beside each reader and are unit-tested
+# in both languages; the table is what they must agree ON. (x-8151, standing
+# law d-450caaeb.)
+
+[target_family]
+# The /target-family first tokens (the per-harness spellings the dispatch
+# surfaces emit). The refusal carrier's vocabulary is scoped to these:
+# rewriting the args of another slash verb would mutate its instruction text,
+# and prose is not a control input (x-9d11). Widen here, rebuild, and every
+# language picks it up.
+spellings = ["/target", "/fno:target", "$fno:target"]
+
+[carrier]
+# The flag is the deterministic merge-POSTURE carrier; the bare token is its
+# legacy spelling, migrated only in the two positions the legacy injectors
+# produced (directly after the verb, or trailing). The env key that carries
+# the decided posture across process boundaries (spawn lanes) is
+# TARGET_NO_MERGE, hardcoded beside each engine - deliberately NOT a table
+# key, so the table only carries what the engines actually read.
+flag = "--no-merge"
+legacy_token = "no-merge"

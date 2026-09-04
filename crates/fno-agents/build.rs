@@ -24,6 +24,7 @@ fn main() {
     // run before the env-var work so a build that later fails still leaves the
     // copies fresh.
     sync_harness_capabilities();
+    sync_merge_posture();
     sync_events_limits();
     sync_check_supersession();
 
@@ -173,6 +174,27 @@ fn sync_harness_capabilities() {
         return;
     }
     write_if_different(&mux_copy, &bytes);
+}
+
+/// PRODUCE the downstream copy of the merge-posture carrier table (x-8151).
+///
+/// Same shape as [`sync_harness_capabilities`]: the canonical TOML lives in
+/// this crate (`merge_posture.rs` `include_str!`s it), and the Python package
+/// reads a byte copy as package data so a binary-less interpreter still
+/// resolves the carrier vocabulary. The only copy is the Python tree's, so
+/// this is one write, not two.
+fn sync_merge_posture() {
+    println!("cargo:rerun-if-changed=src/merge_posture.toml");
+    let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/merge_posture.toml");
+    let Ok(bytes) = std::fs::read(&canonical) else {
+        return;
+    };
+    let Some(root) = repo_root() else { return };
+    let cli_copy = root.join("cli/src/fno/agents/merge_posture.toml");
+    if !cli_copy.is_file() {
+        return;
+    }
+    write_if_different(&cli_copy, &bytes);
 }
 
 /// PRODUCE `src/events_limits.toml` from the Python-owned event schema.

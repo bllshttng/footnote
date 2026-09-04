@@ -185,7 +185,7 @@ def test_agents_group_execs_when_opted_in(monkeypatch) -> None:
 
     captured: list = []
 
-    def fake_route(args):
+    def fake_route(args, **kwargs):
         captured.append(list(args))
         raise SystemExit(0)
 

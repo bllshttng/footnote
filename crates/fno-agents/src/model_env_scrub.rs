@@ -27,10 +27,11 @@ pub const MODEL_ENV_KEYS: [&str; 5] = [
 /// keys such a settings file writes (model vars, plus the endpoint and the
 /// two credential carriers). This is the Rust mirror of Python's
 /// route_settings_path_for test, which keys on the SETTINGS FILE a route or
-/// account wrote, never on the overlay being merely non-empty: the bg lane's
-/// only extra_env is the TARGET_NO_MERGE bookkeeping carrier, and a carrier
-/// owns no slot, so the unrouted floor still applies under it (main's
-/// behavior, which an any-overlay stand-down regressed).
+/// account wrote, never on the overlay being merely non-empty: the bg lane
+/// passes no extra_env at all (the TARGET_NO_MERGE carrier rides the
+/// inherited env since x-8151), and a carrier owns no slot, so the unrouted
+/// floor still applies (main's behavior, which an any-overlay stand-down
+/// regressed).
 pub fn overlay_is_route(extra_env: &[(&str, &str)]) -> bool {
     extra_env.iter().any(|(k, _)| {
         MODEL_ENV_KEYS.contains(k)

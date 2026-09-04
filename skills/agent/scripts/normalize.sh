@@ -331,6 +331,35 @@ set +f
 # MUST match tier 1, or the re-normalize would reclassify as tier 2 forever. The
 # describe-it fuzzy tier (tier 4) is whatever is left - free prose - and lives
 # entirely in the SKILL body behind a confirm.
+# x-8151/d-450caaeb: family membership is answered by the owner's one
+# shell-readable surface, `fno dispatch family` - a pure, side-effect-free
+# verb (no daemon, no config read) whose answer comes from the canonical
+# merge_posture table. This file carries NO hand-copied spelling list: the
+# old regex mirror and its Python parity test are gone (writing the parity
+# guard is itself the trigger to port). FAMILY_RESOLVER is test-injectable
+# (mirrors the provider and slug resolvers): a command taking the message and
+# printing `family` or `other`. A failed or unavailable ask REFUSES the whole
+# normalize loud, never reads as `other`: a family message misread as prose
+# would seed verbatim instead of dispatching, and a skipped no-merge append
+# would let a fire-and-forget worker merge (Locked Decision 6: never grant on
+# a failed read). Remedy for a stale install: `fno doctor update`.
+_normalize_is_family() {
+  local _answer
+  # stdin is cut (</dev/null) so a STALE deployed fno that prompts for a
+  # missing parameter fails fast instead of wedging every normalize on an
+  # interactive read (CI found this: an old binary + an open stdin hung).
+  if [[ -n "${FAMILY_RESOLVER:-}" ]]; then
+    _answer="$("$FAMILY_RESOLVER" "$1" 2>/dev/null </dev/null)" || _answer=""
+  else
+    _answer="$(fno dispatch family --message="$1" 2>/dev/null </dev/null)" || _answer=""
+  fi
+  case "$_answer" in
+    family) return 0 ;;
+    other)  return 1 ;;
+    *) emit_error "cannot classify the message against the /target-family vocabulary (the 'fno dispatch family' ask failed; is the installed fno stale? run 'fno doctor update', or set FAMILY_RESOLVER in tests)" ;;
+  esac
+}
+
 NODE=""
 NODE_BARE=0
 NODE_QUERY=""
@@ -351,12 +380,15 @@ elif printf '%s' "$first_tok" | grep -qE '^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$'; t
   # only deliberate-naming signal available without a graph read; VALIDATE uses
   # it to decide refuse-loud vs degrade-to-seed on a resolution miss.
   [[ "$msg" == "$first_tok" ]] && NODE_BARE=1
-elif printf '%s' "$msg" | grep -qE '^/target([[:space:]]|$)'; then
-  # Unanchored, so a hex-shaped prose word can match a `/target <prose>` line.
+elif _normalize_is_family "$msg"; then
+  # Unanchored extraction, so a hex-shaped prose word can match inside the
+  # message. A verb + id message - exactly two tokens and the second IS the
+  # extracted id, so a path like plans/20260711-dark-mode-x-8af8.md does not
+  # read as deliberate - is as deliberate as a bare id: spawning a worker
+  # onto an id that does not exist just burns it.
   NODE="$(printf '%s' "$msg" | grep -oE '[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}' | head -1)"
-  # `/target <id>` and nothing else is as deliberate as a bare id: spawning a
-  # worker onto an id that does not exist just burns it.
-  [[ -n "$NODE" && "$msg" == "/target $NODE" ]] && NODE_BARE=1
+  second_tok="$(printf '%s' "$msg" | awk 'NR==1 {print $2}')"
+  [[ -n "$NODE" && "$second_tok" == "$NODE" && "$(printf '%s' "$msg" | wc -w | tr -d '[:space:]')" -eq 2 ]] && NODE_BARE=1
 elif printf '%s' "$msg" | grep -iqE '^[a-z0-9][a-z0-9-]*$'; then
   # tier 2: slug candidate. Case-insensitive (`-i`) so a mobile-auto-capitalized
   # slug (`Dashless-spawn`) is still classified as a candidate; the resolver
@@ -839,24 +871,17 @@ esac
 # no-merge default for any native `/target`-family message (node-id build OR an
 # explicit /target passthrough): a fire-and-forget worker should land a PR for
 # review, not auto-merge to main from a fat-fingered tap. --allow-merge or an
-# already-present --no-merge opts out. Covers claude `/target`, opencode
-# `/fno:target`, and codex `$fno:target`; a refused provider never reaches here.
-# ONLY build/passthrough get this: a verbatim seed or a handoff continuation seed
-# that happens to contain `/target` is NOT a build command (sigma-review finding
-# 4), so it must never be no-merge'd. The flag (never a free-text token) is the
-# carrier: the fold does not read prose (x-9d11).
+# already-present --no-merge opts out. ONLY build/passthrough get this: a
+# verbatim seed or a handoff continuation seed that happens to contain `/target`
+# is NOT a build command (sigma-review finding 4), so it must never be
+# no-merge'd. The flag (never a free-text token) is the carrier: the fold does
+# not read prose (x-9d11). Family membership is asked of the single source
+# (x-8151); this file carries no hand-copied spelling list to drift.
 case "$payload_mode" in
   build|passthrough)
-    # A native /target-family invocation (claude/agy `/target`, opencode
-    # `/fno:target`, codex `$fno:target`) is no-merge'd. Single-quote the `$fno:`
-    # literal so it is not read as a variable.
-    case "$message" in
-      /target\ *|/target|/fno:target\ *|/fno:target|'$fno:target '*|'$fno:target')
-        if [[ "$ALLOW_MERGE" -eq 0 && " $message " != *" --no-merge "* ]]; then
-          message="$message --no-merge"
-        fi
-        ;;
-    esac
+    if _normalize_is_family "$message" && [[ "$ALLOW_MERGE" -eq 0 && " $message " != *" --no-merge "* ]]; then
+      message="$message --no-merge"
+    fi
     ;;
 esac
 

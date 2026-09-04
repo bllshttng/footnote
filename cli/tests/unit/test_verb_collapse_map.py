@@ -84,8 +84,9 @@ def test_map_covers_current_surface_once():
     # The store-port branch adds `backlog render-views`, the hidden verb a
     # landed native store write detaches to replay the Python-owned views:
     # 554 -> 555. The attestation ledger adds `do review invocations` and
-    # `do review post-dispositions`: 557 -> 559.
-    assert len(mapped) == 559, (
+    # `do review post-dispositions`: 557 -> 559. x-8151 allocated
+    # `dispatch family` twice (top-level and under agents): 559 -> 561.
+    assert len(mapped) == 561, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

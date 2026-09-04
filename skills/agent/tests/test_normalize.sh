@@ -31,8 +31,29 @@ _de43_stub="$(mktemp -d)"
 # Guard the mktemp: an empty _de43_stub would write the stub to /fno.
 [[ -n "$_de43_stub" && -d "$_de43_stub" ]] || { echo "mktemp -d failed" >&2; exit 1; }
 printf '#!/usr/bin/env bash\nexit 1\n' > "$_de43_stub/fno"; chmod +x "$_de43_stub/fno"
-trap 'rm -rf "$_de43_stub"' EXIT
 run_nofno() { PATH="$_de43_stub:$PATH" bash "$NORM" --input "$1" "${@:2}"; }
+
+# x-8151: family membership is an ASK now (fno dispatch family), fail-closed
+# when the ask fails - the exit-1 stub above would refuse every run_nofno
+# classify. FAMILY_RESOLVER is the documented test injection (normalize.sh
+# consults it before fno), so the "no host fno" property holds: the stub
+# answers the same minimal vocabulary, and no host fno is ever invoked.
+_FAMILY_STUB="$(mktemp -d)"
+[[ -n "$_FAMILY_STUB" && -d "$_FAMILY_STUB" ]] || { echo "mktemp -d failed" >&2; exit 1; }
+cat > "$_FAMILY_STUB/family" <<'EOF'
+#!/usr/bin/env bash
+case "${1%%[[:space:]]*}" in
+  /target|/fno:target|\$fno:target) echo family ;;
+  *) echo other ;;
+esac
+EOF
+chmod +x "$_FAMILY_STUB/family"
+export FAMILY_RESOLVER="$_FAMILY_STUB/family"
+trap 'rm -rf "$_de43_stub" "$_FAMILY_STUB"' EXIT
+[[ "$("$FAMILY_RESOLVER" "/target x-1")" == "family" ]] \
+  && [[ "$("$FAMILY_RESOLVER" '$fno:target x-1')" == "family" ]] \
+  && [[ "$("$FAMILY_RESOLVER" "/think x-1")" == "other" ]] \
+  || { echo "FATAL: family stub self-check failed" >&2; exit 1; }
 
 # run_guarded caps a run at 5s when a timeout binary exists (coreutils `timeout`,
 # or `gtimeout` on macOS), so a regressed $#-guard that spins is caught, not hung.

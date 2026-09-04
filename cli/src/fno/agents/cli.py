@@ -2198,6 +2198,7 @@ def cmd_spawn(
     # arm stays scoped to the family: prose and other verbs arm nothing.
     from fno.agents.harness_map import (
         DispatchResolveError,
+        apply_merge_posture_env,
         check_loop_participation,
         is_target_family,
         message_carries_no_merge,
@@ -2415,41 +2416,9 @@ def cmd_spawn(
     prov_prev: dict[str, "str | None"] = {}
     # x-9d11 set-or-clear BEFORE any substrate branch: the pane transport
     # inherits os.environ directly, so an inherited carrier must be cleared
-    # here too, not only on the bg/headless export path (review round 7). The
-    # message is authoritative in both directions - but only for
-    # /target-family messages, the one vocabulary that can carry the flag. A
-    # prose spawn clears NOTHING: an operator's exported TARGET_NO_MERGE is a
-    # documented control input, and a leaked carrier surviving a prose worker
-    # errs toward refusing merges, the safe side (round 8).
-    prov_prev["TARGET_NO_MERGE"] = os.environ.get("TARGET_NO_MERGE")
-    if message_carries_no_merge(message):
-        # The only other writer of prov_env["TARGET_NO_MERGE"] (above) keys on
-        # the same predicate over the same message, so one check here decides
-        # every substrate (round 10 review).
-        os.environ["TARGET_NO_MERGE"] = "1"
-    elif is_target_family(message) and " no-merge " in f" {message} ":
-        # A family message with a bare token OUTSIDE flag position (the legacy
-        # token migrated above was position-scoped): ambiguous - it may be the
-        # pre-x-9d11 FLAGS-then-token spelling or a feature description that
-        # mentions the word. Neither arm nor clear: prose manufactures nothing,
-        # and dropping an operator's exported refusal on an ambiguous message
-        # errs toward granting merges (round 11). Init's loud no-op note fires
-        # in the worker either way.
-        pass
-    elif is_target_family(message):
-        # A family message with NO refusal token at all clears the carrier: the
-        # flag is the authority. A non-family (prose/other-verb) message clears
-        # NOTHING - see the comment above. Clearing an INHERITED carrier is
-        # never silent: an operator's exported TARGET_NO_MERGE is a documented
-        # control input, and the message overriding it deserves a visible line.
-        if os.environ.get("TARGET_NO_MERGE"):
-            print(
-                "fno agents spawn: inherited TARGET_NO_MERGE cleared; the "
-                "/target-family message carries no --no-merge flag and the "
-                "message is authoritative",
-                file=sys.stderr,
-            )
-        os.environ.pop("TARGET_NO_MERGE", None)
+    # here too, not only on the bg/headless export path (review round 7).
+    # The helper returns the PRIOR value, captured before the mutation.
+    prov_prev["TARGET_NO_MERGE"] = apply_merge_posture_env(message)
 
     # Per-worker identity for task claims: the roster name is the only
     # identity a spawned worker can prove is ITS OWN (a session id inherited

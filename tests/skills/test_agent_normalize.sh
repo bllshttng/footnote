@@ -40,6 +40,29 @@ STUB_GARBAGE="$TMP/stub-garbage.sh"; printf '#!/usr/bin/env bash\necho not-a-pro
 STUB_SLUG="$TMP/stub-slug.sh"; printf '#!/usr/bin/env bash\necho dashless-spawn\n' > "$STUB_SLUG"; chmod +x "$STUB_SLUG"
 export NODE_SLUG_RESOLVER="$STUB_EMPTY"
 
+# x-8151/d-450caaeb: family membership is answered by the Rust owner through
+# `fno dispatch family`; with the FAILING fno on PATH below, every real ask
+# would refuse the normalize (the loud fail-closed contract). Pin the answer
+# with a stub so the suite exercises normalize's own plumbing. The stub is a
+# FIXTURE table - the grammar itself is cargo-tested in
+# crates/fno-agents/src/merge_posture.rs - and its two load-bearing answers
+# are asserted right here so a drifted fixture cannot read as a green
+# normalize.
+STUB_FAMILY="$TMP/stub-family.sh"
+cat > "$STUB_FAMILY" <<'EOF'
+#!/usr/bin/env bash
+case "${1%%[[:space:]]*}" in
+  /target|/fno:target|\$fno:target) echo family ;;
+  *) echo other ;;
+esac
+EOF
+chmod +x "$STUB_FAMILY"
+export FAMILY_RESOLVER="$STUB_FAMILY"
+[[ "$("$STUB_FAMILY" "/target x-1")" == "family" ]] \
+  && [[ "$("$STUB_FAMILY" '$fno:target x-1')" == "family" ]] \
+  && [[ "$("$STUB_FAMILY" "/think x-1")" == "other" ]] \
+  || { echo "FAIL: family stub fixture drifted from the owner's table" >&2; exit 1; }
+
 # A dir with a FAILING `fno` on PATH forces normalize.sh's static command-surface
 # fallback (used when `fno agents dispatch resolve` is unreachable), so surface-dependent
 # assertions are deterministic regardless of the installed fno's freshness (x-de43:

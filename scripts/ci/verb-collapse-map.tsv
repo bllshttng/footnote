@@ -16,6 +16,7 @@ agents crown	T1	agents crown	17
 agents digest	T1	agents digest	7
 agents discovered-json	T1	agents discovered-json	9
 agents dispatch capabilities	T1	agents dispatch capabilities	0
+agents dispatch family	T1	agents dispatch family	1
 agents dispatch one	T1	agents dispatch one	9
 agents dispatch resolve	T1	agents dispatch resolve	23
 agents drive-authority	T1	agents drive-authority	9
@@ -253,6 +254,7 @@ context	KEEP	context	15	single-leaf group
 cost	KEEP	cost	7	single-leaf group
 delivery	KEEP	delivery	7	single-leaf group
 dispatch capabilities	T1	dispatch capabilities	0
+dispatch family	T1	dispatch family	3
 dispatch one	T1	dispatch one	9
 dispatch resolve	T1	dispatch resolve	23
 do delivery evaluate	T1	do delivery evaluate	7

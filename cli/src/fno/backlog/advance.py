@@ -1404,10 +1404,13 @@ def _spawn_worker(
         "settings": settings_obj,
     }
     if is_reconcile:
-        _nm = "" if allow_merge else "--no-merge "
-        resolve_kwargs["command"] = (
-            f"/target {_nm}--reconcile {reconcile_manifest} {{id}}"
-        )
+        # x-8151: the refusal spelling is inserted by the shared vocabulary
+        # helper, never a second hardcoded "--no-merge " string.
+        resolve_kwargs["command"] = f"/target --reconcile {reconcile_manifest} {{id}}"
+        if not allow_merge:
+            resolve_kwargs["command"] = harness_map.inject_no_merge_into_command(
+                resolve_kwargs["command"]
+            )
     elif node_verb:
         resolve_kwargs["verb"] = node_verb
     resolved = harness_map.resolve_dispatch(**resolve_kwargs)
