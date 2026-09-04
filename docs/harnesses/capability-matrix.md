@@ -7,8 +7,8 @@ What each harness can DO, rendered from the capability table (`map_version 16`).
 
 | State | Meaning |
 |---|---|
-| `native` | the harness exposes it and fno drives it; a wired lane exists |
-| `capable` | the harness exposes it and fno has no wired arm |
+| `native` | fno drives it today through a wired lane: the harness's own surface where it exposes one, else a lane fno hosts (the daemon-kept portal) |
+| `capable` | real on the harness, and fno has no wired arm |
 | `absent` | measured not to exist on this harness |
 | `unmeasured` | nobody has looked |
 

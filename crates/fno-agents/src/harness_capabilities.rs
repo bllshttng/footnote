@@ -60,11 +60,15 @@ const FEATURE_KEYS: [&str; 11] = [
     "mcp",
     "acp",
 ];
-/// The four states a feature claim may DECLARE, kept identical to the Python
-/// validator in cli/src/fno/agents/harness_map.py so the two runtimes cannot
-/// disagree. `capable` is the load-bearing third state: the harness exposes
-/// the feature and fno has NO wired arm for it. `thread = false` could not say
-/// that, and `SPAWN_HARNESSES` could only encode it as a tuple plus prose.
+/// The four states a feature claim may DECLARE. `native` means a wired lane
+/// exists TODAY: the harness's own surface where it exposes one, otherwise a
+/// lane fno hosts itself - opencode ships no attach verb and `fno agents
+/// attach` still lands, through the daemon-kept portal. Exposure and
+/// reachability are different answers, and conflating them is the defect
+/// this dimension exists to delete. `capable` is the load-bearing third
+/// state: real on the harness, and fno has NO wired arm for it. `thread =
+/// false` could not say that, and `SPAWN_HARNESSES` could only encode it as
+/// a tuple plus prose.
 const FEATURE_STATES: [&str; 4] = ["native", "capable", "absent", "unmeasured"];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
