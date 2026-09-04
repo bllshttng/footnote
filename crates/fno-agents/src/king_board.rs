@@ -2219,16 +2219,19 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             // refused-worker leg batch probes the whole registry and measured
             // ~7s on a busy fleet, which no longer sits on the critical path.
             let t_needs = s_needs.map(|_slice| {
+                let cwd = cwd_for_threads.clone();
                 s.spawn(move || {
                     let home = crate::paths::AgentsHome::from_env();
                     let (mut event_paths, default_ledger) = default_needs_sources(&home);
                     // The canonical checkout's journal, exactly as `run_needs`
                     // adds it: a question asked from a worktree writes the
-                    // CANONICAL .fno/events.jsonl, never the worktree's.
-                    let cwd_now = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                    if let Some(root) = crate::paths::canonical_repo_root(&cwd_now) {
+                    // CANONICAL .fno/events.jsonl, never the worktree's. The
+                    // project journal anchors on the BOARD's cwd (the caller's
+                    // --cwd for an in-process reader), never the process cwd.
+                    event_paths[0] = cwd.join(".fno").join("events.jsonl");
+                    if let Some(root) = crate::paths::canonical_repo_root(&cwd) {
                         let canonical_events = root.join(".fno").join("events.jsonl");
-                        let cwd_events = cwd_now.join(".fno").join("events.jsonl");
+                        let cwd_events = cwd.join(".fno").join("events.jsonl");
                         if canonical_events != cwd_events
                             && !event_paths.contains(&canonical_events)
                         {
