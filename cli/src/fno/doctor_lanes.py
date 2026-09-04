@@ -342,7 +342,7 @@ def _census(reading: Any, rows: Optional[list], read_ms: int) -> dict:
     conflicts = court.get("conflicts")
     census["kings"] = kings
     census["king_conflicts"] = len(conflicts) if isinstance(conflicts, list) else None
-    census["workers"] = len(rows) - kings
+    census["workers"] = len(rows or ()) - kings
     return census
 
 
