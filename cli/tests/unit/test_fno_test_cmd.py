@@ -198,8 +198,12 @@ def test_rust_mode_runs_each_crate_quietly(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(test_cmd.subprocess, "run", fake_run)
     monkeypatch.setattr(test_cmd.shutil, "which", lambda name: None)
     assert test_cmd._run_rust([]) == 0
-    assert len(cmds) == 2
-    for cmd in cmds:
+    # The lanes reading is real here (unpatched), so its sensor subprocess
+    # calls (macmon, memory_pressure) ride in the capture; the contract under
+    # test is the per-crate sweep, so count the cargo runs.
+    cargo_cmds = [cmd for cmd in cmds if cmd[0] == "cargo"]
+    assert len(cargo_cmds) == 2
+    for cmd in cargo_cmds:
         assert cmd[:3] == ["cargo", "test", "-q"]
         assert "--manifest-path" in cmd
 
