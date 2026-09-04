@@ -2634,12 +2634,16 @@ def cmd_spawn(
                 receipt_obj["permission_mode_requested"] = permission_mode
             # x-d012: name the pinned account so a mis-pin is visible at spawn
             # time, not at billing time. Only when set (receipt byte-stable else).
-            # x-04ce: the account fact carries WHO chose it. A config pick
-            # reached the row but never the receipt, so an injected account
-            # printed identically to a caller decision; now the effective
-            # account and its source ("caller" / "config") both surface.
-            if pane_result.launch_account not in (None, "default"):
-                receipt_obj["account"] = pane_result.launch_account
+            # x-04ce: the account fact carries WHO chose it. The result's
+            # launch fact wins; the caller's flag is the fallback so a back
+            # half that predates the field still reports the pin.
+            _receipt_account = (
+                pane_result.launch_account
+                if pane_result.launch_account not in (None, "default")
+                else account
+            )
+            if _receipt_account is not None:
+                receipt_obj["account"] = _receipt_account
                 if pane_result.launch_account_source is not None:
                     receipt_obj["account_source"] = pane_result.launch_account_source
             if dispatch_account is not None:
