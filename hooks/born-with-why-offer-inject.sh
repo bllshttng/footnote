@@ -31,12 +31,17 @@ source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 source "$HOOK_DIR/../scripts/lib/events-lock.sh" 2>/dev/null || exit 0
 
 REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
-EVENTS="$REPO_ROOT/.fno/events.jsonl"
+# The project journal and the cursor both live in the repo's space, so every
+# worktree shares one daily offer budget. Fall back to the legacy checkout
+# path when fno predates the verb.
+EVENTS=$(fno do state path events 2>/dev/null || true)
+[[ -z "$EVENTS" ]] && EVENTS="$REPO_ROOT/.fno/events.jsonl"
 # No journal means there is no cursor state to serialize. Keep this ahead of
-# lock acquisition because a fresh checkout does not have a .fno parent yet.
+# lock acquisition because a fresh space has nothing on disk yet.
 [[ -f "$EVENTS" ]] || exit 0
 
-CURSOR="$REPO_ROOT/.fno/.think-offer-cursor"
+SPACE_DIR=$(dirname "$EVENTS")
+CURSOR="$SPACE_DIR/.think-offer-cursor"
 if [[ -L "$CURSOR" ]]; then
     CURSOR=$(_resolve_event_symlink "$CURSOR") || exit 0
 fi

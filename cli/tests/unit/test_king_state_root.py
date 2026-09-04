@@ -4,6 +4,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from fno.paths import space_dir
+
 
 def _git(cwd: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
@@ -27,9 +29,13 @@ def test_king_state_root_from_linked_worktree_is_canonical(tmp_path: Path, monke
     _git(main, "worktree", "add", "-q", str(linked), "-b", "feature")
 
     from fno.king.state import king_state_root
+    from fno.paths import space_dir
 
-    assert king_state_root(linked) == main / ".fno"
-    assert king_state_root(main) == main / ".fno"
+    # The coordination root is the repo's SPACE (x-b1ee): canonical-keyed, so
+    # both worktree spellings answer one path, and no checkout holds a crown.
+    expected = space_dir(main)
+    assert king_state_root(linked) == expected
+    assert king_state_root(main) == expected
 
     monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
     monkeypatch.chdir(linked)
@@ -39,7 +45,8 @@ def test_king_state_root_from_linked_worktree_is_canonical(tmp_path: Path, monke
     monkeypatch.setattr(state, "king_loop_enabled", lambda: True)
     from fno.king.cli import king_app
 
-    stale_signal = main / ".fno" / "kings" / "cli.cancelled"
+    kings = space_dir(main) / "kings"
+    stale_signal = kings / "cli.cancelled"
     stale_signal.parent.mkdir(parents=True, exist_ok=True)
     stale_signal.touch()
     result = CliRunner().invoke(
@@ -53,9 +60,9 @@ def test_king_state_root_from_linked_worktree_is_canonical(tmp_path: Path, monke
         ],
     )
     assert result.exit_code == 0, result.output
-    assert (main / ".fno" / "kings" / "cli.md").is_file()
+    assert (kings / "cli.md").is_file()
     assert not stale_signal.exists()
-    assert str(main / ".fno" / "kings" / "cli.md") in result.output
+    assert str(kings / "cli.md") in result.output
 
 
 def test_king_cancel_sets_signal_and_emits_event(tmp_path: Path, monkeypatch) -> None:
@@ -73,7 +80,7 @@ def test_king_cancel_sets_signal_and_emits_event(tmp_path: Path, monkeypatch) ->
     assert sentinel.is_file()
     events = [
         json.loads(line)
-        for line in (tmp_path / ".fno" / "events.jsonl").read_text().splitlines()
+        for line in space_dir(tmp_path).joinpath("events.jsonl").read_text().splitlines()
     ]
     assert any(
         event["type"] == "cancel_signal_set"
@@ -114,4 +121,4 @@ def test_king_cancel_missing_scope_names_canonical_manifest_path(
     result = _cancel("--scope", "missing")
 
     assert result.exit_code == 1
-    assert str(tmp_path / ".fno" / "kings" / "missing.md") in result.output
+    assert str(space_dir(tmp_path) / "kings" / "missing.md") in result.output

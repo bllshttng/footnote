@@ -258,7 +258,11 @@ def _canonical_for(root: Path) -> Path:
 
 
 def spaces_root() -> Path:
-    """Where every space lives: ``config.paths.spaces_dir`` else ``<state_dir>/spaces``."""
+    """Where every space lives: ``FNO_SPACES_DIR``, else
+    ``config.paths.spaces_dir``, else ``<state_dir>/spaces``."""
+    explicit = os.environ.get("FNO_SPACES_DIR")
+    if explicit:
+        return _guard_state_path(Path(os.path.expanduser(explicit)).resolve())
     settings = _settings()
     override = settings.paths.spaces_dir
     if override is not None:

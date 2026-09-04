@@ -97,15 +97,16 @@ def test_receipt_stays_silent_on_the_canonical_checkout(
     assert "WARNING" not in "\n".join(out)
 
 
-def test_receipt_names_the_state_file_that_has_no_resolver(
+def test_receipt_names_the_target_state_resolver(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """`target-state.md` is built by hand at four sites, and the receipt says so
-    rather than printing a path that implies an owner exists."""
+    """`target-state.md` used to be built by hand at four sites; the spaces
+    move gave it an owner, so the receipt now prints a resolved space path."""
     _pin_roots(monkeypatch, tmp_path / "repo", tmp_path / "repo")
     out = _capture(monkeypatch)
 
     _report_state_roots()
 
     line = next(ln for ln in out if "target-state.md" in ln)
-    assert "NO RESOLVER" in line
+    assert "NO RESOLVER" not in line
+    assert "spaces" in line

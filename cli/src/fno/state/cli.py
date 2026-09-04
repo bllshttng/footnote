@@ -369,6 +369,8 @@ def path(
         "kings": paths.kings_dir,
         "scratchpad": lambda: paths.worktree_space_dir() / "scratchpad",
         "status-sinks": paths.status_sinks_dir,
+        "worktree-log": lambda: paths.project_log("worktree-log.jsonl"),
+        "codemap": lambda: paths.worktree_space_dir() / "codemap.md",
     }
     accessor = table.get(name)
     if accessor is None:

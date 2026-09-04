@@ -263,11 +263,10 @@ for envfile in "${ENV_FILES[@]}"; do
     fi
 done
 
-# 2. Symlink .fno/ from main repo (shared state)
-if [[ -d "$MAIN_REPO/.fno" && ! -L "$WORKTREE_PATH/.fno" && ! -e "$WORKTREE_PATH/.fno" ]]; then
-    ln -s "$MAIN_REPO/.fno" "$WORKTREE_PATH/.fno" || true
-    echo "Symlinked .fno/" >&2
-fi
+# 2. (retired) .fno/ used to be symlinked from the main repo for shared state.
+# Project state moved into the repo's space under ~/.fno/spaces/ (keyed on the
+# canonical root), which every worktree resolves identically - there is nothing
+# left to link, and the checkout keeps only .fno/config.toml.
 
 # 3. Auto-detect and install deps (skip if already present)
 # Set worktree.auto_install: false in .fno/settings.yaml to skip dep
@@ -311,9 +310,14 @@ if [[ "$SKIP_VERIFY" != "true" ]]; then
     fi
 fi
 
-# 5. Log lifecycle event
+# 5. Log lifecycle event (the worktree log lives in the repo's space)
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-echo "{\"ts\":\"$TS\",\"action\":\"created\",\"path\":\"$WORKTREE_PATH\"}" >> "$MAIN_REPO/.fno/worktree-log.jsonl" 2>/dev/null
+WLOG=$(fno do state path worktree-log.jsonl 2>/dev/null || true)
+if [[ -z "$WLOG" ]]; then
+    WLOG="$MAIN_REPO/.fno/worktree-log.jsonl"
+fi
+mkdir -p "$(dirname "$WLOG")" 2>/dev/null || true
+echo "{\"ts\":\"$TS\",\"action\":\"created\",\"path\":\"$WORKTREE_PATH\"}" >> "$WLOG" 2>/dev/null || true
 
 echo "Worktree ready: $WORKTREE_PATH" >&2
 

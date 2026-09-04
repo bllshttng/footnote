@@ -58,20 +58,27 @@ class KingManifestExists(RuntimeError):
 
 
 def king_state_root(cwd: Path | None = None) -> Path:
-    """The canonical checkout's ``.fno`` root: shared coordination state, so
-    ambient cwd must not move a crown into a disposable worktree."""
-    from fno.paths import resolve_canonical_repo_root, resolve_canonical_worktree
+    """The canonical-keyed coordination root for king manifests: the repo's
+    space, so a crown never lands in a disposable linked worktree.
 
-    if cwd is None:
-        return resolve_canonical_repo_root() / ".fno"
-    canonical = resolve_canonical_worktree(Path(cwd))
-    return (canonical if canonical is not None else Path(cwd).resolve()) / ".fno"
+    King manifests survive worktree changes and are shared coordination state,
+    so ambient cwd must not move a crown into a per-worktree slice. ``space_dir``
+    keys on the CANONICAL root for either spelling of ``cwd``.
+    """
+    from fno.paths import space_dir
+
+    return space_dir(cwd)
 
 
 def king_manifest_path(scope: str, *, state_root: Optional[Path] = None) -> Path:
-    """The manifest path for one scope. Scope becomes a filename here, so
-    refuse path syntax: two spellings must never select two files and no scope
-    may escape the state root."""
+    """Return the manifest path for one canonical crown scope.
+
+    Scope is registry data, but it becomes a filename here. Refuse path syntax
+    instead of normalizing it: two spellings of one scope must never select two
+    files, and no scope may escape the state root. The default root is the
+    repo's space (cross-worktree, keyed on the canonical checkout); a caller
+    may pin one explicitly.
+    """
     scope = scope.strip()
     if not scope or ".." in scope or "/" in scope or "\\" in scope or "\0" in scope:
         raise ValueError(f"unsafe king scope for manifest path: {scope!r}")

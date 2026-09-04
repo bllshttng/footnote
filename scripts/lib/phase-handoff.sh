@@ -7,15 +7,22 @@
 #   ph_read_latest <phase>
 #   ph_list <session_id>
 #
-# Artifacts are stored at: .fno/artifacts/handoff/{phase}-{session_id}.md
+# Artifacts are stored at: {worktree slice of the space}/artifacts/handoff/{phase}-{session_id}.md
 # The handoff/ subdirectory namespaces away from gate-attestation artifacts.
 
 # Size cap: roughly 500 tokens. 2000 chars is a conservative proxy.
 PH_MAX_CHARS=2000
 
-# Resolve artifact directory relative to cwd (where target runs)
+# Resolve artifact directory (worktree-local, beside the manifest). Falls back
+# to the legacy checkout path when fno predates the verb.
 _ph_dir() {
-  echo ".fno/artifacts/handoff"
+  local d
+  d=$(fno do state path target-state 2>/dev/null | xargs dirname 2>/dev/null || true)
+  if [[ -n "$d" ]]; then
+    echo "$d/artifacts/handoff"
+  else
+    echo ".fno/artifacts/handoff"
+  fi
 }
 
 _ph_path() {
