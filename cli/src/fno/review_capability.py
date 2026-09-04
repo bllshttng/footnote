@@ -732,18 +732,21 @@ def render_self_review_invocation(
 def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:
     """Decide the target spine's pre-ship review step from `config.review.reviewers`.
 
-    The plan is always the same review: the fno lane on the final pushed HEAD,
-    requested through `fno do target request-self-review --pr` once the PR
-    exists, never downgraded to advisory prose. There is no sigma branch to
-    consult anymore: a config still naming sigma is refused at init by the
-    retired descriptor, so it cannot reach this decision. `reviewers` is read
-    for shape only - a registered harness-skill reviewer keeps its own
-    invocation contract at the ship step regardless of this plan.
+    The plan is always the same review: the fno lane on the final local HEAD,
+    requested through the bare `fno do target request-self-review` BEFORE the
+    PR exists, never downgraded to advisory prose. The `--pr` form is the
+    post-push form, for a round requested after the PR exists. There is no
+    sigma branch to consult anymore: a config still naming sigma is refused
+    at init by the retired descriptor, so it cannot reach this decision.
+    `reviewers` is read for shape only - a registered harness-skill reviewer
+    keeps its own invocation contract at the ship step regardless of this
+    plan.
     """
     names = {str(r).strip().lstrip("/") for r in reviewers}
     return PreShipReviewPlan(
         "native",
-        f"run fno do target request-self-review --pr on the final pushed HEAD; "
+        f"run fno do target request-self-review (no --pr) on the final local "
+        f"HEAD before the PR; --pr is the post-push form; "
         f"the fno lane (/fno:review) is the review producer on every harness "
         f"(reviewers resolved: {sorted(names) or ['none']})",
     )

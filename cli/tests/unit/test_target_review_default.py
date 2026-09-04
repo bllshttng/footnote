@@ -1,10 +1,10 @@
-"""Target pre-ship review defaults to a native final-head review; sigma is opt-in.
+"""Target pre-ship review defaults to a native pre-push review; sigma is opt-in.
 
 AC11-HP: no `config.review.reviewers` -> the ship step requests the harness-native
-review verb for the pushed final HEAD through the explicit-target self-send
-router, and no six-agent sigma panel is dispatched. The request is a producer,
-not advisory prose: it names the PR, HEAD SHA, and origin base before it can
-reach the transport.
+review verb for the local final HEAD before any push, through the explicit-target
+self-send router, and no six-agent sigma panel is dispatched. The request is a
+producer, not advisory prose: it names the target (PR or branch), HEAD SHA, and
+origin base before it can reach the transport.
 AC12-CON: `reviewers` includes `sigma` -> sigma runs exactly once (post-ship, on
 the final HEAD) and the skip logic reads in the same direction as its docs.
 
@@ -253,12 +253,20 @@ def test_skill_prose_describes_the_same_direction_as_the_decision():
     ship = (REPO_ROOT / "skills" / "target" / "references" / "ship-and-promise.md").read_text()
     routing = (REPO_ROOT / "skills" / "target" / "references" / "phase-invocations.md").read_text()
 
-    # AC11: the default ship step requests a native review with an explicit
-    # final-head target. The old advisory default is gone.
+    # AC11 + x-98ac: the default ship step requests a native review on the
+    # local HEAD BEFORE /pr create, and the --pr form is documented only as
+    # the post-push form. The old push-first order is gone.
     assert "internal sigma panel (cheap insurance)" not in skill
     assert "internal sigma panel (cheap insurance)" not in phase
-    assert "request-self-review --pr" in skill
-    assert "HEAD" in skill and "origin/main" in skill
+    spine_start = skill.index("```")
+    spine = skill[spine_start : skill.index("```", spine_start + 3)]
+    assert "request-self-review" in spine
+    assert spine.index("request-self-review") < spine.index("/pr create")
+    assert "request-self-review --pr" not in spine
+    pr_lines = [line for line in skill.splitlines() if "request-self-review --pr" in line]
+    assert pr_lines, "the post-push --pr form must stay documented in SKILL.md"
+    assert all("post-push" in line for line in pr_lines)
+    assert "HEAD" in skill and "origin/" in skill
     assert "queued" in skill.lower() and "turn boundary" in skill.lower()
     assert "advisory self-review by default" not in skill
     assert "optional escalation" not in skill
