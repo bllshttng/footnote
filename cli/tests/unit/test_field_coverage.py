@@ -71,14 +71,13 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
     # all accounted as storage_only in schemas/agents-list-row.json. v26
     # added the served facts (liveness, liveness_measured_at, harness_title):
     # 48 -> 54 declared, accounted as rust_only (the Rust row projects them).
-    # x-7955: substrate moved out of storage_only into the projected key set
-    # (required 41 -> 42). The reign parent-edge change adds required
-    # spawned_by_session on top of v26: 41 -> 43 required, declared unchanged
-    # at 54 (spawned_by_session was already a declared v26 leaf), counted from
-    # the merged tree.
-    assert payload["declared_count"] == 54
+    # x-7955: substrate moved out of storage_only into the projected key set.
+    # The reign parent-edge change adds required spawned_by_session on top:
+    # 41 -> 43 required, declared unchanged at 54 (it was already a declared
+    # v26 leaf). v27 added launch_account_source, storage_only: 54 -> 55.
+    assert payload["declared_count"] == 55
     assert payload["required_count"] == 43
-    assert payload["accounted_count"] == 54
+    assert payload["accounted_count"] == 55
     assert payload["known_gaps"] == {}
 
 
