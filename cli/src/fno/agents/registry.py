@@ -2109,6 +2109,9 @@ def _mint_branch_row(
     while any(candidate.name == branch_name for candidate in entries):
         branch_name = f"{branch_base}-{suffix}"
         suffix += 1
+    # A claude branch is born bg-routable (x-a457): short_id is the 8-hex
+    # jobId the rv farm keys on, hex-guarded like every sibling fill site.
+    lead = claude_transport_short_id(session_id)
     branch = replace(
         entry,
         name=branch_name,
@@ -2117,11 +2120,10 @@ def _mint_branch_row(
         predecessor_session_ids=[],
         forked_from_session_id=stale or None,
         related_session_id=None,
-        # A claude branch is born bg-routable: short_id is the 8-hex jobId the
-        # rv socket farm keys on; left "", footprint read the branch as
-        # unattributed cost (x-a457). Others keep "": no transport key there.
         short_id=(
-            claude_transport_short_id(session_id) if entry.harness == "claude" else ""
+            lead
+            if entry.harness == "claude" and _DERIVED_SHORT_RE.match(lead)
+            else ""
         ),
         messaging_socket_path=None,
         mcp_channel_id=None,

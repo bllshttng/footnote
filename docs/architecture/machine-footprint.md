@@ -14,7 +14,7 @@ The observer process and its complete descendant subtree are excluded from CPU, 
 
 Human output prints `spawn load: <load> against <ceiling> (max_load_per_cpu <factor> x <cpus> cpus; <status>)` beside fleet CPU. When load is readable, `spawn_load_status` is `within` or `exceeded`. It is `disabled` or `unavailable` otherwise. These fields are reporting-only: footprint's existing CPU/process verdict and exit code remain unchanged.
 
-The hidden `--cause-only --json` mode performs only the `ps` read and emits the CPU fields without reading the live roster. It is used by spawn-gate diagnosis, not by the standard closure verdict.
+The hidden `--cause-only --json` mode performs the `ps` read, answers the capacity question from the spawn-load snapshot, and reads the liveness witnesses attribution needs: the worker claim store, the claude daemon roster, and one bounded liveness probe per unrouted pane row. All of it shares the reading's deadline. It is used by spawn-gate diagnosis, not by the standard closure verdict.
 
 Exit codes are intentionally separate. `0` means the standard closure numbers are within threshold, or that cause-only measurement succeeded. `3` means a standard CPU or direct-process threshold is over budget. `4` means the reading cannot gate: unreadable required input, or a cause-only reading that answers with an attribution gap. Unreadable input covers malformed `ps` rows and incomplete cause evidence. A gapped cause-only reading still prints the measurement, because an undercount is not headroom. An unavailable roster no longer produces exit 4. The process threshold degrades to none, the reason prints beside the reading, and the CPU threshold still applies. A transient direct CLI burst does not produce exit 3 by itself.
 

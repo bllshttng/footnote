@@ -13,6 +13,13 @@ from typer.testing import CliRunner
 from fno.footprint import parse_footprint
 from fno.cli import app
 
+# Import the mux_spawn -> dispatch chain at collection, before any test
+# patches anything: patching `fno.agents.registry.load_registry` first and
+# importing mux_spawn later would bind the patched loader into dispatch's
+# `from registry import load_registry` permanently, poisoning every later
+# test in the process. One module-level import pins that order for the file.
+import fno.agents.mux_spawn  # noqa: F401,E402
+
 
 runner = CliRunner()
 
@@ -468,6 +475,108 @@ def test_live_root_pids_attributes_routed_row_through_roster_pid(monkeypatch) ->
     assert doctor_footprint._live_root_pids() == ({903}, None)
 
 
+def test_live_root_pids_joins_a_full_uuid_short_id_through_the_derived_key(
+    monkeypatch,
+) -> None:
+    """register_existing_session writes the FULL session uuid into a claude
+    row's short_id when no transport key was given at birth (the SessionStart
+    hook passes none). The daemon maps key on the DERIVED 8-hex, so the join
+    must derive, or a live hook-registered session reads as a corpse."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="idle",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
+        harness_session_id="e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
+        name="e6f78b98",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {"e6f78b98": 903}
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: pid == 903,
+    )
+
+    assert doctor_footprint._live_root_pids() == ({903}, None)
+
+
+def test_live_root_pids_keeps_a_roster_held_row_whose_pid_entry_is_not_usable(
+    monkeypatch,
+) -> None:
+    """The daemon writes a roster worker's pid optional and has drifted field
+    types before. A session the roster HOLDS with no usable pid exists: that
+    is no answer, not a death certificate."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="deadbee",
+        name="hosted",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {"deadbee": None}
+    )
+
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+
+
+def test_live_root_pids_suppresses_on_a_roster_held_row_with_a_dead_pid(
+    monkeypatch,
+) -> None:
+    """A daemon-held record whose pid died is the same fact as a dead
+    socket-map pid: the socket arm suppresses the report for it, so the
+    roster arm must not answer "corpse" instead - the keeper may be mid
+    re-adoption."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="deadbee",
+        name="hosted",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {"deadbee": 404}
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: False,
+    )
+
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    assert error == "worker root liveness unavailable"
+
+
 def test_live_root_pids_drops_unrouted_row_with_expired_claim(monkeypatch) -> None:
     """x-a457: an unrouted row whose worker claim store positively reports no
     live holder is a corpse row. The 14 rows that kept this box's spawn gate
@@ -487,6 +596,22 @@ def test_live_root_pids_drops_unrouted_row_with_expired_claim(monkeypatch) -> No
     monkeypatch.setattr(doctor_footprint, "_claim_witness", lambda _name: "stale")
 
     assert doctor_footprint._live_root_pids() == (set(), None)
+
+
+def test_claim_witness_answers_nothing_for_a_row_that_never_claimed(
+    tmp_path, monkeypatch
+) -> None:
+    """claim_status reports "free" for a claim file that never existed, and a
+    lane that never claimed (an operator-registered session) is not dead on
+    that account: no file means the store has no answer, not a death
+    certificate."""
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._gate_claims_root", lambda: tmp_path
+    )
+
+    assert doctor_footprint._claim_witness("never-registered") is None
 
 
 def test_live_root_pids_keeps_unrouted_row_whose_claim_is_live(monkeypatch) -> None:
@@ -540,10 +665,6 @@ def test_live_root_pids_pane_row_costs_the_attributed_mux_server(monkeypatch) ->
     from fno import doctor_footprint
     from types import SimpleNamespace
 
-    # Same import-order pin as its sibling above: mux_spawn must be imported
-    # (cleanly pulling dispatch's registry binding) before any patch is live.
-    import fno.agents.mux_spawn  # noqa: F401
-
     row = SimpleNamespace(
         status="live",
         pid=None,
@@ -564,13 +685,6 @@ def test_live_root_pids_pane_row_costs_the_attributed_mux_server(monkeypatch) ->
 def test_live_root_pids_refuses_pidless_live_pane(monkeypatch) -> None:
     from fno import doctor_footprint
     from types import SimpleNamespace
-
-    # Import-order pin: patching a module attribute first IMPORTS that module,
-    # and mux_spawn imports dispatch, whose `from registry import load_registry`
-    # would bind whatever the active registry patch holds - permanently
-    # poisoning dispatch for every later test in the process. Import the chain
-    # cleanly before any patch is live.
-    import fno.agents.mux_spawn  # noqa: F401
 
     row = SimpleNamespace(
         status="live",

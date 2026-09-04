@@ -6,9 +6,7 @@ comm was `bg-pty-host` hours older than the worker. The session's own process
 is found through the claude daemon's rendezvous socket farm:
 ``/tmp/cc-daemon-<uid>/<daemon-id>/rv/<short>.sock``, one socket per live bg
 session, whose lsof holder is the process that BECOMES the session. The socket
-stem is the claude jobId, which by construction is the first 8 hex of the
-session uuid - the same string the registry carries as a claude row's
-``short_id``, so the join key needs no derivation.
+stem is the claude jobId, the first 8 hex of the session uuid.
 
 One lsof call prices the whole farm; every consumer (census, ``agents top``,
 roster discovery) shares the same map so the cost view and the gate cannot
@@ -59,9 +57,8 @@ def bg_socket_pid_map(
     """8-hex claude jobId -> pid of the process that IS that bg session.
 
     Best-effort by design: a missing farm, a dead lsof, or a timeout all mean
-    ``{}`` and the caller keeps the pid it recorded. That undercounts a bg
-    row's cost - the defect this module exists to close - so callers that
-    gate on cost must treat an empty map as "unknown", never as "no sessions".
+    ``{}``, which undercounts a bg row's cost, so callers that gate on cost
+    must treat an empty map as "unknown", never as "no sessions".
     """
     base = root if root is not None else rv_socket_root()
     try:
@@ -84,12 +81,14 @@ def bg_socket_pid_map(
     return _pid_map_from_lsof(proc.stdout)
 
 
-def roster_pid_map() -> Optional[dict[str, int]]:
+def roster_pid_map() -> Optional[dict[str, Optional[int]]]:
     """The claude daemon roster as ``{8-hex jobId: host pid}``, or None when unreadable.
 
     The SECOND daemon-side oracle for a bg row the rv farm missed: a short_id
     in neither map is a dead session (x-a457). A roster pid is the PTY HOST
-    hosting it. Missing file: definitive {}; other read failure: None.
+    hosting it. Missing file: definitive {}; other read failure: None. A
+    worker held with no usable pid maps to None: the session exists, so its
+    key must not read as absence.
     """
     from fno.agents.spawn_gate import _roster_path
 
@@ -102,14 +101,14 @@ def roster_pid_map() -> Optional[dict[str, int]]:
     workers = raw.get("workers") if isinstance(raw, dict) else None
     if not isinstance(workers, dict):
         return None
-    return {
-        claude_transport_short_id(w["sessionId"]): w["pid"]
-        for w in workers.values()
-        if isinstance(w, dict)
-        and isinstance(w.get("sessionId"), str)
-        and isinstance(w.get("pid"), int)
-        and not isinstance(w.get("pid"), bool)
-    }
+    out: dict[str, Optional[int]] = {}
+    for w in workers.values():
+        if not isinstance(w, dict) or not isinstance(w.get("sessionId"), str):
+            continue
+        pid = w.get("pid")
+        key = claude_transport_short_id(w["sessionId"])
+        out[key] = pid if isinstance(pid, int) and not isinstance(pid, bool) else None
+    return out
 
 
 def resolve_session_pid(
