@@ -2578,7 +2578,25 @@ class TestTickRecordsAndDeadline:
                 dim: uw.DimensionState(uw.MEASURED, 0, None) for dim in uw.DIMENSIONS
             }
 
-        monkeypatch.setattr(uw, "build_report", lambda roots, *, now_s=None, **kw: _Snap())
+        # Stage trace. `lines` is the only channel that survives to a CI
+        # failure message, so each patched leg drops a marker into it: an
+        # empty trace means the tick never armed the lane at all, and a
+        # partial one names the last leg that ran.
+        def _stage(name, value=None):
+            lines.append(f"stage:{name}")
+            return value
+
+        real_lane_armed = watchdog.lane_armed
+        monkeypatch.setattr(
+            watchdog,
+            "lane_armed",
+            lambda s: _stage(f"lane_armed={real_lane_armed(s)}", real_lane_armed(s)),
+        )
+        monkeypatch.setattr(
+            uw,
+            "build_report",
+            lambda roots, *, now_s=None, **kw: _stage("build_report", _Snap()),
+        )
         monkeypatch.setattr(
             uw,
             "publish_report",
@@ -2592,13 +2610,19 @@ class TestTickRecordsAndDeadline:
         # "watchdog sweep failed", and the loop under test is never reached.
         # Both tests then read an empty `scanned` - one as a false failure, the
         # other as a false pass.
-        monkeypatch.setattr(watchdog, "fleet_rows", lambda **kw: ([], []))
+        monkeypatch.setattr(watchdog, "fleet_rows", lambda **kw: _stage("fleet_rows", ([], [])))
         monkeypatch.setattr(
             watchdog, "measure_provider_outages", lambda rows, *, now_s: {"breakers": []}
         )
         monkeypatch.setattr(watchdog, "_last_events_signature", lambda: "")
         monkeypatch.setattr(watchdog, "supervise_provider_handoffs", lambda *a, **kw: [])
-        monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: ({"verdicts": [], "counts": {}, "warnings": []}, []))
+        monkeypatch.setattr(
+            watchdog,
+            "run_sweep",
+            lambda **kw: _stage(
+                "run_sweep", ({"verdicts": [], "counts": {}, "warnings": []}, [])
+            ),
+        )
         monkeypatch.setattr(watchdog, "_last_recovery_events_signature", lambda: "")
         monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: None)
         monkeypatch.setattr(watchdog, "fresh_non_leave", lambda *a, **k: set())
