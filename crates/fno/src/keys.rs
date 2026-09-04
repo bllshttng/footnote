@@ -380,12 +380,12 @@ pub enum Event {
     /// time. Overlay-mode keys (`n`/`N` pick, `q`/Esc close) are interpreted
     /// by the client's view layer, not here (like OpenAnswers).
     OpenYard,
-    /// (x-3cb3) Open the court panel: load against the cap, the
-    /// kings/workers/tests census, and the lane advisor's own answer. The
-    /// operator asked for this because the cap was invisible: it is
-    /// `max_load_per_cpu x ncpu` and nothing but an agent running a hidden
-    /// verb could see it. Any key closes; the client's view layer interprets
-    /// that, not here.
+    /// (x-3cb3, redefined by x-aeab) Toggle the court block on the left
+    /// sideline between its three-line glance and the full reading: load
+    /// against the cap, what saturates the box, the working/idle/dead
+    /// census, and the lane advisor's own answer. The block is always
+    /// visible; this only expands or collapses it, and the client's view
+    /// layer interprets that, not here.
     OpenCourt,
     /// Show/hide the sideline (prefix+b).
     TogglePanel,
@@ -1112,7 +1112,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             "court",
             OpenCourt,
             Global,
-            "the court (load, census, lanes)",
+            "the court (load, census, lanes)", // minimize/expand, sideline
         ),
         b(
             b'b',
