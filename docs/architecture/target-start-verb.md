@@ -4,7 +4,7 @@
 
 A background `/target` cold-start has to isolate itself before building. Done by hand that is five non-obvious moves across three competing mechanisms (harness `EnterWorktree`, raw `git worktree add`, the skill's attended worktree offer), and two of the moves are silent killers whose fix used to live only in agent memory:
 
-- Project state used to live inside the tree, so a worktree's `.fno` arrived as a whole-dir symlink to canonical and `fno do target init` refused on what looked like a stale manifest. State moved into the repo's space under `~/.fno/spaces/` (x-b1ee), there is nothing to symlink, and the heal step is gone.
+- Project state used to live inside the tree, so a worktree's `.fno` arrived as a whole-dir symlink to canonical and `fno do target init` refused on what looked like a stale manifest. State moved into the repo's space under `~/.fno/spaces/`, there is nothing to symlink, and the heal step is gone.
 - The worktree base is **behind `origin/main`** (branched off local HEAD), so the eventual PR shows phantom deletions of unrelated work, caught only at PR time. The fix is to branch off `origin/main`, never local HEAD.
 
 `fno do target start <node>` collapses all of it into one idempotent verb with a printed receipt, so a memory-less agent (OSS, or a weaker model) succeeds without knowing the folklore.

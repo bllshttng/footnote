@@ -148,7 +148,7 @@ The per-repository journal `<space>/events.jsonl` resolves through `paths.projec
 
 ## The project space (`~/.fno/spaces/<slug>/`)
 
-Project state left the checkout (2026-09-03, x-b1ee). One space per repository, keyed on the CANONICAL repo root (the git common dir's checkout), slug = `<basename>-<first 8 hex of sha256(canonical root path)>`. Every worktree of a repo resolves to ONE space, so cross-worktree state needs no symlink. Per-worktree state sits at `<space>/worktrees/<worktree basename>/`. A checkout keeps only `.fno/config.toml` (committed project config) and the sandbox breadcrumb below. The first resolve of a moved file renames the legacy `<repo>/.fno/<file>` into the space and leaves a `<repo>/.fno/MOVED-TO` pointer naming it.
+Project state left the checkout. One space per repository, keyed on the CANONICAL repo root (the git common dir's checkout), slug = `<basename>-<first 8 hex of sha256(canonical root path)>`. Every worktree of a repo resolves to ONE space, so cross-worktree state needs no symlink. Per-worktree state sits at `<space>/worktrees/<worktree basename>/`. A checkout keeps only `.fno/config.toml` (committed project config) and the sandbox breadcrumb below. The first resolve of a moved file renames the legacy `<repo>/.fno/<file>` into the space and leaves a `<repo>/.fno/MOVED-TO` pointer naming it.
 
 | Entry | Writer | Lifetime |
 |---|---|---|
@@ -160,7 +160,7 @@ Project state left the checkout (2026-09-03, x-b1ee). One space per repository, 
 | `<space>/kings/<scope>.md.wake.log` | `pr_watch/_king_wake.py` (detached wake-mode walk) | append-only stdout of the walks this phase spawned; the events journal is the receipt, this log is diagnosis |
 | `<space>/plans/` | `paths.plans_dir()` default (a configured vault template still wins) | permanent plan docs |
 | `<space>/inbox/` | `paths.inbox_dir()` default | per-project inbox |
-| `<space>/status-sinks/` | `paths.status_sinks_dir()` (x-2057) | per-sink cursors + error logs |
+| `<space>/status-sinks/` | `paths.status_sinks_dir()` | per-sink cursors + error logs |
 | `<space>/carveouts.jsonl`, `.lock.d/` | `cli/src/fno/carveout/core.py` via `paths.project_log` | append-only ledger; consumed by the retro-triage harvest |
 | `<space>/worktree-log.jsonl` | `hooks/worktree-setup.sh` | append-only worktree lifecycle log |
 | `<space>/wake-signals/` | `cli/src/fno/wake/signal.py` | one-shot records; drained by the wake readers |
