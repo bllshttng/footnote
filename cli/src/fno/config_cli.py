@@ -827,7 +827,7 @@ def _report_band_routing() -> None:
         "      Declare [[routing.models]] rows to activate "
         "(docs/architecture/role-based-model-routing.md)"
     )
-    roles = {}
+    roles: dict = {}
     try:
         from fno.config import load_settings
 
