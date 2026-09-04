@@ -641,7 +641,16 @@ def normalize_command(command: str, harness: str) -> str:
         # ``/review`` on codex is the NATIVE verb, and the fno lane is reached
         # namespaced, as ``/fno:review``.
         native = {v for v in caps.get("native_verbs") or () if isinstance(v, str)}
-        if "/" + verb in native or verb not in footnote_verbs():
+        if "/" + verb in native:
+            return cmd
+        # The dispatch verb is footnote's own: a STATIC fact. The roster read
+        # below needs a resolvable plugin root, and an unresolvable one returns
+        # an empty roster indistinguishable from "not ours", which rendered
+        # `/target` for a codex worker as an ordinary pass-through. Not caching
+        # that empty answer stops it freezing; this bypass makes it impossible.
+        if first_word in _TARGET_FAMILY:
+            return "$fno:" + verb + cmd[len(first_word):]
+        if verb not in footnote_verbs():
             return cmd
         return "$fno:" + verb + cmd[len(first_word):]
     if surface == _SLASH and cmd.startswith("/"):

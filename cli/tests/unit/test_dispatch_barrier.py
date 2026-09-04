@@ -501,12 +501,41 @@ def _barrier_diag(tmp_path) -> str:
     """
     import os
 
+    from fno.claims.io import claim_path
     from fno.claims.io import claims_root_for as current_resolver
     from fno.claims.io import global_claims_dir
 
+    def _seen(label: str, root) -> str:
+        """Does a claim FILE exist where this door points, and what holds it?"""
+        try:
+            path = claim_path("node:N", root=root)
+        except Exception as exc:  # noqa: BLE001 - a diagnostic never raises
+            return f"{label}=<unresolvable: {type(exc).__name__}>"
+        if not path.exists():
+            return f"{label}={path}:ABSENT"
+        try:
+            from fno.claims.core import claim_status
+            from fno.claims.staleness import classify
+
+            info = claim_status("node:N", root=root)
+            return f"{label}={path}:holder={info.get('holder')}:state={info.get('state')}"
+        except Exception as exc:  # noqa: BLE001
+            return f"{label}={path}:PRESENT:<unreadable: {type(exc).__name__}>"
+
+    # The three doors, each answered SEPARATELY. The earlier version printed the
+    # roots and stopped, so a failure could not say whether the seeded claim was
+    # missing, in another directory, or present and read as free - three causes
+    # with one appearance. A path plus its holder separates them in one run.
     return (
         f"[diag] resolver={current_resolver('node:N')} global={global_claims_dir()} "
-        f"env={os.environ.get('FNO_CLAIMS_ROOT')!r} tmp={tmp_path}"
+        f"env={os.environ.get('FNO_CLAIMS_ROOT')!r} tmp={tmp_path} "
+        + " ".join(
+            (
+                _seen("seeded", tmp_path),
+                _seen("resolved", current_resolver("node:N")),
+                _seen("default", None),
+            )
+        )
     )
 
 

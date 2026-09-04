@@ -138,6 +138,7 @@ def auto_continue_enabled(
 EVENT_DISPATCHED = "advance_dispatched"
 EVENT_SKIPPED = "advance_skipped"
 EVENT_FAILED = "advance_failed"
+EVENT_SPAWNED = "dispatch_spawned"  # one row per launch, from _spawn_worker
 # x-0676: paired receipt (not a decision) emitted just before an advance_dispatched
 # when on_exhaustion=failover rotates off an exhausted provider.
 EVENT_FAILOVER = "dispatch_failover"
@@ -1277,6 +1278,26 @@ def _spawn_receipt_identity(proc_stdout: Optional[str]) -> str:
     return short_id or harness_session_id
 
 
+def _launch_harness_axis(launch: str, node_cwd: Optional[str] = None) -> Optional[str]:
+    """The harness ``launch`` names, or None when nothing can answer.
+
+    An ACCOUNT RECORD (ccm, ccr) is a real binary but not a harness, so it
+    answers through its registry row. None means unverifiable: pins nothing.
+    A record may also name a roster harness with no capability row (hermes,
+    openclaw). The resolver refuses those, so an answer it cannot honor is as
+    unverifiable as no answer and degrades the same way.
+    """
+    if not launch:
+        return None
+    from fno.adapters.providers.loader import record_harness
+    from fno.agents import harness_map
+
+    if harness_map.is_declared(launch):
+        return launch
+    rec = record_harness(launch, Path(node_cwd) if node_cwd else None)
+    return rec if rec and harness_map.is_declared(rec) else None
+
+
 def _spawn_worker(
     node_id: str,
     node_cwd: Optional[str],
@@ -1293,6 +1314,9 @@ def _spawn_worker(
     dispatch_account: Optional[str] = None,
     permission_mode: Optional[str] = None,
     node: Optional[dict] = None,
+    caller: str = "unknown",
+    events_path: Optional[Path] = None,
+    grid_reason: Optional[str] = None,
 ) -> str:
     """Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
 
@@ -1335,7 +1359,9 @@ def _spawn_worker(
     # --provider selects the account/record (or a bare kind like "claude"); a
     # per-node or dispatch-time pin overrides the claude default. Layer-separate
     # from `harness` (the record's cli, which drives the resolver's substrate).
-    prov = (provider or "").strip() or "claude"
+    # NOT the launch harness: defaulting it here, a rung before the resolver,
+    # launched claude carrying codex syntax.
+    launch = (provider or "").strip()
 
     # Capacity-grid deferral receiving end: the automatic dispatch callers pass
     # resolve_difficulty=False to node_model precisely so difficulty picks the
@@ -1345,10 +1371,12 @@ def _spawn_worker(
     # there instead and arrive already pinned - on a grid decline the pin is the
     # placement harness. An explicit harness therefore skips this consult: under
     # it the grid could pick a harness the caller's placement did not key for.
+    # A caller that resolved the grid hands its reason in; the consult below
+    # is skipped under an explicit harness. grid_reason=None on a grid PICK.
+    grid_why: Optional[str] = grid_reason
     if harness is None:
-        grid_harness, grid_model, _grid_why = _grid_lane_for(node, model=model, provider=provider)
+        grid_harness, grid_model, grid_why = _grid_lane_for(node, model=model, provider=provider)
         if grid_harness is not None:
-            prov = grid_harness
             model = grid_model
             # The resolver must see the grid's harness or it resolves a
             # claude substrate/command for a codex spawn (bg is claude-only).
@@ -1395,9 +1423,12 @@ def _spawn_worker(
         is_unsafe_short_address,
     )
 
+    # One axis: `provider` is the harness under an older spelling, so it must
+    # reach the resolver too, or the command follows the stage table instead.
+    launch_axis = _launch_harness_axis(launch, node_cwd)
     node_verb = (verb or "").strip() or None
     resolve_kwargs: dict = {
-        "harness": (harness or None),
+        "harness": ((harness or "").strip() or launch_axis or None),
         "node_id": node_id,
         "brief": (brief or None),
         "trigger": "autonomous",
@@ -1417,6 +1448,14 @@ def _spawn_worker(
     substrate = resolved["substrate"]
     target_cmd = resolved["command"]
     spawn_env = resolved.get("env") or {}
+
+    prov = launch or resolved["harness"]  # alias kept; resolver owns the default
+    if launch_axis and launch_axis != resolved["harness"]:
+        raise SpawnError(
+            f"refusing to spawn {node_id}: --harness {prov!r} runs "
+            f"{launch_axis!r} but the command is spelled for "
+            f"{resolved['harness']!r} ({target_cmd!r}). Pass one axis."
+        )
 
     cmd = [
         *_subprocess_util.fno_py_cmd(),
@@ -1507,25 +1546,47 @@ def _spawn_worker(
     # thread, no id - so the clean exit IS the proof and we skip the
     # requirement (else the parse below would raise SpawnError, release the
     # reservation, and redispatch a node whose headless worker already ran).
-    if substrate != "thread":
-        return "headless"
-    # Keep scanning past a line that merely MENTIONS an id field but is not the
-    # JSON receipt (banner/log noise) - only stop once an id actually parses.
-    launch_identity = _spawn_receipt_identity(proc.stdout)
-    if not launch_identity:
-        raise SpawnError(
-            f"fno agents spawn exit 0 but no launch-identity receipt: "
-            f"{(proc.stdout or proc.stderr or '').strip()[:200]}"
-        )
-    # A bare 8-hex id aimed at codex is a 65.5-second timestamp bucket, not an
-    # address: refuse by shape instead of binding a duplicate worker to the
-    # wrong session (ruling d-513d9d22, harness_identity.is_unsafe_short_address).
-    resolved_harness = (resolved.get("harness") or "").strip()
-    if is_unsafe_short_address(launch_identity, resolved_harness or None):
-        raise SpawnError(
-            f"fno agents spawn receipt carries a codex head-8 launch "
-            f"identity ({launch_identity}): {CODEX_SHORT_ADDRESS_RULE}"
-        )
+    launch_identity = "headless"
+    if substrate == "thread":
+        # Keep scanning past a line that merely MENTIONS an id field but is
+        # not the JSON receipt - stop once an id actually parses.
+        launch_identity = _spawn_receipt_identity(proc.stdout)
+        if not launch_identity:
+            raise SpawnError(
+                f"fno agents spawn exit 0 but no launch-identity receipt: "
+                f"{(proc.stdout or proc.stderr or '').strip()[:200]}"
+            )
+        # A bare 8-hex id aimed at codex is a 65.5-second timestamp bucket,
+        # not an address: refuse by shape rather than bind a worker to the
+        # wrong session (ruling d-513d9d22, is_unsafe_short_address).
+        if is_unsafe_short_address(
+            launch_identity, (resolved.get("harness") or "").strip() or None
+        ):
+            raise SpawnError(
+                f"fno agents spawn receipt carries a codex head-8 launch "
+                f"identity ({launch_identity}): {CODEX_SHORT_ADDRESS_RULE}"
+            )
+    # One row per launch: only the spawner knows the resolved argv, and it
+    # sits after the guards, so the row is proof of a launch that happened.
+    _emit(
+        EVENT_SPAWNED,
+        {
+            "node_id": node_id,
+            "short_id": launch_identity,
+            "agent_name": agent_name,
+            "harness": prov,
+            "vendor": vendor or "",
+            "model": model or "",
+            "account": dispatch_account or "",
+            "substrate": substrate,
+            "command": target_cmd,
+            "cwd": node_cwd or "",
+            "caller": caller,
+            "grid": grid_why or "",
+            "decision": "; ".join(resolved.get("decision") or []),
+        },
+        events_path,
+    )
     return launch_identity
 
 
@@ -1608,11 +1669,6 @@ def _base_project_id(canonical_root: Path) -> str:
         pass
     return canonical_root.name
 
-
-# The non-claude harness kinds (KNOWN_PROVIDERS minus claude). Any other provider
-# value - a claude ACCOUNT record (ccm/ccr), z.ai/glm, an empty/None - runs under
-# the claude harness, so it maps to claude for the worktree-native decision.
-_NON_CLAUDE_HARNESSES = frozenset({"codex", "gemini", "agy", "opencode"})
 
 
 def _grid_lane_for(
@@ -1697,17 +1753,15 @@ def _grid_lane_for(
     return candidate["harness"], candidate["model"], None
 
 
-def _lane_harness(eff_provider: Optional[str]) -> str:
-    """Resolve a lane's dispatch provider to its worktree harness.
+def _lane_harness(eff_provider: Optional[str], node_cwd: Optional[str] = None) -> str:
+    """Resolve a lane's dispatch provider to the harness the worker will run.
 
-    The worktree-native decision only cares whether the worker runs under claude:
-    an explicit non-claude harness (codex/gemini/agy/opencode) keeps its own
-    harness (-> external base); everything else - claude, a claude account record
-    (ccm/ccr), an empty/None provider - resolves to claude (-> harness-native),
-    matching `_spawn_worker`'s `prov = eff_provider or "claude"` default so the
-    worktree lands where the worker actually runs.
+    One leg, shared with the spawn seam: a hardcoded non-claude set here read
+    every undeclared harness as claude. ``node_cwd`` scopes the read to the SAME
+    repo the seam reads, or placement answers claude while the spawn resolves
+    codex and the one-axis guard skips the lane every tick.
     """
-    return eff_provider if (eff_provider and eff_provider in _NON_CLAUDE_HARNESSES) else "claude"
+    return _launch_harness_axis((eff_provider or "").strip(), node_cwd) or "claude"
 
 
 def _run_setup_worktree(worktree: Path, canonical_root: Path) -> None:
@@ -1747,10 +1801,9 @@ def _ensure_lane_worktree(
     without touching the others (Failure Modes: Errors).
 
     ``harness`` is the lane worker's dispatch harness (the node's provider,
-    defaulting to claude to match `_spawn_worker`'s `prov = eff_provider or
-    "claude"`): claude lands the lane harness-native at `<repo>/.claude/worktrees/`,
-    a non-claude harness at the external base. A `never` project returns the repo
-    root (guarded below) regardless of the harness.
+    defaulting to claude): claude lands the lane harness-native at
+    `<repo>/.claude/worktrees/`, a non-claude harness at the external base. A
+    `never` project returns the repo root (guarded below) whatever the harness.
     """
     # Deliberately the PRE-FOLD spelling. `fno_py_cmd()` resolves the INSTALLED
     # fno-py off PATH, not this source, and the shim only forwards old to new.
@@ -1966,10 +2019,12 @@ def dispatch_lanes(
             # DECLINE pins too: an unpinned spawn re-consults the grid at the
             # spawn seam, and a capacity change in between could land the worker
             # on a harness the worktree was not keyed for.
-            lane_grid_harness, lane_grid_model, _lane_grid_why = _grid_lane_for(
+            lane_grid_harness, lane_grid_model, lane_grid_why = _grid_lane_for(
                 node, model=resolved_model, provider=eff_harness
             )
-            lane_placement_harness = _lane_harness(lane_grid_harness or eff_harness)
+            lane_placement_harness = _lane_harness(
+                lane_grid_harness or eff_harness, str(root)
+            )
             worktree = _ensure_lane_worktree(
                 node_id,
                 canonical_root=root,
@@ -1996,6 +2051,11 @@ def dispatch_lanes(
                 verb=node.get("dispatch_verb"),
                 brief=_brief,
                 node=node,
+                caller="dispatch_lanes",
+                events_path=ev_path,
+                # The door resolved the grid, so the seam's own consult never
+                # runs and the reason field would be blank on the busiest door.
+                grid_reason=lane_grid_why,
             )
         except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
             # Release BOTH the boot-window reservation and the dispatch-time lane
@@ -2834,7 +2894,7 @@ def _join_node(
             # run the restart test first. An invisible team that survives beats
             # a visible one that dies.
             "agents", "spawn", "--substrate", "thread",
-            # Explicit harness, like _spawn_worker's `prov` default: an
+            # Explicit harness, like _spawn_worker's resolved axis: an
             # untagged spawn leaves the lane unresolved, and this machine's
             # codex-scoped agents.defaults.model then injects onto it and
             # trips the vendor-mismatch refusal (live proof, 2026-08-27).
@@ -3075,8 +3135,10 @@ def _events_path(project_root: Optional[Path]) -> Path:
     return project_events_json()
 
 
-def _emit(kind: str, data: dict, events_path: Path) -> None:
-    """Best-effort event emit. Never raises (LD#7: never wedge the host op)."""
+def _emit(kind: str, data: dict, events_path: Optional[Path]) -> None:
+    """Best-effort event emit. Never raises (LD#7: never wedge the host op).
+    ``None`` resolves inside the guard: doing it in a caller's argument list
+    puts a raising repo-root read on the post-spawn path."""
     try:
         from fno.events import _build, append_event
 
@@ -3295,6 +3357,8 @@ def advance(
             node=node,
             verb=node.get("dispatch_verb"),
             brief=_brief,
+            caller="advance",
+            events_path=ev_path,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -3599,6 +3663,8 @@ def _converge_one(
             verb=node_meta.get("dispatch_verb"),
             brief=_brief,
             node=node_meta,
+            caller="_converge_one",
+            events_path=ev_path,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)

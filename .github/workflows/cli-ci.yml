@@ -110,30 +110,14 @@ jobs:
           # would report UNEVALUATED on every run.
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-        with:
-          version: "latest"
-
-      - name: Install PyYAML for bundler + marketplace lint
-        run: python3 -m pip install --upgrade pyyaml
-
-      - name: Install stable Rust toolchain
-        # A changed crate selects its Rust step family; without the toolchain
-        # that would red as a missing prerequisite rather than a real failure.
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install pinned rustfmt toolchain (for the format-on-edit hook test)
-        # Same reasoning as smoke-setup/action.yml's copy of this step: a
-        # changed test/hooks/*.sh packet can select test_format_on_edit.sh,
-        # which needs `rustfmt +1.94.1` present or it SKIPs - and smoke
-        # counts a SKIP as a FAILURE.
-        run: rustup toolchain install 1.94.1 --component rustfmt --profile minimal --no-self-update
+      - name: Provision the smoke runner
+        # The SAME provisioning the full shards get, for the reason the action
+        # itself documents: this job began as a hand-copied subset and the copy
+        # was missing the Rust front. Without FNO_AGENTS_FRONT the graph-store
+        # keeper cannot spawn, read_graph raises, and the merge-guard read
+        # swallows it and answers None - so any packet selecting a
+        # keeper-dependent test file reds for a setup reason, not a real one.
+        uses: ./.github/actions/smoke-setup
 
       - name: Changed packet (CHANGED SUBSET)
         env:

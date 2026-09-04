@@ -13,9 +13,12 @@ def test_an_unresolved_roster_is_never_cached(monkeypatch, tmp_path):
     """A failed plugin-surface read must not freeze the degraded answer.
 
     Empty roster -> every bare `/verb` stays literal -> a codex worker gets
-    `/target`, prose to codex, and the dispatch quietly does nothing. The
-    resolver reads an env hint first, so the next call must be free to
-    succeed. The mirror leg proves a GOOD answer still caches."""
+    prose, and the dispatch quietly does nothing. The resolver reads an env
+    hint first, so the next call must be free to succeed. The mirror leg
+    proves a GOOD answer still caches.
+
+    The specimen is `/blueprint`, not `/target`: the target family bypasses the
+    roster entirely, so it cannot show a degraded read."""
     from fno.agents import harness_map
 
     repo_root = Path(harness_map.__file__).resolve().parents[4]
@@ -25,12 +28,12 @@ def test_an_unresolved_roster_is_never_cached(monkeypatch, tmp_path):
         # read finds nothing, the roster is empty.
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path))
         assert harness_map.footnote_verbs() == frozenset()
-        assert harness_map.normalize_command("/target x-1", "codex") == "/target x-1"
+        assert harness_map.normalize_command("/blueprint x-1", "codex") == "/blueprint x-1"
 
         # Same process, real plugin root. Nothing cleared by hand.
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(repo_root))
         assert "target" in harness_map.footnote_verbs()
-        assert harness_map.normalize_command("/target x-1", "codex") == "$fno:target x-1"
+        assert harness_map.normalize_command("/blueprint x-1", "codex") == "$fno:blueprint x-1"
 
         hits = harness_map._shipped_verbs.cache_info().hits
         harness_map.footnote_verbs()
