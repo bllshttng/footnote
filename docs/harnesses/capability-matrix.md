@@ -3,10 +3,7 @@
      regenerate from crates/fno-agents/src/harness_capabilities.toml. -->
 # Harness capability matrix (features)
 
-What each harness can DO, rendered from the capability table
-(`map_version 16`). One row per supported harness - including roster
-entries with no capability row, which read unmeasured everywhere - and one
-column per feature key.
+What each harness can DO, rendered from the capability table (`map_version 16`). One row per supported harness - including roster entries with no capability row, which read unmeasured everywhere - and one column per feature key.
 
 | State | Meaning |
 |---|---|
@@ -15,10 +12,7 @@ column per feature key.
 | `absent` | measured not to exist on this harness |
 | `unmeasured` | nobody has looked |
 
-Every non-native cell settles the same way: `fno agents harness probe
-<harness>` runs the instrument the table declares for that key. The
-pane-driving mechanics are a different dimension and live in the capability
-table itself, never here.
+Every non-native cell settles the same way: `fno agents harness probe <harness>` runs the instrument the table declares for that key. The pane-driving mechanics are a different dimension and live in the capability table itself, never here.
 
 
 | harness | acp | attach | hooks | mcp | plugins | review | rpc | server | skills_dir | spawn | subagent_dispatch |
