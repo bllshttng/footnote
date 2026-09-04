@@ -520,6 +520,11 @@ case "${1:-status}" in
             *) _GIT_COMMON_DIR="$MAIN_DIR/$_GIT_COMMON_DIR" ;;
         esac
         _WT_SWEEP_LOCK="$_GIT_COMMON_DIR/fno-wt-sweep.lock"
+        # The sweep's own birth certificate, for the budget-expiry grace
+        # below: a directory OLDER than this file predates the sweep and can
+        # be nobody's live claim.
+        _WT_SWEEP_STARTED="$_GIT_COMMON_DIR/.fno-wt-sweep-started.$$"
+        : > "$_WT_SWEEP_STARTED" 2>/dev/null || _WT_SWEEP_STARTED=""
         _wt_lock_acquired=""
         for _wt_lock_attempt in 1 2 3 4 5; do
             if mkdir "$_WT_SWEEP_LOCK" 2>/dev/null; then
@@ -577,6 +582,17 @@ case "${1:-status}" in
                     elif [[ ! -e "$_WT_SWEEP_LOCK" ]]; then
                         # Not what we observed and nobody has claimed the path
                         # since: put it back untouched.
+                        # ACCEPTED RESIDUAL: a verified holder can still be
+                        # dislodged here by a double-steal chain - our stale
+                        # observation outlives a peer's steal-and-verify, our
+                        # mv takes the peer's verified dir, and a third claim
+                        # mkdirs inside the test-to-mv window so the restore
+                        # NESTS the peer's copy and the lift deletes it. The
+                        # lift stays (without it the holder's own trap wedges
+                        # on a non-empty dir); the window is milliseconds wide
+                        # and no shell primitive closes it in place - the
+                        # atomic-claim substrate is the real retirement, filed
+                        # separately.
                         mv "$_WT_STALE" "$_WT_SWEEP_LOCK"
                         # A claim taking the path between the test and this mv
                         # makes the restore NEST (mv moves a dir into an
@@ -608,9 +624,24 @@ case "${1:-status}" in
                 # Still pid-less after the whole retry budget: not a
                 # mid-acquire peer (its write lands in milliseconds) but
                 # debris from a lost pid write. Reaping an EMPTY dir here is
-                # what keeps one lost write from wedging every future sweep;
-                # a dir that grew content survives untouched.
-                rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true
+                # what keeps one lost write from wedging every future sweep,
+                # and the empty-only rmdir is also the guard: a peer's pid
+                # write landing between the emptiness read and here makes the
+                # dir non-empty and the rmdir fails, so a holder is never
+                # removed. The deeper wedge is a PID-LESS dir WITH content -
+                # an interrupted steal's nested copy, whose owner's trap
+                # unlinked the pid but could not rmdir - which the rmdir gives
+                # up on silently and every future sweep expires against. That
+                # one gets rm -rf, only once it is OLDER than this sweep
+                # (find -newer against the birth certificate above): anything
+                # created after the sweep started is someone's live claim and
+                # is spared.
+                if [[ -z "$(ls -A "$_WT_SWEEP_LOCK" 2>/dev/null || true)" ]]; then
+                    rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true
+                elif [[ -n "$_WT_SWEEP_STARTED" ]] \
+                    && [[ -n "$(find "$_WT_SWEEP_LOCK" -maxdepth 0 ! -newer "$_WT_SWEEP_STARTED" 2>/dev/null)" ]]; then
+                    rm -rf "$_WT_SWEEP_LOCK"
+                fi
             fi
             sleep 0.2
         done
@@ -634,7 +665,7 @@ case "${1:-status}" in
         # Only tear down the lock if it still names us - a lock reclaimed
         # from a dead holder, or freshly acquired, must never be removed out
         # from under a different process that has since taken it over.
-        trap '[[ "$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null)" == "$$" ]] && { unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true; rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true; }' EXIT
+        trap 'rm -f "$_WT_SWEEP_STARTED" 2>/dev/null || true; [[ "$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null)" == "$$" ]] && { unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true; rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true; }' EXIT
 
         if [[ -n "$CARGO_TARGETS" ]]; then
             CARGO_APPLY="$APPLY"

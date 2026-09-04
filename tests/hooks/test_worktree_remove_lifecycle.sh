@@ -751,6 +751,94 @@ fi
 rm -f "$OUT_ABA6"
 rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE" "$LOCKDIR".stale.* 2>/dev/null
 
+# 5h7. The deepest wedge: a PID-LESS dir WITH content (an interrupted steal's
+# nested copy, whose owner's trap unlinked the pid but could not rmdir) is
+# invisible to the empty-only reap and used to block every future sweep
+# forever. The budget-expiry grace reaps it once it is older than the sweep
+# itself (find -newer against the sweep's birth certificate), so sweep one
+# gives up and sweep two acquires. No stubs; two ordinary sweeps.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare7.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$(cd "$COMMON" && pwd -P)/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+printf 'junk' > "$LOCKDIR/debris"   # pid-less AND non-empty: the wedge shape
+OUT_W1=$(mktemp -t w7a.XXXXXX)
+OUT_W2=$(mktemp -t w7b.XXXXXX)
+( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_W1" 2>&1 )
+if grep -q "^STATUS" "$OUT_W1"; then
+    fail "wedge sweep one acquired over debris" "[$(cat "$OUT_W1")]"
+else
+    pass "wedge sweep one gives up on the debris dir"
+fi
+if [[ ! -d "$LOCKDIR" ]]; then
+    pass "wedge debris reaped at budget expiry"
+else
+    fail "wedge debris survived the grace" "the pid-less non-empty dir still blocks the path"
+fi
+( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_W2" 2>&1 )
+if grep -q "^STATUS" "$OUT_W2"; then
+    pass "wedge does not reach the second sweep"
+else
+    fail "wedge blocked the second sweep" "[$(tail -1 "$OUT_W2")]"
+fi
+rm -f "$OUT_W1" "$OUT_W2"
+rm -rf "$LOCKDIR" "$S" "$BARE"
+
+# 5h8. The empty-only reap's guard, pinned: a peer's pid write landing
+# between the reaper's emptiness read and the rmdir makes the dir non-empty,
+# the rmdir fails, and the reaper backs off - it never removes a holder's
+# directory. Staged with a stub `ls` that reports the dir EMPTY once while
+# planting a live peer's pid file inside it.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare8.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$(cd "$COMMON" && pwd -P)/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+STUBDIR=$(mktemp -d -t aba8-stub.XXXXXX)
+PEERPID="$LOCKDIR/pid"
+LSDONE="$STUBDIR/ls-done"
+cat > "$STUBDIR/ls" <<EOF
+#!/usr/bin/env bash
+# One-time: the reaper's emptiness read answers EMPTY while a live peer's
+# pid file lands in the directory, so the rmdir must fail and the reaper
+# must back off rather than reap a holder.
+if [[ "\$1" == "-A" && "\$2" == "$LOCKDIR" && ! -e "$LSDONE" ]]; then
+    : > "$LSDONE"
+    echo $$ > "$PEERPID"
+    exit 0
+fi
+exec /bin/ls "\$@"
+EOF
+chmod +x "$STUBDIR/ls"
+OUT_W3=$(mktemp -t w8.XXXXXX)
+( cd "$S" && PATH="$STUBDIR:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_W3" 2>&1 )
+if grep -q "^STATUS" "$OUT_W3"; then
+    fail "reaper removed a holder's directory" "[$(cat "$OUT_W3")]"
+else
+    pass "reaper backs off when the dir grew a holder"
+fi
+if [[ -f "$PEERPID" ]]; then
+    pass "peer holder survives the reap attempt"
+else
+    fail "peer holder was removed" "the pid write that landed first did not protect the directory"
+fi
+if [[ -f "$LSDONE" ]]; then
+    pass "reap instrument ran"
+else
+    fail "reap instrument never ran" "the stub ls was never consulted; a green here would be vacuous"
+fi
+rm -f "$OUT_W3"
+rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE"
+
 echo ""
 echo "worktree lifecycle: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
