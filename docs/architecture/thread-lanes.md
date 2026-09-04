@@ -54,13 +54,13 @@ A row names the axes it CARRIES. Every other axis is refused by name rather than
 
 | Field | What it records |
 |---|---|
-| `carries` | The launch axes this lane has a measured spelling for. The complement is the refusal set. |
+| `carries` | The launch axes this lane has a measured spelling for. The complement is the refusal set. Every entry must name a `_lane_b_thread_spawn` parameter: `model`, `yolo`, `permission_mode`, `add_dir`, `effort` or `resume_session_id`. An override naming anything else raises a TypeError at spawn. |
 | `ready_marker` | This TUI's own composer-idle paint, the positive marker the seed waits for. |
 | `once_refusal` / `resume_refusal` / `headless_refusal` | Why the lane is absent, in the sentence the operator sees. |
 | `bypass_flag`, `bypass_always` | The never-prompt flag. `bypass_always` is for a TUI whose first approval has nobody to answer it. |
 | `clear_modal` | `(regex, keys)` for a TUI that paints a blocking modal before its composer. A TUI behind an unanswered modal runs nothing while holding a live registry row. |
 
-Two rows carry a `finish_argv` completion the fields cannot express. pi appends its provider/model pair, because bare `pi` defaults to provider google. agy upserts folder trust, because a folder agy does not trust puts a modal in front of the composer and in front of the mint.
+Two harnesses need a launch completion no field can express, so it lives in Python beside the loop (`keeper_thread._FINISH_ARGV`) rather than in the row. pi appends its provider/model pair, because bare `pi` defaults to provider google. agy upserts folder trust, because a folder agy does not trust puts a modal in front of the composer and in front of the mint.
 
 The mint is per row too. `cursor-agent` and `agy` are callee-minted-read-back: the harness makes the id and fno reads it back before the TUI launches. `pi` and `grok` take fno's own UUIDv4. Either way the id exists before any worker starts. A caller-supplied id is validated, never minted: a truncated id is a different conversation to the harness, not a resume.
 

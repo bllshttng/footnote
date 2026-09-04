@@ -1523,20 +1523,22 @@ def _keeper_seed_submit(
         last_nudge = 0.0
         modal_answered = False
         while _time.monotonic() < deadline:
-            if ready_marker in bytes(text):
-                break
+            # Modal BEFORE marker: one repaint can deliver the composer paint
+            # and the dialog over it in a single recv, and breaking there pastes
+            # the seed into a TUI still showing the dialog.
             if clear_modal is not None and not modal_answered:
                 pattern, keys = clear_modal
                 if re.search(pattern, bytes(text).decode("utf-8", "replace"), re.I):
-                    # Answer ONCE and clear NEITHER buffer. `raw_pending` can
-                    # hold the head of a partial frame and `text` can hold the
-                    # composer marker from this same recv; `modal_answered` is
-                    # what stops a second answer. The regression test is
-                    # test_lane_b_thread_spawn.py's frame-desync case.
+                    # Answer ONCE and clear NEITHER buffer: `raw_pending` can
+                    # hold the head of a partial frame, and `text` a marker only
+                    # a later repaint paints again. Regression tests are in
+                    # test_lane_b_thread_spawn.py.
                     conn.sendall(frame(tag_input, keys))
                     modal_answered = True
                     _time.sleep(0.5)
                     continue
+            if ready_marker in bytes(text):
+                break
             now = _time.monotonic()
             if now - last_nudge >= 4.0:
                 flip = not flip

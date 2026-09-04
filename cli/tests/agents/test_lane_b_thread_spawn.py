@@ -1003,7 +1003,7 @@ def _serve_frames(sock_path: Path, chunks: list[bytes]) -> threading.Thread:
                         break
                     payload = bytes(pending[5 : 5 + length])
                     del pending[: 5 + length]
-                    if pending[:0] == b"" and payload not in (b"\r",):
+                    if payload != b"\r":
                         conn.sendall(_frame(1, payload))
         finally:
             conn.close()
@@ -1065,3 +1065,39 @@ def test_answering_a_modal_keeps_the_frame_decoder_in_sync() -> None:
     # partial frame would never have seen the marker and would have raised.
     assert sent.count(_frame(1, b"\r")) >= 1, "the modal was never answered"
     assert b"hello" in sent, "the seed never reached the composer"
+
+
+def test_a_modal_arriving_with_the_marker_is_still_answered() -> None:
+    """One repaint can deliver the composer paint and the dialog over it.
+
+    The marker is then already in the buffer when the modal matches, so a loop
+    that tests the marker FIRST breaks out with the dialog unanswered. The seed
+    goes to a TUI showing the modal: its submit CR answers the dialog, the
+    payload is swallowed, and the spawn returns a live registry row with no
+    orders. The modal check runs first for exactly this stream.
+    """
+    from fno.agents.dispatch import _keeper_seed_submit
+
+    short = Path(tempfile.mkdtemp(prefix="fnok-"))
+    sock_path = short / "k.sock"
+    modal = _frame(1, b"Do you trust the contents of this project?\n")
+    ready = _frame(1, b"? for shortcuts")
+    # ONE chunk, both complete: the marker is matchable the first time the loop
+    # looks, which is what makes the ordering load-bearing.
+    server = _serve_frames(sock_path, [ready + modal])
+
+    _keeper_seed_submit(
+        name="wk-modal-same-recv",
+        session_id="0d1a5c33-6b90-4d02-9f77-2a1c5e88b410",
+        sock=sock_path,
+        message="hello",
+        ready_marker=b"? for shortcuts",
+        clear_modal=(r"trust (?:this )?folder|do you trust", b"\r"),
+    )
+    server.join(timeout=10)
+
+    shutil.rmtree(short, ignore_errors=True)
+    sent = b"".join(server.received)  # type: ignore[attr-defined]
+    answer = sent.index(_frame(1, b"\r"))
+    assert b"hello" in sent, "the seed never reached the composer"
+    assert answer < sent.index(b"hello"), "the seed was pasted before the modal was answered"

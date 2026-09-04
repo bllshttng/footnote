@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 #: Every launch axis a spawn can carry, as (flag an operator types, the row's
-#: ``carries`` name). A row that omits the name refuses the flag.
+#: ``carries`` name). A row that omits the name refuses the flag; a row that
+#: names an axis ``_lane_b_thread_spawn`` has no parameter for raises a
+#: TypeError naming it, which only an operator override can produce.
 LAUNCH_AXES: tuple[tuple[str, str], ...] = (
     ("--model", "model"),
     ("--yolo", "yolo"),
@@ -24,12 +26,20 @@ LAUNCH_AXES: tuple[tuple[str, str], ...] = (
     ("--deny-tools", "deny_tools"),
 )
 
+
+def _agy_finish(argv: list[str], cwd: Path) -> list[str]:
+    """agy takes no extra tokens; it needs the folder TRUSTED before launch. A
+    resume id skips the mint that upserts the grant, so the upsert happens here
+    too. A refused write is not fatal: the seed submit answers the modal."""
+    _trust_agy_folder(cwd)
+    return argv
+
+
 #: The one completion per harness the contract cannot express. Bare ``pi``
-#: defaults to provider google, so the pair is always appended. agy needs the
-#: folder trusted, because a resume id skips the mint that upserts it.
+#: defaults to provider google, so the pair is always appended.
 _FINISH_ARGV: dict[str, Callable[[list[str], Path], list[str]]] = {
     "pi": lambda argv, cwd: [*argv, *_pi_provider_model()],
-    "agy": lambda argv, cwd: (_trust_agy_folder(cwd), argv)[1],
+    "agy": _agy_finish,
 }
 
 
@@ -54,11 +64,13 @@ def _trust_agy_folder(cwd: Path) -> bool:
 
 def mint_session_id(harness: str, cwd: Path, requested: Optional[str]) -> Optional[str]:
     """The harness-minted id for a keeper thread, or ``None`` for the
-    caller-assigned default, per the row's ``session_binding.strategy``.
+    caller-assigned default.
 
-    Either way the id exists before any worker starts. A caller-requested id
-    (``spawn --resume``) is VALIDATED rather than minted: a truncated one is a
-    picker or a rival conversation.
+    The row's ``session_binding.strategy`` says whether a mint is REQUIRED and
+    the mint itself is per-harness code, so the two are checked against each
+    other below. Either way the id exists before any worker starts. A requested
+    id (``spawn --resume``) is VALIDATED, never minted: a truncated one names a
+    rival conversation.
     """
     if harness == "cursor-agent":
         from fno.agents.harnesses.cursor_agent import _require_chat_id, create_chat
@@ -73,6 +85,19 @@ def mint_session_id(harness: str, cwd: Path, requested: Optional[str]) -> Option
         # folder would put a modal in front of the mint too.
         _trust_agy_folder(Path(cwd))
         return create_conversation(cwd)
+    from fno.agents.harness_map import capabilities
+
+    binding = capabilities(harness).get("session_binding") or {}
+    if binding.get("strategy") == "callee-minted-read-back":
+        from fno.agents.dispatch import DispatchAskError
+
+        raise DispatchAskError(
+            f"{harness} declares session_binding.strategy = "
+            "callee-minted-read-back but fno has no mint for it; the "
+            "caller-assigned UUIDv4 fallback launches the keeper on an id the "
+            "harness never adopts, and Identify reports that fabricated id",
+            exit_code=2,
+        )
     return requested
 
 
@@ -88,9 +113,7 @@ def complete_launch_argv(
     effort: Optional[str],
 ) -> list[str]:
     """The declared create form plus the axes this harness's PANE arm appends.
-
-    One ORDER serves every lane: flag order is not how a binary launches.
-    """
+    One ORDER serves every lane: flag order is not how a binary launches."""
     from fno.agents.dispatch import DispatchAskError
     from fno.agents.mux_spawn import effort_tokens, permission_pane_tokens
     from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
@@ -140,10 +163,8 @@ def keeper_thread_spawn(
     options: dict,
     lock_timeout: float,
 ):
-    """Run one keeper-lane thread spawn, or return ``None`` for another lane.
-
-    ``options`` carries the ``dispatch_spawn`` locals the rows name.
-    """
+    """Run one keeper-lane thread spawn, or ``None`` for another lane.
+    ``options`` carries the ``dispatch_spawn`` locals the rows name."""
     from fno.agents.dispatch import (
         DispatchAskError,
         SpawnResult,

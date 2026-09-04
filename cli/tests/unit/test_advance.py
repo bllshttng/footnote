@@ -2052,7 +2052,13 @@ def _dispatch_one_capture(monkeypatch, tmp_path):
         # worker actually bound a session, not just whether a pane was created.
         lambda **kw: captured.update(kw) or SimpleNamespace(pane_id="p1", bound=True),
     )
-    verdict = dispatch_mod._dispatch_one(session="s", node=None, project=None)
+    try:
+        verdict = dispatch_mod._dispatch_one(session="s", node=None, project=None)
+    finally:
+        # Warm for the call, cold afterwards. monkeypatch restores the env at
+        # teardown but not the cache behind it, and leaving the real checkout
+        # roster warm hands it to every later test in this xdist worker.
+        harness_map.footnote_verbs.cache_clear()
     return verdict, captured
 
 

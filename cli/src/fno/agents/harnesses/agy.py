@@ -2,8 +2,7 @@
 
 ``--conversation`` resumes and nothing creates, so the id comes from the only
 surface that returns one: a print-mode turn whose JSON envelope carries
-``conversation_id``. Measurement and lane notes: docs/architecture/thread-lanes.md.
-"""
+``conversation_id``. Lane notes: docs/architecture/thread-lanes.md."""
 from __future__ import annotations
 
 import json
@@ -17,9 +16,9 @@ AGY_BINARY = "agy"
 # The mint is a real turn, so it needs a real prompt. A no-op one keeps the
 # conversation's first message harmless.
 MINT_PROMPT = "Reply with exactly: OK"
-# A ceiling, not a budget: the measured mint is 1.5s. It sits inside the row's
-# declared binding window (timeout_ms = 60000), so a wedged `agy` raises the
-# refusal below instead of being killed by a caller with a shorter fuse.
+# A ceiling, not a budget: the measured mint is 1.5s. Inside the row's declared
+# binding window (timeout_ms = 60000), so a wedged `agy` raises the refusal
+# below instead of dying to a caller with a shorter fuse.
 MINT_TIMEOUT_S = 45.0
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -35,7 +34,7 @@ class AgySessionError(DispatchAskError):
 
 
 def require_conversation_id(conversation_id: str) -> str:
-    """Validate an id before any process launches on it: a truncated one is a
+    """Validate before any process launches on it: a truncated id names a
     DIFFERENT conversation to agy, never a resume."""
     text = (conversation_id or "").strip()
     if not _UUID_RE.match(text):
@@ -88,7 +87,7 @@ def create_conversation(cwd: Path | str, *, timeout_s: float = MINT_TIMEOUT_S) -
 
 
 def conversation_store_path(conversation_id: str) -> Path:
-    """Where agy keeps this conversation - its OWN store, so a journey can
-    assert the spawn's id against the harness, not against fno echoing itself."""
+    """Where agy keeps this conversation - its OWN store, so a journey asserts
+    the spawn's id against the harness, not against fno echoing itself."""
     store = Path.home() / ".gemini" / "antigravity-cli" / "conversations"
     return store / f"{require_conversation_id(conversation_id)}.db"
