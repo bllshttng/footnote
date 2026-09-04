@@ -2977,10 +2977,15 @@ mod tests {
         let grammar = rename_agent(&path, "worker-a", "bad label!").unwrap_err();
         assert!(grammar.contains("1-64 letters"), "{grammar}");
         // Nothing was written by any refused call (the b->x rename above DID
-        // land: worker-b is gone, worker-x holds it).
+        // land: worker-x holds it, and "worker-b" answers only as that row's
+        // old-label alias, never as a name of its own).
         let reg = load_registry(&path).unwrap();
         assert!(reg.find("worker-a").is_some() && reg.find("worker-x").is_some());
-        assert!(reg.find("worker-b").is_none() && reg.find("worker-c").is_none());
+        assert_eq!(
+            reg.find("worker-b").map(|e| e.name.as_str()),
+            Some("worker-x")
+        );
+        assert!(reg.find("worker-c").is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 
