@@ -89,14 +89,31 @@ def lane_b_home(tmp_path, monkeypatch):
 # AC4-ERR: the public dispatch surface still refuses
 # ---------------------------------------------------------------------------
 
-def test_partial_lane_thread_dispatch_still_refuses_at_the_gate(lane_b_home) -> None:
-    """agy's `thread` capability row stays false until its own journey passes,
-    so resolve_dispatch refuses the thread substrate - the keeper lane built
-    here is not reachable through the public dispatch surface without one."""
-    assert capabilities("agy")["thread"] is False
+def test_agy_thread_dispatch_resolves_on_the_journey_backed_bit(lane_b_home) -> None:
+    """agy's `thread` row is true behind its own journey
+    (test_agy_spawn_journey.py), so the keeper lane built here IS reachable
+    through the public dispatch surface. agy participates in the loop
+    natively (a Stop handler in its own hooks.json), so unlike pi it needs no
+    installed extension for the autonomous `/target` template to resolve."""
+    assert capabilities("agy")["thread"] is True
+    resolved = resolve_dispatch(harness="agy", substrate="thread", command="agy --version")
+    assert resolved["substrate"] == "thread"
+    assert resolved["thread"] is True
+    resolved_loop = resolve_dispatch(harness="agy", substrate="thread")
+    assert resolved_loop["substrate"] == "thread"
+    assert resolved_loop["loop_participation"] == "native"
+
+
+def test_gemini_thread_dispatch_still_refuses_at_the_gate(lane_b_home) -> None:
+    """The refusal this file used to assert through agy still has a subject.
+    gemini carries a capability row and no thread lane, so nothing resolves
+    onto a keeper lane nobody built for it. Its DEPRECATION gate fires before
+    the substrate gate, so that is the message asserted - the point is that
+    the row alone never buys the lane."""
+    assert capabilities("gemini")["thread"] is False
     with pytest.raises(DispatchResolveError) as exc_info:
-        resolve_dispatch(harness="agy", substrate="thread")
-    assert "substrate 'thread' is unsupported on harness 'agy'" in str(exc_info.value)
+        resolve_dispatch(harness="gemini", substrate="thread")
+    assert "no maintained footnote dispatch lane" in str(exc_info.value)
 
 
 def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit(monkeypatch) -> None:

@@ -336,7 +336,13 @@ status_pattern = ""
 [harness.agy]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-continue"
-thread = false
+# TRUE behind a live journey (cli/tests/agents/test_agy_spawn_journey.py,
+# journey wk-x-d145): fno's keeper hosts the agy TUI and `dispatch_spawn`'s agy
+# branch drives it. Measured 2026-09-03 on agy 1.1.24 - one `agy -p
+# --output-format json` turn returned a conversation_id in 1.5s, the id named a
+# real db under ~/.gemini/antigravity-cli/conversations, and a FRESH process
+# resumed that conversation interactively with its transcript restored.
+thread = true
 autonomous_pane = false
 route_on_pane = false
 # agy, measured 2026-08-28: hooks/agy-target-stop-hook.sh is a real adapter that
@@ -363,7 +369,10 @@ send_keys_enter_delay_ms = 800
 submit_keys = ["enter"]
 stop_strategy = "registry-noop"
 remove_strategy = "registry-only"
-session_binding = { strategy = "unsupported", required = false, timeout_ms = 0 }
+# agy mints its own conversation id and takes none on the command line, so the
+# spawn runs one print-mode turn and reads the id back out of its JSON envelope
+# - cursor-agent's shape, minus the fd dance, because `agy -p` exits on its own.
+session_binding = { strategy = "callee-minted-read-back", required = true, timeout_ms = 60000 }
 
 [harness.agy.state_root_grant]
 # `--add-dir` (writable_dirs.ADD_DIR_PROVIDERS).
@@ -386,9 +395,12 @@ supported = false
 rule_ids = []
 keys = []
 
+# Create and resume are the SAME launch once the id exists: the print-mode turn
+# mints it, every later process rejoins it. Bare `agy` would open a conversation
+# fno cannot name, which is the one thing a keeper thread may never do.
 [harness.agy.resume_strategy.forms.interactive_create]
-kind = "flag"
-tokens = ["agy"]
+kind = "session_flag"
+tokens = ["agy", "--conversation", "{session_id}"]
 
 # `--conversation <id>` resumes the conversation from any process state,
 # the same primitive the headless_resume row below records. Measured
