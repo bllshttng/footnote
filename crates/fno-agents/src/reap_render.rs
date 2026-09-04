@@ -49,6 +49,11 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             .iter()
             .map(|(id, reason)| json!({"id": id, "reason": reason}))
             .collect();
+        let not_terminal: Vec<Value> = summary
+            .kept_not_terminal
+            .iter()
+            .map(|(id, tail)| json!({"id": id, "reason": tail}))
+            .collect();
         return format!(
             "{}\n",
             json!({
@@ -61,7 +66,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "kept_uncorroborated": summary.kept_uncorroborated,
                 "kept_no_receipt": no_receipt,
                 "kept_live": summary.kept_live,
-                "kept_not_terminal": summary.kept_not_terminal,
+                "kept_not_terminal": not_terminal,
                 "kept_contradicted": summary.kept_contradicted,
                 "cleared_contradiction": summary.cleared_contradiction,
                 "expired_receipts": summary.expired_receipts,
@@ -120,9 +125,9 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             "  kept {id} (live: liveness re-check reports it alive)\n"
         ));
     }
-    for id in &summary.kept_not_terminal {
+    for (id, tail) in &summary.kept_not_terminal {
         out.push_str(&format!(
-            "  kept {id} (not terminal: no gate has ruled - still coming up or running, and no pid is confirmed dead)\n"
+            "  kept {id} (not terminal: no gate has ruled - still coming up or running, and no pid is confirmed dead; {tail})\n"
         ));
     }
     for id in &summary.kept_contradicted {

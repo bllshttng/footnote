@@ -615,7 +615,12 @@ pub struct GcSummary {
     /// silently: the same zero-named-rows failure `kept_live` was added for,
     /// one arm over. Reported like `kept_live` because an ordinary keep is
     /// still a keep.
-    pub kept_not_terminal: Vec<String>,
+    ///
+    /// `(id, tail)`: the second half is what the tail probe read for the row,
+    /// because "died mid-turn" and "no transcript to read" are the same word
+    /// otherwise, and an operator cannot act on a bare name. Same shape as
+    /// `kept_dirty` so the id stays a clean name in the JSON.
+    pub kept_not_terminal: Vec<(String, String)>,
     /// Rows that read live AND carry an `exited_at` while the shared liveness
     /// ladder (x-5d96) answers `Unknown`. Before this field the sweep resolved
     /// that contradiction silently by dropping the stamp; now the row is
@@ -2653,13 +2658,18 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         // session id.
         // ONE store lookup answers both the existence question (gone?) and
         // the freshness question (newest match's mtime) for this row.
-        let store_hits = if !is_live && terminal_or_dead && past_grace {
+        // `terminal_or_dead` is deliberately NOT part of this gate. A row
+        // carrying an exit stamp whose STATUS still reads live-ish is the
+        // contradiction the policy has to rule on, and the transcript is the
+        // only independent party that can: gating the read on the status
+        // field meant the one row shape that needs it never got it.
+        let store_hits = if !is_live && past_grace {
             store_matches(e)
         } else {
             None
         };
         let harness_session_gone = store_hits.as_ref().map(|m| m.is_empty());
-        let transcript_fresh = if !is_live && terminal_or_dead && past_grace {
+        let transcript_fresh = if !is_live && past_grace {
             let harness_path = store_hits.as_deref().and_then(newest_by_mtime);
             match harness_path
                 .as_deref()
@@ -2692,7 +2702,15 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         // shortfall. Removing it means every escalated row is judged this
         // sweep, and the count spent is reported.
         let mut dormant_handle = None;
-        if is_live {
+        // A thread row owns no pid BY DESIGN (the shared daemon's pid is not
+        // the worker's to hold), so after a daemon restart it is absent from
+        // `live_workers`, `is_live` is false, and the tail probe below never
+        // ran for it. Its tail is the only reading that can ever say the work
+        // is over, so a row the process surface cannot vouch for but whose
+        // identity IS probeable is asked the same question a live row is. The
+        // one-shot ask row is still excluded: it carries no short_id, so there
+        // is no handle to probe and nothing to resume it with.
+        if is_live || (e.pid.is_none() && !e.short_id.is_empty()) {
             // The idle gate's transcript read comes from the same store index
             // (in memory after the first build), never a fresh walk.
             let transcript = store_matches(e)
@@ -2805,9 +2823,8 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         // Only a POSITIVE `done` reading evicts. A handle the batch could not
         // answer for is absent from the map and stays `false`, exactly as an
         // unanswered per-row probe did: staleness never reaps.
-        if let Some(handle) = dormant_handle {
-            row.dormant_done = tails.get(&handle).map(|s| s == "done").unwrap_or(false);
-        }
+        let tail_state = dormant_handle.as_ref().and_then(|h| tails.get(h)).cloned();
+        row.dormant_done = tail_state.as_deref() == Some("done");
         match crate::gc::gc_action(&row, now, grace_secs) {
             crate::gc::GcAction::Reap => {
                 if stage_reap_receipt(
@@ -2887,8 +2904,18 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
                         // majority verdict. Reported like `kept_live` so a
                         // pass names every row it held and the gate that held
                         // it.
+                        // The tail state rides the id when one was read: a row
+                        // held here because it died mid-turn reads differently
+                        // from one whose transcript nobody could find, and the
+                        // operator cannot act on a bare name.
                         Some(crate::gc::KeepReason::NotTerminal) => {
-                            summary.kept_not_terminal.push(id);
+                            summary.kept_not_terminal.push((
+                                id,
+                                match tail_state {
+                                    Some(state) => format!("tail: {state}"),
+                                    None => "no tail read".to_string(),
+                                },
+                            ));
                         }
                         Some(crate::gc::KeepReason::Contradicted) => {
                             summary.kept_contradicted.push(id);
@@ -13484,7 +13511,11 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         // ladder, the surface-less rows keep as not-terminal - each named.
         assert_eq!(summary.kept_live, vec!["truth-live".to_string()]);
         assert_eq!(
-            summary.kept_not_terminal,
+            summary
+                .kept_not_terminal
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>(),
             vec![
                 "idle-a".to_string(),
                 "idle-b".to_string(),
@@ -13500,7 +13531,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let named: std::collections::BTreeSet<String> = summary
             .kept_live
             .iter()
-            .chain(summary.kept_not_terminal.iter())
+            .chain(summary.kept_not_terminal.iter().map(|(id, _)| id))
             .chain(summary.kept_contradicted.iter())
             .chain(summary.cleared_contradiction.iter())
             .chain(summary.kept_uncorroborated.iter())
@@ -14442,6 +14473,72 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert!(
             reg.entries.iter().any(|e| e.name == "bg-mute"),
             "an unanswered probe is an absence; it must never evict"
+        );
+    }
+
+    /// The outcome test, by name: a finished thread row LEAVES and a live row
+    /// STAYS in the same pass.
+    ///
+    /// A thread row carries no pid by design, so a restarted daemon does not
+    /// host it, `is_live` reads false, its tail was never probed, and
+    /// `NotTerminal` held it forever - 28 of 58 rows on the machine this was
+    /// measured on, and all of the registry's growth. A run that removes
+    /// nothing is the behaviour this test exists to fail on, so both halves
+    /// are asserted BY NAME.
+    #[test]
+    fn gc_sweep_reaps_a_finished_pid_less_thread_row_and_keeps_the_live_one() {
+        let home = tmp_home("gc-thread-dormant");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 86_400);
+        let two_days_ago = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut thread = ask_row("t-finished-thread", None);
+            thread.status = AgentStatus::Live;
+            thread.short_id = "thr1".into();
+            thread.last_message_at = Some(two_days_ago.clone());
+            thread.pid = None;
+            r.entries.push(thread);
+
+            let mut live = ask_row("t-still-working", None);
+            live.status = AgentStatus::Live;
+            live.short_id = "live1".into();
+            live.pid = Some(std::process::id());
+            r.entries.push(live);
+        })
+        .unwrap();
+
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            7,
+            &tails_for(|handle| (handle == "thr1").then(|| "done".to_string())),
+            &|_| None,
+            &live_row_liveness,
+            &|_| None,
+        );
+
+        assert!(
+            summary
+                .reaped_dormant
+                .iter()
+                .any(|id| id.contains("t-finished-thread") || id == "thr1"),
+            "the finished thread row stayed: {:?}",
+            summary.reaped_dormant
+        );
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(
+            !reg.entries.iter().any(|e| e.name == "t-finished-thread"),
+            "the row is still in the registry"
+        );
+        assert!(
+            reg.entries.iter().any(|e| e.name == "t-still-working"),
+            "the live row was taken with it"
         );
     }
 
