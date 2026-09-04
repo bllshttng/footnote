@@ -605,9 +605,10 @@ fn is_expired(rec: &ClaimRecord, now: i64) -> bool {
 /// Compose liveness + expiry into a state (mirrors `staleness.classify`,
 /// INCLUDING the corroborated hybrid arm: an expired-TTL claim whose recorded
 /// pid is a live process on this host is still LIVE only when that pid was
-/// prover-proven at write time - a suspended-but-alive session must not have
-/// its claim reclaimed by a peer, while a live FOREIGN pid (a chat app's
-/// app-server answering for the holder) must not make the lease permanent).
+/// prover-proven at write time AND the record's harness forks per session - a
+/// suspended-but-alive session must not have its claim reclaimed by a peer,
+/// while a live FOREIGN pid (a chat app's app-server answering for the holder)
+/// must not make the lease permanent).
 ///
 /// SUSPECT arm: a TTL claim still inside its window whose recorded pid
 /// is NOT a live process reads `Suspect`, not `Live`. Dead-pid-but-unexpired is
@@ -643,7 +644,18 @@ pub fn classify_with_basis(
         // The liveness reading is only load-bearing here for a prover-proven
         // pid; every other expired claim is Stale on the clock alone, so the
         // probe (a syscall per claim) is skipped on that path.
-        if rec.pid_provenance.as_deref() == Some("session-prover") {
+        //
+        // The harness gate is what makes this true of RECORDS rather than of
+        // writers. A stamp is written by the process being judged, so a guard
+        // whose only evidence is that field is one field away from lying again
+        // - which is exactly how a record written under codex, where the stamp
+        // meant "the app-server is up", once read Live 3h45m past its TTL. The
+        // record's own `harness` is independent evidence, already on every
+        // record, so a pre-fix claim on disk and one from an older binary in a
+        // mixed-version fleet both get the correct verdict here.
+        if rec.pid_provenance.as_deref() == Some("session-prover")
+            && pid_dies_with_session(rec.harness.as_deref())
+        {
             let (live, cause) = liveness_reading(rec, probe);
             if live {
                 return (ClaimState::Live, cause);
@@ -1615,6 +1627,41 @@ fn resolve_identity_from(get: impl Fn(&str) -> Option<String>) -> (Option<String
     }
 }
 
+/// Harnesses whose sessions SHARE one host process. For these the durable pid a
+/// session resolves to is a multiplexer that hosts every session on the machine
+/// and outlives all of them, so its liveness says nothing about the session's.
+/// Membership is proved by MEASUREMENT, never by reading a name: run one
+/// session, walk to its harness ancestor, end the session, and check whether
+/// that pid is still alive.
+///
+///   codex:    MEASURED 2026-09-03. `codex app-server --remote-control` pid
+///             53566, up 9h20m, still answering for a session dead 5h, keeping
+///             a lease live 3h45m past its TTL. ON the list.
+///   opencode: MEASURED 2026-09-04, opencode 1.14.50. `opencode run` forked pid
+///             26245 whose exe IS the session, and zero opencode processes
+///             remained four seconds after it exited. Per-invocation, so OFF
+///             the list.
+///
+/// Every other harness is unmeasured and therefore off the list by default.
+///
+/// The Python twin is `_SHARED_HOST_HARNESSES` in
+/// `cli/src/fno/claims/session_pid.py`; the classifier parity harness holds the
+/// two to one verdict.
+const SHARED_HOST_HARNESSES: &[&str] = &["codex"];
+
+/// True when `harness` forks a process per session, so its pid's death is the
+/// session's death.
+///
+/// False ONLY for a harness measured to share one host process. An unknown or
+/// absent harness returns true and keeps today's behavior: the hybrid arm exists
+/// to stop a peer stealing the claim of a suspended-but-alive session, and this
+/// predicate must never widen that theft to harnesses nobody measured. So the
+/// list is a deny-list, and adding to it costs a measurement.
+pub fn pid_dies_with_session(harness: Option<&str>) -> bool {
+    let name = harness.unwrap_or("").trim().to_ascii_lowercase();
+    !SHARED_HOST_HARNESSES.contains(&name.as_str())
+}
+
 /// Resolve the owning harness from the ambient process environment. `None` when
 /// no marker is set (a bare shell / daemon) - the claim then reads as unknown,
 /// never blocking dispatch on a missing tag.
@@ -1680,6 +1727,10 @@ pub fn ambient_parent_edge_from(
 fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
     let acquired = now_ms();
     let pid_unavailable = opts.pid_unavailable;
+    // Resolved ONCE and used for both the `harness` field and the provenance
+    // stamp below, so a record can never disagree with itself about which
+    // harness wrote it.
+    let harness = resolve_harness();
     ClaimRecord {
         schema_version: if pid_unavailable {
             PID_UNAVAILABLE_SCHEMA_VERSION
@@ -1702,20 +1753,26 @@ fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
         machine_id: Some(machine_id()).filter(|m| !m.is_empty()),
         expires_at: opts.ttl_ms.map(|ttl| acquired + ttl),
         reason: opts.reason.clone(),
-        harness: resolve_harness(),
         // A defaulted pid IS this process, so the claimant vouches for it
         // directly (the native daemon is long-lived, per AcquireOpts). An
         // explicitly passed pid is caller-supplied and unverifiable here, so
         // it stamps ambient and the corroborated hybrid arm will not extend
         // an expired lease on its say-so alone.
+        //
+        // Vouching for this process is only worth something when this process
+        // dies with the session. Under a shared-host harness it does not: the
+        // durable pid is a multiplexer that outlives every session it hosts, so
+        // the claimant would be vouching for a witness that never leaves. That
+        // stamps ambient too, and the TTL stays the lease it claims to be.
         pid_provenance: Some(
-            if opts.pid.is_some() {
+            if opts.pid.is_some() || !pid_dies_with_session(harness.as_deref()) {
                 "ambient"
             } else {
                 "session-prover"
             }
             .to_string(),
         ),
+        harness,
         metadata: opts.metadata.clone().unwrap_or_default(),
     }
 }
@@ -3408,14 +3465,75 @@ mod tests {
     }
 
     #[test]
+    fn pid_dies_with_session_is_a_denylist_of_measured_harnesses() {
+        // AC4-EDGE. Only a harness MEASURED to share one host process is
+        // denied. Unknown and absent keep today's behavior on purpose: 1808 of
+        // 3404 claim records on the filing machine carried no harness, the
+        // native daemon's own long-lived claims among them, and an allow-list
+        // would have stripped TTL extension from every one of them.
+        assert!(!pid_dies_with_session(Some("codex")));
+        assert!(!pid_dies_with_session(Some("  CODEX  ")));
+        for forks_per_session in [
+            Some("claude"),
+            Some("gemini"),
+            Some("opencode"),
+            Some("agy"),
+            Some("unknown"),
+            Some(""),
+            None,
+        ] {
+            assert!(
+                pid_dies_with_session(forks_per_session),
+                "{forks_per_session:?} is unmeasured and must keep today's behavior"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_host_harness_stales_an_expired_prover_claim_by_name() {
+        // AC2-HP, the specimen: node:x-fa8b, expired 3h45m earlier, stamped
+        // session-prover, its pid answering as `codex app-server
+        // --remote-control` up 9h20m. The record is built as a PRE-FIX binary
+        // wrote it, because the fix must reach records already on disk.
+        let me = std::process::id() as i32;
+        let now = now_ms();
+        let host = hostname();
+        let mut codex = record(me, now, Some(now - 1), &host);
+        codex.pid_provenance = Some("session-prover".into());
+        codex.harness = Some("codex".into());
+        // By NAME, both halves. `!= Live` would also pass for a missing pid.
+        assert_eq!(
+            classify_with_basis(&codex, Some(now), &|pid| probe_pid(pid)),
+            (ClaimState::Stale, basis::TTL_EXPIRED)
+        );
+
+        // AC3-HP, the must-not-break twin: identical but for the harness. A
+        // suspended claude session keeps its claim, or this fix is the
+        // over-reap wearing the specimen's clothes.
+        let mut claude = record(me, now, Some(now - 1), &host);
+        claude.pid_provenance = Some("session-prover".into());
+        claude.harness = Some("claude".into());
+        assert_eq!(classify(&claude, Some(now)), ClaimState::Live);
+    }
+
+    #[test]
     fn make_claim_stamps_pid_provenance_by_pid_origin() {
         let td = TempDir::new().unwrap();
-        // A defaulted pid is the claimant itself: the strongest provenance.
+        // A defaulted pid is the claimant itself: the strongest provenance -
+        // but only under a harness that forks per session. The suite's own
+        // ambient harness decides which, so the expectation is derived rather
+        // than hardcoded; hardcoding it makes this test pass under claude and
+        // fail under codex, which is a flake keyed to who ran it.
         let own = match acquire("session:prov", "pty:me", opts_in(&td)) {
             AcquireOutcome::Acquired(r) => r,
             other => panic!("{other:?}"),
         };
-        assert_eq!(own.pid_provenance.as_deref(), Some("session-prover"));
+        let expected = if pid_dies_with_session(own.harness.as_deref()) {
+            "session-prover"
+        } else {
+            "ambient"
+        };
+        assert_eq!(own.pid_provenance.as_deref(), Some(expected));
         // An explicitly passed pid is caller-supplied and unverifiable here:
         // ambient, so the hybrid arm will not extend an expired lease for it.
         let mut o = opts_in(&td);

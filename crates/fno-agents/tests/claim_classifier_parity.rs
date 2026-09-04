@@ -38,8 +38,22 @@ fn pythonpath() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cli/src")
 }
 
+/// The interpreter that runs the oracle. An explicit `FNO_CLAIMS_PARITY_PYTHON`
+/// wins; otherwise the repo's own `cli/.venv` is preferred over a bare
+/// `python3`, because the oracle needs `psutil` and a bare `python3` usually
+/// lacks it. Without that preference this harness SKIPS on a normal dev
+/// machine and prints `ok` for a corpus it never compared - a green that means
+/// "not verified here". It skipped through the very disagreement the
+/// shared-host cases below now pin.
 fn parity_python() -> String {
-    std::env::var("FNO_CLAIMS_PARITY_PYTHON").unwrap_or_else(|_| "python3".to_string())
+    if let Ok(explicit) = std::env::var("FNO_CLAIMS_PARITY_PYTHON") {
+        return explicit;
+    }
+    let venv = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cli/.venv/bin/python");
+    if venv.is_file() {
+        return venv.to_string_lossy().into_owned();
+    }
+    "python3".to_string()
 }
 
 fn python_available() -> bool {
@@ -104,6 +118,11 @@ struct Case {
     acquired_at: i64,
     expires_at: Option<i64>,
     pid_provenance: Option<&'static str>,
+    /// The record's own harness. Load-bearing on the expired arm: a
+    /// shared-host harness never lets a live pid extend an expired lease, so a
+    /// corpus that leaves this `None` everywhere cannot see the two legs
+    /// disagree about codex.
+    harness: Option<&'static str>,
     probe: ProbeSpec,
 }
 
@@ -135,6 +154,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: None,
             pid_provenance: None,
+            harness: None,
             probe: ProbeSpec::Real,
         },
         Case {
@@ -146,6 +166,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: Some(future),
             pid_provenance: None,
+            harness: None,
             probe: ProbeSpec::Real,
         },
         Case {
@@ -157,6 +178,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: None,
             pid_provenance: None,
+            harness: None,
             probe: ProbeSpec::Real,
         },
         Case {
@@ -171,6 +193,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: 0,
             expires_at: None,
             pid_provenance: None,
+            harness: None,
             probe: ProbeSpec::Real,
         },
         Case {
@@ -182,6 +205,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: None,
             pid_provenance: None,
+            harness: None,
             probe: ProbeSpec::Real,
         },
         Case {
@@ -193,6 +217,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: Some(future),
             pid_provenance: None,
+            harness: None,
             probe: ProbeSpec::Real,
         },
         Case {
@@ -204,6 +229,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: Some(future),
             pid_provenance: None,
+            harness: None,
             probe: ProbeSpec::Real,
         },
         Case {
@@ -215,6 +241,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: Some(future),
             pid_provenance: None,
+            harness: None,
             probe: ProbeSpec::Real,
         },
         Case {
@@ -228,6 +255,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: Some(past),
             pid_provenance: None,
+            harness: None,
             probe: ProbeSpec::Real,
         },
         Case {
@@ -239,6 +267,39 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: Some(past),
             pid_provenance: Some("session-prover"),
+            harness: None,
+            probe: ProbeSpec::Real,
+        },
+        Case {
+            // The specimen, in fixture form. Identical to the case above in
+            // every field but `harness`: an expired lease, prover-stamped, its
+            // pid answering. Under claude that reads Live and must keep doing
+            // so. Under codex the answering pid is a shared app-server that
+            // outlives every session it hosts, so the reading is worthless and
+            // the clock decides alone.
+            label: "shared_host_expired_proven_live_pid_stales",
+            pid: Some(self_pid),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: Some(past),
+            pid_provenance: Some("session-prover"),
+            harness: Some("codex"),
+            probe: ProbeSpec::Real,
+        },
+        Case {
+            // The must-not-break twin, named so a fix that stales everything
+            // fails here rather than in production.
+            label: "per_session_host_expired_proven_live_pid_survives",
+            pid: Some(self_pid),
+            pid_unavailable: false,
+            machine_id: local_machine.clone(),
+            host: local_host.clone(),
+            acquired_at: now,
+            expires_at: Some(past),
+            pid_provenance: Some("session-prover"),
+            harness: Some("claude"),
             probe: ProbeSpec::Real,
         },
         Case {
@@ -250,6 +311,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: Some(past),
             pid_provenance: Some("session-prover"),
+            harness: None,
             probe: ProbeSpec::Real,
         },
         Case {
@@ -264,6 +326,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: None,
             pid_provenance: None,
+            harness: None,
             probe: ProbeSpec::Refused,
         },
         Case {
@@ -275,6 +338,7 @@ fn corpus(now: i64, self_pid: i64, identity: &(String, String)) -> Vec<Case> {
             acquired_at: now,
             expires_at: Some(future),
             pid_provenance: None,
+            harness: None,
             probe: ProbeSpec::Refused,
         },
     ]
@@ -296,6 +360,7 @@ fn to_json(c: &Case, now: i64) -> Value {
         "acquired_at": c.acquired_at,
         "expires_at": c.expires_at,
         "pid_provenance": c.pid_provenance,
+        "harness": c.harness,
         "probe": probe,
         "now": now,
     })
@@ -312,7 +377,7 @@ fn record(c: &Case) -> ClaimRecord {
         pid_unavailable: c.pid_unavailable,
         expires_at: c.expires_at,
         reason: None,
-        harness: None,
+        harness: c.harness.map(str::to_string),
         pid_provenance: c.pid_provenance.map(str::to_string),
         machine_id: c.machine_id.clone(),
         metadata: Default::default(),
@@ -354,6 +419,7 @@ for c in cases:
         machine_id=c["machine_id"],
         expires_at=c["expires_at"],
         pid_provenance=c["pid_provenance"],
+        harness=c["harness"],
     )
     state, basis = classify_with_basis(claim, now=c["now"])
     rows[c["label"]] = {"state": state.value, "basis": basis}

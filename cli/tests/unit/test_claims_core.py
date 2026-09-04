@@ -336,8 +336,12 @@ class TestPidProvenanceStamping:
         monkeypatch.setattr(
             "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
         )
+        # The harness is passed, not walked: the stamp now gates on the value
+        # the writer stores, so an unpinned test would assert session-prover
+        # under claude and ambient under codex - a flake keyed to who ran it.
         claim = acquire_claim(
-            "node:x-1", HOLDER_A, ttl_ms=60_000, pid=os.getpid(), root=tmp_path
+            "node:x-1", HOLDER_A, ttl_ms=60_000, pid=os.getpid(),
+            harness="claude", root=tmp_path
         )
         assert claim.pid_provenance == "session-prover"
 
@@ -429,14 +433,129 @@ class TestPidProvenanceStamping:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(serialize_claim(handover))
 
+        # The harness is named, not walked: the rebind gates the stamp on the
+        # harness it STORES, so leaving it ambient makes this assert
+        # session-prover under claude and ambient under codex.
         claim, mode = compare_and_rebind(
             "node:x-5", "spawn-handover:bp-x5",
             new_holder=HOLDER_A, new_pid=os.getpid(), ttl_ms=3_600_000,
-            root=tmp_path,
+            new_harness="claude", root=tmp_path,
         )
         assert mode == "handover"
         assert claim.pid == os.getpid()
         assert claim.pid_provenance == "session-prover"
+        assert claim.harness == "claude"
+
+    def test_rebind_stamp_and_stored_harness_never_disagree(self, tmp_path, monkeypatch):
+        """A rebind that hands a claim to a SHARED-HOST harness must not stamp
+        session-prover, even when the rebinding process's own harness forks per
+        session. The stamp is earned against the harness the record will carry,
+        never against the walker's - otherwise a record contradicts itself
+        about which harness wrote it, which is the state the Rust make_claim
+        hoists one resolve_harness() call to make impossible."""
+        monkeypatch.setattr(
+            "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
+        )
+        handover = Claim(
+            key="node:x-7", holder="spawn-handover:bp-x7",
+            acquired_at=now_ms(), expires_at=now_ms() + 900_000,
+            pid=999_999_999, host=socket.gethostname(), pid_provenance="ambient",
+        )
+        path = claim_path("node:x-7", root=tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(serialize_claim(handover))
+
+        claim, mode = compare_and_rebind(
+            "node:x-7", "spawn-handover:bp-x7",
+            new_holder=HOLDER_A, new_pid=os.getpid(), ttl_ms=3_600_000,
+            new_harness="codex", root=tmp_path,
+        )
+        assert mode == "handover"
+        assert claim.harness == "codex"
+        assert claim.pid_provenance == "ambient"
+
+    def test_rebind_keeping_a_shared_host_harness_still_stamps_ambient(
+        self, tmp_path, monkeypatch
+    ):
+        """The branch the first fix missed. A non-handover rebind writes NO new
+        harness, so the record KEEPS its own - here codex - while the caller
+        resolved its provenance against the rebinding process's harness before
+        the mutex. Passing the expected harness at the call site cannot cover
+        this, because the two part company after that point. _rebound_claim is
+        the single branch that picks the written harness, so the narrowing
+        lives there and every caller inherits it."""
+        monkeypatch.setattr(
+            "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
+        )
+        existing = Claim(
+            key="node:x-8", holder=HOLDER_A,
+            acquired_at=now_ms(), expires_at=now_ms() + 900_000,
+            pid=os.getpid(), host=socket.gethostname(),
+            harness="codex", pid_provenance="ambient",
+        )
+        import fno.claims.core as claims_core
+
+        rebound = claims_core._rebound_claim(
+            existing, os.getpid(), 60_000,
+            # What a claude caller resolves for itself before the mutex.
+            new_pid_provenance="session-prover",
+        )
+        assert rebound.harness == "codex"
+        assert rebound.pid_provenance == "ambient"
+
+    def test_shared_host_harness_never_earns_the_prover_stamp(self, tmp_path, monkeypatch):
+        """AC1 - the writer side of the specimen. The prover walk succeeds:
+        the pid IS resolve_session_pid's answer, and both sides of that
+        equality hold. Under codex they hold for the WRONG reason, because the
+        answer is a shared `codex app-server` that hosts every session on the
+        machine. Proving which process the pid is never proves that process
+        dies with the session, so the stamp is refused and the TTL stays the
+        lease it claims to be."""
+        monkeypatch.setattr(
+            "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
+        )
+        claim = acquire_claim(
+            "node:x-shared", HOLDER_A, ttl_ms=60_000, pid=os.getpid(),
+            harness="codex", root=tmp_path
+        )
+        assert claim.pid_provenance == "ambient"
+        # The stamp is gated on the harness the record STORES, so the two can
+        # never disagree about which harness wrote it.
+        assert claim.harness == "codex"
+
+    def test_per_session_harness_still_earns_the_prover_stamp(self, tmp_path, monkeypatch):
+        """AC1's twin: the identical acquire under a harness that forks per
+        session still earns the stamp. The deny-list must not cost claude the
+        hybrid protection it was built for."""
+        monkeypatch.setattr(
+            "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
+        )
+        claim = acquire_claim(
+            "node:x-forked", HOLDER_A, ttl_ms=60_000, pid=os.getpid(),
+            harness="claude", root=tmp_path
+        )
+        assert claim.pid_provenance == "session-prover"
+
+    def test_refresh_under_shared_host_harness_does_not_repoison(self, tmp_path, monkeypatch):
+        """AC5-EDGE - refresh_claim re-derives the stamp instead of asserting
+        it. Its old hardcode rested on 'the anchor IS the prover's answer',
+        which is true and insufficient: under codex that answer is the
+        multiplexer. Left hardcoded, every renewal would re-poison the record
+        acquire had just stopped poisoning, and a refreshed lease would be
+        permanent again."""
+        monkeypatch.setattr(
+            "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
+        )
+        first = acquire_claim(
+            "node:x-refresh-shared", HOLDER_A, ttl_ms=60_000, pid=os.getpid(),
+            harness="codex", root=tmp_path
+        )
+        assert first.pid_provenance == "ambient"
+        refreshed = refresh_claim(
+            "node:x-refresh-shared", HOLDER_A, ttl_ms=60_000, root=tmp_path
+        )
+        assert refreshed is not None
+        assert refreshed.pid_provenance == "ambient"
 
     def test_refresh_reanchor_stamps_session_prover(self, tmp_path, monkeypatch):
         """The renewal re-anchor's pid IS the prover's answer by construction,
@@ -446,7 +565,8 @@ class TestPidProvenanceStamping:
             "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
         )
         first = acquire_claim(
-            "node:x-6", HOLDER_A, ttl_ms=60_000, pid=os.getpid(), root=tmp_path
+            "node:x-6", HOLDER_A, ttl_ms=60_000, pid=os.getpid(),
+            harness="claude", root=tmp_path
         )
         assert first.pid_provenance == "session-prover"
         refreshed = refresh_claim("node:x-6", HOLDER_A, ttl_ms=60_000, root=tmp_path)

@@ -12,9 +12,16 @@ This is degrade-safe by construction: if no harness ancestor is found (e.g.
 plain-shell), the caller records no ``--pid`` (or the transient default) and the
 claim is LIVE via the TTL arm exactly as before. A mis-resolved/transient pid is
 a dead pid that fails ``is_live`` -> STALE on expiry, indistinguishable from a
-missing one. The pid arm only ever *extends* liveness (every matched process is
-an ancestor of the acquiring one, so it dies no later than the session), so it
-is structurally impossible to regress.
+missing one.
+
+The ancestor is an ancestor of the acquiring process, so it dies no later than
+that process. It dies no later than the SESSION only when the harness forks one
+binary per session. codex does not: its ancestor is a shared ``codex
+app-server`` that hosts every session on the machine and outlives all of them,
+so a pid answering there proves the multiplexer lives and says nothing about the
+session. :func:`pid_dies_with_session` is the gate that separates the two, and
+the provenance stamp is its one consumer - see ``_resolve_pid_provenance`` in
+``core.py``. Nothing else here may read a live ancestor as a live session.
 """
 from __future__ import annotations
 
@@ -39,6 +46,40 @@ _HARNESS_TOKENS = ("claude", "codex", "gemini", "opencode", "agy", "cursor-agent
 # substring of `legacy`, and the ChatGPT desktop app's process tree is full of
 # `Codex Framework.framework` exe paths whose segments are not `codex`.
 _SEGMENT_TOKENS = frozenset(t for t in _HARNESS_TOKENS if t != "claude")
+
+# Harnesses whose sessions SHARE one host process. For these the nearest harness
+# ancestor is a multiplexer that outlives every session it hosts, so its
+# liveness says nothing about the session's. Membership is proved by
+# MEASUREMENT, never by reading a name: run one session, walk to its harness
+# ancestor, end the session, and check whether that pid is still alive.
+#   codex:    MEASURED 2026-09-03. `codex app-server --remote-control` pid
+#             53566, up 9h20m, still answering for a session dead 5h, keeping a
+#             lease live 3h45m past its TTL. ON the list.
+#   opencode: MEASURED 2026-09-04, opencode 1.14.50. `opencode run` forked pid
+#             26245 whose exe IS the session, and the process table held zero
+#             opencode processes four seconds after it exited (the same probe
+#             printed two rows while it ran, which is the positive control that
+#             it can see them at all). Per-invocation, so OFF the list. Its
+#             `serve`/`attach` lane could share a host, but fno dispatches
+#             opencode one-shot and never through attach; measure again if that
+#             changes.
+# The other harnesses are unmeasured and therefore off the list by default, per
+# the deny-list rule below.
+_SHARED_HOST_HARNESSES = frozenset({"codex"})
+
+
+def pid_dies_with_session(harness: Optional[str]) -> bool:
+    """True when HARNESS forks a process per session, so its pid's death is the
+    session's death.
+
+    False ONLY for a harness measured to share one host process. An unknown or
+    absent harness returns True and keeps today's behavior: the hybrid arm
+    exists to stop a peer stealing the claim of a suspended-but-alive session,
+    and this predicate must never widen that theft to harnesses nobody
+    measured. So the list is a deny-list, and adding to it costs a measurement.
+    """
+    return (harness or "").strip().lower() not in _SHARED_HOST_HARNESSES
+
 
 _PSUTIL_ERRORS = (
     psutil.NoSuchProcess,
@@ -208,4 +249,4 @@ def resolve_session_harness(from_pid: Optional[int] = None) -> Optional[str]:
     return None
 
 
-__all__ = ["resolve_session_pid", "resolve_session_harness"]
+__all__ = ["pid_dies_with_session", "resolve_session_pid", "resolve_session_harness"]
