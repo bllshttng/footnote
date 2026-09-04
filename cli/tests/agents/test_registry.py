@@ -745,7 +745,7 @@ def test_us2_schema_version_is_three() -> None:
     # v23 (x-3837): additive `substrate` - the lane a row was spawned on.
     # v24 (x-2019): additive `requested_model`/`requested_provider`/
     # `requested_effort` - the spawn request verbatim beside the effect.
-    assert SCHEMA_VERSION == 26
+    assert SCHEMA_VERSION == 27
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
@@ -2182,7 +2182,7 @@ def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):
         write_registry,
     )
 
-    assert SCHEMA_VERSION == 26
+    assert SCHEMA_VERSION == 27
     use_tmpdir(monkeypatch, tmp_path)
     entry = register_existing_session(
         provider=CLAUDE_HARNESS,
@@ -2248,7 +2248,7 @@ def test_v24_requested_axis_round_trips_verbatim(tmp_path: Path, monkeypatch) ->
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, SCHEMA_VERSION, load_registry, write_registry
 
-    assert SCHEMA_VERSION == 26
+    assert SCHEMA_VERSION == 27
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     entry = AgentEntry(
         name="requested-axis",
