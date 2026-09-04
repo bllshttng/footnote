@@ -389,6 +389,75 @@ def cancel_cmd(
         raise typer.Exit(1) from exc
 
 
+@king_app.command("shape")
+def shape_cmd(
+    shape: str = typer.Argument(..., help="pass or court."),
+    scope: str = typer.Option(
+        "", "--scope", help="Crown scope to reshape. Default: this session's own crown."
+    ),
+) -> None:
+    """Declare this reign's shape: a pure pass, or a court holding workers.
+
+    The field the Stop nudge reads. An undeclared court - a reign that spawned
+    workers and left the manifest at ``pass`` - is nagged at every stop,
+    because choosing court had no machine-visible act before this verb. Declare
+    ``court`` the moment the reign spawns its first worker.
+    """
+    from fno.agents.crown import (
+        AGENT_UNREGISTERED,
+        REGISTRY_UNREADABLE,
+        calling_agent_row,
+    )
+    from fno.king.state import set_manifest_shape
+
+    if shape not in ("pass", "court"):
+        typer.echo("king: shape must be 'pass' or 'court'.", err=True)
+        raise typer.Exit(2)
+
+    caller = calling_agent_row()
+    if caller is REGISTRY_UNREADABLE or caller is AGENT_UNREGISTERED:
+        typer.echo(
+            "king: cannot resolve the caller's crown: this session carries an "
+            "agent identity the registry does not resolve to a row. Run /fno-me "
+            "or retry.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if caller is None:
+        typer.echo(
+            "king: an attended shell holds no crown; the crowned session "
+            "declares its own shape from inside the reign.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    own = getattr(caller, "crown_scope", None)
+    if not own:
+        typer.echo(
+            "king: this session holds no crown, so there is no reign to shape.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if scope.strip() and scope != own:
+        typer.echo(
+            f"king: refusing to reshape {scope!r}: this session's crown is "
+            f"{own!r}, and a holder declares only its own reign's shape.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    session_id = (
+        getattr(caller, "harness_session_id", None)
+        or getattr(caller, "cc_session_id", None)
+        or ""
+    )
+    try:
+        new_value = set_manifest_shape(own, shape, expect_session_id=session_id or None)
+    except ValueError as exc:
+        typer.echo(f"king: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"king: shape declared: {new_value}")
+    typer.echo(f"scope:  {own}")
+
+
 @king_app.command("manifest-path", hidden=True)
 def manifest_path_cmd(
     harness_session_id: str = typer.Option(..., "--harness-session-id"),
@@ -548,6 +617,7 @@ agents_king_app.command("init")(init_cmd)
 agents_king_app.command("done")(done_cmd)
 agents_king_app.command("cancel")(cancel_cmd)
 agents_king_app.command("escalate")(escalate_cmd)
+agents_king_app.command("shape")(shape_cmd)
 # The stop hooks resolve the crown manifest here. They once reached it
 # through the deprecated `fno king` spelling that verb_moves forwards onto
 # THIS app; the verb missed the fold, so the resolver exited 2 and every
