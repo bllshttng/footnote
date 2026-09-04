@@ -21,8 +21,6 @@ from pathlib import Path
 
 import pytest
 
-from fno.king.board import BoardInputs, SourceRead, build_board
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 KING_SKILL = REPO_ROOT / "skills" / "king-for-a-day" / "SKILL.md"
 # The eval worker runs with `--cwd <disposable-worktree>` and writes the
@@ -52,46 +50,9 @@ def test_3d_names_the_supersede_verb():
     assert "fno backlog supersede" in section
 
 
-def _ok(payload):
-    return SourceRead(payload=payload)
-
-
-def _node(node_id, priority="p0", plan_path="/plans/p.md"):
-    return {"id": node_id, "priority": priority, "plan_path": plan_path}
-
-
-def test_unplanned_queue_carries_a_nonempty_note():
-    inputs = BoardInputs(
-        ready=_ok([_node("x-1234", plan_path=None)]),
-        claims=_ok([]),
-        claimed_nodes=_ok([]),
-        holder_activity={},
-        prs=_ok([]),
-        outstanding=_ok({}),
-        needs=_ok([]),
-        lane=_ok([]),
-    )
-    board = build_board(inputs)
-    queue = next(q for q in board["queues"] if q["name"] == "unplanned")
-    assert queue["note"], "unplanned queue has no batching note"
-    assert "3" in queue["note"] or "three" in queue["note"].lower()
-
-
-def test_undispatched_queue_names_the_target_verb_not_blueprint():
-    inputs = BoardInputs(
-        ready=_ok([_node("x-1234")]),
-        claims=_ok([]),
-        claimed_nodes=_ok([]),
-        holder_activity={},
-        prs=_ok([]),
-        outstanding=_ok({}),
-        needs=_ok([]),
-        lane=_ok([]),
-    )
-    board = build_board(inputs)
-    queue = next(q for q in board["queues"] if q["name"] == "undispatched")
-    assert queue["verb"] == "/fno:target"
-    assert "blueprint" not in queue["note"].lower()
+# The unplanned batching note and the undispatched verb/note invariants moved
+# with build_board into the Rust collector (x-25b8): king_board.rs
+# unplanned_note_names_the_batch_and_undispatched_names_the_target covers them.
 
 
 @pytest.mark.skipif(not DISPATCH_PLAN.exists(), reason="behavioral artifact not present; run the eval first")

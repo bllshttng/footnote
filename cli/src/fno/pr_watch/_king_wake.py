@@ -207,12 +207,12 @@ def _sidecar_path(target: CrownTarget) -> Path:
 def _board_hash(scope: str, entries: list, resolver: Optional[Callable] = None) -> str:
     """sha256 over the scope's ``(id, status, column, priority)`` rows.
 
-    Reuses :func:`fno.king.board.compile_scope_ids` for scope resolution -
+    Reuses :func:`fno.king.scope.compile_scope_ids` for scope resolution -
     never a reimplementation. An empty string means "no signal" (uncompilable
     scope), which the caller must treat as unchanged, never as a change: an
     epic that left the graph is not a board refill.
     """
-    from fno.king.board import compile_scope_ids
+    from fno.king.scope import compile_scope_ids
 
     kwargs = {"resolve": resolver} if resolver is not None else {}
     try:
@@ -287,7 +287,7 @@ _ACTIONABLE_COLUMNS = frozenset({"ready", "next"})
 
 def _scope_actionable(scope: str, entries: list, resolver: Optional[Callable] = None) -> int:
     """Scope rows in an undispatched column at a king-worked priority."""
-    from fno.king.board import KING_PRIORITIES, compile_scope_ids
+    from fno.king.scope import KING_PRIORITIES, compile_scope_ids
 
     kwargs = {"resolve": resolver} if resolver is not None else {}
     try:
