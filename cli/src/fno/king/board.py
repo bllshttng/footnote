@@ -981,20 +981,26 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
             lambda: _run_json([*_fno(), "agents", "needs", "--json"], timeout=timeout),
         )
 
-    claims = _run(lambda: claims_f.result())
-    try:
-        claimed_nodes, holders, claimed_warnings = _read_claimed_nodes(claims)
-    except Exception as exc:  # noqa: BLE001 - the degrade-not-crash promise
-        claimed_nodes, holders, claimed_warnings = (
-            SourceRead(error=f"stalled_holder: claimed nodes unreadable: {exc}"),
-            set(),
-            [],
-        )
-    holder_activity: dict[str, dict] = {}
-    try:
-        holder_activity = _resolve_holder_activity(holders)
-    except Exception as exc:  # noqa: BLE001 - an unresolved holder is a stalled one
-        claimed_warnings.append(f"stalled_holder: holder activity unreadable: {exc}")
+        # The claims chain runs HERE, inside the with-block: the executor's
+        # exit joins every worker, so a chain placed after it ran strictly
+        # after all six sources (the reviewer's catch - wall clock was
+        # max(sources) + chain, not max(sources)). Waiting on a pool future
+        # from the calling thread is safe: no pool worker waits on this
+        # thread, so the wait cannot cycle.
+        claims = _run(lambda: claims_f.result())
+        try:
+            claimed_nodes, holders, claimed_warnings = _read_claimed_nodes(claims)
+        except Exception as exc:  # noqa: BLE001 - the degrade-not-crash promise
+            claimed_nodes, holders, claimed_warnings = (
+                SourceRead(error=f"stalled_holder: claimed nodes unreadable: {exc}"),
+                set(),
+                [],
+            )
+        holder_activity: dict[str, dict] = {}
+        try:
+            holder_activity = _resolve_holder_activity(holders)
+        except Exception as exc:  # noqa: BLE001 - an unresolved holder is a stalled one
+            claimed_warnings.append(f"stalled_holder: holder activity unreadable: {exc}")
 
     prs, pr_nodes, warnings = prs_f.result()
     warnings.extend(claimed_warnings)
