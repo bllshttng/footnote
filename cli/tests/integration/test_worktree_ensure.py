@@ -536,3 +536,59 @@ def test_ensure_reuses_the_branch_checkout_when_the_policy_path_moves(
     assert moved.exit_code == 0, moved.stderr
     assert Path(moved.stdout.strip()) == original
     assert "a branch has one checkout" in moved.stderr
+
+
+def test_ensure_refuses_a_prunable_registration_instead_of_a_missing_path(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """A worktree whose directory was deleted by hand is still LISTED.
+
+    `git worktree list --porcelain` keeps the row and only adds a `prunable`
+    line, which the parser drops. Handing that path back with exit 0 sends
+    `spawn --cwd` and `target start`'s setup hook at a directory that is not
+    there. The old failure exited 1 with empty stdout, so every caller's
+    `${wt:-<repo-root>}` fallback took over; exit 0 with a dead path is worse.
+    """
+    import shutil
+
+    first = runner.invoke(
+        app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "lane-p"]
+    )
+    assert first.exit_code == 0, first.stderr
+    original = Path(first.stdout.strip())
+    shutil.rmtree(original)
+    assert not original.exists()
+
+    # The RELOCATED call is the one that consults the branch, so the prunable
+    # row can only be handed back on this path.
+    second = runner.invoke(
+        app,
+        ["worktree", "ensure", "--repo", str(main_repo), "--name", "lane-p",
+         "--harness", "claude"],
+    )
+    assert not (
+        second.exit_code == 0 and Path(second.stdout.strip() or ".") == original
+    ), "handed back a path that does not exist"
+
+
+def test_ensure_never_hands_back_the_canonical_checkout(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """The main checkout is one of the porcelain rows.
+
+    With `feature/<name>` checked out in canonical, reuse-by-branch would
+    return the repo root with exit 0. `target start` reads that as
+    `in_place` and silently launches on the canonical checkout, which is the
+    contradiction the `never` policy arm refuses in the mirror case.
+    """
+    subprocess.run(
+        ["git", "-C", str(main_repo), "checkout", "-b", "feature/lane-c"],
+        check=True, capture_output=True,
+    )
+    out = runner.invoke(
+        app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "lane-c"]
+    )
+    assert not (
+        out.exit_code == 0
+        and Path(out.stdout.strip() or ".").resolve() == main_repo.resolve()
+    ), "handed back the canonical checkout"

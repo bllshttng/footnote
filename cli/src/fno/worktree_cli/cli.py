@@ -465,8 +465,21 @@ def _worktree_ensure(
     # edit - hit `git worktree add`'s "already used by worktree at ..." and
     # wedged that lane forever, the old tree being unmerged. Reuse keyed on the
     # path alone made a relocation fatal; the contract is create-or-reuse.
+    # Only a REAL linked worktree may be handed back. Two rows look like a
+    # reusable checkout and are not: a prunable registration whose directory was
+    # removed by hand (the porcelain still lists it), and the CANONICAL checkout
+    # itself when the branch is checked out there. Returning either with exit 0
+    # is worse than refusing, because the old failure exited 1 with empty stdout
+    # and every caller's `${wt:-<repo-root>}` fallback took over. Falling
+    # through instead reaches `git worktree add`, whose "already used by
+    # worktree at ..." is the honest refusal.
     existing = _worktree_for_branch(top, br)
-    if existing is not None and existing.resolve() != wt.resolve():
+    if (
+        existing is not None
+        and existing.resolve() != wt.resolve()
+        and existing.resolve() != top.resolve()
+        and existing.exists()
+    ):
         typer.echo(
             f"worktree ensure: {policy_receipt}; reusing {br} at {existing} "
             f"(policy resolves {wt}; a branch has one checkout)",
