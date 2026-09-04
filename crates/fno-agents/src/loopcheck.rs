@@ -7877,6 +7877,26 @@ pub fn coverage_receipt_line(
                 .filter(|v| v.verdict == CoverageVerdict::Absent)
                 .map(|v| v.name.as_str())
                 .collect();
+            // The waiting-on arm fires only for absences anyone was OWED. An
+            // optional App that never responds used to own this arm, and since
+            // such an App is absent on every PR forever, the stale arm below -
+            // "your local review read an older commit", the rebase case - was
+            // unreachable: the worker was told to check config.review for a
+            // reviewer that was not the problem. Unowed absences still ride
+            // the line as a trailing clause, so the fact is named without
+            // being the blocker.
+            let absent_owed: Vec<&str> = rep
+                .verdicts
+                .iter()
+                .filter(|v| v.verdict == CoverageVerdict::Absent && v.required)
+                .map(|v| v.name.as_str())
+                .collect();
+            let absent_unowed: Vec<&str> = rep
+                .verdicts
+                .iter()
+                .filter(|v| v.verdict == CoverageVerdict::Absent && !v.required)
+                .map(|v| v.name.as_str())
+                .collect();
             // Stale reviewers are NAMED too. Without this the receipt for the
             // x-5b99 specimen reads "0 reviewed, 0 refused, 0 errored, 0
             // absent" - four zeros describing a PR a bot really did review, at
@@ -7889,21 +7909,19 @@ pub fn coverage_receipt_line(
                 .filter(|v| v.verdict == CoverageVerdict::Stale)
                 .map(|v| v.name.as_str())
                 .collect();
-            // Never prescribe the local verb while anyone is absent, and never
-            // suppress the next action entirely either. Both were tried here and
-            // both were wrong: the offer walks a worker into self-attesting past
-            // a reviewer that may be REQUIRED (the merge gate reads coverage
-            // alone, so nothing downstream catches it), and bare suppression
-            // strands an optional App that is never installed, which sits absent
-            // forever with no reachable exit.
-            //
-            // The escape is that this line cannot know required-ness and should
-            // not try. Name who is outstanding and point at the one move that is
-            // safe whichever they are: check whether they are still configured.
-            let next = if !absent.is_empty() {
+            // Never prescribe the local verb while an OWED reviewer is absent,
+            // and never suppress the next action entirely either. Both were
+            // tried here and both were wrong: the offer walks a worker into
+            // self-attesting past a reviewer the merge gate actually waits on,
+            // and bare suppression strands an optional App that is never
+            // installed with no reachable exit. The verdict now carries
+            // required-ness, so the escape is exact: an owed absence names
+            // itself as the wait, and an unowed one is named without owning
+            // the next action.
+            let next = if !absent_owed.is_empty() {
                 format!(
                     "waiting on {} - if a reviewer there is uninstalled or no longer configured, check config.review",
-                    absent.join(", ")
+                    absent_owed.join(", ")
                 )
             } else if !stale.is_empty() && blind_to_reviewed_commits(rep) {
                 // EVERY github_app verdict is stale AND none carries a commit at
@@ -7952,6 +7970,17 @@ pub fn coverage_receipt_line(
                     }
                     None => format!("run the review verb at HEAD - {REVIEW_ORDER}"),
                 }
+            };
+            // An unowed absence is named on every arm, not only the one it no
+            // longer drives: the fact that a configured App is silent belongs
+            // on the line, but it is not the blocker and must not read as one.
+            let next = if absent_unowed.is_empty() {
+                next
+            } else {
+                format!(
+                    "{next} (not owed, still not responding: {})",
+                    absent_unowed.join(", ")
+                )
             };
             // `stale` counts in the tally and is NAMED in the next action, like
             // `absent`. `refused` keeps its inline names, because a refusal is
@@ -22355,6 +22384,85 @@ git_bounded();";
                 row["name"].as_str().unwrap_or("?")
             );
         }
+    }
+
+    #[test]
+    fn an_unowed_absent_reviewer_does_not_outrank_a_stale_one() {
+        // The rebase shape: a head move staled the local review, and the
+        // absent-forever optional App owned the receipt's next action, so the
+        // worker was told to check config.review for a reviewer that was not
+        // the problem. Nobody owes the absence, so the stale arm - ask for a
+        // re-read - finally fires.
+        let events = attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x");
+        let rep = classify_coverage_tiled(
+            &[],
+            &[],
+            &events,
+            &["gemini-code-assist".to_string()],
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Stale,
+            "feature/x",
+            "currenthead",
+            None,
+            None,
+            false,
+        );
+        let line = coverage_receipt_line(&rep, None, None);
+        assert!(line.contains("reviewed an older commit"), "{line}");
+        assert!(line.contains("code-review"), "{line}");
+        // The unowed absence is still named - as a clause, never the blocker.
+        assert!(line.contains("gemini-code-assist"), "{line}");
+    }
+
+    #[test]
+    fn an_owed_absent_reviewer_still_wins() {
+        let events = attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x");
+        let rep = classify_coverage_tiled(
+            &[],
+            &[],
+            &events,
+            &["gemini-code-assist".to_string()],
+            &["gemini-code-assist".to_string()],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Stale,
+            "feature/x",
+            "currenthead",
+            None,
+            None,
+            false,
+        );
+        let line = coverage_receipt_line(&rep, None, None);
+        assert!(line.contains("waiting on gemini-code-assist"), "{line}");
+        assert!(!line.contains("reviewed an older commit"), "{line}");
+    }
+
+    #[test]
+    fn an_unowed_absent_reviewer_is_still_named() {
+        // Dropping the absence from the line would lose the fact that a
+        // configured App is silent. It rides every arm as the trailing
+        // clause - named, but never the blocker.
+        let rep = classify_coverage_tiled(
+            &[],
+            &[],
+            "",
+            &["gemini-code-assist".to_string()],
+            &[],
+            true,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "",
+            None,
+            None,
+            false,
+        );
+        let line = coverage_receipt_line(&rep, None, None);
+        assert!(line.contains("gemini-code-assist"), "{line}");
+        assert!(line.contains("not owed, still not responding"), "{line}");
+        assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
     }
 
     #[test]
