@@ -2557,10 +2557,33 @@ class TestTickRecordsAndDeadline:
         # which silently skipped the lane these tests live inside. An explicit
         # shape either satisfies the gate or fails loudly naming the field.
         # wake, not report: the recovery-root loop is inside the wake branch.
-        settings.recovery = SimpleNamespace(
+        class _Recording:
+            """Records every attribute read into the trace.
+
+            Two CI anomalies survive every explanation so far: lane_armed
+            answers False against fields that all satisfy it, and the tick
+            raises "'str' object has no attribute 'mail_to'" where the only
+            statements are a getattr with a default and a patched call. Both
+            are claims about attribute reads, so record the reads.
+            """
+
+            def __init__(self, **fields):
+                object.__setattr__(self, "_fields", fields)
+
+            def __getattr__(self, name):
+                fields = object.__getattribute__(self, "_fields")
+                if name in fields:
+                    lines.append(f"attr:{name}={fields[name]!r}")
+                    return fields[name]
+                lines.append(f"attr:{name}=<MISSING>")
+                raise AttributeError(
+                    f"{type(self).__name__!r} object has no attribute {name!r}"
+                )
+
+        settings.recovery = _Recording(
             enabled=True, watchdog="wake", watchdog_mail_to=""
         )
-        settings.autonomy = SimpleNamespace(enabled=True)
+        settings.autonomy = _Recording(enabled=True)
         monkeypatch.setattr(prcli, "load_settings", lambda: settings)
         # Prove the patch took. Every diagnosis so far ASSUMED the tick reads
         # this object, and the CI trace says the gate saw something else.
