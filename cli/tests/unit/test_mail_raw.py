@@ -476,6 +476,22 @@ def test_codex_review_target_parser_has_a_named_module():
     ) == 1427
 
 
+def test_codex_review_target_parser_accepts_the_prepush_branch_form():
+    from fno.mail.codex_review_target import (
+        explicit_review_pr_number,
+        resolve_codex_review_target,
+    )
+
+    # The pre-push default names the local branch in the target slot and
+    # carries no --comment; it scopes to the same base the recipient sits on.
+    assert resolve_codex_review_target(
+        "/review high feature/x-98ac HEAD abc1234 against origin/main"
+    ) == ("baseBranch:origin/main", False)
+    assert explicit_review_pr_number(
+        "high feature/x-98ac HEAD abc1234 against origin/main"
+    ) is None
+
+
 def test_raw_accepts_target_self_review_codex_payload(
     mailbox, monkeypatch, capsys
 ):
