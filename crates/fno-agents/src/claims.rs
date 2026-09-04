@@ -605,9 +605,10 @@ fn is_expired(rec: &ClaimRecord, now: i64) -> bool {
 /// Compose liveness + expiry into a state (mirrors `staleness.classify`,
 /// INCLUDING the corroborated hybrid arm: an expired-TTL claim whose recorded
 /// pid is a live process on this host is still LIVE only when that pid was
-/// prover-proven at write time - a suspended-but-alive session must not have
-/// its claim reclaimed by a peer, while a live FOREIGN pid (a chat app's
-/// app-server answering for the holder) must not make the lease permanent).
+/// prover-proven at write time AND the record's harness forks per session - a
+/// suspended-but-alive session must not have its claim reclaimed by a peer,
+/// while a live FOREIGN pid (a chat app's app-server answering for the holder)
+/// must not make the lease permanent).
 ///
 /// SUSPECT arm: a TTL claim still inside its window whose recorded pid
 /// is NOT a live process reads `Suspect`, not `Live`. Dead-pid-but-unexpired is
@@ -643,7 +644,18 @@ pub fn classify_with_basis(
         // The liveness reading is only load-bearing here for a prover-proven
         // pid; every other expired claim is Stale on the clock alone, so the
         // probe (a syscall per claim) is skipped on that path.
-        if rec.pid_provenance.as_deref() == Some("session-prover") {
+        //
+        // The harness gate is what makes this true of RECORDS rather than of
+        // writers. A stamp is written by the process being judged, so a guard
+        // whose only evidence is that field is one field away from lying again
+        // - which is exactly how a record written under codex, where the stamp
+        // meant "the app-server is up", once read Live 3h45m past its TTL. The
+        // record's own `harness` is independent evidence, already on every
+        // record, so a pre-fix claim on disk and one from an older binary in a
+        // mixed-version fleet both get the correct verdict here.
+        if rec.pid_provenance.as_deref() == Some("session-prover")
+            && pid_dies_with_session(rec.harness.as_deref())
+        {
             let (live, cause) = liveness_reading(rec, probe);
             if live {
                 return (ClaimState::Live, cause);
@@ -1715,6 +1727,10 @@ pub fn ambient_parent_edge_from(
 fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
     let acquired = now_ms();
     let pid_unavailable = opts.pid_unavailable;
+    // Resolved ONCE and used for both the `harness` field and the provenance
+    // stamp below, so a record can never disagree with itself about which
+    // harness wrote it.
+    let harness = resolve_harness();
     ClaimRecord {
         schema_version: if pid_unavailable {
             PID_UNAVAILABLE_SCHEMA_VERSION
@@ -1737,20 +1753,26 @@ fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
         machine_id: Some(machine_id()).filter(|m| !m.is_empty()),
         expires_at: opts.ttl_ms.map(|ttl| acquired + ttl),
         reason: opts.reason.clone(),
-        harness: resolve_harness(),
         // A defaulted pid IS this process, so the claimant vouches for it
         // directly (the native daemon is long-lived, per AcquireOpts). An
         // explicitly passed pid is caller-supplied and unverifiable here, so
         // it stamps ambient and the corroborated hybrid arm will not extend
         // an expired lease on its say-so alone.
+        //
+        // Vouching for this process is only worth something when this process
+        // dies with the session. Under a shared-host harness it does not: the
+        // durable pid is a multiplexer that outlives every session it hosts, so
+        // the claimant would be vouching for a witness that never leaves. That
+        // stamps ambient too, and the TTL stays the lease it claims to be.
         pid_provenance: Some(
-            if opts.pid.is_some() {
+            if opts.pid.is_some() || !pid_dies_with_session(harness.as_deref()) {
                 "ambient"
             } else {
                 "session-prover"
             }
             .to_string(),
         ),
+        harness,
         metadata: opts.metadata.clone().unwrap_or_default(),
     }
 }
