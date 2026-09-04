@@ -395,7 +395,7 @@ expect_silent "codex-stop-prose-without-structured-review"
 # --- THE VERDICT CORPUS (tests/hooks/fixtures/code-review-attest) ----------
 # One byte-exact file per measured final-text shape, the ruled verdict encoded
 # in the filename suffix (.attest / .unparseable / .silent). The walker drives
-# over every file, so the suite is pinned to the MEASURED PAYLOADS rather than
+# over every file manifest.json rules, so the suite is pinned to the MEASURED PAYLOADS rather than
 # to the predicate: flipping the hook's rule without re-measuring the corpus
 # goes red here (the negative control: flip the rule, watch this walk go red,
 # revert). The payloads live in files because a retyped copy drifts - the live
@@ -409,10 +409,33 @@ CORPUS_TX="$CORPUS_DIR/agent-c0rpu5.jsonl"
 jq -nc '{forkedSkill:true, skillName:"code-review"}' \
   > "$CORPUS_DIR/agent-c0rpu5.forked-skill.marker.json"
 
+# The corpus is enumerated by manifest.json, never by a glob over the directory.
+# A glob lets any file on disk cast a ruling. Commit 59697cfa3 renamed six
+# fixtures from .silent to .unparseable, and the six .silent paths stayed on
+# disk untracked afterwards. Each one then asserted the exact contract its own
+# rename had reversed, so this suite read 58 pass / 6 fail on that machine while
+# CI stayed green, because CI checks out clean. A red nobody else can reproduce
+# is the worst kind. The manifest is the ruling; the directory must agree with
+# it in both directions, so a fixture added without a ruling also goes red.
+MANIFEST="$FIXTURES/manifest.json"
+manifest_names="$(jq -r '.shapes | keys[]' "$MANIFEST" | sort)"
+disk_names="$(cd "$FIXTURES" && ls | grep -E '\.(attest|unparseable|silent)$' | sort)"
+if [[ "$manifest_names" == "$disk_names" ]]; then
+  pass "corpus: manifest.json and the fixtures directory name the same files"
+else
+  fail "corpus: manifest and directory disagree
+  only in manifest: $(comm -23 <(printf '%s\n' "$manifest_names") <(printf '%s\n' "$disk_names") | tr '\n' ' ')
+  only on disk:     $(comm -13 <(printf '%s\n' "$manifest_names") <(printf '%s\n' "$disk_names") | tr '\n' ' ')"
+fi
+
 echo "== The verdict corpus: every measured shape, ruled by filename =="
-for fixture in "$FIXTURES"/*.attest "$FIXTURES"/*.unparseable "$FIXTURES"/*.silent; do
-  [[ -f "$fixture" ]] || continue
-  name="$(basename "$fixture")"
+# while-read, never a bare for: a manifest key with whitespace in it must
+# arrive as ONE name (and fail the -f check on its own), not word-split into
+# two bogus names.
+while IFS= read -r name; do
+  [[ -n "$name" ]] || continue
+  fixture="$FIXTURES/$name"
+  [[ -f "$fixture" ]] || { fail "corpus $name: ruled by the manifest, missing on disk"; continue; }
   payload="$(jq -nc --arg cwd "$WORK" --arg tp "$CORPUS_TX" --rawfile msg "$fixture" \
     '{hook_event_name:"SubagentStop", cwd:$cwd, agent_type:"general-purpose",
       agent_id:"c0rpu5", agent_transcript_path:$tp, last_assistant_message:$msg}')"
@@ -441,7 +464,7 @@ for fixture in "$FIXTURES"/*.attest "$FIXTURES"/*.unparseable "$FIXTURES"/*.sile
       if attested; then fail "corpus $name: attested (ruled silent)"; else pass "corpus $name: silent"; fi
       ;;
   esac
-done
+done <<< "$manifest_names"
 
 echo "== A prose review the SIZE of the measured ones still attests =="
 # The three live forks that motivated x-c446 ended in 3497, 2531 and 3357

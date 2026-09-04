@@ -73,6 +73,24 @@ if [[ "$CANONICAL" -ef "$WORKTREE" ]]; then
   exit 0
 fi
 
+# Refuse a WORKTREE that does not exist yet. The mkdir below creates the whole
+# path, so a caller that hands over a location nobody made gets a fully linked
+# directory conjured at it. On 2026-09-03 nine such directories sat under
+# <repo>/worktrees/, which .claude/rules/worktrees.md forbids outright: a test
+# mock printed that path and this script built each one, symlink farm and all.
+# Worktrees live at <repo>/.claude/worktrees/<name> or ~/.fno/worktrees/<name>,
+# and every real caller creates the tree before linking into it, so an absent
+# directory means the caller is wrong about where it is.
+#
+# Non-zero here, unlike the canonical no-op above. That case is a successful
+# nothing-to-do; this one is a caller bug, and `fno do target start` should
+# stop on it rather than initialize against state linked into thin air.
+if [[ ! -d "$WORKTREE" ]]; then
+  echo "setup-worktree: refusing to conjure a worktree that does not exist: $WORKTREE" >&2
+  echo "setup-worktree: create it first (git worktree add <path>), then run this from inside it" >&2
+  exit 1
+fi
+
 mkdir -p "$WORKTREE/.fno" "$WORKTREE/.claude"
 
 # Link a single file. Skips if target is already a non-symlink real file.

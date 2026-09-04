@@ -57,7 +57,7 @@ Both creation paths honor `never`, the hook resolving it through `fno agents wor
 
 - `~/.warp/worktrees/...` (setup script never runs there).
 - `~/.cursor/worktrees/...` (cursor-agent's native worktree). fno allocates the worktree and never passes cursor-agent a native worktree flag.
-- `<repo>/worktrees/` or any non-`.claude` path inside the checkout.
+- `<repo>/worktrees/` or any non-`.claude` path inside the checkout. Enforced since 2026-09-03: `setup-worktree.sh` refuses a `WORKTREE` that does not exist.
 - `../<name>` or any sibling-of-canonical path.
 - Anything beneath `$CODEX_HOME/worktrees`; Footnote never allocates there.
 
