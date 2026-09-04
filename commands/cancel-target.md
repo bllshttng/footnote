@@ -28,7 +28,8 @@ Cancels a target pipeline. Behavior depends on whether a state file exists:
   bypass) so an unattended loop cannot burn credits indefinitely.
 
 ```bash
-STATE_DIR=".fno"
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+STATE_DIR="$REPO_ROOT/.fno"
 STATE_FILE="$STATE_DIR/target-state.md"
 SENTINEL="$STATE_DIR/.target-cancelled"
 TOMBSTONE="$STATE_DIR/.target-cancelled-final"
@@ -52,6 +53,13 @@ if [[ -f "$STATE_FILE" ]]; then
     # The hook then writes status: BLOCKED itself and exits cleanly on the next
     # stop. We deliberately keep the state file.
     touch "$SENTINEL"
+    _EVENT_DATA="$(python3 -c 'import json,sys; print(json.dumps({"lane":"target","path":sys.argv[1],"reason":"operator"}))' "$SENTINEL" 2>/dev/null || true)"
+    if [[ -n "$_EVENT_DATA" ]]; then
+      fno doctor event emit -t cancel_signal_set -s target -d "$_EVENT_DATA" >/dev/null 2>&1 || \
+        echo "warning: cancel signal set but its event was not emitted ($SENTINEL)" >&2
+    else
+      echo "warning: cancel signal set but its event payload could not be built ($SENTINEL)" >&2
+    fi
     echo "✓ Cancel signal asserted ($SENTINEL)."
     echo "  The stop hook will write status: BLOCKED and exit on the next stop."
   fi

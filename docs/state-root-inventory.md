@@ -83,7 +83,7 @@ One file per session, per day, or per throttle window.
 | `.worktree-hook-root` | `hooks/session-start.sh` | single file |
 | `.think-spawn-daily.json` | `provenance/spawn_think.py` | daily, overwritten |
 | `.think-offer-cursor` | `hooks/born-with-why-offer-inject.sh` | single file |
-| `.target-cancelled` | `hooks/helpers/init-target-state.sh`, `crates/fno-agents/src/loopcheck.rs` | consumed by the reader |
+| `.target-cancelled` | `hooks/helpers/init-target-state.sh`, `crates/fno-agents/src/loop_target.rs`, `crates/fno-agents/src/loopcheck.rs` | consumed by the target reader |
 | `.preflight-cancel` | `scripts/ci/preflight.sh` | consumed by the reader (one-shot; stale after one hour) |
 | `.reconcile-stamp`, `.reconcile-result.json`, `.shown` | `scripts/lib/reconcile-throttle.sh`, `hooks/reconcile-session-start.sh` | throttle window |
 | `.plan-sync-watermark` | `plan/cli.py` | single file |
@@ -157,6 +157,7 @@ Not state-root writers, listed here because they are the other family of session
 | `.fno/kings/<scope>.md.lock`, `.md.tmp` | `state.py` / `loop_king.rs` / `king/wake.py` over the manifest lock | lock lives only for the critical section; tmp is replaced on every locked write |
 | `.fno/kings/<scope>.wake.json` | `pr_watch/_king_wake.py` (the tick's wake phase) | tick-local board-hash cache with no reign meaning; refreshed only when a wake fires, so it never outlives the manifest beside it |
 | `.fno/kings/<scope>.md.wake.log` | `pr_watch/_king_wake.py` (detached wake-mode walk) | append-only stdout of the walks this phase spawned; the events journal is the receipt, this log is diagnosis |
+| `.fno/kings/<scope>.cancelled` | `king/cli.py` via `fno agents king cancel` | removed by `--clear` or by the next `king init`; the per-scope walk sentinel is beside its canonical crown manifest |
 
 Target state is write-once after init. King state is atomically refreshed at coronation and both gate a stop hook.
 

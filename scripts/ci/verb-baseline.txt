@@ -94,6 +94,7 @@ inbox outstanding clear !--origin
 inbox outstanding mine do
 inbox outstanding reindex
 king board !--state
+king cancel
 king done
 king escalate
 king init

@@ -8,8 +8,8 @@
 //! Module name starts with "loop" to match the LOC-ratchet glob `crates/fno-agents/src/loop*`.
 
 use crate::{
-    check_supersession::latest_per_name, completion_output::allow_output,
-    delivery_completion::pr_passes,
+    cancel_sentinel::check_cancel_sentinel, check_supersession::latest_per_name,
+    completion_output::allow_output, delivery_completion::pr_passes,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -8259,38 +8259,6 @@ pub(crate) fn is_full_run_id(value: &str) -> bool {
         .is_match(value)
 }
 
-// ── cancel sentinel ───────────────────────────────────────────────────────────
-
-fn check_cancel_sentinel(cwd: &Path, created_at: &Option<String>) -> bool {
-    let sentinel = cwd.join(".fno/.target-cancelled");
-    let tombstone = cwd.join(".fno/.target-cancelled-final");
-
-    for path in &[&tombstone, &sentinel] {
-        if !path.exists() {
-            continue;
-        }
-        // Check mtime >= created_at
-        if let Some(ca) = created_at {
-            if let Ok(parsed_ca) = ca.parse::<DateTime<Utc>>() {
-                if let Ok(meta) = std::fs::metadata(path) {
-                    if let Ok(modified) = meta.modified() {
-                        let sentinel_time: DateTime<Utc> = modified.into();
-                        if sentinel_time >= parsed_ca {
-                            return true;
-                        }
-                        // Stale sentinel (older than created_at) -> ignore
-                        continue;
-                    }
-                }
-            }
-            // Can't read mtime -> treat as present (fail-closed)
-            return true;
-        }
-        return true;
-    }
-    false
-}
-
 // ── budget check ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, PartialEq)]
@@ -8986,7 +8954,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     }
 
     // ── Step 1: cancel sentinel ───────────────────────────────────────────────
-    if check_cancel_sentinel(&cwd, &manifest.created_at) {
+    if check_cancel_sentinel(&cwd, &state_path, &manifest.created_at, "target") {
         emit(
             "termination",
             serde_json::json!({
@@ -13205,7 +13173,12 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         )
     };
 
-    if check_cancel_sentinel(&parsed.cwd, &manifest.created_at) {
+    if check_cancel_sentinel(
+        &parsed.cwd,
+        &parsed.state_path,
+        &manifest.created_at,
+        "king",
+    ) {
         return terminate(
             TerminationReason::Interrupted,
             "cancel sentinel present; exiting",

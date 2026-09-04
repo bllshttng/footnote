@@ -24,6 +24,23 @@ def _default_max_rows() -> int:
 EVENTS_PATH = ".fno/events.jsonl"
 
 
+def _emit_cancel_signal(path: Path, scope: str) -> None:
+    """Record a king cancel after the sentinel is safely on disk."""
+    try:
+        from fno.events import _build, append_event
+
+        append_event(
+            _build(
+                "cancel_signal_set",
+                "agents",
+                {"lane": "king", "path": str(path), "scope": scope, "reason": "operator"},
+            ),
+            events_path=path.parent.parent / "events.jsonl",
+        )
+    except Exception as exc:  # noqa: BLE001 - the sentinel remains authoritative
+        typer.echo(f"king: WARNING: cancel signal event not emitted: {exc}", err=True)
+
+
 @king_app.command("init")
 def init_cmd(
     scope: str = typer.Option(..., "--scope", help="What this king was crowned over."),
@@ -92,6 +109,7 @@ def init_cmd(
             respawn_ceiling=respawn_ceiling,
             force=force,
         )
+        manifest_path.with_suffix(".cancelled").unlink(missing_ok=True)
     except KingManifestExists as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
@@ -341,11 +359,41 @@ def done_cmd(
     )
 
 
+@king_app.command("cancel")
+def cancel_cmd(
+    scope: str = typer.Option(..., "--scope", help="Crown scope whose walk to cancel."),
+    clear: bool = typer.Option(False, "--clear", help="Clear the king cancel signal."),
+) -> None:
+    """Set or clear the cancel signal beside a canonical crown manifest."""
+    from fno.king.state import king_manifest_path
+
+    manifest = king_manifest_path(scope)
+    if not manifest.is_file():
+        typer.echo(
+            f"king: refusing cancel for {scope!r}; no king manifest at canonical path "
+            f"{manifest}",
+            err=True,
+        )
+        raise typer.Exit(1)
+    sentinel = manifest.with_suffix(".cancelled")
+    try:
+        if clear:
+            sentinel.unlink(missing_ok=True)
+            typer.echo(f"king: cancel signal cleared: {sentinel}")
+        else:
+            sentinel.touch()
+            _emit_cancel_signal(sentinel, scope)
+            typer.echo(f"king: cancel signal set: {sentinel}")
+    except OSError as exc:
+        typer.echo(f"king: could not update cancel signal {sentinel}: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+
 @king_app.command("manifest-path", hidden=True)
 def manifest_path_cmd(
     harness_session_id: str = typer.Option(..., "--harness-session-id"),
     harness: str = typer.Option("", "--harness"),
-    state_root: Path = typer.Option(Path(".fno"), "--state-root"),
+    state_root: Optional[Path] = typer.Option(None, "--state-root"),
 ) -> None:
     """Print this live crowned session's existing scope manifest path."""
     from fno.king.state import resolve_king_manifest_path
@@ -498,6 +546,7 @@ agents_king_app = typer.Typer(
 )
 agents_king_app.command("init")(init_cmd)
 agents_king_app.command("done")(done_cmd)
+agents_king_app.command("cancel")(cancel_cmd)
 agents_king_app.command("escalate")(escalate_cmd)
 # The stop hooks resolve the crown manifest here. They once reached it
 # through the deprecated `fno king` spelling that verb_moves forwards onto

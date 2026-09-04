@@ -45,6 +45,7 @@ pub mod agents_config;
 pub mod agy_ask;
 pub mod bash_census;
 mod bounded_spawn;
+mod cancel_sentinel;
 pub mod check_supersession;
 pub mod claims;
 pub mod claude_adopt;

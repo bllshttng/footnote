@@ -89,9 +89,9 @@ def _crowned(court_fn: Callable, rows_fn: Optional[Callable] = None) -> tuple[li
         # ("../x", an absolute path) must refuse here, not escape .fno/kings
         # into a file the ledger would rewrite.
         try:
-            from fno.king.state import king_manifest_path
+            from fno.king.state import king_manifest_path, king_state_root
 
-            manifest = king_manifest_path(scope, state_root=root / ".fno")
+            manifest = king_manifest_path(scope, state_root=king_state_root(root))
         except ValueError:
             continue
         if not manifest.is_file():

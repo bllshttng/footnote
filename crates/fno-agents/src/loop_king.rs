@@ -140,7 +140,9 @@ impl KingQueue {
                 "unsafe king scope for the walk: {scope:?}"
             )));
         }
-        let manifest_path = repo_root
+        let state_root =
+            crate::paths::canonical_repo_root(repo_root).unwrap_or_else(|| repo_root.to_path_buf());
+        let manifest_path = state_root
             .join(".fno")
             .join("kings")
             .join(format!("{scope}.md"));

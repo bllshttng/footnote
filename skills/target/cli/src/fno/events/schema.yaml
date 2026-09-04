@@ -3386,7 +3386,38 @@ event_types:
         session_id:
           type: string
           description: "Optional session correlation key (populated when termination is triggered mid-unit)."
+        cancel_cause:
+          type: string
+          enum: [sigint, sentinel]
+          description: "Why an Interrupted walk stopped: an OS interrupt or a cancel sentinel."
+        cancel_path:
+          type: string
+          description: "Absolute path of the sentinel that stopped the walk; absent for SIGINT."
+        cancel_age_seconds:
+          type: integer
+          description: "Age of the sentinel in seconds when the walk refused to start or continue."
     consumers: [operator, megawalk]
+
+  - name: cancel_signal_set
+    description: "A target or king cancel sentinel was written and the operator can audit which lane it controls."
+    sources: [target, hook, agents]
+    data:
+      required: [lane, path]
+      properties:
+        lane:
+          type: string
+          enum: [target, king]
+          description: "Loop lane controlled by the sentinel."
+        path:
+          type: string
+          description: "Absolute path of the written cancel sentinel."
+        scope:
+          type: string
+          description: "King crown scope when lane=king."
+        reason:
+          type: string
+          description: "Why the sentinel was written, such as operator or claim_held_by_other."
+    consumers: [operator]
 
   - name: delegated
     description: "Emitted after explicit capability escalation proves the destination can answer as the configured model and then proves the child executed target by acquiring the node claim with a child-bound manifest. Legacy boundary-delegation rows remain readable."
