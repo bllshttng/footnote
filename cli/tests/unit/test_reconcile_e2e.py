@@ -49,7 +49,7 @@ def test_full_reconcile_seam_held_to_unheld(iso, tmp_path, monkeypatch):
     #    carrying the manifest path (real _contract_dependents graph read).
     calls = []
     monkeypatch.setattr(rd, "_spawn_worker", lambda n, c, s=None, *, reconcile_manifest=None, model=None,
-                        provider=None, node=None, harness=None:
+                        provider=None, node=None, harness=None, **kwargs:
                         calls.append(reconcile_manifest) or "short1")
     res = rd.dispatch_reconcile_for_blocker(closed_node_id="x-blk", events_path=iso)
     assert [r.decision for r in res] == ["dispatched"]
