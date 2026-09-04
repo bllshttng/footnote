@@ -921,7 +921,8 @@ def spawn_flag_owners() -> None:
 
         from fno.agents.cli import agents_app
 
-        spawn_cmd = typer.main.get_command(agents_app).commands.get("spawn")
+        group = cast("click.Group", typer.main.get_command(agents_app))
+        spawn_cmd = group.commands.get("spawn")
     except Exception as exc:  # noqa: BLE001 - a lint must degrade, not crash
         typer.echo(f"spawn-flag-owners: skipped (parser unavailable: {exc})", err=True)
         return
