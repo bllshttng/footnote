@@ -1790,6 +1790,26 @@ def _preamble_budget_line(
     return "preamble: unavailable (check emitted no report)"
 
 
+def _session_start_bytes_line(preamble_line: Optional[str]) -> Optional[str]:
+    """Advisory TOTAL session-start byte count (x-997a), rest via `fno-agents session-start-bytes`. Best-effort: None on any failure."""
+    match = re.match(r"preamble:\s*(\d+)\s*/", preamble_line or "")
+    if not match:
+        return None
+    try:
+        from fno import rust_binary
+        binary = rust_binary.resolve_binary()
+        if binary is None:
+            return None
+        result = subprocess.run(
+            [str(binary), "session-start-bytes", "--gate-bytes", match.group(1)],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    line = result.stdout.strip()
+    return line if line.startswith("preamble:") else None
+
+
 # ---------------------------------------------------------------------------
 # Verdict
 # ---------------------------------------------------------------------------
@@ -4307,6 +4327,8 @@ def doctor_command(
             preamble_line = _preamble_budget_line(src)
             if preamble_line is not None:
                 typer.echo(preamble_line)
+            if (line := _session_start_bytes_line(preamble_line)) is not None:
+                typer.echo(line)
 
     # A repair from stale source can reinstall the same pre-merge snapshot and
     # then exec away before the final blocker check. Refuse every repair path

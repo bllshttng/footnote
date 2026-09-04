@@ -85,8 +85,15 @@ def test_map_covers_current_surface_once():
     # landed native store write detaches to replay the Python-owned views:
     # 554 -> 555. The attestation ledger adds `do review invocations` and
     # `do review post-dispositions`: 557 -> 559. x-8151 allocated
-    # `dispatch family` twice (top-level and under agents): 559 -> 561.
-    assert len(mapped) == 561, (
+    # `dispatch family` twice (top-level and under agents): 559 -> 561. x-997a
+    # adds `doctor bash-census`, the hidden Bash-call-shape census verb:
+    # counted from the merged file, not taken from either side, 561 -> 562.
+    # The RUST_ONLY_VERB_HELP entries for `graph-get`/`bash-census`/
+    # `session-start-bytes` are also live `fno agents <verb>` leaves
+    # (make_context execs the binary before Click resolves them), so the
+    # uncollapsed inventory carries all three under `agents` too, not just
+    # their own-surface rows: 562 -> 565.
+    assert len(mapped) == 565, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

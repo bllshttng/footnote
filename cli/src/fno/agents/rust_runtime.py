@@ -228,6 +228,15 @@ RUST_CLIENT_VERBS = frozenset(
         # (no daemon RPC, no Python impl); this entry keeps the
         # client.rs<->router parity test in sync and provides the help line.
         "recover",
+        # Batch graph read, Bash-call census, and the session-start byte total
+        # (x-997a): all three dispatch directly in client.rs before
+        # build_request (no daemon RPC, no Python impl). `fno backlog get`'s
+        # forwarder and `fno doctor bash-census` invoke the binary directly
+        # (not via `fno agents` routing); these entries keep the
+        # client.rs<->router parity test in sync.
+        "graph-get",
+        "bash-census",
+        "session-start-bytes",
     }
 )
 
@@ -422,6 +431,9 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "review-coverage": "Emit the review_coverage event for a PR with the stop hook's own resolver/emitter (x-3a3f): --cwd <dir> [--pr <n>] [--head <sha>]. No way to assert coverage without the reads.",
     "recover": "Restore a recorded claude session under its account and route (x-d285): <agent> [--session <id>] names the id when the row holds two; --print-command prints the inspection form and touches nothing.",
     "rename": "Rename a registry row's label: <worker> --name <new-label>; the old label keeps resolving as an alias.",
+    "graph-get": "Batch graph.json read by id (x-997a); invoked directly by `fno backlog get`'s forwarder, not `fno agents` routing.",
+    "bash-census": "Bash-call compound/cd/heredoc shares and top command/verb tables over recent transcripts (x-997a); invoked directly by `fno doctor bash-census`.",
+    "session-start-bytes": "Session-start preamble byte total (x-997a); invoked directly by `fno doctor`'s session-start byte report.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other

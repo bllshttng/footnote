@@ -3,6 +3,7 @@ agents adopt	T1	agents adopt	6
 agents ask	KEEP	agents ask	72	deliberate readability slack for a high-traffic distinct operation
 agents attach	T1	agents attach	13
 agents autonomy status	T1	agents autonomy status	9
+agents bash-census	T1	agents bash-census	0
 agents claim acquire	T1	agents claim acquire	27
 agents claim list	T1	agents claim list	9
 agents claim reap	T1	agents claim reap	1
@@ -22,6 +23,7 @@ agents dispatch resolve	T1	agents dispatch resolve	23
 agents drive-authority	T1	agents drive-authority	9
 agents finalize	T1	agents finalize	26
 agents gate	T1	agents gate	6
+agents graph-get	T1	agents graph-get	0
 agents heal-token	T1	agents heal-token	8
 agents history	T1	agents history	3
 agents kill-check	T1	agents kill-check	4
@@ -79,6 +81,7 @@ agents roles context	T1	agents roles context	2
 agents roles ls	T1	agents roles ls	1
 agents roles resolve	T1	agents roles resolve	2
 agents roles show	T1	agents roles show	2
+agents session-start-bytes	T1	agents session-start-bytes	0
 agents spawn	KEEP	agents spawn	256	deliberate readability slack for a high-traffic distinct operation
 agents spawn-guard	T1	agents spawn-guard	5
 agents status	T1	agents status	5
@@ -334,6 +337,7 @@ do target start	T1	do target start	31
 do target status	T1	do target status	8
 do think dispatch	T1	do think dispatch	4
 do think inspect	T1	do think inspect	7
+doctor bash-census	T1	doctor bash-census	0
 doctor bundle check	T1	doctor bundle check	8
 doctor bundle lint	T1	doctor bundle lint	1
 doctor codemap	T1	doctor codemap	18

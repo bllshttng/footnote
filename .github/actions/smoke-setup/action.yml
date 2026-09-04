@@ -59,6 +59,16 @@ runs:
       # so local runs build it too.
       uses: dtolnay/rust-toolchain@stable
 
+    - name: Install pinned rustfmt toolchain (for the format-on-edit hook test)
+      # tests/hooks/test_format_on_edit.sh drives hooks/format-on-edit.sh,
+      # which shells to `rustfmt +1.94.1` (rust-ci.yml's RUSTFMT_TOOLCHAIN,
+      # kept in lockstep). Without this toolchain the test SKIPs (exit 77),
+      # and smoke counts a SKIP as a FAILURE (see test_cmd.py's discovery
+      # notes) - so the toolchain must actually be present, not merely
+      # tolerated. Component-only + minimal profile, same as rust-ci.yml.
+      shell: bash
+      run: rustup toolchain install 1.94.1 --component rustfmt --profile minimal --no-self-update
+
     - name: Cache Cargo registry + build artifacts (journey tests)
       uses: actions/cache@v4
       with:

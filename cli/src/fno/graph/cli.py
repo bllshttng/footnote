@@ -5966,26 +5966,24 @@ def _render_external_get(id: str, field: Optional[str]) -> None:
 
 @cli.command("get")
 def cmd_get(
-    id: str = typer.Argument(
-        ...,
-        help="Node ab-id, slug, or bare 8-hex (e.g. ab-ff6f96e0 | dashless-spawn | ff6f96e0)",
+    ids: List[str] = typer.Argument(
+        ..., help="One or more node ab-id, slug, or bare 8-hex (e.g. ab-ff6f96e0 | dashless-spawn | ff6f96e0)"
     ),
     field: Optional[str] = typer.Option(None, help="Print only this field"),
     grouped: bool = typer.Option(
-        False,
-        "--grouped",
-        help="Render populated fields in human-readable concept groups.",
+        False, "--grouped", help="Render populated fields in human-readable concept groups."
     ),
     strict: bool = typer.Option(
         False,
         "--strict",
-        help="Exact-only resolution (id/slug/bare-hex); never fuzzy. The stable "
-        "surface the /think router seeds a design from - a miss exits 1 so a "
-        "typo'd token can never silently seed.",
+        help="Exact-only resolution (id/slug/bare-hex); never fuzzy. The stable surface the /think router seeds a design from - a miss exits 1 so a typo'd token can never silently seed.",
     ),
 ) -> None:
     from fno.graph.fuzzy import resolve_node
     from fno.tracker import active_backend_name
+
+    from fno.graph.get_batch import resolve_or_dispatch
+    id = resolve_or_dispatch(ids, field=field, grouped=grouped, strict=strict)
 
     # Pre-rename spelling; shell consumers outside this repo still pass it.
     if field == "_status":

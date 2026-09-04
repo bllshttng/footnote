@@ -12,6 +12,7 @@ import typer.core
 from fno.bundle import bundle_app
 from fno.codemap_cli import app as codemap_app
 from fno.doctor import doctor_command, plugin_file_command
+from fno.doctor_bash_census import bash_census_command
 from fno.agents.harness_probe import harness_probe_command
 from fno.doctor_footprint import footprint_command
 from fno.doctor_lanes import lanes_command
@@ -61,6 +62,8 @@ doctor_app.add_typer(evals_app, name="evals")
 doctor_app.add_typer(doctor_event_app, name="event")
 doctor_app.command("lint")(lint)
 doctor_app.command("footprint", hidden=True)(footprint_command)
+# Bash-call shape over this project's transcripts (x-997a); hidden, `fno help doctor --all`.
+doctor_app.command("bash-census", hidden=True)(bash_census_command)
 # `doctor lanes` is the whole-machine lane advisor: one number and its
 # reasoning, or a refusal naming every dark sensor. Hidden per the new-verb
 # convention; `fno help doctor --all`.

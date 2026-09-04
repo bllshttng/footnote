@@ -16,6 +16,7 @@ def test_doctor_lists_direct_actions() -> None:
     assert isinstance(command, click.Group)
     context = click.Context(command, info_name="doctor")
     assert set(command.list_commands(context)) == {
+        "bash-census",
         "bundle",
         "codemap",
         "evals",

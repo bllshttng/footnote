@@ -125,6 +125,13 @@ jobs:
         # that would red as a missing prerequisite rather than a real failure.
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install pinned rustfmt toolchain (for the format-on-edit hook test)
+        # Same reasoning as smoke-setup/action.yml's copy of this step: a
+        # changed test/hooks/*.sh packet can select test_format_on_edit.sh,
+        # which needs `rustfmt +1.94.1` present or it SKIPs - and smoke
+        # counts a SKIP as a FAILURE.
+        run: rustup toolchain install 1.94.1 --component rustfmt --profile minimal --no-self-update
+
       - name: Changed packet (CHANGED SUBSET)
         env:
           CHANGED_BASE: ${{ github.event.pull_request.base.sha }}

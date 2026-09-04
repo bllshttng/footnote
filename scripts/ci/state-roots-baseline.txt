@@ -102,6 +102,7 @@ A	crates/fno-agents/src/loopcheck.rs	events.jsonl	x-1571	surviving Rust ProjectJ
 A	crates/fno-agents/src/loopcheck.rs	ledger.json	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno-agents/src/daemon.rs	ledger.json	unowned	best-effort ledger enrichment for the reap receipt; the receipt stands on the row when the path is overridden.
 A	crates/fno-agents/src/loopcheck.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
+A	crates/fno-agents/src/graph_get.rs	graph.json	unowned	same class as crates/fno/src/backlog_view.rs below; no Rust resolver exists yet for graph.json.
 A	crates/fno-agents/src/manifest_lookup.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	crates/fno-agents/src/needs.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
 A	crates/fno-agents/src/spawn_gate.rs	claims	unowned	call the resolver STATE_FILES names for this file.

@@ -504,7 +504,9 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
     refusal it already owns is never re-decided here.
     """
     guard = "hooks/bg-process-guard.py"
+    truncation_guard = "hooks/truncation-guard.py"
     assert (REPO_ROOT / guard).is_file(), f"guard missing at {guard}"
+    assert (REPO_ROOT / truncation_guard).is_file(), f"guard missing at {truncation_guard}"
 
     for path, root_var, matcher in (
         (HOOKS_JSON, "CLAUDE_PLUGIN_ROOT", "Bash"),
@@ -527,6 +529,7 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
         expected = [
             f"python3 ${{{root_var}}}/hooks/git-protection.py",
             f"python3 ${{{root_var}}}/{guard}",
+            f"python3 ${{{root_var}}}/{truncation_guard}",
         ]
         assert commands == expected, (
             f"{path.name} PreToolUse {matcher!r} chain drifted: {commands}"

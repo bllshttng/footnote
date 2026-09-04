@@ -67,6 +67,15 @@ MERGE_GATE_MARKER = FNO_HOME / "merge-gate.disabled"
 OVERRIDE_LOG = FNO_HOME / "merge-gate-overrides.log"
 # Both markers expire and are consumed: a forgotten sentinel must not linger.
 MARKER_TTL_SECONDS = 300
+# Push debounce: the timestamp of the last allowed push, one file per branch.
+PUSH_STAMP_DIR = FNO_HOME / "push-stamps"
+# A push whose checks GitHub has not registered yet reads pending: 0, so the
+# CI probe alone cannot see the run it just started. This window covers that
+# blind spot and nothing else; the pending read is the real instrument.
+PUSH_DEBOUNCE_SECONDS = 120
+# `fno do pr status`'s own probe, distinct from the merge vetoes' pair below -
+# a push-time read, not a merge-time one, so it does not share their budget.
+_PUSH_STATUS_PROBE_TIMEOUT = 10
 
 # Substitution forms that run a command without being a separate segment. Any of
 # them disqualifies an authorization: a command substitution IS a second
@@ -245,6 +254,119 @@ def push_names_explicit_dest(command):
     args = m.group(1).split()
     return len(args) >= 2 and args[-1] not in ('HEAD', '@')
 
+def _push_stamp_path(branch):
+    """The last-push stamp for one branch. Slashes are the common case in a
+    feature branch name, so they are flattened rather than nested."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", branch or "HEAD")
+    return PUSH_STAMP_DIR / f"{safe}.stamp"
+
+
+def _read_push_status(cwd=None):
+    """Ask `fno do pr status --json` about the CURRENT branch.
+
+    Returns (pr_number, pending_count) or None when there is nothing to say:
+    no PR, no gh, an old deployment without the verb, a timeout. A broken
+    reader must never block a push - the whole point of routing through this
+    verb rather than a hand-rolled `gh` call is that it already coalesces and
+    caches, so the debounce costs no extra network read per push.
+    """
+    try:
+        proc = subprocess.run(
+            ["fno", "do", "pr", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=_PUSH_STATUS_PROBE_TIMEOUT,
+            cwd=cwd,
+        )
+    except Exception:  # noqa: BLE001 - incl. FileNotFoundError / TimeoutExpired
+        return None
+    payload = None
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                payload = json.loads(line)
+            except ValueError:
+                continue
+    if not isinstance(payload, dict):
+        return None
+    checks = payload.get("checks")
+    if not isinstance(checks, dict):
+        return None
+    pending = checks.get("pending")
+    if not isinstance(pending, int):
+        return None
+    return (payload.get("pr"), pending)
+
+
+def push_debounce_refusal(command, branch):
+    """Refusal text when this push should wait, or None to allow.
+
+    Two blind spots, one instrument each. The CI probe refuses while a run is
+    in flight on the branch head - pushing again only cancels it and starts
+    the wait over. The stamp covers the seconds right after a push, when
+    GitHub has not registered the new run yet and the probe honestly reads
+    `pending: 0` for a run that exists.
+
+    Every failure path allows. `FNO_PUSH_NOW=1` allows and leaves an event row,
+    so a bypass is recoverable from the journal rather than invisible.
+    """
+    if os.environ.get("FNO_PUSH_NOW") == "1":
+        _emit_push_bypass_event(branch)
+        return None
+
+    try:
+        age = time.time() - _push_stamp_path(branch).stat().st_mtime
+        if 0 <= age < PUSH_DEBOUNCE_SECONDS:
+            return (
+                f"[fno push debounce] this branch was pushed {int(age)}s ago and "
+                f"GitHub may not have registered its run yet. Wait with "
+                f"`fno do pr wait <n> --until settled`, then push once. "
+                f"FNO_PUSH_NOW=1 bypasses and records the bypass."
+            )
+    except OSError:
+        pass
+
+    status = _read_push_status()
+    if status is None:
+        return None
+    pr, pending = status
+    if pending > 0:
+        return (
+            f"[fno push debounce] {pending} check(s) still running on PR {pr}. "
+            f"Pushing now cancels that run and restarts the wait. "
+            f"`fno do pr wait {pr} --until settled --timeout 30m`, then push once. "
+            f"FNO_PUSH_NOW=1 bypasses and records the bypass."
+        )
+    return None
+
+
+def _stamp_push(branch):
+    """Record that a push was allowed. Best-effort: a stamp that cannot be
+    written costs one skipped debounce, never a blocked push."""
+    try:
+        PUSH_STAMP_DIR.mkdir(parents=True, exist_ok=True)
+        _push_stamp_path(branch).touch()
+    except OSError:
+        pass
+
+
+def _emit_push_bypass_event(branch):
+    """One journal row per FNO_PUSH_NOW bypass. Best-effort by contract."""
+    try:
+        subprocess.run(
+            [
+                "fno", "doctor", "event", "emit", "push_debounce_bypass",
+                "--json", json.dumps({"branch": branch or "HEAD"}),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:  # noqa: BLE001 - a missing journal never blocks a push
+        pass
+
+
 def get_current_branch():
     """Try to get current branch from git (if in git repo)."""
     try:
@@ -260,16 +382,17 @@ def get_current_branch():
         pass
     return None
 
+def is_a_push(command):
+    """True when this segment is a `git push` at all, protected or not."""
+    return any(
+        re.search(pattern, command, re.IGNORECASE)
+        for pattern in GIT_PUSH_PATTERNS
+    )
+
+
 def is_push_to_protected_branch(command):
     """Check if command is pushing to a protected branch."""
-    # Check if it's a push command
-    is_push = False
-    for pattern in GIT_PUSH_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
-            is_push = True
-            break
-
-    if not is_push:
+    if not is_a_push(command):
         return False, None
 
     # `--all` / `--mirror` push every local ref, so they update a protected
@@ -2132,6 +2255,18 @@ def _evaluate_git_segment(command, has_approval, allowlist_ok=True):
         if has_approval:
             return ("allow", "[Approved] User approved --no-verify commit")
         return ("deny", _no_verify_deny_message(command))
+
+    # Push debounce, LAST among the push gates: it is a pacing rule, not a
+    # safety one, so a protected-branch or --no-verify refusal must be the
+    # sentence the operator reads. Only a feature-branch push reaches here -
+    # a protected push already returned above unless it was bypass-approved,
+    # and an emergency push must not then be held for CI.
+    if not is_protected and is_a_push(command):
+        branch = extract_branch_from_push(command) or get_current_branch()
+        refusal = push_debounce_refusal(command, branch)
+        if refusal:
+            return ("deny", refusal)
+        _stamp_push(branch)
 
     # A git verb this hook does not gate is not this hook's business: it declines
     # to opine and the normal permission system decides.

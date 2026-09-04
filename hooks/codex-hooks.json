@@ -44,6 +44,11 @@
             "type": "command",
             "command": "python3 ${PLUGIN_ROOT}/hooks/bg-process-guard.py",
             "statusMessage": "checking for unbounded background processes"
+          },
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/truncation-guard.py",
+            "statusMessage": "checking for a truncated count-or-existence read"
           }
         ]
       }
@@ -94,6 +99,16 @@
       }
     ],
     "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${PLUGIN_ROOT}/hooks/format-on-edit.sh",
+            "statusMessage": "formatting the edited file"
+          }
+        ]
+      },
       {
         "matcher": "",
         "hooks": [
