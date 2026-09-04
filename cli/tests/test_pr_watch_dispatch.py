@@ -2609,7 +2609,9 @@ class TestTickRecordsAndDeadline:
             lambda s: _stage(
                 f"lane_armed(real)={real_lane_armed(s)} forced=True "
                 f"type={type(s).__name__} mine={s is settings} "
-                f"rec={type(getattr(s, 'recovery', None)).__name__}",
+                f"rec={type(getattr(s, 'recovery', None)).__name__} "
+                f"auto={getattr(getattr(s, 'autonomy', None), 'enabled', '<none>')!r} "
+                f"wd={getattr(getattr(s, 'recovery', None), 'watchdog', '<none>')!r}",
                 True,
             ),
         )
@@ -2621,9 +2623,10 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setattr(
             uw,
             "publish_report",
-            lambda snapshot, *, source, now_s, mail_to, log=None: {
-                "counts": {}, "findings": [], "warnings": []
-            },
+            lambda snapshot, *, source, now_s, mail_to, log=None: _stage(
+                "publish_report",
+                {"counts": {}, "findings": [], "warnings": []},
+            ),
         )
         # The roster legs run BEFORE the recovery-root loop and were the only
         # unpatched real calls left in this fixture. `fleet_rows` needs a live
