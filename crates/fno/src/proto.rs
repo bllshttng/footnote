@@ -3582,24 +3582,51 @@ fn create_startup_marker(marker: &Path) -> std::io::Result<()> {
     result
 }
 
+/// Test seam, mirroring the FNO_E2E logging gate: when the env var is set,
+/// a racer pauses AFTER its create fails AlreadyExists and BEFORE it reads
+/// the marker, so a test can land the owner's exit inside that window
+/// deterministically and prove the read's NotFound retries instead of
+/// escaping. Unset in production, the read is a no-op.
+fn hold_start_marker_for_tests() {
+    if let Some(v) = std::env::var_os("FNO_TEST_MARKER_HOLD_MS") {
+        if let Ok(ms) = v.to_string_lossy().parse::<u64>() {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+    }
+}
+
 fn acquire_startup_guard(socket: &Path) -> std::io::Result<StartupGuard> {
     let marker = startup_sidecar_path(socket);
     loop {
         match create_startup_marker(&marker) {
             Ok(()) => return Ok(StartupGuard::Owned),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let raw = std::fs::read_to_string(&marker).map_err(|read| {
-                    std::io::Error::new(
-                        read.kind(),
-                        format!(
-                            "cannot read mux startup marker {}: {read}",
-                            marker.display()
-                        ),
-                    )
-                })?;
+                // The marker's owner removes it at exit. Between this racer's
+                // create-fails-AlreadyExists and the read below, that exit
+                // can land and take the marker along: NotFound there is the
+                // loop's signal to try owning the path itself, never an
+                // error. A bind race over a serving server used to escape
+                // bind_or_probe as Err(ENOENT) through exactly this seam.
+                hold_start_marker_for_tests();
+                let raw = match std::fs::read_to_string(&marker) {
+                    Ok(raw) => raw,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(read) => {
+                        return Err(std::io::Error::new(
+                            read.kind(),
+                            format!(
+                                "cannot read mux startup marker {}: {read}",
+                                marker.display()
+                            ),
+                        ))
+                    }
+                };
                 let Some((pid, recorded_start)) = parse_pid_sidecar(&raw) else {
                     if !socket.exists() || matches!(probe_status(socket), ProbeOutcome::Dead) {
-                        std::fs::remove_file(&marker)?;
+                        // A peer reclaiming the same stale marker may have
+                        // removed it first; NotFound there is their success,
+                        // and the loop simply retries owning the path.
+                        let _ = std::fs::remove_file(&marker);
                         continue;
                     }
                     return Err(std::io::Error::new(
@@ -3610,7 +3637,7 @@ fn acquire_startup_guard(socket: &Path) -> std::io::Result<StartupGuard> {
                 if startup_guard_live(pid, recorded_start) {
                     return Ok(StartupGuard::ExistingLive);
                 }
-                std::fs::remove_file(&marker)?;
+                let _ = std::fs::remove_file(&marker);
             }
             Err(e) => return Err(e),
         }
