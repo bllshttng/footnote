@@ -2758,7 +2758,6 @@ def append_row_alias(
     registry_path: Optional[Path] = None,
 ) -> bool:
     """Append ``alias`` to the resolved row's ``aliases``.
-
     Idempotent; a REFUSAL when another row answers to the alias (ambiguous
     = no address). Best-effort: a miss is False - never a raise.
     """

@@ -4845,8 +4845,7 @@ def reconcile_agents(
     }
 
     def _entry_for(name: str, session_id: Optional[str] = None) -> Optional["AgentEntry"]:
-        """Identity-first resolution: a probed session id answers before
-        the label, so a renamed row reports its own axes."""
+        """Identity-first: a probed session id answers before the label."""
         if session_id:
             entry = entry_by_sid.get(session_id)
             if entry is not None:

@@ -1753,17 +1753,14 @@ def _resolve_aliases(live: list[dict], name_map_path: Path) -> dict[str, str]:
                 try:
                     from fno.agents.registry import load_registry
                     for entry in load_registry():
-                        alias = next(
-                            (
-                                a
-                                for a in (getattr(entry, "aliases", None) or [])
-                                if a and not _is_accreted(a) and not LEGACY_HANDLE_RE.fullmatch(a)
-                            ),
-                            None,
-                        )
+                        cands = [
+                            a
+                            for a in (getattr(entry, "aliases", None) or [])
+                            if a and not _is_accreted(a) and not LEGACY_HANDLE_RE.fullmatch(a)
+                        ]
                         sid = entry.harness_session_id or entry.short_id
-                        if alias and sid:
-                            row_aliases[sid] = alias
+                        if cands and sid:
+                            row_aliases[sid] = cands[0]
                 except (OSError, ValueError):
                     row_aliases = {}
                 # Retire any alias whose session is no longer live.
@@ -2215,7 +2212,7 @@ def _alias_to_session_ids(token: str, name_map_path: Optional[Path]) -> tuple[li
         return [], False
     hits = [sid for sid, alias in stored.items() if isinstance(sid, str) and alias == token]
     # The rows are the primary name store: an alias a row carries resolves
-    # even after the legacy file pruned it or never had it.
+    # past the legacy file.
     try:
         from fno.agents.registry import load_registry
         for entry in load_registry():
@@ -2499,11 +2496,19 @@ def resolve_reachable(
     if not token or not token.strip():
         return None, []
 
+    from fno.agents.registry import RegistryVersionError
+
     pdir = projects_dir or default_projects_dir()
     # A friendly <project>-<short8> alias must keep working once its session
     # falls out of the live listing; resolve it to real uuids and match those
     # alongside the raw token.
-    alias_sids, alias_ok = _alias_to_session_ids(token, name_map_path)
+    try:
+        alias_sids, alias_ok = _alias_to_session_ids(token, name_map_path)
+        degraded: list[str] = []
+    except RegistryVersionError:
+        # Torn registry: degrade as "registry" (never a clean miss).
+        alias_sids, alias_ok = [], True
+        degraded = ["registry"]
 
     sources = (
         ("transcript", lambda t: _reachable_from_transcripts(t, pdir)),
@@ -2514,7 +2519,8 @@ def resolve_reachable(
     )
     tokens = [token, *alias_sids]
 
-    degraded: list[str] = [] if alias_ok else ["alias-map"]
+    if not alias_ok:
+        degraded.append("alias-map")
     # Keyed on (harness, normalized id). Harness is load-bearing: an id string
     # is only unique WITHIN a harness, so folding on the id alone merges a
     # claude session with a codex one that happens to share it, and the merged
