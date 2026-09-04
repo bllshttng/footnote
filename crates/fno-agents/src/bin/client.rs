@@ -55,6 +55,8 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "recover",
     "reentry-plan",
     "rename",
+    "reign-shape",
+    "reign-state",
     "report",
     "review-coverage",
     "review-summary",
