@@ -320,6 +320,95 @@ def drain_exited_keepers() -> int:
     return reaped
 
 
+def _orphaned_keeper_pids() -> "list[int]":
+    """Live pids whose argv advertises a store keeper against a graph path
+    that no longer exists. The candidate scan of sweep_orphaned_keepers(),
+    factored out so a test can census the SAME probe before the sweep acts:
+    a zero-after fix read is meaningless unless the probe read non-zero
+    first (the zero-filter rule).
+    """
+    listing = subprocess.run(
+        ["ps", "-Ao", "pid=,args="],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    ).stdout
+    pids: "list[int]" = []
+    for line in listing.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid_s, args = parts
+        tokens = args.split()
+        if "--store-keeper" not in tokens or "--graph" not in tokens:
+            continue
+        if not pid_s.isdigit() or int(pid_s) == os.getpid():
+            continue
+        idx = tokens.index("--graph") + 1
+        graph = tokens[idx] if idx < len(tokens) else None
+        if graph is None or Path(graph).exists():
+            continue
+        pids.append(int(pid_s))
+    return pids
+
+
+def sweep_orphaned_keepers(timeout: float = 10.0) -> "list[int]":
+    """SIGTERM every live store keeper whose ``--graph`` path is gone.
+
+    The spawn ledger only knows keepers THIS process spawned, so it is blind
+    to two populations: keepers a CLI subprocess spawned (children of the
+    subprocess, never the test session), and keepers that outlived a session
+    that had no reaper wired. Measured 2026-09-04 during a bounded real run:
+    8-10 live ``fno-agents-worker --store-keeper`` processes against graph
+    paths pytest had already deleted, plus a stale debug-binary keeper from
+    another worktree's run.
+
+    The kill decision is the graph path's EXISTENCE, never the command line:
+    the canonical keepers and the leaked ones share a command line, and an
+    argv match killed the two processes serving the real graph on
+    2026-09-04. argv only nominates candidates here; a keeper whose graph
+    still exists belongs to a live test or the canonical graph and survives.
+
+    Returns the pids that refused to die inside `timeout`.
+    """
+    import signal
+    import time as _time
+
+    candidates = _orphaned_keeper_pids()
+
+    def _alive(pid: int) -> bool:
+        # kill(pid, 0) cannot be the probe: a zombie answers it, so a keeper
+        # that died on TERM under a live parent reads as a survivor. ps stat
+        # distinguishes Z, which is what "died" means here.
+        try:
+            stat = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.strip()
+        except subprocess.TimeoutExpired:
+            return True
+        return bool(stat) and not stat.startswith("Z")
+
+    for pid in candidates:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = _time.monotonic() + timeout
+    pending = {pid for pid in candidates if _alive(pid)}
+    while pending and _time.monotonic() < deadline:
+        _time.sleep(0.05)
+        pending = {pid for pid in pending if _alive(pid)}
+    for pid in sorted(pending):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return sorted(p for p in pending if _alive(p))
+
+
 class _Keeper:
     """One request to one store keeper socket. Frames are one-shot: connect,
     send, read the reply, close. Persistence buys nothing at CLI rates and
