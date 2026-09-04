@@ -16,7 +16,6 @@ from fno.codemap_cli import app as codemap_app
 from fno.doctor import doctor_command, plugin_file_command
 from fno.doctor_bash_census import bash_census_command
 from fno.agents.harness_probe import harness_probe_command
-import fno.doctor_harness_matrix as _harness_matrix
 from fno.doctor_footprint import footprint_command
 from fno.doctor_lanes import lanes_command
 from fno.evals.cli import evals_app
@@ -76,25 +75,25 @@ doctor_app.command("harness", hidden=True)(harness_probe_command)
 
 # `doctor harness-matrix` renders the features matrix doc from the table
 # (x-a3e8). Hidden per the new-verb convention; the freshness gate is the
-# tripwire, this verb is the regenerator. The command lives HERE rather than
-# in the renderer module so `python -m fno.doctor_harness_matrix` (the
-# gate's render step) stays stdlib-only.
+# tripwire, this verb is the regenerator. The renderer is the diagnostics
+# script the gate also calls, so the render lives in one place outside the
+# runtime package.
 @doctor_app.command("harness-matrix", hidden=True)
 def harness_matrix_command(
     write: bool = typer.Option(
         False, "--write", help="Write docs/harnesses/capability-matrix.md from the table."
     ),
-    table: Path | None = typer.Option(
-        None, "--table", help="Render from this capability TOML instead of the packaged copy."
-    ),
 ) -> None:
     """Render the features capability matrix from the capability table."""
-    args: list[str] = []
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[3] / "scripts/diagnostics/render-harness-matrix.py"
+    argv = [sys.executable, str(script)]
     if write:
-        args.append("--write")
-    if table is not None:
-        args.extend(["--table", str(table)])
-    raise SystemExit(_harness_matrix.main(args))
+        argv.append("--write")
+    raise SystemExit(subprocess.call(argv))
 doctor_app.command("plugin-file", hidden=True)(plugin_file_command)
 # `doctor route` is the reachability read: what this installation's declared
 # routing inventory can actually reach (absorbs the old "no surface answers

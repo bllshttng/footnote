@@ -43,13 +43,9 @@ if [[ ! -f "$TABLE" ]]; then
 fi
 
 render() {
-  # Render from the table at $1 to stdout. Runs the repo's own package,
-  # not the installed fno: a stale install must not mask drift. The repo
-  # venv is preferred (it carries fno's runtime deps); bare python3 is the
-  # CI fallback where deps are on PATH already.
-  PY="$REPO_ROOT/cli/.venv/bin/python"
-  [[ -x "$PY" ]] || PY=python3
-  PYTHONPATH="$REPO_ROOT/cli/src" "$PY" -m fno.doctor_harness_matrix --table "$1"
+  # Render from the table at $1 to stdout. Runs the repo's own renderer,
+  # not the installed fno: a stale install must not mask drift.
+  python3 "$REPO_ROOT/scripts/diagnostics/render-harness-matrix.py" --table "$1"
 }
 
 if [[ "$MODE" == "write" ]]; then
