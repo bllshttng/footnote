@@ -664,7 +664,6 @@ def tick() -> None:
                                     _RECOVERY_ROOT_FLOOR_S,
                                 )
                                 break
-                            recovery_roots_done += 1
                             try:
                                 (
                                     recovery_payload,
@@ -687,6 +686,11 @@ def tick() -> None:
                                 )
                                 continue
                             recovery_scans.append((recovery_root, recovery_scan))
+                            # After the work, matching the stranded sweep's
+                            # own counter: a root that raised or refused was
+                            # attempted, never done, and a log line that
+                            # counts attempts overstates what actually ran.
+                            recovery_roots_done += 1
                         for recovery_root, recovery_scan in recovery_scans:
                             results = _wd.apply_recoverable(
                                 recovery_scan,

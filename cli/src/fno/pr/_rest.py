@@ -78,6 +78,15 @@ class RestReason(str):
         return self
 
 
+#: The bucket read inside `_rest_reason` only DECORATES an error the caller
+#: already has, so it may never cost more than the read it explains. Left at
+#: the 30s default it outlived every budget above it: a `read_pr_state` call
+#: declaring 3s spent 3s failing and then 30s more explaining why, because
+#: `_bucket_remaining` passes its own default and that default wins over the
+#: runner's. A caller that WANTS the full window still passes one.
+_REASON_DIAGNOSTIC_TIMEOUT_S = 5.0
+
+
 def _bucket_remaining(
     bucket: str,
     runner: Optional[Callable],
@@ -293,7 +302,9 @@ def _rest_reason(res, *, runner: Optional[Callable] = None, cwd: Optional[str] =
 
     if "rate limit" in text.lower():
         base = matched(lambda ln: "rate limit" in ln.lower())
-        remaining, _reset = _bucket_remaining("core", runner, cwd)
+        remaining, _reset = _bucket_remaining(
+            "core", runner, cwd, _REASON_DIAGNOSTIC_TIMEOUT_S
+        )
         if remaining == 0:
             return RestReason(
                 base + " | this is the CORE REST quota (the live exempt bucket"
