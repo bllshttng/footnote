@@ -333,7 +333,6 @@ def _database(repo: Path) -> dict[str, Any]:
             signal_paths.append(path)
     signals = sorted(dict.fromkeys(signals))
     from fno.paths import worktree_space_dir
-
     artifact = worktree_space_dir(repo) / "codemap.md"
     grounded = False
     try:

@@ -239,9 +239,13 @@ def _coverage_logs(
     refusal text) does not read tens of MB of JSONL to learn two filenames.
     """
     root = _repo_root(cwd)
-    project_path = (
-        project_events if project_events is not None else root / ".fno" / "events.jsonl"
-    )
+    if project_events is not None:
+        project_path = project_events
+    else:
+        # project_log: producers write the space journal; a raw .fno path goes
+        # quiet once any writer migrates it, and every PR then reads unreviewed.
+        from fno.paths import project_log
+        project_path = project_log("events.jsonl", project_root=root)
     try:
         from fno import paths as _paths
 

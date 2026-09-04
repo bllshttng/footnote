@@ -27,6 +27,14 @@ const LOCAL_HEAD: &str = "cafebabecafebabecafebabecafebabe00000001";
 /// bot at HEAD (counts as reviewed), no inline comments. git: HEAD echo, with
 /// `diff --raw` failing so freshness never fabricates a carry (same discipline
 /// as the loop_check suite's green() mock).
+/// The journal the product writes: the repo's space (x-b1ee). Reading through
+/// the same resolver keeps the fixture on the path the binary lands its rows.
+fn project_events(cwd: &std::path::Path) -> std::path::PathBuf {
+    let path = fno_agents::paths::events_path(cwd);
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    path
+}
+
 fn green_bins(dir: &Path) -> (PathBuf, PathBuf) {
     let gh = make_script(
         dir,
@@ -128,7 +136,7 @@ fn explicit_head_rejects_an_abbreviated_sha_without_writing_an_event() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("short-head");
     fs::create_dir_all(cwd.join(".fno")).unwrap();
-    let project = cwd.join(".fno/events.jsonl");
+    let project = project_events(&cwd);
     let global = tmp.path().join("global.jsonl");
     let short = "7e7dc390";
     let args = vec![
@@ -177,7 +185,7 @@ fn fixture(parent: &Path, name: &str) -> (PathBuf, PathBuf, PathBuf) {
         "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n",
     )
     .unwrap();
-    let project = cwd.join(".fno/events.jsonl");
+    let project = project_events(&cwd);
     let global = parent.join(format!("{name}-global-events.jsonl"));
     (cwd, project, global)
 }

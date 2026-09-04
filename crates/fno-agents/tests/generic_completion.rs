@@ -19,6 +19,14 @@ struct GenericEnv {
     evaluator: PathBuf,
 }
 
+/// The journal the product writes: the repo's space (x-b1ee). Reading through
+/// the same resolver keeps the fixture on the path the binary lands its rows.
+fn project_events(cwd: &std::path::Path) -> std::path::PathBuf {
+    let path = fno_agents::paths::events_path(cwd);
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    path
+}
+
 fn setup(response: &str) -> GenericEnv {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("project");
@@ -40,7 +48,7 @@ fn setup(response: &str) -> GenericEnv {
         "{\"message\":{\"role\":\"assistant\",\"content\":\"<promise>\"}}\n",
     )
     .unwrap();
-    let events = cwd.join(".fno/events.jsonl");
+    let events = project_events(&cwd);
     fs::write(&events, "").unwrap();
     let global_events = tmp.path().join("global-events.jsonl");
     let evaluator = tmp.path().join("fno-evaluator");

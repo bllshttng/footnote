@@ -41,8 +41,6 @@ def _resolve_path(path: Optional[Path], type_: Optional[str]) -> Path:
         return Path(path)
     repo_root = _v2_repo_root()
     if type_ is None or type_ == "target":
-        # The manifest lives in the repo's space; the checkout copy is the
-        # legacy fallback, not the answer.
         from fno.paths import target_state_path_or_legacy
 
         return target_state_path_or_legacy(repo_root)

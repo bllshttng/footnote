@@ -315,11 +315,6 @@ else
   echo "setup-worktree: salvage mirror not set (git config failed); commits stay local-only" >&2
 fi
 
-if (( events_journal_shared == 0 )); then
-  echo "setup-worktree: linked independent state but events journal is not shared" >&2
-  exit 1
-fi
-
 echo "setup-worktree: linked shared state from $CANONICAL into $WORKTREE"
 
 if command -v fno >/dev/null 2>&1; then

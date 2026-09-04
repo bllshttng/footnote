@@ -66,6 +66,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "rm",
     "session-start-bytes",
     "spawn",
+    "state",
     "status",
     "stop",
     "subscribe",
@@ -225,7 +226,9 @@ async fn run(args: Vec<String>) -> i32 {
     // `state path` is the shell-hook surface for project-space path resolution
     // (matched with `matches!` like `version`/`mail-inject`: a binary-direct
     // verb that stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and so out
-    // of the client<->router parity guard). No daemon, resolved from cwd.
+    // of the client<->router parity guard; the verb-surface ratchet's binary
+    // probe reads the unknown-verb refusal, so the verb IS registered in
+    // ALL_CLIENT_ACTIONS like every direct dispatch). No daemon, from cwd.
     if matches!(verb, "state") {
         return fno_agents::state_path::run(&args[1..]);
     }

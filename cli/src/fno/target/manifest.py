@@ -49,7 +49,6 @@ def read_target_manifest(project_root: Path) -> Optional[dict[str, Any]]:
     manifest = getattr(getattr(ctx, "session", None), "path", None)
     if manifest is None:
         from fno import paths as _paths
-
         manifest = _paths.target_state_path_or_legacy(project_root)
     try:
         text = manifest.read_text(encoding="utf-8")

@@ -41,7 +41,6 @@ class WakeSignal:
 
 def signals_dir(repo_root: Path) -> Path:
     from fno.paths import space_dir
-
     return space_dir(repo_root) / "wake-signals"
 
 

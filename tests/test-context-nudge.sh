@@ -96,6 +96,14 @@ unset CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID GEMINI_SESSION_ID 
 export CLAUDE_CODE_SESSION_ID="$KING_SID"
 cd "$SBX"   # isolate: hook latches (.fno/), git root (carveouts), and events all land under $SBX
 
+# Clear the carveouts ledger through the accessor that owns it (the repo's
+# space), not the retired checkout path - a truncate of .fno/carveouts.jsonl
+# is inert now that write and read both resolve project_log().
+clear_carveouts() {
+  PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c \
+    'from fno.carveout.core import CARVEOUTS_NAME; from fno.paths import project_log; p = project_log(CARVEOUTS_NAME); p.parent.mkdir(parents=True, exist_ok=True); p.write_text("")'
+}
+
 # registry.json on disk at state_dir/agents/registry.json: {"schema_version":13,"agents":[...]}.
 write_registry() {
   local king_crown="$1" has_children="$2" has_peer="${3:-no}"
@@ -254,7 +262,7 @@ assert_absent "AC15: carveout suppresses orphan block" "$OUT" 'cannot be a pure 
 
 # a carveout for a DIFFERENT scope does NOT suppress
 rm -f "$LATCHES"/.context-nudge-orphan-* 2>/dev/null
-printf '' > "$SBX/.fno/carveouts.jsonl" 2>/dev/null || true   # drop the matching-scope carveout from above
+clear_carveouts   # drop the matching-scope carveout from above
 fno backlog carveout add -k deferred --scope "other-scope" "unrelated" >/dev/null 2>&1
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_contains "AC15: wrong-scope carveout does not suppress" "$OUT" 'cannot be a pure pass'
@@ -262,8 +270,7 @@ assert_contains "AC15: wrong-scope carveout does not suppress" "$OUT" 'cannot be
 # === AC16: both checks fire in one output; orphan resolved does not kill ctx ===
 rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 # remove the matching carveout so orphans are unresolved again; keep king + children
-fno backlog carveout list --json >/dev/null 2>&1   # (carveouts persist; clear by truncating)
-printf '' > "$SBX/.fno/carveouts.jsonl" 2>/dev/null || true
+clear_carveouts
 write_transcript "$SBX/t.jsonl" 500000     # past trigger AND has orphans
 run_hook "$(payload "$SBX/t.jsonl")"
 assert_contains "AC16: ctx reason present" "$OUT" 'COMPACT AND KEEP RULING'

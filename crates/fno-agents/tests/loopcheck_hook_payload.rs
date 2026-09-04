@@ -20,6 +20,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
+/// The journal the product writes: the repo's space (x-b1ee). Reading through
+/// the same resolver keeps the fixture on the path the binary lands its rows.
+fn project_events(cwd: &std::path::Path) -> std::path::PathBuf {
+    let path = fno_agents::paths::events_path(cwd);
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    path
+}
+
 fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -112,7 +120,7 @@ fn fixture_with_manifest(manifest_body: &str) -> Fixture {
     });
     fs::write(&transcript, serde_json::to_string(&line).unwrap() + "\n").unwrap();
 
-    let events = cwd.join(".fno/events.jsonl");
+    let events = project_events(&cwd);
     let (gh, git) = green_bins(tmp.path());
     Fixture {
         _tmp: tmp,
