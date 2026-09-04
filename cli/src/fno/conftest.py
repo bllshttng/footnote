@@ -58,3 +58,8 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ANN001
     import shutil
 
     shutil.rmtree(_SANDBOX, ignore_errors=True)
+    # Sweep AFTER the rmtree: the only ordering that catches the keepers
+    # that were serving the just-deleted sandbox graphs.
+    from fno.graph.store import sweep_orphaned_keepers
+
+    sweep_orphaned_keepers(timeout=15.0)

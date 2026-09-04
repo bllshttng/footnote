@@ -913,3 +913,67 @@ def test_settle_blocked_by_edges_superseded_by_done_prunes_with_the_chain():
     (receipt,) = out["receipts"]
     assert receipt["kind"] == "blocked_by_pruned"
     assert "superseded by ab-done" in receipt["reason"]
+
+
+def test_sweep_kills_only_the_keeper_whose_graph_is_gone(tmp_path):
+    """Positive control for the orphan sweep (the keeper-leak class of
+    2026-09-04).
+
+    The sweep's kill decision is the ``--graph`` path's existence, never the
+    command line: the canonical keepers and the leaked ones share a command
+    line, and an argv match killed the two processes serving the real graph
+    on 2026-09-04. Two real sleepers advertise identical keeper argv; only
+    the one whose graph directory is deleted may die. Both must be visible
+    to the SAME probe the sweep uses before it acts - a zero-after read is
+    meaningless unless the probe first named its target.
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    from fno.graph import store as store_mod
+
+    def _advertised_keeper(graph: Path) -> subprocess.Popen:
+        # A real child whose argv carries the keeper's flags. The sleeper
+        # body ignores them; the ps scan must not.
+        return subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)",
+             "--store-keeper", "--sock", f"{graph}.sock",
+             "--graph", str(graph), "--session", "sweep-test"],
+        )
+
+    doomed_dir = tmp_path / "doomed"
+    doomed_dir.mkdir()
+    doomed_graph = doomed_dir / "graph.json"
+    doomed_graph.write_text('{"entries": []}\n')
+    doomed = _advertised_keeper(doomed_graph)
+    kept_graph = tmp_path / "kept" / "graph.json"
+    kept_graph.parent.mkdir()
+    kept_graph.write_text('{"entries": []}\n')
+    kept = _advertised_keeper(kept_graph)
+    try:
+        assert doomed.poll() is None and kept.poll() is None
+        # Pre-kill census through the sweep's own probe, by pid not by
+        # count: with both graphs present neither is a candidate (the
+        # discriminator), and after the rmtree the doomed one must be a
+        # NAMED candidate - the non-zero control for the sweep's kill.
+        assert doomed.pid not in store_mod._orphaned_keeper_pids()
+        shutil.rmtree(doomed_dir)
+        candidates = store_mod._orphaned_keeper_pids()
+        assert doomed.pid in candidates, (
+            f"the graph-gone sleeper must be a named candidate before the "
+            f"sweep; the probe saw {candidates}"
+        )
+        assert kept.pid not in candidates, (
+            "the graph-alive sleeper must survive the probe: identical argv, "
+            "the graph's existence decides"
+        )
+
+        assert store_mod.sweep_orphaned_keepers(timeout=15.0) == []
+        doomed.wait(timeout=15)
+        assert doomed.poll() is not None, "the graph-gone keeper must die"
+        assert kept.poll() is None, "the graph-alive keeper must survive"
+    finally:
+        for proc in (doomed, kept):
+            proc.kill()
+            proc.wait(timeout=15)

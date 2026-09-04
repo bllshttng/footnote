@@ -320,6 +320,82 @@ def drain_exited_keepers() -> int:
     return reaped
 
 
+def _orphaned_keeper_pids() -> "list[int]":
+    """Live pids advertising a store keeper whose graph tree (file AND parent
+    dir) is gone: the sweep's candidate scan, factored out so a test can
+    census the SAME probe before the sweep acts. The parent-dir conjunct
+    keeps the scan off a live test - a keeper spawned against a graph file
+    not written yet has an existing parent; every measured orphan lost its
+    whole tree at once.
+    """
+    import psutil
+
+    me = os.getpid()
+    pids: "list[int]" = []
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmd = proc.info["cmdline"] or []
+        except psutil.Error:  # noqa: BLE001 - a vanished pid owns no argv
+            continue
+        if proc.info["pid"] == me or "--store-keeper" not in cmd or "--graph" not in cmd:
+            continue
+        idx = cmd.index("--graph") + 1
+        graph = cmd[idx] if idx < len(cmd) else None
+        if graph is None or Path(graph).exists() or Path(graph).parent.exists():
+            continue
+        pids.append(proc.info["pid"])
+    return pids
+
+
+def sweep_orphaned_keepers(timeout: float = 10.0) -> "list[int]":
+    """SIGTERM every live store keeper whose ``--graph`` tree is gone, wait
+    `timeout`, SIGKILL the rest, and return the pids that refused to die.
+
+    Covers the populations the spawn ledger is blind to: keepers a CLI
+    subprocess spawned, and keepers that outlived a session with no reaper
+    wired (measured 2026-09-04: 8-10 live keepers against deleted pytest
+    graph paths). The kill decision is the graph path's existence, never the
+    command line - canonical and leaked keepers share an argv. Every probe
+    and kill is guarded: an unreadable process table degrades to a no-op,
+    never an error.
+    """
+    import signal
+
+    import psutil
+
+    try:
+        candidates = _orphaned_keeper_pids()
+    except Exception:  # noqa: BLE001 - no scan, no sweep, never a crash
+        return []
+
+    def _alive(pid: int) -> bool:
+        # kill(pid, 0) cannot be the probe: a zombie answers it, so a keeper
+        # that died on TERM under a live parent reads as a survivor.
+        try:
+            return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return False
+        except psutil.Error:  # noqa: BLE001 - unreadable reads alive
+            return True
+
+    for pid in candidates:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:  # noqa: BLE001 - gone between scan and kill, or not ours
+            pass
+    deadline = time.monotonic() + timeout
+    pending = {pid for pid in candidates if _alive(pid)}
+    while pending and time.monotonic() < deadline:
+        time.sleep(0.05)
+        pending = {pid for pid in pending if _alive(pid)}
+    for pid in sorted(pending):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:  # noqa: BLE001 - ditto
+            pass
+    return sorted(p for p in pending if _alive(p))
+
+
 class _Keeper:
     """One request to one store keeper socket. Frames are one-shot: connect,
     send, read the reply, close. Persistence buys nothing at CLI rates and
