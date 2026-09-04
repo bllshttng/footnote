@@ -1090,7 +1090,7 @@ def _send_self_review_payload(
 
 
 def _self_review_refusal(
-    pr_number: int, reason: str, *, head_sha: str = "", base_branch: str = ""
+    pr_number: Optional[int], reason: str, *, head_sha: str = "", base_branch: str = ""
 ) -> dict[str, Any]:
     """Build one machine-readable refusal without ever entering the send lane."""
     return {
@@ -1104,7 +1104,13 @@ def _self_review_refusal(
 
 @target_app.command("request-self-review", hidden=True)
 def request_self_review_cmd(
-    pr_number: int = typer.Option(..., "--pr-number", "--pr", help="PR number to review."),
+    pr_number: Optional[int] = typer.Option(
+        None,
+        "--pr-number",
+        "--pr",
+        help="PR number to review (the post-push form). Omit to review the "
+        "local branch and HEAD before any push.",
+    ),
 ) -> None:
     """Request one explicit final-head review through the raw self lane."""
     from fno.review_capability import render_self_review_invocation
@@ -1112,28 +1118,51 @@ def request_self_review_cmd(
     cwd = Path.cwd()
     head_sha = _git_out(cwd, "rev-parse", "HEAD") or ""
     base_branch = ""
+    branch = ""
     metadata: dict[str, Any] = {}
     try:
-        if pr_number <= 0:
-            raise RuntimeError("PR number must be positive")
-        metadata = _read_pr_metadata(pr_number, cwd)
-        pr_head = str(metadata.get("headRefOid") or "").strip()
-        base_branch = str(metadata.get("baseRefName") or "").strip()
         if not head_sha:
             raise RuntimeError("cannot resolve local HEAD")
-        if not pr_head:
-            raise RuntimeError("PR has no headRefOid")
-        if head_sha.lower() != pr_head.lower():
-            raise RuntimeError(
-                f"local HEAD {head_sha} does not match PR head {pr_head}; refusing review"
-            )
-        if not base_branch:
-            raise RuntimeError("PR baseRefName is unresolved; refusing review")
+        if pr_number is not None and pr_number <= 0:
+            raise RuntimeError("PR number must be positive")
+        if pr_number is None:
+            # The default pre-push form: pin the LOCAL branch and HEAD against
+            # the origin base, so the round runs before any push and the PR
+            # opens already reviewed. The base resolves the same way the emit
+            # script resolves it, so the review and its attestation name one
+            # base; there is deliberately no gh call here - no PR exists, and
+            # a network call would fail a local request when GitHub is slow.
+            branch = (_git_out(cwd, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()
+            if not branch or branch == "HEAD":
+                raise RuntimeError(
+                    "no branch to review; check out the feature branch"
+                )
+            base_branch = (
+                _git_out(cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+                or ""
+            ).strip()
+            if base_branch.startswith("origin/"):
+                base_branch = base_branch[len("origin/") :]
+            if not base_branch:
+                base_branch = "main"
+        else:
+            metadata = _read_pr_metadata(pr_number, cwd)
+            pr_head = str(metadata.get("headRefOid") or "").strip()
+            base_branch = str(metadata.get("baseRefName") or "").strip()
+            if not pr_head:
+                raise RuntimeError("PR has no headRefOid")
+            if head_sha.lower() != pr_head.lower():
+                raise RuntimeError(
+                    f"local HEAD {head_sha} does not match PR head {pr_head}; refusing review"
+                )
+            if not base_branch:
+                raise RuntimeError("PR baseRefName is unresolved; refusing review")
         harness, session_id = _resolve_self_review_identity()
         payload = render_self_review_invocation(
             harness=harness,
             project_root=cwd,
             pr_number=pr_number,
+            branch=branch or None,
             head_sha=head_sha,
             base_branch=base_branch,
             raw_transport=True,
@@ -1152,6 +1181,7 @@ def request_self_review_cmd(
         receipt = {
             **receipt,
             "pr": pr_number,
+            "branch": branch or None,
             "head_sha": head_sha,
             "base_branch": base_branch,
             "payload": payload,
