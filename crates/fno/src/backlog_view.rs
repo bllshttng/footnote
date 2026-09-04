@@ -36,6 +36,59 @@ pub fn graph_path() -> PathBuf {
     base.join(".fno").join("graph.json")
 }
 
+/// The `(harness, harness_session_id)` pairs whose work the graph says is
+/// DONE (x-9052). A node is done when `status` names done, `merge_status`
+/// names merged, or `completed_at` is set - the ship vocabulary's terminal
+/// states, never a liveness verdict (a merged node stays done when its
+/// sessions die). Pure so the restore gate is testable without files.
+pub fn done_session_ids_from(raw: &str) -> HashSet<(String, String)> {
+    let mut done = HashSet::new();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return done;
+    };
+    let Some(entries) = value.get("entries").and_then(|v| v.as_array()) else {
+        return done;
+    };
+    for node in entries {
+        let is_done = matches!(node.get("status").and_then(|v| v.as_str()), Some("done"))
+            || matches!(
+                node.get("merge_status").and_then(|v| v.as_str()),
+                Some("merged")
+            )
+            || node
+                .get("completed_at")
+                .and_then(|v| v.as_str())
+                .is_some_and(|v| !v.is_empty());
+        if !is_done {
+            continue;
+        }
+        let Some(sessions) = node.get("sessions").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for session in sessions {
+            let Some(harness) = session.get("harness").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(session_id) = session.get("session_id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            done.insert((harness.to_string(), session_id.to_string()));
+        }
+    }
+    done
+}
+
+/// The live done set. An unreadable or malformed graph reads as EMPTY, not
+/// as "nothing is done" being asserted positively - restore keeps every
+/// worker (today's behavior) when the instrument cannot read (fail open,
+/// x-9052 AC2-EDGE).
+pub fn done_session_ids() -> HashSet<(String, String)> {
+    match std::fs::read_to_string(graph_path()) {
+        Ok(raw) => done_session_ids_from(&raw),
+        Err(_) => HashSet::new(),
+    }
+}
+
 /// Whether an external tracker backend is selected, resolved exactly as the
 /// Python side resolves it (`FNO_TRACKER_BACKEND`, default `graph`). Shared
 /// resolution so the reader and `get_tracker` can never disagree about which
@@ -1041,6 +1094,48 @@ mod tests {
 
     fn graph(nodes: &str) -> String {
         format!(r#"{{"entries": [{nodes}]}}"#)
+    }
+
+    #[test]
+    fn done_sessions_collect_from_done_merged_and_completed_nodes() {
+        // x-9052 AC1-HP: the three terminal spellings all contribute, and a
+        // live node contributes none.
+        let doc = graph(
+            r#"{"id":"a","status":"done","sessions":[{"harness":"codex","session_id":"s1"}]},
+               {"id":"b","status":"in_review","merge_status":"merged","sessions":[{"harness":"claude","session_id":"s2"}]},
+               {"id":"c","status":"ready","completed_at":"2026-09-01","sessions":[{"harness":"agy","session_id":"s3"}]},
+               {"id":"d","status":"ready","sessions":[{"harness":"codex","session_id":"s4"}]}"#,
+        );
+        let done = done_session_ids_from(&doc);
+        assert_eq!(
+            done.len(),
+            3,
+            "done+merged+completed contribute; ready does not"
+        );
+        for pair in [("codex", "s1"), ("claude", "s2"), ("agy", "s3")] {
+            assert!(
+                done.contains(&(pair.0.to_string(), pair.1.to_string())),
+                "missing {pair:?}: {done:?}"
+            );
+        }
+        assert!(!done.contains(&("codex".into(), "s4".into())));
+    }
+
+    #[test]
+    fn done_sessions_fail_open_on_bad_shapes() {
+        // x-9052 AC2-EDGE: a torn document, a missing graph, a node without
+        // sessions, a string session - all read as EMPTY, never as a partial
+        // truth restore would act on.
+        assert!(done_session_ids_from("not json at all").is_empty());
+        assert!(done_session_ids_from("{}").is_empty());
+        assert!(done_session_ids_from(&graph(
+            r#"{"id":"a","status":"done","sessions":[{"harness":"codex"}]}"#
+        ))
+        .is_empty());
+        assert!(done_session_ids_from(&graph(
+            r#"{"id":"a","status":"done","sessions":["plain-string"]}"#
+        ))
+        .is_empty());
     }
 
     /// The graph as five projects' work plus one unscoped node, the shape the

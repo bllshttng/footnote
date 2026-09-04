@@ -3088,6 +3088,45 @@ fn node_without_leaf(node: &Node, skip: u64) -> Option<Node> {
     }
 }
 
+/// (x-9052) Whether a stored layout slot binds a done member. Bindings name
+/// workers with the exact string `worker_binding_key` builds, so the slot
+/// filter and the member-loop gate can never disagree about who is done.
+fn slot_names_done(slot: &LayoutSlot, done: &HashSet<String>) -> bool {
+    matches!(&slot.binding, LayoutBinding::Fno(id) if done.contains(id))
+}
+
+/// (x-9052) The stored tree minus the leaves of DONE slots (names only, the
+/// same strings `LayoutTreeSpec::Slot` carries): done work earns no pane, so
+/// its leaf collapses instead of shell-substituting. Same collapse semantics
+/// as [`node_without_leaf`]; `None` means the tree is gone and the tab is
+/// skipped.
+fn prune_done_slots(tree: &LayoutTreeSpec, done: &HashSet<String>) -> Option<LayoutTreeSpec> {
+    match tree {
+        LayoutTreeSpec::Slot(name) => {
+            (!done.contains(name)).then(|| LayoutTreeSpec::Slot(name.clone()))
+        }
+        LayoutTreeSpec::Split { axis, children } => {
+            let kept: Vec<LayoutTreeChild> = children
+                .iter()
+                .filter_map(|child| {
+                    prune_done_slots(&child.tree, done).map(|tree| LayoutTreeChild {
+                        weight: child.weight,
+                        tree,
+                    })
+                })
+                .collect();
+            match kept.len() {
+                0 => None,
+                1 => Some(kept.into_iter().next().expect("checked").tree),
+                _ => Some(LayoutTreeSpec::Split {
+                    axis: *axis,
+                    children: kept,
+                }),
+            }
+        }
+    }
+}
+
 /// The persisted spec -> a live tree (x-caef restore). `resolve` maps a slot
 /// name to a pane id (`None` = the slot's pane is unavailable and the caller
 /// substitutes). `None` from THIS function means the document is malformed (a
@@ -3199,6 +3238,30 @@ fn restore_registry_rows() -> Option<Vec<RegistryAgent>> {
     std::fs::read_to_string(agents_view::registry_path())
         .ok()
         .and_then(|raw| agents_view::derive_rows(&raw, 0))
+}
+
+/// (x-9052) The restore gate's done set, overridable in tests (a unit test
+/// cannot populate the real graph). `None` falls through to the live
+/// `backlog_view::done_session_ids` read.
+#[cfg(test)]
+thread_local! {
+    static RESTORE_DONE_SESSIONS: std::cell::RefCell<Option<HashSet<(String, String)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_done_sessions(done: HashSet<(String, String)>) {
+    RESTORE_DONE_SESSIONS.with(|slot| *slot.borrow_mut() = Some(done));
+}
+
+#[cfg(test)]
+struct DoneSessionsGuard;
+
+#[cfg(test)]
+impl Drop for DoneSessionsGuard {
+    fn drop(&mut self) {
+        RESTORE_DONE_SESSIONS.with(|slot| *slot.borrow_mut() = None);
+    }
 }
 
 /// (x-7b5e) The stored member's own structural refusal, when the member
@@ -5111,6 +5174,8 @@ impl Core {
             self.reap_pane(pid);
         }
         let outcome = self.session.remove_tab(sid, ti);
+        let survived = matches!(outcome, RemoveOutcome::TabRemoved);
+        let member_ctx_count = ctxs.len();
         for ctx in ctxs {
             self.reconcile_member_close(Some(ctx), false);
         }
@@ -5122,6 +5187,12 @@ impl Core {
             if let Some((name, key)) = ident {
                 self.persist_remove(&name, &key);
             }
+        } else if survived && member_ctx_count == 0 {
+            // (x-9052) A shell-only tab close persisted NOTHING before (the
+            // member reconcile is the only other writer), so its stored tree
+            // outlived the close and restore replayed it forever. Capture the
+            // surviving topology here.
+            self.persist_squad(sid);
         }
         self.tab_areas.remove(&tid);
         if matches!(outcome, RemoveOutcome::SessionEmpty) {
@@ -8997,6 +9068,29 @@ impl Core {
         let mut worker_members_total = 0usize;
         let mut held_workers_total = 0usize;
         let mut refused_workers_total = 0usize;
+        // (x-9052) Worker members whose work the graph says is DONE. They are
+        // history, not garbage: kept as members, never held, never refused-
+        // pane'd, never shell-substituted in the tree lane. Read via the test
+        // override so a unit test never reads the real graph (same seam as
+        // RESTORE_REGISTRY_ROWS).
+        #[cfg(test)]
+        let done_sessions = RESTORE_DONE_SESSIONS.with(|slot| {
+            slot.borrow()
+                .clone()
+                .unwrap_or_else(crate::backlog_view::done_session_ids)
+        });
+        #[cfg(not(test))]
+        let done_sessions = crate::backlog_view::done_session_ids();
+        let mut done_workers_total = 0usize;
+        let mut done_worker_names: Vec<String> = Vec::new();
+        let mut skipped_done_tabs = 0usize;
+        // (x-2990) Member accretion: every attach-id the fresh registry file
+        // still names, EXITED rows included (an exited row is the resumable
+        // dim card; only a forgotten id is dead weight). `None` = unreadable
+        // registry, retire nothing (same fail-safe as the worker prune).
+        let known_attach_ids: Option<HashSet<String>> = restore_registry_rows()
+            .map(|rows| rows.iter().filter_map(|r| r.attach_id.clone()).collect());
+        let mut retired_members_total = 0usize;
         for ps in squads {
             let cwd0 = ps
                 .origins
@@ -9004,6 +9098,10 @@ impl Core {
                 .cloned()
                 .unwrap_or_else(|| home_cwd.clone());
             let mut members: Vec<crate::squad_store::StoredMember> = Vec::new();
+            // (x-9052) Worker bindings skipped as done in this squad's member
+            // loop, so the tree lane prunes their leaves instead of minting
+            // shells. Reset per squad: bindings name workers, not squads.
+            let mut done_bindings: HashSet<String> = HashSet::new();
             // (x-5f7f) Worker members left idle by this restore. Counted for
             // the notice, never spawned.
             let mut idle_workers = 0usize;
@@ -9035,6 +9133,21 @@ impl Core {
             let restore_key = ps.key.clone();
             for m in &ps.members {
                 if m.tombstone {
+                    // (x-2990) A tombstone the registry has FORGOTTEN (no row
+                    // names its attach-id, live or exited) is dead weight a
+                    // first-seen death only borrowed: retire it. An exited row
+                    // still naming the id keeps the dim card. An unreadable
+                    // registry retires nothing (fail-safe, x-5f7f's rule). A
+                    // FRESH death still tombstones once below - retention is
+                    // bounded at one restart cycle, not forever.
+                    let forgotten = known_attach_ids
+                        .as_ref()
+                        .is_some_and(|ids| !ids.contains(&m.attach_id));
+                    if forgotten {
+                        retired_members_total += 1;
+                        done_bindings.insert(m.attach_id.clone());
+                        continue;
+                    }
                     members.push(m.clone()); // already dead - stays a tombstone
                     continue;
                 }
@@ -9096,6 +9209,27 @@ impl Core {
                         continue;
                     }
                     if hold_workers {
+                        // (x-9052) Doneness gate: a worker whose node is done
+                        // (status done / merge_status merged / completed_at
+                        // set) is shipped work. Holding a pane for it, or a
+                        // refused pane when identity is missing, rebuilds a
+                        // ghost the operator already collected. Keep the
+                        // member (history), skip every pane.
+                        let member_done =
+                            match (m.harness.as_deref(), m.harness_session_id.as_deref()) {
+                                (Some(harness), Some(session_id)) => done_sessions
+                                    .contains(&(harness.to_string(), session_id.to_string())),
+                                _ => false,
+                            };
+                        if member_done {
+                            members.push(m.clone());
+                            done_workers_total += 1;
+                            done_worker_names.push(worker_name.to_string());
+                            done_bindings.insert(
+                                worker_binding_key(m).unwrap_or_else(|| worker_name.to_string()),
+                            );
+                            continue;
+                        }
                         members.push(m.clone());
                         let matching_rows: Vec<&RegistryAgent> = self
                             .agents
@@ -9291,10 +9425,54 @@ impl Core {
                         pane_by_id.entry(alias).or_insert(pane);
                     }
                 }
+                // (x-9052) The home lane's fresh attach shell already IS an
+                // unnamed shell at cwd0. Rebuilding a stored unnamed
+                // pure-shell tree beside it minted a second one and
+                // re-captured both, so every server life left one more shell
+                // tree in the store (the measured 12). The first such tree
+                // consumes the claim: the fresh tab stands in for it.
+                let mut fresh_home_shell_claim = home_match
+                    && self
+                        .session
+                        .squad(home_sid)
+                        .is_some_and(|h| !h.tabs.is_empty());
                 for st in &ps.tab_trees {
+                    // (x-9052) Prune done leaves BEFORE any pane minting: a
+                    // slot binding a done member's leaf is removed, one-child
+                    // splits collapse, same collapse semantics as
+                    // `node_without_leaf`. An all-done tab is skipped whole:
+                    // the shell substitute must never rebuild a ghost tab the
+                    // gate just declined to hold.
+                    let done_slot_names: HashSet<String> = st
+                        .slots
+                        .iter()
+                        .filter(|slot| slot_names_done(slot, &done_bindings))
+                        .map(|slot| slot.name.clone())
+                        .collect();
+                    let pruned_tree = prune_done_slots(&st.tree, &done_slot_names);
+                    let Some(tree_spec) = pruned_tree else {
+                        skipped_done_tabs += 1;
+                        continue;
+                    };
+                    let kept_slots: Vec<&LayoutSlot> = st
+                        .slots
+                        .iter()
+                        .filter(|slot| !slot_names_done(slot, &done_bindings))
+                        .collect();
+                    // (x-9052) The stored shell the fresh attach shell already
+                    // represents: skip the tree, no pane minted, the claim is
+                    // consumed once.
+                    let pure_shell_unnamed = st.tab_name.is_none()
+                        && matches!(&tree_spec, LayoutTreeSpec::Slot(_))
+                        && kept_slots.len() == 1
+                        && matches!(kept_slots[0].binding, LayoutBinding::Shell);
+                    if pure_shell_unnamed && fresh_home_shell_claim {
+                        fresh_home_shell_claim = false;
+                        continue;
+                    }
                     let mut slot_pane: HashMap<&str, u64> = HashMap::new();
                     let mut missing: Vec<&str> = Vec::new();
-                    for slot in &st.slots {
+                    for slot in &kept_slots {
                         let pane = match &slot.binding {
                             LayoutBinding::Fno(id) => match pane_by_id.get(id.as_str()) {
                                 Some(p) => Some(*p),
@@ -9327,7 +9505,7 @@ impl Core {
                         }
                     }
                     let lookup = |name: &str| slot_pane.get(name).copied();
-                    match spec_to_node(&st.tree, &lookup) {
+                    match spec_to_node(&tree_spec, &lookup) {
                         Some(root) => {
                             let leaves = tree::leaves(&root);
                             // Every slot pane was minted for THIS tab, so a
@@ -9528,6 +9706,31 @@ impl Core {
                 "restore: pruned {pruned_workers} worker member(s) whose registry row is gone"
             ));
         }
+        if done_workers_total > 0 || skipped_done_tabs > 0 {
+            // (x-9052) The skipped members are named ONCE, in aggregate, not
+            // per row - the same positive-marker shape as pruned_workers. A
+            // tab skipped whole (every slot done) counts here too: the
+            // operator's tab count is the thing the receipt must explain.
+            let mut names = done_worker_names
+                .iter()
+                .take(6)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if done_worker_names.len() > 6 {
+                names.push_str(", ...");
+            }
+            self.notice_all(format!(
+                "restore: skipped {done_workers_total} done worker pane(s) and {skipped_done_tabs} done tab(s): {names}"
+            ));
+        }
+        if retired_members_total > 0 {
+            // (x-2990) Same positive-marker shape: the retirement is named,
+            // never silent.
+            self.notice_all(format!(
+                "restore: retired {retired_members_total} member(s) the registry no longer names"
+            ));
+        }
         // (x-7b5e) policy = resume: the walk deliberately left every member
         // idle; the bulk driver now brings each back through its own
         // harness's declared form. The reply end is dropped on purpose - at
@@ -9573,6 +9776,14 @@ impl Core {
             }
             let members = members.clone();
             self.persist_stored(&name, &key, &origins, &members);
+            // (x-9052) A death never writes a tab-tree removal, so the
+            // graceful paths must: a churned worker's collapsed tab leaves
+            // the store now, not at the next restart. The persist_stored half
+            // above keeps the workspace row (AC4-EDGE); this captures the
+            // surviving live topology.
+            if self.session.squad(sid).is_some() {
+                self.persist_squad(sid);
+            }
         } else {
             members.retain(|m| m.attach_id != attach_id);
             let survives = self.session.squad(sid).is_some();
@@ -20952,6 +21163,129 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_shell_tab_writes_its_tree_removal() {
+        // x-9052 AC4-EDGE: a shell-only tab close used to persist NOTHING on
+        // a surviving squad, so its stored tree replayed at every restart.
+        // Positives both sides: the closed tree leaves tab_trees, the
+        // sibling's tree stays.
+        let _s = StoreScratch::new("x9052-shellclose");
+        let mut core = empty_core();
+        let mut one = leaf_tab(5, 1);
+        let two = leaf_tab(6, 2);
+        one.name = Some("shell-a".into());
+        core.session
+            .add_squad(1, vec!["/a".into()], Some("one".into()), one);
+        core.session.squad_mut(1).expect("squad").tabs.push(two);
+        core.persist_squad(1);
+        let ident = core.squad_identity(1).expect("identity");
+        assert_eq!(
+            crate::squad_store::load()
+                .squads
+                .iter()
+                .find(|s| (s.name.clone(), s.key.clone()) == ident)
+                .map(|s| s.tab_trees.len()),
+            Some(2),
+            "both trees captured before the close"
+        );
+        core.close_tab_cascade(1, 1);
+        assert_eq!(
+            crate::squad_store::load()
+                .squads
+                .iter()
+                .find(|s| (s.name.clone(), s.key.clone()) == ident)
+                .map(|s| s.tab_trees.len()),
+            Some(1),
+            "the closed tab's tree left the store"
+        );
+    }
+
+    #[test]
+    fn churn_writes_the_tree_removal_when_the_squad_survives() {
+        // x-9052 AC4-HP: a churned worker's persist used to be members-only,
+        // so its collapsed tab stayed in tab_trees forever.
+        let _s = StoreScratch::new("x9052-churn");
+        let mut core = empty_core();
+        core.session
+            .add_squad(1, vec!["/a".into()], Some("one".into()), leaf_tab(5, 1));
+        let member = crate::squad_store::StoredMember {
+            attach_id: "a1b2c3d4".into(),
+            tombstone: false,
+            detached: false,
+            tab_name: None,
+            cwd: None,
+            worker: None,
+            harness: None,
+            harness_session_id: None,
+        };
+        core.squad_members.insert(1, vec![member.clone()]);
+        core.attached.insert("a1b2c3d4".into(), 5);
+        core.persist_squad(1);
+        let ident = core.squad_identity(1).expect("identity");
+        assert_eq!(
+            crate::squad_store::load()
+                .squads
+                .iter()
+                .find(|s| (s.name.clone(), s.key.clone()) == ident)
+                .map(|s| s.tab_trees.len()),
+            Some(1),
+            "tree captured while the member pane lives"
+        );
+        // The pane and its tab die with the server's session bookkeeping;
+        // the squad survives (a sibling tab keeps it).
+        let two = leaf_tab(6, 2);
+        core.session.squad_mut(1).expect("squad").tabs.push(two);
+        core.session.remove_tab(1, 0);
+        core.attached.remove("a1b2c3d4");
+        let ctx = (
+            1u64,
+            ident.0.clone(),
+            ident.1.clone(),
+            vec!["/a".into()],
+            "a1b2c3d4".to_string(),
+        );
+        core.reconcile_member_close(Some(ctx), true);
+        assert_eq!(
+            crate::squad_store::load()
+                .squads
+                .iter()
+                .find(|s| (s.name.clone(), s.key.clone()) == ident)
+                .map(|s| s.tab_trees.len()),
+            Some(1),
+            "the churned member's tree left the store; the sibling's stays"
+        );
+    }
+
+    #[test]
+    fn prune_done_slots_collapses_and_skips() {
+        // x-9052 AC3-EDGE: pure collapse semantics - a done leaf vanishes, a
+        // one-child split unwraps, an emptied tree is None, weights and
+        // siblings survive.
+        let done: HashSet<String> = ["gone-slot".to_string()].into_iter().collect();
+        let tree = LayoutTreeSpec::Split {
+            axis: crate::tree::Axis::Horizontal,
+            children: vec![
+                LayoutTreeChild {
+                    weight: 2.0,
+                    tree: LayoutTreeSpec::Slot("gone-slot".into()),
+                },
+                LayoutTreeChild {
+                    weight: 1.0,
+                    tree: LayoutTreeSpec::Slot("kept".into()),
+                },
+            ],
+        };
+        let pruned = prune_done_slots(&tree, &done).expect("one leaf survives");
+        match pruned {
+            LayoutTreeSpec::Slot(name) => assert_eq!(name, "kept"),
+            other => panic!("one-child split should unwrap, got {other:?}"),
+        }
+        let all_done: HashSet<String> = ["gone-slot".to_string(), "kept".to_string()]
+            .into_iter()
+            .collect();
+        assert!(prune_done_slots(&tree, &all_done).is_none());
+    }
+
+    #[test]
     fn close_last_pane_depersists_its_workspace() {
         // Same contract through close_pane (the mouse pane-close path), which
         // de-persisted never before: it handled template specs and nothing
@@ -21851,6 +22185,194 @@ mod tests {
         let next = core.next_pane_id;
         core.command(1, Command::FocusPane(resumed_pid));
         assert_eq!(core.next_pane_id, next, "a second focus spawns nothing");
+    }
+
+    #[test]
+    fn restore_skips_done_members_and_prunes_their_tree_leaves() {
+        // x-9052 AC2-HP / AC3-HP: a worker whose node is done-and-merged is
+        // shipped work. It earns no held pane, no refused pane, and no shell
+        // substitute; the receipt names it once.
+        let s = StoreScratch::new("restore-done");
+        let origin = s.dir.join("repo");
+        std::fs::create_dir_all(&origin).unwrap();
+        let origin_str = origin.to_string_lossy().into_owned();
+        crate::squad_store::upsert(
+            "",
+            &crate::squad_store::origin_key(&[origin_str.clone()]),
+            &[origin_str.clone()],
+            &[
+                crate::squad_store::StoredMember {
+                    attach_id: String::new(),
+                    tombstone: false,
+                    detached: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: Some("t-done-one".into()),
+                    harness: Some("codex".into()),
+                    harness_session_id: Some("done-session".into()),
+                },
+                crate::squad_store::StoredMember {
+                    attach_id: String::new(),
+                    tombstone: false,
+                    detached: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: Some("t-live-one".into()),
+                    harness: Some("codex".into()),
+                    harness_session_id: Some("live-session".into()),
+                },
+            ],
+        )
+        .unwrap();
+        // Two one-slot tabs: one for the done member, one for the live one.
+        let slot_for = |session: &str| crate::proto::LayoutSlot {
+            name: "s0".into(),
+            binding: LayoutBinding::Fno(format!("worker:codex:{session}")),
+        };
+        let tree_for = |session: &str| crate::proto::LayoutTreeSpec::Slot("s0".into());
+        crate::squad_store::set_tab_trees(
+            "",
+            &crate::squad_store::origin_key(&[origin_str.clone()]),
+            &[],
+            &[
+                crate::squad_store::StoredTabTree {
+                    tab_name: None,
+                    tree: tree_for("done-session"),
+                    slots: vec![slot_for("done-session")],
+                    focus: None,
+                },
+                crate::squad_store::StoredTabTree {
+                    tab_name: None,
+                    tree: tree_for("live-session"),
+                    slots: vec![slot_for("live-session")],
+                    focus: None,
+                },
+            ],
+            None,
+        )
+        .unwrap();
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let mut one = exited_claude_row("t-done-one", None);
+        one.harness = Some("codex".into());
+        one.harness_session_id = Some("done-session".into());
+        core.agents = vec![one];
+        let _known = KnownWorkersGuard;
+        set_known_workers(&["t-done-one", "t-live-one"]);
+        let _done = DoneSessionsGuard;
+        set_done_sessions(
+            [("codex".to_string(), "done-session".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Hold);
+        let _pol = RestorePolicyGuard;
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.restore_squads(24, 80, 999);
+        assert_eq!(
+            core.panes.len(),
+            1,
+            "one pane: the live member's held pane; the done member earns none"
+        );
+        assert_eq!(core.held_workers.len(), 1, "only the live member is held");
+        let notices = drain_notices(&mut rx).join("\n");
+        assert!(
+            notices.contains("skipped 1 done worker pane(s)"),
+            "the skip is named once: {notices}"
+        );
+        assert!(
+            notices.contains("t-done-one"),
+            "the done member is named: {notices}"
+        );
+        assert!(
+            notices.contains("1 done tab(s)"),
+            "the skipped tab is counted: {notices}"
+        );
+        // The live member's tree came back with its held pane bound.
+        let held_pid = core.panes.keys().copied().next().unwrap();
+        let (sid, _ti) = core.session.find_pane(held_pid).unwrap();
+        let members: Vec<String> = core
+            .squad_members
+            .values()
+            .flat_map(|ms| ms.iter().filter_map(|m| m.worker.clone()))
+            .collect();
+        assert_eq!(
+            members,
+            vec!["t-done-one".to_string(), "t-live-one".to_string()],
+            "both members stay as rows (history, not garbage)"
+        );
+    }
+
+    #[test]
+    fn restore_retires_members_the_registry_forgot_but_keeps_exited_rows() {
+        // x-2990: a member whose attach-id NO row names is dead weight; one
+        // whose EXITED row still names it is the resumable dim card and stays.
+        let s = StoreScratch::new("restore-retire");
+        let origin = s.dir.join("repo");
+        std::fs::create_dir_all(&origin).unwrap();
+        let origin_str = origin.to_string_lossy().into_owned();
+        crate::squad_store::upsert(
+            "",
+            &crate::squad_store::origin_key(&[origin_str.clone()]),
+            &[origin_str.clone()],
+            &[
+                crate::squad_store::StoredMember {
+                    attach_id: "deadbeef".into(),
+                    tombstone: true,
+                    detached: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: None,
+                    harness: None,
+                    harness_session_id: None,
+                },
+                crate::squad_store::StoredMember {
+                    attach_id: "c0ffee00".into(),
+                    tombstone: true,
+                    detached: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: None,
+                    harness: None,
+                    harness_session_id: None,
+                },
+            ],
+        )
+        .unwrap();
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let mut exited = exited_claude_row("t-exited-agent", None);
+        exited.attach_id = Some("c0ffee00".into());
+        exited.exited = true;
+        core.agents = vec![exited.clone()];
+        let _reg = RestoreRegistryRowsGuard;
+        set_restore_registry_rows(vec![exited]);
+        let _known = KnownWorkersGuard;
+        set_known_workers(&[]);
+        set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Hold);
+        let _pol = RestorePolicyGuard;
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.restore_squads(24, 80, 999);
+        let notices = drain_notices(&mut rx).join("\n");
+        assert!(
+            notices.contains("retired 1 member(s) the registry no longer names"),
+            "the retirement is named: {notices}"
+        );
+        let members: Vec<String> = core
+            .squad_members
+            .values()
+            .flat_map(|ms| ms.iter().map(|m| m.attach_id.clone()))
+            .collect();
+        assert!(
+            !members.contains(&"deadbeef".to_string()),
+            "the forgotten member is gone: {members:?}"
+        );
+        assert!(
+            members.contains(&"c0ffee00".to_string()),
+            "the exited-row member stays: {members:?}"
+        );
     }
 
     #[test]
