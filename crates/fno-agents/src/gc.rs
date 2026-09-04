@@ -435,6 +435,20 @@ fn apply_worktree_guard(row: &GcRow, earned: GcAction) -> (GcAction, Option<Keep
     }
 }
 
+/// The one handle a row is both PROBED and REPORTED under. `fno agents truth`
+/// resolves a row by short_id or by name (measured 2026-09-04 against all nine
+/// empty-short_id codex rows), so the fallback is a real handle, not a display
+/// string. Written once because the dormant gate keys its probe on this and the
+/// summary names the row with it: two spellings would probe under one name and
+/// report under another.
+pub(crate) fn row_handle(e: &crate::state::RegistryEntry) -> String {
+    if e.short_id.is_empty() {
+        e.name.clone()
+    } else {
+        e.short_id.clone()
+    }
+}
+
 /// Decide the GC action for one row. Pure: no clock, no I/O.
 ///
 /// The reap condition is all three of: (1) terminal status OR pid confirmed dead

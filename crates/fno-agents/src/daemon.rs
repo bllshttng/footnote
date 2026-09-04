@@ -2729,11 +2729,7 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
             // `a_live_row_with_a_growing_transcript_is_never_probed_by_the_dormant_gate`.
             if let Some(idle) = row_idle_secs(e, now, transcript.as_deref()) {
                 if idle > grace_secs {
-                    dormant_handle = Some(if e.short_id.is_empty() {
-                        e.name.clone()
-                    } else {
-                        e.short_id.clone()
-                    });
+                    dormant_handle = Some(crate::gc::row_handle(e));
                 }
             }
         }
@@ -2789,11 +2785,7 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         if needs_probe {
             row.worktree_clean = worktree_clean_probe(&e.cwd);
         }
-        let id = if e.short_id.is_empty() {
-            e.name.clone()
-        } else {
-            e.short_id.clone()
-        };
+        let id = crate::gc::row_handle(e);
         pending.push(PendingRow {
             entry: e,
             row,
@@ -2974,11 +2966,7 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
             if to_reap.get(&e.name) != Some(&e.created_at) {
                 continue;
             }
-            let id = if e.short_id.is_empty() {
-                e.name.clone()
-            } else {
-                e.short_id.clone()
-            };
+            let id = crate::gc::row_handle(e);
             if backstop_ids.contains_key(&e.name) {
                 summary.reaped_backstop.push(id);
             } else if dormant_ids.contains_key(&e.name) {
@@ -3113,11 +3101,7 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
                     if !accounted {
                         continue;
                     }
-                    let row_id = if e.short_id.is_empty() {
-                        e.name.clone()
-                    } else {
-                        e.short_id.clone()
-                    };
+                    let row_id = crate::gc::row_handle(e);
                     let node_session = if let (Some(node_id), Some(node_cascade)) =
                         (node_id.as_deref(), node_cascade)
                     {
@@ -3280,11 +3264,7 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
                             ),
                         ]),
                     );
-                    let reaped_id = if e.short_id.is_empty() {
-                        e.name.clone()
-                    } else {
-                        e.short_id.clone()
-                    };
+                    let reaped_id = crate::gc::row_handle(e);
                     // A backstop removal is counted ONLY in its own list, never
                     // in both. Two totals that overlap cannot be compared, and
                     // comparing them is the point. A dormant reap likewise: it
