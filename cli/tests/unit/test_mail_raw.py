@@ -138,7 +138,13 @@ def test_raw_refuses_payload_without_leading_slash(mailbox, monkeypatch, capsys)
     with pytest.raises(typer.Exit) as exc:
         _raw_send("claudepeer", "code-review medium --fix", self_ok=False)
     assert exc.value.exit_code != 0
-    assert "must start with /" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "must start with /" in err
+    # x-1182: the refusal names the lane that CAN answer an interactive
+    # prompt (found by elimination during an incident, written down nowhere
+    # until this fix) rather than leaving the caller to find it by trying
+    # every lane.
+    assert "fno agents ask" in err
 
 
 def test_raw_refuses_multiline_payload(mailbox, monkeypatch, capsys):

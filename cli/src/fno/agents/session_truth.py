@@ -20,6 +20,7 @@ fallback, so an old ``<promise>`` is still ``done`` and an old question is still
     <promise ...>                 -> done         (mission declared complete)
     <watching ...>                -> watching     (armed on an external check)
     ends in '?' OR <help ...>     -> your-move    (needs the operator)
+    ends in [Y/n] / (y/N) / etc.  -> your-move    (an option prompt, x-1182)
     (none) transcript fresh       -> working
     (none) silent for hours       -> stalled
     unresolvable / no records     -> unknown      (hands off, fail-quiet)
@@ -45,6 +46,17 @@ from typing import Any, Callable, Optional
 _PROMISE_RE = re.compile(r"<promise[>\s]")
 _WATCHING_RE = re.compile(r"<watching[>\s]")
 _HELP_RE = re.compile(r"<help[>\s]")
+
+# A trailing interactive option prompt (x-1182): [Y/n], [y/N], (y/N), (Y/n),
+# or a bracketed numbered menu like [1/2/3]. Matched only at the END of the
+# rstripped tail, same position as the trailing "?" check below - a [Y/n]
+# mentioned mid-paragraph is prose about a prompt, not a prompt. This is a
+# DIFFERENT grammar from the pane answerable-prompt manifest in
+# crates/fno-agents/src/manifests/*.toml + scrape.rs: that one classifies a
+# rendered TUI SCREEN by glyph and rule priority, this one classifies
+# assistant PROSE in a transcript. Shelling to Rust per tail read would cost
+# more than this regex is worth.
+_OPTION_PROMPT_RE = re.compile(r"[\[(](?:[Yy]/[Nn]|\d+(?:/\d+)+)[\])]\s*$")
 
 # "silent for hours" (the brief's wording): below this the worker is between
 # turns; above it, nobody has touched the transcript and it is stalled. Surfaced
@@ -96,7 +108,8 @@ def classify_tail(
             return "watching"
         if _PROMISE_RE.search(text):
             return "done"
-        if text.rstrip().endswith("?") or _HELP_RE.search(text):
+        stripped = text.rstrip()
+        if stripped.endswith("?") or _HELP_RE.search(text) or _OPTION_PROMPT_RE.search(stripped):
             return "your-move"
     if mtime_age_s is not None and mtime_age_s > stalled_after_s:
         return "stalled"

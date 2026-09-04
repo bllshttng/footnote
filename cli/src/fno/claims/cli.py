@@ -56,7 +56,7 @@ import json
 import re
 from pathlib import Path
 from types import MappingProxyType
-from typing import List, Mapping, NamedTuple, Optional
+from typing import Callable, List, Mapping, NamedTuple, Optional
 
 import typer
 
@@ -1121,6 +1121,66 @@ def _merge_claims_across_roots(
     return all_rows, row_roots, totals
 
 
+# age_s None means unreadable, not silent or healthy - a separate bucket.
+ClaimSilenceRow = NamedTuple("ClaimSilenceRow", [("key", str), ("holder", str), ("age_s", Optional[float])])
+# scanned = live claims examined, always populated: a detector silent on a
+# healthy fleet is indistinguishable from one that never ran (x-1182).
+ClaimSilenceReport = NamedTuple(
+    "ClaimSilenceReport",
+    [("scanned", int), ("silent", List[ClaimSilenceRow]), ("unreadable", List[ClaimSilenceRow])],
+)
+
+
+def _default_claim_age_lookup(session_id: str, cwd: str) -> Optional[float]:
+    """Seconds since the transcript last advanced. Never raises."""
+    try:
+        import time as _time
+
+        from fno.agents.watchdog import tail_facts
+
+        facts = tail_facts(session_id, cwd)
+        if facts is None or facts.last_event_epoch is None:
+            return None
+        return max(0.0, _time.time() - facts.last_event_epoch)
+    except Exception:  # noqa: BLE001 - unreadable answers nothing
+        return None
+
+
+def _claim_silence_report(
+    rows: List[dict],
+    *,
+    threshold_s: float,
+    age_lookup: Callable[[str, str], Optional[float]],
+) -> ClaimSilenceReport:
+    """Pure over injected rows + age lookup. Reports only - never feed
+    `reap_cmd`, whose probe demands proof by finding the holder, not this."""
+    scanned, silent, unreadable = 0, [], []
+    for row in rows:
+        if row.get("state") != "live":
+            continue
+        scanned += 1
+        key, holder = row.get("key", ""), row.get("holder") or ""
+        session_id = _holder_session_id(holder)
+        cwd = _claim_worktree_cwd(row)
+        age_s = age_lookup(session_id, cwd) if session_id and cwd else None
+        if age_s is None:
+            unreadable.append(ClaimSilenceRow(key, holder, None))
+        elif age_s > threshold_s:
+            silent.append(ClaimSilenceRow(key, holder, age_s))
+    return ClaimSilenceReport(scanned=scanned, silent=silent, unreadable=unreadable)
+
+
+def _render_claim_silence_report(report: ClaimSilenceReport, *, threshold_s: float) -> str:
+    """Always a positive marker, never empty on a healthy fleet."""
+    m = threshold_s / 60.0
+    line = f"scanned {report.scanned} live claim(s); {len(report.silent)} silent past {m:g}m"
+    for r in report.silent:
+        line += f"\n  SILENT {r.key} holder={r.holder} age={(r.age_s or 0) / 60.0:.1f}m"
+    for r in report.unreadable:
+        line += f"\n  unreadable {r.key} holder={r.holder}"
+    return line
+
+
 @cli.command(name="list")
 def list_cmd(
     prefix: str = typer.Option("", "--prefix", help="Filter keys starting with this prefix"),
@@ -1128,6 +1188,11 @@ def list_cmd(
     json_output: bool = typer.Option(False, "--json", "-J"),
     root: Optional[Path] = typer.Option(
         None, "--root", help="Explicit claims root (repo root); overrides the both-roots default"
+    ),
+    silent_after: Optional[str] = typer.Option(
+        None,
+        "--silent-after",
+        help="Opt-in: report LIVE claims silent this long ('15m'). Harness-neutral.",
     ),
 ) -> None:
     """Enumerate claims under the claims directory.
@@ -1154,6 +1219,24 @@ def list_cmd(
         deduped_roots, prefix=prefix, include_stale=include_stale
     )
     n_roots = len(deduped_roots)
+
+    if silent_after is not None:
+        ttl_ms = _parse_ttl(silent_after)
+        if ttl_ms is None:
+            raise typer.BadParameter("--silent-after requires a duration, e.g. '15m'")
+        threshold_s = ttl_ms / 1000.0
+        report = _claim_silence_report(
+            all_rows, threshold_s=threshold_s, age_lookup=_default_claim_age_lookup
+        )
+        if json_output:
+            typer.echo(json.dumps({
+                "scanned": report.scanned,
+                "silent": [r._asdict() for r in report.silent],
+                "unreadable": [r._asdict() for r in report.unreadable],
+            }))
+        else:
+            typer.echo(_render_claim_silence_report(report, threshold_s=threshold_s))
+        return
 
     if json_output:
         # Bare list, matching the original shape: a scripted caller already
@@ -1464,8 +1547,12 @@ def _claim_worktree_cwd(claim) -> Optional[str]:
     The transcript fallback needs a cwd to find the session's tree; the
     roster row (the usual source) is absent on exactly the paths that need
     the fallback, so the claim itself carries it when its writer could.
+    Accepts a Claim object OR a plain dict row (list_cmd's shape) - a bare
+    `getattr(a_dict, "metadata", None)` silently returns None for every
+    dict, so the two shapes need this one branch to share an implementation.
     """
-    meta = getattr(claim, "metadata", None) or {}
+    meta = claim.get("metadata") if isinstance(claim, dict) else getattr(claim, "metadata", None)
+    meta = meta or {}
     for key in ("worktree", "cwd"):
         value = meta.get(key)
         if isinstance(value, str) and value:

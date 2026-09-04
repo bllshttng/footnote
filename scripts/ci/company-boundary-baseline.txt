@@ -27,7 +27,16 @@ cli/src/fno/events/cli.py:168: L0 platform -> L5 runtime / from fno.agents.regis
 cli/src/fno/claims/cli.py:849: L1 core -> L5 runtime / from fno.agents.watchdog import fleet_rows
 cli/src/fno/claims/cli.py:865: L1 core -> L5 runtime / from fno.agents.watchdog import ADVISORY_WARNING_PREFIX
 cli/src/fno/claims/cli.py:939: L1 core -> L5 runtime / from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES
-cli/src/fno/claims/cli.py:1313: L1 core -> L5 runtime / from fno.agents.watchdog import (
-cli/src/fno/claims/cli.py:1337: L1 core -> L5 runtime / from fno.agents.watchdog import (
-cli/src/fno/claims/cli.py:1357: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
+#
+# Added 2026-09-03 (x-1182). `fno agents claim list --silent-after` reads a
+# claim's own transcript tail to answer "has this worker gone quiet", the
+# harness-neutral replacement for the fleet_rows entry above (fleet_rows is
+# claude-only by construction, so it cannot answer the question for a codex
+# or opencode worker). tail_facts IS the transcript reader; there is no
+# lower-layer copy to call instead, and the same shape as the two entries
+# above it.
+cli/src/fno/claims/cli.py:1139: L1 core -> L5 runtime / from fno.agents.watchdog import tail_facts
+cli/src/fno/claims/cli.py:1396: L1 core -> L5 runtime / from fno.agents.watchdog import (
+cli/src/fno/claims/cli.py:1420: L1 core -> L5 runtime / from fno.agents.watchdog import (
+cli/src/fno/claims/cli.py:1440: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
 layer cycle: L0 platform -> L5 runtime -> L0 platform
