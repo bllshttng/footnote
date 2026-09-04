@@ -255,27 +255,32 @@ def test_rust_merge_strategy_allowlist_matches_model() -> None:
     )
 
 
-def test_rust_auto_merge_grant_reads_both_spellings() -> None:
-    """`auto_merge_grant` is the Rust reader of the actor-scope key (x-4be1).
+def test_auto_merge_grant_is_python_only() -> None:
+    """The grant decision has one leg: Python.
 
-    It must read the canonical `auto_merge.grant` spelling AND keep the legacy
-    `dispatch.auto_merge` arm for one release, mirroring the Python alias; a
-    rename honored on one of N reachable paths is exactly the pitfalls-corpus
-    trap this file exists to pin. Source-to-source, same shape as the
-    strategy guard above; the behavior cases live in the Rust unit tests.
+    The Rust reader was deleted because it had zero callers. This guard pins
+    that deletion so a second implementation cannot silently regrow beside
+    the Python predicate.
     """
-    rs = _repo_root() / "crates" / "fno-agents" / "src" / "agents_config.rs"
-    src = rs.read_text(encoding="utf-8")
-    m = re.search(r"pub fn auto_merge_grant.*?\n\}", src, re.DOTALL)
-    assert m, f"auto_merge_grant not found in {rs.name} (guard inert?)"
-    body = m.group(0)
-    assert 'get("auto_merge")' in body and 'get("grant")' in body, (
-        "Rust reader lost the canonical auto_merge.grant spelling"
+    root = _repo_root()
+    rust_hits = [
+        p
+        for p in (root / "crates").rglob("*.rs")
+        if "auto_merge_grant" in p.read_text(encoding="utf-8")
+    ]
+    assert not rust_hits, f"Rust leg of auto_merge_grant regrew: {rust_hits}"
+    py_hits = [
+        p
+        for p in (root / "cli" / "src" / "fno").rglob("*.py")
+        if re.search(
+            r"^def auto_merge_grant\(",
+            p.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+    ]
+    assert len(py_hits) == 1, (
+        f"expected exactly one Python auto_merge_grant definition, found {py_hits}"
     )
-    assert 'get("dispatch")' in body and "auto_merge" in body, (
-        "Rust reader lost the legacy dispatch.auto_merge arm"
-    )
-    assert '"dispatch"' in body, "Rust reader does not compare against the grant literal"
 
 
 def test_rust_auto_merge_enabled_matches_model_default() -> None:
