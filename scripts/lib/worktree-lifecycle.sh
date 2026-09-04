@@ -537,6 +537,15 @@ case "${1:-status}" in
             _held_pid="$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true)"
             if [[ -n "$_held_pid" ]]; then
                 if kill -0 "$_held_pid" 2>/dev/null; then
+                    if [[ "$_held_pid" == "$$" ]]; then
+                        # Our OWN lost claim: the verify above rejected it, so
+                        # this directory is ours to reclaim - backing off to
+                        # ourselves would read as "another sweep is running"
+                        # and strand our pid on the path until it dies.
+                        unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
+                        rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true
+                        continue
+                    fi
                     echo "worktree cleanup: another sweep (pid $_held_pid) is already running; exiting (sweeps are idempotent, no need to overlap)" >&2
                     exit 0
                 fi
