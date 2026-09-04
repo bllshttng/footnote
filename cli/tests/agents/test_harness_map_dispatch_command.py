@@ -165,14 +165,19 @@ def test_malformed_trigger_fails_closed_on_capability_enabled_pane():
         )
 
 
-def test_pane_capability_does_not_enable_opencode_bg():
-    with pytest.raises(DispatchResolveError, match="keeper"):
-        resolve_dispatch(
-            harness="opencode",
-            substrate="bg",
-            node_id="x-abcd",
-            trigger="autonomous",
-        )
+def test_opencode_bg_resolves_on_the_spawn_claim_not_the_pane_bit():
+    """opencode's thread seat comes from its spawn claim (native, measured
+    2026-09-03), never from a pane capability: its autonomous_pane bit is
+    false while the bg alias still resolves. A capability on one substrate
+    must not leak into another."""
+    assert capabilities("opencode")["autonomous_pane"] is False
+    out = resolve_dispatch(
+        harness="opencode",
+        substrate="bg",
+        node_id="x-abcd",
+        trigger="autonomous",
+    )
+    assert out["substrate"] == "thread"
 
 
 def test_codex_thread_capability_allows_bg_alias():
