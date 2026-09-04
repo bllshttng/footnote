@@ -1393,9 +1393,11 @@ def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, st
         steps.append((f"Pytest (changed subset, {len(targets)} file(s))", ".",
                       f"uv run --project cli pytest --tb=short -q{par} "
                       + " ".join(shlex.quote(t) for t in targets)))
+    # The pytest shard DELETES the debug binary on exit (the @requires_rust
+    # seam), so any shell harness after pytest needs a build of its own there;
+    # after a warm pre-build it is a no-op (~0.1s), never a second compile.
     if any(_needs_rust_binary(root, rel) for rel in shell_rels) and _RUST_BUILD_STEP in by_name:
-        if not (pytest_targets and build_selected):
-            steps.append(by_name[_RUST_BUILD_STEP])
+        steps.append(by_name[_RUST_BUILD_STEP])
     for rel in shell_rels:
         steps.append((rel, ".", f"bash {shlex.quote(rel)}"))
     shell_targets = set(shell_rels)

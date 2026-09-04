@@ -17,13 +17,10 @@ struct Decision {
     message: String,
 }
 
-/// The journal the product writes: the repo's space (x-b1ee). Reading through
-/// the same resolver keeps the fixture on the path the binary lands its rows.
-fn project_events(cwd: &std::path::Path) -> std::path::PathBuf {
-    let path = fno_agents::paths::events_path(cwd);
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
-    path
-}
+#[path = "space_paths.rs"]
+mod space_paths;
+
+use space_paths::project_events;
 
 fn fire(args: &[&str]) -> (i32, Decision) {
     let mut args_owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();

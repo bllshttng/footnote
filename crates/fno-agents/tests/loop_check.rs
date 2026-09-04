@@ -10,21 +10,9 @@
 /// All tests assert exactly which JSON fields the output carries and that
 /// `target-state.md` bytes are unmodified after any fire (read-only invariant).
 use fno_agents::loopcheck::run_loop_check;
-
-/// The journal the product writes: the repo's space (x-b1ee), never the
-/// checkout's .fno. Tests read through the same resolver so a fixture that
-/// seeds or asserts does so where the binary actually lands its rows.
-fn project_events(cwd: &std::path::Path) -> std::path::PathBuf {
-    let path = fno_agents::paths::events_path(cwd);
-    fs::create_dir_all(path.parent().unwrap()).ok();
-    path
-}
-
-fn project_ledger(cwd: &std::path::Path) -> std::path::PathBuf {
-    let path = fno_agents::paths::ledger_path(cwd);
-    fs::create_dir_all(path.parent().unwrap()).ok();
-    path
-}
+#[path = "space_paths.rs"]
+mod space_paths;
+use space_paths::{project_events, project_ledger};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
