@@ -40,7 +40,7 @@ Four refusals gate it:
 3. **One push per PR per cycle.** Each PR is visited once per invocation. The single-PR rules above hold inside it. A run in flight keeps the commit local.
 4. **Inherited failures are named and skipped.** A check red on `origin/main` too is main's problem. It is never fixed on the branch.
 
-One invocation emits one `pr_heal_tick` row into the global `~/.fno/events.jsonl`. The row carries the counts: PRs seen, healed, skipped by reason, unknown signatures. `fno doctor event audit --type pr_heal_tick --since 24h` reads it. `--all --apply --dry-run` rehearses every refusal and prints the plan without touching a worktree or the inbox.
+One invocation emits one `pr_heal_tick` row into the global `~/.fno/events.jsonl`. The row carries the counts: PRs seen, healed, skipped by reason, unknown signatures. `fno doctor event find --field type=pr_heal_tick --since 24h` reads it. `--all --apply --dry-run` rehearses every refusal and prints the plan without touching a worktree or the inbox.
 
 ## The tick's heal phase
 
