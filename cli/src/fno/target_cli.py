@@ -3458,9 +3458,8 @@ def start(
         )
         raise typer.Exit(code=1)
     wt_path = Path(wt)
-    # x-28ff: ensure names where the branch came from (continued /
-    # salvaged / fresh) as one token on its stderr receipt. Surface it so a
-    # worker on a re-dispatch knows it is continuing, not starting over.
+    # ensure names the branch's provenance (continued/salvaged/fresh) on its
+    # stderr receipt; a re-dispatched worker must see it is continuing.
     _from = re.search(r" base=(\S+)", ens.stderr or "")
     from_note = f"  from={_from.group(1)}" if _from else ""
 

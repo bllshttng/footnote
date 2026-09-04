@@ -268,12 +268,9 @@ def _ahead_count(repo: Path, base: str, ref: str) -> Optional[int]:
 
 
 def _fetch_failure(fetch: Optional[subprocess.CompletedProcess[str]]) -> str:
-    """The one fatal line that means origin itself was unreachable.
-
-    A missing optional ref also fails the fetch (`couldn't find remote ref`),
-    but that is the NORMAL shape of this fetch: the node's feature branch and
-    salvage ref usually do not exist yet. Only an unreachable origin (network,
-    auth, a moved remote) is a failure worth naming on the receipt."""
+    """The one fatal line meaning origin itself was unreachable. A missing
+    optional ref also fails the fetch, but that is the NORMAL shape here:
+    the feature branch and salvage ref usually do not exist yet."""
     if fetch is None:
         return "git fetch origin timed out after 60s"
     for line in (fetch.stderr or "").splitlines():
@@ -285,18 +282,10 @@ def _fetch_failure(fetch: Optional[subprocess.CompletedProcess[str]]) -> str:
 def _continuation_base(
     repo: Path, name: str, base: str
 ) -> Optional[tuple]:
-    """The ref a re-dispatch should continue, when this node's work already
-    exists somewhere (x-28ff). `origin/feature/<name>` ahead of `base` wins
-    (branch beats salvage); else a salvage ref ahead of `base`, remote first
-    (cross-machine) then local (the founding case: hook wrote the ref, the
-    worker died before any push). Ahead-of-main by rev-list count, never by
-    name existence - a merged branch reads zero and cuts fresh. The tracking
-    fetch aborts only the MISSING refs and still lands the rest, so the
-    verdict reads the resolved refs; the exit code only feeds the failure
-    note. Returns (kind, receipt_ref, count, create_target) or None - the
-    remote salvage ref exists on origin only (git refuses to fetch into a
-    non-standard namespace), so its create target is the per-name tracking
-    ref the fetch writes, never the shared FETCH_HEAD."""
+    """What a re-dispatch should continue (x-28ff): origin/feature/<name>
+    ahead of base wins, then a salvage ref ahead of base (remote, then the
+    local one a dead worker's hook wrote). Ahead-of-base by rev-list count,
+    never name existence. Returns (kind, receipt_ref, count, create_target)."""
     remote_branch = base.split("/", 1)[1]
     salvage = f"refs/fno/salvage/{name}"
     feat = f"origin/feature/{name}"
@@ -310,18 +299,15 @@ def _continuation_base(
         )
     except subprocess.TimeoutExpired:
         fetch = None
-    # The explicit `feature/<name>:<full tracking path>` above materializes
-    # the tracking ref even on a --single-branch clone, whose configured
-    # refspec alone would leave origin/feature/<name> absent and miss the
-    # continue. The dst is the FULL path: a short `origin/feature/<name>`
-    # lands at refs/origin/... and makes every later rev-parse ambiguous.
+    # Full-path dst: materializes the tracking ref even on a --single-branch
+    # clone, and a short `origin/feature/<name>` would land at refs/origin/
+    # and make every later rev-parse ambiguous.
     count = _ahead_count(repo, base, feat_ref)
     if count:
         return ("continued", feat, count, feat_ref)
-    # git refuses to fetch into a non-standard namespace like refs/fno/*, so
-    # the remote salvage ref lands under refs/remotes/fno-salvage/<name>.
-    # A per-name ref, not FETCH_HEAD: .git/FETCH_HEAD is one repo-wide file,
-    # and two parallel ensures would race its fetch-then-read window.
+    # git refuses fetch destinations under refs/fno/*, so the remote salvage
+    # ref lands per-name under refs/remotes/ - never the repo-wide
+    # FETCH_HEAD, which parallel ensures would race.
     remote_salvage = f"refs/remotes/fno-salvage/{name}"
     try:
         sal_fetch = subprocess.run(
@@ -343,8 +329,7 @@ def _continuation_base(
         return ("salvaged", salvage, count, salvage)
     failed = _fetch_failure(fetch)
     if failed:
-        # AC4-EDGE: the receipt says fresh AND names why the refs could not
-        # be trusted fresh - a stale main reads as cuttable when it is not.
+        # Fresh AND why: a stale main reads as cuttable when it is not.
         typer.echo(
             f"worktree ensure: base fetch failed ({failed}); cutting fresh from {base}",
             err=True,
@@ -461,18 +446,16 @@ def _worktree_ensure(
 
     wt.parent.mkdir(parents=True, exist_ok=True)
     br = branch or f"feature/{name}"
-    # `base=` rides the receipt as ONE whitespace-free token; the orientation
-    # line is a `key=value` contract (target_cli `_unmeasured_base`), so the
-    # plan's `( +N)` prose shape collapses to `:+N`.
+    # base= stays ONE whitespace-free token: the orientation line is a
+    # key=value contract.
     base_note = ""
     if _git(top, "show-ref", "--verify", "--quiet", f"refs/heads/{br}").returncode == 0:
         # Branch already exists (e.g. a re-dispatch after archive) -> check it out.
         add = _git(top, "worktree", "add", str(wt), br)
     else:
         base = _base_ref(top)
-        # x-28ff: continue the node's own work when it already reached origin.
-        # An explicit --branch is the caller's deliberate choice (batch lane);
-        # continuation applies only to the default feature/<name> path.
+        # Continue the node's own work when it reached origin. An explicit
+        # --branch (batch lane) is the caller's choice; default path only.
         cont = _continuation_base(top, name, base) if base and branch is None else None
         if cont is not None:
             kind, source, count, target = cont
