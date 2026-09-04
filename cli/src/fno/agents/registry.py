@@ -2710,7 +2710,6 @@ def update_registry(
         before = {entry.name: _identity_signature(entry) for entry in current}
         new_entries = updater(list(current))
         _validate_changed_identities(before, new_entries)
-        _validate_changed_identities(before, new_entries)
         write_registry(new_entries, path=target)
         # After the write persisted: a removal that failed to persist never
         # happened, and announcing it would be a false alarm.
