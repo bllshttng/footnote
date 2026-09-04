@@ -1064,6 +1064,7 @@ mod tests {
             last_event_at: None,
             last_message: None,
             observed_model: serde_json::json!({"kind": "observed", "model": model}),
+            harness_title: None,
         }
     }
 

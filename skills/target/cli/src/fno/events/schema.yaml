@@ -2034,6 +2034,60 @@ event_types:
         reason:
           type: string
 
+  - name: agent_model_changed
+    description: "A worker's harness-side model changed (/model inside the session); the served model flips to verified. The spawn-requested model is never rewritten."
+    sources: [daemon]
+    data:
+      required: [name, harness_session_id, from, to]
+      properties:
+        name:
+          type: string
+        harness_session_id:
+          type: string
+        from:
+          type: [string, "null"]
+        to:
+          type: string
+
+  - name: agent_effort_changed
+    description: "A worker's reasoning-effort arm changed at the harness; the served effort follows the hook-reported level."
+    sources: [daemon]
+    data:
+      required: [name, harness_session_id, from, to]
+      properties:
+        name:
+          type: string
+        harness_session_id:
+          type: string
+        from:
+          type: [string, "null"]
+        to:
+          type: string
+
+  - name: agent_renamed
+    description: "A worker's harness-side title changed (rename never fires a hook, so the transcript tail is the detector); the registry label is never rewritten."
+    sources: [daemon]
+    data:
+      required: [name, harness_session_id, from, to]
+      properties:
+        name:
+          type: string
+        harness_session_id:
+          type: string
+        from:
+          type: [string, "null"]
+        to:
+          type: string
+
+  - name: session_aliases_merged
+    description: "The reconcile sweep folded legible aliases onto registry rows (the session-names overlay, plus default aliases minted for rows that had none). Count-only: the row is the name store, this says how many addresses moved."
+    sources: [daemon]
+    data:
+      required: [count]
+      properties:
+        count:
+          type: integer
+
   - name: agent_exited
     description: "An agent worker process exited (child process exit detected)."
     sources: [subagent]

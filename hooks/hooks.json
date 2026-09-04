@@ -122,6 +122,16 @@
         ]
       }
     ],
+    "PostModelSwitch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inside-leg-report.sh model"
+          }
+        ]
+      }
+    ],
     "StopFailure": [
       {
         "hooks": [

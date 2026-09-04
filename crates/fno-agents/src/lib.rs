@@ -1,4 +1,5 @@
 //! `fno-agents` substrate crate (Phase 6, ab-a09e1eaf).
+#![recursion_limit = "512"]
 //!
 //! This crate is the Rust substrate for PTY-managed agents (codex / gemini /
 //! future OpenCode). It is split per the design's Locked Decisions:
@@ -120,6 +121,7 @@ pub mod run_outcome;
 pub mod run_state;
 pub mod scrape;
 pub mod screen;
+pub mod session_names_fold;
 pub mod session_start_bytes;
 pub mod spawn_gate;
 pub mod spawn_payload;
@@ -762,6 +764,18 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_stop_refused",
     "agent_exited",
     "agent_removed",
+    // Served facts (daemon-emitted): the sweep is the only writer of the
+    // registry's measured surfaces, so each of these announces a change that
+    // a reader would otherwise learn from a snapshot field. `agent_renamed`
+    // is the harness's title moving against the row's last-seen baseline
+    // (the label is never rewritten); `agent_model_changed` /
+    // `agent_effort_changed` are PostModelSwitch axis changes verified by
+    // the report write; `session_aliases_merged` is the session-names
+    // overlay folding legible aliases onto rows.
+    "agent_renamed",
+    "agent_model_changed",
+    "agent_effort_changed",
+    "session_aliases_merged",
     "merge_cleanup_requested",
     "merge_cleanup_completed",
     "merge_cleanup_refused",

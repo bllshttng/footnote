@@ -561,7 +561,7 @@ def _report_observation(
         print(
             f"register_session: warning: {name} already records two session "
             f"ids ({primary}, {related}); not recording a third "
-            f"({session_id})",
+            f"({session_id}); mint it a row with: fno agents adopt {session_id}",
             file=sys.stderr,
         )
         return
@@ -650,6 +650,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         session_id=args.session_id,
         cwd=entry.cwd,
     )
+    # The default legible alias is minted by the daemon sweep (see
+    # session_names_fold.rs), so every row gains one within a tick.
     print(f"register_session: registered {entry.name} ({entry.harness})", file=sys.stderr)
     return 0
 

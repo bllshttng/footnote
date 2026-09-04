@@ -592,3 +592,55 @@ def test_non_claude_restamp_emits_the_classified_transition(
     assert classified[0]["data"]["classification"] == "succession"
     assert classified[0]["data"]["predecessor_session_id"] == BIRTH
     assert classified[0]["data"]["successor_session_id"] == REMINT
+
+
+# -- one name store: the session-names fold ----------------------------------
+
+
+def _row_with_sid(name, sid, short):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry([
+        AgentEntry(
+            name=name,
+            harness="claude",
+            harness_session_id=sid,
+            short_id=short,
+            cwd="/proj",
+            log_path="",
+            status="live",
+        )
+    ])
+
+
+def test_reconcile_migration_folds_a_file_alias_into_its_row_ac5_hp(
+    tmp_path, monkeypatch
+) -> None:
+    """AC5-HP: an alias folded onto the row (the Rust sweep does the fold; its
+    append + idempotence are pinned Rust-side) resolves as a mail address from
+    the row, so the operator's legible name keeps working."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.discover import _alias_to_session_ids
+    from fno.agents.registry import append_row_alias, load_registry
+
+    _row_with_sid("target-x-f0c2", BIRTH, "f0c2abcd")
+
+    assert append_row_alias("f0c2abcd", "legible-alias") is True
+    row = load_registry()[0]
+    assert "legible-alias" in row.aliases, "the row carries the folded alias"
+    ids, read_ok = _alias_to_session_ids("legible-alias", None)
+    assert read_ok and BIRTH in ids, "mail resolution answers from the row"
+
+
+def test_append_row_alias_refuses_an_alias_another_row_answers_to(
+    tmp_path, monkeypatch
+) -> None:
+    """An ambiguous alias is no address: the append fails closed when another
+    row already answers to it, so `find` never has to guess."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import append_row_alias, load_registry
+
+    _row_with_sid("row-a", BIRTH, "aaaa1111")
+    _row_with_sid("legible-alias", REMINT, "bbbb2222")
+    assert append_row_alias("row-a", "legible-alias") is False
+    assert "legible-alias" not in load_registry()[0].aliases, "the ambiguous alias never lands"

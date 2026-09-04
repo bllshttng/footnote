@@ -70,6 +70,11 @@ pub struct RegistryAgent {
     /// invisibly.
     pub predecessor_session_ids: Vec<String>,
     pub forked_from_session_id: Option<String>,
+    /// The one optional PARKED session id: a fork minted under
+    /// unknown evidence that owns no registry row yet. `merge_rows`
+    /// synthesizes a lineage child for it while the roster still lists it
+    /// live, so an addressable session is never invisible.
+    pub related_session_id: Option<String>,
     /// Registry status is terminal (exited/permanent-dead).
     pub exited: bool,
     /// Active do-not-disturb delivery policy. Presence only: it never changes
@@ -148,6 +153,16 @@ pub struct RegistryAgent {
     /// can draw the two differently, per the repo's "assert a positive
     /// marker, never an absence" rule applied to the sideline.
     pub liveness: Liveness,
+    /// Age of the served liveness measurement in seconds, from the
+    /// row's `liveness_measured_at`. `None` = never measured (no served
+    /// pair): the render can say "probe older than N s" instead of a bare
+    /// unmeasured glyph.
+    pub liveness_age_s: Option<u64>,
+    /// The LAST title the harness reported for this session
+    /// (claude's Ctrl+R agent-name record), stored by the daemon sweep. The
+    /// render joins it into the subline when it differs from the label; the
+    /// row's `name` is never rewritten from it.
+    pub harness_title: Option<String>,
 }
 
 /// See [`RegistryAgent::liveness`]. `Alive`/`Dead` are confident reads;
@@ -750,6 +765,31 @@ fn pid_confirmed_dead(pid: u64) -> bool {
     // check (mirrors `server.rs::pid_alive`, inverted for a POSITIVE read).
     let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
     rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+/// A SERVED liveness measurement younger than two sweep budgets
+/// (2 x 5s `RECONCILE_SWEEP_BUDGET`; mirrored because the crates share the
+/// FILE, not types) is trusted over the status-string ladder.
+const LIVENESS_MAX_AGE_SECS: u64 = 10;
+
+/// The served pair decides the row's liveness when the
+/// measurement is fresh; an absent/stale measurement or an unknown word
+/// answers `None` and the status/pid ladder takes over exactly as before.
+fn served_liveness(
+    liveness: Option<&str>,
+    measured_at: Option<u64>,
+    now_secs: u64,
+) -> Option<Liveness> {
+    let age = now_secs.checked_sub(measured_at?)?;
+    if age > LIVENESS_MAX_AGE_SECS {
+        return None;
+    }
+    match liveness? {
+        "alive" => Some(Liveness::Alive),
+        "dead" => Some(Liveness::Dead),
+        "unmeasured" => Some(Liveness::Unmeasured),
+        _ => None,
+    }
 }
 
 /// Derive [`Liveness`] for one row. `status` is the raw registry string;
@@ -1817,11 +1857,32 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
         let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let exited = matches!(status, "exited" | "permanent-dead" | "permanent_dead");
         let dnd = row.get("delivery_policy").and_then(|v| v.as_str()) == Some("bus-only");
-        let liveness = derive_liveness(
-            status,
-            row.get("pid").and_then(|v| v.as_u64()),
-            row.get("short_id").and_then(|v| v.as_str()).unwrap_or(""),
-        );
+        // SERVED liveness outranks the stored `status`
+        // string: the sweep is its only writer and a fresh measurement
+        // answers without trusting an init-time snapshot. Stale or absent,
+        // the status/pid ladder answers exactly as before (a daemon-less
+        // install still renders).
+        let measured_at = row
+            .get("liveness_measured_at")
+            .and_then(|v| v.as_str())
+            .and_then(rfc3339_like_to_secs);
+        let liveness = served_liveness(
+            row.get("liveness").and_then(|v| v.as_str()),
+            measured_at,
+            now_secs,
+        )
+        .unwrap_or_else(|| {
+            derive_liveness(
+                status,
+                row.get("pid").and_then(|v| v.as_u64()),
+                row.get("short_id").and_then(|v| v.as_str()).unwrap_or(""),
+            )
+        });
+        let liveness_age_s = measured_at.and_then(|t| now_secs.checked_sub(t));
+        let harness_title = row
+            .get("harness_title")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let mux = row.get("mux").and_then(|m| {
             Some((
                 m.get("session")?.as_str()?.to_string(),
@@ -2152,6 +2213,11 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             harness_session_id,
             predecessor_session_ids,
             forked_from_session_id,
+            related_session_id: row
+                .get("related_session_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             exited,
             dnd,
             badge,
@@ -2168,6 +2234,8 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             crown_scope,
             spawned_by_session,
             liveness,
+            liveness_age_s,
+            harness_title,
         });
     }
     // Stable order so row-set equality (the change gate) and the rendered
@@ -2179,8 +2247,115 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
 /// The tolerant reader on its own, for every caller that renders or resolves
 /// rather than guards: same rows, count discarded. One body behind both forms
 /// so the two readers cannot drift.
+///
+/// This file reader is the DEGRADED PATH, not a second
+/// authority. When the fno-agents daemon's socket answers, the mux subscribes
+/// through `agent.watch` and gets the rows SERVED (fresh from the sweep's
+/// own writes, one stat per idle tick); this parser then only decodes what
+/// the daemon delivered. Reading `registry.json` directly is what survives
+/// when no daemon is running - a plain `fno mux` with no fleet is a supported
+/// shape - and the server logs one line naming that fallback when it fires.
 pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
     derive_rows_counted(raw, now_secs).map(|(rows, _)| rows)
+}
+
+/// The fno-agents daemon's supervisor socket, resolved the
+/// same way [`registry_path`] resolves the registry home (`FNO_AGENTS_HOME` >
+/// `$HOME/.fno/agents`): the two live side by side under one agents home.
+pub fn supervisor_sock_path() -> PathBuf {
+    if let Some(v) = std::env::var_os("FNO_AGENTS_HOME") {
+        return PathBuf::from(v).join("supervisor.sock");
+    }
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join(".fno").join("agents").join("supervisor.sock")
+}
+
+/// One `agent.watch` round trip against the daemon, if one
+/// answers. The registry's (mtime, len) stamp is the subscription version: it
+/// travels out as `since` and back beside the document, so the caller's
+/// cached stamp gates on the daemon's answer exactly as it gated on its own
+/// file stat.
+///
+/// - `Ok((Some(stamp), Some(raw)))` - the daemon served the document.
+/// - `Ok((None, None))` - the daemon answered "unchanged": the version
+///   matches `since`, nothing was read or parsed server-side.
+/// - `Ok((None, Some(raw)))` - a vanished registry: version null with an
+///   empty document, so the caller's vanish arm clears the rows.
+/// - `Err(_)` - no daemon (refused/absent socket), transport fault, or the
+///   round-trip bound exceeded. The caller falls back to the file scan.
+pub async fn watch_registry(
+    since: Option<(std::time::SystemTime, u64)>,
+    sock: &std::path::Path,
+) -> Result<(Option<(std::time::SystemTime, u64)>, Option<String>), String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    async fn round(
+        since: Option<(std::time::SystemTime, u64)>,
+        sock: &std::path::Path,
+    ) -> Result<(Option<(std::time::SystemTime, u64)>, Option<String>), String> {
+        let since_v = match since {
+            Some((t, len)) => {
+                let nanos = t
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0);
+                serde_json::json!({"mtime_nanos": nanos, "len": len})
+            }
+            None => serde_json::Value::Null,
+        };
+        let req = serde_json::json!({
+            "id": 1u64,
+            "method": "agent.watch",
+            "params": {"since": since_v},
+        });
+        let mut frame = req.to_string();
+        frame.push('\n');
+        let mut conn = tokio::net::UnixStream::connect(sock)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        conn.write_all(frame.as_bytes())
+            .await
+            .map_err(|e| format!("write: {e}"))?;
+        let mut reader = BufReader::new(conn);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
+        let resp: serde_json::Value =
+            serde_json::from_str(line.trim()).map_err(|e| format!("decode: {e}"))?;
+        if let Some(err) = resp.get("error") {
+            return Err(format!("agent.watch error: {err}"));
+        }
+        let result = resp
+            .get("result")
+            .ok_or_else(|| "agent.watch: answer carried neither result nor error".to_string())?;
+        // Version -> stamp: the same (mtime, len) domain the file scan gates
+        // with, so a served answer and a scanned answer are interchangeable
+        // downstream without the reader knowing which one produced it.
+        let stamp = result.get("version").and_then(|v| {
+            let nanos = v.get("mtime_nanos")?.as_i64()?; // null version -> None
+            let len = v.get("len")?.as_u64()?;
+            Some((
+                std::time::UNIX_EPOCH + std::time::Duration::from_nanos(nanos.max(0) as u64),
+                len,
+            ))
+        });
+        let doc = result.get("doc").filter(|d| !d.is_null());
+        let raw = match doc {
+            Some(d) => Some(serde_json::to_string(d).map_err(|e| e.to_string())?),
+            None => None,
+        };
+        Ok((stamp, raw))
+    }
+
+    // Bound the WHOLE round trip: an unchanged answer is one stat server-side,
+    // but a wedged daemon must degrade this tick, not stall the scan loop.
+    tokio::time::timeout(std::time::Duration::from_secs(2), round(since, sock))
+        .await
+        .map_err(|_| "agent.watch: round trip exceeded 2s".to_string())?
 }
 
 /// Union the fno registry rows with claude's roster (x-0a2e). Pure so the
@@ -2247,6 +2422,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             harness_session_id: None,
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
+            related_session_id: None,
             harness: Some("claude".to_string()),
             // A roster worker carries no lane stamps; the roster records none.
             model: None,
@@ -2272,9 +2448,70 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             crown_scope: None,
             spawned_by_session: None,
             liveness: Liveness::Alive,
+            liveness_age_s: None,
+            harness_title: None,
         });
     }
     drop(reg_ids); // release the borrow of `out` before extending it
+
+    // A PARKED fork id renders as a lineage child of its
+    // primary while the roster still lists it live. The second uuid a fork
+    // minted under unknown evidence is addressable but owns no registry row
+    // until the next positive SessionStart observation mints one; today it
+    // was simply invisible. The child carries `spawned_by_session` so the
+    // x-132c join indents it under its parent, `external: false` and the
+    // roster's own id as the attach target. When the real row lands, the
+    // registry owns the id and this synthesis disappears in the same tick
+    // (AC3-HP -> AC4-EDGE is the same row set one observation later).
+    let mut parked = Vec::new();
+    for r in &out {
+        let Some(id) = r.related_session_id.as_deref() else {
+            continue;
+        };
+        // The id already owning a row means the BRANCH arm minted it; nothing
+        // to synthesize (AC4's inverse).
+        if out.iter().any(|x| {
+            x.harness_session_id.as_deref() == Some(id) || x.attach_id.as_deref() == Some(id)
+        }) {
+            continue;
+        }
+        // Only a roster row that still lists the id live synthesizes a child;
+        // nothing lists it -> render nothing, exactly as today (AC4-EDGE).
+        let Some(roster_hit) = roster.iter().find(|w| w.short_id == id) else {
+            continue;
+        };
+        parked.push(RegistryAgent {
+            name: r.name.clone(),
+            cwd: r.cwd.clone(),
+            harness: r.harness.clone(),
+            model: r.model.clone(),
+            route: r.route.clone(),
+            session_id: None,
+            harness_session_id: Some(id.to_string()),
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
+            related_session_id: None,
+            exited: false,
+            dnd: false,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: Some(roster_hit.short_id.clone()),
+            external: false,
+            account: r.account.clone(),
+            claude_session_uuid: Some(id.to_string()),
+            log_path: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            spawned_by_session: r.harness_session_id.clone(),
+            liveness: Liveness::Alive,
+            liveness_age_s: None,
+            harness_title: r.harness_title.clone(),
+        });
+    }
+    out.extend(parked);
     out.extend(foreign);
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
@@ -2722,6 +2959,9 @@ impl ReaderState {
 mod tests {
     use super::*;
 
+    // The parked-fork-child test family lives in its own module;
+    // this file is shrink-only under the file-budget gate.
+    mod parked_child_tests;
     fn reg(rows: &str) -> String {
         format!(r#"{{"schema_version": 6, "agents": [{rows}]}}"#)
     }
@@ -4379,6 +4619,7 @@ config_dir = "~/.claude-alt"
             session_id: None,
             harness_session_id: None,
             predecessor_session_ids: Vec::new(),
+            related_session_id: None,
             forked_from_session_id: None,
             name: name.into(),
             cwd: "/w".into(),
@@ -4402,6 +4643,8 @@ config_dir = "~/.claude-alt"
                 Liveness::Alive
             },
             harness: Some("claude".to_string()),
+            liveness_age_s: None,
+            harness_title: None,
         }
     }
 
@@ -4829,283 +5072,10 @@ config_dir = "~/.claude-alt"
         assert!(out.iter().all(|r| r.state == ExternalState::Unknown));
     }
 
-    // ---- resolve_branch (x-cd67 US4) ----
-
-    fn branch_tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("fno-branch-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    #[test]
-    fn resolve_branch_reads_plain_checkout_head() {
-        let cwd = branch_tmp("plain");
-        std::fs::create_dir_all(cwd.join(".git")).unwrap();
-        std::fs::write(cwd.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-        assert_eq!(resolve_branch(&cwd), Some("main".into()));
-        // A slash-bearing branch keeps only its leaf name.
-        std::fs::write(cwd.join(".git/HEAD"), "ref: refs/heads/feature/x-cd67\n").unwrap();
-        assert_eq!(resolve_branch(&cwd), Some("x-cd67".into()));
-        std::fs::remove_dir_all(&cwd).unwrap();
-    }
-
-    #[test]
-    fn resolve_branch_walks_up_to_repo_root_from_subdir() {
-        // codex review: a pane started in a subdirectory resolves the repo's
-        // branch by walking up to the nearest `.git`, not degrading to the tail.
-        let root = branch_tmp("subdir");
-        std::fs::create_dir_all(root.join(".git")).unwrap();
-        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-        let sub = root.join("crates/fno");
-        std::fs::create_dir_all(&sub).unwrap();
-        assert_eq!(resolve_branch(&sub), Some("main".into()));
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn resolve_branch_detached_head_shortens_sha() {
-        let cwd = branch_tmp("detached");
-        std::fs::create_dir_all(cwd.join(".git")).unwrap();
-        std::fs::write(
-            cwd.join(".git/HEAD"),
-            "0123456789abcdef0123456789abcdef01234567\n",
-        )
-        .unwrap();
-        assert_eq!(resolve_branch(&cwd), Some("01234567".into()));
-        std::fs::remove_dir_all(&cwd).unwrap();
-    }
-
-    #[test]
-    fn resolve_branch_follows_worktree_gitdir_redirect() {
-        // AC3-EDGE: a linked-worktree `.git` FILE points at the real gitdir.
-        let root = branch_tmp("wt");
-        let real_gitdir = root.join(".git/worktrees/x-cd67");
-        std::fs::create_dir_all(&real_gitdir).unwrap();
-        std::fs::write(real_gitdir.join("HEAD"), "ref: refs/heads/x-cd67\n").unwrap();
-        let cwd = root.join("checkout");
-        std::fs::create_dir_all(&cwd).unwrap();
-        // A relative gitdir pointer resolves against cwd.
-        std::fs::write(cwd.join(".git"), "gitdir: ../.git/worktrees/x-cd67\n").unwrap();
-        assert_eq!(resolve_branch(&cwd), Some("x-cd67".into()));
-        // Leading whitespace before the `gitdir:` key is tolerated (gemini review).
-        std::fs::write(cwd.join(".git"), "  \tgitdir: ../.git/worktrees/x-cd67\n").unwrap();
-        assert_eq!(resolve_branch(&cwd), Some("x-cd67".into()));
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn resolve_branch_degrades_on_no_git_and_malformed_head() {
-        // AC1-ERR: a plain dir with no .git -> None (poll must not error).
-        let cwd = branch_tmp("nogit");
-        assert_eq!(resolve_branch(&cwd), None);
-        // A malformed HEAD (neither ref: nor 40-hex) -> None.
-        std::fs::create_dir_all(cwd.join(".git")).unwrap();
-        std::fs::write(cwd.join(".git/HEAD"), "garbage not a ref\n").unwrap();
-        assert_eq!(resolve_branch(&cwd), None);
-        // A worktree pointer whose gitdir target vanished -> None (pruned wt).
-        std::fs::write(cwd.join(".git/HEAD.tmp"), "x").unwrap(); // noise
-        let dangling = branch_tmp("dangling");
-        std::fs::write(dangling.join(".git"), "gitdir: /nonexistent/gitdir\n").unwrap();
-        assert_eq!(resolve_branch(&dangling), None);
-        std::fs::remove_dir_all(&cwd).unwrap();
-        std::fs::remove_dir_all(&dangling).unwrap();
-    }
-
-    // -- x-132c: the lineage forest the sideline orders and indents by --------
-
-    struct LRow {
-        name: &'static str,
-        id: Option<&'static str>,
-        parent: Option<&'static str>,
-    }
-
-    fn layout(rows: &[LRow]) -> (Vec<usize>, Vec<usize>) {
-        lineage_layout(rows, |r| r.id, |r| r.parent)
-    }
-
-    /// Display labels for the returned index order.
-    fn ordered_names(rows: &[LRow], order: &[usize]) -> Vec<&'static str> {
-        order.iter().map(|&i| rows[i].name).collect()
-    }
-
-    #[test]
-    fn derive_rows_reads_the_spawned_by_edge_tolerantly() {
-        // The lineage join key parses like every other registry field: present
-        // and non-empty -> Some, absent/blank/null -> None, never a parse
-        // failure for the whole row.
-        let raw = reg(
-            r#"{"name":"child","cwd":"/w","status":"live","harness":"claude",
-                 "harness_session_id":"sid-c","spawned_by_session":"sid-p"}"#,
-        );
-        let rows = derive_rows(&raw, NOW).unwrap();
-        assert_eq!(
-            rows[0].spawned_by_session.as_deref(),
-            Some("sid-p"),
-            "a stamped parent edge must reach the reader"
-        );
-        let blank = reg(
-            r#"{"name":"root","cwd":"/w","status":"live","harness":"claude",
-                 "harness_session_id":"sid-r","spawned_by_session":""}"#,
-        );
-        let rows = derive_rows(&blank, NOW).unwrap();
-        assert_eq!(rows[0].spawned_by_session, None);
-    }
-
-    #[test]
-    fn lineage_child_renders_beneath_its_parent() {
-        let rows = [
-            LRow {
-                name: "king",
-                id: Some("sid-k"),
-                parent: None,
-            },
-            LRow {
-                name: "worker",
-                id: Some("sid-w"),
-                parent: Some("sid-k"),
-            },
-        ];
-        let (order, depths) = layout(&rows);
-        assert_eq!(ordered_names(&rows, &order), vec!["king", "worker"]);
-        assert_eq!(depths, vec![0, 1]);
-    }
-
-    #[test]
-    fn lineage_grandchild_nests_before_later_siblings() {
-        // Pre-order: the grandchild renders beneath ITS parent, ahead of the
-        // parent's name-later sibling.
-        let rows = [
-            LRow {
-                name: "king",
-                id: Some("k"),
-                parent: None,
-            },
-            LRow {
-                name: "a-child",
-                id: Some("a"),
-                parent: Some("k"),
-            },
-            LRow {
-                name: "a-grand",
-                id: Some("g"),
-                parent: Some("a"),
-            },
-            LRow {
-                name: "b-child",
-                id: Some("b"),
-                parent: Some("k"),
-            },
-        ];
-        let (order, depths) = layout(&rows);
-        assert_eq!(
-            ordered_names(&rows, &order),
-            vec!["king", "a-child", "a-grand", "b-child"]
-        );
-        assert_eq!(depths, vec![0, 1, 2, 1]);
-    }
-
-    #[test]
-    fn lineage_missing_parent_is_a_root_never_an_error() {
-        let rows = [
-            LRow {
-                name: "orphan",
-                id: Some("o"),
-                parent: Some("gone"),
-            },
-            LRow {
-                name: "plain",
-                id: Some("p"),
-                parent: None,
-            },
-        ];
-        let (order, depths) = layout(&rows);
-        assert_eq!(ordered_names(&rows, &order), vec!["orphan", "plain"]);
-        assert_eq!(depths, vec![0, 0]);
-    }
-
-    #[test]
-    fn lineage_two_row_cycle_terminates() {
-        // Ambient-captured parent values are never validated, so a cycle must
-        // lay out (entry rooted, the other member beneath it), not hang.
-        let rows = [
-            LRow {
-                name: "a",
-                id: Some("id-a"),
-                parent: Some("id-b"),
-            },
-            LRow {
-                name: "b",
-                id: Some("id-b"),
-                parent: Some("id-a"),
-            },
-        ];
-        let (order, depths) = layout(&rows);
-        assert_eq!(
-            ordered_names(&rows, &order),
-            vec!["a", "b"],
-            "every cycle member renders exactly once"
-        );
-        assert_eq!(
-            depths,
-            vec![0, 1],
-            "the cycle entry roots, the member nests"
-        );
-    }
-
-    #[test]
-    fn lineage_self_edge_roots() {
-        let rows = [LRow {
-            name: "self",
-            id: Some("s"),
-            parent: Some("s"),
-        }];
-        let (order, depths) = layout(&rows);
-        assert_eq!(ordered_names(&rows, &order), vec!["self"]);
-        assert_eq!(depths, vec![0]);
-    }
-
-    #[test]
-    fn lineage_depth_is_capped_for_rendering() {
-        let mut rows = vec![LRow {
-            name: "r0",
-            id: Some("i0"),
-            parent: None,
-        }];
-        for d in 1..=14 {
-            rows.push(LRow {
-                name: Box::leak(format!("r{d}").into_boxed_str()),
-                id: Some(Box::leak(format!("i{d}").into_boxed_str())),
-                parent: Some(Box::leak(format!("i{}", d - 1).into_boxed_str())),
-            });
-        }
-        let (order, depths) = layout(&rows);
-        assert_eq!(order.len(), 15);
-        assert!(
-            depths.iter().all(|&d| d <= MAX_LINEAGE_DEPTH),
-            "no row indents past the cap: {depths:?}"
-        );
-        assert_eq!(*depths.last().unwrap(), MAX_LINEAGE_DEPTH);
-    }
-
-    #[test]
-    fn lineage_flat_set_is_byte_identical_to_input_order() {
-        let rows = [
-            LRow {
-                name: "b",
-                id: Some("b"),
-                parent: None,
-            },
-            LRow {
-                name: "a",
-                id: Some("a"),
-                parent: None,
-            },
-        ];
-        let (order, depths) = layout(&rows);
-        assert_eq!(ordered_names(&rows, &order), vec!["b", "a"]);
-        assert_eq!(depths, vec![0, 0]);
-    }
+    // (x-cd67 US4 resolve_branch family) moved verbatim into its own module: this file is over the
+    // shrink-only line, and test motion is the sanctioned shrink.
+    #[path = "resolve_branch_tests.rs"]
+    mod resolve_branch_tests;
 
     // ---- (x-07c2) thread_reach tier derivation --------------------------------
 

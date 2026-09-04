@@ -133,6 +133,12 @@ pub struct TruthProbe {
     pub last_event_at: Option<String>,
     pub last_message: Option<String>,
     pub observed_model: serde_json::Value,
+    /// The title the HARNESS carries for this session (claude's Ctrl+R
+    /// agent-name record; codex/opencode's index title), read Python-side by
+    /// the same probe so the list emitter never grows a second title reader.
+    /// `None` = the harness carries none or the probe predates the field:
+    /// absence renders as absence, never as the row's label.
+    pub harness_title: Option<String>,
 }
 
 fn family1_truth_command(handle: &str) -> std::process::Command {
@@ -522,6 +528,8 @@ fn build_truth_probe(parsed: Option<&serde_json::Value>, state: &str) -> TruthPr
         observed_model: parsed
             .and_then(|value| value.get("observed_model").cloned())
             .unwrap_or(serde_json::Value::Null),
+        harness_title: parsed
+            .and_then(|value| value.get("harness_title")?.as_str().map(str::to_owned)),
     }
 }
 
@@ -2417,7 +2425,9 @@ pub fn ask_followup(
 // ===========================================================================
 
 use crate::paths::AgentsHome;
-use crate::state::{load_registry, update_registry, RegistryEntry};
+use crate::state::{
+    find_keyed_mut, load_registry, registry_write_key, update_registry, RegistryEntry,
+};
 use crate::AgentStatus;
 
 /// `_NAME_MAX_LEN` / `_FROM_NAME_MAX_LEN`.
@@ -3268,6 +3278,9 @@ fn followup(
     );
 
     let wait = timeout.unwrap_or(DEFAULT_FOLLOWUP_TIMEOUT);
+    // Captured before the ask: the write inside the closures below re-finds
+    // by this identity, never by the label the caller happened to spell.
+    let key = registry_write_key(&entry);
     match ask_followup(
         claude_home,
         &short_id,
@@ -3278,13 +3291,12 @@ fn followup(
         None,
     ) {
         Ok(reply) => {
-            // Stamp status=live + last_message_at under the registry flock.
-            // A write failure here is FATAL (Python dispatch.py:537-556 parity):
-            // the message was already delivered but the registry can't record
-            // it, so withhold the reply from stdout and exit 12 to prevent a
-            // double-send on retry.
+            // Stamp status=live + last_message_at under the registry flock,
+            // keyed on the row's identity captured before the ask: a same-name
+            // replacement between resolve and write
+            // can no longer receive the first row's write.
             if let Err(e) = update_registry(registry_path, |reg| {
-                if let Some(en) = reg.find_mut(name) {
+                if let Some(en) = find_keyed_mut(reg, &key, name) {
                     en.status = AgentStatus::Live;
                     en.last_message_at = Some(now_iso());
                 }
@@ -3322,50 +3334,39 @@ fn followup(
             AskOutcome::ok_stdout(reply)
         }
         Err(AskError::Orphan { reason, .. }) => {
-            // Decide orphan-vs-routing-gap against the CURRENT row under the same
-            // registry lock that stamps it, so an inside-leg report that landed
-            // during a long ask is not missed (x-c393; codex P2). A recent report
-            // => routing gap (status untouched, `fno agents list` still shows the
-            // live worker); else stamp orphaned. Best-effort stamp: a write
-            // failure stays OBSERVABLE (stderr warning + agent_status_stamp_failed
-            // event) like Python's, not a silent swallow.
+            // The ask path NEVER writes status or liveness:
+            // a stored field must not outrank the sweep's live probe, and an
+            // undeliverable ask is a routing fact, not a death (the stamp this
+            // arm once wrote is the t-x30c2-w1 lie: `orphaned` on a session
+            // that exited 0). The provably-live check still reads the CURRENT
+            // row - an inside-leg report that landed during a long ask is not
+            // missed (x-c393; codex P2) - and decides only which failure the
+            // OPERATOR sees: routing-gap (live, unroutable) vs orphan.
             let now = now_epoch_secs();
             // x-2681: "roster-live-inject-failed" means the control.sock fallback
             // delivery failed on a session that IS live in the daemon roster --
-            // a routing gap, never a death, so it takes the same no-stamp branch
-            // as a recent inside-leg report (a roster-live session is never
-            // stamped orphaned).
+            // a routing gap, never a death.
             let routing_gap = matches!(
                 reason,
                 OrphanReason::RosterLiveInjectFailed | OrphanReason::TruthLiveInjectFailed
             );
-            let mut provably_live = false;
-            let mut stamp_warning = String::new();
-            if let Err(e) = update_registry(registry_path, |reg| {
-                if let Some(en) = reg.find_mut(name) {
-                    if routing_gap || is_provably_live_report(en.inside_leg.as_ref(), now) {
-                        provably_live = true;
-                    } else {
-                        en.status = AgentStatus::Orphaned;
-                    }
-                }
-            }) {
-                stamp_warning = format!(
-                    "fno agents: warning: failed to mark {} as orphaned: {}\n",
-                    py_repr(name),
-                    e
-                );
-                emit_event(
-                    events,
-                    "agent_status_stamp_failed",
-                    &[
-                        ("name", name.into()),
-                        ("short_id", short_id.clone().into()),
-                        ("target_status", "orphaned".into()),
-                        ("error", e.to_string().into()),
-                    ],
-                );
-            }
+            let current = load_registry(registry_path).ok().and_then(|entries| {
+                entries
+                    .entries
+                    .iter()
+                    .find(|en| match key.1.as_deref() {
+                        Some(sid) => {
+                            en.harness_name() == key.0
+                                && en.harness_session_id.as_deref() == Some(sid)
+                        }
+                        None => en.name == name,
+                    })
+                    .cloned()
+            });
+            let provably_live = routing_gap
+                || current
+                    .as_ref()
+                    .is_some_and(|en| is_provably_live_report(en.inside_leg.as_ref(), now));
             if provably_live {
                 emit_event(
                     events,
@@ -3430,8 +3431,7 @@ fn followup(
             AskOutcome {
                 stdout: String::new(),
                 stderr: format!(
-                    "{}agent {} is not running (reason: {}{}){}\n",
-                    stamp_warning,
+                    "agent {} is not running (reason: {}{}){}\n",
                     py_repr(name),
                     reason.as_str(),
                     suspended,

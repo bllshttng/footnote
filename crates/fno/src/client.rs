@@ -1497,60 +1497,9 @@ fn parse_macmon_sample(raw: &[u8]) -> Option<String> {
     Some(line)
 }
 
-/// A pending destructive/costly action awaiting the operator's one-keypress
-/// confirm. `label` is the entity name shown in the prompt; `action` is what
-/// Enter commits (x-a496 dispatch, extended by x-96e8 with squad removal).
-struct ConfirmAction {
-    action: ConfirmKind,
-    label: String,
-}
+mod confirm;
 
-/// What a confirmed [`ConfirmAction`] sends on Enter.
-enum ConfirmKind {
-    /// Start a targeted session on a work-queue card's node (x-a496).
-    Dispatch { node: String },
-    /// Close a whole workspace (x-96e8). `panes` is the blast radius named in
-    /// the prompt; `last` warns that removing the session's only squad ends it.
-    RemoveSquad {
-        squad: u64,
-        panes: usize,
-        last: bool,
-    },
-    /// Stop a live agent row (x-76ea). The captured `name`, not the row index,
-    /// commits - a row that raced out between confirm and Enter resolves to the
-    /// server's stale-name refusal.
-    StopAgent { name: String },
-    /// Remove an exited agent row (x-76ea). Same captured-name commit.
-    RemoveAgent { name: String },
-    /// Bulk-reap every exited fno-agent registry row (x-7561, uppercase `X`).
-    /// No payload - the server's reap verb owns the candidate set.
-    ReapAgents,
-    /// Stop a live external claude-daemon row by stable `attach_id` (x-7561).
-    /// The captured attach id, not the row index, commits; `name` is cosmetic.
-    StopExternal { attach_id: String, name: String },
-    /// Remove a stopped external tombstone by `attach_id` (x-7561). Same
-    /// captured-id commit; the server gates rm on a persisted `stopped` state.
-    RemoveExternal { attach_id: String, name: String },
-    /// Dismiss a member TOMBSTONE from its squad's member list (x-8f11). A
-    /// tombstone is not a registry agent, so RemoveAgent cannot reach it.
-    DismissMember { squad: u64, attach_id: String },
-    /// Remove every exited row in one section (x-f300). The SECTION commits, not
-    /// the row list: the set is re-folded on Enter, so rows that died or were
-    /// reaped while the prompt sat open are handled honestly. `dead` is the count
-    /// the prompt showed, kept only to name it.
-    ClearDead {
-        key: SectionKey,
-        squad: Option<u64>,
-        dead: usize,
-    },
-    /// Close one tab (the tab menu's destructive item). The captured stable
-    /// [`TabId`], not a view index, commits: `CloseTab` closes the SENDER'S
-    /// VIEWED tab server-side, so Enter first selects the captured tab then
-    /// closes it. The id is re-resolved at Enter (the ClearDead re-fold
-    /// precedent): a tab that raced out between arm and Enter is a notice,
-    /// never a bare CloseTab closing whatever is viewed now.
-    CloseTab { tab: TabId },
-}
+pub(crate) use confirm::{ConfirmAction, ConfirmKind};
 
 /// The move-tab / move-pane destination picker's state (x-96e8, cursored by
 /// x-3e17). Was a bare `(MoveSrc, Vec<u64>)` tuple, which had nowhere to keep a
@@ -2207,6 +2156,7 @@ fn remove_dead(a: &AgentRow) -> Command {
         },
         _ => Command::RemoveAgent {
             name: a.name.clone(),
+            harness_session_id: a.harness_session_id.clone(),
         },
     }
 }
@@ -7335,7 +7285,7 @@ impl View {
                     s.tab.is_none() && s.squad == *squad
                 }
                 (
-                    ConfirmKind::StopAgent { name } | ConfirmKind::RemoveAgent { name },
+                    ConfirmKind::StopAgent { name, .. } | ConfirmKind::RemoveAgent { name, .. },
                     DisplayRow::Agent(a),
                 ) => a.name == *name,
                 (
@@ -13383,8 +13333,8 @@ async fn confirm_keys(
         // notice will render at the row, not only the tab bar.
         view.arm_row_stamp(&action.action);
         let row_name = match &action.action {
-            ConfirmKind::StopAgent { name }
-            | ConfirmKind::RemoveAgent { name }
+            ConfirmKind::StopAgent { name, .. }
+            | ConfirmKind::RemoveAgent { name, .. }
             | ConfirmKind::StopExternal { name, .. }
             | ConfirmKind::RemoveExternal { name, .. } => Some(name.clone()),
             _ => None,
@@ -13395,8 +13345,18 @@ async fn confirm_keys(
                 account: view.active_account.clone(),
             }],
             ConfirmKind::RemoveSquad { squad, .. } => vec![Command::RemoveSquad(squad)],
-            ConfirmKind::StopAgent { name } => vec![Command::StopAgent { name }],
-            ConfirmKind::RemoveAgent { name } => vec![Command::RemoveAgent { name }],
+            ConfirmKind::StopAgent { name, sid } => {
+                vec![Command::StopAgent {
+                    name,
+                    harness_session_id: sid,
+                }]
+            }
+            ConfirmKind::RemoveAgent { name, sid } => {
+                vec![Command::RemoveAgent {
+                    name,
+                    harness_session_id: sid,
+                }]
+            }
             ConfirmKind::ReapAgents => vec![Command::ReapAgents],
             ConfirmKind::StopExternal { attach_id, name } => {
                 vec![Command::StopExternal { attach_id, name }]
@@ -14177,6 +14137,7 @@ async fn execute_row_menu_action(
                     },
                     _ => ConfirmKind::StopAgent {
                         name: a.name.clone(),
+                        sid: a.harness_session_id.clone(),
                     },
                 },
                 // Remove routes by row KIND through [`remove_dead`], the same
@@ -14191,6 +14152,7 @@ async fn execute_row_menu_action(
                     }
                     _ => ConfirmKind::RemoveAgent {
                         name: a.name.clone(),
+                        sid: a.harness_session_id.clone(),
                     },
                 },
             };
@@ -15735,12 +15697,16 @@ async fn selector_keys(
                 // the stop. An external row without an attach_id (degenerate)
                 // falls through to the by-name path, which the server refuses.
                 let agent = match view.display_rows().get(cur) {
-                    Some(DisplayRow::Agent(a)) if !a.tombstone && a.pane_id.is_none() => {
-                        Some((a.name.clone(), a.exited, a.external, a.attach_id.clone()))
-                    }
+                    Some(DisplayRow::Agent(a)) if !a.tombstone && a.pane_id.is_none() => Some((
+                        a.name.clone(),
+                        a.exited,
+                        a.external,
+                        a.attach_id.clone(),
+                        a.harness_session_id.clone(),
+                    )),
                     _ => None,
                 };
-                if let Some((name, exited, external, attach_id)) = agent {
+                if let Some((name, exited, external, attach_id, harness_session_id)) = agent {
                     if view.term.0 < MIN_ROWS_FOR_STATUS {
                         view.set_notice("terminal too short for the confirm prompt".into());
                         continue;
@@ -15759,7 +15725,15 @@ async fn selector_keys(
                         // confirm - a live row is stopped as part of its
                         // removal, never as a second ceremony. Stop-only lives
                         // on the row menu's Stop.
-                        _ => ConfirmKind::RemoveAgent { name: name.clone() },
+                        // (x-f191 scope b) `x` states the intent ONCE: remove.
+                        // The server orchestrates stop-then-rm behind this one
+                        // confirm - a live row is stopped as part of its
+                        // removal, never as a second ceremony. Stop-only lives
+                        // on the row menu's Stop.
+                        _ => ConfirmKind::RemoveAgent {
+                            name: name.clone(),
+                            sid: harness_session_id,
+                        },
                     };
                     // (x-f191 scope a+c) The slot feeds the post-commit
                     // re-anchor: the sideline stays open and the cursor stays

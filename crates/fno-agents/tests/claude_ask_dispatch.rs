@@ -625,6 +625,7 @@ fn followup_socket_null_without_truth_exit_13_preserves_status() {
     )
     .unwrap();
 
+    let reg_before = fs::read_to_string(home.registry_json()).unwrap();
     let out = dispatch_claude_ask(
         &home,
         &ch,
@@ -648,9 +649,11 @@ fn followup_socket_null_without_truth_exit_13_preserves_status() {
         out.stderr
     );
 
-    let reg = fs::read_to_string(home.registry_json()).unwrap();
-    assert!(reg.contains("\"status\": \"live\""), "{}", reg);
-    assert!(!reg.contains("\"orphaned\""), "{}", reg);
+    // A refused ask never writes the registry: the row keeps its seeded
+    // live status byte-for-byte, and nothing orphans it.
+    let reg_after = fs::read_to_string(home.registry_json()).unwrap();
+    assert_eq!(reg_before, reg_after, "a refused ask never writes");
+    assert!(!reg_after.contains("orphaned"), "{}", reg_after);
 }
 
 /// Short, collision-free AF_UNIX path under /tmp (macOS sun_path is ~104 chars,

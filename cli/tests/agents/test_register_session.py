@@ -1153,6 +1153,9 @@ def test_a_refused_observation_is_visible_and_the_hook_stays_fail_soft(
     assert refused[0]["source"] == "resume"
     err = capsys.readouterr().err
     assert BIRTH in err and FORK in err, "both recorded ids are in the visible line"
+    assert (
+        f"fno agents adopt {THIRD}" in err
+    ), "the refusal names the adopt verb that mints the parked id a row"
 
 
 def test_both_ids_resolve_to_the_one_row(tmp_path: Path, monkeypatch) -> None:

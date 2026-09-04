@@ -2117,7 +2117,15 @@ fn probe_truth_map() -> Option<HashMap<String, TruthReading>> {
         let Some(name) = row.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
-        let name = name.to_string();
+        // Identity-first key: the full harness
+        // session id when the row carries one, the label otherwise (legacy
+        // rows). A rename no longer orphans a row's readings.
+        let key = row
+            .get("harness_session_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| name.to_string());
         let basis = row
             .get("basis")
             .and_then(|v| v.as_str())
@@ -2126,7 +2134,7 @@ fn probe_truth_map() -> Option<HashMap<String, TruthReading>> {
             .get("last_activity_age_s")
             .and_then(|v| v.as_f64())
             .map(|f| f as u64);
-        map.insert(name, TruthReading { basis, age_s });
+        map.insert(key, TruthReading { basis, age_s });
     }
     Some(map)
 }
@@ -2662,11 +2670,13 @@ struct Core {
     /// transcript or no prose in its tail; the cell renders empty. Display-only,
     /// so a stale line between reader ticks is cosmetic.
     tail_by_session: HashMap<String, String>,
-    /// (v48) Latest registry-name -> reachability-evidence map from the
-    /// off-loop truth probe, joined into each agent row's `basis` /
-    /// `last_activity_age_s` at layout time. Kept-whole on a failed probe: the
+    /// (v48) Latest reachability-evidence map from the off-loop truth probe,
+    /// joined into each agent row's `basis` / `last_activity_age_s` at layout
+    /// time. The key is the row's full harness session id when it
+    /// has one, the label otherwise (legacy rows): identity first, the
+    /// demoted label as the alias fallback. Kept-whole on a failed probe: the
     /// alternative (clearing on failure) would flap every row to "no reading"
-    /// on one miss. A name absent from the map has no probe answer, which the
+    /// on one miss. A key absent from the map has no probe answer, which the
     /// client reads as absence, never as urgency.
     truth_by_name: HashMap<String, TruthReading>,
     /// (v48) The `seq` of the last-applied `CoreMsg::AgentTruth`. Probes run
@@ -10067,7 +10077,29 @@ impl Core {
     /// callers can read `.exited` AND `.claude_session_uuid` (the respawn arm
     /// needs both); the fail-closed semantics (absent / external / ambiguous all
     /// refused) are unchanged.
-    fn resolve_lifecycle_target(&self, name: &str) -> Result<&RegistryAgent, String> {
+    /// (v67) `harness_session_id` rides beside the label on
+    /// `StopAgent`/`RemoveAgent`; when it names a row, resolution prefers
+    /// identity and falls back to the label only when no row answers to that
+    /// id (a stale row, or an old client that carries the label alone). The
+    /// fail-closed rules are unchanged: absent, any external row sharing the
+    /// name (never act on a registry agent an external shadows), or a >1
+    /// non-external collision are all refused, so a keypress can only ever act
+    /// on exactly one unambiguous registry agent, never a guessed match.
+    fn resolve_lifecycle_target(
+        &self,
+        name: &str,
+        harness_session_id: Option<&str>,
+    ) -> Result<&RegistryAgent, String> {
+        if let Some(sid) = harness_session_id.filter(|s| !s.is_empty()) {
+            let by_id: Vec<&RegistryAgent> = self
+                .agents
+                .iter()
+                .filter(|a| !a.external && agent_harness_session_id(a) == Some(sid))
+                .collect();
+            if let [one] = by_id.as_slice() {
+                return Ok(one);
+            }
+        }
         let matches: Vec<&RegistryAgent> = self.agents.iter().filter(|a| a.name == name).collect();
         if matches.is_empty() {
             return Err(format!("no such agent: {name}"));
@@ -10805,15 +10837,23 @@ impl Core {
     }
 
     /// The reachability evidence halves a registry-backed row carries on the
-    /// wire: `None` until a probe has answered for that name. Rows with no
-    /// registry entry (bare panes, tombstones, external lifecycle) never call
-    /// these - there is nothing to probe.
-    fn truth_basis(&self, name: &str) -> Option<String> {
-        self.truth_by_name.get(name).and_then(|t| t.basis.clone())
+    /// wire: `None` until a probe has answered for that row. The map key is
+    /// the row's full harness session id when it has one (identity first),
+    /// else the label; a row with neither (bare panes,
+    /// tombstones, external lifecycle) never calls these - there is nothing
+    /// to probe.
+    fn truth_basis(&self, a: &RegistryAgent) -> Option<String> {
+        self.truth_reading(a).and_then(|t| t.basis.clone())
     }
 
-    fn truth_age(&self, name: &str) -> Option<u64> {
-        self.truth_by_name.get(name).and_then(|t| t.age_s)
+    fn truth_age(&self, a: &RegistryAgent) -> Option<u64> {
+        self.truth_reading(a).and_then(|t| t.age_s)
+    }
+
+    fn truth_reading(&self, a: &RegistryAgent) -> Option<&TruthReading> {
+        agent_harness_session_id(a)
+            .and_then(|sid| self.truth_by_name.get(sid))
+            .or_else(|| self.truth_by_name.get(&a.name))
     }
 
     fn agent_rows(&self) -> Vec<AgentRow> {
@@ -10899,6 +10939,8 @@ impl Core {
                                 exited,
                                 dnd: a.dnd,
                                 unmeasured,
+                                liveness_age_s: a.liveness_age_s,
+                                harness_title: a.harness_title.clone(),
                                 answerable: if exited { None } else { a.answerable.clone() },
                                 // A pane-hosted row focuses its pane; the attach
                                 // target never rides it (wire contract).
@@ -10910,7 +10952,7 @@ impl Core {
                                 // sideline can flag a foreign-cwd join.
                                 cwd_base: cwd_basename(&a.cwd),
                                 tombstone: false,
-                                subline: self.compose_subline(&a.cwd),
+                                subline: subline_with_title(a, self.compose_subline(&a.cwd)),
                                 // Structural roster-dir tag wins (Locked
                                 // Decision 6); else this pane's birth account.
                                 account: a
@@ -10923,8 +10965,8 @@ impl Core {
                                 tail: self.compose_tail(a),
                                 crown_level: a.crown_level,
                                 crown_scope: a.crown_scope.clone(),
-                                basis: self.truth_basis(&a.name),
-                                last_activity_age_s: self.truth_age(&a.name),
+                                basis: self.truth_basis(a),
+                                last_activity_age_s: self.truth_age(a),
                                 resumable: false,
                                 no_pane_reason: None,
                                 // A registry-hosted pane's badge is its primary
@@ -10969,6 +11011,8 @@ impl Core {
                                     || e.is_some_and(|entry| entry.refused_worker.is_some()),
                                 dnd: false,
                                 unmeasured: false,
+                                liveness_age_s: None,
+                                harness_title: None,
                                 answerable: None,
                                 attach_id: None,
                                 external: false,
@@ -11062,6 +11106,8 @@ impl Core {
                         },
                         dnd: a.dnd,
                         unmeasured: false,
+                        liveness_age_s: None,
+                        harness_title: a.harness_title.clone(),
                         answerable: None,
                         attach_id: None,
                         external: a.external,
@@ -11069,7 +11115,7 @@ impl Core {
                         seen: self.seen.contains(pane),
                         cwd_base: cwd_basename(&a.cwd),
                         tombstone: false,
-                        subline: self.compose_subline(&a.cwd),
+                        subline: subline_with_title(a, self.compose_subline(&a.cwd)),
                         account: a.account.clone(),
                         updated_at: a.updated_at,
                         pr: pr_from_name(&a.name)
@@ -11077,8 +11123,8 @@ impl Core {
                         tail: self.compose_tail(a),
                         crown_level: a.crown_level,
                         crown_scope: a.crown_scope.clone(),
-                        basis: self.truth_basis(&a.name),
-                        last_activity_age_s: self.truth_age(&a.name),
+                        basis: self.truth_basis(a),
+                        last_activity_age_s: self.truth_age(a),
                         resumable,
                         no_pane_reason: if detached_live {
                             Some(AgentNoPaneReason::LivePaneless)
@@ -11117,7 +11163,9 @@ impl Core {
                         reason: if a.exited { None } else { a.reason.clone() },
                         exited: a.exited,
                         dnd: a.dnd,
-                        unmeasured: a.exited && a.liveness == agents_view::Liveness::Unmeasured,
+                        unmeasured: a.liveness == agents_view::Liveness::Unmeasured,
+                        liveness_age_s: a.liveness_age_s,
+                        harness_title: a.harness_title.clone(),
                         answerable: if a.exited { None } else { a.answerable.clone() },
                         attach_id: if a.exited { None } else { a.attach_id.clone() },
                         external: a.external,
@@ -11127,7 +11175,7 @@ impl Core {
                         seen: false,
                         cwd_base,
                         tombstone: false,
-                        subline: self.compose_subline(&a.cwd),
+                        subline: subline_with_title(a, self.compose_subline(&a.cwd)),
                         // The structural roster-dir tag: an isolated-account
                         // foreign row carries its source account here (piece 3).
                         account: a.account.clone(),
@@ -11137,8 +11185,8 @@ impl Core {
                         tail: self.compose_tail(a),
                         crown_level: a.crown_level,
                         crown_scope: a.crown_scope.clone(),
-                        basis: self.truth_basis(&a.name),
-                        last_activity_age_s: self.truth_age(&a.name),
+                        basis: self.truth_basis(a),
+                        last_activity_age_s: self.truth_age(a),
                         resumable: self.row_resumable_in_session(a),
                         no_pane_reason: self.row_no_pane_reason_in_session(a),
                         // Watch-only paneless: no PTY, no vt reading.
@@ -11187,6 +11235,8 @@ impl Core {
                     exited: true,
                     dnd: false,
                     unmeasured: false,
+                    liveness_age_s: None,
+                    harness_title: None,
                     answerable: None,
                     // Carried so the client can DismissMember; exited: true keeps
                     // it out of the attach catalog gate (attach_id + !exited).
@@ -11267,6 +11317,8 @@ impl Core {
                 exited,
                 dnd: false,
                 unmeasured: false,
+                liveness_age_s: None,
+                harness_title: None,
                 answerable: None,
                 // Carried on an exited row so the client can send RemoveExternal;
                 // on a live-ish row it is the StopExternal target. Either way the
@@ -14380,28 +14432,43 @@ impl Core {
                 self.push_layout(true);
                 Flow::Continue
             }
-            Command::StopAgent { name } => {
+            Command::StopAgent {
+                name,
+                harness_session_id,
+            } => {
                 // Stop a live sideline row (x-76ea). Stop ONLY: this is the
                 // menu's stop-only path; the one-gesture stop-and-remove
                 // composition lives on RemoveAgent (x-f191 scope b).
-                // `resolve_lifecycle_target` validates the name against THIS
-                // server's catalog fail-closed.
-                match self.resolve_lifecycle_target(&name) {
+                // `resolve_lifecycle_target` validates against THIS server's
+                // catalog fail-closed, identity first (v67). The subprocess
+                // gets the row's CURRENT label, so a harness-side rename
+                // between capture and keypress still reaches the right row.
+                let resolved = self
+                    .resolve_lifecycle_target(&name, harness_session_id.as_deref())
+                    .map(|a| a.name.clone());
+                match resolved {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(_row) => self.agent_action(client_id, "stop", name),
+                    Ok(label) => self.agent_action(client_id, "stop", label),
                 }
                 Flow::Continue
             }
-            Command::RemoveAgent { name } => {
+            Command::RemoveAgent {
+                name,
+                harness_session_id,
+            } => {
                 // (x-f191 scope b) The operator states the intent ONCE: remove.
                 // The server orchestrates stop-then-rm off-loop - a live row is
                 // stopped as part of its removal (the stop's registry flip is
                 // what the rm leg reads), and a stored-live corpse whose stop
                 // no-ops reaches the CLI's already-absent branch through rm's
-                // daemon-side live gate. Same resolution as StopAgent.
-                match self.resolve_lifecycle_target(&name) {
+                // daemon-side live gate. Same resolution as StopAgent: the
+                // subprocess gets the resolved row's current label.
+                let resolved = self
+                    .resolve_lifecycle_target(&name, harness_session_id.as_deref())
+                    .map(|a| a.name.clone());
+                match resolved {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(_row) => self.stop_agent_action(client_id, name),
+                    Ok(label) => self.stop_agent_action(client_id, label),
                 }
                 Flow::Continue
             }
@@ -14416,7 +14483,7 @@ impl Core {
                     );
                     return Flow::Continue;
                 }
-                match self.resolve_lifecycle_target(&name) {
+                match self.resolve_lifecycle_target(&name, None) {
                     Err(msg) => self.notice(client_id, msg),
                     Ok(_row) => self.agent_rename_action(client_id, name, new_name),
                 }
@@ -14519,7 +14586,7 @@ impl Core {
                 // (mail to an EXITED row is legal - it queues durable; an external
                 // row is refused), sanitize the text (blank/over-cap refused,
                 // never truncated), then shell `fno agents mail send` off-loop.
-                match self.resolve_lifecycle_target(&name) {
+                match self.resolve_lifecycle_target(&name, None) {
                     Err(msg) => self.notice(client_id, msg),
                     Ok(_) => match sanitize_mail_text(&text) {
                         Err(msg) => self.notice(client_id, msg),
@@ -14541,7 +14608,7 @@ impl Core {
                 // back in main; an isolated-account session needs `--account`
                 // (its uuid lives in that account's config dir). The row is the
                 // only source of these - they are not on the `--resume` uuid.
-                let resolved = self.resolve_lifecycle_target(&name).map(|a| {
+                let resolved = self.resolve_lifecycle_target(&name, None).map(|a| {
                     (
                         a.exited,
                         a.claude_session_uuid.clone(),
@@ -15542,6 +15609,22 @@ fn subline_from(branch: Option<&str>, cwd: &str) -> Option<String> {
     }
 }
 
+/// The harness's own title for the session joins the subline when it
+/// differs from the row's label: the sideline keeps showing fno's label as the
+/// row name (a Ctrl+R rename never rewrites it), and the title rides the same
+/// dim slot so the rename is visible where the worker works.
+fn subline_with_title(a: &agents_view::RegistryAgent, base: Option<String>) -> Option<String> {
+    match a.harness_title.as_deref().filter(|t| *t != a.name) {
+        Some(t) => Some(match base {
+            Some(b) => format!("{t} · {b}"),
+            None => t.to_string(),
+        }),
+        // No title, or the title already equals the label: the base subline
+        // stands alone rather than a filter swallowing the whole slot.
+        None => base,
+    }
+}
+
 /// (x-6851 US3) The cwd basename carried on EVERY agent row (not just orphans),
 /// so the sideline can flag a foreign-cwd join client-side by comparing it to
 /// the squad's project basename. `None` for an empty cwd (no subline is
@@ -15822,6 +15905,10 @@ async fn serve(
             let mut last_uuids: Vec<(String, Option<String>)> = Vec::new();
             let mut last_tails: HashMap<String, String> = HashMap::new();
             let mut last_truth = Instant::now();
+            // Logged ONCE on the first daemon miss, never per
+            // tick: the fallback is a fact about the environment, and a fleet
+            // with no daemon must not pay one line per second for it.
+            let mut fallback_logged = false;
             // (v48) Launch order for AgentTruth probes, so an out-of-order
             // completion cannot clobber a fresher result (see CoreMsg::AgentTruth).
             let mut truth_probe_seq: u64 = 0;
@@ -15889,7 +15976,31 @@ async fn serve(
                         }
                     });
                 }
-                let (reg_stamp, reg_raw) = scan(reg_path.clone(), state.reg_stamp()).await;
+                // The registry leg subscribes to the daemon
+                // when its socket answers (AC12): rows are SERVED, the stamp
+                // domain is the same (mtime, len) the file scan gated with, and
+                // an unchanged answer costs one stat server-side and one small
+                // frame here - no file read on either side. When nothing
+                // answers, the file scan below stands (AC13, the supported
+                // no-daemon shape), logged once.
+                let (reg_stamp, reg_raw) = match agents_view::watch_registry(
+                    state.reg_stamp(),
+                    &agents_view::supervisor_sock_path(),
+                )
+                .await
+                {
+                    Ok(answer) => answer,
+                    Err(_) => {
+                        if !fallback_logged {
+                            fallback_logged = true;
+                            eprintln!(
+                                "fno mux: no agent daemon answering at {}; reading the registry file directly (degraded fallback)",
+                                agents_view::supervisor_sock_path().display()
+                            );
+                        }
+                        scan(reg_path.clone(), state.reg_stamp()).await
+                    }
+                };
                 let (roster_stamp, roster_raw) =
                     scan(roster_path.clone(), state.roster_stamp()).await;
                 // (x-c914) Each registered isolated account's roster.json, folded
@@ -17466,9 +17577,11 @@ mod tests {
     mod thread_viewer_tests;
     use crate::proto::TemplateName; // x-c4d4 tests; not referenced by name in non-test code
 
-    // (x-0719) The portal test family lives in its own module; this file
+    // (x-0719) The portal test family lives in its own module; the file
     // is shrink-only under the file-budget gate.
     mod portal_tests;
+    // Same treatment: the lifecycle-resolution test family.
+    mod lifecycle_tests;
 
     // The sideline rename test family, same treatment.
     mod rename_tests;
@@ -18030,6 +18143,7 @@ mod tests {
             session_id: None,
             harness_session_id: None,
             predecessor_session_ids: Vec::new(),
+            related_session_id: None,
             forked_from_session_id: None,
             name: "w".into(),
             cwd: "/w".into(),
@@ -18464,7 +18578,9 @@ mod tests {
             session_id: None,
             harness_session_id: None,
             predecessor_session_ids: Vec::new(),
+            related_session_id: None,
             forked_from_session_id: None,
+            harness_title: None,
             name: name.into(),
             cwd: "/w".into(),
             exited: true,
@@ -18482,6 +18598,7 @@ mod tests {
             crown_level: None,
             crown_scope: None,
             liveness,
+            liveness_age_s: None,
             harness: None,
         };
         let mut core = empty_core();
@@ -21358,6 +21475,7 @@ mod tests {
         let flow = core.command(
             1,
             Command::StopAgent {
+                harness_session_id: None,
                 name: "ghost".into(),
             },
         );
@@ -21375,6 +21493,7 @@ mod tests {
             session_id: None,
             harness_session_id: None,
             predecessor_session_ids: Vec::new(),
+            related_session_id: None,
             forked_from_session_id: None,
             name: name.into(),
             cwd: "/w".into(),
@@ -23228,6 +23347,7 @@ mod tests {
             session_id: None,
             harness_session_id: None,
             predecessor_session_ids: Vec::new(),
+            related_session_id: None,
             forked_from_session_id: None,
             external: true,
             ..bg_row("ext-a", "/tmp", Some("deadbee1"))
@@ -23236,6 +23356,7 @@ mod tests {
             session_id: None,
             harness_session_id: None,
             predecessor_session_ids: Vec::new(),
+            related_session_id: None,
             forked_from_session_id: None,
             external: true,
             exited: true,
@@ -23245,12 +23366,14 @@ mod tests {
             (
                 ext_live,
                 Command::StopAgent {
+                    harness_session_id: None,
                     name: "ext-a".into(),
                 },
             ),
             (
                 ext_dead,
                 Command::RemoveAgent {
+                    harness_session_id: None,
                     name: "ext-b".into(),
                 },
             ),
@@ -23398,6 +23521,7 @@ mod tests {
             session_id: None,
             harness_session_id: None,
             predecessor_session_ids: Vec::new(),
+            related_session_id: None,
             forked_from_session_id: None,
             external: true,
             ..bg_row("ext-live", "/tmp", Some("deadbeef"))
@@ -23422,6 +23546,7 @@ mod tests {
             session_id: None,
             harness_session_id: None,
             predecessor_session_ids: Vec::new(),
+            related_session_id: None,
             forked_from_session_id: None,
             external,
             exited,
@@ -23436,7 +23561,13 @@ mod tests {
         ];
         let (c, mut rx) = client_with_rx(1);
         core.clients.push(c);
-        core.command(1, Command::StopAgent { name: "dup".into() });
+        core.command(
+            1,
+            Command::StopAgent {
+                name: "dup".into(),
+                harness_session_id: None,
+            },
+        );
         assert!(drain_notice(&mut rx).unwrap().contains("external"));
 
         // Two non-external rows with one name -> ambiguous refusal.
@@ -23447,7 +23578,13 @@ mod tests {
         ];
         let (c, mut rx) = client_with_rx(1);
         core.clients.push(c);
-        core.command(1, Command::RemoveAgent { name: "dup".into() });
+        core.command(
+            1,
+            Command::RemoveAgent {
+                name: "dup".into(),
+                harness_session_id: None,
+            },
+        );
         assert!(drain_notice(&mut rx).unwrap().contains("ambiguous"));
     }
 
@@ -24772,6 +24909,7 @@ mod tests {
             session_id: None,
             harness_session_id: None,
             predecessor_session_ids: Vec::new(),
+            related_session_id: None,
             forked_from_session_id: None,
             name: name.into(),
             cwd: cwd.into(),
@@ -24854,6 +24992,37 @@ mod tests {
     }
 
     #[test]
+    fn subline_with_title_joins_the_harness_title_beside_the_label() {
+        // A row whose harness title differs from its label
+        // renders the title in the subline slot, joined onto the branch
+        // subline; a title that EQUALS the label renders nothing (the label
+        // already says it), and no title falls back to the base subline.
+        let mut a = bg_row("w1", "/tmp/repos/footnote", Some("j1"));
+        a.harness_title = Some("king-title".into());
+        assert_eq!(
+            subline_with_title(&a, Some("main · footnote".into())),
+            Some("king-title · main · footnote".into())
+        );
+        assert_eq!(
+            subline_with_title(&a, None),
+            Some("king-title".into()),
+            "no base subline -> title alone"
+        );
+        a.harness_title = Some("w1".into());
+        assert_eq!(
+            subline_with_title(&a, Some("main · footnote".into())),
+            Some("main · footnote".into()),
+            "title == label -> base subline untouched"
+        );
+        a.harness_title = None;
+        assert_eq!(
+            subline_with_title(&a, None),
+            None,
+            "no title, no base -> none"
+        );
+    }
+
+    #[test]
     fn agent_rows_join_tail_from_session_map_and_leave_others_empty() {
         // (x-b186 AC2-HP / AC4-ERR) The tail joins on the row's claude session
         // uuid. Data honesty is the point: a row with no uuid, or a uuid with no
@@ -24905,383 +25074,10 @@ mod tests {
             "a tail-only push reaches the row"
         );
     }
-
-    #[test]
-    fn external_lifecycle_row_carries_cwd_base_when_squad_matched() {
-        // x-6851 US3 (codex review): a squad-matched external-lifecycle tombstone
-        // must carry its cwd_base (the every-row wire contract), so a foreign-cwd
-        // child directory still renders the exception subline instead of reading
-        // as same-project. Before the fix this branch left cwd_base None for a
-        // matched row.
-        use crate::squad_store::{ExternalLifecycle, ExternalState};
-        let mut core = placement_core(); // squad 7 owns /repo/default
-        core.external_lifecycle = vec![ExternalLifecycle {
-            attach_id: "abc123".into(),
-            name: "dead-worker".into(),
-            cwd: "/repo/default/worktrees/x-6851".into(), // child of the squad root
-            state: ExternalState::Stopped,
-            generation: 0,
-            updated_at: String::new(),
-            reason: None,
-        }];
-        let rows = core.agent_rows();
-        let row = rows.iter().find(|r| r.name == "dead-worker").unwrap();
-        assert_eq!(
-            row.squad,
-            Some(7),
-            "a cwd under the squad root is squad-matched"
-        );
-        assert_eq!(
-            row.cwd_base.as_deref(),
-            Some("x-6851"),
-            "a squad-matched external row now carries its cwd basename"
-        );
-    }
-
-    #[test]
-    fn external_lifecycle_sync_does_not_flush_the_dirty_map() {
-        // x-0f42: reemit=true's frame-flush (`d.clear()` then reseed only the
-        // client's CURRENTLY VIEWED pane ids) is the actual resize-storm-shaped
-        // defect: it drops any dirty-map entry that isn't part of the live
-        // view, same failure class as x-0296's quiet-pane loss. A currently
-        // VIEWED pane is a bad probe for this (reemit=true immediately reseeds
-        // it with a fresh frame, so `contains_key` stays true either way) - the
-        // probe has to be a dirty entry that push_layout can never reseed: a
-        // pane id belonging to no live tab. reemit=false never touches `dirty`
-        // at all, so it survives; reemit=true's unconditional `d.clear()` wipes
-        // it with nothing to put back.
-        use crate::squad_store::{ExternalLifecycle, ExternalState};
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let p1 = core.spawn_pane(24, 40, "/tmp").expect("pane 1");
-        core.session.add_squad(
-            1,
-            vec!["/tmp/x0f42".into()],
-            None,
-            Tab {
-                name: None,
-                id: 1,
-                root: Node::Leaf(p1),
-                focus: p1,
-            },
-        );
-        let (tx, mut rx) = mpsc::channel::<ServerMsg>(32);
-        let dirty: DirtyMap = Arc::default();
-        core.attach(
-            9,
-            24,
-            80,
-            "/tmp/x0f42".into(),
-            "/tmp/x0f42".into(),
-            tx,
-            dirty.clone(),
-            Arc::new(Notify::new()),
-        );
-        while rx.try_recv().is_ok() {}
-        // A dangling dirty-map entry under a pane id that belongs to no tab -
-        // standing in for a background/quiet pane whose only copy of a frame
-        // sits in a client's dirty map outside its current view. No real
-        // geometry pass can ever reseed this key.
-        const DANGLING_PANE_ID: u64 = 999_999;
-        let sentinel = core.panes.get(&p1).unwrap().vt.frame();
-        dirty.lock().unwrap().insert(DANGLING_PANE_ID, sentinel);
-
-        let existing = vec![ExternalLifecycle {
-            attach_id: "abc123".into(),
-            name: "worker".into(),
-            cwd: "/tmp/other".into(),
-            state: ExternalState::Stopping,
-            generation: 3,
-            updated_at: "t0".into(),
-            reason: None,
-        }];
-        core.external_lifecycle = existing.clone();
-        // A late sync carrying the IDENTICAL record set (a stale action's
-        // late completion, or the startup reconcile re-observing the same
-        // state) is exactly the no-op-content case this handler must treat
-        // as sideline-only.
-        core.handle_msg(CoreMsg::ExternalLifecycleSync {
-            to: None,
-            records: existing,
-            notices: vec![],
-        });
-        assert!(
-            dirty.lock().unwrap().contains_key(&DANGLING_PANE_ID),
-            "an ExternalLifecycleSync must not flush the dirty map: rects \
-             never depend on external_lifecycle content, so this is exactly \
-             the reemit=false case AgentRows/BacklogCards already use (x-0f42)"
-        );
-    }
-
-    #[test]
-    fn external_lifecycle_sync_with_changed_records_still_pushes_layout_to_clients() {
-        // x-0f42: the fix must not turn this into a no-op path entirely - a
-        // genuinely different sideline (a real state transition, e.g.
-        // Stopping -> Stopped) still has to reach clients as a fresh Layout
-        // so the sideline agent list actually updates. reemit=false still
-        // sends Layout unconditionally; only the frame flush is skipped.
-        use crate::squad_store::{ExternalLifecycle, ExternalState};
-        let mut core = empty_core();
-        core.shells = vec!["/bin/cat".into()];
-        let p1 = core.spawn_pane(24, 40, "/tmp").expect("pane 1");
-        core.session.add_squad(
-            1,
-            vec!["/tmp/x0f42b".into()],
-            None,
-            Tab {
-                name: None,
-                id: 1,
-                root: Node::Leaf(p1),
-                focus: p1,
-            },
-        );
-        let (tx, mut rx) = mpsc::channel::<ServerMsg>(32);
-        let dirty: DirtyMap = Arc::default();
-        core.attach(
-            9,
-            24,
-            80,
-            "/tmp/x0f42b".into(),
-            "/tmp/x0f42b".into(),
-            tx,
-            dirty.clone(),
-            Arc::new(Notify::new()),
-        );
-        while rx.try_recv().is_ok() {}
-
-        core.external_lifecycle = vec![ExternalLifecycle {
-            attach_id: "abc123".into(),
-            name: "worker".into(),
-            cwd: "/tmp/other".into(),
-            state: ExternalState::Stopping,
-            generation: 3,
-            updated_at: "t0".into(),
-            reason: None,
-        }];
-        let changed = vec![ExternalLifecycle {
-            attach_id: "abc123".into(),
-            name: "worker".into(),
-            cwd: "/tmp/other".into(),
-            state: ExternalState::Stopped,
-            generation: 4,
-            updated_at: "t1".into(),
-            reason: None,
-        }];
-        core.handle_msg(CoreMsg::ExternalLifecycleSync {
-            to: None,
-            records: changed,
-            notices: vec![],
-        });
-        let saw_layout = std::iter::from_fn(|| rx.try_recv().ok())
-            .any(|m| matches!(m, ServerMsg::Layout { .. }));
-        assert!(
-            saw_layout,
-            "a genuinely different external_lifecycle set must still re-push \
-             Layout to clients, even though no pane resizes (x-0f42)"
-        );
-    }
-
-    #[test]
-    fn routed_backlog_joins_attach_then_hint_and_leaves_ready_alone() {
-        // x-54fa Phase B publish-time join, minus the pane arm (a live pane
-        // needs a real PTY; the pane join key - FNO_NODE provenance equality -
-        // is covered by the extract_fno_node tests + node_pane's trivial scan).
-        let card = |id: &str, state| BacklogCard {
-            id: id.into(),
-            slug: format!("{id}-slug"),
-            priority: "p2".into(),
-            state,
-            pane_id: None,
-            attach_id: None,
-            where_hint: None,
-            project: None,
-            lane: None,
-            plan_path: None,
-            head: false,
-        };
-        let mut core = empty_core();
-        core.backlog = vec![
-            card("x-aaa", CardState::InFlight), // attach via name token
-            card("x-bbb", CardState::InFlight), // hint via matched row, no jobId
-            card("x-ccc", CardState::InFlight), // hint via claim holder
-            card("x-ddd", CardState::InFlight), // unroutable, nothing known
-            card("x-eee", CardState::Ready),    // never joined
-        ];
-        core.agents = vec![
-            bg_row("tgt-x-aaa", "/w/other", Some("deadbee1")),
-            // cwd-basename match (worktree-per-node convention), no jobId.
-            bg_row("worker", "/w/x-bbb", None),
-            // Rows that must NOT route: exited, pane-hosted, ready-card match.
-            RegistryAgent {
-                session_id: None,
-                harness_session_id: None,
-                predecessor_session_ids: Vec::new(),
-                forked_from_session_id: None,
-                exited: true,
-                ..bg_row("tgt-x-ddd", "/w", Some("deadbee2"))
-            },
-            RegistryAgent {
-                session_id: None,
-                harness_session_id: None,
-                predecessor_session_ids: Vec::new(),
-                forked_from_session_id: None,
-                mux: Some(("test".into(), 5)),
-                ..bg_row("tgt-x-ddd", "/w", Some("deadbee3"))
-            },
-            bg_row("tgt-x-eee", "/w", Some("deadbee4")),
-        ];
-        core.backlog_holders
-            .insert("x-ccc".into(), "target-session:abc".into());
-        let cards = core.routed_backlog();
-        assert_eq!(cards[0].attach_id.as_deref(), Some("deadbee1"));
-        assert_eq!(cards[0].where_hint, None, "attach route wins over hint");
-        assert_eq!(
-            cards[1].where_hint.as_deref(),
-            Some("in flight - session worker")
-        );
-        assert_eq!(
-            cards[2].where_hint.as_deref(),
-            Some("in flight - worked by target-session:abc")
-        );
-        let bare = &cards[3];
-        assert!(
-            bare.pane_id.is_none() && bare.attach_id.is_none() && bare.where_hint.is_none(),
-            "exited/pane-hosted rows never route"
-        );
-        let ready = &cards[4];
-        assert!(
-            ready.attach_id.is_none() && ready.where_hint.is_none(),
-            "a ready card is never joined"
-        );
-    }
-
-    #[test]
-    fn inflight_route_resolves_by_id_or_slug_and_fails_closed() {
-        // The stale-client DispatchNode re-check (AC2-ERR): an in-flight card
-        // with an attach target routes; ready/unknown/unroutable stay None so
-        // the handler falls through to dispatch or the refusal notice.
-        let mut core = empty_core();
-        core.backlog = vec![
-            BacklogCard {
-                id: "x-aaa".into(),
-                slug: "aaa-slug".into(),
-                priority: "p2".into(),
-                state: CardState::InFlight,
-                pane_id: None,
-                attach_id: None,
-                where_hint: None,
-                project: None,
-                lane: None,
-                plan_path: None,
-                head: false,
-            },
-            BacklogCard {
-                id: "x-rdy".into(),
-                slug: "rdy-slug".into(),
-                priority: "p2".into(),
-                state: CardState::Ready,
-                pane_id: None,
-                attach_id: None,
-                where_hint: None,
-                project: None,
-                lane: None,
-                plan_path: None,
-                head: false,
-            },
-        ];
-        core.agents = vec![bg_row("tgt-x-aaa", "/w", Some("deadbee1"))];
-        assert_eq!(
-            core.inflight_route("x-aaa"),
-            Some(Command::attach_agent("deadbee1"))
-        );
-        assert_eq!(
-            core.inflight_route("aaa-slug"),
-            Some(Command::attach_agent("deadbee1")),
-            "slug names the same card"
-        );
-        assert_eq!(core.inflight_route("x-rdy"), None, "ready is not routed");
-        assert_eq!(core.inflight_route("x-nope"), None, "unknown fails closed");
-        core.agents.clear();
-        assert_eq!(
-            core.inflight_route("x-aaa"),
-            None,
-            "unroutable in-flight falls through to the refusal notice"
-        );
-    }
-
-    #[test]
-    fn inflight_hint_names_session_then_holder_then_default() {
-        // Codex peer review: a stale-client DispatchNode on an in-flight card
-        // with NO route must get the situated hint, not the bare not-ready
-        // refusal. Hint precedence: matched registry row's session name >
-        // claim holder > the client's default copy.
-        let mut core = empty_core();
-        core.backlog = vec![BacklogCard {
-            id: "x-aaa".into(),
-            slug: "aaa-slug".into(),
-            priority: "p2".into(),
-            state: CardState::InFlight,
-            pane_id: None,
-            attach_id: None,
-            where_hint: None,
-            project: None,
-            lane: None,
-            plan_path: None,
-            head: false,
-        }];
-        // Nothing known at all: the default copy.
-        assert_eq!(
-            core.inflight_hint("x-aaa").as_deref(),
-            Some("card in flight - no session visible here")
-        );
-        // A claim holder is known: name it.
-        core.backlog_holders
-            .insert("x-aaa".into(), "target-session:abc".into());
-        assert_eq!(
-            core.inflight_hint("aaa-slug").as_deref(),
-            Some("in flight - worked by target-session:abc"),
-            "slug names the same card"
-        );
-        // A matched (unattachable) registry row outranks the holder.
-        core.agents = vec![bg_row("tgt-x-aaa", "/w", None)];
-        assert_eq!(
-            core.inflight_hint("x-aaa").as_deref(),
-            Some("in flight - session tgt-x-aaa")
-        );
-        // Not in flight / unknown: None (caller falls through to not-ready).
-        assert_eq!(core.inflight_hint("x-nope"), None);
-    }
-
-    #[test]
-    fn classify_guard_registry_fails_closed_on_a_row_with_no_readable_pane_binding() {
-        // AC4-ERR (x-0b40), the positive marker: the malformed row IS the
-        // defect. A registry holding an agent whose pane cannot be read must
-        // refuse - a nameless row used to be skipped outright and read as
-        // "no row for this pane, it is a shell", so the guarded send wrote
-        // into a working agent.
-        let raw =
-            r#"{"agents":[{"name":"ok","cwd":"/w","status":"live"},{"cwd":"/w","status":"live"}]}"#;
-        let err = classify_guard_registry(raw, 0).unwrap_err();
-        assert!(
-            err.contains("no readable pane binding"),
-            "refusal names the row-level cause: {err}"
-        );
-    }
-
-    #[test]
-    fn classify_guard_registry_fails_closed_on_a_present_but_unparseable_mux() {
-        // The fold arm (x-0b40): the row SURVIVES derivation with `mux: None`,
-        // so this is not a skip and a drop count alone would miss it. The
-        // half-read `session` is this pane's own; the missing `pane_id` is
-        // exactly the part that cannot be attributed.
-        let raw =
-            r#"{"agents":[{"name":"half","cwd":"/w","status":"live","mux":{"session":"sess"}}]}"#;
-        let err = classify_guard_registry(raw, 0).unwrap_err();
-        assert!(
-            err.contains("no readable pane binding"),
-            "refusal names the row-level cause: {err}"
-        );
-    }
+    // (x-0f42 external-lifecycle sync and x-54fa routed-backlog families) moved verbatim into its own module: this file is over the
+    // shrink-only line, and test motion is the sanctioned shrink.
+    #[path = "external_lifecycle_and_backlog_tests.rs"]
+    mod external_lifecycle_and_backlog_tests;
 
     #[test]
     fn classify_guard_registry_keeps_document_and_row_failures_distinct() {

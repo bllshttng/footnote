@@ -320,7 +320,7 @@ fn default_true() -> bool {
 /// open honors, now that the geometry refusal lives inside `reach_portal`
 /// where the slot lookup knows occupancy. Additive, so the compatibility
 /// floor does not move; a repoint keeps owning its geometry and says so.
-pub const PROTO_VERSION: u32 = 66;
+pub const PROTO_VERSION: u32 = 67;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1238,6 +1238,20 @@ pub struct AgentRow {
     /// an old client that cannot render the third state).
     #[serde(default)]
     pub unmeasured: bool,
+    /// (v67) Age of the served liveness measurement in seconds
+    /// (`liveness_measured_at` on the registry row); `None` = never measured
+    /// by the sweep. Lets the render say "probe older than N s" instead of a
+    /// bare unmeasured glyph. `#[serde(default)]` keeps a v66 reader
+    /// wire-tolerant (defaults None, nothing renders).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness_age_s: Option<u64>,
+    /// (v67) The last title the harness reported for this session
+    /// (claude's Ctrl+R agent-name record), from the registry row. The render
+    /// joins it into the subline when it differs from the label; `name` is
+    /// never rewritten from it. `#[serde(default)]` keeps a v66 reader
+    /// wire-tolerant (defaults None, nothing renders).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_title: Option<String>,
     /// (v9, x-c929) The answerable-prompt payload when this row is `blocked` on
     /// a numbered menu a manifest `[rule.answer]` grammar could enumerate;
     /// `None` for any other state or a focus-only blocked prompt. A structural
@@ -1786,16 +1800,24 @@ pub enum Command {
     /// stale name is refused fail-closed with a notice, like `FocusPane`. An
     /// `external: true` roster row is refused (the claude daemon owns it, not the
     /// fno registry). The row's exited flag flips on the next registry poll.
+    /// (v67) The row's harness session id rides beside the label so resolution
+    /// prefers identity over it; `None` keeps the label-only
+    /// fallback for older clients and bare-identity rows.
     StopAgent {
         name: String,
+        #[serde(default)]
+        harness_session_id: Option<String>,
     },
     /// (v26, x-76ea) Remove an EXITED agent row: the server shells `fno-agents
     /// rm <name>`. Refused with a notice when the named row is still live
-    /// (stop-then-rm ordering, mirrored by the CLI's own live-row refusal) or
+    /// (stop-then-rm ordering, mirrored by the CLI's live-row refusal) or
     /// `external`. Same catalog validation as `StopAgent`; the row vanishes on
-    /// the next registry poll.
+    /// the next registry poll. (v67) `harness_session_id` rides beside the
+    /// label, same identity-first resolution as `StopAgent`.
     RemoveAgent {
         name: String,
+        #[serde(default)]
+        harness_session_id: Option<String>,
     },
     /// Rename a sideline row's LABEL. Grammar-checked server-side before any
     /// subprocess; unknown/external/ambiguous rows refuse. Live rows too.
@@ -4272,7 +4294,10 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 66);
+        // The registry-keyed identity pair (StopAgent/RemoveAgent carry
+        // `harness_session_id`; AgentRow carries `liveness_age_s`) bumps it
+        // 66 -> 67.
+        assert_eq!(PROTO_VERSION, 67);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4586,6 +4611,8 @@ mod tests {
                         exited: false,
                         dnd: false,
                         unmeasured: false,
+                        liveness_age_s: None,
+                        harness_title: None,
                         answerable: Some(AnswerablePrompt {
                             prompt: "Do you want to proceed?".into(),
                             options: vec![
@@ -4638,6 +4665,8 @@ mod tests {
                         exited: true,
                         dnd: false,
                         unmeasured: false,
+                        liveness_age_s: None,
+                        harness_title: None,
                         answerable: None,
                         attach_id: None,
                         external: false,
@@ -4901,84 +4930,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn proto_reader_rejects_oversized_length_prefix() {
-        let mut bytes = (MAX_MSG_BYTES + 1).to_be_bytes().to_vec();
-        bytes.extend_from_slice(b"junk");
-        let mut cursor = std::io::Cursor::new(bytes);
-        let res: Result<ServerMsg, _> = read_msg_sync(&mut cursor);
-        assert!(matches!(res, Err(ProtoError::TooLarge(_))), "{res:?}");
-    }
+    // (reader + frozen-wire-shape families) moved verbatim into its own module: this file is over the
+    // shrink-only line, and test motion is the sanctioned shrink.
+    #[path = "reader_and_wire_tests.rs"]
+    mod reader_and_wire_tests;
 
-    #[test]
-    fn proto_reader_surfaces_malformed_body_as_error() {
-        // Valid length prefix, garbage body: must error, never yield a value.
-        let body = b"not json at all";
-        let mut bytes = (body.len() as u32).to_be_bytes().to_vec();
-        bytes.extend_from_slice(body);
-        let mut cursor = std::io::Cursor::new(bytes);
-        let res: Result<ServerMsg, _> = read_msg_sync(&mut cursor);
-        assert!(matches!(res, Err(ProtoError::Malformed(_))), "{res:?}");
-    }
-
-    #[test]
-    fn proto_clean_eof_reads_as_closed() {
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
-        let res: Result<ServerMsg, _> = read_msg_sync(&mut cursor);
-        assert!(matches!(res, Err(ProtoError::Closed)), "{res:?}");
-    }
-
-    #[test]
-    fn proto_mid_body_eof_reads_as_closed() {
-        let body = br#"{"Ok":null}"#;
-        let mut bytes = ((body.len() + 1) as u32).to_be_bytes().to_vec();
-        bytes.extend_from_slice(body);
-        let mut cursor = std::io::Cursor::new(bytes);
-        let res: Result<ServerMsg, _> = read_msg_sync(&mut cursor);
-        assert!(matches!(res, Err(ProtoError::Closed)), "{res:?}");
-    }
-
-    // (x-9b60) The version-pin family lives in the child module below, named
-    // by the question it answers; the file-budget gate keeps this over-budget
-    // file shrink-only.
-    mod version_pin;
-    #[test]
-    fn proto_frame_geometry_check_catches_cell_count_mismatch() {
-        let mut f = test_frame();
-        assert!(f.geometry_ok());
-        f.cells.pop();
-        assert!(!f.geometry_ok(), "short cells vec must fail the check");
-        f.cells.clear();
-        assert!(!f.geometry_ok());
-    }
-
-    #[test]
-    fn proto_pre_attach_wire_shapes_are_frozen() {
-        // Query/KillServer/Info bypass the version handshake, so their JSON
-        // encodings are FROZEN forever (Invariants). This pins the exact
-        // bytes: if this test breaks, you changed a frozen shape - add a new
-        // variant instead.
-        assert_eq!(
-            serde_json::to_string(&ClientMsg::Query).unwrap(),
-            r#""Query""#
-        );
-        assert_eq!(
-            serde_json::to_string(&ClientMsg::KillServer).unwrap(),
-            r#""KillServer""#
-        );
-        assert_eq!(
-            serde_json::to_string(&ServerMsg::Info {
-                session: "s".into(),
-                clients: 1,
-                squads: 2,
-                panes: 3,
-            })
-            .unwrap(),
-            r#"{"Info":{"session":"s","clients":1,"squads":2,"panes":3}}"#
-        );
-    }
-
-    #[test]
     fn proto_session_name_cannot_escape_mux_dir() {
         assert!(socket_path("../evil").is_err());
         assert!(socket_path("").is_err());

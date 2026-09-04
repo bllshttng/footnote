@@ -165,7 +165,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // Python's AgentEntry; same additive-optional writer-protection rationale as
 // v22-v24: a pre-v25 writer accepts the unknown keys and erases them on its
 // next read-modify-write. Accepted set widens to 1..=25.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 25;
+//
+// v26 adds the served facts - `liveness` / `liveness_measured_at` (written
+// only by the reconcile sweep, always paired) and `harness_title` (the
+// sweep's last-seen title baseline). All three are additive-optional; the
+// bump is what makes a pre-v26 reader degrade (drop the keys, refuse the
+// write) instead of TypeError on the unknown AgentEntry kwargs at an equal
+// version number. Accepted set widens to 1..=26.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 26;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -233,10 +240,101 @@ impl Default for Registry {
     }
 }
 
+/// Every session id one row answers to at the full-id tier: its own harness
+/// session id, the one optional related id (a fork's uuid addresses its row
+/// too - both stay valid forever), and predecessor ids (a succeeded session
+/// follows the row that answers as its successor).
+fn entry_session_ids(e: &RegistryEntry) -> impl Iterator<Item = &str> {
+    [
+        e.harness_session_id.as_deref(),
+        e.related_session_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(e.predecessor_session_ids.iter().map(String::as_str))
+}
+
+/// True when `harness`/`session_id` is the row's PRIMARY KEY: same harness,
+/// full-id tier on any of the row's session ids.
+fn session_key_matches(e: &RegistryEntry, harness: &str, session_id: &str) -> bool {
+    e.harness_name() == harness
+        && entry_session_ids(e).any(|sid| session_handle_tier(session_id, sid) == Some(0))
+}
+
+/// True when `token` is one of the row's LABELS: its own name or a prior
+/// label in `aliases`. Identity is not consulted here.
+fn label_matches(e: &RegistryEntry, token: &str) -> bool {
+    e.name == token || e.aliases.iter().any(|a| a == token)
+}
+
 impl Registry {
-    /// Find an entry by agent name.
-    pub fn find(&self, name: &str) -> Option<&RegistryEntry> {
-        self.entries.iter().find(|e| e.name == name)
+    /// Resolve by the primary key. The pair, never the id
+    /// alone: id shapes differ per harness (claude uuid4, codex uuid7 whose
+    /// head-8 collides inside one minute, opencode case-sensitive `ses_`).
+    pub fn find_by_session(&self, harness: &str, session_id: &str) -> Option<&RegistryEntry> {
+        self.entries
+            .iter()
+            .find(|e| session_key_matches(e, harness, session_id))
+    }
+
+    pub fn find_by_session_mut(
+        &mut self,
+        harness: &str,
+        session_id: &str,
+    ) -> Option<&mut RegistryEntry> {
+        let idx = self
+            .entries
+            .iter()
+            .position(|e| session_key_matches(e, harness, session_id))?;
+        self.entries.get_mut(idx)
+    }
+
+    /// How many rows answer to `token` as a LABEL (own name or a prior
+    /// label). Two or more means the label has no honest row: callers that
+    /// cannot resolve by identity must refuse, never take the first match.
+    pub fn label_matches_count(&self, token: &str) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| label_matches(e, token))
+            .count()
+    }
+
+    /// Find by token: LABEL first (own name, then prior labels), then
+    /// identity (the full-id session tier). Name is demoted to a
+    /// mutable alias; session id is the key this falls back for. An
+    /// AMBIGUOUS label (two rows answer it) resolves to nothing: picking the
+    /// first match would let one of two honest rows receive the other's
+    /// write, and labels are unique at birth, so this only ever fires on a
+    /// corrupted store (labels are unique at birth).
+    pub fn find(&self, token: &str) -> Option<&RegistryEntry> {
+        let labels = self.label_matches_count(token);
+        if labels > 1 {
+            return None;
+        }
+        self.entries
+            .iter()
+            .find(|e| label_matches(e, token))
+            .or_else(|| {
+                self.entries
+                    .iter()
+                    .find(|e| session_handle_tier_any(e, token))
+            })
+    }
+
+    pub fn find_mut(&mut self, token: &str) -> Option<&mut RegistryEntry> {
+        if self.label_matches_count(token) > 1 {
+            return None;
+        }
+        let idx = self
+            .entries
+            .iter()
+            .position(|e| label_matches(e, token))
+            .or_else(|| {
+                self.entries
+                    .iter()
+                    .position(|e| session_handle_tier_any(e, token))
+            })?;
+        self.entries.get_mut(idx)
     }
 
     /// Find an entry by agent name or its canonical full harness session id.
@@ -246,23 +344,57 @@ impl Registry {
     /// naming a succeeded session follows the row that now answers as its
     /// successor.
     pub fn find_name_or_full_session_id(&self, token: &str) -> Option<&RegistryEntry> {
-        self.entries.iter().find(|entry| {
-            entry.name == token
-                || [
-                    entry.harness_session_id.as_deref(),
-                    entry.related_session_id.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                .chain(entry.predecessor_session_ids.iter().map(String::as_str))
-                .any(|session_id| session_handle_tier(token, session_id) == Some(0))
-        })
+        self.entries
+            .iter()
+            .find(|entry| entry.name == token || session_handle_tier_any(entry, token))
     }
+}
 
-    /// Mutable find by agent name.
-    pub fn find_mut(&mut self, name: &str) -> Option<&mut RegistryEntry> {
-        self.entries.iter_mut().find(|e| e.name == name)
-    }
+/// True when `token` resolves the row at the full-id session tier.
+fn session_handle_tier_any(e: &RegistryEntry, token: &str) -> bool {
+    entry_session_ids(e).any(|sid| session_handle_tier(token, sid) == Some(0))
+}
+
+/// The `(harness, full session id)` write key for a row resolved outside a
+/// locked write. Capture BEFORE the update; re-find with
+/// [`Registry::find_by_session_mut`] inside the closure so a same-name
+/// replacement cannot receive the first row's write. `None` id = a legacy
+/// row; its writer falls back to the demoted label lookup.
+pub fn registry_write_key(e: &RegistryEntry) -> (String, Option<String>) {
+    (e.harness_name().to_string(), e.harness_session_id.clone())
+}
+
+/// Re-find under the write lock by the identity [`registry_write_key`]
+/// captured, falling back to the demoted label lookup only for a legacy row
+/// with no session id.
+pub fn find_keyed_mut<'r>(
+    reg: &'r mut Registry,
+    key: &(String, Option<String>),
+    name: &str,
+) -> Option<&'r mut RegistryEntry> {
+    let keyed = key.1.as_deref().and_then(|sid| {
+        reg.entries
+            .iter()
+            .position(|e| session_key_matches(e, &key.0, sid))
+    });
+    let idx = match keyed {
+        Some(i) => Some(i),
+        None => {
+            if reg.label_matches_count(name) > 1 {
+                None
+            } else {
+                reg.entries
+                    .iter()
+                    .position(|e| label_matches(e, name))
+                    .or_else(|| {
+                        reg.entries
+                            .iter()
+                            .position(|e| session_handle_tier_any(e, name))
+                    })
+            }
+        }
+    };
+    idx.and_then(move |i| reg.entries.get_mut(i))
 }
 
 /// Inside-leg agent state (inside-out multiplexer E3, "contract v2"). The inside
@@ -514,6 +646,25 @@ pub struct RegistryEntry {
     /// Reasoning-effort arm used by the lane, when one was selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// SERVED harness liveness, one of `alive|dead|unmeasured`,
+    /// written ONLY by the reconcile sweep and always paired with
+    /// `liveness_measured_at`. It never replaces the stored `status` (the
+    /// pane/ask arms still settle that); it exists so no reader has to
+    /// believe a status field that is an init-time snapshot - a probe answer
+    /// older than two sweep budgets reads as stale, and the field's age is
+    /// on the wire beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness_measured_at: Option<String>,
+    /// The LAST title the harness reported for this session (claude's
+    /// Ctrl+R agent-name record; codex/opencode's index title), kept ONLY as
+    /// the diff baseline the sweep's `agent_renamed` emit compares against.
+    /// The row's `name` is never written from it: the label is fno's, the
+    /// title is the harness's, and every reader is served the probe's fresh
+    /// reading with this stored value as fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_title: Option<String>,
     pub cwd: String,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` as
     /// `project_root: str = ""` (ab-b946b59c; see `short_id`): default on read,
@@ -2833,10 +2984,15 @@ mod tests {
         let grammar = rename_agent(&path, "worker-a", "bad label!").unwrap_err();
         assert!(grammar.contains("1-64 letters"), "{grammar}");
         // Nothing was written by any refused call (the b->x rename above DID
-        // land: worker-b is gone, worker-x holds it).
+        // land: worker-x holds it, and "worker-b" answers only as that row's
+        // old-label alias, never as a name of its own).
         let reg = load_registry(&path).unwrap();
         assert!(reg.find("worker-a").is_some() && reg.find("worker-x").is_some());
-        assert!(reg.find("worker-b").is_none() && reg.find("worker-c").is_none());
+        assert_eq!(
+            reg.find("worker-b").map(|e| e.name.as_str()),
+            Some("worker-x")
+        );
+        assert!(reg.find("worker-c").is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -4557,216 +4713,10 @@ mod tests {
         assert!(pty.drive.is_none());
     }
 
-    // ------------------------------------------------------------------
-    // x-4c87: the raw-versus-decoded row count invariant. The live outage's
-    // sanitized shape: real worker rows at the CURRENT schema, one carrying a
-    // value the typed model cannot represent. (On the machine it was measured
-    // on, the divergence was versional: a stale v11 daemon meeting the v14
-    // store; the same-schema unknown-status row below drives the identical
-    // code path -- typed decode fails with rows on disk.)
-    // ------------------------------------------------------------------
-
-    /// A sanitized 3-row registry whose middle row the typed reader cannot
-    /// represent. Keys and value types mirror a real worker row; names, ids,
-    /// and paths are synthetic.
-    fn divergent_registry_fixture() -> String {
-        let row = |name: &str, status: &str| {
-            format!(
-                r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"{status}","created_at":"2026-08-16T00:00:00Z"}}"#
-            )
-        };
-        format!(
-            r#"{{"schema_version":{},"agents":[{},{},{}]}}"#,
-            REGISTRY_SCHEMA_VERSION,
-            row("worker-alpha", "live"),
-            row("worker-beta", "hibernating"),
-            row("worker-gamma", "live")
-        )
-    }
-
-    /// x-d19e wording contract, scoped to text this change introduces: a
-    /// refusal names what to verify and never advertises an override.
-    fn assert_no_override_remedy(msg: &str) {
-        for banned in ["force", "skip", "ignore", "bypass", "no-verify"] {
-            assert!(
-                !msg.to_lowercase().contains(banned),
-                "diagnostic must not name an override remedy ({banned}): {msg}"
-            );
-        }
-    }
-
-    #[test]
-    fn registry_with_unrepresentable_row_errors_naming_both_counts() {
-        // AC3-ERR: a positive raw row count whose typed decode fails is an
-        // InvariantViolation carrying the path, both counts, and the
-        // comparison to run -- never a successful empty roster.
-        let dir = tmpdir("divergent-row");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("registry.json");
-        std::fs::write(&path, divergent_registry_fixture()).unwrap();
-
-        let err = load_registry(&path).expect_err("unrepresentable row must fail the read");
-        let msg = err.to_string();
-        assert!(
-            matches!(err, StateError::InvariantViolation(_)),
-            "got: {msg}"
-        );
-        assert!(
-            msg.contains(path.to_str().unwrap()),
-            "names the path: {msg}"
-        );
-        assert!(msg.contains("raw_rows=3"), "names the raw count: {msg}");
-        assert!(
-            msg.contains("decoded_rows=0"),
-            "names the decoded count: {msg}"
-        );
-        assert!(
-            msg.contains("inspect"),
-            "tells the operator to inspect: {msg}"
-        );
-        assert!(
-            msg.contains("compare"),
-            "names the comparison to run: {msg}"
-        );
-        assert_no_override_remedy(&msg);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn registry_preserves_the_count_of_valid_canonical_rows() {
-        // AC2-HP: a valid schema-14 registry round-trips its exact row count.
-        let dir = tmpdir("valid-count");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("registry.json");
-        std::fs::write(
-            &path,
-            r#"{"schema_version":14,"agents":[
-                {"name":"worker-alpha","cwd":"/tmp/proj","harness":"claude",
-                 "status":"live","created_at":"2026-08-16T00:00:00Z"},
-                {"name":"worker-gamma","cwd":"/tmp/proj","harness":"codex",
-                 "status":"exited","created_at":"2026-08-16T00:00:00Z"}
-            ]}"#,
-        )
-        .unwrap();
-        let (reg, raw) = load_registry_with_counts(&path).unwrap();
-        assert_eq!(reg.entries.len(), 2, "both valid rows decode");
-        assert_eq!(raw, 2, "raw count agrees with the typed count");
-        assert!(reg.find("worker-alpha").is_some());
-        assert!(reg.find("worker-gamma").is_some());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn registry_counts_the_legacy_entries_alias_too() {
-        // A daemon-written legacy store keys its rows under `entries`; the raw
-        // count must follow the same alias the typed decode follows.
-        let dir = tmpdir("legacy-entries");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("registry.json");
-        std::fs::write(
-            &path,
-            r#"{"schema_version":14,"entries":[
-                {"name":"legacy-one","cwd":"/tmp/proj","harness":"claude",
-                 "status":"live","created_at":"2026-08-16T00:00:00Z"},
-                {"name":"legacy-two","cwd":"/tmp/proj","harness":"claude",
-                 "status":"live","created_at":"2026-08-16T00:00:00Z"}
-            ]}"#,
-        )
-        .unwrap();
-        let (reg, raw) = load_registry_with_counts(&path).unwrap();
-        assert_eq!(reg.entries.len(), 2);
-        assert_eq!(raw, 2);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn registry_missing_agents_key_is_a_valid_empty() {
-        // A store with no row array at all is a valid zero-agent registry (the
-        // raw count is 0; nothing could have been lost).
-        let dir = tmpdir("no-array-key");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":14}"#).unwrap();
-        let (reg, raw) = load_registry_with_counts(&path).unwrap();
-        assert!(reg.entries.is_empty());
-        assert_eq!(raw, 0);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn registry_true_empty_states_stay_successful_zeros() {
-        // AC4-EDGE: missing file, whitespace-only, and a real empty array are
-        // valid zero-agent states. No check treats byte length as evidence of
-        // rows.
-        let dir = tmpdir("true-empties");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("registry.json");
-
-        let (reg, raw) = load_registry_with_counts(&path).unwrap();
-        assert!(reg.entries.is_empty(), "missing file is a valid empty");
-        assert_eq!(raw, 0);
-
-        std::fs::write(&path, "   \n\t ").unwrap();
-        let (reg, raw) = load_registry_with_counts(&path).unwrap();
-        assert!(reg.entries.is_empty(), "whitespace file is a valid empty");
-        assert_eq!(raw, 0);
-
-        std::fs::write(&path, r#"{"schema_version":14,"agents":[]}"#).unwrap();
-        let (reg, raw) = load_registry_with_counts(&path).unwrap();
-        assert!(reg.entries.is_empty(), "an empty array is a valid empty");
-        assert_eq!(raw, 0);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn registry_typed_failure_without_rows_keeps_the_parse_error() {
-        // A parse failure with NO rows on disk (here: schema_version of the
-        // wrong type) is a plain parse error, not a row-loss divergence -- the
-        // guard is keyed to a positive raw count, never to byte length.
-        let dir = tmpdir("no-rows-failure");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":"fourteen","agents":[]}"#).unwrap();
-        let err = load_registry(&path).expect_err("wrong-typed schema_version must fail");
-        assert!(
-            !matches!(err, StateError::InvariantViolation(_)),
-            "no rows existed to lose: {err}"
-        );
-        assert!(!err.to_string().contains("raw_rows"));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn registry_future_schema_partial_read_exposes_both_counts() {
-        // Forward policy preserved (see a_newer_row_with_an_unknown_status_
-        // skips_that_row_only): a future-schema store still degrades per-row
-        // with an announcement. What changes is that the read now CARRIES the
-        // raw count, so the daemon's startup assertion can refuse to serve
-        // the 1-of-2 partial as a complete roster.
-        let dir = tmpdir("future-partial");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("registry.json");
-        std::fs::write(
-            &path,
-            // One past THIS binary, derived so a schema bump cannot quietly
-            // turn the future-schema fixture into a current-schema one and
-            // leave the test asserting a condition it no longer sets up.
-            format!(
-                r#"{{"schema_version":{},"agents":[
-                {{"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"}},
-                {{"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":"live","created_at":"2026-01-01T00:00:00Z"}}
-            ]}}"#,
-                REGISTRY_SCHEMA_VERSION + 1
-            ),
-        )
-        .unwrap();
-        let (reg, raw) = load_registry_with_counts(&path).unwrap();
-        assert_eq!(reg.entries.len(), 1, "the representable row still decodes");
-        assert_eq!(raw, 2, "the raw count says what was dropped");
-        std::fs::remove_dir_all(&dir).ok();
-    }
+    // (x-4c87 raw-versus-decoded row count family) moved verbatim into its own module: this file is over the
+    // shrink-only line, and test motion is the sanctioned shrink.
+    #[path = "x4c87_row_counts.rs"]
+    mod row_count_tests;
 }
 
 // ---------------------------------------------------------------------------
@@ -4877,3 +4827,7 @@ mod substitution_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "state_lookup_tests.rs"]
+mod lookup_tests;

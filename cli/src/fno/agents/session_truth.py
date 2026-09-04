@@ -34,6 +34,7 @@ Read-only; never writes; never raises (every read degrades to ``unknown``).
 """
 from __future__ import annotations
 
+import json
 import re
 import time
 from datetime import datetime, timezone
@@ -197,6 +198,36 @@ def _opencode_activity_epoch(session_id: str, db_path: Path) -> Optional[float]:
     return float(rows[0][0]) / 1000.0
 
 
+def observed_title(agent: str, transcript_path: Optional[Path]) -> Optional[str]:
+    """The title the HARNESS carries for this session, or ``None``.
+    claude only: the last ``{"type":"agent-name",...}`` transcript record
+    (a Ctrl+R rename) IS the current title. ``None`` renders as absence.
+    """
+    if agent != "claude" or transcript_path is None:
+        return None
+    try:
+        title: Optional[str] = None
+        with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
+            # agent-name records are rare: pre-filter so json.loads is rare.
+            for line in fh:
+                if '"agent-name"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if (
+                    isinstance(rec, dict)
+                    and rec.get("type") == "agent-name"
+                    and isinstance(rec.get("agentName"), str)
+                    and rec["agentName"].strip()
+                ):
+                    title = rec["agentName"]
+        return title
+    except OSError:
+        return None
+
+
 # Transcript location and the observed-model read live in fno.provenance:
 # fno.graph (core) needs them too, and a core module may not import from the
 # agents runtime. Re-exported so this module's own callers are unaffected.
@@ -220,9 +251,9 @@ def resolve_session_truth(
     """Resolve ``handle`` and classify its transcript tail. Never raises.
 
     Returns ``{handle, state, reason, last_activity_age_s, last_event_at,
-    last_message, session_id, observed_model, suggestions}``. ``state`` is one
-    of done | watching | your-move | working | stalled | unknown; ``reason`` is
-    set only for ``unknown`` (``not-found`` / ``no-records``);
+    last_message, session_id, observed_model, harness_title, suggestions}``.
+    ``state`` is one of done | watching | your-move | working | stalled |
+    unknown; ``reason`` is set only for ``unknown`` (``not-found``/``no-records``);
     ``last_event_at`` is the absolute ISO8601 UTC stamp of the newest transcript
     activity and ``last_message`` the flattened text of the LAST turn (compact
     ``[tool_use: name]`` markers included, whitespace collapsed, capped at 200
@@ -247,6 +278,7 @@ def resolve_session_truth(
             "last_message": None,
             "session_id": session_id,
             "observed_model": observed or {"kind": "no-transcript"},
+            "harness_title": None,
             "suggestions": suggestions or [],
         }
 
@@ -338,6 +370,7 @@ def resolve_session_truth(
         "last_message": " ".join((last.text or "").split())[:200] or None,
         "session_id": sid,
         "observed_model": observed,
+        "harness_title": observed_title(agent, transcript_path),
         "suggestions": [],
     }
 

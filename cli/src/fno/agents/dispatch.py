@@ -4838,13 +4838,26 @@ def reconcile_agents(
         ) from exc
 
     entry_by_name = {entry.name: entry for entry in entries}
+    # The PRIMARY index is (harness, harness_session_id): a label can be
+    # renamed mid-flight; the pair cannot.
+    entry_by_sid = {
+        entry.harness_session_id: entry for entry in entries if entry.harness_session_id
+    }
 
-    def _vendor_for_name(name: str) -> Optional[str]:
-        entry = entry_by_name.get(name)
+    def _entry_for(name: str, session_id: Optional[str] = None) -> Optional["AgentEntry"]:
+        """Identity-first: a probed session id answers before the label."""
+        if session_id:
+            entry = entry_by_sid.get(session_id)
+            if entry is not None:
+                return entry
+        return entry_by_name.get(name)
+
+    def _vendor_for_name(name: str, session_id: Optional[str] = None) -> Optional[str]:
+        entry = _entry_for(name, session_id)
         return entry.provider if entry is not None else None
 
-    def _harness_for_name(name: str) -> Optional[str]:
-        entry = entry_by_name.get(name)
+    def _harness_for_name(name: str, session_id: Optional[str] = None) -> Optional[str]:
+        entry = _entry_for(name, session_id)
         return entry.harness if entry is not None else None
 
     orphaned: list[dict] = []
@@ -5575,25 +5588,7 @@ def reconcile_agents(
             for change in list(backfilled):
                 backfilled.remove(change)
                 errors.append({**change, "id": None, "reason": write_error})
-            for name in pending_backfill:
-                errors.append(
-                    {
-                        "name": name,
-                        "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
-                        "id": None,
-                        "reason": write_error,
-                    }
-                )
-            for name in pending_codex_backfill:
-                errors.append(
-                    {
-                        "name": name,
-                        "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
-                        "id": None,
-                        "reason": write_error,
-                    }
-                )
-            for name in pending_mux_clear:
+            for name in (*pending_backfill, *pending_codex_backfill, *pending_mux_clear):
                 errors.append(
                     {
                         "name": name,
@@ -5603,42 +5598,32 @@ def reconcile_agents(
                     }
                 )
         else:
+
+            def _record_backfill(
+                name: str, hsid: Optional[str], applied: set, raced: str
+            ) -> None:
+                if name in applied:
+                    backfilled.append(
+                        {
+                            "name": name,
+                            "provider": _vendor_for_name(name, hsid), "harness": _harness_for_name(name, hsid),
+                            "harness_session_id": hsid,
+                        }
+                    )
+                else:
+                    errors.append(
+                        {
+                            "name": name,
+                            "provider": _vendor_for_name(name, hsid), "harness": _harness_for_name(name, hsid),
+                            "id": None,
+                            "reason": raced,
+                        }
+                    )
+
             for name, (_probed_short, hsid) in pending_backfill.items():
-                if name in claude_backfill_applied:
-                    backfilled.append(
-                        {
-                            "name": name,
-                            "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
-                            "harness_session_id": hsid,
-                        }
-                    )
-                else:
-                    errors.append(
-                        {
-                            "name": name,
-                            "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
-                            "id": None,
-                            "reason": "claude-session-id-backfill-raced",
-                        }
-                    )
+                _record_backfill(name, hsid, claude_backfill_applied, "claude-session-id-backfill-raced")
             for name, (_epid, _estart, _mux, _pid, _start, hsid) in pending_codex_backfill.items():
-                if name in codex_backfill_applied:
-                    backfilled.append(
-                        {
-                            "name": name,
-                            "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
-                            "harness_session_id": hsid,
-                        }
-                    )
-                else:
-                    errors.append(
-                        {
-                            "name": name,
-                            "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
-                            "id": None,
-                            "reason": "codex-session-id-backfill-raced",
-                        }
-                    )
+                _record_backfill(name, hsid, codex_backfill_applied, "codex-session-id-backfill-raced")
             raced_updates = set(pending_updates) - status_updates_applied
             for change in list(orphaned):
                 if change["name"] in raced_updates:

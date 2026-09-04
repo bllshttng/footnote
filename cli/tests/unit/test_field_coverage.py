@@ -68,10 +68,12 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
     payload = json.loads(result.output)["source"]
     # v25 added the three spawn-stamped route-identity fields
     # (route_provider_id, model_name, account_record_id): 45 -> 48 declared,
-    # all accounted as storage_only in schemas/agents-list-row.json.
-    assert payload["declared_count"] == 51
+    # all accounted as storage_only in schemas/agents-list-row.json. v26
+    # added the served facts (liveness, liveness_measured_at, harness_title):
+    # 48 -> 54 declared, accounted as rust_only (the Rust row projects them).
+    assert payload["declared_count"] == 54
     assert payload["required_count"] == 41
-    assert payload["accounted_count"] == 51
+    assert payload["accounted_count"] == 54
     assert payload["known_gaps"] == {}
 
 
