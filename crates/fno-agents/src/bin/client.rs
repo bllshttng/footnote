@@ -133,6 +133,15 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::manifest_lookup::run_manifest_for_session(&args[1..]);
     }
 
+    // `review-summary` is the display-line author for a pre-push reviewed PR
+    // (node x-98ac): the /pr create worker runs it against the local ledger
+    // and appends its stdout to the body. Same `matches!` treatment as
+    // `claim`/`detect` so the routable-verb parity guard does not see it -
+    // it reads one file and prints, it is not an `fno agents` verb.
+    if matches!(verb, "review-summary") {
+        return fno_agents::review_summary::run_review_summary(&args[1..]);
+    }
+
     if matches!(verb, "codex-loaded-threads") {
         return fno_agents::codex_inject::run_loaded_thread_discovery().await;
     }
