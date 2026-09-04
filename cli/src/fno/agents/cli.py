@@ -1034,10 +1034,8 @@ def _resolve_spawn_merge_grant(message: str) -> dict:
             "recorded_at": recorded_at,
         }
     try:
-        from fno.config.grant import auto_merge_grant
-
-        s = load_settings()
-        granted = bool(s.auto_merge.enabled) and auto_merge_grant(s)
+        auto_merge = load_settings().auto_merge
+        granted = bool(auto_merge.enabled) and str(auto_merge.grant or "none") == "dispatch"
     except Exception:  # noqa: BLE001 - an unreadable config never grants
         granted = False
     return {
