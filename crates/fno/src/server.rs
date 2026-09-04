@@ -10861,18 +10861,35 @@ impl Core {
                 for pid in tree::leaves(&tab.root) {
                     // The registry entry hosting this pane, if any: a
                     // same-session mux match, else a watch-only row the attach
-                    // map reconciled onto this pane (x-0090). First match wins.
-                    let matched = self.agents.iter().position(|a| match &a.mux {
-                        Some((sess, pane)) => sess == &self.session_name && *pane == pid,
-                        None => {
-                            a.attach_id
-                                .as_deref()
-                                .and_then(|id| self.attached.get(id))
-                                .copied()
-                                == Some(pid)
-                                || self.worker_pane_for_agent(a) == Some(pid)
-                        }
-                    });
+                    // map reconciled onto this pane (x-0090). Pane ids recycle
+                    // across server restarts (pty.rs), so two rows can record
+                    // one (session, pane_id): first-match bound a LIVE worker
+                    // behind an exited row that recycled onto the id first
+                    // (observed live 2026-08-12 - an exited codex row at a
+                    // lower index won the bind, and the live claude worker
+                    // rendered in the watch-only appendix marked exited). The
+                    // bind prefers a non-exited row; the appendix below still
+                    // renders the loser. Two rows both live (or both exited)
+                    // on one id stay first-match: settling those needs a
+                    // generation token on the mux ref, a schema bump.
+                    let mux_match = |a: &RegistryAgent| matches!(&a.mux, Some((sess, pane)) if sess == &self.session_name && *pane == pid);
+                    let matched = self
+                        .agents
+                        .iter()
+                        .position(|a| mux_match(a) && !a.exited)
+                        .or_else(|| self.agents.iter().position(mux_match))
+                        .or_else(|| {
+                            self.agents.iter().position(|a| {
+                                a.mux.is_none()
+                                    && (a
+                                        .attach_id
+                                        .as_deref()
+                                        .and_then(|id| self.attached.get(id))
+                                        .copied()
+                                        == Some(pid)
+                                        || self.worker_pane_for_agent(a) == Some(pid))
+                            })
+                        });
                     // One lookup: liveness AND the bare-pane label read the same
                     // entry (a tree leaf reaped from `panes` is dying, so it
                     // forces `exited` - the fact-beats-report rule the old join
@@ -24689,6 +24706,54 @@ mod tests {
         let rows = core.agent_rows();
         let hits = rows.iter().filter(|r| r.name == "w").count();
         assert_eq!(hits, 1, "the merged agent renders exactly once");
+    }
+
+    #[test]
+    fn agent_rows_binds_a_live_row_over_an_exited_row_on_one_recycled_pane() {
+        // x-0345: pane ids recycle across server restarts (pty.rs), so two
+        // rows can record one (session, pane_id). Measured live 2026-08-12:
+        // an EXITED codex row at a lower index won the first-match bind, pane
+        // 26 rendered under its name, and the LIVE claude worker sat in the
+        // watch-only appendix marked exited. The bind prefers the non-exited
+        // row. Assert the BOUND name, never the absence of the loser.
+        let (mut core, _c, p1, _p2, _rx) = seen_test_core();
+        let mut stale = agent_in("test", p1, None, true);
+        stale.name = "exited-older".into();
+        let mut live = agent_in("test", p1, None, false);
+        live.name = "live-worker".into();
+        core.agents = vec![stale, live];
+        let rows = core.agent_rows();
+        let pane_row = rows
+            .iter()
+            .find(|r| r.pane_id == Some(p1))
+            .expect("the recycled pane renders a row");
+        assert_eq!(pane_row.name, "live-worker", "the LIVE row binds the pane");
+        // The loser still renders - paneless in the watch-only appendix.
+        let loser = rows
+            .iter()
+            .find(|r| r.name == "exited-older")
+            .expect("the exited row still renders");
+        assert!(loser.pane_id.is_none(), "the loser lost the pane");
+    }
+
+    #[test]
+    fn agent_rows_attach_rows_still_bind_when_no_mux_row_matches() {
+        // x-0090's attach-map reconciliation must survive the live-preference
+        // reordering: a paneless bg row whose attach map names this pane
+        // binds it when no mux row claims the id.
+        let (mut core, _c, p1, _p2, _rx) = seen_test_core();
+        core.attached.insert("attach-1".into(), p1);
+        core.agents = vec![bg_row("bg-mapped", "/tmp/seen", Some("attach-1"))];
+        let rows = core.agent_rows();
+        let mapped = rows
+            .iter()
+            .find(|r| r.name == "bg-mapped")
+            .expect("the mapped row renders");
+        assert_eq!(
+            mapped.pane_id,
+            Some(p1),
+            "the attach-map row still binds the pane"
+        );
     }
 
     #[test]
