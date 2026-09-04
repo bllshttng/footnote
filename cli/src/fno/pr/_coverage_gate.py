@@ -1163,18 +1163,24 @@ def attestation_chain(
                     if scoped:
                         if data.get("repo") != slug:
                             continue
-                    # Dedup on the producer's invocation_id, falling back to
-                    # the whole payload only when the row predates the field.
-                    # The payload key is wrong across stores: the global
-                    # mirror stamps `repo` onto its copy and the project row
-                    # carries none, so one attestation produced two payload
-                    # keys and the chain counted every mirrored round twice -
-                    # which the no-refund budget turns into "one review reads
-                    # 2/2". The invocation_id is minted once by the producer
-                    # and lands identically on both rows.
+                    # Dedup on the producer's invocation_id PLUS the head it
+                    # attested, falling back to the whole payload only when
+                    # the row predates the field. The payload key is wrong
+                    # across stores: the global mirror stamps `repo` onto its
+                    # copy and the project row carries none, so one
+                    # attestation produced two payload keys and the chain
+                    # counted every mirrored round twice - which the no-refund
+                    # budget turns into "one review reads 2/2". The
+                    # invocation_id is minted once by the producer and lands
+                    # identically on both rows. The head must ride the key
+                    # because one invocation legitimately attests again at a
+                    # NEW head (the emit-attestation recovery path after a
+                    # fix): keyed on the invocation alone, the chain kept the
+                    # FIRST row and swallowed every later pass and its
+                    # dispositions, so a fixed finding read as never resolved.
                     invocation_id = data.get("invocation_id")
                     if isinstance(invocation_id, str) and invocation_id:
-                        key = f"invocation:{invocation_id}"
+                        key = f"invocation:{invocation_id}@{data.get('head_sha', '')}"
                     else:
                         key = json.dumps(data, sort_keys=True)
                     if key in seen:

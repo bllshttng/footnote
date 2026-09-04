@@ -2152,6 +2152,86 @@ def test_attestation_chain_dedupes_the_global_mirror_on_invocation_id(
     assert _coverage_gate.rounds_since_last_pass(chain) == 1
 
 
+def test_attestation_chain_keeps_same_invocation_reattests_at_new_heads(
+    monkeypatch, tmp_path
+):
+    """One invocation, one recovery emit per fixed head, EVERY row kept.
+
+    The emit-attestation recovery path re-attests under the SAME invocation
+    after each fix lands (the hold mints the id once per request). Keyed on
+    the invocation alone, the chain kept the FIRST row - the fail - and
+    swallowed every later pass and its dispositions, so a fixed blocking
+    finding read as never resolved and the merge refused. The head rides the
+    key: mirrors of one row still collapse (same invocation, same head), a
+    re-attestation at a new head survives."""
+    from fno.pr import _reviews
+
+    head_a = "46695fffa00000000000000000000000000000000"
+    head_b = "46695fffb00000000000000000000000000000000"
+    finding = {
+        "finding_key": "cli/src/fno/agents/retask.py:189:correctness",
+        "category": "correctness",
+        "verdict": "CONFIRMED",
+    }
+    fail_row = {
+        "reviewer": "code-review",
+        "head_sha": head_a,
+        "verdict": "fail",
+        "session_id": "s-1",
+        "attester_session_id": "s-1",
+        "branch": "feature/x-1394",
+        "invocation_id": "ri-1",
+        "findings": [finding],
+    }
+    pass_row = {
+        **fail_row,
+        "head_sha": head_b,
+        "verdict": "pass",
+        "findings": [],
+        "dispositions": [
+            {
+                "finding_key": finding["finding_key"],
+                "disposition": "fixed",
+                "reason": "fixed in the head this row attests",
+            }
+        ],
+    }
+
+    def _row(ts, data):
+        return json.dumps(
+            {"ts": ts, "type": "review_attestation", "data": data}
+        ) + "\n"
+
+    project = tmp_path / "project-events.jsonl"
+    project.write_text(
+        _row("2026-09-04T16:26:11Z", fail_row)
+        + _row("2026-09-04T16:30:19Z", pass_row),
+        encoding="utf-8",
+    )
+    global_log = tmp_path / "global-events.jsonl"
+    global_log.write_text(
+        _row("2026-09-04T16:26:11Z", {**fail_row, "repo": "bllshttng/footnote"})
+        + _row("2026-09-04T16:30:19Z", {**pass_row, "repo": "bllshttng/footnote"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        _reviews,
+        "_coverage_logs",
+        lambda cwd, project_events: (project, global_log, "bllshttng/footnote"),
+    )
+    chain = _coverage_gate.attestation_chain(
+        str(tmp_path), head_branch="feature/x-1394", head=head_b
+    )
+    assert [(row["head_sha"], row["verdict"]) for row in chain] == [
+        (head_a, "fail"),
+        (head_b, "pass"),
+    ], "a same-invocation re-attestation at a new head must survive the mirror dedup"
+    refusal, _note, nonterminal, _hard = _coverage_gate.disposition_refusal(
+        chain, cov=None, cwd=str(tmp_path)
+    )
+    assert refusal == "", nonterminal
+
+
 def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):
     """The helper rides the shared _rest_pages reader (page-per-call arrays)
     and maps the three fields the counter reads; a failed read answers with
