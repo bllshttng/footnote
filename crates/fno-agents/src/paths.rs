@@ -394,6 +394,31 @@ pub fn worktree_space_dir(cwd: &Path) -> PathBuf {
     }
 }
 
+/// The project event journal on the space. Migrates the legacy
+/// `<checkout>/.fno/events.jsonl` once on first resolve so appenders never
+/// split the file across the two locations; one contract for every reader
+/// and `fno-agents state path events`.
+pub fn events_path(cwd: &Path) -> PathBuf {
+    let path = space_dir(cwd).join("events.jsonl");
+    migrate_from_checkout(
+        &worktree_repo_root(cwd).join(".fno").join("events.jsonl"),
+        &path,
+    );
+    path
+}
+
+/// The per-checkout cost ledger on the space, with the same legacy migration
+/// as [`events_path`]: a pre-space `<checkout>/.fno/ledger.json` moves on
+/// first read so budget caps stay enforceable across the move.
+pub fn ledger_path(cwd: &Path) -> PathBuf {
+    let path = worktree_space_dir(cwd).join("ledger.json");
+    migrate_from_checkout(
+        &worktree_repo_root(cwd).join(".fno").join("ledger.json"),
+        &path,
+    );
+    path
+}
+
 /// One-shot lazy migration of a legacy `<repo>/.fno/<rel>` file onto the
 /// space, mirroring Python `paths.migrate_from_checkout`. Moves `old` to
 /// `new` when `old` exists, is not a symlink, and `new` does not; leaves a

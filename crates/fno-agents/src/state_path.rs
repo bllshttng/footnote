@@ -7,17 +7,28 @@
 
 use std::path::PathBuf;
 
-use crate::paths::{migrate_from_checkout, space_dir, worktree_repo_root, worktree_space_dir};
+use crate::paths::{space_dir, worktree_repo_root, worktree_space_dir};
 
 /// Print the resolved space path for one named state file. Unknown names
 /// exit 2 with the known set, so a stale hook fails loud instead of writing
 /// through a guessed path.
 pub fn run(args: &[String]) -> i32 {
+    // `state path <name>` and `state <name>` both work; the spelled-out
+    // "path" matches how the hooks and docs say it.
+    let args = if args.first().map(|a| a.as_str() == "path").unwrap_or(false) {
+        &args[1..]
+    } else {
+        args
+    };
     let Some(name) = args.first() else {
         eprintln!("usage: fno-agents state path <target-state|run-log|events|plans|inbox|kings|scratchpad|status-sinks|worktree-log|codemap>");
         return 2;
     };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // Canonicalize so the slug matches what a caller passing the canonical
+    // path (e.g. loop-check's resolved --cwd) hashes: /var vs /private/var
+    // must never mint two spaces.
+    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
     let Some(path) = resolve(name, &cwd) else {
         eprintln!(
             "error: unknown state path {name} (known: codemap, events, inbox, kings, plans, run-log, scratchpad, status-sinks, target-state, worktree-log)"
@@ -49,12 +60,7 @@ fn resolve(name: &str, cwd: &std::path::Path) -> Option<PathBuf> {
             if let Some(v) = std::env::var_os("FNO_EVENTS_PATH").filter(|v| !v.is_empty()) {
                 return Some(PathBuf::from(v));
             }
-            let path = space.join("events.jsonl");
-            migrate_from_checkout(
-                &worktree_repo_root(cwd).join(".fno").join("events.jsonl"),
-                &path,
-            );
-            Some(path)
+            Some(crate::paths::events_path(cwd))
         }
         "plans" => Some(space.join("plans")),
         "inbox" => Some(space.join("inbox")),

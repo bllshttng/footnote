@@ -8568,7 +8568,7 @@ pub(crate) fn resolve_review_inputs(
 ) -> ReviewInputs {
     let project_events = events_path
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| crate::paths::space_dir(cwd).join("events.jsonl"));
+        .unwrap_or_else(|| crate::paths::events_path(cwd));
 
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let global_events = global_events_path
@@ -8898,7 +8898,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     let ledger_path = parsed
         .ledger_path
         .clone()
-        .unwrap_or_else(|| crate::paths::worktree_space_dir(&cwd).join("ledger.json"));
+        .unwrap_or_else(|| crate::paths::ledger_path(&cwd));
 
     // Now timestamp
     let now: DateTime<Utc> = if let Some(ref s) = parsed.now_override {
@@ -9035,7 +9035,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         // retired), so the union collapses to the two live journals.
         let mut journals = vec![project_events.clone(), global_events.clone()];
         if let Some(canon) = crate::paths::canonical_repo_root(&cwd) {
-            let canonical_journal = crate::paths::space_dir(&canon).join("events.jsonl");
+            let canonical_journal = crate::paths::events_path(&canon);
             if !journals.contains(&canonical_journal) {
                 journals.push(canonical_journal);
             }
@@ -13128,7 +13128,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let project_events = parsed
         .events_path
         .clone()
-        .unwrap_or_else(|| crate::paths::space_dir(&parsed.cwd).join("events.jsonl"));
+        .unwrap_or_else(|| crate::paths::events_path(&parsed.cwd));
     let global_events = parsed
         .global_events_path
         .clone()
@@ -13360,7 +13360,7 @@ fn observe_decision(args: &[String], output: &str) {
     };
     let project_events = parsed
         .events_path
-        .unwrap_or_else(|| crate::paths::space_dir(&parsed.cwd).join("events.jsonl"));
+        .unwrap_or_else(|| crate::paths::events_path(&parsed.cwd));
     let global_events = parsed.global_events_path.unwrap_or_else(|| {
         std::env::var("HOME")
             .map(PathBuf::from)

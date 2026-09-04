@@ -89,9 +89,12 @@ count_lines_matching() {
 
 # ── test setup ────────────────────────────────────────────────────────────────
 TMP_DIR="$(mktemp -d)"
+# Not a git repo, so nothing canonicalizes the cwd for the slug: pin the
+# physical path once or the seed and loop-check hash two different spaces.
+TMP_DIR="$(cd "$TMP_DIR" && pwd -P)"
 HOME_DIR="${TMP_DIR}/home"
 STUB_BIN="${TMP_DIR}/stubs"
-EVENTS_FILE="${TMP_DIR}/.fno/events.jsonl"
+EVENTS_FILE="$(cd "$TMP_DIR" && HOME="$HOME_DIR" "$REAL_BIN" state path events)"
 
 mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno" "$STUB_BIN"
 
