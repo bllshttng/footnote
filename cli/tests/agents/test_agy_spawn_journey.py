@@ -32,8 +32,15 @@ surface agy actually reads, and exactly what ``fno config setup`` does) and
 restores whatever was there before.
 
 RUN OF RECORD, 2026-09-03, agy 1.1.24 on a live Google AI Pro subscription,
-worktree debug builds: **GREEN, 213.4s** (evidence ``child_pid=72851
-keeper_pid=72849 session_id=71cc2d46-9c01-4fb4-8266-f7cf79fe227c``).
+worktree debug builds: **GREEN on the post-review arm, 30.8s** (evidence
+``child_pid=73588 keeper_pid=73587
+session_id=a77c7c9c-9033-49cc-b95f-d15f505ae755``), after the same green on the
+pre-review arm at 213.4s (evidence ``child_pid=72851 keeper_pid=72849
+session_id=71cc2d46-9c01-4fb4-8266-f7cf79fe227c``). Re-run because round 1
+changed the modal-answer path this journey exercises: an attestation from
+before a fix is an attestation for other code. The spread is agy's own latency,
+not the lane's - both runs made the same four assertions in the same order, and
+the evidence line prints only after the last one.
 
 Four things had to be built before it could pass, and each was a real gap the
 journey found rather than a test bug:
