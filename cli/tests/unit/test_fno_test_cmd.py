@@ -191,7 +191,8 @@ def test_rust_mode_runs_each_crate_quietly(tmp_path, monkeypatch, capsys):
 
     def fake_run(cmd, env=None, **kw):
         cmds.append(cmd)
-        assert env["RTK_DISABLED"] == "1"
+        if cmd[0] == "cargo":  # sensor calls (lanes reading) pass no env
+            assert env["RTK_DISABLED"] == "1"
         return _Proc()
 
     _fake_checkout_with_crates(tmp_path, monkeypatch)
@@ -224,7 +225,12 @@ def test_rust_mode_prefers_nextest(tmp_path, monkeypatch):
         test_cmd.shutil, "which", lambda name: "/x/cargo-nextest" if name == "cargo-nextest" else None
     )
     assert test_cmd._run_rust([]) == 0
-    assert cmds[0][:3] == ["cargo", "nextest", "run"]
+    # The lanes reading is real here (unpatched): on a cold per-process cache
+    # its registry/roster reads shell out before the cargo command, so assert
+    # the cargo command, not the first captured call.
+    cargo_cmds = [cmd for cmd in cmds if cmd[0] == "cargo"]
+    assert len(cargo_cmds) == 1
+    assert cargo_cmds[0][:3] == ["cargo", "nextest", "run"]
 
 
 def test_rust_mode_explicit_manifest_single_run(tmp_path, monkeypatch):
@@ -242,7 +248,9 @@ def test_rust_mode_explicit_manifest_single_run(tmp_path, monkeypatch):
     monkeypatch.setattr(test_cmd.shutil, "which", lambda name: None)
     rc = test_cmd._run_rust(["--manifest-path", "crates/alpha/Cargo.toml"])
     assert rc == 3  # real cargo exit code propagated
-    assert len(cmds) == 1  # user's manifest respected, no crate sweep
+    # Cargo only: the real lanes reading may shell out (env=None) first.
+    cargo_cmds = [cmd for cmd in cmds if cmd[0] == "cargo"]
+    assert len(cargo_cmds) == 1  # user's manifest respected, no crate sweep
 
 
 def test_pythonpath_pins_worktree_src(tmp_path, monkeypatch):
