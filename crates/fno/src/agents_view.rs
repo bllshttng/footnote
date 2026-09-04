@@ -153,6 +153,11 @@ pub struct RegistryAgent {
     /// can draw the two differently, per the repo's "assert a positive
     /// marker, never an absence" rule applied to the sideline.
     pub liveness: Liveness,
+    /// (x-1ab9) Age of the served liveness measurement in seconds, from the
+    /// row's `liveness_measured_at`. `None` = never measured (no served
+    /// pair): the render can say "probe older than N s" instead of a bare
+    /// unmeasured glyph.
+    pub liveness_age_s: Option<u64>,
 }
 
 /// See [`RegistryAgent::liveness`]. `Alive`/`Dead` are confident reads;
@@ -755,6 +760,31 @@ fn pid_confirmed_dead(pid: u64) -> bool {
     // check (mirrors `server.rs::pid_alive`, inverted for a POSITIVE read).
     let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
     rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+/// A SERVED liveness measurement younger than two sweep budgets
+/// (2 x 5s `RECONCILE_SWEEP_BUDGET`; mirrored because the crates share the
+/// FILE, not types) is trusted over the status-string ladder.
+const LIVENESS_MAX_AGE_SECS: u64 = 10;
+
+/// (x-1ab9 task 4.1) The served pair decides the row's liveness when the
+/// measurement is fresh; an absent/stale measurement or an unknown word
+/// answers `None` and the status/pid ladder takes over exactly as before.
+fn served_liveness(
+    liveness: Option<&str>,
+    measured_at: Option<u64>,
+    now_secs: u64,
+) -> Option<Liveness> {
+    let age = now_secs.checked_sub(measured_at?)?;
+    if age > LIVENESS_MAX_AGE_SECS {
+        return None;
+    }
+    match liveness? {
+        "alive" => Some(Liveness::Alive),
+        "dead" => Some(Liveness::Dead),
+        "unmeasured" => Some(Liveness::Unmeasured),
+        _ => None,
+    }
 }
 
 /// Derive [`Liveness`] for one row. `status` is the raw registry string;
@@ -1822,11 +1852,28 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
         let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let exited = matches!(status, "exited" | "permanent-dead" | "permanent_dead");
         let dnd = row.get("delivery_policy").and_then(|v| v.as_str()) == Some("bus-only");
-        let liveness = derive_liveness(
-            status,
-            row.get("pid").and_then(|v| v.as_u64()),
-            row.get("short_id").and_then(|v| v.as_str()).unwrap_or(""),
-        );
+        // (x-1ab9 task 4.1) SERVED liveness outranks the stored `status`
+        // string: the sweep is its only writer and a fresh measurement
+        // answers without trusting an init-time snapshot. Stale or absent,
+        // the status/pid ladder answers exactly as before (a daemon-less
+        // install still renders).
+        let measured_at = row
+            .get("liveness_measured_at")
+            .and_then(|v| v.as_str())
+            .and_then(rfc3339_like_to_secs);
+        let liveness = served_liveness(
+            row.get("liveness").and_then(|v| v.as_str()),
+            measured_at,
+            now_secs,
+        )
+        .unwrap_or_else(|| {
+            derive_liveness(
+                status,
+                row.get("pid").and_then(|v| v.as_u64()),
+                row.get("short_id").and_then(|v| v.as_str()).unwrap_or(""),
+            )
+        });
+        let liveness_age_s = measured_at.and_then(|t| now_secs.checked_sub(t));
         let mux = row.get("mux").and_then(|m| {
             Some((
                 m.get("session")?.as_str()?.to_string(),
@@ -2178,6 +2225,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             crown_scope,
             spawned_by_session,
             liveness,
+            liveness_age_s,
         });
     }
     // Stable order so row-set equality (the change gate) and the rendered
@@ -2283,6 +2331,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             crown_scope: None,
             spawned_by_session: None,
             liveness: Liveness::Alive,
+            liveness_age_s: None,
         });
     }
     drop(reg_ids); // release the borrow of `out` before extending it
@@ -2340,6 +2389,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             crown_scope: None,
             spawned_by_session: r.harness_session_id.clone(),
             liveness: Liveness::Alive,
+            liveness_age_s: None,
         });
     }
     out.extend(parked);
@@ -4474,6 +4524,7 @@ config_dir = "~/.claude-alt"
                 Liveness::Alive
             },
             harness: Some("claude".to_string()),
+            liveness_age_s: None,
         }
     }
 

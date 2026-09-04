@@ -1238,6 +1238,13 @@ pub struct AgentRow {
     /// an old client that cannot render the third state).
     #[serde(default)]
     pub unmeasured: bool,
+    /// (v67, x-1ab9) Age of the served liveness measurement in seconds
+    /// (`liveness_measured_at` on the registry row); `None` = never measured
+    /// by the sweep. Lets the render say "probe older than N s" instead of a
+    /// bare unmeasured glyph. `#[serde(default)]` keeps a v66 reader
+    /// wire-tolerant (defaults None, nothing renders).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness_age_s: Option<u64>,
     /// (v9, x-c929) The answerable-prompt payload when this row is `blocked` on
     /// a numbered menu a manifest `[rule.answer]` grammar could enumerate;
     /// `None` for any other state or a focus-only blocked prompt. A structural
@@ -4594,6 +4601,7 @@ mod tests {
                         exited: false,
                         dnd: false,
                         unmeasured: false,
+                        liveness_age_s: None,
                         answerable: Some(AnswerablePrompt {
                             prompt: "Do you want to proceed?".into(),
                             options: vec![
@@ -4646,6 +4654,7 @@ mod tests {
                         exited: true,
                         dnd: false,
                         unmeasured: false,
+                        liveness_age_s: None,
                         answerable: None,
                         attach_id: None,
                         external: false,

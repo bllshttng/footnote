@@ -7642,6 +7642,11 @@ where
                     "last_message_at": e.last_message_at,
                     "last_message_at_basis": null,
                     "last_reconciled_at": e.last_reconciled_at,
+                    // (x-1ab9) The SERVED liveness pair, written only by the
+                    // sweep: a reader trusts it while the stamp is young and
+                    // reads its age honestly when it is not.
+                    "liveness": e.liveness,
+                    "liveness_measured_at": e.liveness_measured_at,
                     "status": rendered_status,
                     // The reachability triple, from the same probe the rendered
                     // word above came from. `fno agents list` is where `peek` and
@@ -9070,6 +9075,12 @@ const RECONCILE_SWEEP_BUDGET: Duration = Duration::from_secs(5);
 struct ReconcileChange {
     name: String,
     new_status: Option<AgentStatus>,
+    /// (x-1ab9) The probe's liveness word, `alive|dead|unmeasured`, decided
+    /// where the evidence was gathered and written beside
+    /// `liveness_measured_at`. `None` = not measured this sweep (deferred or
+    /// no evidence): leave the previous measurement standing, its age honest
+    /// on the wire.
+    new_liveness: Option<&'static str>,
 }
 
 /// What a reconcile sweep did, for the `reconcile_done` event and tests.
@@ -9155,6 +9166,13 @@ where
             changes.push(ReconcileChange {
                 name: entry.name.clone(),
                 new_status,
+                // Hosted = the actor answers for it: alive. A rollout means
+                // resumable, not running; nothing on disk is gone. `None`
+                // (hosted) keeps the previous measurement standing.
+                new_liveness: match new_status {
+                    Some(AgentStatus::Exited) | Some(AgentStatus::Orphaned) => Some("dead"),
+                    _ => None,
+                },
             });
             continue;
         }
@@ -9213,10 +9231,23 @@ where
             changes.push(ReconcileChange {
                 name: entry.name.clone(),
                 new_status,
+                // The ask arm's evidence, not a guess: a bg-live roster hit
+                // with a silent ladder never positively answers, so it reads
+                // unmeasured, never dead; a finished ask is gone.
+                new_liveness: match new_status {
+                    Some(AgentStatus::Exited) => Some("dead"),
+                    Some(AgentStatus::Orphaned) => Some("unmeasured"),
+                    _ => None,
+                },
             });
             continue;
         }
-        let new_status = match probe(entry) {
+        // One probe, two verdicts: the status transition (below) and the
+        // SERVED liveness word (x-1ab9) both come from the same measurement,
+        // so the wire can never claim an age or a word the sweep did not
+        // itself just observe.
+        let measured = probe(entry);
+        let new_status = match &measured {
             Ok(true) => {
                 // Recovery needs BOTH signals. A store hit alone means "the
                 // session still exists" (= resumable), which for a store that
@@ -9314,6 +9345,11 @@ where
         changes.push(ReconcileChange {
             name: entry.name.clone(),
             new_status,
+            new_liveness: match measured {
+                Ok(true) => Some("alive"),
+                Ok(false) => Some("dead"),
+                Err(_) => Some("unmeasured"),
+            },
         });
     }
     (changes, out)
@@ -9332,8 +9368,20 @@ where
 /// The `Exited` transition also stamps `exited_at`: `last_reconciled_at` rotates
 /// on every probe, so it is a CHECKED stamp, not a transition stamp, and the only
 /// timestamp a reader can attribute to the exit itself is one written here.
-fn apply_reconcile_change(e: &mut RegistryEntry, new_status: Option<AgentStatus>, now: &str) {
+fn apply_reconcile_change(
+    e: &mut RegistryEntry,
+    new_status: Option<AgentStatus>,
+    new_liveness: Option<&str>,
+    now: &str,
+) {
     e.last_reconciled_at = Some(now.to_string());
+    if let Some(word) = new_liveness {
+        // The sweep is the ONLY writer of the served pair (x-1ab9): a probe
+        // answer is a fact about the moment it measured, so it carries its
+        // stamp with it.
+        e.liveness = Some(word.to_string());
+        e.liveness_measured_at = Some(now.to_string());
+    }
     if let Some(s) = new_status {
         e.status = s;
         if matches!(s, AgentStatus::Exited) {
@@ -9967,7 +10015,7 @@ fn apply_keeper_sweep_changes(
             superseded.push(change.name.clone());
             continue;
         }
-        apply_reconcile_change(entry, change.status, now);
+        apply_reconcile_change(entry, change.status, None, now);
         if let Some(pid) = change.child_pid {
             entry.keeper_child_pid = Some(pid);
         }
@@ -10223,7 +10271,6 @@ fn run_reconcile_sweep(
     let mut entries = registry.entries.clone();
     entries.sort_by(|a, b| a.last_reconciled_at.cmp(&b.last_reconciled_at));
 
-    let start = Instant::now();
     let probe = |e: &RegistryEntry| -> Result<bool, ReachabilityProbeError> {
         // Fast path: a reachable worker socket is authoritative, PID-reuse-immune
         // liveness for a PTY-managed agent — no provider probe (and no 250ms
@@ -10286,6 +10333,12 @@ fn run_reconcile_sweep(
     };
     let truth = batched_row_truths(&entries, &live_truth_tail_states);
     let prober = live_liveness_prober(truth);
+    // (x-1ab9) The sweep budget starts HERE, after the truth batch and the
+    // roster load: those reads serve every verb, and charging them to the
+    // probe loop's 5s window was why 79 rows went unprobed every sweep
+    // (24s wall, 0 probed). The probe loop and the roster-progress loop
+    // below share this one clock.
+    let start = Instant::now();
     let (changes, outcome) = plan_reconcile(
         &entries,
         probe,
@@ -10335,7 +10388,7 @@ fn run_reconcile_sweep(
                 None => r.find_mut(&ch.name),
             };
             if let Some(e) = target {
-                apply_reconcile_change(e, ch.new_status, &now);
+                apply_reconcile_change(e, ch.new_status, ch.new_liveness, &now);
             }
         }
     }) {
@@ -15911,6 +15964,64 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     }
 
     #[test]
+    fn reconcile_budget_starts_after_truth_batch() {
+        // (x-1ab9 task 4.1) The sweep's clock must start at plan_reconcile,
+        // NOT before batched_row_truths: the truth batch serves every verb
+        // and once ate the whole 5s budget (24s wall, 0 of 79 rows probed).
+        // The budget's position is structural, so pin it where the source
+        // cannot silently drift back: the clock line sits AFTER the truth
+        // batch and the roster load inside `run_reconcile_sweep`.
+        let src = include_str!("daemon.rs");
+        let sweep = src
+            .split("fn run_reconcile_sweep(")
+            .nth(1)
+            .expect("run_reconcile_sweep exists");
+        let clock = sweep
+            .find("let start = Instant::now();")
+            .expect("clock line");
+        let truth = sweep
+            .find("batched_row_truths(&entries")
+            .expect("truth batch call");
+        let roster = sweep
+            .find("ClaudeRoster::load_default()")
+            .expect("roster load");
+        assert!(
+            truth < clock && roster < clock,
+            "the sweep budget must start after the truth batch and roster load"
+        );
+    }
+
+    #[test]
+    fn sweep_serves_liveness_over_a_stale_status_ac7_edge() {
+        // A row whose stored status still reads `orphaned` (the t-x30c2-w1
+        // shape) but whose probe says reachable serves `alive` with a fresh
+        // stamp: the wire word comes from the measurement, never the status.
+        let entries = vec![rentry("t-x30c2-w1", AgentStatus::Orphaned, None)];
+        let (changes, _out) = plan_reconcile(
+            &entries,
+            |_| Ok(true),
+            || false,
+            |_| true,
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Unknown,
+            true,
+        );
+        let ch = changes.iter().find(|c| c.name == "t-x30c2-w1").unwrap();
+        assert_eq!(
+            ch.new_liveness,
+            Some("alive"),
+            "the probe word is what gets served"
+        );
+        assert_eq!(
+            ch.new_status,
+            Some(AgentStatus::Live),
+            "recovery still flips the stored status"
+        );
+    }
+
+    #[test]
     fn session_transition_apply_preserves_succession_and_splits_live_branch() {
         let mut registry = state::Registry::default();
         let mut predecessor = rentry("worker", AgentStatus::Live, None);
@@ -16744,7 +16855,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             received_at: "2026-06-27T00:00:00Z".into(),
             ttl_ms: None,
         });
-        apply_reconcile_change(&mut to_exited, Some(AgentStatus::Exited), "T1");
+        apply_reconcile_change(&mut to_exited, Some(AgentStatus::Exited), None, "T1");
         assert_eq!(to_exited.status, AgentStatus::Exited);
         assert_eq!(to_exited.pid, None, "exited row must drop its pid");
         assert_eq!(to_exited.pid_start_time, None);
@@ -16768,7 +16879,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             received_at: "2026-06-27T00:00:00Z".into(),
             ttl_ms: None,
         });
-        apply_reconcile_change(&mut to_orphaned, Some(AgentStatus::Orphaned), "T2");
+        apply_reconcile_change(&mut to_orphaned, Some(AgentStatus::Orphaned), None, "T2");
         assert_eq!(to_orphaned.status, AgentStatus::Orphaned);
         assert_eq!(
             to_orphaned.pid,
@@ -16787,7 +16898,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         // No status change: status held, but CHECKED still freshens (AC2-FR).
         let mut no_change = rentry("z", AgentStatus::Live, Some("OLD"));
         no_change.pid = Some(4242);
-        apply_reconcile_change(&mut no_change, None, "T3");
+        apply_reconcile_change(&mut no_change, None, None, "T3");
         assert_eq!(no_change.status, AgentStatus::Live);
         assert_eq!(no_change.pid, Some(4242));
         assert_eq!(no_change.last_reconciled_at.as_deref(), Some("T3"));
@@ -18654,7 +18765,12 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         // the re-decision and skips grace.
         let mut e = bg_claude_row("zombie", "zomb0001");
         e.exited_at = Some("2026-08-21T00:42:40Z".into());
-        apply_reconcile_change(&mut e, Some(AgentStatus::Orphaned), "2026-09-01T00:00:00Z");
+        apply_reconcile_change(
+            &mut e,
+            Some(AgentStatus::Orphaned),
+            None,
+            "2026-09-01T00:00:00Z",
+        );
         assert_eq!(e.status, AgentStatus::Orphaned);
         assert!(e.exited_at.is_none());
     }

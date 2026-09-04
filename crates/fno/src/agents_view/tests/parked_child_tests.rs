@@ -109,3 +109,47 @@ fn parked_id_already_owning_a_row_never_double_renders() {
         "the real branch row is the only render"
     );
 }
+
+// -- task 4.1 reader half: served liveness outranks the status string -------
+
+#[test]
+fn served_liveness_beats_a_stale_status_when_fresh() {
+    // A fresh `alive` measurement answers Alive even though the stored
+    // status still reads `orphaned` - the exact t-x30c2-w1 lie, read
+    // correctly on the render path.
+    let raw = r#"{"schema_version": 6, "agents": [{"name": "served", "cwd": "/w", "status": "orphaned", "liveness": "alive", "liveness_measured_at": "MEASURED_AT"}]}"#;
+    let (rows, _) = derive_rows_counted(&raw.replace("MEASURED_AT", &now_stamp(0)), NOW).unwrap();
+    assert_eq!(rows[0].liveness, Liveness::Alive);
+    assert_eq!(rows[0].liveness_age_s, Some(0));
+}
+
+#[test]
+fn stale_served_liveness_falls_back_to_the_status_ladder() {
+    // A measurement older than the freshness window is not trusted: the
+    // ladder answers (orphaned -> Unmeasured here), never a stale `alive`.
+    let raw = r#"{"schema_version": 6, "agents": [{"name": "served", "cwd": "/w", "status": "orphaned", "liveness": "alive", "liveness_measured_at": "MEASURED_AT"}]}"#;
+    let (rows, _) =
+        derive_rows_counted(&raw.replace("MEASURED_AT", &now_stamp(3600)), NOW).unwrap();
+    assert_eq!(rows[0].liveness, Liveness::Unmeasured);
+    // The age is still carried so the render can say "probe older than N s".
+    assert_eq!(rows[0].liveness_age_s, Some(3600));
+}
+
+#[test]
+fn served_dead_reads_dead() {
+    let raw = r#"{"schema_version": 6, "agents": [{"name": "served", "cwd": "/w", "status": "live", "liveness": "dead", "liveness_measured_at": "MEASURED_AT"}]}"#;
+    let (rows, _) = derive_rows_counted(&raw.replace("MEASURED_AT", &now_stamp(1)), NOW).unwrap();
+    assert_eq!(rows[0].liveness, Liveness::Dead);
+}
+
+/// An RFC3339-like stamp `age` seconds before NOW (1_800_000_000 =
+/// 2027-01-15T08:00:00Z), same fixed format the registry writes and
+/// `rfc3339_like_to_secs` parses. Explicit table: the parser is strict.
+fn now_stamp(age: u64) -> String {
+    match age {
+        0 => "2027-01-15T08:00:00Z".to_string(),
+        1 => "2027-01-15T07:59:59Z".to_string(),
+        3600 => "2027-01-15T07:00:00Z".to_string(),
+        _ => unreachable!("only these three ages are used"),
+    }
+}

@@ -238,10 +238,13 @@ impl Default for Registry {
 /// too - both stay valid forever), and predecessor ids (a succeeded session
 /// follows the row that answers as its successor, x-dfe7).
 fn entry_session_ids(e: &RegistryEntry) -> impl Iterator<Item = &str> {
-    [e.harness_session_id.as_deref(), e.related_session_id.as_deref()]
-        .into_iter()
-        .flatten()
-        .chain(e.predecessor_session_ids.iter().map(String::as_str))
+    [
+        e.harness_session_id.as_deref(),
+        e.related_session_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(e.predecessor_session_ids.iter().map(String::as_str))
 }
 
 /// True when `harness`/`session_id` is the row's PRIMARY KEY (law
@@ -262,7 +265,9 @@ impl Registry {
     /// alone: id shapes differ per harness (claude uuid4, codex uuid7 whose
     /// head-8 collides inside one minute, opencode case-sensitive `ses_`).
     pub fn find_by_session(&self, harness: &str, session_id: &str) -> Option<&RegistryEntry> {
-        self.entries.iter().find(|e| session_key_matches(e, harness, session_id))
+        self.entries
+            .iter()
+            .find(|e| session_key_matches(e, harness, session_id))
     }
 
     pub fn find_by_session_mut(
@@ -281,7 +286,10 @@ impl Registry {
     /// label). Two or more means the label has no honest row: callers that
     /// cannot resolve by identity must refuse, never take the first match.
     pub fn label_matches_count(&self, token: &str) -> usize {
-        self.entries.iter().filter(|e| label_matches(e, token)).count()
+        self.entries
+            .iter()
+            .filter(|e| label_matches(e, token))
+            .count()
     }
 
     /// Find by token: LABEL first (own name, then prior labels), then
@@ -299,7 +307,11 @@ impl Registry {
         self.entries
             .iter()
             .find(|e| label_matches(e, token))
-            .or_else(|| self.entries.iter().find(|e| session_handle_tier_any(e, token)))
+            .or_else(|| {
+                self.entries
+                    .iter()
+                    .find(|e| session_handle_tier_any(e, token))
+            })
     }
 
     pub fn find_mut(&mut self, token: &str) -> Option<&mut RegistryEntry> {
@@ -310,7 +322,11 @@ impl Registry {
             .entries
             .iter()
             .position(|e| label_matches(e, token))
-            .or_else(|| self.entries.iter().position(|e| session_handle_tier_any(e, token)))?;
+            .or_else(|| {
+                self.entries
+                    .iter()
+                    .position(|e| session_handle_tier_any(e, token))
+            })?;
         self.entries.get_mut(idx)
     }
 
@@ -623,6 +639,17 @@ pub struct RegistryEntry {
     /// Reasoning-effort arm used by the lane, when one was selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// (x-1ab9) SERVED harness liveness, one of `alive|dead|unmeasured`,
+    /// written ONLY by the reconcile sweep and always paired with
+    /// `liveness_measured_at`. It never replaces the stored `status` (the
+    /// pane/ask arms still settle that); it exists so no reader has to
+    /// believe a status field that is an init-time snapshot - a probe answer
+    /// older than two sweep budgets reads as stale, and the field's age is
+    /// on the wire beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness_measured_at: Option<String>,
     pub cwd: String,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` as
     /// `project_root: str = ""` (ab-b946b59c; see `short_id`): default on read,

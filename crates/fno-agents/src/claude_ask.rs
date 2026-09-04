@@ -3326,50 +3326,39 @@ fn followup(
             AskOutcome::ok_stdout(reply)
         }
         Err(AskError::Orphan { reason, .. }) => {
-            // Decide orphan-vs-routing-gap against the CURRENT row under the same
-            // registry lock that stamps it, so an inside-leg report that landed
-            // during a long ask is not missed (x-c393; codex P2). A recent report
-            // => routing gap (status untouched, `fno agents list` still shows the
-            // live worker); else stamp orphaned. Best-effort stamp: a write
-            // failure stays OBSERVABLE (stderr warning + agent_status_stamp_failed
-            // event) like Python's, not a silent swallow.
+            // (x-1ab9 task 4.1) The ask path NEVER writes status or liveness:
+            // a stored field must not outrank the sweep's live probe, and an
+            // undeliverable ask is a routing fact, not a death (the stamp this
+            // arm once wrote is the t-x30c2-w1 lie: `orphaned` on a session
+            // that exited 0). The provably-live check still reads the CURRENT
+            // row - an inside-leg report that landed during a long ask is not
+            // missed (x-c393; codex P2) - and decides only which failure the
+            // OPERATOR sees: routing-gap (live, unroutable) vs orphan.
             let now = now_epoch_secs();
             // x-2681: "roster-live-inject-failed" means the control.sock fallback
             // delivery failed on a session that IS live in the daemon roster --
-            // a routing gap, never a death, so it takes the same no-stamp branch
-            // as a recent inside-leg report (a roster-live session is never
-            // stamped orphaned).
+            // a routing gap, never a death.
             let routing_gap = matches!(
                 reason,
                 OrphanReason::RosterLiveInjectFailed | OrphanReason::TruthLiveInjectFailed
             );
-            let mut provably_live = false;
-            let mut stamp_warning = String::new();
-            if let Err(e) = update_registry(registry_path, |reg| {
-                if let Some(en) = find_keyed_mut(reg, &key, name) {
-                    if routing_gap || is_provably_live_report(en.inside_leg.as_ref(), now) {
-                        provably_live = true;
-                    } else {
-                        en.status = AgentStatus::Orphaned;
-                    }
-                }
-            }) {
-                stamp_warning = format!(
-                    "fno agents: warning: failed to mark {} as orphaned: {}\n",
-                    py_repr(name),
-                    e
-                );
-                emit_event(
-                    events,
-                    "agent_status_stamp_failed",
-                    &[
-                        ("name", name.into()),
-                        ("short_id", short_id.clone().into()),
-                        ("target_status", "orphaned".into()),
-                        ("error", e.to_string().into()),
-                    ],
-                );
-            }
+            let current = load_registry(registry_path).ok().and_then(|entries| {
+                entries
+                    .entries
+                    .iter()
+                    .find(|en| match key.1.as_deref() {
+                        Some(sid) => {
+                            en.harness_name() == key.0
+                                && en.harness_session_id.as_deref() == Some(sid)
+                        }
+                        None => en.name == name,
+                    })
+                    .cloned()
+            });
+            let provably_live = routing_gap
+                || current
+                    .as_ref()
+                    .is_some_and(|en| is_provably_live_report(en.inside_leg.as_ref(), now));
             if provably_live {
                 emit_event(
                     events,
@@ -3434,8 +3423,7 @@ fn followup(
             AskOutcome {
                 stdout: String::new(),
                 stderr: format!(
-                    "{}agent {} is not running (reason: {}{}){}\n",
-                    stamp_warning,
+                    "agent {} is not running (reason: {}{}){}\n",
                     py_repr(name),
                     reason.as_str(),
                     suspended,

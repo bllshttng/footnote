@@ -10939,6 +10939,7 @@ impl Core {
                                 exited,
                                 dnd: a.dnd,
                                 unmeasured,
+                                liveness_age_s: a.liveness_age_s,
                                 answerable: if exited { None } else { a.answerable.clone() },
                                 // A pane-hosted row focuses its pane; the attach
                                 // target never rides it (wire contract).
@@ -11009,6 +11010,7 @@ impl Core {
                                     || e.is_some_and(|entry| entry.refused_worker.is_some()),
                                 dnd: false,
                                 unmeasured: false,
+                                liveness_age_s: None,
                                 answerable: None,
                                 attach_id: None,
                                 external: false,
@@ -11102,6 +11104,7 @@ impl Core {
                         },
                         dnd: a.dnd,
                         unmeasured: false,
+                        liveness_age_s: None,
                         answerable: None,
                         attach_id: None,
                         external: a.external,
@@ -11157,7 +11160,8 @@ impl Core {
                         reason: if a.exited { None } else { a.reason.clone() },
                         exited: a.exited,
                         dnd: a.dnd,
-                        unmeasured: a.exited && a.liveness == agents_view::Liveness::Unmeasured,
+                        unmeasured: a.liveness == agents_view::Liveness::Unmeasured,
+                        liveness_age_s: a.liveness_age_s,
                         answerable: if a.exited { None } else { a.answerable.clone() },
                         attach_id: if a.exited { None } else { a.attach_id.clone() },
                         external: a.external,
@@ -11227,6 +11231,7 @@ impl Core {
                     exited: true,
                     dnd: false,
                     unmeasured: false,
+                    liveness_age_s: None,
                     answerable: None,
                     // Carried so the client can DismissMember; exited: true keeps
                     // it out of the attach catalog gate (attach_id + !exited).
@@ -11307,6 +11312,7 @@ impl Core {
                 exited,
                 dnd: false,
                 unmeasured: false,
+                liveness_age_s: None,
                 answerable: None,
                 // Carried on an exited row so the client can send RemoveExternal;
                 // on a live-ish row it is the StopExternal target. Either way the
@@ -18541,6 +18547,7 @@ mod tests {
             crown_level: None,
             crown_scope: None,
             liveness,
+            liveness_age_s: None,
             harness: None,
         };
         let mut core = empty_core();

@@ -1,4 +1,5 @@
 //! `fno-agents` substrate crate (Phase 6, ab-a09e1eaf).
+#![recursion_limit = "512"]
 //!
 //! This crate is the Rust substrate for PTY-managed agents (codex / gemini /
 //! future OpenCode). It is split per the design's Locked Decisions:
