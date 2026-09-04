@@ -188,6 +188,6 @@ The breadcrumb is here because it is the only thing a mute worker can still say.
 
 A worker whose sandbox denies the fno state root has lost the claim store, the mail bus and the spawn mutex in one move. It cannot report that, because reporting is the capability it lost. It reports into its own transcript, which nothing reads, and the fleet meanwhile sees a live row with progress advancing. Five workers died that way in one night. Two of them finished real work nobody heard about.
 
-The same sandbox that took the state root left the repo writable. So the refusal is written here, inside the one root the worker demonstrably has, and the operator reads it from outside the sandbox. Moving it into the space would move it behind the very grant that was denied. The write is best effort and never raises: a breadcrumb that cannot be written must not become a second failure stacked on the first.
+The same sandbox that took the state root left the repo writable. So the refusal is written here, inside the one root the worker demonstrably has, and the operator reads it from outside the sandbox. Moving it into the space puts it behind the very grant that was denied. The write is best effort and never raises: a breadcrumb that cannot be written must not become a second failure stacked on the first.
 
 It carries the denied absolute root, the harness session id, and a UTC timestamp. A successful claim write clears it, because a stale breadcrumb reads as a live problem forever.
