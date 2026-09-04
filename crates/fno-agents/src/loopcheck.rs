@@ -2922,6 +2922,7 @@ fn read_pr_info(
                 &[],
                 &events_text,
                 &[],
+                &[],
                 !(no_external && login_gate_active),
                 author_session,
                 &freshness,
@@ -3272,6 +3273,7 @@ fn read_pr_info(
             comments_arr,
             &events_text,
             &gh_logins,
+            required_bots,
             true,
             author_session,
             &freshness,
@@ -5732,7 +5734,7 @@ fn compute_review_info(
 /// The channel a review verdict came from. Two producers that share a name (the
 /// `chatgpt-codex-connector` App vs the local `codex` CLI) are distinguished by
 /// this axis, never by the reviewer string alone (x-9ae8, x-0eaf).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageProducer {
     /// A GitHub App bot that posts review objects via the reviews API. Can
@@ -5746,7 +5748,7 @@ pub enum CoverageProducer {
 
 /// One verdict for one reviewer over one producer axis (x-0eaf). `reviewed` here
 /// is derived from observed evidence, unlike the old boolean of the same name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageVerdict {
     /// Posted a review object, or a `pass` attestation, against a commit whose
@@ -5815,7 +5817,7 @@ impl Coverage {
 /// successor or a second agent in a shared worktree is a different session and
 /// is still not independent. A match is strong evidence of self-attestation; a
 /// mismatch is weak evidence of anything.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttestationOrigin {
     SelfAttested,
@@ -5830,7 +5832,7 @@ pub enum AttestationOrigin {
 /// the one a refusal must NAME rather than silently drop: a pre-branch-field
 /// attestation on a moved head is unscopeable, and a reader told only "0
 /// reviewed" cannot tell it from nobody-ever-reviewed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttestationScope {
     AttestedBranch,
@@ -5838,7 +5840,7 @@ pub enum AttestationScope {
 }
 
 /// One reviewer's classification, for the `review_coverage` event and receipts.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewerVerdict {
     pub producer: CoverageProducer,
     pub name: String,
@@ -5847,7 +5849,7 @@ pub struct ReviewerVerdict {
     /// EXCLUDED from the coverage count: whether it should count is the
     /// operator's call (lean: exclude; a solo self-approval is self-cert).
     /// One predicate flip in `CoverageReport::coverage_count` includes it.
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(skip_serializing_if = "is_false", default)]
     pub human_approval: bool,
     /// Whether this human approval's login is the PR author's (or the PR
     /// author could not be read, which asserts the same thing fail-closed).
@@ -5855,7 +5857,7 @@ pub struct ReviewerVerdict {
     /// lets a human approval count when `github_approval_satisfies` is on.
     /// GitHub refuses an author's own approval server-side; this field
     /// asserts the property the gate depends on rather than inferring it.
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(skip_serializing_if = "is_false", default)]
     pub author_approval: bool,
     /// Whether a local attestation was emitted by the authoring session
     /// (`SelfAttested`), a different one (`OtherSession`), or that is
@@ -5867,7 +5869,10 @@ pub struct ReviewerVerdict {
     /// human approvals carry `Unknown` (omitted on serialize) since a GitHub
     /// login has no session to compare. Defaults to `Unknown` so every
     /// pre-existing attestation lands there unchanged.
-    #[serde(skip_serializing_if = "is_attestation_origin_unknown")]
+    #[serde(
+        skip_serializing_if = "is_attestation_origin_unknown",
+        default = "default_attestation_origin"
+    )]
     pub attestation_origin: AttestationOrigin,
     /// The commit this reviewer actually read: a github_app review object's
     /// `.commit.oid`, or a local attestation's `data.head_sha`. Empty when
@@ -5878,7 +5883,7 @@ pub struct ReviewerVerdict {
     /// the head at EVAL time, so a bot verdict rendered twelve hours and two
     /// commits earlier serialized as coverage for a commit its author never
     /// saw.
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(skip_serializing_if = "String::is_empty", default)]
     pub reviewed_sha: String,
     /// Whether `reviewed_sha` still describes the code at HEAD. `None` on a
     /// verdict with no review behind it (`Absent`, `Refused`), where there is
@@ -5906,6 +5911,14 @@ pub struct ReviewerVerdict {
     /// marker satisfies rung 4 - `other_session` or unknown never does).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reviewer_context: Option<String>,
+    /// Whether a verdict from this reviewer was OWED: the login is in the
+    /// resolved required set, or the verdict is a local-attestation lane the
+    /// config floored. An optional GitHub App is honored if present and owed
+    /// nothing, so its refusal must not rename an uncovered row after it.
+    /// Absent on serialize when true, so every pre-field row reads REQUIRED and
+    /// keeps today's exact semantics.
+    #[serde(skip_serializing_if = "is_true", default = "default_true")]
+    pub required: bool,
 }
 
 /// The one counting rule for human GitHub approvals: a `reviewed` verdict
@@ -6023,7 +6036,7 @@ impl CoverageReport {
         if self
             .verdicts
             .iter()
-            .any(|verdict| verdict.verdict == CoverageVerdict::Refused)
+            .any(|verdict| verdict.verdict == CoverageVerdict::Refused && verdict.required)
         {
             return Some(ReviewState::ReviewerRefused);
         }
@@ -6041,6 +6054,18 @@ impl CoverageReport {
 
 fn is_false(b: &bool) -> bool {
     !b
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_attestation_origin() -> AttestationOrigin {
+    AttestationOrigin::Unknown
 }
 
 fn is_attestation_origin_unknown(o: &AttestationOrigin) -> bool {
@@ -6829,6 +6854,9 @@ fn local_refused_verdicts(events_text: &str, head_sha: &str) -> Vec<ReviewerVerd
             scope: None,
             refusal_reason,
             reviewer_context: None,
+            // A refusal row records an attempt that RAN and declined: real
+            // work with a real remedy, always owed its own name.
+            required: true,
         });
     }
     out
@@ -7059,6 +7087,9 @@ fn local_attestation_verdict(
             AttestationScope::AttestedBranch
         }),
         refusal_reason: None,
+        // The local lane is the config-floored reviewer (`self_review_required`);
+        // its verdict is always owed, whatever the required bot list says.
+        required: true,
     }
 }
 
@@ -7094,6 +7125,9 @@ pub fn classify_coverage(
         comments,
         events_text,
         github_app_logins,
+        // The bare spelling answers "owed" from the same list, so every
+        // pre-field unit test keeps its exact verdict set.
+        github_app_logins,
         github_read_ok,
         author_session,
         freshness,
@@ -7118,6 +7152,7 @@ pub fn classify_coverage_tiled(
     comments: &[Value],
     events_text: &str,
     github_app_logins: &[String],
+    required_logins: &[String],
     github_read_ok: bool,
     author_session: Option<&str>,
     freshness: &dyn Fn(&str) -> Freshness,
@@ -7232,6 +7267,7 @@ pub fn classify_coverage_tiled(
                 scope: None,
                 refusal_reason: None,
                 reviewer_context: None,
+                required: required_logins.iter().any(|l| login_matches_bot(login, l)),
             });
         }
         // (3) Known-App reviewers NOT in the configured list still count
@@ -7254,6 +7290,7 @@ pub fn classify_coverage_tiled(
                     scope: None,
                     refusal_reason: None,
                     reviewer_context: None,
+                    required: required_logins.iter().any(|l| login_matches_bot(author, l)),
                 });
             }
         }
@@ -7311,6 +7348,7 @@ pub fn classify_coverage_tiled(
                     scope: None,
                     refusal_reason: None,
                     reviewer_context: None,
+                    required: required_logins.iter().any(|l| login_matches_bot(author, l)),
                 });
             }
         }
@@ -7515,6 +7553,8 @@ pub fn classify_coverage_tiled(
                     }),
                     refusal_reason: None,
                     reviewer_context: lp.reviewer_context.clone(),
+                    // Local-attestation lane: always owed.
+                    required: true,
                 });
             }
         }
@@ -17790,6 +17830,7 @@ git_bounded();";
                     scope: None,
                     refusal_reason: None,
                     reviewer_context: None,
+                    required: true,
                 }],
             };
             pr
@@ -22145,6 +22186,175 @@ git_bounded();";
         let unknown_event = coverage_event_data(1, &unknown, "abc12345", "", None);
         assert_eq!(unknown_event["coverage"], "unknown");
         assert!(unknown_event.get("review_state").is_none());
+    }
+
+    // ── the `required` bit: an OWED refusal names the state, an optional one does not ──
+
+    fn github_verdict_with_required(
+        name: &str,
+        verdict: CoverageVerdict,
+        required: bool,
+    ) -> ReviewerVerdict {
+        ReviewerVerdict {
+            producer: CoverageProducer::GithubApp,
+            name: name.to_string(),
+            verdict,
+            human_approval: false,
+            author_approval: false,
+            attestation_origin: AttestationOrigin::Unknown,
+            reviewed_sha: String::new(),
+            freshness: None,
+            scope: None,
+            refusal_reason: None,
+            reviewer_context: None,
+            required,
+        }
+    }
+
+    #[test]
+    fn optional_app_refusal_does_not_name_the_review_state() {
+        // The defect this bit closes: an optional App's quota bounce renamed
+        // an uncovered PR `reviewer_refused`, and `awaiting_review_only` read
+        // that as a wait for a reviewer nobody was owed. The positive marker:
+        // the state is Unreviewed - the honest "nothing has reviewed this
+        // head" - which routes the worker to the runnable local remedy.
+        let rep = CoverageReport {
+            github_approval_satisfies: false,
+            coverage: Coverage::Covered(0),
+            verdicts: vec![github_verdict_with_required(
+                "chatgpt-codex-connector",
+                CoverageVerdict::Refused,
+                false,
+            )],
+        };
+        assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
+    }
+
+    #[test]
+    fn required_app_refusal_still_names_the_review_state() {
+        let rep = CoverageReport {
+            github_approval_satisfies: false,
+            coverage: Coverage::Covered(0),
+            verdicts: vec![github_verdict_with_required(
+                "chatgpt-codex-connector",
+                CoverageVerdict::Refused,
+                true,
+            )],
+        };
+        assert_eq!(rep.review_state(), Some(ReviewState::ReviewerRefused));
+        assert!(rep.refused_reviewers().contains(&"chatgpt-codex-connector"));
+    }
+
+    #[test]
+    fn local_attestation_refusal_is_always_owed() {
+        // A local refusal records an attempt that RAN and declined - real
+        // work with a real remedy - so it keeps naming itself. The wire form
+        // carries NO `required` key: true is omitted on serialize, which is
+        // byte-identical to what every pre-field row looked like.
+        let events = r#"{"type":"review_invocation","data":{"stage":"refused","head_sha":"abc12345","verb":"code-review","reason":"empty_diff"}}"#;
+        let rep = classify_coverage(
+            &[],
+            &[],
+            events,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "abc12345",
+        );
+        let verdict = rep.verdicts.first().expect("the refused verdict");
+        assert_eq!(verdict.verdict, CoverageVerdict::Refused);
+        assert!(verdict.required);
+        let wire = serde_json::to_value(verdict).unwrap();
+        assert!(wire.get("required").is_none(), "{wire}");
+        assert_eq!(rep.review_state(), Some(ReviewState::ReviewerRefused));
+    }
+
+    #[test]
+    fn a_row_with_no_required_key_reads_required() {
+        // The deserialization half of the default: a stored verdict emitted
+        // before the field existed carries no `required` key, and reading it
+        // back must keep today's semantics - the refusal was owed.
+        let stored = serde_json::json!({
+            "producer": "github_app",
+            "name": "chatgpt-codex-connector",
+            "verdict": "refused"
+        });
+        assert!(stored.get("required").is_none());
+        let verdict: ReviewerVerdict = serde_json::from_value(stored).unwrap();
+        assert!(verdict.required, "absence reads REQUIRED, never skipped");
+        let rep = CoverageReport {
+            github_approval_satisfies: false,
+            coverage: Coverage::Covered(0),
+            verdicts: vec![verdict],
+        };
+        assert_eq!(rep.review_state(), Some(ReviewState::ReviewerRefused));
+    }
+
+    #[test]
+    fn optional_only_refusal_is_not_awaiting_review() {
+        // The stop gate must not end the session DoneAwaitingReview over a
+        // refusal nobody was owed: on a repo with no required bots that
+        // terminal was trivially reachable, and the message told the worker
+        // to wait for a reviewer that will never come. The gate blocks, so
+        // the unattested local reviewer reads as the real work it is.
+        let mut pr = watch_pr();
+        pr.coverage = CoverageReport {
+            github_approval_satisfies: false,
+            coverage: Coverage::Covered(0),
+            verdicts: vec![github_verdict_with_required(
+                "chatgpt-codex-connector",
+                CoverageVerdict::Refused,
+                false,
+            )],
+        };
+        assert!(!awaiting_review_only(&pr));
+        // The same refusal OWED is still the terminal's case - the pre-change
+        // semantics, kept: a required bot declined and nothing else is unmet.
+        pr.coverage.verdicts[0].required = true;
+        assert!(awaiting_review_only(&pr));
+    }
+
+    #[test]
+    fn review_state_table_rows_match_between_both_legs() {
+        // One oracle, two readers (the optional_apps_default.json pattern):
+        // `CoverageReport::review_state` here and `_derive_review_state` in
+        // cli/src/fno/pr/_reviews.py both answer these rows, so a drift on
+        // either side fails its own test against the SAME file.
+        let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cli/tests/config/review_state_table.json");
+        let text = std::fs::read_to_string(&golden)
+            .unwrap_or_else(|e| panic!("read golden {}: {e}", golden.display()));
+        let table: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for row in table["rows"].as_array().expect("rows") {
+            let verdicts: Vec<ReviewerVerdict> = row["verdicts"]
+                .as_array()
+                .expect("verdicts")
+                .iter()
+                .map(|v| {
+                    serde_json::from_value(v.clone())
+                        .unwrap_or_else(|e| panic!("row {}: {e}", row["name"]))
+                })
+                .collect();
+            let rep = CoverageReport {
+                github_approval_satisfies: false,
+                coverage: Coverage::Covered(0),
+                verdicts,
+            };
+            let expected = match row["expected_state"].as_str().unwrap() {
+                "reviewed" => ReviewState::Reviewed,
+                "reviewer_refused" => ReviewState::ReviewerRefused,
+                "unreviewed" => ReviewState::Unreviewed,
+                other => panic!("unknown expected_state {other}"),
+            };
+            assert_eq!(
+                rep.review_state(),
+                Some(expected),
+                "row {} diverged",
+                row["name"].as_str().unwrap_or("?")
+            );
+        }
     }
 
     #[test]
