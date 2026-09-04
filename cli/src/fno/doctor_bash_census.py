@@ -1,5 +1,4 @@
-"""``fno doctor bash-census`` (x-997a): thin wrapper over `fno-agents
-bash-census`. The fold lives in Rust; this resolves the binary and forwards flags."""
+"""``fno doctor bash-census`` (x-997a): thin wrapper over `fno-agents bash-census` (the fold lives in Rust)."""
 from __future__ import annotations
 
 import subprocess
@@ -14,13 +13,10 @@ from fno.rust_binary import resolve_binary
 def bash_census_command(
     days: int = typer.Option(21, "--days", help="Window size in days (0 = every transcript)."),
     allow: bool = typer.Option(False, "--allow", help="Print Bash(fno <verb>:*) allow lines."),
-    json_output: bool = typer.Option(
-        False, "--json", "-J", help="Emit the report as one JSON object."
-    ),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit the report as one JSON object."),
     cwd: Optional[str] = typer.Option(None, "--cwd", help="Project to read. Default: cwd."),
 ) -> None:
-    """Bash-call compound/cd/heredoc shares and top command/verb tables.
-    Exit 3 when the window holds no Bash calls."""
+    """Bash-call compound/cd/heredoc shares and top command/verb tables. Exit 3 when empty."""
     binary = resolve_binary()
     if binary is None:
         typer.echo(

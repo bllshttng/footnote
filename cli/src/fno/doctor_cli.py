@@ -62,8 +62,7 @@ doctor_app.add_typer(evals_app, name="evals")
 doctor_app.add_typer(doctor_event_app, name="event")
 doctor_app.command("lint")(lint)
 doctor_app.command("footprint", hidden=True)(footprint_command)
-# `doctor bash-census` folds this project's Claude transcripts into a Bash-call
-# shape (x-997a); hidden per the new-verb convention, `fno help doctor --all`.
+# Bash-call shape over this project's transcripts (x-997a); hidden, `fno help doctor --all`.
 doctor_app.command("bash-census", hidden=True)(bash_census_command)
 # `doctor lanes` is the whole-machine lane advisor: one number and its
 # reasoning, or a refusal naming every dark sensor. Hidden per the new-verb

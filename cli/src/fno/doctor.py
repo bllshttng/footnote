@@ -1791,15 +1791,12 @@ def _preamble_budget_line(
 
 
 def _session_start_bytes_line(preamble_line: Optional[str]) -> Optional[str]:
-    """Advisory TOTAL session-start byte count (x-997a): A from
-    ``preamble_line``, the rest from `fno-agents session-start-bytes` (Rust
-    owns the file reads). Best-effort: any failure returns None."""
+    """Advisory TOTAL session-start byte count (x-997a), rest via `fno-agents session-start-bytes`. Best-effort: None on any failure."""
     match = re.match(r"preamble:\s*(\d+)\s*/", preamble_line or "")
     if not match:
         return None
     try:
         from fno import rust_binary
-
         binary = rust_binary.resolve_binary()
         if binary is None:
             return None
