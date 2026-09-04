@@ -54,8 +54,17 @@ _SEGMENT_TOKENS = frozenset(t for t in _HARNESS_TOKENS if t != "claude")
 # ancestor, end the session, and check whether that pid is still alive.
 #   codex:    MEASURED 2026-09-03. `codex app-server --remote-control` pid
 #             53566, up 9h20m, still answering for a session dead 5h, keeping a
-#             lease live 3h45m past its TTL.
-#   opencode: see below - this list only ever names what was measured.
+#             lease live 3h45m past its TTL. ON the list.
+#   opencode: MEASURED 2026-09-04, opencode 1.14.50. `opencode run` forked pid
+#             26245 whose exe IS the session, and the process table held zero
+#             opencode processes four seconds after it exited (the same probe
+#             printed two rows while it ran, which is the positive control that
+#             it can see them at all). Per-invocation, so OFF the list. Its
+#             `serve`/`attach` lane could share a host, but fno dispatches
+#             opencode one-shot and never through attach; measure again if that
+#             changes.
+# The other harnesses are unmeasured and therefore off the list by default, per
+# the deny-list rule below.
 _SHARED_HOST_HARNESSES = frozenset({"codex"})
 
 

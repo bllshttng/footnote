@@ -1622,9 +1622,15 @@ fn resolve_identity_from(get: impl Fn(&str) -> Option<String>) -> (Option<String
 /// session, walk to its harness ancestor, end the session, and check whether
 /// that pid is still alive.
 ///
-///   codex: MEASURED 2026-09-03. `codex app-server --remote-control` pid 53566,
-///          up 9h20m, still answering for a session dead 5h, keeping a lease
-///          live 3h45m past its TTL.
+///   codex:    MEASURED 2026-09-03. `codex app-server --remote-control` pid
+///             53566, up 9h20m, still answering for a session dead 5h, keeping
+///             a lease live 3h45m past its TTL. ON the list.
+///   opencode: MEASURED 2026-09-04, opencode 1.14.50. `opencode run` forked pid
+///             26245 whose exe IS the session, and zero opencode processes
+///             remained four seconds after it exited. Per-invocation, so OFF
+///             the list.
+///
+/// Every other harness is unmeasured and therefore off the list by default.
 ///
 /// The Python twin is `_SHARED_HOST_HARNESSES` in
 /// `cli/src/fno/claims/session_pid.py`; the classifier parity harness holds the
