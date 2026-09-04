@@ -109,6 +109,7 @@
       "inside_leg",
       "keeper_child_pid",
       "launch_account",
+      "launch_account_source",
       "mcp_channel_id",
       "messaging_socket_path",
       "model_name",

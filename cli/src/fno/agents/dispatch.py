@@ -2299,12 +2299,9 @@ class SpawnResult:
     # fabricated negative (a fresh spawn whose transcript has no sample yet
     # says nothing).
     model_substituted: Optional[dict] = None
-    # x-04ce: the bg row's launch-account fact and WHO chose it, so the
-    # receipt can answer the question the row answers. `launch_account`
-    # mirrors the row's three-valued axis verbatim (an id, "default", or
-    # None on lanes that cannot know); `launch_account_source` is the shared
-    # provenance vocabulary ("caller" / "config") or None when there is no
-    # concrete account to attribute.
+    # x-04ce: the row's launch-account fact plus WHO chose it ("caller" /
+    # "config"), so the receipt answers the question the row answers. None
+    # source = no concrete account to attribute.
     launch_account: Optional[str] = None
     launch_account_source: Optional[str] = None
 
@@ -3025,9 +3022,8 @@ def dispatch_spawn(
                     None,
                 )
                 row_launch_account = getattr(account_source, "launch_account", None)
-                # A revive inherits the source row's account, so it inherits
-                # the source row's provenance too; rows written before the
-                # column exist have none, and None is honest there.
+                # A revive inherits the source row's provenance too; rows
+                # written before the column exist, and None is honest there.
                 row_launch_account_source = getattr(
                     account_source, "launch_account_source", None
                 )

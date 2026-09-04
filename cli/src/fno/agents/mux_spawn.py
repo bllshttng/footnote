@@ -152,11 +152,9 @@ class MuxSpawnResult:
     # `painted` / `blank` / `unreadable`; None when no seed was requested.
     pane_observation: Optional[str] = None
     fno_id: Optional[str] = None
-    # The row's launch-account fact and WHO chose it ("caller" / "config"),
-    # so the receipt answers the question the row answers. Both None on
-    # non-claude rows and rows that positively pinned no account (the row
-    # already says "default"); `launch_account` carries the concrete id or
-    # the "default" sentinel exactly as the row records it.
+    # The row's launch-account fact plus WHO chose it ("caller" / "config").
+    # `launch_account` carries the concrete id or the "default" sentinel
+    # exactly as the row records it; source is None when nothing to attribute.
     launch_account: Optional[str] = None
     launch_account_source: Optional[str] = None
 
@@ -3714,10 +3712,8 @@ def dispatch_spawn_pane(
     # Same helper, same rules (explicit account wins, routed spawns are skipped).
     # x-d285: the picked OVERLAY (not just its env) so the row can stamp the
     # account id it picked; an explicit launch_account from the caller wins.
-    # x-04ce: the id alone answers WHICH account, never WHO chose it - a
-    # config injection printed identically to a caller decision. The source
-    # rides the row (`launch_account_source`) and the receipt
-    # (`account_source`) in the shared vocabulary from spawn_flag_owners.
+    # x-04ce: the source rides the row and receipt - the id alone answers
+    # WHICH account, never WHO chose it.
     effective_launch_account = launch_account
     launch_account_source = (
         spawn_flag_owners.CALLER if launch_account is not None else None
