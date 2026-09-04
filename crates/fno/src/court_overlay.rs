@@ -154,10 +154,15 @@ impl Panel {
     /// reopen off the slow read. A stale reading is KEPT rather than
     /// dropped, so the panel can render it as stale while the refresh runs;
     /// dropping it here is what would put `unknown` on screen.
+    ///
+    /// `degraded` is NOT cleared here. Only a fold that actually succeeds
+    /// clears it. Clearing on open erases a failed refresh the moment the
+    /// operator looks away and back, and inside the TTL no new fold runs to
+    /// re-discover it, so the panel would quietly present a reading whose
+    /// last refresh failed as if nothing had gone wrong.
     pub fn open(&mut self) {
         self.open = true;
         self.gen = self.gen.wrapping_add(1);
-        self.degraded = false;
         if !self.fold_at.is_some_and(|t| t.elapsed() < CACHE_TTL) {
             self.want = true;
         }
@@ -594,6 +599,38 @@ mod tests {
             text.contains("load    unknown - load average unreadable"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_failed_refresh_survives_a_close_and_reopen() {
+        // Clearing `degraded` on open would erase the failure the moment the
+        // operator looks away and back, and inside the TTL no new fold runs
+        // to re-discover it.
+        let mut panel = opened(live());
+        panel.want = true;
+        let gen = panel.take_want().expect("wants a refresh");
+        assert!(panel.apply(gen, None));
+        panel.close();
+        panel.open();
+
+        assert!(panel.take_want().is_none(), "still inside the TTL");
+        assert!(
+            panel.lines().join("\n").contains("last refresh failed"),
+            "the reopen must not hide the failed refresh"
+        );
+    }
+
+    #[test]
+    fn a_successful_refresh_clears_the_failure_note() {
+        let mut panel = opened(live());
+        panel.want = true;
+        let gen = panel.take_want().expect("wants a refresh");
+        assert!(panel.apply(gen, None));
+        panel.want = true;
+        let gen = panel.take_want().expect("wants another");
+        assert!(panel.apply(gen, Some(live())));
+
+        assert!(!panel.lines().join("\n").contains("last refresh failed"));
     }
 
     #[test]

@@ -289,17 +289,18 @@ def _power_arm(sample: Optional[dict], reason: Optional[str]) -> ArmReading:
     )
 
 
-def _fleet_snapshot() -> tuple[Any, Optional[list], int]:
-    """One footprint reading, the live rows, and how long both took. The rows
-    come from the same reader the leak threshold uses: a second registry read
-    here would be two implementations of one question, free to disagree."""
+def _fleet_snapshot() -> tuple[Any, Optional[list], Optional[str], int]:
+    """One footprint reading, the live rows, why they are missing, and how long
+    both took. The rows come from the same reader the leak threshold uses: a
+    second registry read here would be two implementations of one question,
+    free to disagree."""
     from fno.doctor_footprint import cause_reading, live_registry_rows
 
     started = time.monotonic()
     reading, error = cause_reading()
-    rows, _rows_error = live_registry_rows()
+    rows, rows_error = live_registry_rows()
     read_ms = int((time.monotonic() - started) * 1000)
-    return (None if error is not None else reading), rows, read_ms
+    return (None if error is not None else reading), rows, rows_error, read_ms
 
 
 def _fleet_cost(reading: Any, rows: Optional[list]) -> tuple[float, float, int, str]:
@@ -314,7 +315,9 @@ def _fleet_cost(reading: Any, rows: Optional[list]) -> tuple[float, float, int, 
     return per_cpu, per_gb, count, "measured from the live roster's attributed footprint"
 
 
-def _census(reading: Any, rows: Optional[list], read_ms: int) -> dict:
+def _census(
+    reading: Any, rows: Optional[list], rows_error: Optional[str], read_ms: int
+) -> dict:
     """The court census: kings, workers, tests.
 
     Kings and workers are ROW counts, tests is a PROCESS count, and the two
@@ -326,6 +329,10 @@ def _census(reading: Any, rows: Optional[list], read_ms: int) -> dict:
         "tests": None if reading is None else reading.test_process_count,
         "roster_rows": None if rows is None else len(rows),
         "attribution_gap": None if reading is None else reading.attribution_gap,
+        # An unread count NAMES why, the same rule every arm follows. Without
+        # it the panel prints "unknown rows" and the reader cannot tell an
+        # unreadable registry from an incomplete one.
+        "roster_error": rows_error,
         "read_ms": read_ms,
     }
     try:
@@ -369,8 +376,8 @@ def read_lanes(
     # One fleet read serves both the census and the per-lane divisor, taken
     # BEFORE the refusal branch: a refused lane number is exactly when a
     # person most wants to see what the machine is holding.
-    footprint, rows, read_ms = _fleet_snapshot()
-    reading.census = _census(footprint, rows, read_ms)
+    footprint, rows, rows_error, read_ms = _fleet_snapshot()
+    reading.census = _census(footprint, rows, rows_error, read_ms)
 
     dark = [a for a in reading.arms if a.state == DARK]
     if cpu_arm.state == DARK or mem_arm.state == DARK:
@@ -434,6 +441,8 @@ def _census_lines(census: dict) -> list[str]:
             f"  court conflicts: {n['king_conflicts']} scope(s) held by more than "
             "one live crown - a bare king count hides this"
         )
+    if census.get("roster_error"):
+        lines.append(f"  roster: {n['roster_error']} - the counts above are unread")
     if census.get("attribution_gap"):
         lines.append(
             f"  attribution gap: {n['attribution_gap']} - the fleet CPU share is "

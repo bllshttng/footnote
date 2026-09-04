@@ -81,7 +81,7 @@ def _healthy_reading(monkeypatch, sample=None):
     monkeypatch.setattr(
         dl,
         "_fleet_snapshot",
-        lambda: (_footprint(), _rows(6), 421),
+        lambda: (_footprint(), _rows(6), None, 421),
     )
     monkeypatch.setattr(
         dl,
@@ -309,7 +309,7 @@ def test_ac2_edge_unreadable_registry_nulls_the_counts_and_keeps_the_seed(
     The counts are null and the cost falls back to the documented seed with
     its reason named."""
     _healthy_reading(monkeypatch)
-    monkeypatch.setattr(dl, "_fleet_snapshot", lambda: (_footprint(), None, 12))
+    monkeypatch.setattr(dl, "_fleet_snapshot", lambda: (_footprint(), None, "registry unreadable", 12))
     monkeypatch.setattr(dl, "_fleet_cost", _REAL_FLEET_COST)
 
     reading = dl.read_lanes()
@@ -319,7 +319,9 @@ def test_ac2_edge_unreadable_registry_nulls_the_counts_and_keeps_the_seed(
     assert census["kings"] is None
     assert census["workers"] is None
     assert reading.cost_source == "seed (no live roster rows to measure)"
-    assert "unknown" in dl.render(reading)
+    text = dl.render(reading)
+    assert "unknown" in text
+    assert "roster: registry unreadable - the counts above are unread" in text
 
 
 def test_the_census_renders_on_a_refusal_too(monkeypatch) -> None:
@@ -327,7 +329,7 @@ def test_the_census_renders_on_a_refusal_too(monkeypatch) -> None:
     _pin_load(monkeypatch)
     monkeypatch.setattr(dl, "read_macmon", lambda **k: (None, "macmon not on PATH"))
     monkeypatch.setattr(dl, "read_memory_pressure", lambda **k: (None, "unreadable"))
-    monkeypatch.setattr(dl, "_fleet_snapshot", lambda: (_footprint(), _rows(4), 30))
+    monkeypatch.setattr(dl, "_fleet_snapshot", lambda: (_footprint(), _rows(4), None, 30))
     monkeypatch.setattr(
         "fno.agents.court.gather_court",
         lambda rows=None: {"conflicts": [], "summary": {"total": 1}},
@@ -348,7 +350,7 @@ def test_the_attribution_gap_rides_its_own_line_never_the_counts(
     _healthy_reading(monkeypatch)
     gap = "11 pidless row(s) with no identity route (codex)"
     monkeypatch.setattr(
-        dl, "_fleet_snapshot", lambda: (_footprint(gap=gap), _rows(6), 40)
+        dl, "_fleet_snapshot", lambda: (_footprint(gap=gap), _rows(6), None, 40)
     )
 
     text = dl.render(dl.read_lanes())
