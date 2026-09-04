@@ -12159,9 +12159,14 @@ mod tests {
         let wt = root.join("leaf");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&repo).unwrap();
+        // GIT_CONFIG_* pinned: a concurrent test holding the board suite's
+        // HOME_LOCK can flip HOME mid-run, and inherited git config from a
+        // temp HOME makes git fail at random. /dev/null config is env-proof.
         let git = |args: &[&str], cwd: &std::path::Path| {
             std::process::Command::new("git")
                 .current_dir(cwd)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
                 .args(args)
                 .output()
                 .unwrap()
