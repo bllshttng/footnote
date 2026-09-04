@@ -2562,6 +2562,9 @@ class TestTickRecordsAndDeadline:
         )
         settings.autonomy = SimpleNamespace(enabled=True)
         monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+        # Prove the patch took. Every diagnosis so far ASSUMED the tick reads
+        # this object, and the CI trace says the gate saw something else.
+        assert prcli.load_settings() is settings
         monkeypatch.setattr(
             "fno.pr_watch._dispatch.tick", lambda **kw: TickResult(open_prs=0, acted=0)
         )
@@ -2603,7 +2606,12 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setattr(
             watchdog,
             "lane_armed",
-            lambda s: _stage(f"lane_armed(real)={real_lane_armed(s)} forced=True", True),
+            lambda s: _stage(
+                f"lane_armed(real)={real_lane_armed(s)} forced=True "
+                f"type={type(s).__name__} mine={s is settings} "
+                f"rec={type(getattr(s, 'recovery', None)).__name__}",
+                True,
+            ),
         )
         monkeypatch.setattr(
             uw,
