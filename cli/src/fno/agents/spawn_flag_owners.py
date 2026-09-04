@@ -45,7 +45,10 @@ One vocabulary, defined here, used statically and at runtime:
 
 The column records what the code verifiably does today; a row whose value
 can only ever be caller-or-default says so, and a new injection path lands
-together with its ``sources`` edit in the same diff.
+together with its ``sources`` edit in the same diff. The harness axis
+predates this vocabulary and keeps its own receipt wire values
+(``harness_source:`` explicit / harness-inferred / builtin-default); they
+map onto it as caller / env / default.
 """
 
 from __future__ import annotations
@@ -115,7 +118,9 @@ FLAG_OWNERS: dict[str, FlagOwner] = {
     "--yolo": FlagOwner(
         TRANSLATED,
         "dangerous-mode bypass; the emitted spelling differs per harness",
-        site="cli/src/fno/agents/mux_spawn.py:build_pane_argv",
+        site="cli/src/fno/agents/mux_spawn.py:build_pane_argv"
+        " + cli/src/fno/agents/dispatch.py:_claude_create_path"
+        " + cli/src/fno/agents/dispatch.py:dispatch_spawn",
     ),
     "--fresh": FlagOwner(FNO, "workdir-policy alias fno reads (canonical-root default)"),
     "--here": FlagOwner(FNO, "workdir policy: stay in the caller's cwd"),
