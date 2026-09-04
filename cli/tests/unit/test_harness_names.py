@@ -75,6 +75,45 @@ def test_install_adapters_are_not_harness_evidence():
     assert {"hermes", "openclaw"} <= set(KNOWN_HARNESSES)
 
 
+def test_thread_refusal_renders_from_the_roster_without_the_runtime():
+    """x-d145: the pane-only sentence reads the roster beside the accept list,
+    not the capability table. A rostered-but-unrowed name (hermes) gets it -
+    the pane lane execs whatever is on PATH, so a row is not what earns one -
+    and an unrecognized name gets no promise about a binary nobody looked for.
+
+    The subprocess is the positive marker for the boundary the builder's
+    caller depends on: `fno.graph.cli` renders this refusal at L1 core, so
+    reaching a capability row would be an L1 -> L5 edge. Importing only
+    fno.harness_names and rendering both branches must pull in no fno.agents.
+    """
+    from fno.harness_names import unknown_thread_harness_message
+
+    rostered = unknown_thread_harness_message("hermes")
+    assert "hermes launches on --substrate pane only." in rostered
+    typo = unknown_thread_harness_message("claud")
+    assert "--substrate pane only" not in typo
+    assert "accepted here: " in typo
+
+    repo_src = Path(__file__).resolve().parents[3] / "cli" / "src"
+    env = dict(os.environ, PYTHONPATH=str(repo_src))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from fno.harness_names import unknown_thread_harness_message as m; "
+            "m('gemini'); m('claud'); "
+            "print(sorted(k for k in sys.modules if k.startswith('fno.agents')) or 'NONE')",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "NONE" in result.stdout, (
+        f"the refusal builder dragged the runtime: {result.stdout.strip()}"
+    )
+
+
 def test_importing_dispatch_flags_does_not_drag_the_runtime():
     """x-cec8 defect: importing fno.dispatch_flags used to eagerly import
     fno.agents (via harness_identity -> harness_map). The name set now lives at

@@ -493,7 +493,7 @@ def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
     # sentence derives from the tuple here too, so neither seam can name a
     # harness the other has since admitted.
     raise DispatchAskError(
-        unknown_thread_harness_message(name, declared=True),
+        unknown_thread_harness_message(name),
         exit_code=2,
     )
 

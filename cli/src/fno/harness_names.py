@@ -84,21 +84,27 @@ SPAWN_HARNESSES: tuple[str, ...] = (
 )
 
 
-def unknown_thread_harness_message(name: str, *, declared: bool) -> str:
+def unknown_thread_harness_message(name: str) -> str:
     """The one refusal every thread-substrate seam raises.
 
-    Both halves derive from ``SPAWN_HARNESSES``: the accept list, and whether
-    a pane lane is offered instead. Two seams used to render the list from this
-    tuple and hardcode the pane-only sentence beside it, so the prose could
-    name a harness the tuple had since admitted - and did. ``declared`` keeps
-    that line honest: a rowed harness has a pane lane, a typo has no lane.
+    Both halves derive from the tuples in this module: the accept list from
+    ``SPAWN_HARNESSES``, the pane-only sentence from the roster beside it. Two
+    seams used to render the list from the tuple and hardcode that sentence,
+    so the prose could name a harness the tuple had since admitted - and did.
+
+    The roster, not the capability table, decides the pane line. The pane lane
+    hosts an UNDECLARED binary too (it execs whatever is on PATH), so a rowed
+    harness is not the set that has one; a rostered name is a harness fno
+    recognizes, and pane is the lane left once the accept list refuses it. An
+    unrecognized name gets no such promise, because nothing here knows whether
+    a binary by that name exists at all.
     """
     accepted = ", ".join(SPAWN_HARNESSES)
     lines = [
         f"unknown harness {name!r} on the thread substrate (--harness names "
         f"the CLI BINARY); accepted here: {accepted}.",
     ]
-    if declared:
+    if name in KNOWN_HARNESSES:
         lines.append(f"{name} launches on --substrate pane only.")
     lines.append("If you meant a model VENDOR, that is -P/--provider.")
     return "\n".join(lines)

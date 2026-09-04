@@ -5558,16 +5558,13 @@ def cmd_dispatch_lanes(
             harness = harness.strip()
             if not harness:
                 raise DispatchFlagError("--harness must not be empty")
-            from fno.agents.harness_map import is_declared
             from fno.harness_names import SPAWN_HARNESSES
             from fno.harness_names import unknown_thread_harness_message
 
             if harness not in SPAWN_HARNESSES:
-                # The builder the spawn seam raises. is_declared keeps the pane
-                # line honest for a typo as well as a declared harness.
-                raise DispatchFlagError(
-                    unknown_thread_harness_message(harness, declared=is_declared(harness))
-                )
+                # The builder the spawn seam raises, rendered from the tuples
+                # beside it - so this seam needs no capability-table read.
+                raise DispatchFlagError(unknown_thread_harness_message(harness))
         if provider is not None:
             provider = provider.strip()
             if not provider:
