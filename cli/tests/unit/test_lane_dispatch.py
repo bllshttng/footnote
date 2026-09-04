@@ -426,7 +426,10 @@ def test_dispatch_lanes_refuses_pane_only_harness_before_selection(monkeypatch):
 
     assert result.exit_code == 2
     assert "accepted here: claude, codex, opencode" in result.output
-    assert "agy and gemini launch on --substrate pane only" in result.output
+    # The pane sentence derives from SPAWN_HARNESSES now (x-d145), so it names
+    # the harness that was actually refused. agy is no longer that harness.
+    assert "gemini launches on --substrate pane only" in result.output
+    assert "agy" not in result.output
     assert called is False
 
 

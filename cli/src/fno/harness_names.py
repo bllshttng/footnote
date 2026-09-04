@@ -73,3 +73,24 @@ SPAWN_HARNESSES: tuple[str, ...] = (
     "pi",
     "grok",
 )
+
+
+def unknown_thread_harness_message(name: str, *, declared: bool) -> str:
+    """The one refusal every thread-substrate seam raises.
+
+    Both halves derive from ``SPAWN_HARNESSES``: the accept list, and whether
+    a pane lane is offered instead. Two seams used to render the accept list
+    from this tuple and then hardcode the same pane-only sentence beside it,
+    so the prose could name a harness the tuple had since admitted - and did
+    (agy, until x-d145). ``declared`` keeps the pane line honest: a harness
+    with a capability row always has a pane lane, a typo has no lane at all.
+    """
+    accepted = ", ".join(SPAWN_HARNESSES)
+    lines = [
+        f"unknown harness {name!r} on the thread substrate (--harness names "
+        f"the CLI BINARY); accepted here: {accepted}.",
+    ]
+    if declared:
+        lines.append(f"{name} launches on --substrate pane only.")
+    lines.append("If you meant a model VENDOR, that is -P/--provider.")
+    return "\n".join(lines)

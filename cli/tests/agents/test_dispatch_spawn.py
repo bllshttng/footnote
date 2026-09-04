@@ -517,41 +517,78 @@ def test_spawn_thread_refusal_names_axis_and_actual_accept_set(workdir) -> None:
     assert "agy" not in result.output
 
     # A DECLARED pane-only harness keeps the accept-set message (x-8f7f).
-    # pi joined SPAWN_HARNESSES in x-43bd, so the declared pane-only name
-    # asserted here is agy, the harness the message itself names.
+    # agy joined SPAWN_HARNESSES in x-d145, so the declared pane-only name
+    # asserted here is gemini: it carries a capability row (so it passes the
+    # undeclared arm above) and stays out of the tuple.
     declared = _make_runner().invoke(
         agents_app,
         [
-            "spawn", "--name", "fooagent2", "--harness", "agy",
+            "spawn", "--name", "fooagent2", "--harness", "gemini",
             "--substrate", "thread", "hello",
         ],
     )
     assert declared.exit_code == 2
     assert (
-        "unknown harness 'agy' on the thread substrate (--harness names the "
+        "unknown harness 'gemini' on the thread substrate (--harness names the "
         f"CLI BINARY); accepted here: {', '.join(SPAWN_HARNESSES)}."
     ) in declared.output
-    assert "agy and gemini launch on --substrate pane only." in declared.output
+    # The pane sentence derives from the tuple now, so it names the refused
+    # harness and can never contradict the accept list beside it.
+    assert "gemini launches on --substrate pane only." in declared.output
 
 
 def test_spawn_thread_refusal_renders_from_accept_set(monkeypatch) -> None:
     from fno.agents import dispatch
 
+    from fno import harness_names
+
     dispatch._check_spawn_harness("opencode")
+    # Patch the ONE tuple the message builder reads. dispatch's own import is a
+    # second binding of the same names, and patching it would prove nothing
+    # about where the rendered text comes from.
     monkeypatch.setattr(
-        dispatch, "SPAWN_HARNESSES", (*dispatch.SPAWN_HARNESSES, "future")
+        harness_names, "SPAWN_HARNESSES", (*harness_names.SPAWN_HARNESSES, "future")
     )
 
     with pytest.raises(dispatch.DispatchAskError) as caught:
         # A DECLARED harness outside SPAWN_HARNESSES renders the accept set;
         # an undeclared name takes the undeclared arm instead, so the set is
-        # asserted through a declared pane-only harness (agy; pi joined the
-        # set in x-43bd).
-        dispatch._check_spawn_harness("agy")
+        # asserted through a declared pane-only harness (gemini; pi joined the
+        # set in x-43bd and agy in x-d145).
+        dispatch._check_spawn_harness("gemini")
 
-    expected = ", ".join((*dispatch.SPAWN_HARNESSES,))
+    expected = ", ".join(harness_names.SPAWN_HARNESSES)
     assert f"accepted here: {expected}" in str(caught.value)
     assert expected.endswith("future"), "the monkeypatched name must be rendered"
+    # The pane sentence derives too: it names the refused harness, never a
+    # hardcoded roster that the tuple can outgrow.
+    assert "gemini launches on --substrate pane only." in str(caught.value)
+
+
+def test_thread_refusal_is_one_message_across_both_seams(monkeypatch) -> None:
+    """The spawn seam and the dispatch-lanes seam raise the SAME text.
+
+    Two files used to render the accept set from the tuple and then hardcode
+    the same pane-only sentence beside it, so one could name a harness the
+    other had since admitted - and did.
+    """
+    from typer.testing import CliRunner
+
+    from fno.agents import dispatch
+    from fno.backlog import advance
+    from fno.graph import cli as graph_cli
+
+    with pytest.raises(dispatch.DispatchAskError) as caught:
+        dispatch._check_spawn_harness("gemini")
+
+    monkeypatch.setattr(advance, "dispatch_lanes", lambda *a, **k: [])
+    lanes = CliRunner().invoke(
+        graph_cli.cli, ["dispatch-lanes", "--harness", "gemini", "--max", "1"]
+    )
+
+    assert lanes.exit_code == 2
+    for line in str(caught.value).splitlines():
+        assert line in lanes.output
 
 
 def test_spawn_pi_thread_passes_the_seam_and_headless_refuses_unmeasured() -> None:

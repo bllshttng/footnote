@@ -56,6 +56,7 @@ from fno.agents.context import EventContext, build_context
 from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
+from fno.harness_names import unknown_thread_harness_message
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.reachability import mux_ref_names_a_pane
 from fno.agents.registry import (
@@ -487,12 +488,11 @@ def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
             "If you meant a model VENDOR, that is -P/--provider.",
             exit_code=2,
         )
-    accepted = ", ".join(SPAWN_HARNESSES)
+    # One builder, shared with the `dispatch-lanes` seam (x-d145): the pane
+    # sentence derives from the tuple here too, so neither seam can name a
+    # harness the other has since admitted.
     raise DispatchAskError(
-        f"unknown harness {name!r} on the thread substrate (--harness names "
-        f"the CLI BINARY); accepted here: {accepted}.\n"
-        "agy and gemini launch on --substrate pane only.\n"
-        "If you meant a model VENDOR, that is -P/--provider.",
+        unknown_thread_harness_message(name, declared=True),
         exit_code=2,
     )
 

@@ -5558,15 +5558,22 @@ def cmd_dispatch_lanes(
             harness = harness.strip()
             if not harness:
                 raise DispatchFlagError("--harness must not be empty")
-            from fno.harness_names import SPAWN_HARNESSES
+            from fno.harness_names import (
+                SPAWN_HARNESSES,
+                unknown_thread_harness_message,
+            )
 
             if harness not in SPAWN_HARNESSES:
-                accepted = ", ".join(SPAWN_HARNESSES)
+                # The same builder the spawn seam raises (x-d145). Reading
+                # is_declared here is what makes the two agree for a typo as
+                # well as for a declared harness: a name with no capability
+                # row is offered no pane lane it does not have.
+                from fno.agents.harness_map import is_declared
+
                 raise DispatchFlagError(
-                    f"unknown harness {harness!r} on the thread substrate "
-                    f"(--harness names the CLI BINARY); accepted here: {accepted}.\n"
-                    "agy and gemini launch on --substrate pane only.\n"
-                    "If you meant a model VENDOR, that is -P/--provider."
+                    unknown_thread_harness_message(
+                        harness, declared=is_declared(harness)
+                    )
                 )
         if provider is not None:
             provider = provider.strip()
