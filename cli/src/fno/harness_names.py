@@ -67,15 +67,12 @@ KNOWN_HARNESSES: tuple[str, ...] = (
 # until its provider is configured (the operator's who-pays axis), so no
 # row and no SPAWN_HARNESSES seat can stand behind an unmeasured lane.
 #
-# agy joins the same keeper lane. It takes no id on the command line, so the
-# dispatch_spawn arm mints one from a print-mode turn whose JSON envelope
-# carries `conversation_id`, and every later process rejoins with
-# `--conversation <id>` - cursor-agent's callee-minted-read-back shape.
-# Measured 2026-09-03 on agy 1.1.24: the mint returned in 1.5s, the id named a
-# real db under ~/.gemini/antigravity-cli/conversations, and a fresh process
-# resumed that conversation INTERACTIVELY with its transcript restored. agy's
-# HEADLESS lane stays unmeasured and `_check_spawn_harness` refuses it by the
-# row's stance, not by absence from this tuple.
+# agy joins the same keeper lane, callee-minted like cursor-agent: it takes no
+# id on the command line, so the arm mints one from a print-mode turn's JSON
+# envelope and every later process rejoins with `--conversation <id>`.
+# Measured 2026-09-03 on agy 1.1.24 - the id named a real db under
+# ~/.gemini/antigravity-cli/conversations and a fresh process resumed it
+# INTERACTIVELY. agy's HEADLESS lane stays unmeasured.
 SPAWN_HARNESSES: tuple[str, ...] = (
     "claude",
     "codex",
@@ -91,11 +88,10 @@ def unknown_thread_harness_message(name: str, *, declared: bool) -> str:
     """The one refusal every thread-substrate seam raises.
 
     Both halves derive from ``SPAWN_HARNESSES``: the accept list, and whether
-    a pane lane is offered instead. Two seams used to render the accept list
-    from this tuple and then hardcode the same pane-only sentence beside it,
-    so the prose could name a harness the tuple had since admitted - and did
-    (agy, until x-d145). ``declared`` keeps the pane line honest: a harness
-    with a capability row always has a pane lane, a typo has no lane at all.
+    a pane lane is offered instead. Two seams used to render the list from this
+    tuple and hardcode the pane-only sentence beside it, so the prose could
+    name a harness the tuple had since admitted - and did. ``declared`` keeps
+    that line honest: a rowed harness has a pane lane, a typo has no lane.
     """
     accepted = ", ".join(SPAWN_HARNESSES)
     lines = [

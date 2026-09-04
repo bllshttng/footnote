@@ -1,16 +1,13 @@
 """Antigravity CLI (``agy``) conversation-id adapter.
 
-agy takes no conversation id on the command line: ``--conversation`` resumes
-one and nothing creates one. So the id comes from the only surface that
-returns it, a print-mode turn whose JSON envelope carries ``conversation_id``.
-That makes agy a callee-minted-read-back harness like cursor-agent, minus the
-fd dance - ``agy -p`` prints and exits, where ``cursor-agent create-chat``
-stays alive and has to be killed.
+``--conversation`` resumes and nothing creates, so the id comes from the only
+surface that returns one: a print-mode turn whose JSON envelope carries
+``conversation_id``. Callee-minted-read-back like cursor-agent, minus the fd
+dance, because ``agy -p`` prints and exits where ``create-chat`` stays alive.
 
 Measured 2026-09-03 on agy 1.1.24: the mint returned in 1.5s, the id equalled
 the db filename under ``~/.gemini/antigravity-cli/conversations``, and a fresh
-process given ``agy --conversation <id>`` painted the TUI with that
-conversation's transcript restored.
+process given ``agy --conversation <id>`` restored that transcript.
 """
 from __future__ import annotations
 
@@ -22,9 +19,9 @@ from pathlib import Path
 from fno.agents.dispatch import DispatchAskError
 
 AGY_BINARY = "agy"
-# The mint is a real turn, so it needs a real prompt. A no-op instruction keeps
-# the conversation's first message harmless: the seed the spawn actually cares
-# about arrives at the composer once the keeper has the TUI up.
+# The mint is a real turn, so it needs a real prompt. A no-op one keeps the
+# conversation's first message harmless; the seed arrives at the composer once
+# the keeper has the TUI up.
 MINT_PROMPT = "Reply with exactly: OK"
 MINT_TIMEOUT_S = 120.0
 _UUID_RE = re.compile(
@@ -41,11 +38,9 @@ class AgySessionError(DispatchAskError):
 
 
 def require_conversation_id(conversation_id: str) -> str:
-    """Validate an id before any process launches on it.
-
-    A truncated or misspelled id is a DIFFERENT conversation to agy, never a
-    resume: it would start an empty one under a name fno believes is occupied.
-    """
+    """Validate an id before any process launches on it: a truncated one is a
+    DIFFERENT conversation to agy, never a resume, so it would open an empty
+    one under a name fno believes is occupied."""
     text = (conversation_id or "").strip()
     if not _UUID_RE.match(text):
         raise AgySessionError(
@@ -103,11 +98,9 @@ def create_conversation(cwd: Path | str, *, timeout_s: float = MINT_TIMEOUT_S) -
 
 
 def conversation_store_path(conversation_id: str) -> Path:
-    """Where agy keeps the conversation named by ``conversation_id``.
-
-    agy's own store, so a journey can assert the spawn's id against the
-    harness rather than against fno's registry row echoing itself back.
-    """
+    """Where agy keeps this conversation - its OWN store, so a journey can
+    assert the spawn's id against the harness rather than against fno's
+    registry row echoing itself back."""
     return (
         Path.home()
         / ".gemini"

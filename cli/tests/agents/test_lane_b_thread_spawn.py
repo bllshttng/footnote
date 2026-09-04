@@ -136,19 +136,20 @@ def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit(monkeypatch) -> N
 
 
 def test_lane_b_spawn_wiring_names_every_wired_keeper_harness() -> None:
-    """The public dispatch_spawn body reaches the keeper entry point through
-    the wired arms - cursor-agent (callee-minted), pi (caller-assigned,
-    x-43bd) and grok (caller-assigned, x-fd31) - and this keeps any wiring
-    from being dropped by accident. (pi's half inverts the pre-arm guard,
-    which asserted the public body did NOT reference the driver while the
-    arm was unbuilt.)
+    """The public dispatch_spawn body reaches the keeper entry point, and the
+    table it dispatches through carries every wired arm - cursor-agent
+    (callee-minted), pi and grok (caller-assigned) and agy (callee-minted) -
+    so no wiring is dropped by accident. Each row is asserted through the
+    field that makes it a real arm rather than a stub: the refusal an
+    operator reads when the lane has no one-shot form.
     """
+    from fno.agents.keeper_thread import KEEPER_ARMS
+
     source = inspect.getsource(dispatch_mod.dispatch_spawn)
-    assert "_lane_b_thread_spawn" in source
-    assert 'harness="cursor-agent"' in source
-    assert 'harness="pi"' in source
-    assert 'harness="grok"' in source
-    assert 'harness="agy"' in source
+    assert "keeper_thread_spawn" in source
+    assert set(KEEPER_ARMS) == {"cursor-agent", "pi", "grok", "agy"}
+    for harness, arm in KEEPER_ARMS.items():
+        assert arm.once_refusal, f"{harness} declares no one-shot refusal"
 
 
 # ---------------------------------------------------------------------------

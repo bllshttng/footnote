@@ -5558,22 +5558,15 @@ def cmd_dispatch_lanes(
             harness = harness.strip()
             if not harness:
                 raise DispatchFlagError("--harness must not be empty")
-            from fno.harness_names import (
-                SPAWN_HARNESSES,
-                unknown_thread_harness_message,
-            )
+            from fno.agents.harness_map import is_declared
+            from fno.harness_names import SPAWN_HARNESSES
+            from fno.harness_names import unknown_thread_harness_message
 
             if harness not in SPAWN_HARNESSES:
-                # The same builder the spawn seam raises (x-d145). Reading
-                # is_declared here is what makes the two agree for a typo as
-                # well as for a declared harness: a name with no capability
-                # row is offered no pane lane it does not have.
-                from fno.agents.harness_map import is_declared
-
+                # The builder the spawn seam raises. is_declared keeps the pane
+                # line honest for a typo as well as a declared harness.
                 raise DispatchFlagError(
-                    unknown_thread_harness_message(
-                        harness, declared=is_declared(harness)
-                    )
+                    unknown_thread_harness_message(harness, declared=is_declared(harness))
                 )
         if provider is not None:
             provider = provider.strip()

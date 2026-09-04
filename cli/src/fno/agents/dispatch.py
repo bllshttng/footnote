@@ -56,6 +56,7 @@ from fno.agents.context import EventContext, build_context
 from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
+from fno.agents.keeper_thread import complete_launch_argv, mint_session_id
 from fno.harness_names import unknown_thread_harness_message
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.reachability import mux_ref_names_a_pane
@@ -1177,52 +1178,12 @@ def _mint_thread_session_id(
 ) -> str:
     """The harness session id a keeper thread launches on, fixed BEFORE launch.
 
-    Two shapes, declared by the row's ``session_binding.strategy``:
-    caller-assigned (pi, the default) - fno mints a UUIDv4 and the harness
-    adopts it. ``callee-minted-read-back`` (cursor-agent) - only the harness
-    mints, so fno runs ``create-chat``, reads the one id line, and kills the
-    helper (it never exits on its own). Either way the id exists before any
-    worker starts and rides the registry row from birth. A caller-requested id
-    (``spawn --resume``) skips the mint and validates instead, because a
-    truncated or bare id is a picker or a rival chat, never a resume.
+    The per-harness shapes live in :func:`fno.agents.keeper_thread.
+    mint_session_id`; the caller-assigned default is here because a UUIDv4 is
+    not a harness fact.
     """
-    if requested is not None:
-        if harness == "cursor-agent":
-            from fno.agents.harnesses.cursor_agent import (
-                CursorAgentSessionError,
-                _require_chat_id,
-            )
-
-            try:
-                return _require_chat_id(requested)
-            except CursorAgentSessionError as exc:
-                raise DispatchAskError(str(exc), exit_code=2) from exc
-        if harness == "agy":
-            from fno.agents.harnesses.agy import require_conversation_id
-
-            return require_conversation_id(requested)
-        return requested
-    if harness == "cursor-agent":
-        from fno.agents.harnesses.cursor_agent import (
-            CursorAgentSessionError,
-            create_chat,
-        )
-
-        try:
-            return create_chat(cwd)
-        except CursorAgentSessionError as exc:
-            raise DispatchAskError(str(exc), exit_code=2) from exc
-    if harness == "agy":
-        # agy has no id-only mint verb, so the id comes from one print-mode
-        # turn's JSON envelope. The turn runs in the spawn's own cwd, which is
-        # why the trust upsert has to happen before this call and not at
-        # launch: an untrusted folder puts a modal in front of the mint too.
-        from fno.agents.harnesses.agy import create_conversation
-        from fno.agents.mux_spawn import _ensure_agy_folder_trusted
-
-        _ensure_agy_folder_trusted(Path(cwd))
-        return create_conversation(cwd)
-    return str(uuid.uuid4())
+    minted = mint_session_id(harness, cwd, requested)
+    return minted if minted is not None else str(uuid.uuid4())
 
 
 def _keeper_pid_start_time(pid: int) -> Optional[int]:
@@ -1326,101 +1287,16 @@ def _lane_b_thread_spawn(
                 f"argv: {exc}",
                 exit_code=2,
             ) from exc
-        if harness == "cursor-agent":
-            # The pane lane's build_pane_argv appends the same completion. The
-            # declared form already carries --trust (an untrusted cwd refuses
-            # with Workspace Trust Required and fno always spawns into a fresh
-            # worktree); what rides here is the rest of the launch axes: the
-            # bypass, the one model axis, and the state-root grant the row's
-            # argv-add-dir cell declares.
-            from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
-            from fno.agents.mux_spawn import permission_pane_tokens
-
-            if permission_mode:
-                argv = [*argv, *permission_pane_tokens("cursor-agent", permission_mode)]
-            elif yolo:
-                argv = [*argv, "--force"]
-            if model:
-                argv = [*argv, "--model", model]
-            argv = [
-                *argv,
-                *add_dir_tokens(
-                    "cursor-agent",
-                    add_dir,
-                    worker_writable_dirs(cwd),
-                    unsupported=lambda flag: (_ for _ in ()).throw(
-                        DispatchAskError(
-                            f"{flag} is not supported on the cursor-agent "
-                            "thread lane",
-                            exit_code=2,
-                        )
-                    ),
-                ),
-            ]
-        elif harness == "pi":
-            # Provider AND model, both, always: bare pi defaults to provider
-            # google (credentials_not_configured here) and `--provider
-            # openai-codex` without `--model` falls to a Bedrock model - the
-            # x-c198 trap. The pane lane's build_pane_argv has always appended
-            # this pair; the keeper hosts the same TUI and needs the same
-            # completion or the thread comes up unable to answer a prompt.
-            from fno.agents.harnesses.pi import pi_model, pi_provider
-
-            argv = [*argv, "--provider", pi_provider(), "--model", pi_model()]
-        elif harness == "grok":
-            # The axes the row's arms append on the pane lane: the bypass,
-            # the one model axis and the effort axis. The declared form
-            # carries only `--session-id`; the keeper hosts the same TUI the
-            # pane does, so the completion must match build_pane_argv's grok
-            # arm or the two lanes disagree about how the worker launches.
-            from fno.agents.mux_spawn import permission_pane_tokens
-
-            if permission_mode:
-                argv = [*argv, *permission_pane_tokens("grok", permission_mode)]
-            elif yolo:
-                argv = [*argv, "--always-approve"]
-            if model:
-                argv = [*argv, "--model", model]
-            if effort:
-                argv = [*argv, "--reasoning-effort", effort]
-        elif harness == "agy":
-            # The same axes build_pane_argv's agy arm appends. The keeper hosts
-            # the same TUI the pane does, so the two lanes must not disagree
-            # about how the worker launches. The bypass is load-bearing here:
-            # an unattended keeper has nobody to answer a tool approval.
-            from fno.agents.mux_spawn import (
-                _ensure_agy_folder_trusted,
-                effort_tokens,
-                permission_pane_tokens,
-            )
-            from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
-
-            argv = [*argv, "--dangerously-skip-permissions"]
-            if permission_mode:
-                argv = [*argv, *permission_pane_tokens("agy", permission_mode)]
-            if effort:
-                argv = [*argv, *effort_tokens("agy", effort)]
-            if model:
-                argv = [*argv, "--model", model]
-            argv = [
-                *argv,
-                *add_dir_tokens(
-                    "agy",
-                    add_dir,
-                    worker_writable_dirs(cwd),
-                    unsupported=lambda flag: (_ for _ in ()).throw(
-                        DispatchAskError(
-                            f"{flag} is not supported on the agy thread lane",
-                            exit_code=2,
-                        )
-                    ),
-                ),
-            ]
-            # A folder agy does not trust puts a modal in front of the composer,
-            # and the keeper has nobody to answer it. The mint already upserted
-            # this cwd; a caller-supplied resume id skips the mint, so the
-            # upsert has to happen on this path too.
-            _ensure_agy_folder_trusted(cwd)
+        argv = complete_launch_argv(
+            harness,
+            argv,
+            cwd=cwd,
+            model=model,
+            yolo=yolo,
+            permission_mode=permission_mode,
+            add_dir=add_dir,
+            effort=effort,
+        )
 
         sock = _lane_b_keeper_socket(name)
         log_path = paths.state_dir() / "agents" / name / "keeper.log"
@@ -3003,322 +2879,31 @@ def dispatch_spawn(
             effective_message=effective_message,
         )
 
-    # 3b-2. cursor-agent threads are keeper-hosted lane B (x-61bc's generic
-    # thread lane). The harness has no daemon and no bidirectional transport:
-    # the keeper holds the TUI's pty so the thread survives supervisor death,
-    # and the chat id is minted by `create-chat` (callee-minted-read-back)
-    # before the child launches. The pane stays the attended substrate; the
-    # thread lane is the dispatch one.
-    if harness == "cursor-agent":
-        if once or headless:
-            raise DispatchAskError(
-                "cursor-agent has no headless lane: --print is output-only "
-                "(no --input-format, no rpc), so there is no one-shot form. "
-                "Use the thread substrate for a persistent worker or "
-                "--substrate pane for an attended one.",
-                exit_code=2,
-            )
-        unsupported = next(
-            (
-                flag
-                for flag, value in (
-                    ("--role", launch_role),
-                    ("--agent", agent),
-                    ("--tools", tools),
-                    ("--deny-tools", deny_tools),
-                    ("--effort", effort),
-                )
-                if value
-            ),
-            None,
-        )
-        if unsupported is not None:
-            raise DispatchAskError(
-                f"{unsupported} is not supported on the cursor-agent thread "
-                "lane; drop it or use --substrate pane",
-                exit_code=2,
-            )
-        receipt = _lane_b_thread_spawn(
-            name=name,
-            harness="cursor-agent",
-            cwd=cwd,
-            model=model,
-            yolo=yolo,
-            permission_mode=permission_mode,
-            add_dir=add_dir,
-            resume_session_id=resume_session_id,
-            lock_timeout=lock_timeout,
-        )
-        session_id = receipt["session_id"]
-        if message.strip():
-            _keeper_seed_submit(
-                name=name,
-                session_id=session_id,
-                sock=Path(receipt["keeper_socket"]),
-                message=message,
-            )
-        _emit_ev(
-            "agent_ask_done",
-            stage="dispatch",
-            name=name,
-            provider="cursor-agent",
-            substrate="thread",
-        )
-        return SpawnResult(
-            kind="created",
-            name=name,
-            provider="cursor-agent",
-            short_id=session_id,
-            effective_message=effective_message,
-        )
+    # 3b-2. The keeper-lane thread spawns (cursor-agent, pi, grok, agy). Each
+    # is a row in `fno.agents.keeper_thread.KEEPER_ARMS`: what it refuses by
+    # name, whether it has a one-shot or a resume form, which axes ride the
+    # lane driver, and its own composer-idle paint. Four hand-written copies of
+    # one forty-line block is what that table replaced.
+    from fno.agents.keeper_thread import keeper_thread_spawn
 
-    # 3b-3. pi thread spawns are hosted by the keeper lane (x-43bd), the
-    # same lane the restart journey proved (wk-x61bc). pi's headless lane
-    # never reached this point: _check_spawn_harness refused the unmeasured
-    # stance above. The lane driver mints the caller-assigned session id and
-    # appends pi's provider/model pair itself, so every option that would
-    # ride another lane's argv is refused by name rather than silently
-    # dropped.
-    if harness == "pi" and not headless:
-        unsupported = next(
-            (
-                flag
-                for flag, value in (
-                    ("--model", model),
-                    ("--yolo", yolo),
-                    ("--role", launch_role),
-                    ("--add-dir", add_dir),
-                    ("--agent", agent),
-                    ("--tools", tools),
-                    ("--deny-tools", deny_tools),
-                    ("--effort", effort),
-                )
-                if value
-            ),
-            None,
-        )
-        if unsupported is not None:
-            raise DispatchAskError(
-                f"{unsupported} is not supported on the pi thread lane; "
-                "drop it or use --substrate pane",
-                exit_code=2,
-            )
-        if resume_session_id:
-            raise DispatchAskError(
-                f"--resume {resume_session_id} is not supported on the pi "
-                "thread lane yet; the keeper row resumes by name (fno agents "
-                "ask/resume <name>). Refusing rather than silently spawning "
-                "a fresh session.",
-                exit_code=2,
-            )
-        if once:
-            raise DispatchAskError(
-                "--once is not supported on the pi thread lane (it is "
-                "persistent); pi has no one-shot lane - its headless stance "
-                "is unmeasured",
-                exit_code=2,
-            )
-        receipt = _lane_b_thread_spawn(
-            name=name,
-            harness="pi",
-            cwd=cwd,
-            lock_timeout=lock_timeout,
-        )
-        session_id = receipt["session_id"]
-        if message.strip():
-            # The seed rides the same keeper paste the cursor lane uses: the
-            # pi status bar's subscription tag is the composer-ready marker,
-            # and the repaint of the submitted line is the landing proof.
-            _keeper_seed_submit(
-                name=name,
-                session_id=session_id,
-                sock=Path(receipt["keeper_socket"]),
-                message=message,
-                ready_marker=b"(sub)",
-            )
-        _emit_ev(
-            "agent_ask_done",
-            stage="dispatch",
-            name=name,
-            provider="pi",
-            substrate="thread",
-        )
-        return SpawnResult(
-            kind="created",
-            name=name,
-            provider="pi",
-            short_id=session_id,
-            effective_message=effective_message,
-        )
-
-    # 3b-4. grok thread spawns ride the same keeper lane (x-fd31). The
-    # measurement behind the row: `--session-id` adopts the caller-assigned
-    # uuid, `--resume` on a fresh process recalls a prior turn across a
-    # SIGKILL. Model, effort and the permission axis are carried; everything
-    # else the lane has no measured spelling for is refused by name, the
-    # pi branch's posture.
-    if harness == "grok" and not headless:
-        unsupported = next(
-            (
-                flag
-                for flag, value in (
-                    ("--role", launch_role),
-                    ("--agent", agent),
-                    ("--tools", tools),
-                    ("--deny-tools", deny_tools),
-                    ("--add-dir", add_dir),
-                )
-                if value
-            ),
-            None,
-        )
-        if unsupported is not None:
-            raise DispatchAskError(
-                f"{unsupported} is not supported on the grok thread lane; "
-                "drop it or use --substrate pane",
-                exit_code=2,
-            )
-        if once:
-            raise DispatchAskError(
-                "--once is not supported on the grok thread lane (it is "
-                "persistent); grok has no one-shot lane - its headless "
-                "stance is unmeasured",
-                exit_code=2,
-            )
-        if resume_session_id:
-            # `--session-id` on an id that already exists is a grok REFUSAL
-            # ("must not already exist"), never a resume; rendering the
-            # create form with a used id would fail the spawn with grok's
-            # flag error instead of fno's posture. Same stance as pi.
-            raise DispatchAskError(
-                f"--resume {resume_session_id} is not supported on the grok "
-                "thread lane yet; the keeper row resumes by name (fno agents "
-                "ask/resume <name>). Refusing rather than spawning a fresh "
-                "session.",
-                exit_code=2,
-            )
-        receipt = _lane_b_thread_spawn(
-            name=name,
-            harness="grok",
-            cwd=cwd,
-            model=model,
-            yolo=yolo,
-            permission_mode=permission_mode,
-            effort=effort,
-            lock_timeout=lock_timeout,
-        )
-        session_id = receipt["session_id"]
-        if message.strip():
-            # The seed rides the keeper paste; the status bar's mode hint is
-            # the composer-ready marker (the row's idle marker, measured
-            # 2026-09-02).
-            _keeper_seed_submit(
-                name=name,
-                session_id=session_id,
-                sock=Path(receipt["keeper_socket"]),
-                message=message,
-                ready_marker=b"Shift+Tab:mode",
-            )
-        _emit_ev(
-            "agent_ask_done",
-            stage="dispatch",
-            name=name,
-            provider="grok",
-            substrate="thread",
-        )
-        return SpawnResult(
-            kind="created",
-            name=name,
-            provider="grok",
-            short_id=session_id,
-            effective_message=effective_message,
-        )
-
-    # 3b-5. agy thread spawns ride the same keeper lane. agy mints its own
-    # conversation id and adopts none from the command line, so the lane
-    # driver reads one back from a print-mode turn before the TUI launches -
-    # cursor-agent's shape. Model, effort, add-dir and the permission axis are
-    # carried because the pane arm carries all four; everything else the lane
-    # has no measured spelling for is refused by name, the pi branch's posture.
-    if harness == "agy":
-        if headless:
-            # agy's state_root_grant records the WRITE-ACCESS mechanism per
-            # lane (--add-dir on all three), never whether a lane has been
-            # run, so joining SPAWN_HARNESSES passed agy through the seam's
-            # unmeasured-stance check for headless as well. Nothing has driven
-            # `agy -p` unattended, so the refusal is stated here rather than
-            # inherited from the thread lane that was measured.
-            raise DispatchAskError(
-                "agy's headless lane is unmeasured: `agy -p` prints and exits, "
-                "and nothing has run it as an fno worker. Use --substrate "
-                "thread for a persistent worker or --substrate pane for an "
-                "attended one.",
-                exit_code=2,
-            )
-        unsupported = next(
-            (
-                flag
-                for flag, value in (
-                    ("--role", launch_role),
-                    ("--agent", agent),
-                    ("--tools", tools),
-                    ("--deny-tools", deny_tools),
-                )
-                if value
-            ),
-            None,
-        )
-        if unsupported is not None:
-            raise DispatchAskError(
-                f"{unsupported} is not supported on the agy thread lane; "
-                "drop it or use --substrate pane",
-                exit_code=2,
-            )
-        if once:
-            raise DispatchAskError(
-                "--once is not supported on the agy thread lane (it is "
-                "persistent); agy's one-shot form is `agy -p`, whose lane is "
-                "unmeasured",
-                exit_code=2,
-            )
-        receipt = _lane_b_thread_spawn(
-            name=name,
-            harness="agy",
-            cwd=cwd,
-            model=model,
-            yolo=yolo,
-            permission_mode=permission_mode,
-            add_dir=add_dir,
-            effort=effort,
-            resume_session_id=resume_session_id,
-            lock_timeout=lock_timeout,
-        )
-        session_id = receipt["session_id"]
-        if message.strip():
-            # The seed rides the keeper paste; the hint bar's shortcut prompt
-            # is agy's composer-ready paint (measured 2026-09-03 on 1.1.24,
-            # after the restored transcript finishes painting).
-            _keeper_seed_submit(
-                name=name,
-                session_id=session_id,
-                sock=Path(receipt["keeper_socket"]),
-                message=message,
-                ready_marker=b"? for shortcuts",
-            )
-        _emit_ev(
-            "agent_ask_done",
-            stage="dispatch",
-            name=name,
-            provider="agy",
-            substrate="thread",
-        )
-        return SpawnResult(
-            kind="created",
-            name=name,
-            provider="agy",
-            short_id=session_id,
-            effective_message=effective_message,
-        )
+    keeper_result = keeper_thread_spawn(
+        harness=harness,
+        name=name,
+        message=message,
+        effective_message=effective_message,
+        cwd=cwd,
+        headless=headless,
+        once=once,
+        options={
+            "model": model, "yolo": yolo, "effort": effort, "add_dir": add_dir,
+            "launch_role": launch_role, "agent": agent, "tools": tools,
+            "deny_tools": deny_tools, "permission_mode": permission_mode,
+            "resume_session_id": resume_session_id,
+        },
+        lock_timeout=lock_timeout,
+    )
+    if keeper_result is not None:
+        return keeper_result
 
     registry_path = paths.agents_registry_path()
 
