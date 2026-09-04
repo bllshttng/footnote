@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import suppress
 from typing import Any, Callable, NamedTuple, Optional
 
 from pathlib import Path
@@ -160,6 +161,94 @@ def acquire_review_hold(
     except Exception as exc:  # noqa: BLE001 - see docstring
         sys.stderr.write(f"review-hold: could not register hold on {branch}: {exc}\n")
         return None
+
+
+# --- The review-cap invocation gate: the cap held at the merge decision only,
+# so rounds three through five ran against a saturated counter.
+VERIFY_FIXES_FLAG = "--verify-fixes"  # matches invocation.KNOWN_REVIEW_FLAGS
+
+
+def _code_patch_lines(cwd: str, base: str, sha: str) -> Optional[list[str]]:
+    """Content lines of the PR's code patch at ``sha``, or ``None``. Mirror
+    of ``code_patch_lines`` in review_freshness.rs; the two must measure alike
+    or the invocation and freshness gates answer one rebase differently."""
+    import subprocess
+
+    # Function-local: _merge imports this module (a cycle at module level).
+    from fno.pr._merge import _is_documentation_path
+
+    try:
+        out = subprocess.run(
+            ["git", "diff", "--no-color", "--no-ext-diff", "--no-renames", f"{base}...{sha}"],
+            cwd=cwd,
+            capture_output=True,
+            timeout=30,
+        )
+    except Exception:  # noqa: BLE001 - an unreadable patch must not gate
+        return None
+    if out.returncode != 0 or len(out.stdout) > 8 * 1024 * 1024:
+        return None
+    lines: list[str] = []
+    in_docs_section = False
+    for raw in out.stdout.decode("utf-8", errors="replace").splitlines():
+        if raw.startswith("diff --git a/"):
+            in_docs_section = _is_documentation_path(raw[13:].split(" b/")[0].strip('"'))
+            continue
+        if raw and not in_docs_section and not raw.startswith(("index ", "---", "+++", "@@")):
+            lines.append(raw.rstrip())
+    return lines
+
+
+def _interdiff_lines(cwd: str, base: str, old_sha: str, new_sha: str) -> Optional[int]:
+    """Multiset symmetric difference of the two patches against the base (review_freshness.rs mirror)."""
+    old_patch = _code_patch_lines(cwd, base, old_sha)
+    new_patch = _code_patch_lines(cwd, base, new_sha)
+    if old_patch is None or new_patch is None:
+        return None
+    counts: dict[str, int] = {}
+    for line in old_patch:
+        counts[line] = counts.get(line, 0) + 1
+    for line in new_patch:
+        counts[line] = counts.get(line, 0) - 1
+    return sum(abs(c) for c in counts.values())
+
+
+def review_invocation_refusal(
+    branch: str, head: str, flags: Optional[list[str]] = None, cwd: Optional[str] = None
+) -> str:
+    """Why a NEW hunting round may not start, or ``""`` when it may. Carveouts,
+    both the law's own: ``--verify-fixes`` is a scoped fix-verification (not a
+    round) and a rebase delta at or over ``review.carry_interdiff_lines``; an
+    unmeasurable interdiff fails open."""
+    from fno.pr._coverage_gate import attestation_chain, resolved_max_rounds, rounds_since_last_pass
+
+    where = cwd or os.getcwd()
+    chain = attestation_chain(where, head_branch=branch, head=head)
+    rounds_used = rounds_since_last_pass(chain)
+    max_rounds = resolved_max_rounds(where)
+    if rounds_used < max_rounds:
+        return ""
+    if flags and VERIFY_FIXES_FLAG in flags:
+        return ""
+    last_head = chain[-1].get("head_sha", "") if chain else ""
+    if last_head and head and last_head != head:
+        base = chain[-1].get("reviewed_base_sha", "")
+        if base:
+            carry = 100
+            with suppress(Exception):
+                from fno.config import load_settings
+
+                carry = int(getattr(load_settings().review, "carry_interdiff_lines", 100))
+            measured = _interdiff_lines(where, base, last_head, head)
+            if measured is None or measured >= carry:
+                return ""
+    return (
+        f"review refused: the two-round cap is spent for this head "
+        f"({rounds_used} of {max_rounds} rounds used); a new hunting round may "
+        "not start. The cap law's remedy: decline the remaining findings with "
+        "a recorded reason and merge, run a scoped fix-verification with "
+        f"{VERIFY_FIXES_FLAG}, or review a rebase delta over the interdiff budget."
+    )
 
 
 def release_review_hold(

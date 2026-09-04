@@ -26,6 +26,10 @@ requires:
 
 This is a **router**, not a monolith. It parses the first argument as a mode, announces the resolved mode, then loads that mode's reference and follows it in this same context. It never calls another skill at runtime (it dispatches review subagents via the Task/Agent tool and loads modes via Read).
 
+## Review-cap gate
+
+The two-round cap is enforced at the review invocation itself, not only at the merge decision: the hold hook denies a review whose PR's rounds are spent, and the denial text is the instruction - decline the remaining findings with a recorded reason and merge. Two shapes pass the gate, both the attestation law's own. `--verify-fixes` in the invocation flags declares a scoped fix-verification of named findings, which is not a round. And a rebase delta measuring at or over the interdiff budget reviews freely.
+
 ## Active skill freshness preflight
 
 Before resolving any argument, run the diagnostic against the active review instructions:
