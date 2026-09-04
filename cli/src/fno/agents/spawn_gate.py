@@ -268,6 +268,10 @@ class LoadSnapshot:
     load_cpu_count: int
     load_ceiling: float
     spawn_load_status: Literal["disabled", "unavailable", "within", "exceeded"]
+    # The 5m/15m averages ride along for the court panel: a climb and a spike
+    # look identical through the 1m figure alone. Nothing gates on them.
+    load_5m: float | None = None
+    load_15m: float | None = None
 
 
 def census() -> LiveCensus:
@@ -1231,7 +1235,7 @@ def _load_snapshot(max_load_per_cpu: float) -> LoadSnapshot:
             spawn_load_status="disabled",
         )
     try:
-        load1 = os.getloadavg()[0]
+        load1, load5, load15 = os.getloadavg()
     except (OSError, AttributeError):
         return LoadSnapshot(
             load_1m=None,
@@ -1246,6 +1250,8 @@ def _load_snapshot(max_load_per_cpu: float) -> LoadSnapshot:
         load_cpu_count=cpus,
         load_ceiling=ceiling,
         spawn_load_status="within" if load1 <= ceiling else "exceeded",
+        load_5m=load5,
+        load_15m=load15,
     )
 
 

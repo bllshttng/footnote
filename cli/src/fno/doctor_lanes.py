@@ -193,10 +193,20 @@ def _spawn_load_arm() -> ArmReading:
     status = getattr(snapshot, "spawn_load_status", "unavailable")
     if load is None or ceiling is None:
         return ArmReading("spawn load", DARK, reason="load snapshot unavailable")
+    load_5m = getattr(snapshot, "load_5m", None)
+    load_15m = getattr(snapshot, "load_15m", None)
     return ArmReading(
         "spawn load",
         MEASURED,
-        value={"load_1m": round(load, 1), "ceiling": round(ceiling, 1), "status": status},
+        value={
+            "load_1m": round(load, 1),
+            "load_5m": round(load_5m, 1) if load_5m is not None else None,
+            "load_15m": round(load_15m, 1) if load_15m is not None else None,
+            "ceiling": round(ceiling, 1),
+            "max_load_per_cpu": round(getattr(snapshot, "max_load_per_cpu", 0.0), 1),
+            "load_cpu_count": getattr(snapshot, "load_cpu_count", None),
+            "status": status,
+        },
         source="max_load_per_cpu x ncpu",
     )
 
@@ -328,11 +338,20 @@ def _census(
         "tests": None if reading is None else reading.test_process_count,
         "roster_rows": None if rows is None else len(rows),
         "attribution_gap": None if reading is None else reading.attribution_gap,
+        # Top fleet consumers by program name, aggregated from the ps read
+        # this census already sits on. The panel renders them in its expanded
+        # view; a dark footprint leaves them None rather than fabricating a
+        # list.
+        "top_consumers": None,
         # An unread count NAMES why, the rule every arm follows: without it
         # "unknown rows" cannot be told from an incomplete registry.
         "roster_error": rows_error,
         "read_ms": read_ms,
     }
+    if reading is not None:
+        from fno.footprint import top_consumers
+
+        census["top_consumers"] = top_consumers(reading.top)
     try:
         from fno.agents.court import gather_court
 
