@@ -453,6 +453,392 @@ fi
 rm -f "$OUT_A" "$OUT_B"
 rm -rf "$LOCKDIR" "$S" "$BARE"
 
+# 5h2. ABA, staged deterministically - no timing, no concurrency. The
+# reclaimer observes a stale lock (dead pid), and between that observation
+# and the reclaim step the lock is replaced by a peer's FRESH EMPTY claim
+# (the mkdir-landed, pid-not-yet-written window). The reclaimer must not eat
+# what it did not observe: the fresh claim survives and the reclaimer gives
+# up. A stub `cat` performs the swap inside the pid read, so the interleaving
+# is forced, not raced: this test failed against the blind rmdir on main,
+# failed against the mv-only reclaim, and passes against the steal that
+# compares the moved directory's pid stamp against the one it observed.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare2.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+# Physical path: macOS /var is a symlink to /private/var, and the script's
+# own git rev-parse resolves physical, so the stub's comparison must too.
+LOCKDIR="$(cd "$COMMON" && pwd -P)/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+( exec true ) & DEAD=$!; wait "$DEAD" 2>/dev/null   # pid now dead
+echo "$DEAD" > "$LOCKDIR/pid"
+STUBDIR=$(mktemp -d -t aba-stub.XXXXXX)
+SWAPDONE="$STUBDIR/swap-done"
+cat > "$STUBDIR/cat" <<EOF
+#!/usr/bin/env bash
+# One-time: the FIRST pid read answers the stale pid, and the swap happens
+# AFTER that read (reading first, then swapping, is the whole staging: the
+# reclaimer observes the stale lock and acts on a path that now holds a
+# peer's fresh empty claim). Every later read passes through, so the trap
+# and the retry loop see the real world.
+if [[ "\$1" == "$LOCKDIR/pid" && ! -e "$SWAPDONE" ]]; then
+    _out=\$(/bin/cat "\$@")
+    : > "$SWAPDONE"
+    rm -rf "$LOCKDIR"
+    mkdir "$LOCKDIR"
+    printf '%s' "\$_out"
+    exit 0
+fi
+exec /bin/cat "\$@"
+EOF
+chmod +x "$STUBDIR/cat"
+OUT_ABA=$(mktemp -t aba-a.XXXXXX)
+( cd "$S" && PATH="$STUBDIR:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_ABA" 2>&1 )
+if grep -q "^STATUS" "$OUT_ABA"; then
+    fail "ABA reclaim eats a fresh claim" "reclaimer proceeded over a lock it did not observe: [$(cat "$OUT_ABA")]"
+else
+    pass "ABA reclaim backs off a lock it did not observe"
+fi
+# Positive marker for the exhausted-retry path: without it, an early
+# "another sweep is already running" exit would pass the STATUS check above
+# without the steal/restore logic ever running.
+if grep -q "could not acquire sweep lock after retries" "$OUT_ABA"; then
+    pass "ABA reclaimer exhausted retries against the fresh claim"
+else
+    fail "ABA reclaimer left the retry path" "no exhausted-retries marker; the sweep exited some other way"
+fi
+if [[ -f "$SWAPDONE" ]]; then
+    pass "ABA swap instrument ran"
+else
+    fail "ABA swap instrument never ran" "the stub cat was never consulted; a green here would be vacuous"
+fi
+# The frozen pid-less claim is DEBRIS once the retry budget expires (a real
+# mid-acquire peer writes its pid in milliseconds), and the budget-expiry
+# reap must leave the next sweep a clean path: a wedge here is permanent.
+OUT_ABA_B=$(mktemp -t aba-b.XXXXXX)
+( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_ABA_B" 2>&1 )
+if grep -q "^STATUS" "$OUT_ABA_B"; then
+    pass "ABA debris does not wedge the next sweep"
+else
+    fail "ABA debris wedged the next sweep" "second sweep could not acquire: [$(cat "$OUT_ABA_B")]"
+fi
+rm -f "$OUT_ABA" "$OUT_ABA_B"
+rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE"
+
+# 5h3. The else arm: the path is re-taken before the restore, the moved copy
+# carries a LIVE stamp, and the reclaimer must LEAVE it (deleting a live
+# claim is the eat by another name). Staged with a stub `mv` that performs
+# the real steal and then plants a third party's claim on the path, and a
+# swap-in directory whose stamp names pid 1 (alive on every platform this
+# suite targets).
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare3.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$(cd "$COMMON" && pwd -P)/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+( exec true ) & DEAD=$!; wait "$DEAD" 2>/dev/null
+echo "$DEAD" > "$LOCKDIR/pid"
+STUBDIR=$(mktemp -d -t aba3-stub.XXXXXX)
+SWAPDONE="$STUBDIR/swap-done"
+MVDONE="$STUBDIR/mv-done"
+cat > "$STUBDIR/cat" <<EOF
+#!/usr/bin/env bash
+# One-time stale-pid answer, then the swap-in carries a LIVE stamp: this
+# test's own pid, same user, visible to kill -0. pid 1 would LIE here - as
+# root-owned launchd/systemd it answers EPERM to a user's kill -0 and reads
+# as dead.
+if [[ "\$1" == "$LOCKDIR/pid" && ! -e "$SWAPDONE" ]]; then
+    _out=\$(/bin/cat "\$@")
+    : > "$SWAPDONE"
+    rm -rf "$LOCKDIR"
+    mkdir "$LOCKDIR"
+    echo $$ > "$LOCKDIR/pid"
+    printf '%s' "\$_out"
+    exit 0
+fi
+exec /bin/cat "\$@"
+EOF
+cat > "$STUBDIR/mv" <<EOF
+#!/usr/bin/env bash
+# One-time: perform the real steal, then take the path with a third party's
+# claim so the restore finds the path occupied and the else arm is reached.
+if [[ "\$1" == "$LOCKDIR" && ! -e "$MVDONE" ]]; then
+    : > "$MVDONE"
+    /bin/mv "\$@"
+    mkdir "$LOCKDIR"
+    exit 0
+fi
+exec /bin/mv "\$@"
+EOF
+chmod +x "$STUBDIR/cat" "$STUBDIR/mv"
+OUT_ABA3=$(mktemp -t aba3.XXXXXX)
+( cd "$S" && PATH="$STUBDIR:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_ABA3" 2>&1 )
+if grep -q "^STATUS" "$OUT_ABA3"; then
+    fail "ABA3 live-claim copy eaten" "reclaimer proceeded over an unobserved live claim: [$(cat "$OUT_ABA3")]"
+else
+    pass "ABA3 reclaimer backs off a live-stamp claim"
+fi
+if ls "$LOCKDIR".stale.* >/dev/null 2>&1; then
+    pass "ABA3 live-stamp copy left in place"
+else
+    fail "ABA3 live-stamp copy deleted" "the else arm reaped a claim whose stamp names a live process"
+fi
+if [[ -f "$MVDONE" && -f "$SWAPDONE" ]]; then
+    pass "ABA3 instruments ran"
+else
+    fail "ABA3 instruments never ran" "the stubs were never consulted; a green here would be vacuous"
+fi
+rm -f "$OUT_ABA3"
+rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE" "$LOCKDIR".stale.* 2>/dev/null
+
+# 5h4. A holder whose verify read lies must recover its own claim, not back
+# off to itself. The stub `cat` answers the FIRST pid read - the holder's own
+# post-mkdir verify - with a foreign pid, once. The holder must loop, see
+# ITS OWN live pid on attempt two, reclaim its own directory via the self
+# arm, and acquire on attempt three. Without the self arm the sweep reads
+# its own pid as "another sweep is already running" and exits, stranding a
+# live-pid lock that only a later sweep can reclaim.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare4.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$(cd "$COMMON" && pwd -P)/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"
+STUBDIR=$(mktemp -d -t aba4-stub.XXXXXX)
+LIEDONE="$STUBDIR/lie-done"
+cat > "$STUBDIR/cat" <<EOF
+#!/usr/bin/env bash
+# The FIRST pid read is the holder's own verify (the path starts clear, so
+# no earlier read exists). Answer it with a foreign pid, once; every later
+# read passes through.
+if [[ "\$1" == "$LOCKDIR/pid" && ! -e "$LIEDONE" ]]; then
+    : > "$LIEDONE"
+    printf '999'
+    exit 0
+fi
+exec /bin/cat "\$@"
+EOF
+chmod +x "$STUBDIR/cat"
+OUT_ABA4=$(mktemp -t aba4.XXXXXX)
+( cd "$S" && PATH="$STUBDIR:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_ABA4" 2>&1 )
+if grep -q "^STATUS" "$OUT_ABA4"; then
+    pass "verify-loop holder recovers its own lost claim"
+else
+    fail "verify-loop holder backed off to itself" "[$(tail -1 "$OUT_ABA4")]"
+fi
+if [[ -f "$LIEDONE" ]]; then
+    pass "verify instrument ran"
+else
+    fail "verify instrument never ran" "the stub cat was never consulted; a green here would be vacuous"
+fi
+rm -f "$OUT_ABA4"
+rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE"
+
+# 5h5. A restore that lands NESTED inside a claim which took the path in
+# front of the mv must lift our copy back out, leaving the holder able to
+# rmdir its own directory later. Staged with a stub `mv` that passes the
+# steal through, then on the restore plants a third party's directory before
+# performing the real mv, which moves ours INSIDE theirs. The swap-in carries
+# this test's pid as its stamp, so the moved copy mismatches the observed
+# dead pid and the restore arm is the one that runs.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare5.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$(cd "$COMMON" && pwd -P)/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+( exec true ) & DEAD=$!; wait "$DEAD" 2>/dev/null
+echo "$DEAD" > "$LOCKDIR/pid"
+STUBDIR=$(mktemp -d -t aba5-stub.XXXXXX)
+SWAPDONE="$STUBDIR/swap-done"
+MVDONE="$STUBDIR/mv-done"
+cat > "$STUBDIR/cat" <<EOF
+#!/usr/bin/env bash
+# One-time stale-pid answer, then swap the lock for a claim whose stamp is
+# THIS test's pid: alive, and different from the observed dead pid, forcing
+# the mismatch that takes the restore arm.
+if [[ "\$1" == "$LOCKDIR/pid" && ! -e "$SWAPDONE" ]]; then
+    _out=\$(/bin/cat "\$@")
+    : > "$SWAPDONE"
+    rm -rf "$LOCKDIR"
+    mkdir "$LOCKDIR"
+    echo $$ > "$LOCKDIR/pid"
+    printf '%s' "\$_out"
+    exit 0
+fi
+exec /bin/cat "\$@"
+EOF
+cat > "$STUBDIR/mv" <<EOF
+#!/usr/bin/env bash
+# First call is the steal (pass it through). Second call is the restore:
+# plant a third party's claim on the path BEFORE the real mv, so the mv
+# nests our copy inside theirs.
+if [[ -n "\$2" && "\$2" == "$LOCKDIR" && -e "$SWAPDONE" && ! -e "$MVDONE" ]]; then
+    : > "$MVDONE"
+    mkdir "$LOCKDIR"
+    /bin/mv "\$@"
+    exit 0
+fi
+exec /bin/mv "\$@"
+EOF
+chmod +x "$STUBDIR/cat" "$STUBDIR/mv"
+OUT_ABA5=$(mktemp -t aba5.XXXXXX)
+( cd "$S" && PATH="$STUBDIR:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_ABA5" 2>&1 )
+if grep -q "^STATUS" "$OUT_ABA5"; then
+    fail "ABA5 reclaimer proceeded after a nested restore" "[$(cat "$OUT_ABA5")]"
+else
+    pass "ABA5 backs off after a nested restore"
+fi
+if ls "$LOCKDIR"/fno-wt-sweep.lock.stale.* >/dev/null 2>&1; then
+    fail "ABA5 nested copy never lifted" "our stale copy is still nested inside the holder's directory"
+else
+    pass "ABA5 nested copy lifted out of the holder's directory"
+fi
+if [[ -f "$MVDONE" && -f "$SWAPDONE" ]]; then
+    pass "ABA5 instruments ran"
+else
+    fail "ABA5 instruments never ran" "the stubs were never consulted; a green here would be vacuous"
+fi
+rm -f "$OUT_ABA5"
+rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE" "$LOCKDIR".stale.* 2>/dev/null
+
+# 5h6. The acquisition-time sibling sweep reaps stale-steal leftovers: a
+# sibling whose stamp is absent or dead goes, one whose stamp names a live
+# process stays. No stubs: two leftovers are planted by hand and a normal
+# sweep does the reaping.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare6.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$(cd "$COMMON" && pwd -P)/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"
+( exec true ) & DEAD=$!; wait "$DEAD" 2>/dev/null
+mkdir -p "$LOCKDIR.stale.999001"; echo "$DEAD" > "$LOCKDIR.stale.999001/pid"
+mkdir -p "$LOCKDIR.stale.999002"; echo "$$" > "$LOCKDIR.stale.999002/pid"
+OUT_ABA6=$(mktemp -t aba6.XXXXXX)
+( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_ABA6" 2>&1 )
+if grep -q "^STATUS" "$OUT_ABA6"; then
+    pass "sibling GC sweep acquired normally"
+else
+    fail "sibling GC sweep never acquired" "[$(tail -1 "$OUT_ABA6")]"
+fi
+if [[ ! -d "$LOCKDIR.stale.999001" ]]; then
+    pass "sibling GC reaped the dead-stamp leftover"
+else
+    fail "sibling GC kept a dead-stamp leftover" "the interrupted-steal debris was never reaped"
+fi
+if [[ -d "$LOCKDIR.stale.999002" ]]; then
+    pass "sibling GC left the live-stamp leftover"
+else
+    fail "sibling GC ate a live-stamp leftover" "a claim naming a live process was reaped"
+fi
+rm -f "$OUT_ABA6"
+rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE" "$LOCKDIR".stale.* 2>/dev/null
+
+# 5h7. The deepest wedge: a PID-LESS dir WITH content (an interrupted steal's
+# nested copy, whose owner's trap unlinked the pid but could not rmdir) is
+# invisible to the empty-only reap and used to block every future sweep
+# forever. The budget-expiry grace reaps it once it is older than the sweep
+# itself (find -newer against the sweep's birth certificate), so sweep one
+# gives up and sweep two acquires. No stubs; two ordinary sweeps.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare7.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$(cd "$COMMON" && pwd -P)/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+printf 'junk' > "$LOCKDIR/debris"   # pid-less AND non-empty: the wedge shape
+OUT_W1=$(mktemp -t w7a.XXXXXX)
+OUT_W2=$(mktemp -t w7b.XXXXXX)
+( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_W1" 2>&1 )
+if grep -q "^STATUS" "$OUT_W1"; then
+    fail "wedge sweep one acquired over debris" "[$(cat "$OUT_W1")]"
+else
+    pass "wedge sweep one gives up on the debris dir"
+fi
+if [[ ! -d "$LOCKDIR" ]]; then
+    pass "wedge debris reaped at budget expiry"
+else
+    fail "wedge debris survived the grace" "the pid-less non-empty dir still blocks the path"
+fi
+( cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_W2" 2>&1 )
+if grep -q "^STATUS" "$OUT_W2"; then
+    pass "wedge does not reach the second sweep"
+else
+    fail "wedge blocked the second sweep" "[$(tail -1 "$OUT_W2")]"
+fi
+rm -f "$OUT_W1" "$OUT_W2"
+rm -rf "$LOCKDIR" "$S" "$BARE"
+
+# 5h8. The empty-only reap's guard, pinned: a peer's pid write landing
+# between the reaper's emptiness read and the rmdir makes the dir non-empty,
+# the rmdir fails, and the reaper backs off - it never removes a holder's
+# directory. Staged with a stub `ls` that reports the dir EMPTY once while
+# planting a live peer's pid file inside it.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare8.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+LOCKDIR="$(cd "$COMMON" && pwd -P)/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+STUBDIR=$(mktemp -d -t aba8-stub.XXXXXX)
+PEERPID="$LOCKDIR/pid"
+LSDONE="$STUBDIR/ls-done"
+cat > "$STUBDIR/ls" <<EOF
+#!/usr/bin/env bash
+# One-time: the reaper's emptiness read answers EMPTY while a live peer's
+# pid file lands in the directory, so the rmdir must fail and the reaper
+# must back off rather than reap a holder.
+if [[ "\$1" == "-A" && "\$2" == "$LOCKDIR" && ! -e "$LSDONE" ]]; then
+    : > "$LSDONE"
+    echo $$ > "$PEERPID"
+    exit 0
+fi
+exec /bin/ls "\$@"
+EOF
+chmod +x "$STUBDIR/ls"
+OUT_W3=$(mktemp -t w8.XXXXXX)
+( cd "$S" && PATH="$STUBDIR:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_W3" 2>&1 )
+if grep -q "^STATUS" "$OUT_W3"; then
+    fail "reaper removed a holder's directory" "[$(cat "$OUT_W3")]"
+else
+    pass "reaper backs off when the dir grew a holder"
+fi
+if [[ -f "$PEERPID" ]]; then
+    pass "peer holder survives the reap attempt"
+else
+    fail "peer holder was removed" "the pid write that landed first did not protect the directory"
+fi
+if [[ -f "$LSDONE" ]]; then
+    pass "reap instrument ran"
+else
+    fail "reap instrument never ran" "the stub ls was never consulted; a green here would be vacuous"
+fi
+rm -f "$OUT_W3"
+rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE"
+
 echo ""
 echo "worktree lifecycle: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
