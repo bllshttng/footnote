@@ -236,6 +236,80 @@ def _pidless_route(row: Any) -> str | None:
     return None
 
 
+#: Claim states that positively report NO live holder; an absence never does.
+_CLAIM_DEAD_STATES = frozenset({"free", "stale"})
+
+
+def _claim_witness(name: str) -> str | None:
+    """The ``worker:<name>`` claim state, or None when the store cannot answer.
+
+    The liveness oracle for rows with no pid and no route - a codex thread
+    lane holds no process of its own. free/stale positively report no witness
+    (x-a457: 14 routless rows, every claim expired, kept the reading
+    fail-closed); an unreadable store proves nothing.
+    """
+    try:
+        from fno.agents.spawn_gate import _gate_claims_root
+        from fno.claims.core import claim_status
+
+        state = claim_status(f"worker:{name}", root=_gate_claims_root()).get("state")
+    except Exception:  # noqa: BLE001 - an unreadable store proves nothing
+        return None
+    return str(state) if state else None
+
+
+def _claude_roster_pids() -> dict[str, int] | None:
+    """The claude daemon roster as ``{8-hex jobId: host pid}``, or None when unreadable.
+
+    The second daemon-side oracle for a routed row the socket map missed: a
+    short_id in NEITHER the rv farm NOR the daemon's own worker list is a
+    corpse row (x-a457, measured: all 21 map-missed rows were roster-absent
+    too). A roster pid is the PTY HOST hosting that session. Missing file:
+    definitive {}; other read failure: None (fail closed).
+    """
+    try:
+        from fno.agents.spawn_gate import _roster_path
+        from fno.harness_identity import claude_transport_short_id
+
+        raw = json.loads(_roster_path().read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception:  # noqa: BLE001 - an unreadable roster proves nothing
+        return None
+    workers = raw.get("workers") if isinstance(raw, dict) else None
+    if not isinstance(workers, dict):
+        return None
+    return {
+        claude_transport_short_id(w["sessionId"]): w["pid"]
+        for w in workers.values()
+        if isinstance(w, dict)
+        and isinstance(w.get("sessionId"), str)
+        and w["sessionId"]
+        and isinstance(w.get("pid"), int)
+        and not isinstance(w.get("pid"), bool)
+    }
+
+
+def _unrouted_row_costs_fleet(row: Any) -> bool:
+    """Whether an unrouted live row's cost is plausibly real and unattributed.
+
+    Fail closed: every unreadable witness answers True (gap row); only a
+    POSITIVE dead answer drops the row. A pane's cost rides the attributed
+    mux server, so only an unanswered pane probe stays a gap.
+    """
+    mux = getattr(row, "mux", None)
+    if isinstance(mux, dict) and mux:
+        try:
+            from fno.agents.mux_spawn import _mux_pane_alive
+
+            pane = _mux_pane_alive(mux)
+        except Exception:  # noqa: BLE001 - an unanswered probe proves nothing
+            pane = None
+        return pane is None
+    state = _claim_witness(str(getattr(row, "name", "")))
+    return state not in _CLAIM_DEAD_STATES
+
+
 def _terminal_row_changed_after_snapshot(row: Any, snapshot_at: float) -> bool:
     # Only the exit-transition stamp (`exited_at`) counts: `last_reconciled_at`
     # rotates on every probe, so a CHECKED bump inside the measurement window
@@ -312,14 +386,16 @@ def _live_root_pids(
         unrouted_rows = [row for row in pidless_rows if _pidless_route(row) is None]
         routed_rows = [row for row in pidless_rows if _pidless_route(row) is not None]
         # A pidless row NO route accepts is an attribution gap, not a dead
-        # reading: one such row used to suppress the entire report (x-e040,
-        # measured: six pidless codex rows kept the sensor returning
-        # "worker root discovery unavailable" at rest). The machine-level
-        # measurement stands; the gap names what is unattributed.
+        # reading (x-e040). x-a457: but only while a witness says the cost is
+        # real - a corpse row's claim is expired, and counting it kept the
+        # gate refusing for hours. Only a POSITIVE dead answer drops a row.
+        fleet_unrouted = [
+            row for row in unrouted_rows if _unrouted_row_costs_fleet(row)
+        ]
         gap_rows: list[str] = [
-            f"{len(unrouted_rows)} pidless row(s) with no identity route "
-            f"({', '.join(sorted({str(row.harness) for row in unrouted_rows}))})"
-        ] if unrouted_rows else []
+            f"{len(fleet_unrouted)} pidless row(s) with no identity route "
+            f"({', '.join(sorted({str(row.harness) for row in fleet_unrouted}))})"
+        ] if fleet_unrouted else []
         if not routed_rows:
             return roots, AttributionGap("; ".join(gap_rows)) if gap_rows else None
         if deadline is not None and time.monotonic() >= deadline:
@@ -332,6 +408,25 @@ def _live_root_pids(
         )
         socket_pids = bg_socket_pid_map(timeout=socket_timeout)
         missing = [row for row in routed_rows if row.short_id not in socket_pids]
+        if missing:
+            # x-a457: the socket map is the FIRST daemon-side oracle, not the
+            # last word. Roster-held rows attribute through their roster pid;
+            # a short_id in neither is a corpse row; an unreadable roster
+            # stays a gap row (fail closed).
+            roster_pids = _claude_roster_pids()
+            still_missing: list[Any] = []
+            for row in missing:
+                pid = roster_pids.get(row.short_id) if roster_pids else None
+                if pid is None:
+                    if roster_pids is None:
+                        still_missing.append(row)
+                    continue
+                root_live = _root_pid_is_live(pid, None)
+                if root_live is None:
+                    return roots, "worker root liveness unavailable"
+                if root_live:
+                    roots.add(pid)
+            missing = still_missing
         if missing:
             gap_rows.append(
                 f"{len(missing)} bg-socket row(s) missing from the socket map"
@@ -646,9 +741,10 @@ def _emit_result(
     capacity = "unknown"
     leak = "unknown"
     exit_code = 0
-    # cause_only keeps passing None (never the sentinel) so _payload does not
-    # compute a load snapshot the cause-only contract promises not to spend.
-    load_snapshot = None if cause_only else _spawn_load_snapshot()
+    # Cause-only answers the capacity question too (x-a457): a None snapshot
+    # can only ever say unknown. Exit codes stay 0/4 - the Rust gate reads
+    # stdout only on exit 0 and its own thresholds decide admission.
+    load_snapshot = _spawn_load_snapshot()
     if not cause_only:
         leak = leak_verdict(reading.direct_process_count, process_threshold)
         capacity = capacity_verdict(load_snapshot)
