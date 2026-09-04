@@ -40,7 +40,7 @@ What each harness can DO, rendered from the capability table (`map_version {vers
 | `absent` | measured not to exist on this harness |
 | `unmeasured` | nobody has looked |
 
-Every non-native cell settles the same way: `fno agents harness probe <harness>` runs the instrument the table declares for that key. Until the reader port lands (x-d2ed) the probe reports feature keys as undeclared rows: the dimension is inert by the split ruling, and this doc measures the table, not the readers. The pane-driving mechanics are a different dimension and live in the capability table itself, never here.
+Every non-native cell settles the same way: `fno agents harness probe <harness>` runs the instrument the table declares for that key. Until the reader port lands the probe reports feature keys as undeclared rows: the dimension is inert by the split ruling, and this doc measures the table, not the readers. The pane-driving mechanics are a different dimension and live in the capability table itself, never here.
 """
 
 
