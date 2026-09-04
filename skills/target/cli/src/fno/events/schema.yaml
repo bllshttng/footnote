@@ -3494,6 +3494,54 @@ event_types:
           description: "Number of graph entries scanned by the independent observer."
     consumers: [operator]
 
+  - name: dispatch_spawned
+    retention: durable
+    description: "Emitted inside `_spawn_worker` once per successful autonomous launch, naming the argv it actually sent. The spawner is the only place that knows the resolved pair, so this is where the receipt lives: the sibling advance_dispatched rows name a node and an agent, which left the three dispatch doors (lane fill, merge-triggered auto-continue, active-backlog drain) indistinguishable in the file. `caller` is what tells them apart. `harness` is the --harness argv and `command` is the message as sent, so a row where they disagree is the x-374b split reopening. Best-effort: a journal failure never wedges a launch that already happened, so an absent row is not proof no spawn occurred."
+    sources: [backlog]
+    data:
+      required: [node_id, harness, substrate, command, caller]
+      properties:
+        node_id:
+          type: string
+          description: "The backlog node this worker was launched for."
+        short_id:
+          type: string
+          description: "Launch identity from the spawn receipt: a claude short id, a full codex session id, or the literal 'headless' for a one-shot substrate that already ran to completion."
+        agent_name:
+          type: string
+          description: "Spawned agent name (target-<full-node-id>-<slug>, or reconcile-<...> on a de-stub pass)."
+        harness:
+          type: string
+          description: "The --harness argv value: the CLI binary launched. Usually the resolved harness; an account record (ccm/ccr) keeps its own alias here, and its registry row names the harness the command was spelled for."
+        vendor:
+          type: string
+          description: "The --provider argv value: the model VENDOR (zai, or a model_routing.providers name). Empty when unset. NOT the harness axis."
+        model:
+          type: string
+          description: "The --model argv value, empty when the harness default was taken."
+        account:
+          type: string
+          description: "The --dispatch-account argv value: the account RECORD id whose credentials the worker runs on, empty when no cutover pinned one. A fifth axis, distinct from harness, vendor and model. A record whose config points at the wrong login makes every other field name a lane it did not bill, and that is unreadable from the file unless the record id is here."
+        substrate:
+          type: string
+          description: "The resolved substrate: thread (persistent, attachable) or headless (one-shot). pane is not an autonomous lane."
+        command:
+          type: string
+          description: "The dispatched message exactly as sent, with {id} substituted and spelled for the resolved harness (`/target ...` on claude/opencode, `$fno:target ...` on codex)."
+        cwd:
+          type: string
+          description: "The --cwd the worker was launched into; empty means --fresh."
+        caller:
+          type: string
+          description: "Which dispatch door fired: dispatch_lanes, advance, _converge_one, or unknown for a caller that has not been threaded yet. The field this row exists for."
+        grid:
+          type: string
+          description: "The capacity grid's terminal reason for this spawn, e.g. grid=no-inventory-declared when config.routing.models is undeclared so difficulty bands route nothing. Empty when an explicit pin skipped the grid."
+        decision:
+          type: string
+          description: "The resolver's decision trail joined with '; ' (harness=config(codex); substrate=default(thread); ...): which rung supplied each axis."
+    consumers: [operator]
+
   - name: advance_dispatched
     retention: durable
     description: "Emitted by `fno backlog advance` (merge-triggered auto-continue) when it dispatches a fresh background /target --no-merge worker for the next now-unblocked node after a PR merge. Also emitted by advance_dependents when it dispatches a now-unblocked direct blocked_by dependent: cross-project into its own work-map repo (cross_project=true, G1) or same-project into its own project root (cross_project=false, RC1/x-33b2; work-map resolved, recorded cwd as fallback). Surfaced in the next SessionStart reconcile reminder line."

@@ -95,17 +95,24 @@ fi
 # ---------------------------------------------------------------------------
 # Plant distinct content into both session blocks.
 python3 - "$DOC" <<'PY'
+import re
 import sys
 p = sys.argv[1]
 s = open(p).read()
-s = s.replace(
-    "_Merge order and the reason for it. Nothing external knows this; the session fills it at full context._",
+# Match the placeholder by its OPENING words, not the whole sentence: pinning
+# the full text made a reworded default a silent no-op, so the sentinels never
+# landed and this case failed as a clobber that never happened.
+s, n1 = re.subn(
+    r"_Merge order and the reason for it\.[^\n]*_",
     "Merge #784 before #782.\nSENTINEL_MERGE_7",
+    s,
 )
-s = s.replace(
-    "_Open decisions awaiting the operator. Nothing external knows this; the session fills it at full context._",
+s, n2 = re.subn(
+    r"_Open decisions awaiting the operator\.[^\n]*_",
     "dependency ordering question\nSENTINEL_DEC_7",
+    s,
 )
+assert n1 == 1 and n2 == 1, f"placeholders not found: merge={n1} decisions={n2}"
 open(p, "w").write(s)
 PY
 run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$DOC\"}" >/dev/null 2>&1
