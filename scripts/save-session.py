@@ -158,15 +158,24 @@ def parse_rounds(transcript_path: str) -> list[tuple[str | None, str]]:
 def format_transcript(rounds: list[tuple[str | None, str]], frontmatter: str) -> str:
     lines = [frontmatter]
 
+    def balanced(text: str) -> list[str]:
+        # A fence never legally crosses a role heading, so an odd fence count
+        # in a message is closed there rather than inverting the rest of the file.
+        out = [text]
+        fences = sum(1 for ln in text.splitlines() if ln.lstrip().startswith("```"))
+        if fences % 2:
+            out.append("```")
+        return out
+
     for user_text, assistant_text in rounds:
         lines.append("---")
         lines.append("")
         if user_text:
             lines.append("## User")
-            lines.append(user_text)
+            lines.extend(balanced(user_text))
             lines.append("")
         lines.append("## Assistant")
-        lines.append(assistant_text)
+        lines.extend(balanced(assistant_text))
         lines.append("")
 
     return "\n".join(lines)
