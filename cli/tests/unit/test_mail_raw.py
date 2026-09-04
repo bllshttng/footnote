@@ -413,7 +413,7 @@ def test_raw_codex_review_passes_sender_and_original_payload_to_transport_audit(
         "fno.events.append_event",
         lambda event, *_a, **_k: python_events.append(event),
     )
-    payload = "/code-review focus on concurrency"
+    payload = "/code-review --uncommitted"
     with pytest.raises(typer.Exit) as exc:
         _raw_send("codexpeer", payload, self_ok=False)
     assert exc.value.exit_code == 0
@@ -430,7 +430,7 @@ def test_raw_codex_review_passes_sender_and_original_payload_to_transport_audit(
         )
     ]
     assert not python_events, "the Rust transport owns the sole audit event"
-    assert "unrecognized remainder ignored" in capsys.readouterr().out
+    assert "unrecognized remainder ignored" not in capsys.readouterr().out
 
 
 def test_raw_codex_review_uses_process_owned_sender_with_inherited_marker(
@@ -462,7 +462,45 @@ def test_raw_codex_review_uses_process_owned_sender_with_inherited_marker(
     assert calls[0]["audit_sender"] == SID_CLAUDE[:8]
 
 
-def test_raw_unparsed_codex_review_remainder_defaults_without_custom_rewrite(
+def test_codex_review_target_parser_has_a_named_module():
+    from fno.mail.codex_review_target import (
+        explicit_review_pr_number,
+        resolve_codex_review_target,
+    )
+
+    assert resolve_codex_review_target(
+        "/review medium --comment 1427 HEAD abc1234 against origin/main"
+    ) == ("baseBranch:origin/main", False)
+    assert explicit_review_pr_number(
+        "medium --comment 1427 HEAD abc1234 against origin/main"
+    ) == 1427
+
+
+def test_raw_accepts_target_self_review_codex_payload(
+    mailbox, monkeypatch, capsys
+):
+    from fno.mail.cli import _raw_send
+
+    _seed_codex_app_server(mailbox, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._review_start_codex",
+        lambda session, target, **_audit: calls.append((session, target))
+        or {
+            "delivered": True,
+            "turn_id": "turn-self-review",
+            "review_thread_id": "review-self-review",
+        },
+    )
+    payload = "/review medium --comment 1427 HEAD abc1234 against origin/main"
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("codexpeer", payload, self_ok=False)
+    assert exc.value.exit_code == 0
+    assert calls == [(SID_CODEX, "baseBranch:origin/main")]
+    assert "target=baseBranch:origin/main" in capsys.readouterr().out
+
+
+def test_raw_refuses_unparsed_codex_review_remainder_before_rpc(
     mailbox, monkeypatch, capsys
 ):
     from fno.mail.cli import _raw_send
@@ -478,14 +516,15 @@ def test_raw_unparsed_codex_review_remainder_defaults_without_custom_rewrite(
             "review_thread_id": "review-3",
         },
     )
+    payload = "/review focus on concurrency"
     with pytest.raises(typer.Exit) as exc:
-        _raw_send("codexpeer", "/review focus on concurrency", self_ok=False)
-    assert exc.value.exit_code == 0
-    assert calls == [(SID_CODEX, "uncommittedChanges")]
-    out = capsys.readouterr().out
-    assert "target=uncommittedChanges" in out
-    assert "unrecognized remainder ignored" in out
-    assert "custom:" not in out
+        _raw_send("codexpeer", payload, self_ok=False)
+    assert exc.value.exit_code == 2
+    assert calls == []
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "arguments after the verb do not parse" in err
+    assert "unrecognized remainder ignored" not in err
 
 
 @pytest.mark.parametrize("payload", ["/compact", "/reviewboard"])
