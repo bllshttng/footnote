@@ -133,7 +133,7 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 
 NEVER edit these directly (a `PreToolUse` hook detects it). Use `fno backlog` / `fno do state`:
 - `~/.fno/graph.json` - the backlog graph; mutate via `fno backlog` only.
-- `<space>/worktrees/<name>/target-state.md` (the session manifest, resolved via `fno-agents state path target-state`) - immutable after init. The only legal post-init write is first-fill of an empty `plan_path` via `fno do state set`.
+- `<space>/worktrees/<name>/target-state.md` - immutable manifest; only post-init write is first-fill of empty `plan_path` via `fno do state set`.
 
 | File | Default | Purpose | Owner |
 |------|---------|---------|-------|
@@ -174,7 +174,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 
 ## CLI subsystems (summary + doc)
 
-- **`fno agents claim`** - the one work-claim primitive with atomic lockfiles (global-id keys under `~/.fno/claims/`, repo-local keys under the repo's space). `target init` already claims the node - never `claim acquire` manually. [coordination](docs/architecture/coordination.md).
+- **`fno agents claim`** - the one work-claim primitive; atomic lockfiles. `target init` already claims the node - never `claim acquire` manually. [coordination](docs/architecture/coordination.md).
 - **`fno agents mail` - native review.** A worker runs the native review via Skill; raw mail is the fallback. The stop gate and `fno do pr merge` enforce code review; `review.self_review_required = false` needs a live claim, expires after `review.optout_ttl_minutes`, and disarms unattended auto-merge. [review lanes](docs/architecture/review-lanes.md).
 - **`fno inbox decide`** - records a ruling per subject. `fno inbox decisions X` recovers it, newest first. [decision-record](docs/architecture/decision-record.md).
 - **`fno whoami` / `fno whoami status`** - read-only self-introspection; run when confused after compaction.
