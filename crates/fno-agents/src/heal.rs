@@ -1,5 +1,7 @@
 //! `fno-agents pr-heal` -- classify a red check by signature, apply the
-//! canonical fix, push once.
+//! canonical fix, push once. `--all --apply` is the drive loop: one heal per
+//! red open PR, each from that PR's own worktree, behind four refusals, with
+//! one `pr_heal_tick` journal row per invocation.
 //!
 //! Everything after a push already had a reader (`fno do pr status` names the
 //! failing step, `fno do pr logs` spools its log, `loop-check` knows whether
@@ -120,7 +122,6 @@ impl Finding {
 /// human sees in the job's own output.
 pub(crate) struct Ctx<'a> {
     pub check: &'a str,
-    pub workflow: &'a str,
     pub log: &'a str,
     /// The `gh pr checks` bucket. Some classes are decided by the check's
     /// STATE, never by its log: a cancelled run leaves a log with nothing in
@@ -631,12 +632,19 @@ const REMEDY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Parsed `pr-heal` arguments. `gh_bin` / `git_bin` / `cwd` are the same test
 /// seams `loop-check` carries, so push discipline is provable against stub
-/// executables instead of a real remote.
+/// executables instead of a real remote. `claims_root` and `events_file`
+/// exist for the same reason the drive loop needs them: its two side effects
+/// (the claim read, the tick row) must be provable without touching the real
+/// `~/.fno`.
+#[derive(Clone)]
 struct Args {
     pr: Option<String>,
     apply: bool,
     all: bool,
     playbook: bool,
+    /// Rehearse the drive loop: every refusal is walked and printed, no
+    /// remedy runs, nothing pushes, no question is filed.
+    dry_run: bool,
     gh_bin: String,
     git_bin: String,
     cwd: std::path::PathBuf,
@@ -645,6 +653,14 @@ struct Args {
     /// mutating the process PATH: PATH is global, and a stub `git` placed
     /// there leaked into three unrelated tests running in parallel.
     bin_dir: String,
+    /// Explicit claims ROOT (the dir containing `.fno/claims`). Empty
+    /// resolves by key prefix: `node:` keys route to `$FNO_CLAIMS_ROOT`,
+    /// else `$HOME`.
+    claims_root: String,
+    /// Explicit `events.jsonl` for the `pr_heal_tick` row. Empty writes the
+    /// global `~/.fno/events.jsonl`, the same journal the pr-watch tick's own
+    /// `_emit_event` defaults to.
+    events_file: String,
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
@@ -653,15 +669,18 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         apply: false,
         all: false,
         playbook: false,
+        dry_run: false,
         gh_bin: "gh".to_string(),
         git_bin: "git".to_string(),
         cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         bin_dir: String::new(),
+        claims_root: String::new(),
+        events_file: String::new(),
     };
     let mut i = 0;
     while i < argv.len() {
         let arg = argv[i].as_str();
-        let mut take = |name: &str| -> Result<String, String> {
+        let take = |name: &str| -> Result<String, String> {
             argv.get(i + 1)
                 .cloned()
                 .ok_or_else(|| format!("{name} needs a value"))
@@ -670,6 +689,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--apply" => a.apply = true,
             "--all" => a.all = true,
             "--playbook" => a.playbook = true,
+            "--dry-run" => a.dry_run = true,
             "--gh-bin" => {
                 a.gh_bin = take("--gh-bin")?;
                 i += 1;
@@ -684,6 +704,14 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             }
             "--bin-dir" => {
                 a.bin_dir = take("--bin-dir")?;
+                i += 1;
+            }
+            "--claims-root" => {
+                a.claims_root = take("--claims-root")?;
+                i += 1;
+            }
+            "--events-file" => {
+                a.events_file = take("--events-file")?;
                 i += 1;
             }
             other if other.starts_with('-') => return Err(format!("unknown flag: {other}")),
@@ -901,25 +929,37 @@ fn rest_bucket(run: &Value) -> &'static str {
     }
 }
 
-/// Classify every failing row of one PR.
-fn findings_for(a: &Args, pr: &str, head: &str) -> Result<Vec<Finding>, String> {
+/// Classify every failing row of one PR. `cached_inherited` carries a
+/// drive-loop invocation's one shared read of main's failing checks, so a
+/// fleet of N PRs costs ONE main-HEAD read instead of N; `None` means "read
+/// it here" and is what the single-PR path passes.
+fn findings_for(
+    a: &Args,
+    pr: &str,
+    head: &str,
+    cached_inherited: Option<&Vec<String>>,
+) -> Result<Vec<Finding>, String> {
     let checks = read_checks(a, head)?;
     // `None` means the main-head read did not answer, which is NOT the same
     // as "main is green". Defaulting it to an empty set silently reclassified
     // every inherited failure as this PR's own, so the caller is told instead
     // and the report says the classification was unavailable.
-    let inherited = crate::loopcheck::main_head_failing_checks(&a.gh_bin, &a.cwd, 20);
-    if inherited.is_none() {
-        println!(
-            "note: could not read main's HEAD, so no row can be shown as inherited; \
-             a failure below may be main's rather than this PR's"
-        );
-    }
-    let inherited = inherited.unwrap_or_default();
+    let inherited = match cached_inherited {
+        Some(v) => v.clone(),
+        None => {
+            let read = crate::loopcheck::main_head_failing_checks(&a.gh_bin, &a.cwd, 20);
+            if read.is_none() {
+                println!(
+                    "note: could not read main's HEAD, so no row can be shown as inherited; \
+                     a failure below may be main's rather than this PR's"
+                );
+            }
+            read.unwrap_or_default()
+        }
+    };
     let mut out = Vec::new();
     for row in failing_rows(&checks) {
         let check = row["name"].as_str().unwrap_or("").to_string();
-        let workflow = row["workflow"].as_str().unwrap_or("").to_string();
         let log = match job_id(row["link"].as_str().unwrap_or("")) {
             Some(id) => gh_api(
                 a,
@@ -937,7 +977,6 @@ fn findings_for(a: &Args, pr: &str, head: &str) -> Result<Vec<Finding>, String> 
         out.push(classify(
             &Ctx {
                 check: &check,
-                workflow: &workflow,
                 log: &stripped,
                 bucket: &bucket,
             },
@@ -1007,14 +1046,7 @@ fn apply_auto(a: &Args, findings: &mut [Finding]) -> Vec<String> {
         for cmd in cmds.iter().chain(verify.iter()) {
             let dir = a.cwd.join(&cmd.cwd);
             let argv: Vec<&str> = cmd.argv.iter().map(|s| s.as_str()).collect();
-            let bin = if a.bin_dir.is_empty() {
-                argv[0].to_string()
-            } else {
-                std::path::Path::new(&a.bin_dir)
-                    .join(argv[0])
-                    .to_string_lossy()
-                    .into_owned()
-            };
+            let bin = seam_bin(a, argv[0]);
             let ok = run(&bin, &argv[1..], &dir, REMEDY_TIMEOUT)
                 .map(|(ok, _, _)| ok)
                 .unwrap_or(false);
@@ -1154,7 +1186,7 @@ pub fn run_heal(argv: &[String]) -> i32 {
         Ok(a) => a,
         Err(msg) => {
             eprintln!("pr-heal: {msg}");
-            eprintln!("usage: pr-heal <pr> [--apply] [--all] [--playbook]");
+            eprintln!("usage: pr-heal <pr> [--apply] | --all [--apply] [--dry-run] | --playbook");
             return EXIT_READ_ERROR;
         }
     };
@@ -1163,9 +1195,12 @@ pub fn run_heal(argv: &[String]) -> i32 {
         return EXIT_CLEAN;
     }
     if a.all && a.apply {
+        return run_all_apply(&a, a.dry_run);
+    }
+    if a.dry_run {
         eprintln!(
-            "pr-heal: --all is report-only. Applying needs the PR's own worktree, \
-             which is this process's cwd; run --apply from each PR's checkout."
+            "pr-heal: --dry-run rehearses the --all --apply drive loop; plain --all \
+             and the single-PR report are already dry"
         );
         return EXIT_READ_ERROR;
     }
@@ -1233,6 +1268,344 @@ pub(crate) fn open_pr_numbers(pages: &[Value]) -> Vec<String> {
     out
 }
 
+// ── the drive loop (--all --apply) ───────────────────────────────────────────
+
+/// Node ids a PR head ref names, as delimiter-bounded segments. Parity with
+/// `branch_node_ids` in `cli/src/fno/pr/closure.py` (`NODE_ID_BODY`), whose
+/// delimiter-bounded rule exists so fixed-width hex can never make `x-5b66`
+/// count inside `x-5b667`. The Rust regex crate has no lookahead, so the
+/// Python pattern's `(?=$|[/-])` becomes explicit boundary checks on the
+/// characters either side of each match.
+pub(crate) fn branch_node_ids(head_ref: &str) -> Vec<String> {
+    let re = Regex::new(r"[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}").expect("static regex");
+    let mut out: Vec<String> = Vec::new();
+    for m in re.find_iter(head_ref) {
+        let before = &head_ref[..m.start()];
+        let before_ok = before.is_empty() || before.ends_with('/') || before.ends_with('-');
+        let after = &head_ref[m.end()..];
+        let after_ok = after.is_empty() || after.starts_with('/') || after.starts_with('-');
+        let id = m.as_str().to_string();
+        if before_ok && after_ok && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// Every worktree of this checkout's repo, as (branch, path) pairs parsed
+/// from `git worktree list --porcelain`. Detached worktrees carry no `branch`
+/// line and are skipped: the drive loop keys strictly on the PR's head ref.
+/// An unreadable answer yields an empty list, which the caller reports as
+/// `no_worktree` per PR rather than guessing.
+pub(crate) fn worktrees_by_branch(
+    git_bin: &str,
+    cwd: &std::path::Path,
+) -> Vec<(String, std::path::PathBuf)> {
+    let Ok((true, stdout, _)) = run(
+        git_bin,
+        &["worktree", "list", "--porcelain"],
+        cwd,
+        READ_TIMEOUT,
+    ) else {
+        return Vec::new();
+    };
+    let mut list = Vec::new();
+    let mut path: Option<std::path::PathBuf> = None;
+    for line in stdout.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            path = Some(std::path::PathBuf::from(p.trim()));
+        } else if let Some(b) = line.strip_prefix("branch ") {
+            if let (Some(p), Some(name)) = (&path, b.trim().strip_prefix("refs/heads/")) {
+                list.push((name.to_string(), p.clone()));
+            }
+        }
+    }
+    list
+}
+
+/// The live claim holder on any node the head ref names, if one exists.
+/// `Suspect` counts as held (its TTL still protects the slot); `Stale` does
+/// not (the holder is dead and the slot is recoverable). The claim lockfile
+/// is the read, never a stored pid or a manifest snapshot.
+fn claim_holder(head_ref: &str, claims_root: Option<&std::path::Path>) -> Option<(String, String)> {
+    for id in branch_node_ids(head_ref) {
+        let (state, rec) = crate::claims::status(&format!("node:{id}"), claims_root);
+        if matches!(
+            state,
+            crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+        ) {
+            let holder = rec.map(|r| r.holder).unwrap_or_default();
+            return Some((id, holder));
+        }
+    }
+    None
+}
+
+/// A binary through the bin-dir seam when set (the same resolution the
+/// remedies use), so a test can stub `fno` without mutating PATH.
+fn seam_bin(a: &Args, name: &str) -> String {
+    if a.bin_dir.is_empty() {
+        name.to_string()
+    } else {
+        std::path::Path::new(&a.bin_dir)
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// Does an already-open operator question carry this marker? Read through
+/// the same `fno inbox outstanding --json` an operator would run, so dedup
+/// can never drift from what is actually on the board. An unreadable board
+/// fails toward asking: silence is the failure a question exists to prevent.
+fn open_questions_mention(a: &Args, marker: &str) -> bool {
+    let bin = seam_bin(a, "fno");
+    match run(
+        &bin,
+        &["inbox", "outstanding", "--json"],
+        &a.cwd,
+        READ_TIMEOUT,
+    ) {
+        Ok((true, out, _)) => serde_json::from_str::<Value>(&out)
+            .ok()
+            .and_then(|v| v.get("questions").and_then(|q| q.as_array()).cloned())
+            .is_some_and(|qs| {
+                qs.iter().any(|q| {
+                    q.get("question")
+                        .and_then(|s| s.as_str())
+                        .is_some_and(|s| s.contains(marker))
+                })
+            }),
+        _ => false,
+    }
+}
+
+/// File one operator question for a failing check no signature recognized,
+/// via `fno inbox outstanding ask` -- the inbox, never a file nobody reads.
+/// Deduplicated on the marker, so a 600s tick cannot re-ask a question the
+/// board already carries. Returns true when a question was filed.
+fn escalate_unknown_signature(a: &Args, pr: &str, check: &str, head_ref: &str) -> bool {
+    let marker = format!("heal: PR {pr} check {check}");
+    if open_questions_mention(a, &marker) {
+        return false;
+    }
+    let question = format!(
+        "{marker} failed with no playbook signature. Classify it with \
+         `fno do pr heal {pr}` (that report carries the log tail) or add a \
+         signature in crates/fno-agents/src/heal.rs."
+    );
+    let bin = seam_bin(a, "fno");
+    let mut argv: Vec<&str> = vec!["inbox", "outstanding", "ask", &question];
+    let node = branch_node_ids(head_ref).into_iter().next();
+    let node_flag;
+    if let Some(n) = &node {
+        node_flag = vec!["--node", n.as_str()];
+        argv.extend(node_flag.iter().copied());
+    }
+    match run(&bin, &argv, &a.cwd, READ_TIMEOUT) {
+        Ok((true, _, _)) => true,
+        Ok((_, _, err)) => {
+            eprintln!(
+                "pr-heal: escalation for PR {pr} {check} refused: {}",
+                err.trim()
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("pr-heal: escalation for PR {pr} {check} failed: {e}");
+            false
+        }
+    }
+}
+
+/// One `pr_heal_tick` row per drive-loop invocation: the arm's visibility
+/// (x-1b88's shared row widens onto this later). Written to the global
+/// `~/.fno/events.jsonl`, the same default journal the tick's own
+/// `_emit_event` writes, so `fno doctor event find` reads one place.
+fn emit_tick_event(
+    a: &Args,
+    counts: &std::collections::BTreeMap<&'static str, usize>,
+    unknown: usize,
+    dry_run: bool,
+) {
+    let path = if a.events_file.is_empty() {
+        crate::paths::AgentsHome::from_env()
+            .root()
+            .parent()
+            .map(|p| p.join("events.jsonl"))
+            .unwrap_or_else(|| std::path::PathBuf::from(".fno/events.jsonl"))
+    } else {
+        std::path::PathBuf::from(&a.events_file)
+    };
+    let mut fields = serde_json::Map::new();
+    for (k, v) in counts {
+        fields.insert((*k).to_string(), serde_json::json!(v));
+    }
+    fields.insert("unknown".to_string(), serde_json::json!(unknown));
+    fields.insert("dry_run".to_string(), serde_json::json!(dry_run));
+    if let Err(e) =
+        crate::events::EventEmitter::new(path, "pr-heal").emit_fields("pr_heal_tick", fields)
+    {
+        eprintln!("pr-heal: the pr_heal_tick row did not land: {e}");
+    }
+}
+
+/// The drive loop: one heal per red open PR, from that PR's own worktree,
+/// behind four refusals -- claim free, known signature, one push per PR per
+/// cycle, inherited failures named and skipped. `--dry-run` walks every
+/// refusal and prints the plan without touching a worktree or the inbox.
+fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
+    let pages = match gh_api_pages(a, "repos/{owner}/{repo}/pulls?state=open&per_page=100") {
+        Ok(p) => p,
+        Err(msg) => {
+            eprintln!("pr-heal: {msg}");
+            return EXIT_READ_ERROR;
+        }
+    };
+    let worktrees = worktrees_by_branch(&a.git_bin, &a.cwd);
+    // One main-HEAD read per invocation, shared by every PR: the failing
+    // checks of origin/main do not change between PRs in one cycle, and N
+    // reads per tick is exactly the shared-quota spend the broker refuses.
+    let inherited_once = crate::loopcheck::main_head_failing_checks(&a.gh_bin, &a.cwd, 20);
+    if inherited_once.is_none() {
+        println!(
+            "note: could not read main's HEAD, so no row can be shown as inherited; \
+             a failure below may be main's rather than this PR's"
+        );
+    }
+    let claims_root = if a.claims_root.is_empty() {
+        None
+    } else {
+        Some(std::path::Path::new(&a.claims_root))
+    };
+    let mut counts: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    let bump = |counts: &mut std::collections::BTreeMap<&'static str, usize>, key: &'static str| {
+        *counts.entry(key).or_default() += 1;
+    };
+    let mut unknown: Vec<(String, String, String)> = Vec::new();
+    let mut worst = EXIT_CLEAN;
+    for pr in open_pr_numbers(&pages) {
+        bump(&mut counts, "seen");
+        println!("── PR {pr}");
+        let (head, head_ref, _body) = match read_pr(a, &pr) {
+            Ok(v) => v,
+            Err(msg) => {
+                eprintln!("pr-heal: {msg}");
+                bump(&mut counts, "skip_read_error");
+                worst = worse_of(worst, EXIT_READ_ERROR);
+                continue;
+            }
+        };
+        // Refusal 1: a live worker owns this node; a healer pushing under it
+        // is the two-writers failure.
+        if let Some((node, holder)) = claim_holder(&head_ref, claims_root) {
+            println!(
+                "skip claim_held: {node} is held by {holder}; \
+                 the healer never pushes under a live worker"
+            );
+            bump(&mut counts, "skip_claim_held");
+            continue;
+        }
+        let findings = match findings_for(
+            a,
+            &pr,
+            &head,
+            // A failed shared read classifies with an empty set, same as the
+            // per-PR read it replaces; the note above already named it.
+            inherited_once.as_ref().or(Some(&Vec::new())),
+        ) {
+            Ok(f) => f,
+            Err(msg) => {
+                eprintln!("pr-heal: {msg}");
+                bump(&mut counts, "skip_read_error");
+                worst = worse_of(worst, EXIT_READ_ERROR);
+                continue;
+            }
+        };
+        // Refusal 4 is classify()'s own: a check red on main HEAD reads
+        // Inherited, is named in the report, and never counts against the PR.
+        let own: Vec<&Finding> = findings.iter().filter(|f| f.counts_against_pr()).collect();
+        if own.is_empty() {
+            println!("skip inherited: nothing red here that main is not already red on");
+            bump(&mut counts, "skip_inherited");
+            continue;
+        }
+        // Refusal 2: an unknown signature is escalated, never guessed at.
+        for f in own.iter().filter(|f| f.signature == "unknown") {
+            unknown.push((pr.clone(), f.check.clone(), head_ref.clone()));
+        }
+        let healable = own
+            .iter()
+            .any(|f| matches!(f.remedy, Remedy::Auto { .. } | Remedy::EditBody { .. }));
+        if !healable {
+            // Known-but-escalate rows (pytest, mypy, a guard refusal) have a
+            // playbook entry and a repro; the report is their lane.
+            report(&findings, true, true);
+            bump(&mut counts, "skip_escalate_only");
+            worst = worse_of(worst, EXIT_ESCALATIONS);
+            continue;
+        }
+        if dry_run {
+            report(&findings, true, true);
+            bump(&mut counts, "would_heal");
+            // A rehearsal reports work the way the report-only --all does:
+            // red PRs exist, so a preflight reading exit 0 must mean "nothing
+            // red", never "the rehearsal ran".
+            worst = worse_of(worst, EXIT_ESCALATIONS);
+            continue;
+        }
+        // Applying needs the PR's own checkout: every remedy runs in it and
+        // the push is from it. No worktree means no heal; the loop never
+        // clones a repo on its own.
+        let Some((_, wt)) = worktrees.iter().find(|(b, _)| b == &head_ref) else {
+            println!(
+                "skip no_worktree: no checkout on branch {head_ref}; \
+                 heal it by hand from that PR's worktree"
+            );
+            bump(&mut counts, "skip_no_worktree");
+            worst = worse_of(worst, EXIT_ESCALATIONS);
+            continue;
+        };
+        let sub = Args {
+            cwd: wt.clone(),
+            ..a.clone()
+        };
+        // Refusal 3 rides inside run_one: the pre-push re-read holds the
+        // commit local over a run in flight, and it pushes exactly once.
+        let code = run_one(&sub, &pr);
+        match code {
+            EXIT_CLEAN => bump(&mut counts, "healed"),
+            EXIT_IN_FLIGHT => bump(&mut counts, "skip_in_flight"),
+            EXIT_CWD_REFUSAL => bump(&mut counts, "skip_dirty_tree"),
+            _ => bump(&mut counts, "still_red"),
+        }
+        worst = worse_of(worst, code);
+    }
+    let unknown_n = unknown.len();
+    if !dry_run {
+        for (pr, check, head_ref) in &unknown {
+            if escalate_unknown_signature(a, pr, check, head_ref) {
+                println!("escalated: PR {pr} check {check} is now an inbox question");
+            }
+        }
+    }
+    emit_tick_event(a, &counts, unknown_n, dry_run);
+    let skipped: Vec<String> = counts
+        .iter()
+        .filter(|(k, _)| k.starts_with("skip_"))
+        .map(|(k, v)| format!("{}={v}", k.strip_prefix("skip_").unwrap_or(k)))
+        .collect();
+    println!(
+        "pr heal: seen={} healed={} unknown={} skipped={}",
+        counts.get("seen").unwrap_or(&0),
+        counts.get("healed").unwrap_or(&0),
+        unknown_n,
+        skipped.join(",")
+    );
+    worst
+}
+
 fn run_one(a: &Args, pr: &str) -> i32 {
     let (head, head_ref, body) = match read_pr(a, pr) {
         Ok(v) => v,
@@ -1251,7 +1624,7 @@ fn run_one(a: &Args, pr: &str) -> i32 {
             return EXIT_CWD_REFUSAL;
         }
     }
-    let mut findings = match findings_for(a, pr, &head) {
+    let mut findings = match findings_for(a, pr, &head, None) {
         Ok(f) => f,
         Err(msg) => {
             eprintln!("pr-heal: {msg}");
@@ -1360,10 +1733,9 @@ mod tests {
         "2026-09-03T03:06:04.8929731Z ##[error]Process completed with exit code 1.\n",
     );
 
-    fn ctx<'a>(check: &'a str, workflow: &'a str, log: &'a str) -> Ctx<'a> {
+    fn ctx<'a>(check: &'a str, log: &'a str) -> Ctx<'a> {
         Ctx {
             check,
-            workflow,
             log,
             bucket: "fail",
         }
@@ -1372,7 +1744,6 @@ mod tests {
     fn cancelled_ctx<'a>(check: &'a str, log: &'a str) -> Ctx<'a> {
         Ctx {
             check,
-            workflow: "",
             log,
             bucket: "cancel",
         }
@@ -1391,7 +1762,7 @@ mod tests {
     #[test]
     fn a_fmt_red_row_classifies_as_rustfmt_drift_in_the_crate_the_log_named() {
         let log = strip_timestamps(FMT_LOG);
-        let f = classify(&ctx("cargo fmt --check (pinned)", "rust-ci", &log), false);
+        let f = classify(&ctx("cargo fmt --check (pinned)", &log), false);
         assert_eq!(f.signature, "rustfmt-drift");
         match f.remedy {
             Remedy::Auto { run, verify } => {
@@ -1409,7 +1780,7 @@ mod tests {
         let log = strip_timestamps(&format!(
             "{FMT_LOG}2026-09-03T03:06:03Z Diff in /home/runner/work/footnote/footnote/crates/fno-agents/src/heal.rs:1:\n"
         ));
-        let f = classify(&ctx("cargo fmt --check (pinned)", "rust-ci", &log), false);
+        let f = classify(&ctx("cargo fmt --check (pinned)", &log), false);
         match f.remedy {
             Remedy::Auto { run, .. } => {
                 let dirs: Vec<&str> = run.iter().map(|c| c.cwd.as_str()).collect();
@@ -1421,10 +1792,7 @@ mod tests {
 
     #[test]
     fn a_fmt_check_whose_log_named_no_path_sweeps_both_crates() {
-        let f = classify(
-            &ctx("cargo fmt --check (pinned)", "rust-ci", "log unavailable"),
-            false,
-        );
+        let f = classify(&ctx("cargo fmt --check (pinned)", "log unavailable"), false);
         assert_eq!(f.signature, "rustfmt-drift");
         match f.remedy {
             Remedy::Auto { run, .. } => assert_eq!(run.len(), 2, "{run:?}"),
@@ -1440,10 +1808,7 @@ mod tests {
             "2026-09-03T07:15:29.7310931Z    --> src/fno/king/board.py:886:21\n",
             "2026-09-03T07:15:29.7322711Z Found 1 error.\n",
         ));
-        let f = classify(
-            &ctx("Python static correctness (495 sources)", "cli-ci", &log),
-            false,
-        );
+        let f = classify(&ctx("Python static correctness (495 sources)", &log), false);
         assert_eq!(f.signature, "ruff-lint");
         match f.remedy {
             Remedy::Auto { run, verify } => {
@@ -1463,7 +1828,7 @@ mod tests {
     #[test]
     fn a_mypy_error_is_mypy_not_ruff_lint() {
         let log = "src/fno/x.py:12: error: Incompatible return value type";
-        let f = classify(&ctx("Python static correctness", "cli-ci", log), false);
+        let f = classify(&ctx("Python static correctness", log), false);
         assert_eq!(f.signature, "mypy");
         assert!(
             matches!(&f.remedy, Remedy::Escalate { repro } if repro.contains("mypy")),
@@ -1479,7 +1844,7 @@ mod tests {
             "and the exact trailer claims none of them.\n",
             "  Add a line reading:\n",
         );
-        let f = classify(&ctx("check-pr-node-closure", "pr-node-closure", log), false);
+        let f = classify(&ctx("check-pr-node-closure", log), false);
         assert_eq!(f.signature, "closure-trailer");
         assert_eq!(
             f.remedy,
@@ -1496,7 +1861,7 @@ mod tests {
             "FAILED tests/unit/test_agents_cli_fold.py::test_paths - assert\n",
             "3 failed, 19455 passed, 301 skipped\n",
         );
-        let f = classify(&ctx("smoke-pytest", "guards", log), false);
+        let f = classify(&ctx("smoke-pytest", log), false);
         assert_eq!(f.signature, "pytest");
         match f.remedy {
             Remedy::Escalate { repro } => {
@@ -1517,7 +1882,7 @@ mod tests {
             "FAILED tests/unit/test_a.py::test_one - x\n",
             "FAILED cli/tests/unit/test_b.py::test_two - y\n",
         );
-        let f = classify(&ctx("smoke-pytest", "guards", log), false);
+        let f = classify(&ctx("smoke-pytest", log), false);
         match f.remedy {
             Remedy::Escalate { repro } => {
                 assert!(repro.contains("tests/unit/test_b.py::test_two"), "{repro}");
@@ -1533,7 +1898,7 @@ mod tests {
             .map(|n| format!("FAILED tests/unit/t.py::test_{n} - x"))
             .collect::<Vec<_>>()
             .join("\n");
-        let f = classify(&ctx("smoke-pytest", "guards", &log), false);
+        let f = classify(&ctx("smoke-pytest", &log), false);
         match f.remedy {
             Remedy::Escalate { repro } => {
                 assert!(repro.contains("test_5"), "{repro}");
@@ -1554,7 +1919,7 @@ mod tests {
             "smoke-pytest=failure smoke-rest=failure\n",
             "##[error]Process completed with exit code 1.\n",
         );
-        let f = classify(&ctx("smoke", "guards", log), false);
+        let f = classify(&ctx("smoke", log), false);
         assert_eq!(f.signature, "shard-rollup");
         match f.remedy {
             Remedy::Escalate { repro } => {
@@ -1584,7 +1949,7 @@ mod tests {
             "smoke-pytest=cancelled smoke-rest=success\n",
             "##[error]Process completed with exit code 1.\n",
         );
-        let f = classify(&ctx("smoke", "guards", log), false);
+        let f = classify(&ctx("smoke", log), false);
         assert_eq!(f.signature, "shard-rollup");
         match f.remedy {
             Remedy::Escalate { repro } => {
@@ -1603,7 +1968,7 @@ mod tests {
         // 13 unrecognized checks across every open PR buried the --all report
         // in 40-line log tails. Terse keeps the first line only.
         let findings = vec![classify(
-            &ctx("mystery", "w", "line one\nline two\nline three"),
+            &ctx("mystery", "line one\nline two\nline three"),
             false,
         )];
         assert_eq!(findings[0].signature, "unknown");
@@ -1618,7 +1983,7 @@ mod tests {
     fn a_cargo_test_failure_escalates_naming_the_failing_test() {
         let log = "test stream_worker::tests::mid_turn_silence ... FAILED\n\
                    test result: FAILED. 1948 passed; 1 failed;\n";
-        let f = classify(&ctx("cargo test + schema parity", "rust-ci", log), false);
+        let f = classify(&ctx("cargo test + schema parity", log), false);
         assert_eq!(f.signature, "cargo-test");
         match f.remedy {
             Remedy::Escalate { repro } => {
@@ -1635,7 +2000,7 @@ mod tests {
     #[test]
     fn a_guard_refusal_escalates_with_the_guards_own_script() {
         let log = "check-file-budget: cli/src/fno/mail/cli.py is 6105 lines (budget 5000)";
-        let f = classify(&ctx("guards", "guards", log), false);
+        let f = classify(&ctx("guards", log), false);
         assert_eq!(f.signature, "guard-script");
         assert_eq!(
             f.remedy,
@@ -1657,7 +2022,7 @@ mod tests {
             "smoke: step failed, stopping (fail-fast): Verb-surface ratchet (real count)\n",
             "##[error]Process completed with exit code 1.\n",
         );
-        let f = classify(&ctx("smoke-rest", "guards", log), false);
+        let f = classify(&ctx("smoke-rest", log), false);
         assert_eq!(f.signature, "smoke-step");
         match f.remedy {
             Remedy::Escalate { repro } => {
@@ -1681,7 +2046,7 @@ mod tests {
             "##[error]Process completed with exit code 1.\n",
             "check-package-path-escapes: OK\n",
         );
-        let f = classify(&ctx("guards", "guards", log), false);
+        let f = classify(&ctx("guards", log), false);
         assert_eq!(f.signature, "guard-script");
         assert_eq!(
             f.remedy,
@@ -1693,7 +2058,7 @@ mod tests {
 
     #[test]
     fn a_red_review_coverage_status_is_the_gate_not_a_defect() {
-        let f = classify(&ctx("fno/review-coverage", "", ""), false);
+        let f = classify(&ctx("fno/review-coverage", ""), false);
         assert_eq!(f.signature, "review-gate");
         assert!(
             matches!(&f.remedy, Remedy::Escalate { repro } if repro.contains("not a CI failure")),
@@ -1731,7 +2096,7 @@ mod tests {
     #[test]
     fn a_check_red_on_main_reads_inherited_even_when_its_log_matches() {
         let log = strip_timestamps(FMT_LOG);
-        let f = classify(&ctx("cargo fmt --check (pinned)", "rust-ci", &log), true);
+        let f = classify(&ctx("cargo fmt --check (pinned)", &log), true);
         assert_eq!(f.signature, "inherited");
         assert_eq!(f.remedy, Remedy::Inherited);
         assert!(!f.counts_against_pr());
@@ -1743,7 +2108,7 @@ mod tests {
             .map(|n| format!("line {n}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let f = classify(&ctx("mystery", "somewhere", &log), false);
+        let f = classify(&ctx("mystery", &log), false);
         assert_eq!(f.signature, "unknown");
         match f.remedy {
             Remedy::Escalate { repro } => {
@@ -1758,7 +2123,7 @@ mod tests {
 
     #[test]
     fn an_unavailable_log_is_unknown_never_dropped() {
-        let f = classify(&ctx("some-check", "guards", ""), false);
+        let f = classify(&ctx("some-check", ""), false);
         assert_eq!(f.signature, "unknown");
         assert!(f.counts_against_pr());
     }
@@ -2036,7 +2401,7 @@ exit 0
         stub_cargo_noop(d);
 
         let mut findings = vec![classify(
-            &ctx("cargo fmt --check (pinned)", "rust-ci", "log unavailable"),
+            &ctx("cargo fmt --check (pinned)", "log unavailable"),
             false,
         )];
         let args = parse_args(&args_for(d, &["--apply"])).unwrap();
@@ -2076,15 +2441,259 @@ exit 0
     }
 
     #[test]
-    fn all_refuses_to_apply_because_applying_needs_the_prs_own_worktree() {
+    fn dry_run_outside_the_drive_loop_is_a_usage_error() {
+        // --dry-run rehearses --all --apply; on the single-PR path it would
+        // silently mean "the report you already get without --apply".
+        assert_eq!(
+            run_heal(&[
+                "1".to_string(),
+                "--apply".to_string(),
+                "--dry-run".to_string()
+            ]),
+            EXIT_READ_ERROR
+        );
+    }
+
+    // ── the drive loop ─────────────────────────────────────────────────────
+    //
+    // Driven against stub gh/git/cargo/fno executables, so the four refusals
+    // and the tick row are provable rather than argued.
+
+    /// A stub `gh` answering the drive loop's reads: an open-PR listing with
+    /// PR 1 (branch feature/x-1111, free) and PR 2 (feature/x-2222, whose
+    /// node the test holds a live claim on), each with one rustfmt-drift
+    /// failure. `mystery` swaps PR 1's check for one no signature matches.
+    fn stub_gh_drive(dir: &Path, mystery: bool) -> std::path::PathBuf {
+        let check = if mystery {
+            r#"{"name":"mystery-check","status":"completed","conclusion":"failure","html_url":"https://github.com/o/r/actions/runs/1/job/9"}"#
+        } else {
+            r#"{"name":"cargo fmt --check (pinned)","status":"completed","conclusion":"failure","html_url":"https://github.com/o/r/actions/runs/1/job/9"}"#
+        };
+        // A mystery PR's log must match nothing in the table either: the
+        // rustfmt Diff line would classify it rustfmt-drift however the check
+        // is named, and the escalation under test would never fire.
+        let log_line = if mystery {
+            "totally novel failure output"
+        } else {
+            "Diff in /w/w/crates/fno-agents/src/x.rs:1:"
+        };
+        write_exec(
+            dir,
+            "gh",
+            &format!(
+                r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "gh $*" >> "$D/gh.log"
+for a in "$@"; do case "$a" in
+  *'pulls?state=open'*)
+     echo '[{{"number":1,"head":{{"sha":"aaa1","ref":"feature/x-1111"}},"body":"b"}},{{"number":2,"head":{{"sha":"bbb2","ref":"feature/x-2222"}},"body":"b"}}]'
+     exit 0 ;;
+  *pulls/1*) echo '{{"head":{{"sha":"aaa1","ref":"feature/x-1111"}},"body":"b"}}'; exit 0 ;;
+  *pulls/2*) echo '{{"head":{{"sha":"bbb2","ref":"feature/x-2222"}},"body":"b"}}'; exit 0 ;;
+  *check-runs) echo '{{"check_runs":[{check}]}}'; exit 0 ;;
+  */logs) echo "{log_line}"; exit 0 ;;
+  */status) echo '{{"statuses":[]}}'; exit 0 ;;
+esac; done
+echo '[]'
+"#
+            ),
+        )
+    }
+
+    /// A stub `git` that both lists one worktree (on feature/x-1111) and
+    /// answers run_one's branch/porcelain/commit/push questions inside it.
+    fn stub_git_drive(dir: &Path) -> std::path::PathBuf {
+        let wt = dir.join("wt");
+        let wt = wt.to_string_lossy().into_owned();
+        write_exec(
+            dir,
+            "git",
+            &format!(
+                r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "git $*" >> "$D/git.log"
+case "$1 $2" in
+  "worktree list") printf 'worktree {wt}\nHEAD aaa\nbranch refs/heads/feature/x-1111\n\n'; exit 0 ;;
+  "rev-parse --abbrev-ref") echo feature/x-1111; exit 0 ;;
+  "status --porcelain") if [ -f "$D/fixed" ]; then echo ' M src/x.rs'; fi; exit 0 ;;
+esac
+exit 0
+"#
+            ),
+        )
+    }
+
+    /// A stub `fno` answering the inbox reads. `existing` is the question
+    /// list `outstanding --json` reports; every `ask` lands in fno-ask.log.
+    fn stub_fno(dir: &Path, existing: &str) {
+        write_exec(
+            dir,
+            "fno",
+            &format!(
+                r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "fno $*" >> "$D/fno.log"
+case "$*" in
+  *"outstanding --json"*) echo '{existing}'; exit 0 ;;
+  *"outstanding ask"*) echo "ask $*" >> "$D/fno-ask.log"; exit 0 ;;
+esac
+exit 0
+"#
+            ),
+        );
+    }
+
+    /// Hold a live claim on `x-2222` under the given root, as a worker would.
+    fn hold_claim(dir: &Path) {
+        let opts = crate::claims::AcquireOpts {
+            pid: Some(std::process::id()),
+            root: Some(dir.to_path_buf()),
+            events_dir: Some(dir.to_path_buf()),
+            ..Default::default()
+        };
+        match crate::claims::acquire("node:x-2222", "worker:t-x", opts) {
+            crate::claims::AcquireOutcome::Acquired(_) => {}
+            other => panic!("claim setup failed: {other:?}"),
+        }
+    }
+
+    /// Drive-loop argv with the claim root and the events file pinned to the
+    /// test dir, so the two side effects never touch the real `~/.fno`.
+    fn drive_args(dir: &Path, extra: &[&str]) -> Vec<String> {
+        let mut v = args_for(dir, &["--all", "--apply"]);
+        v.push("--claims-root".to_string());
+        v.push(dir.to_string_lossy().into_owned());
+        v.push("--events-file".to_string());
+        v.push(dir.join("events.jsonl").to_string_lossy().into_owned());
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    }
+
+    #[test]
+    fn branch_node_ids_match_the_closure_producers_delimiter_rule() {
+        // Parity cases from the Python half and the CI gate: a plain branch
+        // names nothing, a node branch names its node, and a trailing segment
+        // never re-glues into a second, bogus candidate.
+        assert_eq!(branch_node_ids("main"), Vec::<String>::new());
+        assert_eq!(branch_node_ids("fix/respawn-race"), Vec::<String>::new());
+        assert_eq!(
+            branch_node_ids("feature/x-974c"),
+            vec!["x-974c".to_string()]
+        );
+        assert_eq!(
+            branch_node_ids("feature/x-cdef-1234"),
+            vec!["x-cdef".to_string()],
+            "the all-hex suffix must not re-glue into cdef-1234"
+        );
+        // Fixed-width hex makes x-5b66 a prefix of x-5b667: only the
+        // delimiter-bounded one counts.
+        assert_eq!(
+            branch_node_ids("feature/x-5b667"),
+            vec!["x-5b667".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_drive_loop_skips_a_claimed_pr_and_rehearses_the_free_one() {
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
-        stub_gh(d, false);
-        stub_git(d, "feature/x", false);
+        stub_gh_drive(d, false);
+        stub_git_drive(d);
         stub_cargo(d);
-        let code = run_heal(&args_for(d, &["--all", "--apply"]));
-        assert_eq!(code, EXIT_READ_ERROR);
-        assert_eq!(log_of(d, "cargo.log"), "");
+        stub_fno(d, r#"{"questions":[]}"#);
+        hold_claim(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        let code = run_heal(&drive_args(d, &["--dry-run"]));
+        assert_eq!(
+            code, EXIT_ESCALATIONS,
+            "a rehearsal over a would-heal PR reports the work, exactly like the report-only --all"
+        );
+        let out = log_of(d, "gh.log");
+        assert!(out.contains("pulls/2"), "the claimed PR was read: {out}");
+        assert_eq!(log_of(d, "cargo.log"), "", "a dry run runs no remedy");
+        assert!(!log_of(d, "git.log").contains("push"), "and pushes nothing");
+        // The tick row lands with the dry_run marker and both verdicts.
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("pr_heal_tick"), "{events}");
+        assert!(events.contains("\"dry_run\":true"), "{events}");
+        assert!(events.contains("\"skip_claim_held\":1"), "{events}");
+        assert!(events.contains("\"would_heal\":1"), "{events}");
+    }
+
+    #[test]
+    fn the_drive_loop_heals_the_free_pr_from_its_own_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive(d, false);
+        stub_git_drive(d);
+        stub_cargo(d);
+        stub_fno(d, r#"{"questions":[]}"#);
+        hold_claim(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        let code = run_heal(&drive_args(d, &[]));
+        assert_eq!(code, EXIT_CLEAN, "the free PR healed: {code}");
+        let git = log_of(d, "git.log");
+        assert_eq!(git.matches("git push").count(), 1, "one push: {git}");
+        assert_ne!(log_of(d, "cargo.log"), "", "the remedy ran");
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("\"healed\":1"), "{events}");
+        assert!(events.contains("\"skip_claim_held\":1"), "{events}");
+    }
+
+    #[test]
+    fn an_unknown_signature_escalates_to_the_inbox_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive(d, true);
+        stub_git_drive(d);
+        stub_fno(d, r#"{"questions":[]}"#);
+        hold_claim(d);
+        let code = run_heal(&drive_args(d, &[]));
+        assert_eq!(code, EXIT_ESCALATIONS, "the unknown row remains work");
+        let asks = log_of(d, "fno-ask.log");
+        assert_eq!(asks.matches("outstanding ask").count(), 1, "{asks}");
+        assert!(
+            asks.contains("no playbook signature") && asks.contains("mystery-check"),
+            "{asks}"
+        );
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("\"unknown\":1"), "{events}");
+    }
+
+    #[test]
+    fn a_question_already_on_the_board_is_not_re_asked_each_tick() {
+        // The tick fires every 600s; an unanswered question must not become
+        // one new inbox row per tick.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive(d, true);
+        stub_git_drive(d);
+        hold_claim(d);
+        stub_fno(
+            d,
+            r#"{"questions":[{"question":"heal: PR 1 check mystery-check failed with no playbook signature"}]}"#,
+        );
+        run_heal(&drive_args(d, &[]));
+        assert_eq!(log_of(d, "fno-ask.log"), "", "deduped, never re-asked");
+    }
+
+    #[test]
+    fn a_pr_with_no_worktree_is_named_and_skipped_never_cloned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive(d, false);
+        // No stub_git_drive: `git worktree list` fails, so no worktree is
+        // found for the free PR's branch.
+        stub_git(d, "feature/x-1111", false);
+        stub_cargo(d);
+        stub_fno(d, r#"{"questions":[]}"#);
+        hold_claim(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        let code = run_heal(&drive_args(d, &[]));
+        assert_ne!(code, EXIT_CLEAN, "the red PR is still red");
+        assert_eq!(log_of(d, "cargo.log"), "", "no remedy ran anywhere");
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("skip_no_worktree"), "{events}");
     }
 
     #[test]
@@ -2137,7 +2746,7 @@ exit 0
             "check-pr-node-closure: HEAD ref 'feature/x-a1-x-b2' names x-a1,x-b2, ",
             "and the exact trailer claims none of them.\n",
         );
-        let f = classify(&ctx("check-pr-node-closure", "pr-node-closure", log), false);
+        let f = classify(&ctx("check-pr-node-closure", log), false);
         assert_eq!(
             f.remedy,
             Remedy::EditBody {

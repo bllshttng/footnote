@@ -382,7 +382,8 @@ def logs(
     help=(
         "Classify a red check by signature, apply the mechanical fix, push "
         "once. Dry run unless --apply. --playbook prints the signature table; "
-        "--all reports every red open PR (report-only). Exit 0 nothing red, "
+        "--all reports every red open PR; --all --apply drives them (each "
+        "from its own worktree, behind four refusals). Exit 0 nothing red, "
         "1 escalations remain, 2 a run is in flight, 3 wrong branch or dirty "
         "tree, 4 read error, 127 binary missing."
     ),

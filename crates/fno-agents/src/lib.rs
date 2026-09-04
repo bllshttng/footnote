@@ -924,6 +924,12 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // verdict was stored/refreshed/cleared on a hook-less mux row, or a
     // provider's manifest failed to load.
     "screen_state_change",
+    // CI heal drive loop (pr-heal verb, x-974c): one row per --all --apply
+    // invocation carrying the per-tick counts, so the arm is visible in the
+    // journal even on a quiet cycle. Emitted even when every PR is skipped,
+    // for the same reason worktree_sweep is: a quiet repo must not read as a
+    // loop that never ran. The Python tick emits nothing for this family.
+    "pr_heal_tick",
     // NOTE: the a2a status-breakpoint kinds (task_started/task_done/blocked/
     // run_summary, x-dbaf) are NOT registered here. They are Python-defined in
     // cli/src/fno/events/schema.yaml; the parity gate partitions names (a kind
@@ -968,7 +974,7 @@ pub fn emit_schema_json() -> serde_json::Value {
                 "source": {
                     "type": "string",
                     "anyOf": [
-                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "python", "skill_diff", "subagent", "target", "test"] },
+                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "python", "skill_diff", "subagent", "target", "test"] },
                         { "pattern": "^(worker|stream-worker):.+$" }
                     ],
                     "description": "Producer identity: a fixed-string source or a per-agent worker (worker:<id> / stream-worker:<id>)"

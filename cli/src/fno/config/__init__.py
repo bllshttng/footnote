@@ -51,16 +51,17 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationInfo,
+    ValidationError as _PydValidationError,
     field_validator,
     model_validator,
 )
-from pydantic import ValidationError as _PydValidationError
 
 # Pure file-reader leaf, extracted to break the config<->graph cycle. Re-exported
 # here so every existing `from fno.config import read_config_flat` (etc.) caller
 # keeps working unchanged. The redundant `X as X` aliases are the explicit-reexport
 # idiom mypy's --no-implicit-reexport requires (these names used to be defined here).
 from fno.config import _watchdog
+from fno.config._auto_heal import AutoHealBlock
 from fno.config._watchdog import WatchdogBlock
 from fno.config_io import _apply_search_ceiling as _apply_search_ceiling
 from fno.config_io import _deep_merge as _deep_merge
@@ -4588,6 +4589,7 @@ class ConfigBlock(BaseModel):
     active_backlog: ActiveBacklogConfig = Field(default_factory=ActiveBacklogConfig)
     parallel: ParallelBlock = Field(default_factory=ParallelBlock)
     auto_merge: AutoMergeBlock = Field(default_factory=AutoMergeBlock)
+    auto_heal: AutoHealBlock = Field(default_factory=AutoHealBlock)
     pr_watch: PrWatchBlock = Field(default_factory=PrWatchBlock)
     groom: GroomBlock = Field(default_factory=GroomBlock)
     restart: RestartBlock = Field(default_factory=RestartBlock)
@@ -4989,12 +4991,9 @@ class SettingsModel(ConfigBlock):
 # config.local.toml is flat, so no `config.` prefix.
 WORKTREE_LOCAL_KEYS: frozenset[str] = frozenset(
     {
-        # post_merge.parking_lot_path was removed (x-071c): the post-merge ritual
-        # is a serial one-shot durable write, and its two write vehicles (capture
-        # add under a file lock, narrative append under the per-PR reconcile mutex
-        # with O_APPEND) are already safe on the shared canonical file. Redirecting
-        # it per-lane only orphaned the prose into an untracked file archive-worktree
-        # deletes. The ritual now always resolves against the canonical root.
+        # post_merge.parking_lot_path was removed (x-071c): the ritual is a
+        # serial one-shot durable write, already safe on the shared canonical
+        # file; a per-lane redirect only orphaned the prose.
         "project.id",
     }
 )
