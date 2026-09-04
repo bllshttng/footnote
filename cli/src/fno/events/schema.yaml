@@ -4168,7 +4168,7 @@ event_types:
           description: "Wall-clock seconds from tick entry to this record."
         phase:
           type: string
-          description: "Last stage marker reached: one of entry, settings, lock, discover, sweep, dispatch, recovery, watchdog, catchup."
+          description: "Last stage marker reached: one of entry, settings, lock, discover, sweep, dispatch, recovery, watchdog, king_wake, heal, stranded, catchup."
         sweep_failures:
           type: integer
           description: "Repo listing failures (present when a sweep ran)."
@@ -4184,6 +4184,52 @@ event_types:
         pid:
           type: integer
           description: "OS pid of the tick process."
+
+  - name: pr_heal_tick
+    description: "CI heal drive loop (x-974c): one row per pr-heal --all --apply invocation carrying the per-cycle counts. Emitted even when every PR is skipped, so a quiet cycle cannot read as a loop that never ran. Rust-emitted into the global journal; the tick's own phase only gates the invocation."
+    sources: [pr-heal]
+    data:
+      required: [seen, unknown, dry_run]
+      properties:
+        seen:
+          type: integer
+          description: "Open PRs the loop examined this cycle."
+        healed:
+          type: integer
+          description: "PRs whose remedy applied, committed and pushed clean (exit 0)."
+        would_heal:
+          type: integer
+          description: "Dry-run rehearsal verdicts: healable PRs the loop would have acted on."
+        skip_claim_held:
+          type: integer
+          description: "PRs skipped because a branch-named node holds a live or suspect claim."
+        skip_inherited:
+          type: integer
+          description: "PRs with nothing red of their own (every red check is red on main too)."
+        skip_escalate_only:
+          type: integer
+          description: "PRs whose findings all carry a known signature with a repro but nothing mechanical."
+        skip_in_flight:
+          type: integer
+          description: "PRs whose fix was committed but held local over a run in flight."
+        skip_no_worktree:
+          type: integer
+          description: "Healable PRs with no checkout on their branch; never cloned for."
+        skip_dirty_tree:
+          type: integer
+          description: "PRs whose worktree was on the wrong branch or dirty at apply time."
+        skip_read_error:
+          type: integer
+          description: "PRs the world would not answer (read failures)."
+        still_red:
+          type: integer
+          description: "PRs acted on that remain red (escalations or read errors after apply)."
+        unknown:
+          type: integer
+          description: "Failing checks no signature recognized; each becomes one inbox question unless already on the board."
+        dry_run:
+          type: boolean
+          description: "True for a --all --apply --dry-run rehearsal: nothing changed, nothing pushed, no question filed."
 
   - name: recovery_nudge
     description: "Session auto-recovery (x-f47c) injected a resume nudge into a footnote-launched bg session that was idle-but-incomplete after an abnormal turn termination."
