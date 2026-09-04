@@ -2233,13 +2233,14 @@ def test_attach_codex_refused_with_exit_13(
     assert result.exit_code == 13
     assert called is False
     err = capsys.readouterr().err
-    assert "one-shot" in err
-    # The refusal used to close by promising cross-provider attach "in the
-    # Phase 6 supervisor". That supervisor is codex's own app-server daemon,
-    # it is already running, and a codex THREAD attaches through it now. What
-    # is left here is the fallback for a row with no persistent session, so
-    # the sentence pointing at a retired plan is gone.
-    assert "Phase 6" not in err
+    # The old refusal claimed codex is "one-shot; no persistent session" -
+    # the exact misread x-a3e8 indicts: features.attach reads native, and
+    # the honest answer is that the wired arm (the fno-agents binary) is
+    # absent in this runtime, not that the harness cannot attach.
+    assert "one-shot" not in err
+    assert "features.attach" not in err
+    assert "fno-agents binary" in err
+    assert "fno doctor --fix" in err
     assert "fno agents logs worker-codex --follow" in err
 
 

@@ -25,7 +25,7 @@ from fno.agents.harness_map import (
 )
 
 FEATURE_KEYS = {
-    "review", "spawn", "rpc", "server", "plugins", "hooks",
+    "review", "spawn", "attach", "rpc", "server", "plugins", "hooks",
     "skills_dir", "subagent_dispatch", "mcp", "acp",
 }
 FEATURE_STATES = {"native", "capable", "absent", "unmeasured"}

@@ -47,9 +47,10 @@ const PROBE_KINDS: [&str; 3] = ["declared", "behavioral", "unprobeable"];
 /// a review command, an RPC surface, a plugin system - as opposed to the
 /// keystroke mechanics above, which model how fno PUPPETS a pane. Closed so a
 /// typo is a parse error rather than a silent new dimension.
-const FEATURE_KEYS: [&str; 10] = [
+const FEATURE_KEYS: [&str; 11] = [
     "review",
     "spawn",
+    "attach",
     "rpc",
     "server",
     "plugins",

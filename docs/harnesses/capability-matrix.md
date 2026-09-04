@@ -21,15 +21,15 @@ pane-driving mechanics are a different dimension and live in the capability
 table itself, never here.
 
 
-| harness | acp | hooks | mcp | plugins | review | rpc | server | skills_dir | spawn | subagent_dispatch |
-|---|---|---|---|---|---|---|---|---|---|---|
-| claude | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
-| codex | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
-| gemini | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `absent` | `unmeasured` |
-| agy | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `absent` | `unmeasured` |
-| opencode | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
-| pi | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
-| hermes | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
-| openclaw | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
-| cursor-agent | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
-| grok | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
+| harness | acp | attach | hooks | mcp | plugins | review | rpc | server | skills_dir | spawn | subagent_dispatch |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| claude | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
+| codex | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
+| gemini | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `absent` | `unmeasured` |
+| agy | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `absent` | `unmeasured` |
+| opencode | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
+| pi | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
+| hermes | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| openclaw | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| cursor-agent | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
+| grok | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |

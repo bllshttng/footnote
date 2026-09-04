@@ -127,13 +127,20 @@ effort_labels = {}
 status_command = "/status"
 status_pattern = 'Model:\s+(?P<model>\S+).*?(?:reasoning|effort)\s+(?P<effort>minimal|low|medium|high|xhigh|max)'
 
-# FEATURES. Both states are measured. spawn: one of the two journey-proven
+# FEATURES. All three states are measured. spawn: one of the two journey-proven
 # thread lanes. review: Claude Code ships /code-review, and the fno review
-# lane drives it on claude workers today.
+# lane drives it on claude workers today. attach: the subcommand above IS the
+# native verb, and resume_cli renders it.
 [harness.claude.features.review]
 state = "native"
 
 [harness.claude.features.spawn]
+state = "native"
+
+# Reachability, not verb inventory: the form field above answers "ships a
+# native attach subcommand"; this answers "can fno attach". They happen to
+# agree on claude and disagree on codex (x-a3e8).
+[harness.claude.features.attach]
 state = "native"
 
 [harness.codex]
@@ -259,14 +266,20 @@ effort_labels = { low = "Low", medium = "Medium (default)", high = "High", xhigh
 status_command = "/status"
 status_pattern = 'Model:\s+(?P<model>\S+).*?reasoning\s+(?P<effort>minimal|low|medium|high|xhigh|max)'
 
-# FEATURES. Both states are measured. spawn: the second journey-proven
+# FEATURES. All three states are measured. spawn: the second journey-proven
 # thread lane. review: the only structured review path in the table -
 # `review_verbs` above map onto the app-server daemon's review RPC, which
-# the mail lane's own --check exercises.
+# the mail lane's own --check exercises. attach: the proof the two questions
+# split. Codex ships NO attach subcommand - the form field above is really
+# resume plus a daemon endpoint - yet fno attaches today through exactly
+# that form, so verb inventory says no and reachability says yes.
 [harness.codex.features.review]
 state = "native"
 
 [harness.codex.features.spawn]
+state = "native"
+
+[harness.codex.features.attach]
 state = "native"
 
 [harness.gemini]
@@ -904,10 +917,10 @@ reason = "measured over 5 delays x 3 trials on a live pane; no one-shot probe re
 
 # THE FEATURES DIMENSION (x-a3e8). Each per-harness row may carry a
 # [harness.<name>.features.<key>] stanza answering WHAT A HARNESS CAN DO, held
-# beside the keystroke mechanics above and never instead of them. Ten keys,
+# beside the keystroke mechanics above and never instead of them. Eleven keys,
 # closed so a typo is a parse error rather than a silent new dimension:
 #
-#   review  spawn  rpc  server  plugins  hooks  skills_dir
+#   review  spawn  attach  rpc  server  plugins  hooks  skills_dir
 #   subagent_dispatch  mcp  acp
 #
 # A claim's only field is `state`, one of four:
@@ -933,6 +946,15 @@ marker = "a review verb dispatched on the harness's lane returns a structured ve
 [probe."features.spawn"]
 kind = "behavioral"
 marker = "an unattended spawn, drive and stop on the harness's thread lane ends at the loop's own stop gate, not at a timeout (the keeper-journey template)"
+
+# attach is measured on the LIVE session, never from a row: a harness whose
+# resume form is the only verb still attaches when the daemon is the keeper
+# (agy, opencode, pi prove it through the mux-thread portal). The marker is
+# the positive-marker rule itself - an attach that returns the session's own
+# interface, not a refusal or a delivery receipt.
+[probe."features.attach"]
+kind = "behavioral"
+marker = "a real attach to a live session lands in that session's own interface and returns its lines - the native verb where one ships, else the daemon-kept lane (mux-thread portal) against a session the keeper holds"
 
 [probe."features.rpc"]
 kind = "declared"

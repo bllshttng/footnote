@@ -272,8 +272,8 @@ _LOOP_PARTICIPATION = {"native", "extension", "none"}
 # mechanics, which model how fno PUPPETS a pane. Closed so a typo is a parse
 # error rather than a silent new dimension.
 _FEATURE_KEYS = frozenset({
-    "review", "spawn", "rpc", "server", "plugins", "hooks",
-    "skills_dir", "subagent_dispatch", "mcp", "acp",
+    "review", "spawn", "attach", "rpc", "server", "hooks",
+    "skills_dir", "subagent_dispatch", "mcp", "acp", "plugins",
 })
 # The four states a feature claim may declare, kept identical to the Rust
 # validator's FEATURE_STATES so the two runtimes cannot disagree. `capable`

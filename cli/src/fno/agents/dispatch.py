@@ -6156,33 +6156,70 @@ def attach_agent(name: str) -> AttachResult:
             exit_code=landed.returncode,
         )
 
-    if existing.harness in ("codex", "gemini"):
-        # (x-6678) A codex THREAD is attachable now: it lives on the shared
-        # app-server daemon and `codex resume --remote` opens the real TUI on
-        # it. That path is the Rust verb's (client_verbs.rs), which is what
-        # `fno agents attach` routes to. This fallback runs only when the Rust
-        # binary is unavailable, and in that world no codex thread exists to
-        # attach to, because the Rust daemon is what spawns one.
-        sys.stderr.write(
-            f"{existing.harness} agents are one-shot; no persistent "
-            "session to attach to. Use 'fno agents logs "
-            f"{name} --follow' for live output.\n"
-        )
-        # Forensic event so an `events.jsonl` audit can correlate
-        # "why did this attach attempt fail" against operator activity.
-        # (Sigma-review C4 finding: silent on the refused path before.)
-        events.emit(
-            "agent_attach_refused",
-            name=name,
-            provider=existing.harness,
-            reason="one-shot-provider-no-persistent-session",
-        )
-        return AttachResult(name=name, provider=existing.harness, exit_code=13)
-
     if existing.harness != "claude":
+        # (x-a3e8) Reachability is the table's answer, never the verb
+        # inventory and never the gap in this file: features.attach says
+        # whether fno can attach to a live session on this harness. The old
+        # branches read a missing Python implementation as the harness's
+        # inability, which is how a daemon-held codex thread and a
+        # keeper-held agy session both read as unattachable.
+        from fno.agents.harness_map import DispatchResolveError, feature_claim
+
+        try:
+            attach_state = feature_claim(existing.harness, "attach")
+        except DispatchResolveError:
+            attach_state = "unmeasured"
+        if attach_state != "native":
+            capability = {
+                "absent": "has no attachable session",
+                "capable": "can hold a live session, but fno has wired no attach arm for it",
+                "unmeasured": "has not had attach reachability measured",
+            }[attach_state]
+            sys.stderr.write(
+                f"attach to {name!r} ({existing.harness}) is refused: its "
+                f"capability row records features.attach = {attach_state!r} - "
+                f"it {capability}. Settle the row with 'fno agents harness "
+                f"probe {existing.harness}'. 'fno agents logs {name} --follow' "
+                "still shows live output.\n"
+            )
+            # Forensic event so an `events.jsonl` audit can correlate
+            # "why did this attach attempt fail" against operator activity.
+            events.emit(
+                "agent_attach_refused",
+                name=name,
+                provider=existing.harness,
+                reason=f"features-attach-{attach_state}",
+            )
+            return AttachResult(name=name, provider=existing.harness, exit_code=13)
+        if existing.harness == "codex":
+            # Native, but the wired arm is the fno-agents binary
+            # (client_verbs.rs), which `fno agents attach` routes to before
+            # this Python fallback ever runs. This fallback executes only
+            # when that binary is unavailable, and in that world no codex
+            # thread exists to attach to, because the Rust daemon is what
+            # spawns one. The lane is down; the harness is not unable.
+            sys.stderr.write(
+                "codex attach is wired through the fno-agents binary, which "
+                "is unavailable in this runtime, and a codex thread exists "
+                f"only under that daemon. Run 'fno doctor --fix'. 'fno agents "
+                f"logs {name} --follow' still shows live output.\n"
+            )
+            events.emit(
+                "agent_attach_refused",
+                name=name,
+                provider="codex",
+                reason="attach-lane-binary-unavailable",
+            )
+            return AttachResult(name=name, provider="codex", exit_code=13)
+        # Native on a keeper-held harness: the wired arm is the daemon-kept
+        # lane (the mux-thread portal) already tried above. Reaching this
+        # point means no live mux server answered, so the lane is down.
         raise DispatchAskError(
-            f"attach for harness {existing.harness!r} is not implemented",
-            exit_code=2,
+            f"{existing.harness} attach rides the daemon-kept lane (the "
+            "mux-thread portal), and no live mux server answered. Start one "
+            "with 'fno mux serve' and retry; 'fno agents logs "
+            f"{name} --follow' shows live output meanwhile.",
+            exit_code=24,
         )
 
     short_id = existing.short_id

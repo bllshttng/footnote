@@ -19,7 +19,7 @@ FEATURE_FIELDS = sorted(
     for field in probe_declarations()
     if field.startswith("features.")
 )
-assert len(FEATURE_FIELDS) == 10, "the closed feature set drifted; update this test"
+assert len(FEATURE_FIELDS) == 11, "the closed feature set drifted; update this test"
 
 
 def _report_fields(report: dict) -> dict[str, dict]:
