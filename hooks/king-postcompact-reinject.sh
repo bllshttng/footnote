@@ -80,6 +80,26 @@ CONTEXT="## You are still the king
 Crown: level ${CROWN_LEVEL:-?} over ${CROWN_SCOPE:-?}. Confirm with \`fno whoami\`.
 
 $(sed '/^<!--/d' "$BRIEF")"
+
+# Reign limb (x-7b36): when the crowned scope's manifest reports a shape AND
+# names THIS session, this is a tenured reign, and its beat needs re-teaching
+# after a compact. Reads the same manifest every king arm resolves; a missing
+# manifest or a foreign session id means the king-for-a-day brief above is the
+# whole teaching, so nothing is appended (fail to the narrower rule).
+REPO_ROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
+REIGN_MANIFEST="$(fno agents king manifest-path --harness-session-id "$SID" \
+    --state-root "$REPO_ROOT/.fno" 2>/dev/null || true)"
+if [[ -n "$REIGN_MANIFEST" && -f "$REIGN_MANIFEST" ]]; then
+    REIGN_SHAPE="$(sed -n 's/^shape:[[:space:]]*//p' "$REIGN_MANIFEST" | head -1 | tr -d '[:space:]')"
+    REIGN_SID="$(sed -n 's/^harness_session_id:[[:space:]]*//p' "$REIGN_MANIFEST" | head -1 | tr -d '[:space:]')"
+    if [[ -n "$REIGN_SHAPE" && "$REIGN_SID" == "$SID" ]]; then
+        CONTEXT="$CONTEXT
+
+## You are still reigning (shape: ${REIGN_SHAPE})
+
+The loop, goal and monitors survive a compact: verify with \`/hooks\` and the loop receipt, and re-arm any that is missing. The six monitors: unread mail (60s), board-change proxy (120s), crown liveness (300s), main-branch CI (300s), capacity band debounced across two samples (300s), arm staleness (600s). The two self-injected commands: \`/loop <king.checkin_interval> <king.checkin_text>\` and \`/goal <king.goal_text>\`. Levers in order: mail the stalled worker, \`fno backlog rank --top\`, undefer or supersede, ask the operator. Journal \`reign_checkin\`; dispatch only on a red dispatching arm, journaled as \`reign_dispatch_exception\`. Never \`/goal clear\` on NoProgress - escalate-and-park is the stop path."
+    fi
+fi
 postcompact_emit "$(postcompact_carrier "$SOURCE")" "$CONTEXT"
 
 exit 0

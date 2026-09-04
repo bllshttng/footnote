@@ -481,6 +481,20 @@ mod tests {
     // surfaces. This test scans every production call site and fails on drift.
 
     // ── fire the registry check HERE, not only in CI ──────────────────────
+    /// The reign events (x-7b36): a king journals these from the session, and
+    /// `fno doctor event audit --type` resolves the name through this table.
+    /// A kind dropped here makes the done-probe read "unknown type", which is
+    /// the absence-lie in audit form.
+    #[test]
+    fn event_table_knows_reign() {
+        for kind in ["reign_armed", "reign_checkin", "reign_dispatch_exception"] {
+            assert!(
+                KNOWN_EVENT_KINDS.contains(&kind),
+                "{kind} missing from KNOWN_EVENT_KINDS"
+            );
+        }
+    }
+
     // `KNOWN_EVENT_KINDS` and `schema.yaml` cannot be generated from each
     // other: the YAML entry carries description/sources/data/consumers the
     // const does not have, and the two sets are a deliberate partition. So
@@ -874,6 +888,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "reconcile_deferred",
     "reconcile_done",
     "reconcile_error",
+    // Reign (king-emitted, x-7b36): the tenured-king skill journals these from
+    // the reigning session; audit resolves the names through this table.
+    "reign_armed",
+    "reign_checkin",
+    "reign_dispatch_exception",
     // Startup reconcile sweep (daemon-emitted, plan ab-70faa65b Architecture B)
     "startup_reconcile_done",
     "startup_reconcile_failed",
