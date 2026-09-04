@@ -2,9 +2,13 @@
 
 The Stop nudge reads the manifest's shape field to learn whether live spawned
 workers are an answered court or an unshaped pass. These tests pin the CLI
-half: the holder declares, on its own crowned manifest, idempotently.
+half: the holder declares, on its own crowned manifest, idempotently. The
+write itself lives in Rust (`fno-agents reign-shape`, pinned by loop_reign.rs
+tests); the two write tests run the real binary and skip when it is not built.
 """
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -41,7 +45,20 @@ def court(tmp_path, monkeypatch):
     # The verb resolves the manifest state root from the caller's cwd; seat
     # the court so that resolution lands on the tmp state root too.
     monkeypatch.chdir(tmp_path)
+    built = Path(__file__).parents[3] / (
+        "crates/fno-agents/target/debug/fno-agents"
+    )
+    if built.is_file():
+        monkeypatch.setenv("FNO_AGENTS_BIN", str(built))
     return tmp_path
+
+
+def _binary_available() -> bool:
+    import os
+
+    if os.environ.get("FNO_AGENTS_BIN"):
+        return Path(os.environ["FNO_AGENTS_BIN"]).is_file()
+    return (Path(__file__).parents[3] / "crates/fno-agents/target/debug/fno-agents").is_file()
 
 
 def _seat(name: str, session: str, *, scope: str | None = SCOPE, status: str = "busy"):
@@ -75,6 +92,7 @@ def _shape(*args: str):
     return CliRunner().invoke(agents_king_app, ["shape", *args])
 
 
+@pytest.mark.skipif(not _binary_available(), reason="fno-agents binary not built")
 def test_shape_court_lands_on_the_manifest_and_echoes(court) -> None:
     _seat("reigning-king", CALLER_SESSION)
     manifest = _manifest(court)
@@ -86,6 +104,7 @@ def test_shape_court_lands_on_the_manifest_and_echoes(court) -> None:
     assert parse_manifest(manifest)["shape"] == "court"
 
 
+@pytest.mark.skipif(not _binary_available(), reason="fno-agents binary not built")
 def test_shape_is_idempotent_on_a_second_call(court) -> None:
     _seat("reigning-king", CALLER_SESSION)
     manifest = _manifest(court)

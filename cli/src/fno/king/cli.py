@@ -403,12 +403,16 @@ def shape_cmd(
     because choosing court had no machine-visible act before this verb. Declare
     ``court`` the moment the reign spawns its first worker.
     """
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
     from fno.agents.crown import (
         AGENT_UNREGISTERED,
         REGISTRY_UNREADABLE,
         calling_agent_row,
     )
-    from fno.king.state import set_manifest_shape
+    from fno.king.state import _owner_state_root
+    from fno.rust_binary import resolve_binary
 
     if shape not in ("pass", "court"):
         typer.echo("king: shape must be 'pass' or 'court'.", err=True)
@@ -449,12 +453,29 @@ def shape_cmd(
         or getattr(caller, "cc_session_id", None)
         or ""
     )
-    try:
-        new_value = set_manifest_shape(own, shape, expect_session_id=session_id or None)
-    except ValueError as exc:
-        typer.echo(f"king: {exc}", err=True)
-        raise typer.Exit(1) from exc
-    typer.echo(f"king: shape declared: {new_value}")
+    # The rewrite lives in Rust (`fno-agents reign-shape`, loop_reign.rs):
+    # the Python tree is the compatibility shell, so the write went to the
+    # crate and this shell keeps only the caller ladder, which keys on the
+    # Python self-stamp no binary can resolve.
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "king: the fno-agents binary was not found, and the shape write "
+            "lives there. Reinstall fno, run `fno doctor update --rust`, or "
+            "set FNO_AGENTS_BIN.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    root = _owner_state_root(None)
+    argv = [str(binary), "reign-shape", "--scope", own, "--shape", shape,
+            "--root", str(root.parent if root.name == ".fno" else root)]
+    if session_id:
+        argv += ["--session", session_id]
+    result = subprocess.run(argv, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        typer.echo(f"king: {result.stderr.strip()}", err=True)
+        raise typer.Exit(code=propagate_returncode(result.returncode))
+    typer.echo(f"king: shape declared: {result.stdout.strip()}")
     typer.echo(f"scope:  {own}")
 
 

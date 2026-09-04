@@ -12794,6 +12794,12 @@ pub(crate) struct KingManifest {
     pub(crate) fno_id: String,
     pub(crate) scope: String,
     pub(crate) created_at: Option<String>,
+    /// The crowned session the manifest names; `loop_reign`'s split read keys
+    /// on it. Empty on manifests written before identity fields existed.
+    pub(crate) harness_session_id: Option<String>,
+    /// `pass` | `court`. Absent reads as `pass`, the value its writer's
+    /// default would have recorded, never as a third unknown shape.
+    pub(crate) shape: String,
     pub(crate) max_iterations: u64,
     pub(crate) respawn_count: u64,
     pub(crate) respawn_ceiling: u64,
@@ -12822,6 +12828,8 @@ pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
             "fno_id" => out.fno_id = value,
             "scope" => out.scope = value,
             "created_at" => out.created_at = Some(value),
+            "harness_session_id" => out.harness_session_id = Some(value),
+            "shape" => out.shape = value,
             "budget_max_iterations" => {
                 if let Ok(n) = value.parse::<u64>() {
                     out.max_iterations = n;

@@ -1,248 +1,175 @@
-"""``reign_state``: one reader for who is reigning, in what shape, and is it live.
+"""``reign_state``: the Python client over the Rust reign reader.
 
-The four cases the plan pins (agreeing, split, no manifest, unreadable
-registry) plus the shape rewrite. Every assertion on an unknown names the
-reason: a clean ``False`` where the instrument could not read is the
-absence-lie this reader exists to prevent, so the tests refuse to let one in.
+The reader's semantics (agreeing, split, no manifest, unreadable registry,
+terminal rows, unsafe scopes, the shape rewrite) live in
+``crates/fno-agents/src/loop_reign.rs`` and are pinned by that module's own
+tests. What these tests pin is the client half: the JSON maps onto the
+dataclass unchanged, a missing or failing binary answers unknown with a named
+reason (never a clean ``False``), and the argv carries the caller's intent.
 """
 from __future__ import annotations
 
+import json
+import stat
 from pathlib import Path
 
 import pytest
 
 from fno.paths_testing import use_tmpdir
 
+PAYLOAD = {
+    "crowned": True,
+    "scope": "alpha",
+    "shape": "pass",
+    "manifest_session": "aaaa1111-0000-4000-8000-000000000001",
+    "registry_session": "aaaa1111-0000-4000-8000-000000000001",
+    "live": True,
+    "split": False,
+    "unknown_reason": None,
+}
 
-def _entry(name: str, **kw):
-    from fno.agents.registry import AgentEntry
 
-    harness = kw.pop("harness", "claude")
-    kw.setdefault("harness_session_id", f"{name}-session")
-    return AgentEntry(name=name, cwd="/w", log_path="", harness=harness, **kw)
-
-
-def _write_manifest(tmp_path: Path, scope: str, session: str, shape: str = "pass") -> Path:
-    from fno.king.state import king_manifest_path, write_manifest
-
-    path = king_manifest_path(scope, state_root=tmp_path / ".fno")
-    write_manifest(
-        path,
-        scope=scope,
-        harness_session_id=session,
-        shape=shape,
-        owner_cwd=str(tmp_path),
-    )
+def _stub_binary(tmp_path: Path, body: str, *, name: str = "fno-agents") -> Path:
+    path = tmp_path / name
+    path.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
     return path
 
 
-def _isolate(monkeypatch, tmp_path: Path) -> None:
-    """Point every king-manifest root this module resolves at the tmp dir.
-
-    ``reign_state`` derives its default root from the caller's git repo (the
-    same per-project root the stop hooks pass as --state-root), and a pytest
-    run's repo is this worktree, not the fixture's tmp_path.
-    """
-    use_tmpdir(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        "fno.king.state._owner_state_root", lambda _cwd=None: tmp_path / ".fno"
-    )
-
-
 def test_ac1_manifest_written_by_init_carries_shape_pass(tmp_path: Path) -> None:
-    from fno.king.state import parse_manifest
+    from fno.king.state import king_manifest_path, parse_manifest, write_manifest
 
-    path = _write_manifest(tmp_path, "alpha", "aaaa1111-0000-4000-8000-000000000001")
+    path = king_manifest_path("alpha", state_root=tmp_path / ".fno")
+    write_manifest(
+        path,
+        scope="alpha",
+        harness_session_id="aaaa1111-0000-4000-8000-000000000001",
+        owner_cwd=str(tmp_path),
+    )
     fields = parse_manifest(path)
     assert fields["shape"] == "pass"
     # A court-shaped write records court verbatim, not normalized away.
-    court = _write_manifest(
-        tmp_path, "beta", "aaaa2222-0000-4000-8000-000000000002", shape="court"
+    court = king_manifest_path("beta", state_root=tmp_path / ".fno")
+    write_manifest(
+        court,
+        scope="beta",
+        harness_session_id="aaaa2222-0000-4000-8000-000000000002",
+        shape="court",
+        owner_cwd=str(tmp_path),
     )
     assert parse_manifest(court)["shape"] == "court"
 
 
-def test_ac2_live_crowned_session_answers_scope_and_live(
+def test_client_maps_the_rust_payload_onto_the_dataclass(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from fno.agents.registry import write_registry
     from fno.king.state import reign_state
 
-    _isolate(monkeypatch, tmp_path)
-    sid = "aaaa1111-0000-4000-8000-000000000001"
-    write_registry(
-        [_entry("king", status="busy", crown_scope="alpha", harness_session_id=sid)]
+    use_tmpdir(monkeypatch, tmp_path)
+    script = _stub_binary(
+        tmp_path, "import sys\nsys.stdout.write(" + repr(json.dumps(PAYLOAD)) + ")\n"
     )
-    _write_manifest(tmp_path, "alpha", sid)
-
-    class _Ident:
-        session_id = sid
-        harness = "claude"
-
-    monkeypatch.setattr(
-        "fno.agents.self_stamp.resolve_self_identity", lambda: _Ident()
-    )
-    state = reign_state()
-    assert state.crowned is True
-    assert state.scope == "alpha"
-    assert state.live is True
-    assert state.shape == "pass"
-    assert state.split is False
-
-
-def test_ac3_manifest_and_registry_sessions_differ_is_split(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from fno.agents.registry import write_registry
-    from fno.king.state import reign_state
-
-    _isolate(monkeypatch, tmp_path)
-    manifest_sid = "aaaa1111-0000-4000-8000-000000000001"
-    registry_sid = "bbbb2222-0000-4000-8000-000000000002"
-    write_registry(
-        [_entry("heir", status="idle", crown_scope="alpha", harness_session_id=registry_sid)]
-    )
-    _write_manifest(tmp_path, "alpha", manifest_sid)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: script)
 
     state = reign_state(scope="alpha")
-    assert state.split is True
-    assert state.manifest_session == manifest_sid
-    assert state.registry_session == registry_sid
+
+    assert state.crowned is True
+    assert state.scope == "alpha"
+    assert state.shape == "pass"
+    assert state.live is True
+    assert state.split is False
+    assert state.unknown_reason is None
 
 
-def test_ac4_unreadable_registry_answers_unknown_never_clean_false(
+def test_client_argv_carries_scope_session_and_registry(
     tmp_path: Path, monkeypatch
 ) -> None:
     from fno.king.state import reign_state
 
-    _isolate(monkeypatch, tmp_path)
+    use_tmpdir(monkeypatch, tmp_path)
+    log = tmp_path / "argv.json"
+    script = _stub_binary(
+        tmp_path,
+        "import json, sys\n"
+        f"json.dump(sys.argv[1:], open({str(log)!r}, 'w'))\n"
+        "sys.stdout.write(" + repr(json.dumps(PAYLOAD)) + ")\n",
+    )
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: script)
+    monkeypatch.chdir(tmp_path)
 
-    def _boom():
-        raise OSError("disk on fire")
+    reign_state(scope="alpha", session_id="aaaa1111-0000-4000-8000-000000000001")
 
-    monkeypatch.setattr("fno.agents.registry.load_registry", _boom)
+    argv = json.loads(log.read_text())
+    assert argv[0] == "reign-state"
+    assert "--scope" in argv and argv[argv.index("--scope") + 1] == "alpha"
+    assert "--session" in argv
+    assert (
+        argv[argv.index("--session") + 1] == "aaaa1111-0000-4000-8000-000000000001"
+    )
+    assert "--registry" in argv
+    assert "--root" in argv
+
+
+def test_missing_binary_answers_unknown_never_clean_false(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.king.state import reign_state
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: None)
     state = reign_state(scope="alpha")
     assert state.live is None
     assert state.crowned is None
     assert state.split is None
     assert state.unknown_reason is not None
-    assert "registry" in state.unknown_reason
+    assert "binary" in state.unknown_reason
 
 
-def test_scope_with_no_manifest_keeps_split_none_and_names_it(
+def test_failing_binary_carries_its_stderr_as_the_reason(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from fno.agents.registry import write_registry
-    from fno.king.state import reign_state
-
-    _isolate(monkeypatch, tmp_path)
-    write_registry([_entry("king", status="busy", crown_scope="alpha")])
-
-    state = reign_state(scope="alpha")
-    assert state.crowned is True
-    assert state.split is None
-    assert state.shape is None
-    assert state.unknown_reason is not None
-    assert "no manifest" in state.unknown_reason
-
-
-def test_terminal_crown_row_is_not_a_live_reign(tmp_path: Path, monkeypatch) -> None:
-    from fno.agents.registry import write_registry
-    from fno.king.state import reign_state
-
-    _isolate(monkeypatch, tmp_path)
-    write_registry([_entry("king", status="exited", crown_scope="alpha")])
-
-    state = reign_state(scope="alpha")
-    assert state.crowned is False
-    assert state.live is False
-    assert state.split is None
-
-
-def test_set_manifest_shape_rewrites_and_is_idempotent(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from fno.king.state import parse_manifest, set_manifest_shape
-
-    use_tmpdir(monkeypatch, tmp_path)
-    sid = "aaaa1111-0000-4000-8000-000000000001"
-    path = _write_manifest(tmp_path, "alpha", sid)
-
-    assert set_manifest_shape("alpha", "court", state_root=tmp_path / ".fno") == "court"
-    assert parse_manifest(path)["shape"] == "court"
-    # Second call with the same value is a no-op rewrite, not a refusal.
-    assert set_manifest_shape("alpha", "court", state_root=tmp_path / ".fno") == "court"
-    assert parse_manifest(path)["shape"] == "court"
-    # And back, on the caller's own manifest.
-    assert set_manifest_shape(
-        "alpha", "pass", state_root=tmp_path / ".fno", expect_session_id=sid
-    ) == "pass"
-
-
-def test_set_manifest_shape_refuses_another_kings_manifest(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from fno.king.state import set_manifest_shape
-
-    use_tmpdir(monkeypatch, tmp_path)
-    _write_manifest(tmp_path, "alpha", "aaaa1111-0000-4000-8000-000000000001")
-
-    with pytest.raises(ValueError, match="names session"):
-        set_manifest_shape(
-            "alpha",
-            "court",
-            state_root=tmp_path / ".fno",
-            expect_session_id="bbbb2222-0000-4000-8000-000000000002",
-        )
-
-
-def test_set_manifest_shape_refuses_without_manifest(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from fno.king.state import set_manifest_shape
-
-    use_tmpdir(monkeypatch, tmp_path)
-    with pytest.raises(ValueError, match="no manifest"):
-        set_manifest_shape("alpha", "court", state_root=tmp_path / ".fno")
-    with pytest.raises(ValueError, match="pass or court"):
-        set_manifest_shape("alpha", "siege", state_root=tmp_path / ".fno")
-
-
-def test_unsafe_scope_with_unreadable_registry_degrades_not_raises(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """A crash on this branch would replace the named reason with a different
-    error; the reader answers unknown, never escapes (found in review)."""
     from fno.king.state import reign_state
 
     use_tmpdir(monkeypatch, tmp_path)
-
-    def _boom():
-        raise OSError("disk on fire")
-
-    monkeypatch.setattr("fno.agents.registry.load_registry", _boom)
-    state = reign_state(scope="a/b")
-    assert state.live is None
-    assert state.split is None
-    assert "unsafe scope" in state.unknown_reason
-
-
-def test_shape_insert_lands_inside_the_frontmatter(tmp_path: Path) -> None:
-    """A pre-change manifest has no shape line; the inserted line must land
-    after the opening fence or every fenced parser misses it (found in
-    review)."""
-    from fno.king.state import king_manifest_path, parse_manifest, set_manifest_shape
-
-    root = tmp_path / ".fno"
-    path = king_manifest_path("legacy", state_root=root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "---\nscope: legacy\nharness_session_id: "
-        "dddd1111-0000-4000-8000-00000000000d\n---\n",
-        encoding="utf-8",
+    script = _stub_binary(
+        tmp_path,
+        "import sys\nsys.stderr.write('unsafe king scope')\nsys.exit(1)\n",
     )
-    set_manifest_shape("legacy", "court", state_root=root)
-    lines = path.read_text().splitlines()
-    assert lines[0] == "---"
-    assert lines[1] == "shape: court"
-    assert parse_manifest(path)["shape"] == "court"
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: script)
+    state = reign_state(scope="alpha")
+    assert state.crowned is None
+    assert "unsafe king scope" in (state.unknown_reason or "")
+    assert "exited 1" in (state.unknown_reason or "")
+
+
+def test_garbage_stdout_is_unknown_not_a_crash(tmp_path: Path, monkeypatch) -> None:
+    from fno.king.state import reign_state
+
+    use_tmpdir(monkeypatch, tmp_path)
+    script = _stub_binary(tmp_path, "print('not json')\n")
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: script)
+    state = reign_state(scope="alpha")
+    assert state.crowned is None
+    assert "no JSON" in (state.unknown_reason or "")
+
+
+def test_rust_reader_semantics_live_in_the_crate() -> None:
+    """The semantic cases (split, terminal, unsafe scope, legacy shape) are
+    pinned by loop_reign.rs's own tests; this file pins only the client."""
+    import subprocess
+    import sys
+
+    from pathlib import Path as _P
+
+    crate = _P(__file__).parents[3] / "crates" / "fno-agents" / "src" / "loop_reign.rs"
+    assert crate.is_file(), f"the Rust reader moved: {crate}"
+    text = crate.read_text(encoding="utf-8")
+    for needle in (
+        "sessions_differ_is_split",
+        "unknown_never_clean_false",
+        "unsafe_scope_with_unreadable_registry",
+        "terminal_crown_row_is_not_a_live_reign",
+        "legacy_manifest_without_shape_reads_as_pass",
+    ):
+        assert needle in text, f"the Rust suite lost the {needle!r} case"
+    del subprocess, sys

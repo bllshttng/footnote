@@ -358,259 +358,92 @@ class ReignState:
     unknown_reason: Optional[str]
 
 
+def _unknown_state(
+    scope: Optional[str], reason: str
+) -> ReignState:
+    return ReignState(
+        crowned=None,
+        scope=scope,
+        shape=None,
+        manifest_session=None,
+        registry_session=None,
+        live=None,
+        split=None,
+        unknown_reason=reason,
+    )
+
+
 def reign_state(
     scope: Optional[str] = None,
     session_id: Optional[str] = None,
     *,
     state_root: Optional[Path] = None,
-    registry: Optional[list] = None,
 ) -> ReignState:
-    """Answer "who is reigning, over what, in what shape, and is it live".
+    """Ask the Rust reader who is reigning, over what, in what shape, is it live.
 
-    Two entry points, one reader. With ``scope``, the registry crown rows over
-    that territory are the authority and the manifest is corroborated against
-    them (the split court cannot see today). With neither argument, the caller's
-    own session resolves through the registry exactly as
-    :func:`resolve_king_manifest_path` does, so a king asking about itself and
-    a court asking about a scope cannot drift into two answers.
+    The compute lives in ``crates/fno-agents/src/loop_reign.rs``
+    (``fno-agents reign-state``); this is the JSON client the Python callers
+    (escalate's closing sentence, the shape shell) read through, so Python and
+    Rust cannot drift into two answers. With ``scope``, the registry crown rows
+    over that territory are the authority. With neither argument, the caller's
+    own session resolves through the registry exactly as the Rust reader's
+    caller form does. Every failure answers unknown with a named reason, never
+    a clean ``False``.
     """
-    from fno.agents.registry import TERMINAL_STATUSES, load_registry
-    from fno.agents.whoami import _find_by_session
+    import subprocess
+
+    from fno import paths
+    from fno.rust_binary import resolve_binary
+
+    if scope is None and not session_id:
+        from fno.agents.self_stamp import resolve_self_identity
+
+        ident = resolve_self_identity()
+        session_id = ident.session_id or ""
 
     root = state_root if state_root is not None else _owner_state_root(None)
-    if registry is None:
-        try:
-            registry = load_registry()
-        except Exception as exc:  # noqa: BLE001 - named, never a clean False
-            # The registry is the crown authority, so crowned/live/split are
-            # unanswerable. The manifest (scope permitting) still reads: shape
-            # is a file fact, and starving the caller of it because a different
-            # instrument broke is the absence-lie this module refuses.
-            manifest_session = None
-            shape = None
-            reason = f"registry unreadable: {exc}"
-            if scope:
-                try:
-                    manifest_session, shape = _read_manifest_identity(
-                        king_manifest_path(scope, state_root=root)
-                    )
-                except ValueError:
-                    # An unsafe scope must degrade the manifest side to
-                    # unknown, not escape this reader: every other path guards
-                    # king_manifest_path, and this branch answers "registry
-                    # unreadable" - raising a different error here would
-                    # replace the named reason with a crash.
-                    reason = f"registry unreadable: {exc}; unsafe scope {scope!r}"
-            return ReignState(
-                crowned=None,
-                scope=scope,
-                shape=shape,
-                manifest_session=manifest_session,
-                registry_session=None,
-                live=None,
-                split=None,
-                unknown_reason=reason,
-            )
+    # The Rust reader joins ``.fno`` itself, so it wants the repo root; this
+    # module's state_root convention names the .fno directory.
+    repo_root = root.parent if root.name == ".fno" else root
 
-    if scope is None:
-        ident_sid, ident_harness = _caller_identity(session_id)
-        if not ident_sid:
-            return ReignState(
-                crowned=False,
-                scope=None,
-                shape=None,
-                manifest_session=None,
-                registry_session=None,
-                live=False,
-                split=None,
-                unknown_reason="no session identity: not resolvable to a crown",
-            )
-        try:
-            row = _find_by_session(registry, ident_sid, ident_harness)
-        except Exception as exc:  # noqa: BLE001
-            return ReignState(
-                crowned=None, scope=None, shape=None, manifest_session=None,
-                registry_session=None, live=None, split=None,
-                unknown_reason=f"registry unreadable: {exc}",
-            )
-        if row is None:
-            return ReignState(
-                crowned=False, scope=None, shape=None, manifest_session=None,
-                registry_session=None, live=False, split=None,
-                unknown_reason=f"no registry row matches session {ident_sid}",
-            )
-        if row.status in TERMINAL_STATUSES:
-            return ReignState(
-                crowned=False, scope=None, shape=None, manifest_session=None,
-                registry_session=None, live=False, split=None,
-                unknown_reason=f"row status is terminal ({row.status})",
-            )
-        scope = getattr(row, "crown_scope", None)
-        registry_session = _row_session(row)
-        if not isinstance(scope, str) or not scope.strip():
-            return ReignState(
-                crowned=False, scope=None, shape=None, manifest_session=None,
-                registry_session=registry_session, live=False, split=None,
-                unknown_reason="row holds no crown",
-            )
-        crowned, live = True, True
-    else:
-        holders = [
-            r
-            for r in registry
-            if r.status not in TERMINAL_STATUSES and r.crown_scope == scope
-        ]
-        if not holders:
-            return ReignState(
-                crowned=False, scope=scope, shape=None, manifest_session=None,
-                registry_session=None, live=False, split=None,
-                unknown_reason=f"no live crowned row over {scope}",
-            )
-        crowned, live = True, True
-        registry_session = _row_session(holders[0])
-        note = (
-            f"multiple live rows hold {scope}; court conflicts names them all"
-            if len(holders) > 1
-            else None
+    binary = resolve_binary()
+    if binary is None:
+        return _unknown_state(
+            scope,
+            "fno-agents binary not found: the reign reader lives in Rust. "
+            "Reinstall fno, run `fno doctor update --rust`, or set FNO_AGENTS_BIN.",
         )
-        if note:
-            return _with_manifest(
-                ReignState(
-                    crowned=crowned, scope=scope, shape=None,
-                    manifest_session=None, registry_session=registry_session,
-                    live=live, split=None, unknown_reason=note,
-                ),
-                scope, root,
-            )
-
-    return _with_manifest(
-        ReignState(
-            crowned=crowned, scope=scope, shape=None, manifest_session=None,
-            registry_session=registry_session, live=live, split=None,
-            unknown_reason=None,
-        ),
-        scope, root,
-    )
-
-
-def _caller_identity(session_id: Optional[str]) -> tuple[str, Optional[str]]:
-    """The caller's session id and harness, explicit or self-resolved."""
+    argv = [str(binary), "reign-state", "--root", str(repo_root)]
+    if scope:
+        argv += ["--scope", scope]
     if session_id:
-        return session_id, None
-    from fno.agents.self_stamp import resolve_self_identity
-
-    ident = resolve_self_identity()
-    return ident.session_id or "", ident.harness or None
-
-
-def _row_session(row) -> Optional[str]:
-    """The row's canonical session id, tolerating legacy rows without one."""
-    return getattr(row, "harness_session_id", None) or getattr(row, "cc_session_id", None)
-
-
-def _read_manifest_identity(path: Path) -> tuple[Optional[str], Optional[str]]:
-    """``(manifest_session, shape)``; both ``None`` when the file cannot read."""
+        argv += ["--session", session_id]
     try:
-        fields = parse_manifest(path)
-    except (OSError, ValueError):
-        return None, None
-    if not fields:
-        return None, None
-    session = fields.get("harness_session_id") or None
-    # A readable manifest from before the field existed reads as its writer's
-    # default, not as a third unknown shape.
-    shape = fields.get("shape") or "pass"
-    return session, shape
-
-
-def _with_manifest(state: ReignState, scope: str, root: Path) -> ReignState:
-    """Fill the manifest limb of an otherwise-answered ReignState in place."""
-    try:
-        path = king_manifest_path(scope, state_root=root)
-    except ValueError:
-        state.unknown_reason = state.unknown_reason or f"unsafe scope for manifest: {scope!r}"
-        return state
-    if not path.is_file():
-        state.unknown_reason = state.unknown_reason or f"no manifest at {path}"
-        return state
-    state.manifest_session, state.shape = _read_manifest_identity(path)
-    if state.manifest_session is None and state.shape is None:
-        state.unknown_reason = state.unknown_reason or f"manifest unreadable: {path}"
-        return state
-    if state.manifest_session is None:
-        # A manifest with no session id cannot be compared; shape still read.
-        state.unknown_reason = state.unknown_reason or f"manifest names no session: {path}"
-        return state
-    if state.registry_session and state.manifest_session != state.registry_session:
-        state.split = True
-    elif state.registry_session:
-        state.split = False
-    return state
-
-
-def set_manifest_shape(
-    scope: str,
-    shape: str,
-    *,
-    state_root: Optional[Path] = None,
-    expect_session_id: Optional[str] = None,
-) -> str:
-    """Rewrite ``shape`` in place on one scope's existing manifest.
-
-    The only legal post-init write to a king manifest. Refuses (raises
-    ``ValueError``) when the manifest is absent, names a session other than
-    ``expect_session_id`` (a split: the caller would be reshaping another
-    king's reign), or ``shape`` is not ``pass``/``court``. Returns the shape
-    now on the file, which makes a same-value second call idempotent.
-    """
-    if shape not in ("pass", "court"):
-        raise ValueError(f"shape must be pass or court, got {shape!r}")
-    root = state_root if state_root is not None else _owner_state_root(None)
-    path = king_manifest_path(scope, state_root=root)
-    if not path.is_file():
-        raise ValueError(
-            f"no manifest at {path}; declare a shape only on a crown you have "
-            "armed with `fno agents king init --scope`."
+        argv += ["--registry", str(paths.agents_registry_path())]
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, check=False, timeout=30
         )
-    with _manifest_lock(path):
-        fields = parse_manifest(path)
-        if not fields:
-            raise ValueError(f"manifest unreadable: {path}")
-        manifest_session = fields.get("harness_session_id") or None
-        if (
-            expect_session_id
-            and manifest_session
-            and manifest_session != expect_session_id
-        ):
-            raise ValueError(
-                f"refusing to reshape {scope!r}: the manifest names session "
-                f"{manifest_session}, not {expect_session_id}. Re-read with "
-                "`fno agents court` before touching anything."
-            )
-        lines = path.read_text(encoding="utf-8").splitlines()
-        out, seen = [], False
-        for line in lines:
-            if line.split(":", 1)[0].strip() == "shape":
-                out.append(f"shape: {shape}")
-                seen = True
-            else:
-                out.append(line)
-        if not seen:
-            # Insert just after the opening fence, where a reader scanning the
-            # frontmatter expects the crown's own fields. Prepending to the
-            # file would land the line ABOVE the `---`, readable to this
-            # module's unfenced parser but invisible to any fenced one, and
-            # every manifest written before the field existed hits this branch.
-            for index, line in enumerate(out):
-                if line.strip() == "---":
-                    out.insert(index + 1, f"shape: {shape}")
-                    break
-            else:
-                out = [f"shape: {shape}"] + out
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
-        os.replace(str(tmp), str(path))
-    return shape
+    except (OSError, subprocess.SubprocessError) as exc:
+        return _unknown_state(scope, f"reign reader failed to run: {exc}")
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        return _unknown_state(
+            scope, f"reign reader exited {proc.returncode}: {detail}"
+        )
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return _unknown_state(scope, f"reign reader emitted no JSON: {exc}")
+    return ReignState(
+        crowned=payload.get("crowned"),
+        scope=payload.get("scope") or scope,
+        shape=payload.get("shape"),
+        manifest_session=payload.get("manifest_session"),
+        registry_session=payload.get("registry_session"),
+        live=payload.get("live"),
+        split=payload.get("split"),
+        unknown_reason=payload.get("unknown_reason"),
+    )
 
 
 def parse_window(window: str) -> int:

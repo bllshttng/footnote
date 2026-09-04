@@ -249,6 +249,17 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::kill_criteria::run_kill_check(&args[1..]);
     }
 
+    // `reign-state`/`reign-shape`: the reign reader and the shape rewrite (see
+    // loop_reign.rs doc). Direct dispatch, daemon-free reads; the Python
+    // `fno agents king shape` shell and escalate's client invoke the binary
+    // directly rather than routing through the agents verb set.
+    if verb == "reign-state" {
+        return fno_agents::loop_reign::run_reign_state(&args[1..]);
+    }
+    if verb == "reign-shape" {
+        return fno_agents::loop_reign::run_reign_shape(&args[1..]);
+    }
+
     // `graph-get`/`bash-census`/`session-start-bytes` (x-997a): daemon-free reads, not routable `fno agents` verbs (same reasoning as kill-check).
     if verb == "graph-get" {
         return fno_agents::graph_get::run_graph_get(&args[1..]);
