@@ -266,6 +266,14 @@ set_resolved_cwd() { echo "$2" > "$MOCKSTATE/resolved_cwd_$1"; }
 set_pr() { echo "$2" > "$MOCKSTATE/pr_$1"; }   # node carries an open (unmerged) PR
 reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/claim_garbage "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair "$MOCKSTATE"/verb_* "$MOCKSTATE"/slug_* "$MOCKSTATE"/cfg_auto_merge "$MOCKSTATE"/cfg_auto_merge_err "$MOCKSTATE"/repo_ensure.log "$MOCKSTATE"/ensure_fail "$MOCKSTATE"/ensure_policy_never 2>/dev/null || true; }
 ask_count()  { [[ -f "$MOCKSTATE/ask.log" ]] && wc -l < "$MOCKSTATE/ask.log" | tr -d ' ' || echo 0; }
+# Read repo_ensure.log joined on one line. cat + strip, never tail -1: the rtk
+# wrapper on this machine silently empties tail -1. One home for the join so
+# the five call sites cannot drift apart.
+last_ensure_repo() {
+  local r
+  r="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"
+  printf '%s' "${r//$'\n'/}"
+}
 
 echo "=============================================="
 echo "US5 - targeted bg-dispatch (dispatch-node.sh)"
@@ -639,7 +647,7 @@ echo "$out" | grep -q "^parked ab-dddd4444 reason=\"claimed but node:ab-dddd4444
 # project the isolation was taken off, which is what cross-project means here.
 reset_mock; set_status ab-aaaa1111 ready; set_cwd ab-aaaa1111 /tmp/example-pipeline
 bash "$DISPATCH" ab-aaaa1111 >/dev/null 2>&1
-last_repo="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"; last_repo="${last_repo//$'\n'/}"
+last_repo="$(last_ensure_repo)"
 [[ "$last_repo" == "/tmp/example-pipeline" ]] && grep -q -- "--cwd $MOCKSTATE/ensured/" "$MOCKSTATE/ask.log" \
   && pass "codex-P2: dispatch isolates off the node's recorded cwd, not the caller's" \
   || fail "codex-P2: ensure repo '$last_repo' want '/tmp/example-pipeline': $(cat "$MOCKSTATE/ask.log" 2>/dev/null)"
@@ -656,8 +664,7 @@ bash "$DISPATCH" ab-aaaa1111 >/dev/null 2>&1
 _gcd="$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
 _expect_root=""
 [[ -n "$_gcd" ]] && _expect_root="$(dirname "$_gcd")"
-# sed, not tail: the rtk wrapper on this machine silently empties tail -1.
-last_repo="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"; last_repo="${last_repo//$'\n'/}"
+last_repo="$(last_ensure_repo)"
 if [[ -n "$_expect_root" && "$last_repo" == "$_expect_root" ]] \
    && grep -q -- "--cwd $MOCKSTATE/ensured/" "$MOCKSTATE/ask.log" \
    && ! grep -q -- "--fresh" "$MOCKSTATE/ask.log"; then
@@ -696,7 +703,7 @@ fi
 # have kept passing had the dispatch stopped honoring the node cwd entirely.
 reset_mock; set_status ab-aaaa1111 ready; set_cwd ab-aaaa1111 /tmp/example-pipeline
 bash "$DISPATCH" ab-aaaa1111 >/dev/null 2>&1
-last_repo="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"; last_repo="${last_repo//$'\n'/}"
+last_repo="$(last_ensure_repo)"
 if [[ "$last_repo" == "/tmp/example-pipeline" ]] \
    && grep -q -- "--cwd $MOCKSTATE/ensured/" "$MOCKSTATE/ask.log" \
    && ! grep -q -- "--fresh" "$MOCKSTATE/ask.log"; then
@@ -894,7 +901,7 @@ fi
 # Real launch: the ensure mock records its --repo; _resolved_cwd must win, and
 # the worker lands in the worktree ensure returned.
 out_real="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
-last_repo="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"; last_repo="${last_repo//$'\n'/}"
+last_repo="$(last_ensure_repo)"
 [[ "$last_repo" == "/resolved/root" ]] \
   && pass "AC1-HP: real dispatch feeds _resolved_cwd to worktree ensure" \
   || fail "AC1-HP: ensure got repo '$last_repo', want /resolved/root"
@@ -913,7 +920,7 @@ echo "$out" | grep -q -- "--cwd <fno agents workspace worktree ensure>" \
   && pass "AC1-EDGE: stale-fno dry-run carries the ensure hint" \
   || fail "AC1-EDGE: stale-fno dry-run wrong: $out"
 out_real="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
-last_repo="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"; last_repo="${last_repo//$'\n'/}"
+last_repo="$(last_ensure_repo)"
 [[ "$last_repo" == "/recorded/other" ]] \
   && pass "AC1-EDGE: stale-fno fallback feeds raw cwd to worktree ensure" \
   || fail "AC1-EDGE: ensure got repo '$last_repo', want /recorded/other"
@@ -1079,7 +1086,7 @@ if [[ -n "$spawn_cwd" && "$spawn_cwd" == "$MOCKSTATE/ensured/"* && -f "$spawn_cw
 else
   fail "isolation: spawn cwd '$spawn_cwd' is not a set-up ensured worktree: $out"
 fi
-last_repo="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"; last_repo="${last_repo//$'\n'/}"
+last_repo="$(last_ensure_repo)"
 [[ "$last_repo" == "$NODE_REPO" ]] \
   && pass "isolation: the node's recorded root fed worktree ensure" \
   || fail "isolation: ensure got repo '$last_repo', want $NODE_REPO"

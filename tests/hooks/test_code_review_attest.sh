@@ -429,7 +429,11 @@ else
 fi
 
 echo "== The verdict corpus: every measured shape, ruled by filename =="
-for name in $manifest_names; do
+# while-read, never a bare for: a manifest key with whitespace in it must
+# arrive as ONE name (and fail the -f check on its own), not word-split into
+# two bogus names.
+while IFS= read -r name; do
+  [[ -n "$name" ]] || continue
   fixture="$FIXTURES/$name"
   [[ -f "$fixture" ]] || { fail "corpus $name: ruled by the manifest, missing on disk"; continue; }
   payload="$(jq -nc --arg cwd "$WORK" --arg tp "$CORPUS_TX" --rawfile msg "$fixture" \
@@ -460,7 +464,7 @@ for name in $manifest_names; do
       if attested; then fail "corpus $name: attested (ruled silent)"; else pass "corpus $name: silent"; fi
       ;;
   esac
-done
+done <<< "$manifest_names"
 
 echo "== A prose review the SIZE of the measured ones still attests =="
 # The three live forks that motivated x-c446 ended in 3497, 2531 and 3357
