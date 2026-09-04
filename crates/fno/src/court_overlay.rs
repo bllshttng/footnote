@@ -245,10 +245,14 @@ impl Panel {
         if self.inflight {
             return None;
         }
-        Some(match self.fold_at {
+        // The retry backoff WINS over a stale reading's due time: otherwise a
+        // failed refresh over an already-stale reading leaves a past-due
+        // deadline, and the timer branch busy-spins until the backoff ends.
+        let due = match self.fold_at {
             Some(t) => t + CACHE_TTL,
-            None => self.retry_at.unwrap_or_else(Instant::now),
-        })
+            None => Instant::now(),
+        };
+        Some(self.retry_at.map_or(due, |r| r.max(due)))
     }
 
     /// Arm and consume the refresh want: true exactly when a fold should
@@ -921,6 +925,21 @@ mod tests {
         // The failure armed a retry delay, so the always-visible block does
         // not turn an instantly-failing fold into a hot refetch loop.
         assert!(!panel.take_want());
+        assert!(panel.refresh_deadline().is_some_and(|t| t > Instant::now()));
+    }
+
+    #[test]
+    fn a_failed_refresh_over_a_stale_reading_never_leaves_a_past_due_deadline() {
+        // The spin: a stale reading arms a refresh, the refresh fails, and
+        // the retry backoff starts from NOW while the stale reading's due
+        // time is already long past. The timer wake must wait for the
+        // backoff, not re-fire every pass until it ends.
+        let mut panel = opened(live());
+        panel.fold_at = Some(Instant::now() - CACHE_TTL - Duration::from_secs(120));
+        assert!(panel.take_want());
+        panel.apply(None);
+
+        assert!(!panel.take_want(), "still inside the retry backoff");
         assert!(panel.refresh_deadline().is_some_and(|t| t > Instant::now()));
     }
 
