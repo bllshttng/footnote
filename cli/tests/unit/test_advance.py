@@ -2045,7 +2045,12 @@ def _dispatch_one_capture(monkeypatch, tmp_path):
     # in the worker - two claim tests measured that leak.
     monkeypatch.setattr("fno.paths._persist_plugin_root", lambda _root: None)
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(Path(__file__).resolve().parents[3]))
-    harness_map.footnote_verbs.cache_clear()
+    # Clear the CACHE, not the alias: `footnote_verbs.cache_clear` is a
+    # function attribute, so a sibling test that monkeypatches the name in this
+    # xdist worker leaves this line raising AttributeError instead of failing
+    # on the roster it meant to assert. `_shipped_verbs` is what holds the
+    # cache and nothing patches it.
+    harness_map._shipped_verbs.cache_clear()
     assert "target" in harness_map.footnote_verbs(), "roster must read the checkout"
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(dispatch_mod, "_resolve_provider_id", lambda *a, **k: "ccm")
@@ -2066,7 +2071,7 @@ def _dispatch_one_capture(monkeypatch, tmp_path):
         # Warm for the call, cold afterwards. monkeypatch restores the env at
         # teardown but not the cache behind it, and leaving the real checkout
         # roster warm hands it to every later test in this xdist worker.
-        harness_map.footnote_verbs.cache_clear()
+        harness_map._shipped_verbs.cache_clear()
     return verdict, captured
 
 
