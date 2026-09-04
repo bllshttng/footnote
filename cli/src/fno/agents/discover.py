@@ -1747,8 +1747,7 @@ def _resolve_aliases(live: list[dict], name_map_path: Path) -> dict[str, str]:
                     time.sleep(min(_ALIAS_LOCK_POLL_SECONDS, remaining))
             try:
                 stored = _load_name_map(name_map_path)
-                # Rows are the PRIMARY name store: a row's own legible
-                # alias outranks the legacy file for the same sid.
+                # A row's own legible alias outranks the legacy file.
                 row_aliases: dict[str, str] = {}
                 try:
                     from fno.agents.registry import load_registry
@@ -2211,8 +2210,7 @@ def _alias_to_session_ids(token: str, name_map_path: Optional[Path]) -> tuple[li
     except (OSError, ValueError, UnicodeDecodeError):
         return [], False
     hits = [sid for sid, alias in stored.items() if isinstance(sid, str) and alias == token]
-    # The rows are the primary name store: an alias a row carries resolves
-    # past the legacy file.
+    # The rows are the primary name store: their aliases resolve past the file.
     try:
         from fno.agents.registry import load_registry
         for entry in load_registry():
@@ -2505,10 +2503,8 @@ def resolve_reachable(
     try:
         alias_sids, alias_ok = _alias_to_session_ids(token, name_map_path)
         degraded: list[str] = []
-    except RegistryVersionError:
-        # Torn registry: degrade as "registry" (never a clean miss).
-        alias_sids, alias_ok = [], True
-        degraded = ["registry"]
+    except RegistryVersionError:  # torn store: degrade, never a clean miss
+        alias_sids, alias_ok, degraded = [], True, ["registry"]
 
     sources = (
         ("transcript", lambda t: _reachable_from_transcripts(t, pdir)),

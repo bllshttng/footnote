@@ -165,7 +165,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // Python's AgentEntry; same additive-optional writer-protection rationale as
 // v22-v24: a pre-v25 writer accepts the unknown keys and erases them on its
 // next read-modify-write. Accepted set widens to 1..=25.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 25;
+//
+// v26 adds the served facts - `liveness` / `liveness_measured_at` (written
+// only by the reconcile sweep, always paired) and `harness_title` (the
+// sweep's last-seen title baseline). All three are additive-optional; the
+// bump is what makes a pre-v26 reader degrade (drop the keys, refuse the
+// write) instead of TypeError on the unknown AgentEntry kwargs at an equal
+// version number. Accepted set widens to 1..=26.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 26;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 

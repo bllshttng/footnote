@@ -200,10 +200,8 @@ def _opencode_activity_epoch(session_id: str, db_path: Path) -> Optional[float]:
 
 def observed_title(agent: str, transcript_path: Optional[Path]) -> Optional[str]:
     """The title the HARNESS carries for this session, or ``None``.
-
-    claude only: a ``Ctrl+R`` rename appends a ``{"type":"agent-name",...}``
-    record and fires no hook, so the last such record IS the current title.
-    ``None`` renders as absence, never as the fno label; never written back.
+    claude only: the last ``{"type":"agent-name",...}`` transcript record
+    (a Ctrl+R rename) IS the current title. ``None`` renders as absence.
     """
     if agent != "claude" or transcript_path is None:
         return None

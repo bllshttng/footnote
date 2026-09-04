@@ -263,7 +263,9 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # supervisor joins outage evidence on these; a row without them is a blind
 # spot for that collector, never a default. Same additive-optional shape and
 # forward-compat rationale as v11-v24.
-SCHEMA_VERSION = 25
+# v26: additive served facts (liveness + its stamp, harness_title): a pre-v26
+# reader degrades (drops the keys, refuses writes) instead of TypeError at v25.
+SCHEMA_VERSION = 26
 
 
 
@@ -603,6 +605,11 @@ class AgentEntry:
     requested_model: Optional[str] = None
     requested_provider: Optional[str] = None
     requested_effort: Optional[str] = None
+
+    # v26 served facts; the Rust sweep writes them, python is a passthrough.
+    liveness: Optional[str] = None
+    liveness_measured_at: Optional[str] = None
+    harness_title: Optional[str] = None
 
     @property
     def session_id(self) -> Optional[str]:
@@ -2757,9 +2764,8 @@ def append_row_alias(
     *,
     registry_path: Optional[Path] = None,
 ) -> bool:
-    """Append ``alias`` to the resolved row's ``aliases``.
-    Idempotent; a REFUSAL when another row answers to the alias (ambiguous
-    = no address). Best-effort: a miss is False - never a raise.
+    """Append ``alias`` to the resolved row's ``aliases``; REFUSE when
+    another row answers to it. Best-effort: a miss is False, never a raise.
     """
     alias = alias.strip()
     if not alias:
