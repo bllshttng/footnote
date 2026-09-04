@@ -54,7 +54,6 @@ from typing import Optional, TypedDict
 
 import typer
 
-from fno.agents.harness_map import capabilities as _harness_capabilities
 from fno.mail.codex_review_target import (
     explicit_review_pr_number,
     resolve_codex_review_target as _codex_review_target,
