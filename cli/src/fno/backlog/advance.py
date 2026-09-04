@@ -1577,6 +1577,7 @@ def _spawn_worker(
                 "harness": prov,
                 "vendor": vendor or "",
                 "model": model or "",
+                "account": dispatch_account or "",
                 "substrate": substrate,
                 "command": target_cmd,
                 "cwd": node_cwd or "",

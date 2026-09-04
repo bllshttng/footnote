@@ -3519,6 +3519,9 @@ event_types:
         model:
           type: string
           description: "The --model argv value, empty when the harness default was taken."
+        account:
+          type: string
+          description: "The --dispatch-account argv value: the account RECORD id whose credentials the worker runs on, empty when no cutover pinned one. A fifth axis, distinct from harness, vendor and model. A record whose config points at the wrong login makes every other field name a lane it did not bill, and that is unreadable from the file unless the record id is here."
         substrate:
           type: string
           description: "The resolved substrate: thread (persistent, attachable) or headless (one-shot). pane is not an autonomous lane."

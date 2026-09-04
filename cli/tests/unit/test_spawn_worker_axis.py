@@ -149,6 +149,18 @@ def test_spawn_emits_one_dispatch_spawned_row(monkeypatch, tmp_path):
     assert data["node_id"] == "x-0000"
     assert data["substrate"] == _flag(captured["cmd"], "--substrate")
     assert data["grid"] == "grid=test-stub"
+    assert data["account"] == ""
+
+
+def test_receipt_names_the_pinned_account_record(monkeypatch, tmp_path):
+    """A record whose config points at the wrong login makes every other field
+    name a lane it did not bill, and only the record id makes that readable."""
+    _capture(monkeypatch, _settings())
+    ev = tmp_path / "events.jsonl"
+    advance._spawn_worker(
+        "x-0000", None, "slug", dispatch_account="ccr", events_path=ev
+    )
+    assert _rows(ev, "dispatch_spawned")[0]["data"]["account"] == "ccr"
 
 
 def test_failed_spawn_emits_no_receipt(monkeypatch, tmp_path):
