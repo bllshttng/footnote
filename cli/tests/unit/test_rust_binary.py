@@ -164,6 +164,7 @@ def test_resolve_falls_back_to_path(monkeypatch, tmp_path) -> None:
 
 def test_resolve_falls_back_to_cargo_dev(monkeypatch, tmp_path) -> None:
     dev = _make_exe(tmp_path / "target" / "release" / rust_binary.BINARY_NAME)
+    monkeypatch.setattr(rust_binary, "_env_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_sibling_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_path_binary", lambda: None)
@@ -172,6 +173,7 @@ def test_resolve_falls_back_to_cargo_dev(monkeypatch, tmp_path) -> None:
 
 
 def test_resolve_returns_none_when_absent(monkeypatch) -> None:
+    monkeypatch.setattr(rust_binary, "_env_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_sibling_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_path_binary", lambda: None)
