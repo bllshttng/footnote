@@ -5630,10 +5630,10 @@ async fn clear_dead_removes_every_dead_row_in_the_section() {
         decode_cmds(buf),
         vec![
             Command::RemoveAgent {
-                name: "dead-a".into()
+                harness_session_id: None,                name: "dead-a".into()
             },
             Command::RemoveAgent {
-                name: "dead-b".into()
+                harness_session_id: None,                name: "dead-b".into()
             },
         ],
         "only the exited rows are removed"
@@ -5817,13 +5817,13 @@ fn every_confirm_variant_renders_shared_chrome_and_controls() {
         ),
         (
             ConfirmKind::StopAgent {
-                name: "agent".into(),
+                sid: None,                name: "agent".into(),
             },
             "stop agent",
         ),
         (
             ConfirmKind::RemoveAgent {
-                name: "agent".into(),
+                sid: None,                name: "agent".into(),
             },
             "remove agent",
         ),
@@ -6245,7 +6245,7 @@ async fn clear_dead_refolds_the_set_at_commit_not_at_open() {
     assert_eq!(
         decode_cmds(buf),
         vec![Command::RemoveAgent {
-            name: "dead-b".into()
+            harness_session_id: None,            name: "dead-b".into()
         }],
         "the vanished row is not re-removed"
     );
@@ -6266,7 +6266,7 @@ async fn clear_dead_routes_external_rows_by_attach_id() {
         decode_cmds(buf),
         vec![
             Command::RemoveAgent {
-                name: "plain-dead".into()
+                harness_session_id: None,                name: "plain-dead".into()
             },
             Command::RemoveExternal {
                 attach_id: "deadbeef".into(),
@@ -6340,7 +6340,7 @@ async fn clear_dead_dismisses_member_tombstones() {
                 attach_id: "deadbeef".into()
             },
             Command::RemoveAgent {
-                name: "plain-dead".into()
+                harness_session_id: None,                name: "plain-dead".into()
             },
         ]
     );
@@ -6454,7 +6454,7 @@ async fn clear_dead_is_scoped_to_its_own_section() {
     assert_eq!(
         decode_cmds(buf),
         vec![Command::RemoveAgent {
-            name: "dead-in-1".into()
+            harness_session_id: None,            name: "dead-in-1".into()
         }],
         "the sibling squad's dead row is untouched"
     );
@@ -6486,7 +6486,7 @@ async fn clear_dead_works_on_the_elsewhere_band_too() {
     assert_eq!(
         decode_cmds(buf),
         vec![Command::RemoveAgent {
-            name: "stray-dead".into()
+            harness_session_id: None,            name: "stray-dead".into()
         }]
     );
 }
@@ -6824,7 +6824,7 @@ async fn row_menu_keys_run_the_same_execute_path_as_enter() {
     assert!(
         matches!(
             v.confirm.as_ref().map(|c| &c.action),
-            Some(super::ConfirmKind::StopAgent { name }) if name == "w1"
+            Some(super::ConfirmKind::StopAgent { name, .. }) if name == "w1"
         ),
         "the stop key armed the stop confirm"
     );
@@ -7060,7 +7060,7 @@ async fn menu_accelerator_remove_arms_the_dead_row_confirm() {
     let mut buf: Vec<u8> = Vec::new();
     row_menu_keys(&mut v, &[key], &mut buf).await.unwrap();
     match v.confirm.as_ref().map(|c| &c.action) {
-        Some(super::ConfirmKind::RemoveAgent { name }) => assert_eq!(name, "dead"),
+        Some(super::ConfirmKind::RemoveAgent { name, .. }) => assert_eq!(name, "dead"),
         _ => panic!("expected RemoveAgent{{dead}} confirm"),
     }
     let mut buf: Vec<u8> = Vec::new();
@@ -7068,7 +7068,7 @@ async fn menu_accelerator_remove_arms_the_dead_row_confirm() {
     assert_eq!(
         decode_cmds(buf),
         vec![Command::RemoveAgent {
-            name: "dead".into()
+            harness_session_id: None,            name: "dead".into()
         }],
         "the confirm the key armed removes exactly this row"
     );
@@ -7197,7 +7197,7 @@ async fn a_confirm_survives_the_release_of_the_click_that_armed_it() {
     confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
     assert_eq!(
         decode_cmds(buf),
-        vec![Command::StopAgent { name: "w".into() }],
+        vec![Command::StopAgent { name: "w".into(), harness_session_id: None }],
         "Enter commits the confirm the click armed"
     );
 }
@@ -12167,7 +12167,7 @@ async fn selector_x_on_live_agent_arms_remove_confirm() {
     assert!(buf.is_empty(), "arming a confirm sends nothing");
     assert_eq!(v.selector, None, "the confirm closes the selector");
     match v.confirm.as_ref().map(|c| (&c.action, c.label.as_str())) {
-        Some((ConfirmKind::RemoveAgent { name }, label)) => {
+        Some((ConfirmKind::RemoveAgent { name, .. }, label)) => {
             assert_eq!(name, "worker-a");
             assert_eq!(label, "worker-a");
         }
@@ -12186,7 +12186,7 @@ async fn selector_x_on_exited_agent_arms_remove_confirm() {
     selector_keys(&mut v, b"x", &mut buf).await.unwrap();
     assert!(buf.is_empty());
     match v.confirm.as_ref().map(|c| &c.action) {
-        Some(ConfirmKind::RemoveAgent { name }) => assert_eq!(name, "worker-b"),
+        Some(ConfirmKind::RemoveAgent { name, .. }) => assert_eq!(name, "worker-b"),
         _ => panic!("expected a RemoveAgent confirm"),
     }
 }
@@ -12385,12 +12385,12 @@ async fn confirm_keys_enter_sends_stop_then_remove_agent() {
     // sends the captured-name command (the row index is never re-read).
     for (kind, want) in [
         (
-            ConfirmKind::StopAgent { name: "w".into() },
-            Command::StopAgent { name: "w".into() },
+            ConfirmKind::StopAgent { name: "w".into(), sid: None },
+            Command::StopAgent { name: "w".into(), harness_session_id: None },
         ),
         (
-            ConfirmKind::RemoveAgent { name: "w".into() },
-            Command::RemoveAgent { name: "w".into() },
+            ConfirmKind::RemoveAgent { name: "w".into(), sid: None },
+            Command::RemoveAgent { name: "w".into(), harness_session_id: None },
         ),
     ] {
         let mut v = view_with_agents(vec![]);

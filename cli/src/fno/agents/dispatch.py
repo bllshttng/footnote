@@ -4838,13 +4838,32 @@ def reconcile_agents(
         ) from exc
 
     entry_by_name = {entry.name: entry for entry in entries}
+    # (x-1ab9) The PRIMARY index is (harness, harness_session_id) - law
+    # d-e952ed19: a label can be renamed by its harness mid-flight; the pair
+    # cannot. ``entry_by_name`` stays as the alias map the probe loop's
+    # name-keyed helpers read.
+    entry_by_session = {
+        (entry.harness, entry.harness_session_id): entry
+        for entry in entries
+        if entry.harness_session_id
+    }
 
-    def _vendor_for_name(name: str) -> Optional[str]:
-        entry = entry_by_name.get(name)
+    def _entry_for(name: str, session_id: Optional[str] = None) -> Optional["AgentEntry"]:
+        """Identity-first resolution for the results loop (x-1ab9): a
+        probed session id answers before the label, so a row renamed by its
+        harness mid-sweep still reports its own axes."""
+        if session_id:
+            for entry in entry_by_session.values():
+                if entry.harness_session_id == session_id:
+                    return entry
+        return entry_by_name.get(name)
+
+    def _vendor_for_name(name: str, session_id: Optional[str] = None) -> Optional[str]:
+        entry = _entry_for(name, session_id)
         return entry.provider if entry is not None else None
 
-    def _harness_for_name(name: str) -> Optional[str]:
-        entry = entry_by_name.get(name)
+    def _harness_for_name(name: str, session_id: Optional[str] = None) -> Optional[str]:
+        entry = _entry_for(name, session_id)
         return entry.harness if entry is not None else None
 
     orphaned: list[dict] = []
@@ -5608,7 +5627,7 @@ def reconcile_agents(
                     backfilled.append(
                         {
                             "name": name,
-                            "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
+                            "provider": _vendor_for_name(name, hsid), "harness": _harness_for_name(name, hsid),
                             "harness_session_id": hsid,
                         }
                     )
@@ -5616,7 +5635,7 @@ def reconcile_agents(
                     errors.append(
                         {
                             "name": name,
-                            "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
+                            "provider": _vendor_for_name(name, hsid), "harness": _harness_for_name(name, hsid),
                             "id": None,
                             "reason": "claude-session-id-backfill-raced",
                         }
@@ -5626,7 +5645,7 @@ def reconcile_agents(
                     backfilled.append(
                         {
                             "name": name,
-                            "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
+                            "provider": _vendor_for_name(name, hsid), "harness": _harness_for_name(name, hsid),
                             "harness_session_id": hsid,
                         }
                     )
@@ -5634,7 +5653,7 @@ def reconcile_agents(
                     errors.append(
                         {
                             "name": name,
-                            "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
+                            "provider": _vendor_for_name(name, hsid), "harness": _harness_for_name(name, hsid),
                             "id": None,
                             "reason": "codex-session-id-backfill-raced",
                         }

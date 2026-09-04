@@ -2417,7 +2417,9 @@ pub fn ask_followup(
 // ===========================================================================
 
 use crate::paths::AgentsHome;
-use crate::state::{load_registry, update_registry, RegistryEntry};
+use crate::state::{
+    find_keyed_mut, load_registry, registry_write_key, update_registry, RegistryEntry,
+};
 use crate::AgentStatus;
 
 /// `_NAME_MAX_LEN` / `_FROM_NAME_MAX_LEN`.
@@ -3268,6 +3270,9 @@ fn followup(
     );
 
     let wait = timeout.unwrap_or(DEFAULT_FOLLOWUP_TIMEOUT);
+    // Captured before the ask: the write inside the closures below re-finds
+    // by this identity, never by the label the caller happened to spell.
+    let key = registry_write_key(&entry);
     match ask_followup(
         claude_home,
         &short_id,
@@ -3278,13 +3283,12 @@ fn followup(
         None,
     ) {
         Ok(reply) => {
-            // Stamp status=live + last_message_at under the registry flock.
-            // A write failure here is FATAL (Python dispatch.py:537-556 parity):
-            // the message was already delivered but the registry can't record
-            // it, so withhold the reply from stdout and exit 12 to prevent a
-            // double-send on retry.
+            // Stamp status=live + last_message_at under the registry flock,
+            // keyed on the row's identity captured before the ask (law
+            // d-e952ed19): a same-name replacement between resolve and write
+            // can no longer receive the first row's write.
             if let Err(e) = update_registry(registry_path, |reg| {
-                if let Some(en) = reg.find_mut(name) {
+                if let Some(en) = find_keyed_mut(reg, &key, name) {
                     en.status = AgentStatus::Live;
                     en.last_message_at = Some(now_iso());
                 }
@@ -3342,7 +3346,7 @@ fn followup(
             let mut provably_live = false;
             let mut stamp_warning = String::new();
             if let Err(e) = update_registry(registry_path, |reg| {
-                if let Some(en) = reg.find_mut(name) {
+                if let Some(en) = find_keyed_mut(reg, &key, name) {
                     if routing_gap || is_provably_live_report(en.inside_leg.as_ref(), now) {
                         provably_live = true;
                     } else {

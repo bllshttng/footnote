@@ -233,10 +233,85 @@ impl Default for Registry {
     }
 }
 
+/// Every session id one row answers to at the full-id tier: its own harness
+/// session id, the one optional related id (a fork's uuid addresses its row
+/// too - both stay valid forever), and predecessor ids (a succeeded session
+/// follows the row that answers as its successor, x-dfe7).
+fn entry_session_ids(e: &RegistryEntry) -> impl Iterator<Item = &str> {
+    [e.harness_session_id.as_deref(), e.related_session_id.as_deref()]
+        .into_iter()
+        .flatten()
+        .chain(e.predecessor_session_ids.iter().map(String::as_str))
+}
+
+/// True when `harness`/`session_id` is the row's PRIMARY KEY (law
+/// d-e952ed19): same harness, full-id tier on any of the row's session ids.
+fn session_key_matches(e: &RegistryEntry, harness: &str, session_id: &str) -> bool {
+    e.harness_name() == harness
+        && entry_session_ids(e).any(|sid| session_handle_tier(session_id, sid) == Some(0))
+}
+
+/// True when `token` is one of the row's LABELS: its own name or a prior
+/// label in `aliases`. Identity is not consulted here.
+fn label_matches(e: &RegistryEntry, token: &str) -> bool {
+    e.name == token || e.aliases.iter().any(|a| a == token)
+}
+
 impl Registry {
-    /// Find an entry by agent name.
-    pub fn find(&self, name: &str) -> Option<&RegistryEntry> {
-        self.entries.iter().find(|e| e.name == name)
+    /// Resolve by the primary key (law d-e952ed19). The pair, never the id
+    /// alone: id shapes differ per harness (claude uuid4, codex uuid7 whose
+    /// head-8 collides inside one minute, opencode case-sensitive `ses_`).
+    pub fn find_by_session(&self, harness: &str, session_id: &str) -> Option<&RegistryEntry> {
+        self.entries.iter().find(|e| session_key_matches(e, harness, session_id))
+    }
+
+    pub fn find_by_session_mut(
+        &mut self,
+        harness: &str,
+        session_id: &str,
+    ) -> Option<&mut RegistryEntry> {
+        let idx = self
+            .entries
+            .iter()
+            .position(|e| session_key_matches(e, harness, session_id))?;
+        self.entries.get_mut(idx)
+    }
+
+    /// How many rows answer to `token` as a LABEL (own name or a prior
+    /// label). Two or more means the label has no honest row: callers that
+    /// cannot resolve by identity must refuse, never take the first match.
+    pub fn label_matches_count(&self, token: &str) -> usize {
+        self.entries.iter().filter(|e| label_matches(e, token)).count()
+    }
+
+    /// Find by token: LABEL first (own name, then prior labels), then
+    /// identity (the full-id session tier). Law d-e952ed19 demotes name to a
+    /// mutable alias; session id is the key this falls back for. An
+    /// AMBIGUOUS label (two rows answer it) resolves to nothing: picking the
+    /// first match would let one of two honest rows receive the other's
+    /// write, and labels are unique at birth, so this only ever fires on a
+    /// corrupted store (labels are unique at birth).
+    pub fn find(&self, token: &str) -> Option<&RegistryEntry> {
+        let labels = self.label_matches_count(token);
+        if labels > 1 {
+            return None;
+        }
+        self.entries
+            .iter()
+            .find(|e| label_matches(e, token))
+            .or_else(|| self.entries.iter().find(|e| session_handle_tier_any(e, token)))
+    }
+
+    pub fn find_mut(&mut self, token: &str) -> Option<&mut RegistryEntry> {
+        if self.label_matches_count(token) > 1 {
+            return None;
+        }
+        let idx = self
+            .entries
+            .iter()
+            .position(|e| label_matches(e, token))
+            .or_else(|| self.entries.iter().position(|e| session_handle_tier_any(e, token)))?;
+        self.entries.get_mut(idx)
     }
 
     /// Find an entry by agent name or its canonical full harness session id.
@@ -246,23 +321,57 @@ impl Registry {
     /// naming a succeeded session follows the row that now answers as its
     /// successor.
     pub fn find_name_or_full_session_id(&self, token: &str) -> Option<&RegistryEntry> {
-        self.entries.iter().find(|entry| {
-            entry.name == token
-                || [
-                    entry.harness_session_id.as_deref(),
-                    entry.related_session_id.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                .chain(entry.predecessor_session_ids.iter().map(String::as_str))
-                .any(|session_id| session_handle_tier(token, session_id) == Some(0))
-        })
+        self.entries
+            .iter()
+            .find(|entry| entry.name == token || session_handle_tier_any(entry, token))
     }
+}
 
-    /// Mutable find by agent name.
-    pub fn find_mut(&mut self, name: &str) -> Option<&mut RegistryEntry> {
-        self.entries.iter_mut().find(|e| e.name == name)
-    }
+/// True when `token` resolves the row at the full-id session tier.
+fn session_handle_tier_any(e: &RegistryEntry, token: &str) -> bool {
+    entry_session_ids(e).any(|sid| session_handle_tier(token, sid) == Some(0))
+}
+
+/// The `(harness, full session id)` write key for a row resolved outside a
+/// locked write. Capture BEFORE the update; re-find with
+/// [`Registry::find_by_session_mut`] inside the closure so a same-name
+/// replacement cannot receive the first row's write. `None` id = a legacy
+/// row; its writer falls back to the demoted label lookup.
+pub fn registry_write_key(e: &RegistryEntry) -> (String, Option<String>) {
+    (e.harness_name().to_string(), e.harness_session_id.clone())
+}
+
+/// Re-find under the write lock by the identity [`registry_write_key`]
+/// captured, falling back to the demoted label lookup only for a legacy row
+/// with no session id.
+pub fn find_keyed_mut<'r>(
+    reg: &'r mut Registry,
+    key: &(String, Option<String>),
+    name: &str,
+) -> Option<&'r mut RegistryEntry> {
+    let keyed = key.1.as_deref().and_then(|sid| {
+        reg.entries
+            .iter()
+            .position(|e| session_key_matches(e, &key.0, sid))
+    });
+    let idx = match keyed {
+        Some(i) => Some(i),
+        None => {
+            if reg.label_matches_count(name) > 1 {
+                None
+            } else {
+                reg.entries
+                    .iter()
+                    .position(|e| label_matches(e, name))
+                    .or_else(|| {
+                        reg.entries
+                            .iter()
+                            .position(|e| session_handle_tier_any(e, name))
+                    })
+            }
+        }
+    };
+    idx.and_then(move |i| reg.entries.get_mut(i))
 }
 
 /// Inside-leg agent state (inside-out multiplexer E3, "contract v2"). The inside
@@ -4877,3 +4986,7 @@ mod substitution_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "state_lookup_tests.rs"]
+mod lookup_tests;

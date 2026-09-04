@@ -83,8 +83,8 @@ impl View {
     /// bar. No-op for bulk and non-row confirms (reap, squad, close-tab).
     pub(super) fn arm_row_stamp(&mut self, action: &ConfirmKind) {
         let name = match action {
-            ConfirmKind::StopAgent { name }
-            | ConfirmKind::RemoveAgent { name }
+            ConfirmKind::StopAgent { name, .. }
+            | ConfirmKind::RemoveAgent { name, .. }
             | ConfirmKind::StopExternal { name, .. }
             | ConfirmKind::RemoveExternal { name, .. } => Some(name.clone()),
             _ => None,
@@ -318,6 +318,7 @@ mod tests {
         // stamps the named row with its failure.
         let mut view = two_pane_view();
         view.arm_row_stamp(&ConfirmKind::StopAgent {
+            sid: None,
             name: "corpse".into(),
         });
         assert!(view.row_arm.is_some(), "a row-scoped commit arms the stamp");
@@ -342,6 +343,7 @@ mod tests {
     fn row_stamp_success_reads_as_success() {
         let mut view = two_pane_view();
         view.arm_row_stamp(&ConfirmKind::RemoveAgent {
+            sid: None,
             name: "corpse".into(),
         });
         view.resolve_row_stamp("removed corpse");
@@ -357,6 +359,7 @@ mod tests {
         // A lost outcome must not stamp some LATER notice onto the row.
         let mut view = two_pane_view();
         view.arm_row_stamp(&ConfirmKind::StopAgent {
+            sid: None,
             name: "corpse".into(),
         });
         view.row_arm.as_mut().unwrap().expires = Instant::now();

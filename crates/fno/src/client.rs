@@ -1518,10 +1518,13 @@ enum ConfirmKind {
     },
     /// Stop a live agent row (x-76ea). The captured `name`, not the row index,
     /// commits - a row that raced out between confirm and Enter resolves to the
-    /// server's stale-name refusal.
-    StopAgent { name: String },
-    /// Remove an exited agent row (x-76ea). Same captured-name commit.
-    RemoveAgent { name: String },
+    /// server's stale-name refusal. (v67) The row's harness session id rides
+    /// beside the label (law d-e952ed19): `sid` is captured with the name at
+    /// gesture time so the server resolves identity-first; `None` for an old
+    /// capture or a bare-identity row.
+    StopAgent { name: String, sid: Option<String> },
+    /// Remove an exited agent row (x-76ea). Same captured name + session id.
+    RemoveAgent { name: String, sid: Option<String> },
     /// Bulk-reap every exited fno-agent registry row (x-7561, uppercase `X`).
     /// No payload - the server's reap verb owns the candidate set.
     ReapAgents,
@@ -2207,6 +2210,7 @@ fn remove_dead(a: &AgentRow) -> Command {
         },
         _ => Command::RemoveAgent {
             name: a.name.clone(),
+            harness_session_id: a.harness_session_id.clone(),
         },
     }
 }
@@ -7335,7 +7339,7 @@ impl View {
                     s.tab.is_none() && s.squad == *squad
                 }
                 (
-                    ConfirmKind::StopAgent { name } | ConfirmKind::RemoveAgent { name },
+                    ConfirmKind::StopAgent { name, .. } | ConfirmKind::RemoveAgent { name, .. },
                     DisplayRow::Agent(a),
                 ) => a.name == *name,
                 (
@@ -13383,8 +13387,8 @@ async fn confirm_keys(
         // notice will render at the row, not only the tab bar.
         view.arm_row_stamp(&action.action);
         let row_name = match &action.action {
-            ConfirmKind::StopAgent { name }
-            | ConfirmKind::RemoveAgent { name }
+            ConfirmKind::StopAgent { name, .. }
+            | ConfirmKind::RemoveAgent { name, .. }
             | ConfirmKind::StopExternal { name, .. }
             | ConfirmKind::RemoveExternal { name, .. } => Some(name.clone()),
             _ => None,
@@ -13395,8 +13399,18 @@ async fn confirm_keys(
                 account: view.active_account.clone(),
             }],
             ConfirmKind::RemoveSquad { squad, .. } => vec![Command::RemoveSquad(squad)],
-            ConfirmKind::StopAgent { name } => vec![Command::StopAgent { name }],
-            ConfirmKind::RemoveAgent { name } => vec![Command::RemoveAgent { name }],
+            ConfirmKind::StopAgent { name, sid } => {
+                vec![Command::StopAgent {
+                    name,
+                    harness_session_id: sid,
+                }]
+            }
+            ConfirmKind::RemoveAgent { name, sid } => {
+                vec![Command::RemoveAgent {
+                    name,
+                    harness_session_id: sid,
+                }]
+            }
             ConfirmKind::ReapAgents => vec![Command::ReapAgents],
             ConfirmKind::StopExternal { attach_id, name } => {
                 vec![Command::StopExternal { attach_id, name }]
@@ -14177,6 +14191,7 @@ async fn execute_row_menu_action(
                     },
                     _ => ConfirmKind::StopAgent {
                         name: a.name.clone(),
+                        sid: a.harness_session_id.clone(),
                     },
                 },
                 // Remove routes by row KIND through [`remove_dead`], the same
@@ -14191,6 +14206,7 @@ async fn execute_row_menu_action(
                     }
                     _ => ConfirmKind::RemoveAgent {
                         name: a.name.clone(),
+                        sid: a.harness_session_id.clone(),
                     },
                 },
             };
@@ -15735,12 +15751,16 @@ async fn selector_keys(
                 // the stop. An external row without an attach_id (degenerate)
                 // falls through to the by-name path, which the server refuses.
                 let agent = match view.display_rows().get(cur) {
-                    Some(DisplayRow::Agent(a)) if !a.tombstone && a.pane_id.is_none() => {
-                        Some((a.name.clone(), a.exited, a.external, a.attach_id.clone()))
-                    }
+                    Some(DisplayRow::Agent(a)) if !a.tombstone && a.pane_id.is_none() => Some((
+                        a.name.clone(),
+                        a.exited,
+                        a.external,
+                        a.attach_id.clone(),
+                        a.harness_session_id.clone(),
+                    )),
                     _ => None,
                 };
-                if let Some((name, exited, external, attach_id)) = agent {
+                if let Some((name, exited, external, attach_id, harness_session_id)) = agent {
                     if view.term.0 < MIN_ROWS_FOR_STATUS {
                         view.set_notice("terminal too short for the confirm prompt".into());
                         continue;
@@ -15759,7 +15779,15 @@ async fn selector_keys(
                         // confirm - a live row is stopped as part of its
                         // removal, never as a second ceremony. Stop-only lives
                         // on the row menu's Stop.
-                        _ => ConfirmKind::RemoveAgent { name: name.clone() },
+                        // (x-f191 scope b) `x` states the intent ONCE: remove.
+                        // The server orchestrates stop-then-rm behind this one
+                        // confirm - a live row is stopped as part of its
+                        // removal, never as a second ceremony. Stop-only lives
+                        // on the row menu's Stop.
+                        _ => ConfirmKind::RemoveAgent {
+                            name: name.clone(),
+                            sid: harness_session_id,
+                        },
                     };
                     // (x-f191 scope a+c) The slot feeds the post-commit
                     // re-anchor: the sideline stays open and the cursor stays

@@ -2117,7 +2117,15 @@ fn probe_truth_map() -> Option<HashMap<String, TruthReading>> {
         let Some(name) = row.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
-        let name = name.to_string();
+        // Identity-first key (x-1ab9, law d-e952ed19): the full harness
+        // session id when the row carries one, the label otherwise (legacy
+        // rows). A rename no longer orphans a row's readings.
+        let key = row
+            .get("harness_session_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| name.to_string());
         let basis = row
             .get("basis")
             .and_then(|v| v.as_str())
@@ -2126,7 +2134,7 @@ fn probe_truth_map() -> Option<HashMap<String, TruthReading>> {
             .get("last_activity_age_s")
             .and_then(|v| v.as_f64())
             .map(|f| f as u64);
-        map.insert(name, TruthReading { basis, age_s });
+        map.insert(key, TruthReading { basis, age_s });
     }
     Some(map)
 }
@@ -2662,11 +2670,13 @@ struct Core {
     /// transcript or no prose in its tail; the cell renders empty. Display-only,
     /// so a stale line between reader ticks is cosmetic.
     tail_by_session: HashMap<String, String>,
-    /// (v48) Latest registry-name -> reachability-evidence map from the
-    /// off-loop truth probe, joined into each agent row's `basis` /
-    /// `last_activity_age_s` at layout time. Kept-whole on a failed probe: the
+    /// (v48) Latest reachability-evidence map from the off-loop truth probe,
+    /// joined into each agent row's `basis` / `last_activity_age_s` at layout
+    /// time. (x-1ab9) The key is the row's full harness session id when it
+    /// has one, the label otherwise (legacy rows): identity first, the
+    /// demoted label as the alias fallback. Kept-whole on a failed probe: the
     /// alternative (clearing on failure) would flap every row to "no reading"
-    /// on one miss. A name absent from the map has no probe answer, which the
+    /// on one miss. A key absent from the map has no probe answer, which the
     /// client reads as absence, never as urgency.
     truth_by_name: HashMap<String, TruthReading>,
     /// (v48) The `seq` of the last-applied `CoreMsg::AgentTruth`. Probes run
@@ -10067,7 +10077,29 @@ impl Core {
     /// callers can read `.exited` AND `.claude_session_uuid` (the respawn arm
     /// needs both); the fail-closed semantics (absent / external / ambiguous all
     /// refused) are unchanged.
-    fn resolve_lifecycle_target(&self, name: &str) -> Result<&RegistryAgent, String> {
+    /// (v67) `harness_session_id` rides beside the label on
+    /// `StopAgent`/`RemoveAgent`; when it names a row, resolution prefers
+    /// identity and falls back to the label only when no row answers to that
+    /// id (a stale row, or an old client that carries the label alone). The
+    /// fail-closed rules are unchanged: absent, any external row sharing the
+    /// name (never act on a registry agent an external shadows), or a >1
+    /// non-external collision are all refused, so a keypress can only ever act
+    /// on exactly one unambiguous registry agent, never a guessed match.
+    fn resolve_lifecycle_target(
+        &self,
+        name: &str,
+        harness_session_id: Option<&str>,
+    ) -> Result<&RegistryAgent, String> {
+        if let Some(sid) = harness_session_id.filter(|s| !s.is_empty()) {
+            let by_id: Vec<&RegistryAgent> = self
+                .agents
+                .iter()
+                .filter(|a| !a.external && agent_harness_session_id(a) == Some(sid))
+                .collect();
+            if let [one] = by_id.as_slice() {
+                return Ok(one);
+            }
+        }
         let matches: Vec<&RegistryAgent> = self.agents.iter().filter(|a| a.name == name).collect();
         if matches.is_empty() {
             return Err(format!("no such agent: {name}"));
@@ -10805,15 +10837,23 @@ impl Core {
     }
 
     /// The reachability evidence halves a registry-backed row carries on the
-    /// wire: `None` until a probe has answered for that name. Rows with no
-    /// registry entry (bare panes, tombstones, external lifecycle) never call
-    /// these - there is nothing to probe.
-    fn truth_basis(&self, name: &str) -> Option<String> {
-        self.truth_by_name.get(name).and_then(|t| t.basis.clone())
+    /// wire: `None` until a probe has answered for that row. The map key is
+    /// the row's full harness session id when it has one (identity first,
+    /// law d-e952ed19), else the label; a row with neither (bare panes,
+    /// tombstones, external lifecycle) never calls these - there is nothing
+    /// to probe.
+    fn truth_basis(&self, a: &RegistryAgent) -> Option<String> {
+        self.truth_reading(a).and_then(|t| t.basis.clone())
     }
 
-    fn truth_age(&self, name: &str) -> Option<u64> {
-        self.truth_by_name.get(name).and_then(|t| t.age_s)
+    fn truth_age(&self, a: &RegistryAgent) -> Option<u64> {
+        self.truth_reading(a).and_then(|t| t.age_s)
+    }
+
+    fn truth_reading(&self, a: &RegistryAgent) -> Option<&TruthReading> {
+        agent_harness_session_id(a)
+            .and_then(|sid| self.truth_by_name.get(sid))
+            .or_else(|| self.truth_by_name.get(&a.name))
     }
 
     fn agent_rows(&self) -> Vec<AgentRow> {
@@ -10923,8 +10963,8 @@ impl Core {
                                 tail: self.compose_tail(a),
                                 crown_level: a.crown_level,
                                 crown_scope: a.crown_scope.clone(),
-                                basis: self.truth_basis(&a.name),
-                                last_activity_age_s: self.truth_age(&a.name),
+                                basis: self.truth_basis(a),
+                                last_activity_age_s: self.truth_age(a),
                                 resumable: false,
                                 no_pane_reason: None,
                                 // A registry-hosted pane's badge is its primary
@@ -11077,8 +11117,8 @@ impl Core {
                         tail: self.compose_tail(a),
                         crown_level: a.crown_level,
                         crown_scope: a.crown_scope.clone(),
-                        basis: self.truth_basis(&a.name),
-                        last_activity_age_s: self.truth_age(&a.name),
+                        basis: self.truth_basis(a),
+                        last_activity_age_s: self.truth_age(a),
                         resumable,
                         no_pane_reason: if detached_live {
                             Some(AgentNoPaneReason::LivePaneless)
@@ -11137,8 +11177,8 @@ impl Core {
                         tail: self.compose_tail(a),
                         crown_level: a.crown_level,
                         crown_scope: a.crown_scope.clone(),
-                        basis: self.truth_basis(&a.name),
-                        last_activity_age_s: self.truth_age(&a.name),
+                        basis: self.truth_basis(a),
+                        last_activity_age_s: self.truth_age(a),
                         resumable: self.row_resumable_in_session(a),
                         no_pane_reason: self.row_no_pane_reason_in_session(a),
                         // Watch-only paneless: no PTY, no vt reading.
@@ -14380,28 +14420,43 @@ impl Core {
                 self.push_layout(true);
                 Flow::Continue
             }
-            Command::StopAgent { name } => {
+            Command::StopAgent {
+                name,
+                harness_session_id,
+            } => {
                 // Stop a live sideline row (x-76ea). Stop ONLY: this is the
                 // menu's stop-only path; the one-gesture stop-and-remove
                 // composition lives on RemoveAgent (x-f191 scope b).
-                // `resolve_lifecycle_target` validates the name against THIS
-                // server's catalog fail-closed.
-                match self.resolve_lifecycle_target(&name) {
+                // `resolve_lifecycle_target` validates against THIS server's
+                // catalog fail-closed, identity first (v67). The subprocess
+                // gets the row's CURRENT label, so a harness-side rename
+                // between capture and keypress still reaches the right row.
+                let resolved = self
+                    .resolve_lifecycle_target(&name, harness_session_id.as_deref())
+                    .map(|a| a.name.clone());
+                match resolved {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(_row) => self.agent_action(client_id, "stop", name),
+                    Ok(label) => self.agent_action(client_id, "stop", label),
                 }
                 Flow::Continue
             }
-            Command::RemoveAgent { name } => {
+            Command::RemoveAgent {
+                name,
+                harness_session_id,
+            } => {
                 // (x-f191 scope b) The operator states the intent ONCE: remove.
                 // The server orchestrates stop-then-rm off-loop - a live row is
                 // stopped as part of its removal (the stop's registry flip is
                 // what the rm leg reads), and a stored-live corpse whose stop
                 // no-ops reaches the CLI's already-absent branch through rm's
-                // daemon-side live gate. Same resolution as StopAgent.
-                match self.resolve_lifecycle_target(&name) {
+                // daemon-side live gate. Same resolution as StopAgent: the
+                // subprocess gets the resolved row's current label.
+                let resolved = self
+                    .resolve_lifecycle_target(&name, harness_session_id.as_deref())
+                    .map(|a| a.name.clone());
+                match resolved {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(_row) => self.stop_agent_action(client_id, name),
+                    Ok(label) => self.stop_agent_action(client_id, label),
                 }
                 Flow::Continue
             }
@@ -14416,7 +14471,7 @@ impl Core {
                     );
                     return Flow::Continue;
                 }
-                match self.resolve_lifecycle_target(&name) {
+                match self.resolve_lifecycle_target(&name, None) {
                     Err(msg) => self.notice(client_id, msg),
                     Ok(_row) => self.agent_rename_action(client_id, name, new_name),
                 }
@@ -14519,7 +14574,7 @@ impl Core {
                 // (mail to an EXITED row is legal - it queues durable; an external
                 // row is refused), sanitize the text (blank/over-cap refused,
                 // never truncated), then shell `fno agents mail send` off-loop.
-                match self.resolve_lifecycle_target(&name) {
+                match self.resolve_lifecycle_target(&name, None) {
                     Err(msg) => self.notice(client_id, msg),
                     Ok(_) => match sanitize_mail_text(&text) {
                         Err(msg) => self.notice(client_id, msg),
@@ -14541,7 +14596,7 @@ impl Core {
                 // back in main; an isolated-account session needs `--account`
                 // (its uuid lives in that account's config dir). The row is the
                 // only source of these - they are not on the `--resume` uuid.
-                let resolved = self.resolve_lifecycle_target(&name).map(|a| {
+                let resolved = self.resolve_lifecycle_target(&name, None).map(|a| {
                     (
                         a.exited,
                         a.claude_session_uuid.clone(),
@@ -17466,9 +17521,11 @@ mod tests {
     mod thread_viewer_tests;
     use crate::proto::TemplateName; // x-c4d4 tests; not referenced by name in non-test code
 
-    // (x-0719) The portal test family lives in its own module; this file
+    // (x-0719) The portal test family lives in its own module; the file
     // is shrink-only under the file-budget gate.
     mod portal_tests;
+    // (x-1ab9) Same treatment: the lifecycle-resolution test family.
+    mod lifecycle_tests;
 
     // The sideline rename test family, same treatment.
     mod rename_tests;
@@ -21358,6 +21415,7 @@ mod tests {
         let flow = core.command(
             1,
             Command::StopAgent {
+                harness_session_id: None,
                 name: "ghost".into(),
             },
         );
@@ -23245,12 +23303,14 @@ mod tests {
             (
                 ext_live,
                 Command::StopAgent {
+                    harness_session_id: None,
                     name: "ext-a".into(),
                 },
             ),
             (
                 ext_dead,
                 Command::RemoveAgent {
+                    harness_session_id: None,
                     name: "ext-b".into(),
                 },
             ),
@@ -23436,7 +23496,13 @@ mod tests {
         ];
         let (c, mut rx) = client_with_rx(1);
         core.clients.push(c);
-        core.command(1, Command::StopAgent { name: "dup".into() });
+        core.command(
+            1,
+            Command::StopAgent {
+                name: "dup".into(),
+                harness_session_id: None,
+            },
+        );
         assert!(drain_notice(&mut rx).unwrap().contains("external"));
 
         // Two non-external rows with one name -> ambiguous refusal.
@@ -23447,7 +23513,13 @@ mod tests {
         ];
         let (c, mut rx) = client_with_rx(1);
         core.clients.push(c);
-        core.command(1, Command::RemoveAgent { name: "dup".into() });
+        core.command(
+            1,
+            Command::RemoveAgent {
+                name: "dup".into(),
+                harness_session_id: None,
+            },
+        );
         assert!(drain_notice(&mut rx).unwrap().contains("ambiguous"));
     }
 

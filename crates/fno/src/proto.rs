@@ -320,7 +320,7 @@ fn default_true() -> bool {
 /// open honors, now that the geometry refusal lives inside `reach_portal`
 /// where the slot lookup knows occupancy. Additive, so the compatibility
 /// floor does not move; a repoint keeps owning its geometry and says so.
-pub const PROTO_VERSION: u32 = 66;
+pub const PROTO_VERSION: u32 = 67;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1786,16 +1786,24 @@ pub enum Command {
     /// stale name is refused fail-closed with a notice, like `FocusPane`. An
     /// `external: true` roster row is refused (the claude daemon owns it, not the
     /// fno registry). The row's exited flag flips on the next registry poll.
+    /// (v67) The row's harness session id rides beside the label so resolution
+    /// prefers identity over it (law d-e952ed19); `None` keeps the label-only
+    /// fallback for older clients and bare-identity rows.
     StopAgent {
         name: String,
+        #[serde(default)]
+        harness_session_id: Option<String>,
     },
     /// (v26, x-76ea) Remove an EXITED agent row: the server shells `fno-agents
     /// rm <name>`. Refused with a notice when the named row is still live
-    /// (stop-then-rm ordering, mirrored by the CLI's own live-row refusal) or
+    /// (stop-then-rm ordering, mirrored by the CLI's live-row refusal) or
     /// `external`. Same catalog validation as `StopAgent`; the row vanishes on
-    /// the next registry poll.
+    /// the next registry poll. (v67) `harness_session_id` rides beside the
+    /// label, same identity-first resolution as `StopAgent`.
     RemoveAgent {
         name: String,
+        #[serde(default)]
+        harness_session_id: Option<String>,
     },
     /// Rename a sideline row's LABEL. Grammar-checked server-side before any
     /// subprocess; unknown/external/ambiguous rows refuse. Live rows too.

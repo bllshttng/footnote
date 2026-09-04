@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use crate::claude_ask::emit_event;
 use crate::paths::AgentsHome;
 use crate::provider::normalize_codex_command;
-use crate::state::{load_registry, update_registry};
+use crate::state::{find_keyed_mut, load_registry, update_registry};
 use crate::AgentStatus;
 
 // ===========================================================================
@@ -1483,9 +1483,12 @@ fn dispatch_resume(
         }
     };
 
-    // Stamp status=live + last_message_at on success.
+    // Stamp status=live + last_message_at on success, keyed on the row's
+    // identity (law d-e952ed19) captured before the write, so a same-name
+    // replacement between resolve and write cannot receive this stamp.
+    let key = ("codex".to_string(), Some(session_id.clone()));
     if let Err(e) = update_registry(registry_path, |reg| {
-        if let Some(en) = reg.find_mut(name) {
+        if let Some(en) = find_keyed_mut(reg, &key, name) {
             en.status = AgentStatus::Live;
             en.last_message_at = Some(now_iso());
         }

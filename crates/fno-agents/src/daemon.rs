@@ -10319,7 +10319,22 @@ fn run_reconcile_sweep(
     // mislead automation and hide stale lifecycle state.
     if let Err(err) = state::update_registry(&home.registry_json(), |r| {
         for ch in &changes {
-            if let Some(e) = r.find_mut(&ch.name) {
+            // Keyed on the probed row's identity (law d-e952ed19) read off
+            // the same snapshot the sweep planned from, so a row replaced
+            // under the same label between snapshot and locked write cannot
+            // receive the first row's status.
+            let ident = entries
+                .iter()
+                .find(|e| e.name == ch.name)
+                .map(state::registry_write_key);
+            let keyed = ident
+                .as_ref()
+                .and_then(|(h, sid)| sid.as_deref().and_then(|sid| r.find_by_session_mut(h, sid)));
+            let target = match keyed {
+                Some(e) => Some(e),
+                None => r.find_mut(&ch.name),
+            };
+            if let Some(e) = target {
                 apply_reconcile_change(e, ch.new_status, &now);
             }
         }
