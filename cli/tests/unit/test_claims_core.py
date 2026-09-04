@@ -474,6 +474,35 @@ class TestPidProvenanceStamping:
         assert claim.harness == "codex"
         assert claim.pid_provenance == "ambient"
 
+    def test_rebind_keeping_a_shared_host_harness_still_stamps_ambient(
+        self, tmp_path, monkeypatch
+    ):
+        """The branch the first fix missed. A non-handover rebind writes NO new
+        harness, so the record KEEPS its own - here codex - while the caller
+        resolved its provenance against the rebinding process's harness before
+        the mutex. Passing the expected harness at the call site cannot cover
+        this, because the two part company after that point. _rebound_claim is
+        the single branch that picks the written harness, so the narrowing
+        lives there and every caller inherits it."""
+        monkeypatch.setattr(
+            "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
+        )
+        existing = Claim(
+            key="node:x-8", holder=HOLDER_A,
+            acquired_at=now_ms(), expires_at=now_ms() + 900_000,
+            pid=os.getpid(), host=socket.gethostname(),
+            harness="codex", pid_provenance="ambient",
+        )
+        import fno.claims.core as claims_core
+
+        rebound = claims_core._rebound_claim(
+            existing, os.getpid(), 60_000,
+            # What a claude caller resolves for itself before the mutex.
+            new_pid_provenance="session-prover",
+        )
+        assert rebound.harness == "codex"
+        assert rebound.pid_provenance == "ambient"
+
     def test_shared_host_harness_never_earns_the_prover_stamp(self, tmp_path, monkeypatch):
         """AC1 - the writer side of the specimen. The prover walk succeeds:
         the pid IS resolve_session_pid's answer, and both sides of that

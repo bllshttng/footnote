@@ -632,6 +632,18 @@ def _rebound_claim(
         expires_at = now + max(existing.expires_at - existing.acquired_at, MIN_TTL_MS)
     else:
         expires_at = None
+    # This is the ONE place that decides which harness a rebound record
+    # carries, so it is also where the stamp is held to it. A caller resolves
+    # its provenance before the mutex, against the harness it EXPECTS to write,
+    # and a non-handover rebind then keeps the prior record's harness instead -
+    # so the two can part company between there and here. Narrowing at the
+    # branch that picks the harness makes the record self-consistent by
+    # construction rather than by four callers each remembering.
+    from .session_pid import pid_dies_with_session
+
+    written_harness = new_harness if new_harness is not None else existing.harness
+    if not pid_dies_with_session(written_harness):
+        new_pid_provenance = "ambient"
     return Claim(
         schema_version=(
             PID_UNAVAILABLE_SCHEMA_VERSION
@@ -647,7 +659,7 @@ def _rebound_claim(
         host=socket.gethostname(),
         machine_id=machine_id() or None,
         reason=new_reason if new_reason is not None else existing.reason,
-        harness=new_harness if new_harness is not None else existing.harness,
+        harness=written_harness,
         # The pid is being REWRITTEN here, so the prior record's provenance
         # describes a process this claim no longer names. A rebound pid either
         # earns its own stamp from the caller (the reanchor path's pid IS the
