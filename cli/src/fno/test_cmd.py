@@ -370,19 +370,79 @@ def _run(args: Sequence[str], stream: bool = False) -> int:
     return _run_captured([cmd], env, _log_path(root))
 
 
+# The per-process lanes reading behind _lanes_threads(). One reading per
+# invocation is the semantic; the cache only stops repeated in-process calls
+# (the unit suite) re-paying the up-to-5 s macmon sample. Tests reset it.
+_LANES_READING: Optional[tuple[Optional[int], str]] = None
+
+
+def _lanes_threads() -> tuple[Optional[int], str]:
+    """Test-thread cap from the `fno doctor lanes` reading, or None at default.
+
+    `lane_count` is how many MORE lanes fit: an idle box tops out at 64
+    (LANE_ANSWER_CAP) - full parallelism, not a lowered constant - and a
+    spawn-load ceiling breach forces 0, which clamps to 1 (serial). A refused
+    reading (a dark sensor is never headroom) or a failed one returns None so
+    the runner keeps its own default where sensors are dark (CI).
+    """
+    global _LANES_READING
+    if _LANES_READING is not None:
+        return _LANES_READING
+    try:
+        from fno.doctor_lanes import read_lanes
+
+        reading = read_lanes()
+    except Exception as exc:  # the reading must never block the suite
+        _LANES_READING = (None, f"reading failed ({exc})")
+        return _LANES_READING
+    lane_count = reading.lane_count
+    if lane_count is None:
+        _LANES_READING = (None, f"reading refused ({reading.refusal_reason})")
+        return _LANES_READING
+    _LANES_READING = (
+        max(1, int(lane_count)),
+        f"{lane_count} more fit (fno doctor lanes)",
+    )
+    return _LANES_READING
+
+
 def _run_rust(args: Sequence[str], stream: bool = False) -> int:
     """Run the Rust suites: nextest when installed, else `cargo test -q`.
 
     No workspace root exists, so without an explicit `--manifest-path` we sweep
     every `crates/*/Cargo.toml` (the two-test-trees lesson: a green subset is
     not proof).
+
+    The test-thread count comes from the `fno doctor lanes` reading, not core
+    count: the keeper tests exec a real pty-holding worker each, so a dozen
+    threads is a dozen live processes. The reading (and what it did) prints so
+    a slow run explains itself.
     """
     root = _repo_root(Path.cwd()) or Path.cwd()
     cargo_args = list(args)
-    if shutil.which("cargo-nextest"):
+    nextest = bool(shutil.which("cargo-nextest"))
+    threads, lanes_note = _lanes_threads()
+    override = any(
+        a == "--" or a == "--jobs" or a.startswith(("-j", "--test-threads"))
+        for a in cargo_args
+    )
+    if nextest:
         base = ["cargo", "nextest", "run"]
     else:
         base = ["cargo", "test", "-q"]
+    cap_tail: list[str] = []
+    if threads is None:
+        sys.stdout.write(f"fno doctor test rust: lanes {lanes_note}; runner default parallelism\n")
+    elif override:
+        sys.stdout.write(
+            f"fno doctor test rust: lanes {lanes_note}; user parallelism flag wins, cap not applied\n"
+        )
+    else:
+        if nextest:
+            base = [*base, "--test-threads", str(threads)]
+        else:
+            cap_tail = ["--", "--test-threads", str(threads)]
+        sys.stdout.write(f"fno doctor test rust: lanes {lanes_note}; test threads capped at {threads}\n")
 
     if "--manifest-path" in cargo_args:
         cmds = [[*base, *cargo_args]]
@@ -392,6 +452,8 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
             sys.stderr.write(f"fno doctor test rust: no crates/*/Cargo.toml under {root}\n")
             return 2
         cmds = [[*base, "--manifest-path", str(m), *cargo_args] for m in manifests]
+    if cap_tail:
+        cmds = [[*c, *cap_tail] for c in cmds]
 
     env = _child_env(root)
     if stream:
