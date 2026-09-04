@@ -507,3 +507,32 @@ def test_policy_verb_reports_never_and_default(main_repo: Path, tmp_path: Path) 
     lines = res2.stdout.strip().splitlines()
     assert lines[0] == "harness-native"
     assert lines[1].startswith("base=")
+
+
+def test_ensure_reuses_the_branch_checkout_when_the_policy_path_moves(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """A relocated policy path must reuse the branch's existing checkout.
+
+    A branch has exactly one checkout. When the resolved path moves under an
+    existing lane (a node whose harness stopped resolving to claude, or a
+    `worktrees_base` edit), `git worktree add` refuses with "already used by
+    worktree at ..." and the lane wedges on every tick, because its tree is
+    unmerged and nothing reaps it.
+    """
+    first = runner.invoke(
+        app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "lane-a"]
+    )
+    assert first.exit_code == 0, first.stderr
+    original = Path(first.stdout.strip())
+    assert original == _default_wt(tmp_path, main_repo, "lane-a")
+
+    # Same node, a harness whose policy resolves somewhere else.
+    moved = runner.invoke(
+        app,
+        ["worktree", "ensure", "--repo", str(main_repo), "--name", "lane-a",
+         "--harness", "claude"],
+    )
+    assert moved.exit_code == 0, moved.stderr
+    assert Path(moved.stdout.strip()) == original
+    assert "a branch has one checkout" in moved.stderr

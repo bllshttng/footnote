@@ -235,6 +235,18 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _worktree_for_branch(repo: Path, branch: str) -> Optional[Path]:
+    """The worktree that already has ``branch`` checked out, or None.
+
+    Through the porcelain parser three other modules already share, which also
+    gets `bare` and `detached` right - a second hand-rolled reader of the same
+    output is the shape the dual-implementation rule refuses.
+    """
+    from fno.worktree_status import _worktrees
+
+    return next((Path(p) for b, p in _worktrees(repo) if b == branch), None)
+
+
 def _abs_git_path(repo: Path, which: str) -> Optional[Path]:
     """Absolute path of a repo's git-dir or git-common-dir (symlink-resolved)."""
     out = _git(repo, "rev-parse", f"--{which}")
@@ -444,11 +456,25 @@ def _worktree_ensure(
         )
         return 1
 
-    wt.parent.mkdir(parents=True, exist_ok=True)
     br = branch or f"feature/{name}"
     # base= stays ONE whitespace-free token: the orientation line is a
     # key=value contract.
     base_note = ""
+    # A branch has exactly ONE checkout, so anything that MOVES the resolved
+    # path - a harness that stopped resolving to claude, a `worktrees_base`
+    # edit - hit `git worktree add`'s "already used by worktree at ..." and
+    # wedged that lane forever, the old tree being unmerged. Reuse keyed on the
+    # path alone made a relocation fatal; the contract is create-or-reuse.
+    existing = _worktree_for_branch(top, br)
+    if existing is not None and existing.resolve() != wt.resolve():
+        typer.echo(
+            f"worktree ensure: {policy_receipt}; reusing {br} at {existing} "
+            f"(policy resolves {wt}; a branch has one checkout)",
+            err=True,
+        )
+        typer.echo(str(existing))
+        return 0
+    wt.parent.mkdir(parents=True, exist_ok=True)
     if _git(top, "show-ref", "--verify", "--quiet", f"refs/heads/{br}").returncode == 0:
         # Branch already exists (e.g. a re-dispatch after archive) -> check it out.
         add = _git(top, "worktree", "add", str(wt), br)
