@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
 from fno import paths
+from fno.agents import spawn_flag_owners
 from fno.agents.dispatch import (
     DispatchAskError,
     _capture_parent_edge,
@@ -151,6 +152,13 @@ class MuxSpawnResult:
     # `painted` / `blank` / `unreadable`; None when no seed was requested.
     pane_observation: Optional[str] = None
     fno_id: Optional[str] = None
+    # The row's launch-account fact and WHO chose it ("caller" / "config"),
+    # so the receipt answers the question the row answers. Both None on
+    # non-claude rows and rows that positively pinned no account (the row
+    # already says "default"); `launch_account` carries the concrete id or
+    # the "default" sentinel exactly as the row records it.
+    launch_account: Optional[str] = None
+    launch_account_source: Optional[str] = None
 
 
 def _claim_store_writable(
@@ -3706,7 +3714,14 @@ def dispatch_spawn_pane(
     # Same helper, same rules (explicit account wins, routed spawns are skipped).
     # x-d285: the picked OVERLAY (not just its env) so the row can stamp the
     # account id it picked; an explicit launch_account from the caller wins.
+    # x-04ce: the id alone answers WHICH account, never WHO chose it - a
+    # config injection printed identically to a caller decision. The source
+    # rides the row (`launch_account_source`) and the receipt
+    # (`account_source`) in the shared vocabulary from spawn_flag_owners.
     effective_launch_account = launch_account
+    launch_account_source = (
+        spawn_flag_owners.CALLER if launch_account is not None else None
+    )
     if account_env is None and provider == "claude":
         from fno.agents.dispatch import _pick_account_overlay
 
@@ -3714,6 +3729,7 @@ def dispatch_spawn_pane(
         if picked is not None:
             account_env = dict(picked.env)
             effective_launch_account = picked.account_id
+            launch_account_source = spawn_flag_owners.CONFIG
 
     # The monitor contract is judged BEFORE the generic route guard: an
     # explicit --monitor happy refusal names the zai-shaped gap it found, and
@@ -4868,6 +4884,9 @@ def dispatch_spawn_pane(
                         if provider == "claude"
                         else None
                     ),
+                    launch_account_source=(
+                        launch_account_source if provider == "claude" else None
+                    ),
                     # x-98ab: the node this pane works, from the SAME resolved
                     # provenance map the child env got - never the spawning
                     # session's ambient value.
@@ -5233,4 +5252,10 @@ def dispatch_spawn_pane(
         seed_source=seed_source,
         pane_observation=seed_pane,
         fno_id=session_uuid or name,
+        launch_account=(
+            (effective_launch_account or "default") if provider == "claude" else None
+        ),
+        launch_account_source=(
+            launch_account_source if provider == "claude" else None
+        ),
     )

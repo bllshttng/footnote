@@ -3598,6 +3598,7 @@ fn create(
     // markers read here name this row's true parent.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     let launch_account = crate::state::launch_account_from_env();
+    let launch_account_source = crate::state::launch_account_source_from_env();
     let new_entry = RegistryEntry {
         // x-98ab: client-side mint - this process inherited the spawning
         // session's env, so the exported FNO_NODE names the node THIS spawn
@@ -3613,6 +3614,7 @@ fn create(
         // v9: the claude jobId is the unified transport key (was claude_short_id);
         // follow-up/logs read it via `transport_short()`.
         short_id: short_id.clone(),
+        launch_account_source,
         legacy_provider: String::new(),
         provider: Some("anthropic".to_string()),
         // (x-d401) The model the worker was launched with, and the basis
