@@ -92,13 +92,6 @@ const SRC_PR_NODES: &str = "gh pr list --state open --json number,title,mergeabl
 const SRC_QUESTIONS: &str = "fno inbox outstanding --json";
 const SRC_NEEDS: &str = "fno agents needs --json";
 
-/// The needs fold's default window (needs.rs DEFAULT_WINDOW_SECS), carried here
-/// because that constant is private and the board's needs source must read the
-/// same window the verb reads.
-const DEFAULT_WINDOW_SECS_BOARD: u64 = 24 * 60 * 60;
-
-const DEFAULT_FIRES_FLOOR_BOARD: u64 = 2;
-
 fn now_secs_board() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -265,6 +258,22 @@ fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 
 fn s_i64(v: &Value, key: &str) -> Option<i64> {
     v.get(key).and_then(Value::as_i64)
+}
+
+/// Python `bool()` over a JSON value: null/false/empty-string/zero/empty
+/// container are false. The classify port decides `completed`/`has_pr`/
+/// `batch_owner` the way the Python `bool(entry.get(...))` did, so a legacy
+/// empty-string `completed_at` or a zero `pr_number` reads as absent, exactly
+/// as the retired module read it.
+fn truthy(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
+        Value::String(st) => !st.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+    }
 }
 
 fn as_int(v: &Value) -> i64 {
@@ -598,18 +607,18 @@ fn classify_planned_unclaimed(entries: &[Value], claims: &[Value]) -> Result<Val
             .unwrap_or(false);
         let status_ready = s_str(entry, "status") == Some("ready");
         let leaf = s_str(entry, "type") != Some("epic") && !child_ids.contains(&node_id);
-        let completed = entry.get("completed_at").is_some_and(|v| !v.is_null());
-        let has_pr = entry.get("pr_number").is_some_and(|v| !v.is_null())
+        let completed = entry.get("completed_at").map(truthy).unwrap_or(false);
+        let has_pr = entry.get("pr_number").map(truthy).unwrap_or(false)
             || entry
                 .get("additional_prs")
                 .and_then(Value::as_array)
                 .map(|extras| {
                     extras
                         .iter()
-                        .any(|e| e.is_object() && e.get("number").is_some_and(|n| !n.is_null()))
+                        .any(|e| e.is_object() && e.get("number").map(truthy).unwrap_or(false))
                 })
                 .unwrap_or(false);
-        let batch_owner = entry.get("batch").is_some_and(|v| !v.is_null());
+        let batch_owner = entry.get("batch").map(truthy).unwrap_or(false);
         let blocked = entry
             .get("blocked_by")
             .and_then(Value::as_array)
@@ -622,7 +631,7 @@ fn classify_planned_unclaimed(entries: &[Value], claims: &[Value]) -> Result<Val
                         None => true,
                         Some(blocker) => {
                             s_str(blocker, "status") != Some("done")
-                                && blocker.get("completed_at").is_none_or(|v| v.is_null())
+                                && !blocker.get("completed_at").map(truthy).unwrap_or(false)
                         }
                     }
                 })
@@ -2002,6 +2011,12 @@ pub struct BoardOpts {
     pub max_pr_reads: usize,
     /// King manifest whose `scope` bounds the board.
     pub state_path: Option<PathBuf>,
+    /// The directory every config-tier, claims-root, and project-journal
+    /// resolution anchors on. `None` means the process cwd (the hand-run CLI
+    /// case); an IN-PROCESS caller such as loopcheck passes its `--cwd` here,
+    /// because the old subprocess board ran with the king session's cwd and
+    /// the calling process's cwd is not guaranteed to be the same directory.
+    pub cwd: Option<PathBuf>,
 }
 
 impl Default for BoardOpts {
@@ -2010,6 +2025,7 @@ impl Default for BoardOpts {
             budget_ms: HAND_RUN_BUDGET_MS,
             max_pr_reads: 20,
             state_path: None,
+            cwd: None,
         }
     }
 }
@@ -2017,7 +2033,10 @@ impl Default for BoardOpts {
 /// Read the whole board. Never panics on a source; every failure lands in its
 /// queue's error and the payload still answers.
 pub fn read_board(opts: &BoardOpts) -> Value {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = opts
+        .cwd
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let mut budget = Budget::new(opts.budget_ms);
     let mut sources: Map<String, Value> = Map::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -2216,13 +2235,13 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                             event_paths.push(canonical_events);
                         }
                     }
-                    let since = now_secs_board().saturating_sub(DEFAULT_WINDOW_SECS_BOARD);
+                    let since = now_secs_board().saturating_sub(crate::needs::DEFAULT_WINDOW_SECS);
                     crate::needs::collect_needs_items(
                         &home,
                         &event_paths,
                         &default_ledger,
                         since,
-                        DEFAULT_FIRES_FLOOR_BOARD,
+                        crate::needs::DEFAULT_FIRES_FLOOR,
                     )
                 })
             });
@@ -2551,6 +2570,22 @@ mod tests {
         assert_eq!(rows.len(), 2, "{receipt}");
         assert_eq!(rows[0]["id"], "x-aaaa");
         assert_eq!(receipt["status"], "ok");
+    }
+
+    #[test]
+    fn degenerate_field_values_read_as_absent_like_python_bool() {
+        // Python bool("") and bool(0) are false: an empty completed_at is not
+        // closure, a zero pr_number is not a PR, an empty batch is not a batch.
+        let entries = vec![json!({"id": "x-aaaa", "status": "ready", "priority": "p0",
+                   "plan_path": "/p.md", "type": "feature",
+                   "completed_at": "", "pr_number": 0, "batch": ""})];
+        let receipt = classify_planned_unclaimed(&entries, &[]).unwrap();
+        let rows = receipt.get("rows").and_then(Value::as_array).unwrap();
+        assert_eq!(rows.len(), 1, "{receipt}");
+        let facts = rows[0]["facts"].clone();
+        assert_eq!(facts["completed"], false, "{facts}");
+        assert_eq!(facts["has_pr"], false, "{facts}");
+        assert_eq!(facts["batch_owner"], false, "{facts}");
     }
 
     #[test]

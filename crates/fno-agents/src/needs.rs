@@ -23,14 +23,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Default fold window when `--since-epoch` is absent: the last 24h.
-const DEFAULT_WINDOW_SECS: u64 = 24 * 60 * 60;
+pub const DEFAULT_WINDOW_SECS: u64 = 24 * 60 * 60;
 
 /// `fires` floor for `review_wedged`: the loop must have re-checked at least
 /// this many times before a green-PR block counts as wedged (a fresh block
 /// during a normal review wait is not yet a wedge). Hardcoded heuristic, not a
 /// config knob - tune the const if it misfires (ponytail: no config for a value
 /// that never changes); a hidden `--fires-floor` overrides it for tests.
-const DEFAULT_FIRES_FLOOR: u64 = 2;
+pub const DEFAULT_FIRES_FLOOR: u64 = 2;
 
 /// Below this age, a pile of unharvested carve-outs or stale claims is not yet
 /// a needs-me item - only a pile that has actually gone stale belongs in the

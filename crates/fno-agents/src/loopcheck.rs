@@ -12944,11 +12944,14 @@ pub(crate) fn read_king_board(
     // a slice of the budget and names what it could not read), so an
     // unreadable queue still blocks - a king that cannot see its board must
     // not certify itself finished.
-    let _ = (fno_bin, cwd);
+    let _ = fno_bin;
     let opts = crate::king_board::BoardOpts {
         budget_ms: stopgate_read_timeout().as_millis() as u64,
         max_pr_reads: 20,
         state_path: Some(state_path.to_path_buf()),
+        // The old subprocess board ran with this cwd; config-tier, claims-root
+        // and project-journal resolution anchor on the same directory now.
+        cwd: Some(cwd.to_path_buf()),
     };
     let payload = crate::king_board::read_board(&opts);
     parse_king_board_value(&payload).ok_or_else(|| {
