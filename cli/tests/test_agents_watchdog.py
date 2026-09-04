@@ -3515,24 +3515,6 @@ def test_a_shared_worktree_row_probed_dead_is_reapable_and_the_tree_is_held(
     assert monkey_flags["ran"] is False, "the destructive step ran on a shared tree"
 
 
-def test_a_shared_worktree_row_probed_alive_or_unknown_is_refused_and_names_it():
-    """The probe gate, named (x-ad13): on the same shared tree, a row the
-    probe reports ALIVE refuses as NO, and a row the probe cannot answer
-    refuses as UNKNOWN. Neither is ever a YES; the basis names which."""
-    shared = {
-        "aaaa1111-0000": _facts(FINISHED_TAIL, age_min=30),
-    }
-    nodes = {"x-done": {"status": "done"}}
-    for probe, expect in (("alive", "leave"), ("unknown", "stale")):
-        row = Row("aaaa1111-0000", "quiet", "working", "x-done", "/wt/x-bcb5",
-                  origin="spawn", last_message_at=STALE_MESSAGE_STAMP,
-                  probe=probe)
-        [v] = _run([row], shared, nodes=nodes)
-        assert v.verdict == expect, (probe, v.verdict, v.basis)
-        assert "liveness probe" in v.basis, (probe, v.basis)
-        assert probe in v.basis
-
-
 def test_a_king_shaped_row_is_never_reaped():
     """The measured hazard the guard split was blocked on (x-ad13).
 

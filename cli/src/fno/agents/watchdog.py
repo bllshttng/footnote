@@ -1587,6 +1587,7 @@ def _verdict_one(
         window, reset_epoch, stamp = rate_limit_window(facts.records, now_s)
 
     reap_basis = ""
+    reap_unknown_basis = ""
     if row.node:
         answer, reap_basis = reap_decision(
             row,
@@ -1603,17 +1604,23 @@ def _verdict_one(
             return Verdict(row.row_id, row.name, row.state, REAP,
                            reap_basis, "stop+rm", cotenants)
         if answer is REAP_UNKNOWN:
-            # Not "leave": leave says the row was read and is healthy. This
-            # says the read did not answer, which is a different fact and a
-            # human's to resolve.
-            return Verdict(row.row_id, row.name, row.state, STALE,
-                           reap_basis, "report")
+            # HELD, not returned. Reap's non-answer used to return STALE here,
+            # above retire, so every row whose liveness probe stayed silent -
+            # 55 of 55 on the machine this was measured on, because a row
+            # carrying no pid and no heartbeat can only answer UNKNOWN - was
+            # reported instead of stopped, including rows whose node was done
+            # AND merged. Retire is strictly weaker (it runs `stop`, which
+            # `fno agents resume` undoes) and carries its own probe and state
+            # guards, so it inherits none of reap's protection by being asked
+            # first. The basis is returned below if retire also declines.
+            reap_unknown_basis = reap_basis
 
-    # retire: below reap, and reachable whether or not the row carries a node -
-    # a blueprint worker's row routinely has none, and it is the population this
-    # lane was built for. It runs before reap's LEAVE return so a row reap
-    # declines on its own (stricter) preconditions can still be stopped by this
-    # (weaker, non-destructive) one.
+    # retire: below a reap that ANSWERED yes, above one that did not answer, and
+    # reachable whether or not the row carries a node - a blueprint worker's row
+    # routinely has none, and it is the population this lane was built for. It
+    # runs before reap's LEAVE return so a row reap declines on its own
+    # (stricter) preconditions can still be stopped by this (weaker,
+    # non-destructive) one.
     retire_yes, retire_basis = retire_decision(
         row,
         facts=facts,
@@ -1628,6 +1635,13 @@ def _verdict_one(
     if retire_yes:
         return Verdict(row.row_id, row.name, row.state, RETIRE,
                        retire_basis, "stop")
+
+    if reap_unknown_basis:
+        # Not "leave": leave says the row was read and is healthy. This says
+        # the read did not answer, which is a different fact and a human's to
+        # resolve.
+        return Verdict(row.row_id, row.name, row.state, STALE,
+                       reap_unknown_basis, "report")
 
     if reap_basis:
         return Verdict(row.row_id, row.name, row.state, LEAVE,
@@ -2243,24 +2257,44 @@ def _is_linked_worktree(cwd: str) -> bool:
         return False
 
 
-def _claim_view(node: str) -> dict:
+class _Unreadable:
+    """A seam read that FAILED, which is not the same fact as one that
+    answered empty.
+
+    Both seams below used to answer ``{}`` on any exception, so an unreadable
+    claims root and a node with no claim produced one value. `reap_decision`
+    documents that a read which raised is UNKNOWN, but with the exception
+    swallowed here it never saw one: the contract held only for the seams a
+    test injected. The sentinel travels to the wiring in `run_sweep`, which
+    raises on it, so the production path answers UNKNOWN with the read failure
+    in its basis. Retire meets the same raise through `_shipped_work_basis`,
+    which already treats a failed read as no marker and no stop.
+    """
+
+    __slots__ = ("detail",)
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+
+
+def _claim_view(node: str) -> dict | _Unreadable:
     from fno.claims.core import claim_status
     from fno.claims.io import claims_root_for
 
     key = f"node:{node}"
     try:
         return claim_status(key, root=claims_root_for(key))
-    except Exception:  # noqa: BLE001 - an unreadable claim condemns nothing
-        return {}
+    except Exception as exc:  # noqa: BLE001 - an unreadable claim condemns nothing
+        return _Unreadable(f"claims root unreadable ({exc!r})")
 
 
-def _graph_index() -> dict[str, dict]:
+def _graph_index() -> dict[str, dict] | _Unreadable:
     from fno.graph.load import load_graph
 
     try:
         entries = load_graph()
-    except Exception:  # noqa: BLE001 - graph miss degrades to "no node state"
-        return {}
+    except Exception as exc:  # noqa: BLE001 - a graph miss is never node state
+        return _Unreadable(f"graph unreadable ({exc!r})")
     return {
         str(e.get("id")): e for e in entries if isinstance(e, dict) and e.get("id")
     }
@@ -2779,7 +2813,12 @@ def _production_route_policy(row: Row) -> tuple[list[str], dict[str, str]]:
     from fno.agents.dispatch_target import resolve_dispatch_target
 
     root = Path(row.cwd)
-    node = _graph_index().get(str(row.node), {}) if row.node else {}
+    index = _graph_index()
+    node = (
+        index.get(str(row.node), {})
+        if row.node and not isinstance(index, _Unreadable)
+        else {}
+    )
     pins = {
         key: str(node.get(key) or "")
         for key in ("provider", "harness", "model")
@@ -2878,8 +2917,8 @@ def run_sweep(
     now_s: Optional[float] = None,
     rows_provider: Optional[Callable[[], tuple[list[Row], list[str]]]] = None,
     transcript_fn: Optional[Callable[[str], Optional[TailFacts]]] = None,
-    claim_fn: Optional[Callable[[str], dict]] = None,
-    graph_fn: Optional[Callable[[], dict[str, dict]]] = None,
+    claim_fn: Optional[Callable[[str], dict | _Unreadable]] = None,
+    graph_fn: Optional[Callable[[], dict[str, dict] | _Unreadable]] = None,
     provider_outage_fn: Optional[Callable[[], dict[str, Any]]] = None,
     roster_timeout: Optional[float] = None,
 ) -> tuple[dict, list[Row]]:
@@ -2948,6 +2987,23 @@ def run_sweep(
 
         def graph_fn() -> dict[str, dict]:
             return index
+
+    # The one place a seam's read FAILURE becomes a raise. `reap_decision`
+    # answers UNKNOWN on a raise and names the failure in its basis; retire's
+    # `_shipped_work_basis` answers no marker. Returning the sentinel through
+    # instead would read as "no claim" and "no node state", which is what the
+    # swallowed exception used to say.
+    def claim_for(node: str) -> dict:
+        view = claim_fn(node)
+        if isinstance(view, _Unreadable):
+            raise RuntimeError(view.detail)
+        return view
+
+    def node_state_for(node: str) -> Optional[dict]:
+        entries = graph_fn()
+        if isinstance(entries, _Unreadable):
+            raise RuntimeError(entries.detail)
+        return entries.get(node)
     try:
         from fno.config import load_settings
 
@@ -2957,8 +3013,8 @@ def run_sweep(
     vs = verdicts(
         rows,
         transcript_for=transcript_fn,
-        claim_for=claim_fn,
-        node_state_for=lambda node: graph_fn().get(node),
+        claim_for=claim_for,
+        node_state_for=node_state_for,
         now_s=now_s,
         quiet_after_s=quiet_after_s,
         provider_outages=provider_outages,
