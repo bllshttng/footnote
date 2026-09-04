@@ -1,10 +1,10 @@
-"""Target pre-ship review defaults to a native final-head review; sigma is opt-in.
+"""Target pre-ship review defaults to a native pre-push review; sigma is opt-in.
 
 AC11-HP: no `config.review.reviewers` -> the ship step requests the harness-native
-review verb for the pushed final HEAD through the explicit-target self-send
-router, and no six-agent sigma panel is dispatched. The request is a producer,
-not advisory prose: it names the PR, HEAD SHA, and origin base before it can
-reach the transport.
+review verb for the local final HEAD before any push, through the explicit-target
+self-send router, and no six-agent sigma panel is dispatched. The request is a
+producer, not advisory prose: it names the target (PR or branch), HEAD SHA, and
+origin base before it can reach the transport.
 AC12-CON: `reviewers` includes `sigma` -> sigma runs exactly once (post-ship, on
 the final HEAD) and the skip logic reads in the same direction as its docs.
 
@@ -159,6 +159,92 @@ def test_request_self_review_refuses_when_local_head_does_not_match_pr(
     assert "HEAD" in receipt["reason"]
 
 
+def test_request_self_review_without_pr_pins_local_head_and_branch(
+    monkeypatch,
+):
+    import fno.target_cli as target_cli
+    from typer.testing import CliRunner
+
+    calls = []
+
+    def fake_git_out(_cwd, *args):
+        if args == ("rev-parse", "HEAD"):
+            return "abc1234"
+        if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+            return "feature/x-98ac"
+        if args == ("symbolic-ref", "--short", "refs/remotes/origin/HEAD"):
+            return "origin/main"
+        return None
+
+    monkeypatch.setattr(target_cli, "_git_out", fake_git_out)
+    monkeypatch.setattr(
+        target_cli,
+        "_read_pr_metadata",
+        lambda _pr, _cwd: (_ for _ in ()).throw(AssertionError("no-PR form read a PR")),
+    )
+    monkeypatch.setattr(
+        target_cli,
+        "_resolve_self_review_identity",
+        lambda: ("codex", "codex-session"),
+    )
+    monkeypatch.setattr(
+        target_cli,
+        "_send_self_review_payload",
+        lambda **kwargs: calls.append(kwargs) or {"outcome": "started", "transport": "codex-daemon"},
+    )
+
+    result = CliRunner().invoke(target_cli.target_app, ["request-self-review"])
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output)
+    assert receipt["outcome"] == "started"
+    assert receipt["pr"] is None
+    assert receipt["branch"] == "feature/x-98ac"
+    # The branch name leads the target slot, HEAD and base trail: the same
+    # strict-reader contract as the --pr form, pre-push. No --comment: the
+    # PR the flag writes to does not exist yet.
+    assert calls[0]["payload"].endswith(
+        "feature/x-98ac HEAD abc1234 against origin/main"
+    )
+    assert "--comment" not in calls[0]["payload"]
+
+
+def test_request_self_review_without_pr_refuses_detached_head(
+    monkeypatch,
+):
+    import fno.target_cli as target_cli
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr(
+        target_cli,
+        "_git_out",
+        lambda _cwd, *args: "abc1234" if args == ("rev-parse", "HEAD") else "HEAD",
+    )
+
+    result = CliRunner().invoke(target_cli.target_app, ["request-self-review"])
+
+    assert result.exit_code == 2
+    receipt = json.loads(result.output)
+    assert receipt["outcome"] == "refused"
+    assert "no branch" in receipt["reason"]
+
+
+def test_render_self_review_invocation_refuses_pr_and_branch_together():
+    from fno.review_capability import render_self_review_invocation
+
+    try:
+        render_self_review_invocation(
+            pr_number=123,
+            branch="feature/x-98ac",
+            head_sha="abc1234",
+            base_branch="main",
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("pr_number and branch together must raise ValueError")
+
+
 def test_skill_prose_describes_the_same_direction_as_the_decision():
     # The contract the decision encodes must hold across every reachable target
     # surface, or a guard on one path is decorative (repo pitfall #1).
@@ -167,12 +253,20 @@ def test_skill_prose_describes_the_same_direction_as_the_decision():
     ship = (REPO_ROOT / "skills" / "target" / "references" / "ship-and-promise.md").read_text()
     routing = (REPO_ROOT / "skills" / "target" / "references" / "phase-invocations.md").read_text()
 
-    # AC11: the default ship step requests a native review with an explicit
-    # final-head target. The old advisory default is gone.
+    # AC11 + x-98ac: the default ship step requests a native review on the
+    # local HEAD BEFORE /pr create, and the --pr form is documented only as
+    # the post-push form. The old push-first order is gone.
     assert "internal sigma panel (cheap insurance)" not in skill
     assert "internal sigma panel (cheap insurance)" not in phase
-    assert "request-self-review --pr" in skill
-    assert "HEAD" in skill and "origin/main" in skill
+    spine_start = skill.index("```")
+    spine = skill[spine_start : skill.index("```", spine_start + 3)]
+    assert "request-self-review" in spine
+    assert spine.index("request-self-review") < spine.index("/pr create")
+    assert "request-self-review --pr" not in spine
+    pr_lines = [line for line in skill.splitlines() if "request-self-review --pr" in line]
+    assert pr_lines, "the post-push --pr form must stay documented in SKILL.md"
+    assert all("post-push" in line for line in pr_lines)
+    assert "HEAD" in skill and "origin/" in skill
     assert "queued" in skill.lower() and "turn boundary" in skill.lower()
     assert "advisory self-review by default" not in skill
     assert "optional escalation" not in skill

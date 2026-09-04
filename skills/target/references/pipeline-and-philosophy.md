@@ -39,7 +39,7 @@ Docs and browser testing run BEFORE `/pr create` so they ride in the same PR, ge
 | Plan | `/blueprint` | Create waves + tasks | If no plan exists (self-grounds via its own discovery gate; never awaits a `/think` doc - x-42c5) | Opus (inline) |
 | Execute |`/execute waves` | Wave orchestration + TDD | Always | Opus (inline) |
 | Clean | `/simplify` | Remove AI slop patterns | Only with `clean` modifier | Opus (inline) |
-| Review | native final-head request | `fno do target request-self-review --pr <n>` after PR creation; sigma runs once post-ship only when `config.review.reviewers` names it | Always for code payloads | Opus (inline) |
+| Review | native final-head request | `fno do target request-self-review` on the local HEAD BEFORE the PR; `--pr <n>` is the post-push form for a round after PR creation; sigma is retired | Always for code payloads | Opus (inline) |
 | Validate | _(bash)_ | npm run build / pytest | Always | Opus (inline) |
 | Docs | `/ship-docs` | Architecture + how-to in parallel | Default YES, skip with `--no-docs` or config - runs BEFORE ship so docs ride in the same PR | **Sonnet** (agents) |
 | Browser | `/tdd` (browser-testing ref) | Human-like UI checks (advisory: runs and logs, never gates `<promise>`) | If `has_ui` - runs BEFORE ship | Sonnet (agent) |
@@ -54,7 +54,7 @@ See [usage-detail.md](usage-detail.md) for model-optimization rationale (when to
 - **/blueprint**: run it whenever you started from a bare idea, or the bound plan is still design-stage. It self-grounds on a bare idea via its own discovery gate (`fno do think inspect` + up to 3-5 targeted questions). It never awaits a `/think` doc (x-42c5). A prior `/think` doc is consumed as already-cited findings, never required. A blueprint-complete plan skips straight to implement.
 - **/execute waves**: for a multi-task plan with parallelizable waves. A single-file or locked refactor runs **inline**, not through the wave orchestrator.
 - **/simplify (clean)**: only with the `clean` modifier, or on AI-slop-prone new code.
-- **review**: after the PR exists, run `fno do target request-self-review --pr <n>` on the final HEAD. It must return a positive result. It must produce the clean head-pinned attestation before promise. A busy Codex mux `queued` result ends the turn at the boundary. Docs-only payloads and the explicit opt-out keep their exemptions.
+- **review**: before the PR exists, run `fno do target request-self-review` (no `--pr`) on the final local HEAD. The `--pr <n>` form is the post-push form, for a round requested after the PR exists. It must return a positive result. It must produce the clean head-pinned attestation before promise. A busy Codex mux `queued` result ends the turn at the boundary. Docs-only payloads and the explicit opt-out keep their exemptions.
 - **/ship-docs**: skip for an internal refactor with no public API or architecture change; run it when behavior or a public surface changed.
 - **browser testing**: only if `has_ui`.
 - **/pr create + `<promise>`**: always. That is the deliverable.

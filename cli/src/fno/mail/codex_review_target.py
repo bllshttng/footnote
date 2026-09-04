@@ -5,8 +5,15 @@ import re
 
 
 _COMMIT_SHA = re.compile(r"[0-9a-fA-F]{7,64}")
+# Two explicit shapes share this grammar: the post-push form, which names a
+# PR with --comment, and the pre-push form, which names a local BRANCH in the
+# target slot (no --comment: the PR does not exist yet). A branch-shaped
+# token may also be absent entirely, which keeps the bare `HEAD <sha>` legacy
+# form parsing; backtracking separates a literal leading HEAD from a branch
+# token, and no legal branch is spelled HEAD (the request verb refuses one).
 _EXPLICIT_PR_REVIEW = re.compile(
-    r"^(?:(?:low|medium|high|xhigh|max) --comment (?P<comment_pr>[1-9][0-9]*) )?"
+    r"^(?:(?:low|medium|high|xhigh|max)(?: --comment (?P<comment_pr>[1-9][0-9]*))? )?"
+    r"(?:(?P<branch>[A-Za-z0-9][A-Za-z0-9._/-]*) )?"
     r"HEAD (?P<head>[0-9a-fA-F]{7,64})"
     r"(?: of PR (?P<pr>[1-9][0-9]*))? "
     r"against origin/(?P<base>[A-Za-z0-9][A-Za-z0-9._/-]*)$"

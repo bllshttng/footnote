@@ -513,7 +513,9 @@ def level_for_diff(changed_files: int, diff_lines: int) -> str:
     return "max"
 
 
-def self_review_invocation(harness: Optional[str], level: Optional[str] = "medium") -> str:
+def self_review_invocation(
+    harness: Optional[str], level: Optional[str] = "medium", comment: bool = True
+) -> str:
     """The recommended self-review invocation: the fno lane, every harness.
 
     `/fno:review <level>`, read from the `code-review` descriptor's scalar
@@ -527,14 +529,16 @@ def self_review_invocation(harness: Optional[str], level: Optional[str] = "mediu
     telling a worker how to clear a head-pinned gate, and a fix pass moves
     HEAD, which voids the attestation the round just earned.
 
-    `--comment` IS appended, and the distinction is the reason above rather
-    than a preference. `--fix` writes to the tree; `--comment` writes to the
-    PR, moves no commit, and so cannot void the attestation the round earns.
-    Without it a machinery-issued review keeps its findings in the transcript,
-    which is the same defect x-c446 fixed one layer down: a review that ran
-    and left no durable record reads exactly like a review that never ran.
-    Measured at the time: all 18 machinery uses of `--comment` attached to
-    native verbs, none to this lane.
+    `--comment` IS appended by default, and the distinction is the reason
+    above rather than a preference. `--fix` writes to the tree; `--comment`
+    writes to the PR, moves no commit, and so cannot void the attestation the
+    round earns. Without it a machinery-issued review keeps its findings in
+    the transcript, which is the same defect x-c446 fixed one layer down: a
+    review that ran and left no durable record reads exactly like a review
+    that never ran. Measured at the time: all 18 machinery uses of
+    `--comment` attached to native verbs, none to this lane. The `comment`
+    keyword drops it for the pre-push branch form, where the PR the flag
+    writes to does not exist yet; the ledger is that round's durable record.
 
     What it buys is bounded, and the bound is worth stating. The router
     resolves the target from the first non-flag token, so
@@ -579,8 +583,12 @@ def self_review_invocation(harness: Optional[str], level: Optional[str] = "mediu
         spelled = base
     # Flag order follows the router grammar: [level] [--comment] [--fix]
     # [target]. `render_self_review_invocation` appends the target after this,
-    # so the flag must sit here rather than at the end.
-    return f"{spelled} <level> --comment" if level is None else f"{spelled} {level} --comment"
+    # so the flag must sit here rather than at the end. A pre-push branch
+    # target drops the flag: there is no PR for it to write to.
+    flag = " --comment" if comment else ""
+    if level is None:
+        return f"{spelled} <level>{flag}"
+    return f"{spelled} {level}{flag}"
 
 
 def _git_out(cwd: Path, *args: str) -> Optional[str]:
@@ -643,11 +651,12 @@ def render_self_review_invocation(
     project_root: Optional[Path] = None,
     *,
     pr_number: Optional[int] = None,
+    branch: Optional[str] = None,
     head_sha: Optional[str] = None,
     base_branch: Optional[str] = None,
     raw_transport: bool = False,
 ) -> str:
-    """Render the native review request, optionally pinned to one PR head.
+    """Render the native review request, pinned to one PR head or one local branch.
 
     The render every refusal site names (x-dae5): a worker held at the stop
     gate reads THIS string, not a `<level>` placeholder it has no renderer for.
@@ -655,28 +664,43 @@ def render_self_review_invocation(
     never the builder's `medium` default - the standing instruction is to size
     from the diff. With no measurable diff the level is None and the
     placeholder stays: an honest unsized render beats a fabricated one.
-    Harness falls back to the ambient session when not given. When PR identity
-    is supplied, all three fields are required and the exact PR, HEAD, and
-    origin base are rendered into the one-line payload. Never infer a missing
-    target from the ambient cwd."""
+    Harness falls back to the ambient session when not given. Two explicit
+    targets exist and are mutually exclusive: a PR (all of pr_number,
+    head_sha, and base_branch required; the post-push form) or a local branch
+    (branch, head_sha, and base_branch required; the pre-push default form).
+    The exact target, HEAD, and origin base are rendered into the one-line
+    payload. Never infer a missing target from the ambient cwd."""
     try:
         h = harness or detect_session().harness
         level = diff_review_level(project_root)
+        if branch is not None and pr_number is not None:
+            raise ValueError(
+                "explicit self-review target takes pr_number or branch, not both"
+            )
+        # A branch target has no PR for --comment to write to; the lane would
+        # print "flag ignored" on every default run, so the pre-push payload
+        # never carries it.
+        with_comment = branch is None
         if raw_transport and h == "codex":
             # Raw Codex review routing reaches the app-server review/start RPC,
             # whose payload grammar requires the native slash verb. `$fno:review`
             # is the skill spelling for a model prompt, not a raw RPC payload.
-            rendered = f"/review {level or '<level>'} --comment"
+            rendered = f"/review {level or '<level>'}" + (" --comment" if with_comment else "")
         else:
-            rendered = self_review_invocation(h, level=level)
-        target_fields = (pr_number, head_sha, base_branch)
-        if any(value is not None for value in target_fields):
-            if not all(value is not None for value in target_fields):
+            rendered = self_review_invocation(h, level=level, comment=with_comment)
+        if branch is not None or any(
+            value is not None for value in (pr_number, head_sha, base_branch)
+        ):
+            if branch is None and not all(
+                value is not None for value in (pr_number, head_sha, base_branch)
+            ):
                 raise ValueError(
                     "explicit self-review target requires pr_number, head_sha, and base_branch"
                 )
-            if pr_number is None or pr_number <= 0:
-                raise ValueError("explicit self-review target requires a positive PR number")
+            if branch is not None and (head_sha is None or base_branch is None):
+                raise ValueError(
+                    "explicit self-review target requires branch, head_sha, and base_branch"
+                )
             if not re.fullmatch(r"[0-9a-fA-F]{7,64}", str(head_sha or "")):
                 raise ValueError("explicit self-review target requires a commit SHA")
             base = str(base_branch or "").strip()
@@ -684,15 +708,23 @@ def render_self_review_invocation(
                 base = base[len("origin/") :]
             if not base or any(char.isspace() for char in base) or base.startswith("-"):
                 raise ValueError("explicit self-review target requires a branch name")
-            # Target slot first: the bare PR number is the first non-flag
-            # token after the level, so a strict reader resolves the target to
-            # the PR. HEAD and base ride behind it as trailing context; the
-            # earlier "HEAD <sha> of PR <n>" order made a strict reader see a
-            # branch target and silently ignore --comment.
-            rendered = f"{rendered} {pr_number} HEAD {head_sha} against origin/{base}"
+            # Target slot first: the bare PR number or branch name is the first
+            # non-flag token after the level, so a strict reader resolves the
+            # target to it. HEAD and base ride behind it as trailing context;
+            # the earlier "HEAD <sha> of PR <n>" order made a strict reader see
+            # a branch target and silently ignore --comment.
+            if branch is not None:
+                name = str(branch).strip()
+                if not name or any(char.isspace() for char in name) or name.startswith("-"):
+                    raise ValueError("explicit self-review target requires a branch name")
+                rendered = f"{rendered} {name} HEAD {head_sha} against origin/{base}"
+            else:
+                if pr_number is None or pr_number <= 0:
+                    raise ValueError("explicit self-review target requires a positive PR number")
+                rendered = f"{rendered} {pr_number} HEAD {head_sha} against origin/{base}"
         return rendered
     except Exception:  # noqa: BLE001 - advisory text; the gate stays the gate
-        if any(value is not None for value in (pr_number, head_sha, base_branch)):
+        if any(value is not None for value in (pr_number, branch, head_sha, base_branch)):
             raise
         return self_review_invocation(harness, level=None)
 
@@ -700,18 +732,21 @@ def render_self_review_invocation(
 def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:
     """Decide the target spine's pre-ship review step from `config.review.reviewers`.
 
-    The plan is always the same review: the fno lane on the final pushed HEAD,
-    requested through `fno do target request-self-review --pr` once the PR
-    exists, never downgraded to advisory prose. There is no sigma branch to
-    consult anymore: a config still naming sigma is refused at init by the
-    retired descriptor, so it cannot reach this decision. `reviewers` is read
-    for shape only - a registered harness-skill reviewer keeps its own
-    invocation contract at the ship step regardless of this plan.
+    The plan is always the same review: the fno lane on the final local HEAD,
+    requested through the bare `fno do target request-self-review` BEFORE the
+    PR exists, never downgraded to advisory prose. The `--pr` form is the
+    post-push form, for a round requested after the PR exists. There is no
+    sigma branch to consult anymore: a config still naming sigma is refused
+    at init by the retired descriptor, so it cannot reach this decision.
+    `reviewers` is read for shape only - a registered harness-skill reviewer
+    keeps its own invocation contract at the ship step regardless of this
+    plan.
     """
     names = {str(r).strip().lstrip("/") for r in reviewers}
     return PreShipReviewPlan(
         "native",
-        f"run fno do target request-self-review --pr on the final pushed HEAD; "
+        f"run fno do target request-self-review (no --pr) on the final local "
+        f"HEAD before the PR; --pr is the post-push form; "
         f"the fno lane (/fno:review) is the review producer on every harness "
         f"(reviewers resolved: {sorted(names) or ['none']})",
     )
