@@ -826,19 +826,22 @@ mod tests {
         assert_eq!(session_id_from_argv(&picker), None);
 
         // agy's create form: `--conversation <uuid>`, split and glued.
-        let agy_shape: Vec<String> = ["agy", "--conversation", "91b59536-7ea4-4235-9691-4ca8f991a9b2"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let agy_shape: Vec<String> = [
+            "agy",
+            "--conversation",
+            "91b59536-7ea4-4235-9691-4ca8f991a9b2",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         assert_eq!(
             session_id_from_argv(&agy_shape),
             Some("91b59536-7ea4-4235-9691-4ca8f991a9b2".to_string())
         );
-        let agy_glued: Vec<String> =
-            ["agy", "--conversation=91b59536-7ea4-4235-9691-4ca8f991a9b2"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+        let agy_glued: Vec<String> = ["agy", "--conversation=91b59536-7ea4-4235-9691-4ca8f991a9b2"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(
             session_id_from_argv(&agy_glued),
             Some("91b59536-7ea4-4235-9691-4ca8f991a9b2".to_string())
