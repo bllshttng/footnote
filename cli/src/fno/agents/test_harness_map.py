@@ -774,6 +774,20 @@ def test_native_verbs_roster_is_filled_from_measured_sources():
     assert capabilities("gemini").get("native_verbs") is None
 
 
+def test_native_verb_stays_literal_on_the_slash_surface():
+    """The slash branch guards on the same roster the codex branch reads:
+    `/undo` on opencode is opencode's own palette verb, so it must reach the
+    palette verbatim, never a phantom `/fno:undo` plugin skill. Footnote verbs
+    still namespace, and an unknown verb keeps the AC4-EDGE behavior."""
+    from fno.agents.harness_map import normalize_command
+
+    assert normalize_command("/undo", "opencode") == "/undo"
+    assert normalize_command("/init", "opencode") == "/init"
+    assert normalize_command("/share x", "opencode") == "/share x"
+    assert normalize_command("/target x-1", "opencode") == "/fno:target x-1"
+    assert normalize_command("/zzz", "opencode") == "/fno:zzz"
+
+
 def test_explicit_thread_on_unbuilt_lane_refused_with_the_reason():
     """An explicit thread request where fno has no arm is a hard error naming
     the spawn state and the missing lane, never a silent ride onto a

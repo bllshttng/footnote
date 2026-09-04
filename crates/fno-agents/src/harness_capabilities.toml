@@ -494,11 +494,12 @@ state = "capable"
 [harness.opencode]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-session"
-# Launch-only: `ask` refuses (no steering over the HTTP API yet); the x-d9f9
-# journey covers spawn + one turn, not kill-survival, cold resume or review.
-# A caller routed onto thread by default got a session it could not talk to.
-# The steering lane still owes its own unattended journey test; the 2026-09-03
-# spawn measurement below is what seats the thread lane now.
+# Launch-only: `ask` refuses (no steering over the HTTP API yet). That gap
+# belongs to the attach and steer claims, not to the seat: the 2026-09-03
+# spawn measurement below (unattended launch, one full turn, clean stop -
+# opencode_serve_journey.rs) is what seats the thread lane now. Kill-survival,
+# cold resume and review remain unproven here and no claim above says
+# otherwise.
 autonomous_pane = false
 route_on_pane = false
 # opencode, measured 2026-08-28, and the old "native" was WRONG. opencode has no
@@ -975,7 +976,7 @@ marker = "a review verb dispatched on the harness's lane returns a structured ve
 
 [probe."features.spawn"]
 kind = "behavioral"
-marker = "an unattended spawn, drive and stop on the harness's thread lane ends at the loop's own stop gate, not at a timeout (the keeper-journey template)"
+marker = "an unattended spawn on the harness's thread lane starts, drives a turn to completion, and ends in a clean stop, never at a timeout (keeper journeys prove it across supervisor death; the serve-lane harnesses prove launch, turn and cleanup on the live lane)"
 
 # attach is measured on the LIVE session, never from a row (agy, opencode, pi
 # prove it through the mux-thread portal). The marker is the positive-marker

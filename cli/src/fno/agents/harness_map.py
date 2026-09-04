@@ -641,6 +641,15 @@ def normalize_command(command: str, harness: str) -> str:
         # already-namespaced `/fno:verb`, so re-applying would double it.
         if prefix and cmd.startswith("/" + prefix):
             return cmd
+        # A native verb of the harness stays literal: `/undo` on opencode is
+        # opencode's own palette verb, and namespacing it would mint a phantom
+        # `/fno:undo` plugin skill. Same `native_verbs` roster the codex-skill
+        # branch reads; the claude/agy rows are inert here only because their
+        # prefix is empty. The roster names verbs, so the guard reads the
+        # first token of the remainder, never the message tail.
+        native = {v for v in caps.get("native_verbs") or () if isinstance(v, str)}
+        if "/" + verb.split(maxsplit=1)[0] in native:
+            return cmd
         return "/" + prefix + verb
     return cmd
 
