@@ -233,6 +233,7 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         spawned_by_harness: parent_harness,
         spawned_by_cwd: parent_cwd,
         legacy_claude_short_id: None,
+        ..Default::default()
     }
 }
 

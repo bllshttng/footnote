@@ -28,6 +28,10 @@ use tokio::sync::mpsc;
 
 use crate::agents_view::lineage_layout;
 use crate::chrome;
+
+mod rename_overlay;
+
+use self::rename_overlay::RenameTarget;
 use crate::keys::{
     key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner, PANE_IDS_REPEAT_WINDOW,
 };
@@ -1525,14 +1529,6 @@ enum ConfirmKind {
     CloseTab { tab: TabId },
 }
 
-/// The entity a rename overlay is editing (x-96e8 widened x-c150's tab-only
-/// overlay to also rename a squad): one buffer, one key handler, one esc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RenameTarget {
-    Tab(TabId),
-    Squad(u64),
-}
-
 /// The move-tab / move-pane destination picker's state (x-96e8, cursored by
 /// x-3e17). Was a bare `(MoveSrc, Vec<u64>)` tuple, which had nowhere to keep a
 /// cursor or the escape carry an arrow key needs.
@@ -1907,6 +1903,10 @@ enum MenuAction {
     /// free-text composer (`peek_input`) that peek `m` opens, never a second
     /// input surface.
     Mail,
+    /// Rename a sideline row's registry LABEL - opens the shared rename
+    /// overlay on `RenameTarget::Agent`. Built only for a non-external,
+    /// unambiguous agent row.
+    RenameAgent,
 }
 
 impl MenuAction {
@@ -1935,6 +1935,7 @@ impl MenuAction {
             MenuAction::Stop => Some("stop-row"),
             MenuAction::Peek => Some("peek-row"),
             MenuAction::Mail => Some("mail-row"),
+            MenuAction::RenameAgent => Some("rename-agent"),
             MenuAction::Diff => Some("diff-row"),
             MenuAction::OpenHere => Some("open-here"),
             MenuAction::Resume => Some("resume-row"),
@@ -2101,6 +2102,10 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     // (x-d545) Bound in menu scope now, so its hint is the live key.
     add(PopupRow::Rule, &[]);
     add(entry_acc("±", "Diff", "diff-row"), &[MenuAction::Diff]);
+    // Live AND exited rows are renamable; an EXTERNAL row is claude-owned.
+    if !agent.external {
+        add(entry("✎", "Rename"), &[MenuAction::RenameAgent]);
+    }
     RowMenu {
         popup: Popup::new(rows, anchor),
         target: MenuTarget::Agent(AgentIdent::of(agent)),
@@ -2110,17 +2115,10 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
 
 /// (x-1d91) The v1 reorder menu for a Backlog card: float to top, defer. Both
 /// route through `fno backlog` server-side; the mux never writes the graph.
-///
-/// Floating a READY card to the top can make the active dispatcher pick it up
-/// within about a minute, so those carry a hint saying so - the gesture is an
-/// implicit dispatch request, and the operator should know that before pressing
-/// rather than discover it when a session appears.
-///
-/// The hint says "may dispatch", not "will": the picker applies guards the mux
-/// does not model (containers, batched members, stale/dead-ancestor candidates,
-/// project scoping), so a floated card is not certain to be taken. Warning about
-/// a possibility is the useful half; promising a certainty would be a claim this
-/// code cannot keep.
+/// Floated READY cards carry a "may dispatch" hint: the dispatcher can pick
+/// one up in about a minute, and the guards it applies (containers, batching,
+/// stale candidates, project scope) are not modeled here, so the hint promises
+/// nothing.
 fn build_card_menu(
     card: &BacklogCard,
     obsidian: &crate::digest_overlay::ObsidianCfg,
@@ -3442,26 +3440,6 @@ impl View {
         self.confirm = Some(action);
     }
 
-    /// Open the rename overlay modally for `target` (x-c150 tab, widened x-96e8
-    /// to a squad), clearing any other keyboard-opened overlay first - the same
-    /// discipline as [`View::open_create`] (a lingering selector would swallow
-    /// the name).
-    fn open_rename(&mut self, target: RenameTarget) {
-        self.selector = None;
-        self.answers = None;
-        self.yard = None;
-        self.search = None;
-        self.move_pick = None;
-        self.attach_place = None;
-        self.create = None;
-        self.nav = None;
-        self.recruit = None;
-        self.recruit_esc.clear();
-        self.clear_peek();
-        self.rename = Some((target, String::new()));
-        self.rename_esc.clear();
-    }
-
     /// Open the move-to-position prompt for `tab` (x-cf97), clearing any other
     /// keyboard-opened overlay first - the same discipline as
     /// [`View::open_rename`], whose shape this prompt copies: a surface that
@@ -4262,12 +4240,16 @@ impl View {
             let noun = match target {
                 RenameTarget::Tab(_) => "tab",
                 RenameTarget::Squad(_) => "workspace",
+                RenameTarget::Agent(_) => "row",
             };
-            return Some(self.name_modal_layout(
-                &format!("rename {noun}"),
-                name,
-                Some("empty resets to auto"),
-            ));
+            // An agent label is never derived, so there is no auto to reset
+            // to: the hint names the grammar instead of the blank-clears
+            // semantics the tab/squad targets share.
+            let hint = match target {
+                RenameTarget::Agent(_) => Some("a-z 0-9 - _ (1-64 chars)"),
+                _ => Some("empty resets to auto"),
+            };
+            return Some(self.name_modal_layout(&format!("rename {noun}"), name, hint));
         }
         if let Some(name) = &self.recruit {
             return Some(self.name_modal_layout(
@@ -7166,15 +7148,13 @@ impl View {
             let noun = match target {
                 RenameTarget::Tab(_) => "tab",
                 RenameTarget::Squad(_) => "workspace",
+                RenameTarget::Agent(_) => "row",
             };
-            self.draw_name_modal(
-                cells,
-                rows,
-                cols,
-                &format!("rename {noun}"),
-                name,
-                Some("empty resets to auto"),
-            );
+            let hint = match target {
+                RenameTarget::Agent(_) => Some("a-z 0-9 - _ (1-64 chars)"),
+                _ => Some("empty resets to auto"),
+            };
+            self.draw_name_modal(cells, rows, cols, &format!("rename {noun}"), name, hint);
             return;
         }
         // The move-to prompt (x-cf97): the typed number IS the body; the hint
@@ -14236,6 +14216,12 @@ async fn execute_row_menu_action(
             .await
             .map_err(|e| format!("diff send failed: {e}"))?;
         }
+        MenuAction::RenameAgent => {
+            // The CURRENT label, re-resolved at execute above (a rename
+            // between menu-open and pick addresses the live row), seeded so
+            // Enter with no edit lands on the verb's same-label no-op.
+            view.open_rename_seeded(RenameTarget::Agent(a.name.clone()), a.name.clone());
+        }
         MenuAction::Peek | MenuAction::Mail => {
             let idx = view
                 .display_rows()
@@ -16827,10 +16813,22 @@ async fn rename_keys(
             SearchKey::Byte(b) => match b {
                 b'\r' | b'\n' => {
                     if let Some((target, name)) = view.rename.take() {
+                        // An agent label is never derived, so an empty buffer
+                        // is NOT the tab/squad "reset to auto": the overlay
+                        // stays open and the send never happens.
+                        if matches!(&target, RenameTarget::Agent(_)) && name.is_empty() {
+                            view.rename = Some((target, name));
+                            view.set_notice("label required - type the new registry label".into());
+                            break;
+                        }
                         view.rename_esc.clear();
                         let cmd = match target {
                             RenameTarget::Tab(tab) => Command::RenameTab { tab, name },
                             RenameTarget::Squad(squad) => Command::RenameSquad { squad, name },
+                            RenameTarget::Agent(agent) => Command::RenameAgent {
+                                name: agent,
+                                new_name: name,
+                            },
                         };
                         write_msg(sock_w, &ClientMsg::Command(cmd))
                             .await
@@ -16851,8 +16849,19 @@ async fn rename_keys(
                         let cap = match target {
                             RenameTarget::Tab(_) => MAX_TAB_NAME,
                             RenameTarget::Squad(_) => MAX_SQUAD_NAME,
+                            // The registry grammar's own ceiling.
+                            RenameTarget::Agent(_) => 64,
                         };
-                        if buf.len() < cap {
+                        // An agent label admits only grammar bytes; a space or
+                        // symbol never enters the buffer, so what is typed is
+                        // what the server would keep.
+                        let legal = match target {
+                            RenameTarget::Agent(_) => {
+                                b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+                            }
+                            _ => true,
+                        };
+                        if legal && buf.len() < cap {
                             buf.push(b as char);
                         }
                     }
@@ -16948,26 +16957,17 @@ async fn move_to_keys(
 }
 
 /// Needs-me overlay keys (x-feec, grown from x-c929; x-f730 folded MINE and
-/// live questions in as editable/answerable lanes): a digit answers the
-/// selected answerable NEED row (unchanged [`ClientMsg::PaneAnswer`] -
-/// daemon-pinned keystroke, fingerprint fail-closed, focus unchanged) OR,
-/// when the row is a question with options, closes it via `outstanding
-/// clear --answer <option>`. `n`/`N` (and j/k/arrows) cycle across every
-/// lane, Enter routes per kind (goto its pane/attach; opens a free-text
-/// answer entry for a no-options question; else a focus-manually notice for
-/// a squadless live row or a MINE row), q/Esc closes. `x` toggles and `d`
-/// drops the selected MINE row; `a` opens a text entry (typed below the MINE
-/// lane) that appends a new unticked item on Enter, Esc cancels it. Every
-/// MINE/question mutation only ever queues `View::mine_action` /
-/// `View::question_action` for the run loop to shell out (each its own
-/// single-flight, via `mine_acting`/`question_acting`) - the file/record is
-/// the one writer, so the render updates only once the mutation lands and
-/// re-folds, never optimistically. The projection is read once per chunk
-/// from the same [`View::needs_projection`] the overlay draws, so the cursor
-/// and the rendered rows never diverge. An empty overlay (the "nothing needs you"
-/// state) closes on ANY key except `a` (AC4-EDGE - but the operator must be
-/// able to add their first item to an empty lane). Closing bumps the
-/// generation token so an in-flight fold result is discarded (AC6-FR).
+/// live questions in as editable/answerable lanes). A digit answers the
+/// selected answerable NEED row (unchanged [`ClientMsg::PaneAnswer`]) or, for
+/// a question with options, closes it via `outstanding clear --answer`.
+/// `n`/`N` (and j/k/arrows) cycle lanes, Enter routes per kind, q/Esc closes;
+/// `x`/`d` toggle/drop a MINE row, `a` opens a text entry that appends an
+/// item. Mutations only queue `View::mine_action` / `View::question_action`
+/// (each single-flighted): the file is the one writer, so the render updates
+/// once the mutation lands, never optimistically. The projection is read once
+/// per chunk from [`View::needs_projection`], so cursor and rows never
+/// diverge. An empty overlay closes on any key except `a`. Closing bumps the
+/// generation token so an in-flight fold result is discarded.
 async fn answer_keys(
     view: &mut View,
     bytes: &[u8],

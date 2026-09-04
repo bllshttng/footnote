@@ -1242,8 +1242,8 @@ pub const MENU_BINDINGS: &[MenuKeyBinding] = &[
     // reap, so the menu's own free mnemonic takes Stop), `p` peek (the
     // sideline's attach/peek neighbour), `m` mail (the peek overlay's reply
     // key), `d` diff (the prefix-chord diff-pane letter, now a menu byte
-    // too), `o` open-here, and `r` resume (peek `r` resumes; the row menu
-    // never offers rename, so the byte cannot collide inside one open menu).
+    // too), `o` open-here, `r` resume (peek `r` resumes), and `l` label
+    // (the row rename renames the registry LABEL).
     MenuKeyBinding {
         action: "stop-row",
         key: b's',
@@ -1267,6 +1267,10 @@ pub const MENU_BINDINGS: &[MenuKeyBinding] = &[
     MenuKeyBinding {
         action: "resume-row",
         key: b'r',
+    },
+    MenuKeyBinding {
+        action: "rename-agent",
+        key: b'l',
     },
 ];
 

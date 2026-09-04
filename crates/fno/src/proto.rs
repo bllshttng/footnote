@@ -297,32 +297,25 @@ fn default_true() -> bool {
 /// additive-tolerant via `#[serde(default)]`, but the shape change belongs
 /// to one bump, and the handshake, not serde tolerance, is the skew guard.
 ///
-/// v60 (x-7b5e, workspace restore): `ControlVerb::WorkspaceRestore` +
-/// `ServerMsg::WorkspaceRestored` carrying [`RestoreRow`]s - NEW enum
-/// variants, so a v59 peer cannot decode the pair; the handshake is what
-/// stops the skew. (Second-to-merge re-bump: this branch first claimed 59,
-/// the lineage branch merged first.)
+/// v60 (workspace restore): `ControlVerb::WorkspaceRestore` +
+/// `ServerMsg::WorkspaceRestored` ([`RestoreRow`]s). New variants: a v59 peer
+/// cannot decode them, so the handshake stops the skew.
 ///
-/// v61 (x-7d02, DND presence): `AgentRow.dnd` - additive do-not-disturb
-/// presence, separate from the liveness badge; the pane-send DND refusal
-/// rides the same generation.
+/// v61 (DND presence): `AgentRow.dnd`, additive; the pane-send refusal rides
+/// the same generation.
+/// v62 (row detach): `Command::DetachPane { pane }` removes a live worker
+/// pane from the visible tree without touching frozen `ClientMsg::Detach`.
 ///
-/// v62 (row detach): `Command::DetachPane { pane }` removes a live
-/// worker pane from the visible tree without changing the frozen client-session
-/// `ClientMsg::Detach` behavior.
+/// v64 (portals): `PanePlacement.portal`, `PanePlacement.portal_new` and
+/// `AgentRow.portal` make the one thread pane an addressable set.
+/// `thread_pane` stays as a compatibility alias meaning portal 0.
 ///
-/// v64 (x-8f9d, portals): `PanePlacement.portal`, `PanePlacement.portal_new`
-/// and `AgentRow.portal` - additive fields that make the one thread pane an
-/// addressable set. The `thread_pane` bool stays as a compatibility alias
-/// meaning portal 0, so the floor does not move.
-///
-/// v65 (x-cf97, tab organization): `ControlVerb::TabReorder { squad, tab, to }`
-/// - the CLI door onto the reorder trunk the TUI already owns - and
-/// `PaneInfo.shell_idle`, the measured "idle now" reading (ran something, at a
-/// prompt now) the used-shell prune sweep needs to tell a spent shell from a
-/// running one. A new verb is not additive-tolerant; the field rides the same
-/// generation per house rule.
-pub const PROTO_VERSION: u32 = 65;
+/// v65 (tab organization): `ControlVerb::TabReorder { squad, tab, to }`, the
+/// CLI door onto the reorder trunk, and `PaneInfo.shell_idle`, the measured
+/// "idle now" reading the used-shell prune sweep needs. A new verb is not
+/// additive-tolerant; the field rides the same generation.
+/// v66 (sideline rename): `Command::RenameAgent` - a new verb, this generation.
+pub const PROTO_VERSION: u32 = 66;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1789,6 +1782,12 @@ pub enum Command {
     /// the next registry poll.
     RemoveAgent {
         name: String,
+    },
+    /// Rename a sideline row's LABEL. Grammar-checked server-side before any
+    /// subprocess; unknown/external/ambiguous rows refuse. Live rows too.
+    RenameAgent {
+        name: String,
+        new_name: String,
     },
     /// (v29, x-c376) Ask the server for a sideline row's recent transcript so the
     /// operator can peek BEFORE attaching (peek reads disk; only attach spawns a
@@ -4258,7 +4257,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 65);
+        assert_eq!(PROTO_VERSION, 66);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

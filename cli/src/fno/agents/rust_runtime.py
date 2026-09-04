@@ -188,6 +188,9 @@ RUST_CLIENT_VERBS = frozenset(
         # build_request (no daemon RPC); this entry keeps the client.rs<->router
         # parity test in sync.
         "probe-run",
+        # Registry-label rename: `agent.rename` over the daemon RPC, the same
+        # transport as rm/stop. The old label rides home as a persisted alias.
+        "rename",
         # Inside-leg state push (inside-out E3.2): a per-turn hook calls
         # `fno agents report --session-id <uuid> --seq <n> --state <s>` and the
         # Rust client sends the agent.report RPC to an already-running daemon
@@ -288,8 +291,8 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # boundary and must not become the generator - truncating there would make
     # the name a caller reasons about differ from the one the runtime registers.
     "name",
-    # Registry-label mutation and pane retasking remain Python-owned orchestration.
-    "rename",
+    # Pane retasking remains Python-owned orchestration. Label rename went the
+    # other way: the Rust client carries it over the daemon RPC.
     "retask",
     # The cadence-deadline silence backstop. Pure Python: it reads the registry
     # and each row's transcript truth through fno.agents.sweep, writes nothing,
@@ -418,6 +421,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "adopt": "Register an orphaned session by its session id so it is addressable (peek/ask/resume/mail); resolves the registry, .fno/target-state.md, then harness stores.",
     "review-coverage": "Emit the review_coverage event for a PR with the stop hook's own resolver/emitter (x-3a3f): --cwd <dir> [--pr <n>] [--head <sha>]. No way to assert coverage without the reads.",
     "recover": "Restore a recorded claude session under its account and route (x-d285): <agent> [--session <id>] names the id when the row holds two; --print-command prints the inspection form and touches nothing.",
+    "rename": "Rename a registry row's label: <worker> --name <new-label>; the old label keeps resolving as an alias.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other

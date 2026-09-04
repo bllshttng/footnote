@@ -176,13 +176,13 @@ def test_max_len_matches_the_daemon_contract():
     import re as _re
     from pathlib import Path
 
-    daemon = Path(__file__).resolve().parents[3] / "crates/fno-agents/src/daemon.rs"
-    if not daemon.is_file():
+    state = Path(__file__).resolve().parents[3] / "crates/fno-agents/src/state.rs"
+    if not state.is_file():
         import pytest as _pytest
 
         _pytest.skip("rust crate not present in this checkout")
-    src = daemon.read_text()
-    fn = src[src.index("fn valid_agent_name") : src.index("fn valid_agent_name") + 400]
+    src = state.read_text()
+    fn = src[src.index("fn is_valid_registry_label") : src.index("fn is_valid_registry_label") + 400]
     found = _re.search(r"len\(\)\s*<=\s*(\d+)", fn)
-    assert found, f"could not locate the daemon length check in: {fn[:200]!r}"
+    assert found, f"could not locate the registry length check in: {fn[:200]!r}"
     assert int(found.group(1)) == MAX_LEN
