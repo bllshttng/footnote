@@ -293,7 +293,9 @@ def read_pr_state(
     ``timeout_s`` is the budget for the WHOLE call, not for each leg. It used
     to bound each leg separately, so one candidate could spend twice the
     declared number and walk past a tick deadline that is only checked
-    between candidates.
+    between candidates. One residual: a rate-limited merge-state read adds
+    ``_rest._REASON_DIAGNOSTIC_TIMEOUT_S`` to decorate its own error, and that
+    branch is only reached by a response that returns fast.
 
     Raises ``ReconcileError`` on any gh failure (non-zero returncode, timeout,
     parse failure, missing binary) and on a budget that the merge-state leg

@@ -78,10 +78,13 @@ class RestReason(str):
         return self
 
 
-#: The bucket read here only DECORATES an error the caller already has, so it
-#: may never outlive the read it explains. At the 30s default it did: a
-#: `read_pr_state` declaring 3s spent 3s failing then 30s more explaining,
-#: because `_bucket_remaining`'s own default beats the runner's.
+#: The bucket read here only DECORATES an error the caller already has. At the
+#: 30s default it dwarfed it: a `read_pr_state` declaring 3s spent 3s failing
+#: then 30s more explaining, because `_bucket_remaining`'s own default beats
+#: the runner's. This number does not bound the overshoot on its own - it
+#: exceeds `PR_READ_FLOOR_S`. The branch does: only a rate-limit error reaches
+#: the probe, and that response returns fast, so the read it decorates has
+#: spent almost none of its budget. A timeout never gets here.
 _REASON_DIAGNOSTIC_TIMEOUT_S = 5.0
 
 
