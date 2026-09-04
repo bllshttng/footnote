@@ -1361,7 +1361,6 @@ def _spawn_worker(
     # (Locked Decision 6). The same settings object feeds the resolver
     # (config.dispatch.*) and the permission-mode read below, so all three
     # config reads are node-consistent.
-    allow_merge = False
     settings_obj = None
     try:
         from fno.config import load_settings, load_settings_for_repo

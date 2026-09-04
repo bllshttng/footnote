@@ -266,7 +266,11 @@ def test_auto_merge_grant_is_python_only() -> None:
     rust_hits = [
         p
         for p in (root / "crates").rglob("*.rs")
-        if "auto_merge_grant" in p.read_text(encoding="utf-8")
+        # Skip cargo build/package dirs: a `cargo package` run drops full
+        # source copies under target/package/, which would read as a regrown
+        # leg that no source carries.
+        if "target" not in p.relative_to(root).parts
+        and "auto_merge_grant" in p.read_text(encoding="utf-8")
     ]
     assert not rust_hits, f"Rust leg of auto_merge_grant regrew: {rust_hits}"
     py_hits = [
