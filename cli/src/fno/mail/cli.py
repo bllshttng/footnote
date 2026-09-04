@@ -55,10 +55,15 @@ from typing import Optional, TypedDict
 import typer
 
 from fno.agents.harness_map import capabilities as _harness_capabilities
-from fno.agents.harness_map import review_lane_block as _review_lane_block
 from fno.mail.codex_review_target import (
     explicit_review_pr_number,
     resolve_codex_review_target as _codex_review_target,
+)
+from fno.mail.review_gate import (
+    _CODEX_REVIEW_VERBS,
+    codex_default_review_base as _codex_default_review_base,
+    codex_review_subject_nonempty as _codex_review_subject_nonempty,
+    keystroke_review_refusal,
 )
 from fno.inbox.store import (
     DEPRECATED_KINDS,
@@ -3075,120 +3080,11 @@ def _escalate_to_human(
     return "escalated" if code == 0 else "notifier-unavailable"
 
 
-# Single-sourced from the capability table (the codex row's review_verbs, the
-# same place the verb normalizer reads native_verbs): a second hand-written
-# enumeration would drift the first time a verb is added.
-_CODEX_REVIEW_VERBS = frozenset(_harness_capabilities("codex")["review_verbs"])
-# The review SUBJECT, not a verb inventory: any namespace-qualified or
-# code-qualified spelling of /review gates the keystroke lane against the
-# recipient row's features.review. The codex-daemon lane keeps its exact
-# _CODEX_REVIEW_VERBS membership test above.
-_REVIEW_VERB_RE = re.compile(r"^/(?:[a-z][a-z0-9-]*:)?(?:code-)?review$", re.IGNORECASE)
-
-
-def _codex_default_review_base(cwd: str | None) -> str | None:
-    """Return the repository-declared origin default branch, never a guessed name."""
-    if not cwd:
-        return None
-    import subprocess
-
-    try:
-        proc = subprocess.run(
-            [
-                "git",
-                "-C",
-                cwd,
-                "symbolic-ref",
-                "--quiet",
-                "--short",
-                "refs/remotes/origin/HEAD",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    ref = proc.stdout.strip()
-    return ref if proc.returncode == 0 and ref else None
-
-
-def _codex_review_subject_nonempty(cwd: str | None, base_ref: str) -> tuple[bool, str]:
-    """Whether the recipient session's checkout has branch-side changes to read.
-
-    A ``baseBranch`` review/start diffs the RECIPIENT session's checkout against
-    the base: the target scopes the base side only, and codex computes the diff
-    in the thread's cwd. A session living on the base branch therefore reviews
-    an empty diff, reports clean with an empty findings array, and attests
-    nothing - the measured 2026-08-30 shape where reviews "succeeded" at
-    recipients on main while the PRs sat at review_coverage_uncovered with a
-    receipt in hand. This is the fire-side mirror of emit-attestation.sh's
-    empty-diff refusal: refuse BEFORE the RPC when the measured subject is
-    empty or unmeasurable, naming the checkout so the remedy is obvious.
-
-    The measurement is the COMMITTED range (merge-base..HEAD), matching the
-    ``baseBranch`` target's own scope; the protocol's separate
-    ``uncommittedChanges`` target exists precisely because baseBranch does not
-    read the working tree. A checkout whose branch-side work is entirely
-    uncommitted reads empty HERE as it would in the review itself; the caller
-    who wants the working tree asks for ``/review --uncommitted`` and skips
-    this guard.
-    """
-    if not cwd:
-        return False, (
-            "the recipient session's cwd is unknown, so the review subject "
-            "cannot be measured; re-register the row (`fno agents register`) "
-            "or fire from the PR worktree session"
-        )
-
-    def _git(*args: str) -> str | None:
-        try:
-            proc = subprocess.run(
-                ["git", "-C", cwd, *args],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        return proc.stdout.strip() if proc.returncode == 0 else None
-
-    head = _git("rev-parse", "HEAD")
-    if not head:
-        return False, (
-            f"the recipient session's checkout at {cwd} has no resolvable HEAD"
-        )
-    merge_base = _git("merge-base", head, base_ref) or _git(
-        "merge-base", head, base_ref.removeprefix("origin/")
-    )
-    if not merge_base:
-        return False, (
-            f"the recipient session's checkout at {cwd} (HEAD {head[:8]}) "
-            f"cannot resolve {base_ref} to a merge-base; fetch the base or "
-            "fire from a checkout that tracks it"
-        )
-    names = _git("diff", "--name-only", f"{merge_base}..{head}")
-    if names is None:
-        # A failed or timed-out measurement is NOT a measured empty diff: the
-        # refusal below would assert "0 changed files" on a git call that never
-        # completed, sending the caller to move the review when nothing was
-        # wrong with it. Unmeasurable keeps its own message, like the HEAD and
-        # merge-base stages above.
-        return False, (
-            f"the recipient session's checkout at {cwd} (HEAD {head[:8]}) "
-            f"could not be measured against {base_ref} (git timed out or "
-            "failed); measure it by hand before firing the review"
-        )
-    count = len([line for line in names.splitlines() if line])
-    if count == 0:
-        return False, (
-            f"the recipient session's checkout at {cwd} (HEAD {head[:8]}) has "
-            f"0 changed files against {base_ref}; the review would read an "
-            "empty diff, complete cleanly, and attest nothing"
-        )
-    return True, f"{count} changed files against {base_ref} at HEAD {head[:8]}"
-
-
+# The review machinery (verbs, target parser, default base, subject
+# measurement) and the keystroke review gate live in review_gate.py, the
+# module this lane's review question names; the import at the top of this
+# file binds the names here so existing callers and monkeypatches keep
+# their addresses.
 def _raw_send(
     name,
     payload,
@@ -3620,22 +3516,11 @@ def _raw_send(
 
     # A review verb on a keystroke lane is asked of the TABLE before it is
     # typed (x-a3e8): this branch used to paste whatever it was given and
-    # return a delivery receipt. The subject match and the row answer live
-    # beside the table (harness_map.review_lane_block); only the remedy
-    # bullets are mail's.
-    verb = stripped.split(maxsplit=1)[0]
-    row_reason = _review_lane_block(getattr(entry, "harness", None) or "", verb)
-    if row_reason:
-        reason = (
-            f"{name!r} runs {getattr(entry, 'harness', None) or 'an undeclared harness'}, whose "
-            f"{row_reason}\n"
-            "  - to have the model READ this anyway, drop --raw (a wrapped "
-            "send delivers it as text, which is all this lane could do with "
-            "it)\n"
-            "  - run the review on a harness whose row reads native: "
-            "/code-review on a claude worker, /review on a codex daemon "
-            "thread"
-        )
+    # return a delivery receipt.
+    reason = keystroke_review_refusal(
+        name, getattr(entry, "harness", None) or "", stripped.split(maxsplit=1)[0]
+    )
+    if reason:
         if check:
             print(f"not-injectable: {reason}")
             raise typer.Exit(code=1)
