@@ -2516,12 +2516,33 @@ class TestTickRecordsAndDeadline:
         assert ("roots", [str(tmp_path)]) in published
 
     def _arm_watchdog_tick(self, monkeypatch, tmp_path, roots):
-        """The minimum scaffolding that reaches the recovery-root loop."""
+        """The minimum scaffolding that reaches the recovery-root loop.
+
+        Returns `(scanned, lines)`. `lines` is the tick logger's own output,
+        taken from a handler attached DIRECTLY to `fno.pr_watch.cli` rather
+        than through caplog: caplog captures at the root, so a `propagate =
+        False` anywhere above this logger silently yields an empty capture,
+        which is what it did on CI while working locally. The tick swallows
+        every leg failure into a warning on this same logger, so when the loop
+        is not reached these lines name the reason."""
+        import logging
         from unittest.mock import MagicMock
 
         from fno.agents import watchdog
         from fno.pr_watch import cli as prcli
         from fno.pr_watch._dispatch import TickResult
+
+        lines: list[str] = []
+
+        class _Grab(logging.Handler):
+            def emit(self, record):
+                lines.append(record.getMessage())
+
+        # `handlers` and `level` are plain attributes, so monkeypatch restores
+        # both at teardown and the handler never leaks into another test.
+        tick_log = logging.getLogger("fno.pr_watch.cli")
+        monkeypatch.setattr(tick_log, "handlers", [*tick_log.handlers, _Grab()])
+        monkeypatch.setattr(tick_log, "level", logging.INFO)
 
         settings = MagicMock()
         settings.pr_watch.enabled = True
@@ -2606,7 +2627,7 @@ class TestTickRecordsAndDeadline:
             )
 
         monkeypatch.setattr(watchdog, "run_recoverable_sweep", _sweep)
-        return scanned
+        return scanned, lines
 
     def test_recovery_root_loop_stops_when_the_tick_budget_runs_out(
         self, monkeypatch, tmp_path, caplog
@@ -2615,18 +2636,15 @@ class TestTickRecordsAndDeadline:
         sweep already re-checks per root; this leg had no check at all, so a
         multi-root tick walked past the deadline and SIGALRM killed every leg
         behind it."""
-        import logging
-
         import typer
         from typer.testing import CliRunner
 
         from fno.pr_watch import cli as prcli
 
-        caplog.set_level(logging.INFO, logger="fno.pr_watch.cli")
         roots = [tmp_path / "a", tmp_path / "b", tmp_path / "c"]
         for root in roots:
             root.mkdir()
-        scanned = self._arm_watchdog_tick(monkeypatch, tmp_path, roots)
+        scanned, lines = self._arm_watchdog_tick(monkeypatch, tmp_path, roots)
 
         # A floor larger than the whole tick: every root is unaffordable after
         # the first check, so the loop must stop rather than scan all three.
@@ -2642,9 +2660,9 @@ class TestTickRecordsAndDeadline:
         # that never reached this loop produces the same empty list - which is
         # exactly what an unpatched roster leg did until the fixture above
         # closed it. Assert the break actually fired before trusting the zero.
-        assert "Codex recovery scan stopped after 0 root(s)" in caplog.text, (
-            "the loop never reached its budget check"
-        )
+        assert any(
+            "Codex recovery scan stopped after 0 root(s)" in line for line in lines
+        ), f"the loop never reached its budget check; tick said: {lines}; out={result.output!r}"
         assert scanned == [], "the loop scanned a root it had no budget for"
 
     def test_recovery_root_loop_scans_every_root_when_the_budget_holds(
@@ -2659,7 +2677,7 @@ class TestTickRecordsAndDeadline:
         roots = [tmp_path / "a", tmp_path / "b", tmp_path / "c"]
         for root in roots:
             root.mkdir()
-        scanned = self._arm_watchdog_tick(monkeypatch, tmp_path, roots)
+        scanned, lines = self._arm_watchdog_tick(monkeypatch, tmp_path, roots)
         monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "600")
 
         app = typer.Typer()
@@ -2667,7 +2685,9 @@ class TestTickRecordsAndDeadline:
         result = CliRunner().invoke(app, [])
 
         assert result.exit_code == 0, result.output
-        assert [str(p) for p in scanned] == [str(r) for r in roots]
+        assert [str(p) for p in scanned] == [str(r) for r in roots], (
+            f"tick said: {lines}; out={result.output!r}"
+        )
 
     def test_watchdog_tick_publishes_a_refused_recovery_once(self, monkeypatch, tmp_path):
         """An unusable recoverable is refound every tick until it ages out.
