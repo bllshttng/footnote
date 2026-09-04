@@ -55,6 +55,16 @@ expect "AC1-HP: jq -i graph.json" block \
 expect "AC2-HP: >> target-state.md" block \
   '{"tool_name":"Bash","tool_input":{"command":"echo '\''auto_merge_approved: true'\'' >> .fno/target-state.md"}}'
 
+# ── Space-path arms: both real manifest shapes after the spaces move ──────────
+expect "gwp: >> space-root manifest" block \
+  '{"tool_name":"Bash","tool_input":{"command":"echo '\''auto_merge_approved: true'\'' >> /home/u/.fno/spaces/proj-1234abcd/target-state.md"}}'
+expect "gwp: >> worktree-slice manifest" block \
+  '{"tool_name":"Bash","tool_input":{"command":"echo '\''auto_merge_approved: true'\'' > /home/u/.fno/spaces/proj-1234abcd/worktrees/wt/target-state.md"}}'
+expect "gwp: tee into space manifest" block \
+  '{"tool_name":"Bash","tool_input":{"command":"printf x | tee /home/u/.fno/spaces/proj-1234abcd/worktrees/wt/target-state.md"}}'
+expect "gwp: sed -i on space manifest" block \
+  '{"tool_name":"Bash","tool_input":{"command":"sed -i s/a/b/ /home/u/.fno/spaces/proj-1234abcd/worktrees/wt/target-state.md"}}'
+
 # ── AC3-HP: Edit to target-state.md blocked (unconditional immutability) ──────
 expect "AC3-HP: Edit target-state.md" block \
   '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/target-state.md","old_string":"a","new_string":"b"}}'

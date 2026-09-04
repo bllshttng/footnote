@@ -312,7 +312,7 @@ fi
 
 # 5. Log lifecycle event (the worktree log lives in the repo's space)
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-WLOG=$(fno-agents state path worktree-log.jsonl 2>/dev/null || true)
+WLOG=$(fno-agents state path worktree-log 2>/dev/null || true)
 if [[ -z "$WLOG" ]]; then
     WLOG="$MAIN_REPO/.fno/worktree-log.jsonl"
 fi

@@ -76,7 +76,7 @@ _bash_targets_protected() {
     # Second arm: the manifest moved into the repo's space
     # (`~/.fno/spaces/<slug>[/worktrees/<name>]/target-state.md`); the old
     # checkout path stays matched so an edit to a stale copy is still refused.
-    local pp='([^[:space:];|&<>]*\.fno/(graph\.json|target-state\.md)|[^[:space:];|&<>]*/spaces/[^[:space:];|&<>/]*target-state\.md)([[:space:];|&<>"'\'']|$)'
+    local pp='([^[:space:];|&<>]*\.fno/(graph\.json|target-state\.md)|[^[:space:];|&<>]*/spaces/[^[:space:];|&<>]*target-state\.md)([[:space:];|&<>"'\'']|$)'
     # A run of non-separator chars (stays inside one command clause), and a
     # clause tail that ends at a protected path. Kept in vars because an inline
     # `[^;|&]` breaks `[[ =~ ]]` parsing (`;`/`|` are shell-special there).
