@@ -341,6 +341,20 @@ fn session_id_from_argv(argv: &[String]) -> Option<String> {
                 .filter(|s| is_full_uuid(s))
                 .map(str::to_string);
         }
+        // agy's create form, the other callee-minted-read-back shape: the
+        // conversation id rides `--conversation <uuid>`. Same shape filter,
+        // and for the same reason - agy resumes by EXACT id, so a truncated
+        // one opens a different conversation rather than failing.
+        if arg == "--conversation" {
+            return it
+                .next()
+                .map(String::as_str)
+                .filter(|s| is_full_uuid(s))
+                .map(str::to_string);
+        }
+        if let Some(value) = arg.strip_prefix("--conversation=") {
+            return is_full_uuid(value).then(|| value.to_string());
+        }
     }
     None
 }
@@ -810,6 +824,32 @@ mod tests {
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
         assert_eq!(session_id_from_argv(&picker), None);
+
+        // agy's create form: `--conversation <uuid>`, split and glued.
+        let agy_shape: Vec<String> = ["agy", "--conversation", "91b59536-7ea4-4235-9691-4ca8f991a9b2"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            session_id_from_argv(&agy_shape),
+            Some("91b59536-7ea4-4235-9691-4ca8f991a9b2".to_string())
+        );
+        let agy_glued: Vec<String> =
+            ["agy", "--conversation=91b59536-7ea4-4235-9691-4ca8f991a9b2"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        assert_eq!(
+            session_id_from_argv(&agy_glued),
+            Some("91b59536-7ea4-4235-9691-4ca8f991a9b2".to_string())
+        );
+        // A truncated conversation id addresses a DIFFERENT conversation to
+        // agy, so it answers None rather than being read as an identity.
+        let agy_truncated: Vec<String> = ["agy", "--conversation", "91b59536"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(session_id_from_argv(&agy_truncated), None);
         // A head-8 is an fno session handle, not a chat id: no identity.
         let truncated = ["cursor-agent", "--resume", "74db359a"]
             .iter()

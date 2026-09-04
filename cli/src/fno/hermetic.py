@@ -211,6 +211,11 @@ _RUNNER_PASSTHROUGH = (
     # live test restores real HOME because kimi's credential lives under
     # ~/.kimi-code, while its cwd remains an isolated fixture.
     "FNO_KIMI_LIVE",
+    # opt-in live agy journey. The live test restores real HOME because agy's
+    # credential, its conversation store under ~/.gemini/antigravity-cli, and
+    # the hooks.json its Stop adapter installs into all live there; the cwd
+    # remains an isolated fixture.
+    "FNO_AGY_LIVE",
 )
 
 # Toolchain CACHES, not state fno reads. Sandboxing HOME relocates them, which

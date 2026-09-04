@@ -31,10 +31,22 @@ shipped Stop adapter into the real ``~/.gemini/config/hooks.json`` (the
 surface agy actually reads, and exactly what ``fno config setup`` does) and
 restores whatever was there before.
 
-RUN OF RECORD: unrun. Record the date, the agy version, the wall time, and the
-``child_pid`` / ``keeper_pid`` / ``session_id`` evidence line the run prints,
-the way the pi journey's docstring does. An unrecorded green is not a run of
-record.
+RUN OF RECORD, 2026-09-03, agy 1.1.24 on a live Google AI Pro subscription,
+worktree debug builds: **GREEN, 213.4s** (evidence ``child_pid=72851
+keeper_pid=72849 session_id=71cc2d46-9c01-4fb4-8266-f7cf79fe227c``).
+
+Four things had to be built before it could pass, and each was a real gap the
+journey found rather than a test bug:
+
+  - the keeper read the session id off ``--session-id`` and ``--resume`` only,
+    so agy's ``--conversation <uuid>`` answered Identify with ``None``;
+  - the trust-file upsert alone did not clear agy's folder-trust modal, and a
+    keeper has nobody to answer one, so the seed submit now answers it;
+  - the keeper mail lane had no confirm source for agy and demoted every
+    probe to ``no-confirm-source``;
+  - ``FNO_AGY_LIVE`` was swept by the hermetic env, so this journey skipped
+    for anyone who set it - the exact trap that list's comment already names
+    for pi.
 """
 from __future__ import annotations
 
@@ -94,7 +106,14 @@ elif _front_bin is None:
 _JOURNEY_NAME = "wk-x-d145"
 SEED_TOKEN = "AGYSEED-4417"
 SEED = f"Reply with exactly: {SEED_TOKEN}"
-PROBE = "/target x-d145 (the footnote target verb): report what you can do, then stop."
+# The token the model must PRODUCE. The probe never spells it, because a pasted
+# envelope repaints into the same screen the answer does: a marker the prompt
+# carries would confirm delivery and be read as a turn.
+PROBE_TOKEN = "YTIVARGITNA"
+PROBE = (
+    "/target (the footnote target verb): say in one line what you can do, and "
+    "end your reply with the word ANTIGRAVITY spelled backwards, in capitals."
+)
 # The `--transcript` path agy's Stop adapter synthesizes. Nothing else in the
 # fleet writes this shape, so a loop-check argv naming it proves the ADAPTER
 # invoked the gate rather than some other caller.
@@ -351,9 +370,14 @@ def test_AC1_HP_the_spawn_seam_journey_on_a_real_agy_thread(
         # The manifest is the Stop adapter's active-session discriminator, and
         # it is keyed on agy's OWN conversation id - which only exists after
         # the spawn, so it is written here rather than before.
+        # `harness_session_id` is the key manifest-for-session matches on; a
+        # `session_id` line is invisible to it and the adapter answers "no
+        # manifest names session <id>" while looking like it never ran.
         (journey_cwd / ".fno" / "target-state.md").write_text(
             "---\n"
-            f"session_id: {session_id}\n"
+            "harness: agy\n"
+            f"harness_session_id: {session_id}\n"
+            f"owner_cwd: {journey_cwd}\n"
             'created_at: "2026-09-03T00:00:00Z"\n'
             "---\n\n"
             "# journey manifest\n",
@@ -375,8 +399,11 @@ def test_AC1_HP_the_spawn_seam_journey_on_a_real_agy_thread(
         # log line naming a .agy-loopcheck- synth transcript is the marker that
         # the ADAPTER invoked it - no other component synthesizes that shape.
         _send_mail(PROBE, session_id, monkeypatch, capsys)
-        assert _read_paint(keeper_sock, b"x-d145", 240.0), (
-            "the mailed probe never painted a fresh turn"
+        # The token the MODEL must produce, never a word the probe itself
+        # carries: a pasted envelope echoes into the same paint, so matching
+        # the prompt would confirm delivery and call it a turn.
+        assert _read_paint(keeper_sock, PROBE_TOKEN.encode(), 300.0), (
+            "the mailed probe never produced a fresh assistant turn"
         )
 
         deadline = time.monotonic() + 120

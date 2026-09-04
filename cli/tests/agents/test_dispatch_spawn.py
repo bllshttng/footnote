@@ -19,6 +19,7 @@ Acceptance criteria (operator-locked):
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -729,8 +730,15 @@ def test_spawn_agy_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) ->
             "argv": ["agy"],
         }
 
-    def _fake_seed(*, name, session_id, sock, message, ready_marker):
-        seeds.append({"session_id": session_id, "message": message, "marker": ready_marker})
+    def _fake_seed(*, name, session_id, sock, message, ready_marker, clear_modal):
+        seeds.append(
+            {
+                "session_id": session_id,
+                "message": message,
+                "marker": ready_marker,
+                "modal": clear_modal,
+            }
+        )
 
     monkeypatch.setattr(dispatch, "_lane_b_thread_spawn", _fake_lane_b)
     monkeypatch.setattr(dispatch, "_keeper_seed_submit", _fake_seed)
@@ -749,6 +757,12 @@ def test_spawn_agy_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) ->
     assert seeds[0]["session_id"] == "c5661b28-bcba-4690-8b2e-4a4a88541e8c"
     assert seeds[0]["message"].startswith("hello")
     assert seeds[0]["marker"] == b"? for shortcuts"
+    # A keeper has nobody to answer agy's folder-trust modal, and a TUI behind
+    # one runs nothing while holding a live row, so the seed carries the answer.
+    assert seeds[0]["modal"] is not None
+    pattern, keys = seeds[0]["modal"]
+    assert re.search(pattern, "Do you trust the contents of this project?", re.I)
+    assert keys == b"\r"
 
 
 def test_spawn_seam_refuses_an_absent_stance(monkeypatch) -> None:

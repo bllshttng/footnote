@@ -1455,6 +1455,7 @@ def _keeper_seed_submit(
     sock: Path,
     message: str,
     ready_marker: bytes = b"Plan, search, build anything",
+    clear_modal: Optional[tuple[str, bytes]] = None,
 ) -> None:
     """Deliver a thread spawn's seed to its keeper-hosted TUI.
 
@@ -1476,6 +1477,14 @@ def _keeper_seed_submit(
     per-harness: cursor-agent's status line reads "Plan, search, build
     anything"; pi's subscription tag renders only once its model session is
     wired (the same marker the journeys wait on).
+
+    ``clear_modal`` is ``(regex, keys)`` for a TUI that can paint a blocking
+    modal BEFORE its composer. agy's folder-trust gate is the case: a keeper
+    has nobody to answer it, and a TUI behind an unanswered modal runs NOTHING
+    while holding a live registry row. The pane lane answers the same modal the
+    same way. Both keep the trust-file upsert beside it - a granted folder
+    never paints the modal, and the answer covers the times the grant does not
+    take.
     """
     import socket as _socket
     import time as _time
@@ -1516,9 +1525,22 @@ def _keeper_seed_submit(
         deadline = _time.monotonic() + 60.0
         flip = False
         last_nudge = 0.0
+        modal_answered = False
         while _time.monotonic() < deadline:
             if ready_marker in bytes(text):
                 break
+            if clear_modal is not None and not modal_answered:
+                pattern, keys = clear_modal
+                if re.search(pattern, bytes(text).decode("utf-8", "replace"), re.I):
+                    # Answer ONCE, then drop what painted: the composer marker
+                    # is the read-back proving it cleared, and a second answer
+                    # would be typed into whatever replaced the modal.
+                    conn.sendall(frame(tag_input, keys))
+                    modal_answered = True
+                    text.clear()
+                    raw_pending.clear()
+                    _time.sleep(0.5)
+                    continue
             now = _time.monotonic()
             if now - last_nudge >= 4.0:
                 flip = not flip
@@ -1542,10 +1564,11 @@ def _keeper_seed_submit(
             _decode_frames(decoded)
             text.extend(_strip_ansi(bytes(decoded)))
         else:
+            answered = " A blocking modal was answered and the composer still never painted." if modal_answered else ""
             raise DispatchAskError(
                 f"keeper thread for {name!r} never painted its idle composer "
-                f"within 60s; the seed was not delivered. Inspect with "
-                f"'fno agents peek {name}' and send the prompt by mail.",
+                f"within 60s; the seed was not delivered.{answered} Inspect "
+                f"with 'fno agents peek {name}' and send the prompt by mail.",
                 exit_code=1,
             )
 

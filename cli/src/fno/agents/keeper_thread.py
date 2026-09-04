@@ -49,6 +49,10 @@ class KeeperArm:
     takes_add_dir: bool = False
     #: One completion the fields cannot express: ``(argv, cwd) -> argv``.
     finish_argv: Optional[Callable[[list[str], Path], list[str]]] = None
+    #: ``(regex, keys)`` for a TUI that can paint a blocking modal before its
+    #: composer. A keeper has nobody to answer one, and a TUI behind an
+    #: unanswered modal runs NOTHING while holding a live registry row.
+    clear_modal: Optional[tuple[str, bytes]] = None
 
 
 #: Every launch axis a spawn can carry, as (flag an operator types, the
@@ -173,6 +177,10 @@ KEEPER_ARMS: dict[str, KeeperArm] = {
         # cwd; a caller-supplied resume id skips the mint, so the upsert has to
         # happen on the launch path too.
         finish_argv=lambda argv, cwd: (_trust_agy_folder(cwd), argv)[1],
+        # agy asks about folder trust before its composer, and the file upsert
+        # above does not always take. Enter accepts the highlighted default,
+        # "Yes, I trust this folder" - the same answer the pane lane submits.
+        clear_modal=(r"trust (?:this )?folder|do you trust", b"\r"),
     ),
 }
 
@@ -275,7 +283,7 @@ def keeper_thread_spawn(
     harness: str,
     name: str,
     message: str,
-    effective_message: str,
+    effective_message: Optional[str],
     cwd: Path,
     headless: bool,
     once: bool,
@@ -343,15 +351,17 @@ def keeper_thread_spawn(
         # The seed rides the keeper paste: a Resize forces a repaint, the idle
         # marker off the stream proves the composer is up, and the echo of the
         # submitted line is the landing proof.
-        marker = (
-            {"ready_marker": arm.ready_marker} if arm.ready_marker is not None else {}
-        )
+        extra: dict[str, Any] = {}
+        if arm.ready_marker is not None:
+            extra["ready_marker"] = arm.ready_marker
+        if arm.clear_modal is not None:
+            extra["clear_modal"] = arm.clear_modal
         _keeper_seed_submit(
             name=name,
             session_id=session_id,
             sock=Path(receipt["keeper_socket"]),
             message=message,
-            **marker,
+            **extra,
         )
     _emit_ev(
         "agent_ask_done",
