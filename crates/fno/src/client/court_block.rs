@@ -35,6 +35,24 @@ impl View {
             .map(|a| a.last_activity_age_s)
             .collect()
     }
+
+    /// The block's lines rendered once, with the row count the sideline
+    /// must reserve for them: zero when the terminal cannot hold the block
+    /// beside at least one row - the block yields, the rows never do.
+    pub(super) fn court_block_layout(&self, term_rows: usize) -> (usize, Vec<String>) {
+        let lines = if self.court.is_expanded() {
+            self.court.expanded_lines(&self.agent_ages())
+        } else {
+            self.court.minimized_lines(&self.agent_ages())
+        };
+        let available = term_rows.saturating_sub(self.bottom_row_is_chrome() as usize);
+        let reserved = if available > lines.len() {
+            lines.len()
+        } else {
+            0
+        };
+        (reserved, lines)
+    }
 }
 
 /// Paint the court block's lines at the bottom of the sideline column. The

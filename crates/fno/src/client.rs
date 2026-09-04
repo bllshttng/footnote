@@ -8151,26 +8151,9 @@ impl View {
         // an agent row indents by the depth computed over exactly the set that
         // paints - never a re-derivation over a different visibility set.
         let (display, row_depths) = self.display_rows_with_depths();
-        // (x-aeab) The court block owns the bottom rows of the column, so
-        // the row list stops above it. The block's lines are rendered ONCE
-        // here and their count is the reserved height: the same function of
-        // (fold, ages) that `court_block_rows` computes for the layout, so
-        // the paint can never disagree with the reservation. When the
-        // terminal cannot hold the block beside at least one row, the block
-        // yields entirely and the list runs to the full height exactly as
-        // before this change.
-        let block_ages = self.agent_ages();
-        let mut block_lines = if self.court.is_expanded() {
-            self.court.expanded_lines(&block_ages)
-        } else {
-            self.court.minimized_lines(&block_ages)
-        };
-        let block_available = rows.saturating_sub(self.bottom_row_is_chrome() as usize);
-        let block_rows = if block_available > block_lines.len() {
-            block_lines.len()
-        } else {
-            0
-        };
+        // (x-aeab) The court block reserves the bottom rows; its lines are
+        // rendered once here and the reservation is their count.
+        let (block_rows, block_lines) = self.court_block_layout(rows);
         let list_rows = rows - block_rows;
         for (i, drow) in display.into_iter().enumerate().skip(off) {
             // (x-cd67 US1) The sideline owns the full column height including
@@ -8633,9 +8616,7 @@ impl View {
         // list already stopped above it; the block renders DIM so it reads as
         // chrome beside the live rows, and the painter truncates to the panel
         // width - the same rule every sideline row follows.
-        if block_rows > 0 {
-            court_block::paint_court_block(cells, block_lines, list_rows, rows, cols, text_w);
-        }
+        court_block::paint_court_block(cells, block_lines, list_rows, rows, cols, text_w);
         // The divider column, now full terminal height (the sideline owns row
         // 0 too; the strip sits right of the divider) - x-cd67 US1.
         //
@@ -11159,9 +11140,8 @@ async fn attach_and_run(
     let (yard_tx, mut yard_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<crate::yard_overlay::YardItem>>)>();
 
-    // (x-3cb3 → x-aeab) The court fold leg. No generation: the block has no
-    // open/close to supersede, and single-flight + the TTL are the whole
-    // concurrency contract.
+    // (x-aeab) The court fold leg: single-flight + the TTL are the whole
+    // concurrency contract; no generation to supersede.
     let (court_tx, mut court_rx) =
         tokio::sync::mpsc::unbounded_channel::<Option<crate::court_overlay::Court>>();
 
@@ -11402,11 +11382,8 @@ async fn attach_and_run(
         // spotlight animates on an otherwise idle terminal (nothing else
         // redraws there). Re-armed each loop pass, so the cadence holds until
         // the overlay closes; closed -> no deadline, no wakeups.
-        // (x-aeab) The court block is painted on every frame, so its refresh
-        // is a timer: wake at the next TTL boundary (or immediately for the
-        // first fold) so an idle terminal still gets fresh numbers. While a
-        // fold is in flight the deadline is None - the landing redraws, and
-        // a past-due wake would only burn loop passes.
+        // (x-aeab) The block is painted every frame, so its refresh is a
+        // timer; None while a fold runs (the landing redraws).
         let court_tick = view.court.refresh_deadline();
         // (x-b2bf) The yard's frame cycling is a flavour channel on a timer:
         // while the overlay is open, wake at the next frame boundary so the
@@ -11740,10 +11717,7 @@ async fn attach_and_run(
                 }
             }
             Some(result) = court_rx.recv() => {
-                // (x-3cb3 → x-aeab) The court fold landed. `apply` owns the
-                // merge discipline (degrade-loud, no age restamp on a
-                // failure); the block is always painted, so every landing
-                // redraws.
+                // (x-aeab) The fold landed; `apply` owns the merge rules.
                 view.court.apply(result);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
@@ -17145,6 +17119,10 @@ fn map_color(c: Color) -> CtColor {
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "client_tests/court_block_tests.rs"]
+mod court_block_tests;
 
 #[path = "client/court_block.rs"]
 mod court_block;

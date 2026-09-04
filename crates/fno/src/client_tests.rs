@@ -18932,7 +18932,3 @@ fn ux_shot_twenty_tabs_before() {
         "twenty tabs (before: clipped)",
     );
 }
-
-#[cfg(test)]
-#[path = "client_tests/court_block_tests.rs"]
-mod court_block_tests;
