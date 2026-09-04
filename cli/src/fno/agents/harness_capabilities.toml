@@ -274,8 +274,9 @@ status_pattern = 'Model:\s+(?P<model>\S+).*?reasoning\s+(?P<effort>minimal|low|m
 # FEATURES. All three states are measured. spawn: the second journey-proven
 # thread lane. review: `review_verbs` above map onto the app-server daemon's
 # review RPC, which the mail lane's --check exercises. attach: the proof the
-# two questions split. Codex ships NO attach subcommand - the form field is
-# resume plus a daemon endpoint - so verb inventory says no, reachability yes.
+# two questions split. The row's form is `codex resume --remote` against the
+# app-server daemon, not a dedicated attach verb - fno drives it today, so
+# the reachability answer reads native.
 [harness.codex.features.review]
 state = "native"
 
