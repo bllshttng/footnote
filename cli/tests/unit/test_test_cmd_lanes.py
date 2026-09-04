@@ -2,8 +2,8 @@
 
 Every claim here is a positive marker: the flag in the built command, the
 printed reading line. "The suite passed" proves nothing about the cap (the
-x-e19e defect was exactly that a green run hid an 18-worker pile-up), so no
-test in this file treats a zero-exit as evidence.
+defect this cap fixes was exactly that a green run hid an 18-worker pile-up),
+so no test in this file treats a zero-exit as evidence.
 """
 
 from types import SimpleNamespace
@@ -63,8 +63,8 @@ def _reset_lanes(monkeypatch):
 
 
 def test_marker_breached_ceiling_caps_threads_at_one(tmp_path, monkeypatch, capsys):
-    """Load 319.21 against a 96.0 ceiling (status exceeded) - the exact
-    receipt from the x-e19e node - must both cap the threads at 1 and print
+    """Load 319.21 against a 96.0 ceiling (status exceeded) - the measured
+    receipt that motivated the cap - must both cap the threads at 1 and print
     the reading the cap was chosen from."""
     _fake_checkout(tmp_path, monkeypatch)
     _reset_lanes(monkeypatch)

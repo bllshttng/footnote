@@ -395,12 +395,13 @@ def _lanes_threads() -> tuple[Optional[int], str]:
     except Exception as exc:  # the reading must never block the suite
         _LANES_READING = (None, f"reading failed ({exc})")
         return _LANES_READING
-    if reading.refused:
+    lane_count = reading.lane_count
+    if lane_count is None:
         _LANES_READING = (None, f"reading refused ({reading.refusal_reason})")
         return _LANES_READING
     _LANES_READING = (
-        max(1, int(reading.lane_count)),
-        f"{reading.lane_count} more fit (fno doctor lanes)",
+        max(1, int(lane_count)),
+        f"{lane_count} more fit (fno doctor lanes)",
     )
     return _LANES_READING
 
