@@ -8,8 +8,8 @@
 //! Module name starts with "loop" to match the LOC-ratchet glob `crates/fno-agents/src/loop*`.
 
 use crate::{
-    check_supersession::latest_per_name, completion_output::allow_output,
-    delivery_completion::pr_passes,
+    cancel_sentinel::check_cancel_sentinel, check_supersession::latest_per_name,
+    completion_output::allow_output, delivery_completion::pr_passes,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -8257,49 +8257,6 @@ pub(crate) fn is_full_run_id(value: &str) -> bool {
             .expect("full run id regex is valid")
         })
         .is_match(value)
-}
-
-// ── cancel sentinel ───────────────────────────────────────────────────────────
-
-fn check_cancel_sentinel(
-    cwd: &Path,
-    state_path: &Path,
-    created_at: &Option<String>,
-    driver: &str,
-) -> bool {
-    let target_sentinel = cwd.join(".fno/.target-cancelled");
-    let target_tombstone = cwd.join(".fno/.target-cancelled-final");
-    let king_sentinel = state_path.with_extension("cancelled");
-    let paths: Vec<&Path> = if driver == "king" {
-        vec![king_sentinel.as_path()]
-    } else {
-        vec![target_tombstone.as_path(), target_sentinel.as_path()]
-    };
-
-    for path in paths {
-        if !path.exists() {
-            continue;
-        }
-        // Check mtime >= created_at
-        if let Some(ca) = created_at {
-            if let Ok(parsed_ca) = ca.parse::<DateTime<Utc>>() {
-                if let Ok(meta) = std::fs::metadata(path) {
-                    if let Ok(modified) = meta.modified() {
-                        let sentinel_time: DateTime<Utc> = modified.into();
-                        if sentinel_time >= parsed_ca {
-                            return true;
-                        }
-                        // Stale sentinel (older than created_at) -> ignore
-                        continue;
-                    }
-                }
-            }
-            // Can't read mtime -> treat as present (fail-closed)
-            return true;
-        }
-        return true;
-    }
-    false
 }
 
 // ── budget check ──────────────────────────────────────────────────────────────
