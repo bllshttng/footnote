@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 
 @dataclass(frozen=True)
@@ -48,7 +48,7 @@ class KeeperArm:
     takes_effort: bool = False
     takes_add_dir: bool = False
     #: One completion the fields cannot express: ``(argv, cwd) -> argv``.
-    finish_argv: Optional[object] = None
+    finish_argv: Optional[Callable[[list[str], Path], list[str]]] = None
 
 
 #: Every launch axis a spawn can carry, as (flag an operator types, the
@@ -328,12 +328,15 @@ def keeper_thread_spawn(
             f"--resume {resume_session_id} {arm.resume_refusal}", exit_code=2
         )
 
+    lane_kwargs: dict[str, Any] = {key: options.get(key) for key in arm.carries}
+    if "yolo" in lane_kwargs:
+        lane_kwargs["yolo"] = bool(lane_kwargs["yolo"])
     receipt = _lane_b_thread_spawn(
         name=name,
         harness=harness,
         cwd=cwd,
         lock_timeout=lock_timeout,
-        **{key: options.get(key) for key in arm.carries},
+        **lane_kwargs,
     )
     session_id = receipt["session_id"]
     if message.strip():
