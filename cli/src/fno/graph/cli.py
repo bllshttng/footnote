@@ -14819,7 +14819,7 @@ def cmd_find(
 # -- new --
 
 
-@cli.command("discover")
+@cli.command("discover", hidden=True)
 def cmd_discover(
     limit: int = typer.Option(
         20,
@@ -14861,6 +14861,20 @@ def cmd_discover(
 
     worklist: list[dict[str, Any]] = []
     degraded_warnings: list[str] = []
+    pr_merged_cache: dict[int, bool] = {}
+
+    def _pr_merged(number: int) -> bool:
+        """gh-verified merge state; deferral clears every node-side completion field."""
+        if number not in pr_merged_cache:
+            from fno.pr._verify import _gh_api_json
+
+            row = _gh_api_json(
+                ["repos/{owner}/{repo}/pulls/" + str(number), "--jq", ".merged"],
+                cwd=".",
+            )
+            pr_merged_cache[number] = row is True
+        return pr_merged_cache[number]
+
     for entry in expired:
         result = discovery.candidates(
             str(entry.get("title") or ""),
@@ -14870,10 +14884,11 @@ def cmd_discover(
             exclude_id=entry.get("id") if isinstance(entry.get("id"), str) else None,
             limit=limit,
             token_cache=token_cache,
+            domain=str(entry.get("domain") or "code"),
         )
         if result.degraded and result.warning and result.warning not in degraded_warnings:
             degraded_warnings.append(result.warning)
-        assessment = discovery.assess(entry, result)
+        assessment = discovery.assess(entry, result, pr_state=_pr_merged)
         worklist.append(
             {
                 "id": entry.get("id"),
@@ -14905,6 +14920,13 @@ def cmd_discover(
         positive = discovery.positive_control(
             control_query, graph_path=graph_path, entries=entries
         )
+        if not positive["matches"]:
+            typer.echo(
+                "failed instrument: the positive control matched nothing, so "
+                "the all-empty worklist is not trusted",
+                err=True,
+            )
+            raise typer.Exit(code=2)
 
     after = graph_path.read_bytes()
     if after != before:

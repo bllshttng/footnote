@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from fno.graph import fts, relatedness
 
@@ -91,13 +91,17 @@ def candidates(
     graph_path: Path | None = None,
     exclude_id: str | None = None,
     token_cache: dict[str, frozenset[str]] | None = None,
+    domain: str = "code",
 ) -> CandidateResults:
     """Union FTS5 and relatedness recall, ranked by relatedness score.
 
     ``entries`` is an optional narrowed pool for callers such as the filing
     gate.  The FTS cache still searches the graph bytes, then ids are filtered
     to that pool.  Relatedness is allowed below the filing floor so an FTS-only
-    vocabulary hit remains visible with its measured score.
+    vocabulary hit remains visible with its measured score.  ``domain`` is the
+    incoming node's own domain: relatedness grants a same-domain bonus, so a
+    caller that knows it must pass it rather than let every query read as
+    ``code``.
     """
     if limit < 1:
         return CandidateResults()
@@ -113,7 +117,7 @@ def candidates(
         "id": "__incoming__",
         "title": title or "",
         "details": details or "",
-        "domain": "code",
+        "domain": domain,
     }
 
     fts_ids: list[str] = []
@@ -219,24 +223,33 @@ def _stale_reason_still_true(node: dict[str, Any]) -> bool:
     return age_days >= 30
 
 
-def assess(node: dict[str, Any], cands: Iterable[Candidate]) -> Assessment:
-    """Assess one node without changing it or making an external mutation."""
+def assess(
+    node: dict[str, Any],
+    cands: Iterable[Candidate],
+    pr_state: Callable[[int], bool] | None = None,
+) -> Assessment:
+    """Assess one node without changing it or making an external mutation.
+
+    ``pr_state`` is the caller's gh-verified answer for whether a PR number is
+    merged.  Deferral clears every node-side completion field, so a shipped
+    node that later expired is only provable through evidence that survives
+    the defer: a verified merged PR, or files recorded in its text that still
+    exist on disk.
+    """
     candidates_list = list(cands)
     pr_number = node.get("pr_number")
-    if (
-        isinstance(pr_number, int)
-        and not isinstance(pr_number, bool)
-        and (
-            node.get("status") == "done"
-            or node.get("completed_at")
-            or node.get("merged_at")
-            or node.get("pr_merged") is True
-        )
+    has_pr = isinstance(pr_number, int) and not isinstance(pr_number, bool)
+    if has_pr and (
+        node.get("status") == "done"
+        or node.get("completed_at")
+        or node.get("merged_at")
+        or node.get("pr_merged") is True
+        or (pr_state is not None and pr_state(pr_number))
     ):
         return Assessment("satisfied", [f"PR#{pr_number}"], "merged PR recorded on node")
 
     file_evidence = _file_evidence(node)
-    if node.get("status") == "done" and file_evidence:
+    if file_evidence and (node.get("status") == "done" or has_pr):
         return Assessment("satisfied", file_evidence, "existing file recorded by node")
 
     if candidates_list:
