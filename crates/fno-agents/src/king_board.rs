@@ -2781,11 +2781,17 @@ mod tests {
         );
     }
 
+    /// Serializes the tests that point process-global HOME at a temp dir:
+    /// every other test in this binary reads HOME, so a concurrent reader can
+    /// catch it mid-flip (the same ENV_LOCK shape client_tests uses).
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn the_board_answers_inside_a_tight_budget_with_every_queue_present() {
         // An isolated HOME + cwd: no graph, no claims, no lane - the degraded
         // machine. The board must still answer with all eleven queues (plus
         // nothing else), the unreadable actionable ones counted, and exit 1.
+        let _guard = HOME_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", dir.path());
         let payload = read_board(&BoardOpts {
@@ -2826,6 +2832,7 @@ mod tests {
 
     #[test]
     fn the_scope_error_queue_is_actionable_and_loud() {
+        let _guard = HOME_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("king.md");
         std::fs::write(&state, "---\nscope: not-a-real-thing\n---\n").unwrap();
@@ -2845,6 +2852,7 @@ mod tests {
 
     #[test]
     fn a_manifest_without_a_scope_is_a_scope_error() {
+        let _guard = HOME_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("king.md");
         std::fs::write(&state, "---\nfno_id: k1\n---\n").unwrap();
