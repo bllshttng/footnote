@@ -91,17 +91,8 @@ _TARGET_FAMILY = _carrier_vocab()[0]
 
 
 @cache
-def footnote_verbs() -> frozenset:
-    """The shipped footnote verb roster: every ``skills/<name>/SKILL.md`` and
-    every ``commands/<name>.md`` the plugin ships.
-
-    Read from the shipped plugin surface, never a retyped literal: a literal
-    copy goes stale the first time a verb ships, and the failure is silent -
-    the new verb simply stops normalizing on codex and nothing notices.
-    Cached once per process. Empty on any resolution or read failure, which
-    on the codex surface leaves every bare ``/verb`` literal - pass-through is
-    the safe direction - while the plugin-qualified ``/fno:verb`` spelling
-    keeps working, since its namespace alone proves it is a footnote verb."""
+def _shipped_verbs() -> frozenset:
+    """One cached read of the plugin surface; `footnote_verbs` is the caller."""
     from fno.paths import resolve_plugin_script
 
     verbs: set[str] = set()
@@ -116,6 +107,33 @@ def footnote_verbs() -> frozenset:
     except OSError:
         pass
     return frozenset(verbs)
+
+
+def footnote_verbs() -> frozenset:
+    """The shipped footnote verb roster: every ``skills/<name>/SKILL.md`` and
+    every ``commands/<name>.md`` the plugin ships.
+
+    Read from the shipped plugin surface, never a retyped literal: a literal
+    copy goes stale the first time a verb ships, and the failure is silent -
+    the new verb simply stops normalizing on codex and nothing notices.
+
+    Empty on any resolution or read failure, which on the codex surface leaves
+    every bare ``/verb`` literal - pass-through is the safe direction - while
+    the plugin-qualified ``/fno:verb`` spelling keeps working, since its
+    namespace alone proves it is a footnote verb.
+
+    A good answer caches; an EMPTY one does not. Empty means the plugin
+    surface did not RESOLVE, never that footnote ships no verbs, and the
+    resolver reads an env hint first, so the next call can succeed. Caching
+    the failure froze the degraded answer for the whole process, silently: a
+    codex worker gets `/target`, which codex reads as prose, not a verb."""
+    verbs = _shipped_verbs()
+    if not verbs:
+        _shipped_verbs.cache_clear()
+    return verbs
+
+
+footnote_verbs.cache_clear = _shipped_verbs.cache_clear  # type: ignore[attr-defined]
 
 
 def normalize_legacy_no_merge(command: str) -> str:

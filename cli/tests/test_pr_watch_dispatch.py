@@ -1822,6 +1822,153 @@ class TestReadPrStateJsonGuards:
         assert obs.latest_review_ts is None
 
 
+class TestReadPrStateBudget:
+    """One read spends one budget. Measured 2026-09-03 over eight real open
+    PRs: the merge-state leg means 1.07s and the reviews leg 1.42s, so neither
+    leg is the cost. The cost was that ``timeout_s`` bounded EACH leg, so one
+    candidate could spend 60s against a tick deadline checked only between
+    candidates."""
+
+    def _cand(self, tmp_path):
+        from fno.pr_watch._discover import PrCandidate
+
+        return PrCandidate(
+            node_id="x-abc",
+            pr_number=7,
+            pr_url="https://github.com/owner/repo/pull/7",
+            repo_dir=tmp_path,
+            repo_slug="owner/repo",
+        )
+
+    @staticmethod
+    def _info_stdout():
+        return json.dumps(
+            {
+                "state": "open",
+                "number": 7,
+                "html_url": "https://github.com/owner/repo/pull/7",
+                "merged": False,
+                "merged_at": None,
+                "head": {"sha": "head", "ref": "feature/test"},
+                "base": {"ref": "main"},
+            }
+        )
+
+    @staticmethod
+    def _view_stdout():
+        return (
+            '{"reviews":[],"comments":[],"createdAt":"2026-06-01T00:00:00Z",'
+            '"number":7,"state":"OPEN","url":"","mergedAt":null}'
+        )
+
+    def test_reviews_leg_gets_only_what_the_merge_leg_left(self, tmp_path, monkeypatch):
+        from fno.pr_watch import _discover
+        from fno.pr_watch._discover import read_pr_state
+
+        clock = [100.0]
+        monkeypatch.setattr(_discover.time, "monotonic", lambda: clock[0])
+        seen = {}
+
+        def runner(cmd, **kw):
+            cmd_str = " ".join(str(c) for c in cmd)
+            if "comments" in cmd_str:
+                seen["reviews_timeout"] = kw.get("timeout")
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout=self._view_stdout(), stderr=""
+                )
+            seen["merge_timeout"] = kw.get("timeout")
+            clock[0] += 4.0  # the merge leg burns 4 of the 10s budget
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=self._info_stdout(), stderr=""
+            )
+
+        read_pr_state(self._cand(tmp_path), reviewers=[], runner=runner, timeout_s=10.0)
+
+        assert seen["merge_timeout"] == pytest.approx(10.0)
+        # The whole point: the second leg may not restart the clock at 10.
+        assert seen["reviews_timeout"] == pytest.approx(6.0)
+
+    def test_a_spent_budget_refuses_the_second_leg(self, tmp_path, monkeypatch):
+        from fno.graph._reconcile import ReconcileError
+        from fno.pr_watch import _discover
+        from fno.pr_watch._discover import read_pr_state
+
+        clock = [100.0]
+        monkeypatch.setattr(_discover.time, "monotonic", lambda: clock[0])
+        launched = []
+
+        def runner(cmd, **kw):
+            cmd_str = " ".join(str(c) for c in cmd)
+            if "comments" in cmd_str:
+                launched.append(cmd_str)
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout=self._view_stdout(), stderr=""
+                )
+            clock[0] += 10.0  # the merge leg eats the entire budget
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=self._info_stdout(), stderr=""
+            )
+
+        with pytest.raises(ReconcileError) as exc:
+            read_pr_state(self._cand(tmp_path), reviewers=[], runner=runner, timeout_s=10.0)
+
+        assert "budget" in str(exc.value).lower()
+        assert launched == [], "gh pr view ran with no budget left to bound it"
+
+    def test_a_sliver_of_budget_refuses_the_second_leg_too(self, tmp_path, monkeypatch):
+        """A floor, not a zero check. A remaining budget under what the leg
+        costs spawns a gh process certain to time out, spending the deadline
+        to learn nothing."""
+        from fno.graph._reconcile import ReconcileError
+        from fno.pr_watch import _discover
+        from fno.pr_watch._discover import REVIEWS_LEG_FLOOR_S, read_pr_state
+
+        clock = [100.0]
+        monkeypatch.setattr(_discover.time, "monotonic", lambda: clock[0])
+        launched = []
+
+        def runner(cmd, **kw):
+            cmd_str = " ".join(str(c) for c in cmd)
+            if "comments" in cmd_str:
+                launched.append(cmd_str)
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout=self._view_stdout(), stderr=""
+                )
+            # Leaves a positive sliver, strictly under the floor.
+            clock[0] += 10.0 - (REVIEWS_LEG_FLOOR_S / 2)
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=self._info_stdout(), stderr=""
+            )
+
+        with pytest.raises(ReconcileError):
+            read_pr_state(self._cand(tmp_path), reviewers=[], runner=runner, timeout_s=10.0)
+
+        assert launched == [], "gh pr view ran on a budget it cannot finish in"
+
+    def test_the_default_path_still_reads(self, tmp_path):
+        """A fast merge leg leaves nearly the whole default budget, so the
+        ordinary case keeps working and is only capped in total."""
+        from fno.pr_watch._discover import read_pr_state
+
+        seen = {}
+
+        def runner(cmd, **kw):
+            cmd_str = " ".join(str(c) for c in cmd)
+            if "comments" in cmd_str:
+                seen["reviews_timeout"] = kw.get("timeout")
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout=self._view_stdout(), stderr=""
+                )
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=self._info_stdout(), stderr=""
+            )
+
+        obs = read_pr_state(self._cand(tmp_path), reviewers=[], runner=runner)
+
+        assert obs.state == "OPEN"
+        assert 0 < seen["reviews_timeout"] <= 30.0
+
+
 class TestDispatchEntryGuards:
     """AC-gemini-medium _dispatch.py:352 and :410: corrupt store entry + retry increment."""
 
@@ -2368,6 +2515,251 @@ class TestTickRecordsAndDeadline:
         assert result.exit_code == 0, result.output
         assert ("publish", "tick", "") in published
         assert ("roots", [str(tmp_path)]) in published
+
+    def _arm_watchdog_tick(self, monkeypatch, tmp_path, roots):
+        """The minimum scaffolding that reaches the recovery-root loop.
+
+        Returns `(scanned, lines)`. `lines` is the tick logger's own output,
+        taken from a handler attached DIRECTLY to `fno.pr_watch.cli` rather
+        than through caplog: caplog captures at the root, so a `propagate =
+        False` anywhere above this logger silently yields an empty capture,
+        which is what it did on CI while working locally. The tick swallows
+        every leg failure into a warning on this same logger, so when the loop
+        is not reached these lines name the reason."""
+        import logging
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from fno.agents import watchdog
+        from fno.pr_watch import cli as prcli
+        from fno.pr_watch._dispatch import TickResult
+
+        lines: list[str] = []
+
+        class _Grab(logging.Handler):
+            def emit(self, record):
+                lines.append(record.getMessage())
+
+        # `handlers` and `level` are plain attributes, so monkeypatch restores
+        # both at teardown and the handler never leaks into another test.
+        tick_log = logging.getLogger("fno.pr_watch.cli")
+        monkeypatch.setattr(tick_log, "handlers", [*tick_log.handlers, _Grab()])
+        monkeypatch.setattr(tick_log, "level", logging.INFO)
+
+        settings = MagicMock()
+        settings.pr_watch.enabled = True
+        settings.pr_watch.max_age_days = 30
+        settings.pr_watch.retries = 3
+        settings.pr_watch.graphql_min_remaining = 200
+        # The two sections the arming gate reads are REAL objects, not mock
+        # attributes. A MagicMock answers every attribute truthily, so the
+        # gate's own `except Exception: return False` could never be observed
+        # here - and on CI something upstream still made it answer False,
+        # which silently skipped the lane these tests live inside. An explicit
+        # shape either satisfies the gate or fails loudly naming the field.
+        # wake, not report: the recovery-root loop is inside the wake branch.
+        class _Recording:
+            """Records every attribute read into the trace.
+
+            Two CI anomalies survive every explanation so far: lane_armed
+            answers False against fields that all satisfy it, and the tick
+            raises "'str' object has no attribute 'mail_to'" where the only
+            statements are a getattr with a default and a patched call. Both
+            are claims about attribute reads, so record the reads.
+            """
+
+            def __init__(self, **fields):
+                object.__setattr__(self, "_fields", fields)
+
+            def __getattr__(self, name):
+                fields = object.__getattribute__(self, "_fields")
+                if name in fields:
+                    lines.append(f"attr:{name}={fields[name]!r}")
+                    return fields[name]
+                lines.append(f"attr:{name}=<MISSING>")
+                raise AttributeError(
+                    f"{type(self).__name__!r} object has no attribute {name!r}"
+                )
+
+        settings.recovery = _Recording(
+            enabled=True, watchdog="wake", watchdog_mail_to=""
+        )
+        settings.autonomy = _Recording(enabled=True)
+        monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+        # Prove the patch took. Every diagnosis so far ASSUMED the tick reads
+        # this object, and the CI trace says the gate saw something else.
+        assert prcli.load_settings() is settings
+        monkeypatch.setattr(
+            "fno.pr_watch._dispatch.tick", lambda **kw: TickResult(open_prs=0, acted=0)
+        )
+        monkeypatch.setattr("fno.recovery.run_recovery_sweep", lambda *a, **k: 0)
+        monkeypatch.setattr("fno.agents.sweep.run_sweep", lambda **kw: ([], 0))
+        monkeypatch.setattr(prcli, "_emit_event", lambda *a, **k: True)
+        monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: list(roots))
+        monkeypatch.setattr("fno.worktree_stranded.sweep", lambda **kw: [])
+        monkeypatch.setattr("fno.worktree_stranded.apply_sweep", lambda *a, **kw: [])
+
+        from fno.agents import unfinished_work as uw
+
+        class _Snap:
+            generated_at = "2026-08-27T00:00:00Z"
+            findings = ()
+            complete = True
+            warnings = ()
+            dimensions = {
+                dim: uw.DimensionState(uw.MEASURED, 0, None) for dim in uw.DIMENSIONS
+            }
+
+        # Stage trace. `lines` is the only channel that survives to a CI
+        # failure message, so each patched leg drops a marker into it: an
+        # empty trace means the tick never armed the lane at all, and a
+        # partial one names the last leg that ran.
+        def _stage(name, value=None):
+            lines.append(f"stage:{name}")
+            return value
+
+        # The arming gate is scaffolding here, not the subject: these tests
+        # are about the recovery-root budget INSIDE the lane. Reading it off
+        # MagicMock truthiness made the whole suite depend on a gate that
+        # answered True locally and False on CI, which skipped the lane and
+        # left both tests reading an empty scan for a reason neither names.
+        # `lane_armed` keeps its own direct coverage in test_agents_watchdog.
+        # The real verdict still goes in the trace, so the divergence stays
+        # visible rather than being papered over.
+        real_lane_armed = watchdog.lane_armed
+        monkeypatch.setattr(
+            watchdog,
+            "lane_armed",
+            lambda s: _stage(
+                f"lane_armed(real)={real_lane_armed(s)} forced=True "
+                f"type={type(s).__name__} mine={s is settings} "
+                f"rec={type(getattr(s, 'recovery', None)).__name__} "
+                f"auto={getattr(getattr(s, 'autonomy', None), 'enabled', '<none>')!r} "
+                f"wd={getattr(getattr(s, 'recovery', None), 'watchdog', '<none>')!r}",
+                True,
+            ),
+        )
+        monkeypatch.setattr(
+            uw,
+            "build_report",
+            lambda roots, *, now_s=None, **kw: _stage("build_report", _Snap()),
+        )
+        monkeypatch.setattr(
+            uw,
+            "publish_report",
+            lambda snapshot, *, source, now_s, mail_to, log=None: _stage(
+                "publish_report",
+                {"counts": {}, "findings": [], "warnings": []},
+            ),
+        )
+        # The roster legs run BEFORE the recovery-root loop and were the only
+        # unpatched real calls left in this fixture. `fleet_rows` needs a live
+        # daemon, so on CI it raises, the tick's own handler swallows it as
+        # "watchdog sweep failed", and the loop under test is never reached.
+        # Both tests then read an empty `scanned` - one as a false failure, the
+        # other as a false pass.
+        monkeypatch.setattr(watchdog, "fleet_rows", lambda **kw: _stage("fleet_rows", ([], [])))
+        monkeypatch.setattr(
+            watchdog, "measure_provider_outages", lambda rows, *, now_s: {"breakers": []}
+        )
+        monkeypatch.setattr(watchdog, "_last_events_signature", lambda: "")
+        monkeypatch.setattr(watchdog, "supervise_provider_handoffs", lambda *a, **kw: [])
+        monkeypatch.setattr(
+            watchdog,
+            "run_sweep",
+            lambda **kw: _stage(
+                "run_sweep", ({"verdicts": [], "counts": {}, "warnings": []}, [])
+            ),
+        )
+        monkeypatch.setattr(watchdog, "_last_recovery_events_signature", lambda: "")
+        monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: None)
+        monkeypatch.setattr(watchdog, "fresh_non_leave", lambda *a, **k: set())
+        monkeypatch.setattr(watchdog, "emit_event", lambda *a, **k: None)
+        monkeypatch.setattr(watchdog, "apply_recoverable", lambda *a, **kw: [])
+
+        scanned = []
+
+        class _Scan:
+            complete = True
+            recoverable = ()
+
+        def _sweep(**kw):
+            scanned.append(kw.get("cwd"))
+            return (
+                {
+                    "generated_at": "2026-09-03T00:00:00Z",
+                    "verdicts": [],
+                    "counts": {},
+                    "warnings": [],
+                    "complete": True,
+                    "cwd": str(kw.get("cwd")),
+                },
+                [],
+                _Scan(),
+            )
+
+        monkeypatch.setattr(watchdog, "run_recoverable_sweep", _sweep)
+        return scanned, lines
+
+    def test_recovery_root_loop_stops_when_the_tick_budget_runs_out(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        """Measured 2026-09-02 at 0.8s per root over 18 roots. The stranded
+        sweep already re-checks per root; this leg had no check at all, so a
+        multi-root tick walked past the deadline and SIGALRM killed every leg
+        behind it."""
+        import typer
+        from typer.testing import CliRunner
+
+        from fno.pr_watch import cli as prcli
+
+        roots = [tmp_path / "a", tmp_path / "b", tmp_path / "c"]
+        for root in roots:
+            root.mkdir()
+        scanned, lines = self._arm_watchdog_tick(monkeypatch, tmp_path, roots)
+
+        # A floor larger than the whole tick: every root is unaffordable after
+        # the first check, so the loop must stop rather than scan all three.
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "60")
+        monkeypatch.setattr(prcli, "_RECOVERY_ROOT_FLOOR_S", 10_000.0)
+
+        app = typer.Typer()
+        app.command()(prcli.tick)
+        result = CliRunner().invoke(app, [])
+
+        assert result.exit_code == 0, result.output
+        # The positive marker first. `scanned == []` is an ABSENCE, and a tick
+        # that never reached this loop produces the same empty list - which is
+        # exactly what an unpatched roster leg did until the fixture above
+        # closed it. Assert the break actually fired before trusting the zero.
+        assert any(
+            "Codex recovery scan stopped after 0 root(s)" in line for line in lines
+        ), f"the loop never reached its budget check; tick said: {lines}; out={result.output!r}"
+        assert scanned == [], "the loop scanned a root it had no budget for"
+
+    def test_recovery_root_loop_scans_every_root_when_the_budget_holds(
+        self, monkeypatch, tmp_path
+    ):
+        """The mirror: an ample budget must not lose a root."""
+        import typer
+        from typer.testing import CliRunner
+
+        from fno.pr_watch import cli as prcli
+
+        roots = [tmp_path / "a", tmp_path / "b", tmp_path / "c"]
+        for root in roots:
+            root.mkdir()
+        scanned, lines = self._arm_watchdog_tick(monkeypatch, tmp_path, roots)
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "600")
+
+        app = typer.Typer()
+        app.command()(prcli.tick)
+        result = CliRunner().invoke(app, [])
+
+        assert result.exit_code == 0, result.output
+        assert [str(p) for p in scanned] == [str(r) for r in roots], (
+            f"tick said: {lines}; out={result.output!r}"
+        )
 
     def test_watchdog_tick_publishes_a_refused_recovery_once(self, monkeypatch, tmp_path):
         """An unusable recoverable is refound every tick until it ages out.

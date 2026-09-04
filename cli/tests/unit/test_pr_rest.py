@@ -377,6 +377,23 @@ def _rate_limit_runner(core_remaining=None):
     return r
 
 
+def test_the_reason_diagnostic_read_is_bounded_below_any_callers_budget():
+    """The bucket read only DECORATES an error the caller already has, so it
+    may never cost more than the read it explains. It passed its own 30s
+    default, which wins over the runner's, so a read_pr_state declaring 3s
+    spent 3s failing and up to 30s more explaining why."""
+    seen = {}
+
+    def r(cmd, cwd=None, timeout=None):
+        seen["timeout"] = timeout
+        return Result(1, "", "instrument unreadable")
+
+    _rest._rest_reason(Result(1, "", "gh: API rate limit exceeded (HTTP 403)"), runner=r)
+
+    assert seen["timeout"] == _rest._REASON_DIAGNOSTIC_TIMEOUT_S
+    assert seen["timeout"] < 30.0
+
+
 def test_verbatim_403_with_healthy_core_reads_secondary_and_carries_the_verdict():
     """The p0 fixture: the measured 403 body says only `API rate limit
     exceeded` (no `secondary` anywhere) while the exempt bucket answers

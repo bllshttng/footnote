@@ -17,7 +17,7 @@ _NON_STATE_CACHE_REASONS = {
     ("fno.claims.hostid", "machine_id"): "cache key is the process machine identity, not fno state",
     ("fno.graph._reconcile", "_gh_executable"): "cache key is tool discovery, not fno state",
     ("fno.agents.mux_spawn", "_codex_cli_version"): "cache key is tool version discovery, not fno state",
-    ("fno.agents.harness_map", "footnote_verbs"): "cache key is the shipped plugin surface, not fno state",
+    ("fno.agents.harness_map", "_shipped_verbs"): "cache key is the shipped plugin surface, not fno state",
     ("fno.agents.harness_map", "_carrier_vocab"): "cache key is the shipped package-data table, not fno state",
 }
 

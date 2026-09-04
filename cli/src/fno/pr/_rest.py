@@ -78,6 +78,14 @@ class RestReason(str):
         return self
 
 
+#: The bucket read here only DECORATES an error the caller already has. At the
+#: 30s default it dwarfed it: a 3s `read_pr_state` spent 3s failing then 30s
+#: explaining, `_bucket_remaining`'s default beating the runner's. This number
+#: exceeds `PR_READ_FLOOR_S`, so the BRANCH is what bounds the overshoot: only
+#: a rate-limit error reaches the probe, and it returns fast.
+_REASON_DIAGNOSTIC_TIMEOUT_S = 5.0
+
+
 def _bucket_remaining(
     bucket: str,
     runner: Optional[Callable],
@@ -293,7 +301,9 @@ def _rest_reason(res, *, runner: Optional[Callable] = None, cwd: Optional[str] =
 
     if "rate limit" in text.lower():
         base = matched(lambda ln: "rate limit" in ln.lower())
-        remaining, _reset = _bucket_remaining("core", runner, cwd)
+        remaining, _reset = _bucket_remaining(
+            "core", runner, cwd, _REASON_DIAGNOSTIC_TIMEOUT_S
+        )
         if remaining == 0:
             return RestReason(
                 base + " | this is the CORE REST quota (the live exempt bucket"

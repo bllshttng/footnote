@@ -947,10 +947,27 @@ def test_query_missing_gh_is_retryable_availability_failure():
     assert raised.value.retryable is True
 
 
-def test_query_rate_limit_reader_forwards_timeout_to_bucket_probe():
+def test_the_bucket_probe_is_bounded_below_the_read_it_explains():
+    """The probe only DECORATES a failure the caller already holds, so it may
+    never cost what the read itself cost.
+
+    This assertion used to read ``[30.0]`` against a caller that also declared
+    30.0, and those two spellings produce the same number: the forwarded
+    budget and ``_bucket_remaining``'s own default were indistinguishable. The
+    bug hiding behind that ambiguity was real. A caller declaring 3s got a 30s
+    probe, because the helper's explicit default wins over the runner's
+    substitution, so one ``read_pr_state`` call could spend 33 seconds against
+    a declared 3.
+
+    The caller here declares 3.0 precisely so neither old explanation can
+    produce the observed number. Residual, recorded rather than hidden: a
+    caller declaring less than the ceiling still pays the ceiling, which is
+    bounded and small where 30 was neither.
+    """
     import json
 
     from fno.graph._reconcile import ReconcileError, query_pr_merge_state
+    from fno.pr import _rest
     from fno.pr._proc import Result
 
     probe_timeouts: list[float | None] = []
@@ -962,10 +979,11 @@ def test_query_rate_limit_reader_forwards_timeout_to_bucket_probe():
         return Result(1, "", "API rate limit exceeded")
 
     with pytest.raises(ReconcileError) as raised:
-        query_pr_merge_state(5, repo="o/r", runner=runner)
+        query_pr_merge_state(5, repo="o/r", runner=runner, timeout_s=3.0)
 
     assert raised.value.kind == "availability"
-    assert probe_timeouts == [30.0]
+    assert probe_timeouts == [_rest._REASON_DIAGNOSTIC_TIMEOUT_S]
+    assert probe_timeouts[0] < 30.0
 
 
 def test_query_file_cap_is_non_retryable_incomplete_evidence():

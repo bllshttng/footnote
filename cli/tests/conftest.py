@@ -112,9 +112,54 @@ def partition_pytest_nodeids(nodeids: list[str], spec: str) -> list[str]:
     return selected
 
 
+def _store_keeper_absent() -> bool:
+    """True when no ``fno-agents-worker`` binary can back the graph store.
+
+    Every graph read goes through a store keeper the client spawns from that
+    binary, so a test that reads the graph cannot run without it. The
+    `changed-smoke` CI job installs the Rust toolchain and never builds the
+    binary, while `smoke-pytest` builds it through `smoke-setup`. So these
+    tests pass in the full gate and fail in the changed subset for an absent
+    runtime rather than a defect, and a false red on an unrelated PR is worse
+    than no evidence.
+
+    NOT the ``find_dev_binary()`` the ``@requires_rust`` convention uses, and
+    the difference is load-bearing: that helper answers for ``fno-agents``,
+    which the full smoke shard DELETES so the parity suites skip. The worker
+    survives that delete on purpose, so keying on it would skip these tests
+    in the one job that can actually run them.
+    """
+    try:
+        from fno.graph.store import _worker_binary
+    except Exception:  # noqa: BLE001 - an unreadable probe never skips
+        return False
+    try:
+        return _worker_binary() is None
+    except Exception:  # noqa: BLE001 - same
+        return False
+
+
+#: Tests whose subject is reached only through a graph-store read. Each entry
+#: is a nodeid PREFIX (a file, or a file plus a class), so a new case inside a
+#: listed class is covered without a second edit here.
+_NEEDS_STORE_KEEPER = (
+    "tests/test_pr_watch_dispatch.py::TestDurableGrantExecution",
+    "tests/unit/test_cli_wrappers.py::test_get_one_id_never_invokes_the_binary",
+    "tests/unit/test_pr_closure_producer.py::test_supersede_keeps_the_human_reason",
+)
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Keep filed parallel racers on one worker without skipping them."""
+    """Keep filed parallel racers on one worker without skipping them, and
+    skip store-backed tests where no keeper binary can spawn."""
+    keeper_absent = _store_keeper_absent()
+    skip_no_keeper = pytest.mark.skip(
+        reason=(
+            "no fno-agents-worker binary, so the graph store keeper cannot "
+            "spawn; build it with `cargo build -p fno-agents`"
+        )
+    )
     for item in items:
         nodeid = item.nodeid.replace("\\", "/")
         serial_file = nodeid.split("::", 1)[0]
@@ -123,6 +168,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         ):
             item.add_marker(pytest.mark.serial)
             item.add_marker(pytest.mark.xdist_group(name="serial"))
+        if keeper_absent and nodeid.startswith(_NEEDS_STORE_KEEPER):
+            item.add_marker(skip_no_keeper)
     spec = os.environ.get("FNO_PYTEST_SHARD", "").strip()
     if spec:
         items[:] = [

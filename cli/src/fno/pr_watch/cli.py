@@ -249,6 +249,11 @@ _WAKE_APPLY_FLOOR_S = 200
 #: sweeps from scratch, there is no partial state to lose.
 _STRANDED_FLOOR_S = 10.0
 
+#: 0.8s per root measured 2026-09-02 over 18 roots and 3113 rollouts (14.9s
+#: for the leg); the floor carries headroom for a fatter-than-mean root.
+#: Skipping under it costs nothing - the next tick starts the scan over.
+_RECOVERY_ROOT_FLOOR_S = 3.0
+
 
 class TickDeadlineExceeded(BaseException):
     """The tick's wall-clock deadline fired; the phase marker names where.
@@ -643,7 +648,22 @@ def tick() -> None:
                                     },
                                 )
                         recovery_scans = []
+                        recovery_roots_done = 0
                         for recovery_root in roots:
+                            # Per root, not once before the loop: the stranded
+                            # sweep learned this from a review finding and this
+                            # leg never got the same check.
+                            recovery_left = deadline - (time.monotonic() - started)
+                            if recovery_left < _RECOVERY_ROOT_FLOOR_S:
+                                log.info(
+                                    "pr-watch: Codex recovery scan stopped after %d "
+                                    "root(s), %.1fs left, under the %.0fs a scan "
+                                    "costs - remaining roots retry next tick",
+                                    recovery_roots_done,
+                                    recovery_left,
+                                    _RECOVERY_ROOT_FLOOR_S,
+                                )
+                                break
                             try:
                                 (
                                     recovery_payload,
@@ -666,6 +686,10 @@ def tick() -> None:
                                 )
                                 continue
                             recovery_scans.append((recovery_root, recovery_scan))
+                            # After the work, like the stranded sweep's own
+                            # counter: a root that raised or refused was
+                            # attempted, never done.
+                            recovery_roots_done += 1
                         for recovery_root, recovery_scan in recovery_scans:
                             results = _wd.apply_recoverable(
                                 recovery_scan,
