@@ -1573,11 +1573,12 @@ mod tests {
                 .map(|claim| claim.state.as_str())
                 .unwrap_or("unmeasured")
         };
-        for harness in ["claude", "codex", "opencode", "pi", "cursor-agent", "grok"] {
+        for harness in ["claude", "codex", "opencode", "pi", "cursor-agent", "grok", "agy"] {
             assert_eq!(state(harness, "spawn"), "native", "{harness}");
         }
-        assert_eq!(state("agy", "spawn"), "capable");
         assert_eq!(state("gemini", "spawn"), "absent");
+        // The middle rung, kept asserted: real on the harness, no fno arm.
+        assert_eq!(state("gemini", "subagent_dispatch"), "capable");
         assert_eq!(state("claude", "review"), "native");
         assert_eq!(state("codex", "review"), "native");
         assert_eq!(state("claude", "mcp"), "unmeasured");
@@ -1638,7 +1639,7 @@ mod tests {
 
     #[test]
     fn a_row_without_a_features_table_loads_with_no_refusal() {
-        let stanza = "[harness.agy.features.spawn]\nstate = \"capable\"\n";
+        let stanza = "[harness.agy.features.spawn]\nstate = \"native\"\n";
         let stripped = CAPABILITY_TOML.replacen(stanza, "", 1);
         let contract = HarnessContract::parse(&stripped).unwrap();
         assert!(contract.capabilities("agy").unwrap().features.is_empty());
