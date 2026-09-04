@@ -1281,16 +1281,9 @@ def _spawn_receipt_identity(proc_stdout: Optional[str]) -> str:
 def _launch_harness_axis(launch: str, node_cwd: Optional[str] = None) -> Optional[str]:
     """The harness ``launch`` names, or None when nothing can answer.
 
-    ``provider`` on the spawn seam is the harness axis under an older spelling,
-    so most values answer for themselves. The exception is an ACCOUNT RECORD
-    (ccm, ccr): a real binary on PATH, not a harness, whose registry row names
-    the harness it runs. Reading through the row is what lets an account-pinned
-    spawn keep its alias on ``--harness`` while the command is spelled for the
-    harness that alias actually is.
-
-    None means unverifiable - an undeclared binary with no record - and an
-    unverifiable value is left alone rather than guessed at: it pins nothing and
-    triggers no disagreement refusal.
+    An ACCOUNT RECORD (ccm, ccr) is a real binary but not a harness, so it
+    answers through its registry row. None means unverifiable: it pins nothing
+    and triggers no disagreement refusal.
     """
     if not launch:
         return None
@@ -1369,14 +1362,8 @@ def _spawn_worker(
     # --provider selects the account/record (or a bare kind like "claude"); a
     # per-node or dispatch-time pin overrides the claude default. Layer-separate
     # from `harness` (the record's cli, which drives the resolver's substrate).
-    #
-    # x-374b: `prov` is no longer computed here. It used to be
-    # `(provider or "").strip() or "claude"`, decided BEFORE the resolver ran,
-    # so the launch binary and the command surface came from two different
-    # sources: an unpinned dispatch launched claude while `resolve_dispatch`
-    # read the stage table and spelled the command for codex. The specimen was a
-    # claude worker whose first user line was `$fno:target x-30c2`. Both now come
-    # off one `resolve_dispatch` below.
+    # NOT the launch harness. Deciding it here, one rung before the resolver,
+    # is what let an unpinned dispatch launch claude carrying codex syntax.
     launch = (provider or "").strip()
 
     # Capacity-grid deferral receiving end: the automatic dispatch callers pass
@@ -1437,11 +1424,8 @@ def _spawn_worker(
         is_unsafe_short_address,
     )
 
-    # One harness axis. `harness` is the explicit pin; `provider` is the same
-    # axis arriving under the older spelling, so it must reach the resolver too
-    # or the command is spelled for whatever the stage table says while the
-    # worker launches on `provider`. An account record (ccm/ccr) is not itself a
-    # harness, so it answers through its registry row.
+    # One axis: `provider` is the harness under an older spelling, so it must
+    # reach the resolver too or the command follows the stage table instead.
     launch_axis = _launch_harness_axis(launch, node_cwd)
     node_verb = (verb or "").strip() or None
     resolve_kwargs: dict = {
@@ -1466,17 +1450,14 @@ def _spawn_worker(
     target_cmd = resolved["command"]
     spawn_env = resolved.get("env") or {}
 
-    # The launch binary. An account record keeps its own alias (that IS the
-    # point of the record); everything else takes the resolver's answer, which
-    # already owns the builtin claude fallback the deleted `or "claude"` used to
-    # duplicate one rung too early.
+    # An account record keeps its alias; everything else takes the resolver's
+    # answer, which already owns the builtin claude fallback.
     prov = launch or resolved["harness"]
     if launch_axis and launch_axis != resolved["harness"]:
         raise SpawnError(
-            f"refusing to spawn {node_id}: the launch harness and the command "
-            f"surface disagree. --harness {prov!r} runs {launch_axis!r} while "
-            f"the resolved command is spelled for {resolved['harness']!r} "
-            f"({target_cmd!r}). Pass one axis, not two."
+            f"refusing to spawn {node_id}: --harness {prov!r} runs "
+            f"{launch_axis!r} but the command is spelled for "
+            f"{resolved['harness']!r} ({target_cmd!r}). Pass one axis."
         )
 
     cmd = [
@@ -1559,14 +1540,11 @@ def _spawn_worker(
         )
 
     def _receipt(short_id: str) -> str:
-        """One ``dispatch_spawned`` row per launch, then hand back the identity.
+        """One ``dispatch_spawned`` row per launch, then the identity back.
 
-        The spawner is the only place that knows the resolved argv, so the
-        receipt is emitted here rather than folded into the callers'
-        ``advance_dispatched`` rows: those name a node and an agent, and three
-        different dispatch doors (lane fill, auto-continue, active backlog) were
-        indistinguishable in the file. Best-effort via ``_emit``, so a journal
-        failure never wedges a launch that already happened.
+        Here because the spawner alone knows the resolved argv; the callers'
+        ``advance_dispatched`` rows left the four dispatch doors
+        indistinguishable. Best-effort: never wedge a launch that happened.
         """
         _emit(
             EVENT_SPAWNED,

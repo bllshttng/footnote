@@ -801,18 +801,11 @@ def _report_deprecated_dispatch_harness() -> None:
 def _report_band_routing() -> None:
     """Say when difficulty bands are routing nothing, and why.
 
-    ``config.routing.models`` is config-first by design: with no declared rows
-    ``resolve_grid`` records ``grid=no-inventory-declared`` and picks nothing,
-    so every banded plan lands on the ambient default. The band was computed
-    correctly and then never consulted, which reads as a routing bug rather
-    than an unset key.
-
-    ``model_routing.roles`` is a DIFFERENT axis - a per-role provider map the
-    spawn env applies - and having it set is exactly what makes an operator
-    read band routing as already on, so the line says so when both hold.
-
-    Advisory only: no threshold, no exit change. Same wrap as the sibling
-    reports; a report must never crash the diagnostic.
+    The grid is config-first: with no declared rows it records
+    ``grid=no-inventory-declared`` and picks nothing, so a band is computed
+    correctly and never consulted. ``model_routing.roles`` is a DIFFERENT axis,
+    and having it set is what makes that read as already on. Advisory only,
+    wrapped by the caller like its sibling reports.
     """
     from fno import route_resolve
 
@@ -832,8 +825,8 @@ def _report_band_routing() -> None:
         from fno.config import load_settings
 
         roles = getattr(getattr(load_settings(), "model_routing", None), "roles", None) or {}
-    except Exception:  # noqa: BLE001 - the roles note is a hint on top of the line
-        roles = {}
+    except Exception:  # noqa: BLE001 - the note is a hint on top of the line
+        pass
     if roles:
         line += (
             "\n      Note: model_routing.roles is set, but it routes by ROLE, "
