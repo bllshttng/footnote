@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import shutil
 import subprocess
 import tempfile
 import time
@@ -186,10 +185,6 @@ def _cgroup_ancestors(path: Path, mount: Path) -> list[Path]:
         if current == mount or current.parent == current:
             return ancestors
         current = current.parent
-
-
-def _fno_binary() -> str:
-    return shutil.which("fno") or shutil.which("fno-py") or "fno"
 
 
 def _root_pid_is_live(pid: int, pid_start: int | None) -> bool | None:
@@ -520,33 +515,28 @@ def _spawn_load_snapshot():
 
 
 def _roster_count() -> tuple[int | None, str | None]:
+    """Live registry rows, read in process.
+
+    This used to shell out to ``fno agents list --status live --json`` under a
+    5.0s budget. That read measured 8.5s at rest and 21.7s under load, so the
+    roster was always unavailable exactly when the reading mattered: the
+    report printed "roster unavailable" and then "unexplained processes:
+    unknown". ``load_registry`` answers the same question from the same file
+    in 0.42s, so there is no budget left to miss and no cache to age.
+    """
     try:
-        result = subprocess.run(
-            [_fno_binary(), "agents", "list", "--status", "live", "--json"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5.0,
-        )
-    except subprocess.TimeoutExpired:
-        return None, "roster unavailable: fno agents list timed out after 5.0s"
-    except OSError as exc:
-        return None, f"roster unavailable: {exc}"
-    if result.returncode != 0:
-        detail = (result.stderr or "").strip() or f"exit {result.returncode}"
-        return None, f"roster unavailable: {detail}"
-    try:
-        payload = json.loads(result.stdout)
-    except (TypeError, json.JSONDecodeError) as exc:
-        return None, f"roster unavailable: invalid JSON ({exc})"
-    if isinstance(payload, list):
-        return len(payload), None
-    if isinstance(payload, dict):
-        for key in ("agents", "rows", "workers", "items"):
-            rows = payload.get(key)
-            if isinstance(rows, list):
-                return len(rows), None
-    return None, "roster unavailable: JSON did not contain a row list"
+        from fno.agents.registry import load_registry
+        from fno.agents.spawn_gate import LIVE_STATUSES
+
+        rows = load_registry()
+    except Exception as exc:
+        return None, f"roster unavailable: registry unreadable ({exc})"
+    if not getattr(rows, "complete", True):
+        # An incomplete registry is a different fact from an unreadable one:
+        # the rows present are real but the count would undercount. Name the
+        # registry rather than a timeout that no longer happens.
+        return None, "roster unavailable: worker registry incomplete"
+    return sum(1 for row in rows if row.status in LIVE_STATUSES), None
 
 
 def capacity_verdict(load_snapshot: Any) -> str:
@@ -656,6 +646,7 @@ def _emit_result(
     json_output: bool,
     cause_only: bool = False,
     note: str | None = None,
+    live_roster_rows: int | None = None,
 ) -> NoReturn:
     capacity = "unknown"
     leak = "unknown"
@@ -689,6 +680,7 @@ def _emit_result(
         command_limit=command_limit,
         load_snapshot=load_snapshot,
     )
+    payload["live_roster_rows"] = live_roster_rows
     if note is not None:
         payload["degraded"] = note
     if json_output:
@@ -816,4 +808,5 @@ def footprint_command(
         reading,
         process_threshold=roster_count + DAEMON_ALLOWANCE,
         json_output=json_output,
+        live_roster_rows=roster_count,
     )

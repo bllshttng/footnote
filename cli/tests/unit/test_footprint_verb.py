@@ -33,13 +33,29 @@ def no_worker_roots(monkeypatch):
     )
 
 
-def _fake_runner(ps_output: str, roster: list[dict], calls: list[list[str]]):
+def _fake_runner(
+    monkeypatch, ps_output: str, roster: list[dict], calls: list[list[str]]
+):
+    """Fake the ``ps`` snapshot and pin the live roster the count reads.
+
+    The roster used to arrive over a ``fno agents list`` subprocess and now
+    comes from an in-process registry read, so the fake moves with it. A
+    subprocess other than ``ps`` is an assertion failure rather than a
+    silently faked roster: that is what proves the shell-out is gone.
+    """
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry",
+        lambda: [SimpleNamespace(status="live", **row) for row in roster],
+    )
+
     def run(argv, **kwargs):
         calls.append(list(argv))
         if argv[0] == "ps":
             kwargs["stdout"].write(ps_output)
             return subprocess.CompletedProcess(argv, 0)
-        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(roster), stderr="")
+        raise AssertionError(f"unexpected subprocess in a footprint run: {argv}")
 
     return run
 
@@ -475,20 +491,67 @@ def test_ac9_edge_cause_text_output_is_bounded(capsys) -> None:
     assert all("... (" in ln for ln in consumers)
 
 
-def test_ac9_edge_roster_read_is_bounded(monkeypatch) -> None:
-    # A hung `fno agents list` must reach the exit-4 unavailable-roster path,
-    # not block the verb (or a watcher invoking it) indefinitely.
+def test_ac1_hp_roster_count_reads_the_registry_in_process(monkeypatch) -> None:
+    # AC1-HP: the count comes from load_registry, not from a subprocess whose
+    # 8.5s-to-21.7s answer never fit the 5.0s budget it was given.
+    from types import SimpleNamespace
+
     from fno import doctor_footprint
 
-    def hung(*_args, **_kwargs):
-        raise subprocess.TimeoutExpired(cmd="fno agents list", timeout=5.0)
+    rows = [
+        SimpleNamespace(status="live"),
+        SimpleNamespace(status="busy"),
+        SimpleNamespace(status="exited"),
+    ]
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
 
-    monkeypatch.setattr(doctor_footprint.subprocess, "run", hung)
+    def no_subprocess(*_args, **_kwargs):
+        raise AssertionError("the roster count must not shell out")
+
+    monkeypatch.setattr(doctor_footprint.subprocess, "run", no_subprocess)
+
+    count, error = doctor_footprint._roster_count()
+
+    assert error is None
+    assert count == 2
+
+
+def test_ac1_edge_incomplete_registry_names_the_registry_not_a_timeout(
+    monkeypatch,
+) -> None:
+    # AC1-EDGE: the degraded note must name the registry. A "timed out" reason
+    # would describe a subprocess this path no longer runs.
+    from types import SimpleNamespace
+
+    from fno import doctor_footprint
+
+    class _Incomplete(list):
+        complete = False
+
+    rows = _Incomplete([SimpleNamespace(status="live")])
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
 
     count, error = doctor_footprint._roster_count()
 
     assert count is None
-    assert error is not None and "timed out" in error
+    assert error == "roster unavailable: worker registry incomplete"
+    assert "timed out" not in error
+
+
+def test_ac1_edge_unreadable_registry_degrades_with_a_named_reason(
+    monkeypatch,
+) -> None:
+    from fno import doctor_footprint
+
+    def boom():
+        raise OSError("graph.json is a directory")
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", boom)
+
+    count, error = doctor_footprint._roster_count()
+
+    assert count is None
+    assert error is not None and "registry unreadable" in error
 
 
 def test_ac9_edge_ps_output_with_invalid_utf8_degrades_not_crashes(monkeypatch) -> None:
@@ -579,6 +642,7 @@ def test_ac5_hp_json_reports_fleet_totals_and_cpu_shares(
         doctor_footprint.subprocess,
         "run",
         _fake_runner(
+            monkeypatch,
             """\
             PID PPID ELAPSED %CPU RSS COMMAND
             100 1 01:00:00 20.0 1024 fno-agents-worker --run
@@ -662,6 +726,7 @@ def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(
         doctor_footprint.subprocess,
         "run",
         _fake_runner(
+            monkeypatch,
             f"""\
             PID PPID ELAPSED %CPU RSS COMMAND
             {observer_pid} 1 01:00:00 20.0 1024 fno-py doctor footprint
@@ -702,6 +767,7 @@ def test_ac6_edge_cause_only_seeds_live_detached_registry_root(
         doctor_footprint.subprocess,
         "run",
         _fake_runner(
+            monkeypatch,
             """\
             PID PPID ELAPSED %CPU RSS COMMAND
             100 1 01:00:00 20.0 1024 opencode serve --detach
@@ -735,6 +801,7 @@ def test_ac6_edge_cause_only_refuses_root_missing_from_snapshot(
         doctor_footprint.subprocess,
         "run",
         _fake_runner(
+            monkeypatch,
             """\
             PID PPID ELAPSED %CPU RSS COMMAND
             100 1 01:00:00 20.0 1024 fno-agents-worker --run
@@ -779,6 +846,7 @@ def test_ac7_edge_short_lived_descendant_counts_in_fleet_cpu(
         doctor_footprint.subprocess,
         "run",
         _fake_runner(
+            monkeypatch,
             """\
             PID PPID ELAPSED %CPU RSS COMMAND
             100 1 01:00:00 20.0 1024 fno-agents-worker --run
@@ -805,6 +873,7 @@ def test_ac8_edge_descendants_do_not_consume_direct_process_threshold(
         doctor_footprint.subprocess,
         "run",
         _fake_runner(
+            monkeypatch,
             """\
             PID PPID ELAPSED %CPU RSS COMMAND
             100 1 01:00:00 20.0 1024 fno-agents-worker --run
@@ -836,6 +905,7 @@ def test_ac9_edge_cpu_share_uses_constrained_capacity(
         doctor_footprint.subprocess,
         "run",
         _fake_runner(
+            monkeypatch,
             """\
             PID PPID ELAPSED %CPU RSS COMMAND
             100 1 01:00:00 100.0 1024 fno-agents-worker --run
@@ -865,6 +935,7 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(
         doctor_footprint.subprocess,
         "run",
         _fake_runner(
+            monkeypatch,
             """\
             PID ELAPSED %CPU RSS COMMAND
             101 01:00:00 20.0 1024 fno mux serve
@@ -874,7 +945,6 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(
             calls,
         ),
     )
-    monkeypatch.setattr(doctor_footprint.shutil, "which", lambda name: "/usr/local/bin/fno")
 
     result = runner.invoke(app, ["doctor", "footprint"])
 
@@ -883,9 +953,10 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(
     assert "processes: 2" in result.stdout
     assert "unexplained processes: 0 (2 direct, roster explains 3)" in result.stdout
     assert "transient calls: 1" in result.stdout
-    assert [call for call in calls if call[0] in {"ps", "/usr/local/bin/fno"}] == [
+    # ps is the only subprocess left: the roster count reads the registry
+    # in process, so there is no second shell-out to budget.
+    assert [call for call in calls] == [
         ["ps", "-Ao", "pid,ppid,etime,%cpu,rss,command"],
-        ["/usr/local/bin/fno", "agents", "list", "--status", "live", "--json"],
     ]
 
 
@@ -902,6 +973,7 @@ def test_ac4_edge_capacity_over_exits_three_and_names_top_consumers(
         doctor_footprint.subprocess,
         "run",
         _fake_runner(
+            monkeypatch,
             """\
             PID ELAPSED %CPU RSS COMMAND
             201 02:00:00 80.0 1024 fno mux serve
@@ -911,7 +983,6 @@ def test_ac4_edge_capacity_over_exits_three_and_names_top_consumers(
             [],
         ),
     )
-    monkeypatch.setattr(doctor_footprint.shutil, "which", lambda name: "/usr/local/bin/fno")
 
     result = runner.invoke(app, ["doctor", "footprint"])
 
@@ -935,6 +1006,7 @@ def test_ac4_edge_unexplained_processes_get_their_own_exit(
         doctor_footprint.subprocess,
         "run",
         _fake_runner(
+            monkeypatch,
             """\
             PID ELAPSED %CPU RSS COMMAND
             211 02:00:00 10.0 1024 fno worker-a
@@ -944,7 +1016,6 @@ def test_ac4_edge_unexplained_processes_get_their_own_exit(
             [],
         ),
     )
-    monkeypatch.setattr(doctor_footprint.shutil, "which", lambda name: "/usr/local/bin/fno")
 
     result = runner.invoke(app, ["doctor", "footprint"])
 
@@ -959,24 +1030,26 @@ def test_ac5_edge_roster_failure_degrades_the_threshold_not_the_reading(
     monkeypatch, no_worker_roots
 ) -> None:
     """x-e040: the roster is an enrichment. On roster failure the measurement
-    still prints, with the threshold degraded away and the reason named - a
-    5s roster timeout under load is exactly when this reading matters. The
+    still prints, with the threshold degraded away and the reason named. The
     old contract killed the whole report (exit 4, no reading)."""
     from fno import doctor_footprint
 
     calls: list[list[str]] = []
 
-    def failed_roster(argv, **kwargs):
+    def ps_only(argv, **kwargs):
         calls.append(list(argv))
         if argv[0] == "ps":
             kwargs["stdout"].write(
                 "PID ELAPSED %CPU RSS COMMAND\n101 01:00:00 20.0 1024 fno daemon\n"
             )
             return subprocess.CompletedProcess(argv, 0)
-        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="roster failed")
+        raise AssertionError(f"unexpected subprocess in a footprint run: {argv}")
 
-    monkeypatch.setattr(doctor_footprint.subprocess, "run", failed_roster)
-    monkeypatch.setattr(doctor_footprint.shutil, "which", lambda name: "/usr/local/bin/fno")
+    def unreadable_registry():
+        raise OSError("registry is a directory")
+
+    monkeypatch.setattr(doctor_footprint.subprocess, "run", ps_only)
+    monkeypatch.setattr("fno.agents.registry.load_registry", unreadable_registry)
     _pin_load(monkeypatch, status="within")
     _pin_capacity(monkeypatch, 4)
 
@@ -987,10 +1060,8 @@ def test_ac5_edge_roster_failure_degrades_the_threshold_not_the_reading(
     assert "unexplained processes: unknown" in result.stdout
     assert "processes:" in result.stdout
     assert "degraded: roster unavailable" in result.stdout
-    assert [call for call in calls if call[0] in {"ps", "/usr/local/bin/fno"}] == [
-        ["ps", "-Ao", "pid,ppid,etime,%cpu,rss,command"],
-        ["/usr/local/bin/fno", "agents", "list", "--status", "live", "--json"],
-    ]
+    # The roster no longer costs a subprocess: ps is the only one left.
+    assert [call[0] for call in calls] == ["ps"]
 
 
 def test_ac7_edge_json_contains_thresholds_and_exit_meaning(
@@ -1004,6 +1075,7 @@ def test_ac7_edge_json_contains_thresholds_and_exit_meaning(
         doctor_footprint.subprocess,
         "run",
         _fake_runner(
+            monkeypatch,
             """\
             PID ELAPSED %CPU RSS COMMAND
             301 00:00:01 92.0 1024 fno --version
@@ -1012,7 +1084,6 @@ def test_ac7_edge_json_contains_thresholds_and_exit_meaning(
             [],
         ),
     )
-    monkeypatch.setattr(doctor_footprint.shutil, "which", lambda name: "/usr/local/bin/fno")
 
     result = runner.invoke(app, ["doctor", "footprint", "--json"])
 
