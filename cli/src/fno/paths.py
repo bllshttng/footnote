@@ -223,34 +223,23 @@ def resolve_canonical_repo_root() -> Path:
     return resolve_repo_root()
 
 
-# ---------------------------------------------------------------------------
-# Project spaces: the per-repository state root OUTSIDE any checkout
-# ---------------------------------------------------------------------------
-#
-# Project state leaves the checkout. Cross-worktree state (events, claims,
-# kings, plans, inbox, status sinks) lives at the space root; per-worktree
-# state (target-state.md, run-log, codemap, scratchpad) lives under
-# ``worktrees/<name>/``. The only file left in a checkout is
-# ``.fno/config.toml``, which is project configuration a team commits, the
-# same way ``.claude/settings.json`` is. Keying on the CANONICAL root (the
-# git common dir's checkout) makes every worktree of one repo resolve to ONE
-# space, so the per-file ``.fno`` symlink dance in setup-worktree.sh and the
-# target-start heal retire with this move.
+# Project spaces: the per-repository state root OUTSIDE any checkout.
+# Cross-worktree state sits at the space root, session-keyed state under
+# ``worktrees/<name>/``; a checkout keeps only ``.fno/config.toml``. Keying
+# on the CANONICAL root gives every worktree of one repo ONE space.
 
 
 def space_slug(canonical_root: Path) -> str:
     """The per-repo space key: ``<basename>-<first 8 hex of sha256(path)>``.
 
-    The hash disambiguates two same-named checkouts under different roots;
-    the basename keeps the directory human-readable. Pure so both languages
-    can mirror it byte for byte (``fno-agents::paths``).
+    Mirrored byte for byte in ``fno-agents::paths`` (a golden-value test on
+    each side pins the format).
     """
     digest = hashlib.sha256(str(canonical_root).encode("utf-8")).hexdigest()[:8]
     return f"{canonical_root.name}-{digest}"
 
 
 def _canonical_for(root: Path) -> Path:
-    """The canonical root behind ``root``, or itself when it is canonical."""
     canonical = resolve_canonical_worktree(root)
     if canonical is not None:
         return canonical.resolve()
@@ -258,8 +247,7 @@ def _canonical_for(root: Path) -> Path:
 
 
 def spaces_root() -> Path:
-    """Where every space lives: ``FNO_SPACES_DIR``, else
-    ``config.paths.spaces_dir``, else ``<state_dir>/spaces``."""
+    """``FNO_SPACES_DIR`` > ``config.paths.spaces_dir`` > ``<state_dir>/spaces``."""
     explicit = os.environ.get("FNO_SPACES_DIR")
     if explicit:
         return _guard_state_path(Path(os.path.expanduser(explicit)).resolve())
@@ -271,24 +259,15 @@ def spaces_root() -> Path:
 
 
 def space_dir(project_root: Optional[Path] = None) -> Path:
-    """The space for one repository, keyed on its CANONICAL root.
-
-    Every worktree of a repo answers the same path, so cross-worktree
-    coordination state (claims, kings, events, inbox, plans) needs no
-    symlink. ``project_root`` re-derives the slug for a repo other than the
-    process cwd's (the king manifest resolves its owner this way).
-    """
+    """The space for the repo behind ``project_root`` (default: cwd's),
+    keyed on its CANONICAL root so every worktree answers the same path."""
     root = resolve_canonical_repo_root() if project_root is None else _canonical_for(project_root)
     return _guard_state_path(spaces_root() / space_slug(root))
 
 
 def worktree_space_dir(project_root: Optional[Path] = None) -> Path:
-    """The per-worktree slice under the space: ``<space>/worktrees/<name>/``.
-
-    Session-keyed state (``target-state.md``, ``run-log.jsonl``,
-    ``scratchpad``) answers here from a linked worktree; the canonical
-    checkout answers at the space root itself.
-    """
+    """The session-keyed slice: ``<space>/worktrees/<name>/`` from a linked
+    worktree, the space root from canonical."""
     root = project_root or resolve_repo_root()
     if root.resolve() != _canonical_for(root):
         return _guard_state_path(space_dir(root) / "worktrees" / root.name)

@@ -222,6 +222,14 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::loopcheck::run_loop_check(&args[1..]);
     }
 
+    // `state path` is the shell-hook surface for project-space path resolution
+    // (matched with `matches!` like `version`/`mail-inject`: a binary-direct
+    // verb that stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and so out
+    // of the client<->router parity guard). No daemon, resolved from cwd.
+    if matches!(verb, "state") {
+        return fno_agents::state_path::run(&args[1..]);
+    }
+
     // `probe-run`: see its own doc in loopcheck.rs. Direct dispatch.
     if verb == "probe-run" {
         return fno_agents::loopcheck::run_probe_run(&args[1..]);

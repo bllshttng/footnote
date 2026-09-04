@@ -333,19 +333,27 @@ pub fn worktree_repo_root(cwd: &Path) -> PathBuf {
 // Project spaces: the per-repository state root OUTSIDE any checkout
 // ---------------------------------------------------------------------------
 
-/// The state root spaces hang off: `FNO_AGENTS_HOME`'s parent (the same anchor
-/// `registry_path` uses), else `$HOME/.fno`. `config.paths.spaces_dir` is
-/// Python-only for now: relocation through `FNO_AGENTS_HOME` covers tests and
-/// isolation, and the default answers byte-identically to `fno.paths` (the
-/// slug contract below is a cross-language wire format).
-fn state_root_for_spaces() -> Option<PathBuf> {
-    if let Some(v) = std::env::var_os(HOME_ENV).filter(|v| !v.is_empty()) {
-        let home = PathBuf::from(&v);
-        return Some(home.parent().map(|p| p.to_path_buf()).unwrap_or(home));
+/// The spaces ROOT (the directory holding `<slug>` space dirs): `FNO_SPACES_DIR`
+/// verbatim -- it names the root itself, like Python `spaces_root` -- else
+/// `<FNO_AGENTS_HOME parent>/spaces`, else `$HOME/.fno/spaces`.
+/// `config.paths.spaces_dir` is Python-only for now: relocation through the
+/// env pins covers tests and isolation, and the default answers
+/// byte-identically to `fno.paths` (the slug contract below is a
+/// cross-language wire format).
+fn spaces_root_dir() -> PathBuf {
+    if let Some(v) = std::env::var_os("FNO_SPACES_DIR").filter(|v| !v.is_empty()) {
+        return PathBuf::from(v);
     }
-    std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
-        .map(|h| PathBuf::from(h).join(".fno"))
+    let state_root = if let Some(v) = std::env::var_os(HOME_ENV).filter(|v| !v.is_empty()) {
+        let home = PathBuf::from(&v);
+        home.parent().map(|p| p.to_path_buf()).unwrap_or(home)
+    } else {
+        std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .map(|h| PathBuf::from(h).join(".fno"))
+            .unwrap_or_else(|| PathBuf::from(".fno"))
+    };
+    state_root.join("spaces")
 }
 
 /// The per-repo space key: `<basename>-<first 8 hex of sha256(path)>`.
@@ -367,10 +375,7 @@ pub fn space_slug(canonical_root: &Path) -> String {
 /// (claims, events, kings) resolves here; mirrors Python `paths.space_dir`.
 pub fn space_dir(cwd: &Path) -> PathBuf {
     let root = canonical_repo_root(cwd).unwrap_or_else(|| worktree_repo_root(cwd));
-    state_root_for_spaces()
-        .unwrap_or_else(|| PathBuf::from(".fno"))
-        .join("spaces")
-        .join(space_slug(&root))
+    spaces_root_dir().join(space_slug(&root))
 }
 
 /// The per-worktree slice: `<space>/worktrees/<name>/` from a linked
@@ -380,9 +385,11 @@ pub fn space_dir(cwd: &Path) -> PathBuf {
 pub fn worktree_space_dir(cwd: &Path) -> PathBuf {
     let root = worktree_repo_root(cwd);
     match canonical_repo_root(cwd) {
-        Some(canonical) if canonical != root => space_dir(cwd)
-            .join("worktrees")
-            .join(root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+        Some(canonical) if canonical != root => space_dir(cwd).join("worktrees").join(
+            root.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ),
         _ => space_dir(cwd),
     }
 }
@@ -410,7 +417,16 @@ pub fn migrate_from_checkout(old: &Path, new: &Path) -> bool {
     let marker = old.parent().map(|p| p.join("MOVED-TO"));
     if let Some(marker) = marker {
         if !marker.exists() {
-            let _ = std::fs::write(&marker, format!("{}\n", new.parent().map(|p| p.to_path_buf()).unwrap_or_default().display()));
+            let _ = std::fs::write(
+                &marker,
+                format!(
+                    "{}\n",
+                    new.parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_default()
+                        .display()
+                ),
+            );
         }
     }
     true
@@ -654,6 +670,10 @@ mod tests {
         assert_eq!(slug, space_slug(p), "same root mints the same slug");
         let other = Path::new("/tmp/other/whatever");
         assert_ne!(slug, space_slug(other), "a different root must not collide");
+        // Golden value pinning the cross-language wire format: Python
+        // `space_slug` is the same sha256 prefix, and the two languages must
+        // mint the SAME directory. Change one and check the other.
+        assert_eq!(space_slug(Path::new("/repos/web")), "web-059f3dd5");
     }
 
     #[test]
@@ -671,7 +691,7 @@ mod tests {
         git(&main, &["config", "user.email", "t@t"]);
         git(&main, &["config", "user.name", "t"]);
         git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
-        let linked = main.join(".claude").join("worktrees").join("bar");
+        let linked = base.join("bar");
         std::fs::create_dir_all(linked.parent().unwrap()).unwrap();
         git(
             &main,
