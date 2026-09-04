@@ -305,12 +305,10 @@ def _fleet_snapshot() -> tuple[Any, Optional[list], int]:
 def _fleet_cost(reading: Any, rows: Optional[list]) -> tuple[float, float, int, str]:
     """Per-lane CPU cores and GB, measured from the fleet's own attributed
     footprint over the live roster; the documented seed when no row is live."""
-    if reading is None:
-        return SEED_PER_LANE_CORES, SEED_PER_LANE_GB, 0, "seed (footprint unavailable)"
-    count = len(rows) if rows else 0
+    count = 0 if reading is None else len(rows or ())
     if not count:
-        seed = "seed (no live roster rows to measure)"
-        return SEED_PER_LANE_CORES, SEED_PER_LANE_GB, 0, seed
+        why = "footprint unavailable" if reading is None else "no live roster rows to measure"
+        return SEED_PER_LANE_CORES, SEED_PER_LANE_GB, 0, f"seed ({why})"
     per_cpu = max(0.01, reading.fleet_cpu_cores / count)
     per_gb = max(0.01, reading.rss_gb / count)
     return per_cpu, per_gb, count, "measured from the live roster's attributed footprint"
