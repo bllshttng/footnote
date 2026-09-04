@@ -184,6 +184,14 @@ The optional OpenRouter snapshot can supply a percentile for a row whose `band` 
 
 `fno config doctor` checks the resolved posture before a worker is launched. It reports a substrate/provider pair the spawn seam cannot honor. It also probes whether THIS session can write the claim store, by writing a real file there and removing it. A hand-started session cannot receive a per-spawn grant, so that probe is the only thing covering it. A spawned worker is covered instead by the computed `--add-dir` set (see [coordination.md](coordination.md)).
 
+## Two keys, two axes
+
+`[[routing.models]]` is the band inventory the difficulty grid reads (`route_resolve.resolve_grid`). `model_routing.roles` is the per-role provider map spawn-env applies. They are different axes and neither seeds the other.
+
+The grid stays config-first, so an undeclared inventory routes nothing: `resolve_grid` records `grid=no-inventory-declared`, which the `dispatch_spawned` receipt carries, and every banded plan lands on the ambient default. Having `model_routing.roles` set does not change that, and is exactly what makes an undeclared inventory read as working. `fno config doctor` prints a `band routing inactive:` line when the inventory is undeclared, and names the roles key as the other axis when it is set.
+
+Open ruling: whether roles should seed the inventory, or whether the two keys stay separate for good. Until it is made, the doctor line is what keeps the gap visible.
+
 ## `fno config route` - legibility + on-the-fly switching
 
 Six verbs over the same machinery (`model_routing.py` stays the single source of the env-var contract):

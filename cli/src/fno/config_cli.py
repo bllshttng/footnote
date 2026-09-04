@@ -608,6 +608,10 @@ def doctor_cmd(
         _report_deprecated_dispatch_harness()
     except Exception:  # noqa: BLE001 - advisory, same wrap as the three above
         pass
+    try:
+        _report_band_routing()
+    except Exception:  # noqa: BLE001 - advisory, same wrap as the four above
+        pass
     raise typer.Exit(rc)
 
 
@@ -792,6 +796,50 @@ def _report_deprecated_dispatch_harness() -> None:
             f"      Migrate: fno config set agents.profiles.target.provider {reads_as}{scope_flag} && "
             f"fno config unset dispatch.harness{scope_flag}"
         )
+
+
+def _report_band_routing() -> None:
+    """Say when difficulty bands are routing nothing, and why.
+
+    ``config.routing.models`` is config-first by design: with no declared rows
+    ``resolve_grid`` records ``grid=no-inventory-declared`` and picks nothing,
+    so every banded plan lands on the ambient default. The band was computed
+    correctly and then never consulted, which reads as a routing bug rather
+    than an unset key.
+
+    ``model_routing.roles`` is a DIFFERENT axis - a per-role provider map the
+    spawn env applies - and having it set is exactly what makes an operator
+    read band routing as already on, so the line says so when both hold.
+
+    Advisory only: no threshold, no exit change. Same wrap as the sibling
+    reports; a report must never crash the diagnostic.
+    """
+    from fno import route_resolve
+
+    inventory = route_resolve.resolve_inventory()
+    if inventory.declared:
+        return
+    names = ", ".join(sorted(inventory.rows)) or "none"
+    line = (
+        "band routing inactive: config.routing.models is undeclared, so "
+        "difficulty bands never pick a lane.\n"
+        f"      The built-in rows keep a tier request answerable: {names}\n"
+        "      Declare [[routing.models]] rows to activate "
+        "(docs/architecture/role-based-model-routing.md)"
+    )
+    roles = {}
+    try:
+        from fno.config import load_settings
+
+        roles = getattr(getattr(load_settings(), "model_routing", None), "roles", None) or {}
+    except Exception:  # noqa: BLE001 - the roles note is a hint on top of the line
+        roles = {}
+    if roles:
+        line += (
+            "\n      Note: model_routing.roles is set, but it routes by ROLE, "
+            "not by band."
+        )
+    typer.echo(line)
 
 
 @app.command("active-backlog")
