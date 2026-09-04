@@ -2586,20 +2586,20 @@ class TestTickRecordsAndDeadline:
             lines.append(f"stage:{name}")
             return value
 
+        # The arming gate is scaffolding here, not the subject: these tests
+        # are about the recovery-root budget INSIDE the lane. Reading it off
+        # MagicMock truthiness made the whole suite depend on a gate that
+        # answered True locally and False on CI, which skipped the lane and
+        # left both tests reading an empty scan for a reason neither names.
+        # `lane_armed` keeps its own direct coverage in test_agents_watchdog.
+        # The real verdict still goes in the trace, so the divergence stays
+        # visible rather than being papered over.
         real_lane_armed = watchdog.lane_armed
-
-        def _armed_spy(s):
-            armed = real_lane_armed(s)
-            return _stage(
-                f"lane_armed={armed} type={type(s).__name__} "
-                f"wd={getattr(s.recovery, 'watchdog', '<none>')!r} "
-                f"rec={getattr(s.recovery, 'enabled', '<none>')!r} "
-                f"auto={getattr(s.autonomy, 'enabled', '<none>')!r} "
-                f"same={s is settings}",
-                armed,
-            )
-
-        monkeypatch.setattr(watchdog, "lane_armed", _armed_spy)
+        monkeypatch.setattr(
+            watchdog,
+            "lane_armed",
+            lambda s: _stage(f"lane_armed(real)={real_lane_armed(s)} forced=True", True),
+        )
         monkeypatch.setattr(
             uw,
             "build_report",
