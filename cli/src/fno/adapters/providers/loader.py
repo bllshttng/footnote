@@ -491,9 +491,8 @@ def record_harness(record_id: str, repo_root: Path | None = None) -> str | None:
 
     None means the registry ANSWERED and had nothing: no such record, or one
     with no harness field. An unreadable config RAISES, because merging the two
-    let a config typo silently disarm the spawn seam's one-axis guard. A quota
-    probe may keep probing on a broken config; the seam may not. Each caller
-    wraps to its own posture.
+    let a config typo disarm the spawn seam's one-axis guard. Each caller wraps
+    to its own posture.
     """
     rec = load_providers(repo_root=repo_root).by_id.get(record_id)
     return (getattr(rec, "harness", "") or "").strip() or None

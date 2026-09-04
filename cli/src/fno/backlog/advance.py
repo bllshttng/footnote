@@ -1283,8 +1283,7 @@ def _launch_harness_axis(launch: str, node_cwd: Optional[str] = None) -> Optiona
 
     An ACCOUNT RECORD (ccm, ccr) is a real binary but not a harness, so it
     answers through its registry row. None means unverifiable: pins nothing.
-
-    A record may name a roster harness with no capability row (hermes,
+    A record may also name a roster harness with no capability row (hermes,
     openclaw). The resolver refuses those, so an answer it cannot honor is as
     unverifiable as no answer and degrades the same way.
     """
@@ -1360,8 +1359,8 @@ def _spawn_worker(
     # --provider selects the account/record (or a bare kind like "claude"); a
     # per-node or dispatch-time pin overrides the claude default. Layer-separate
     # from `harness` (the record's cli, which drives the resolver's substrate).
-    # NOT the launch harness: defaulting it here, one rung before the
-    # resolver, launched claude carrying codex syntax.
+    # NOT the launch harness: defaulting it here, a rung before the resolver,
+    # launched claude carrying codex syntax.
     launch = (provider or "").strip()
 
     # Capacity-grid deferral receiving end: the automatic dispatch callers pass
@@ -1372,8 +1371,8 @@ def _spawn_worker(
     # there instead and arrive already pinned - on a grid decline the pin is the
     # placement harness. An explicit harness therefore skips this consult: under
     # it the grid could pick a harness the caller's placement did not key for.
-    # A caller that resolved the grid itself hands its reason in: the consult
-    # below is skipped under an explicit harness and would otherwise blank it.
+    # A caller that resolved the grid hands its reason in: the consult below
+    # is skipped under an explicit harness and would otherwise blank it.
     grid_why: Optional[str] = grid_reason
     if harness is None:
         grid_harness, grid_model, grid_why = _grid_lane_for(node, model=model, provider=provider)
@@ -1560,7 +1559,7 @@ def _spawn_worker(
                 f"{(proc.stdout or proc.stderr or '').strip()[:200]}"
             )
         # A bare 8-hex id aimed at codex is a 65.5-second timestamp bucket,
-        # not an address: refuse by shape instead of binding a worker to the
+        # not an address: refuse by shape rather than bind a worker to the
         # wrong session (ruling d-513d9d22, is_unsafe_short_address).
         if is_unsafe_short_address(
             launch_identity, (resolved.get("harness") or "").strip() or None
@@ -1571,7 +1570,7 @@ def _spawn_worker(
             )
     # One row per launch: only the spawner knows the resolved argv, and the
     # callers' advance_dispatched rows left the four doors indistinguishable.
-    # After the guards, so a receipt is proof of a launch.
+    # After the guards, so the row is proof of a launch that happened.
     _emit(
         EVENT_SPAWNED,
         {
@@ -1760,13 +1759,11 @@ def _grid_lane_for(
 def _lane_harness(eff_provider: Optional[str], node_cwd: Optional[str] = None) -> str:
     """Resolve a lane's dispatch provider to the harness the worker will run.
 
-    One leg, shared with the spawn seam: a hardcoded non-claude set here was a
-    second answer to `_spawn_worker`'s question, and it read every undeclared
-    harness as claude.
-
-    ``node_cwd`` scopes the read to the SAME repo the spawn seam reads. Without
-    it a project with local account records places for claude while the spawn
-    resolves codex, and the one-axis guard then skips the lane every tick.
+    One leg, shared with the spawn seam: a hardcoded non-claude set here read
+    every undeclared harness as claude. ``node_cwd`` scopes the read to the
+    SAME repo the seam reads, or a project with local account records places
+    for claude while the spawn resolves codex, and the one-axis guard then
+    skips the lane every tick.
     """
     return _launch_harness_axis((eff_provider or "").strip(), node_cwd) or "claude"
 

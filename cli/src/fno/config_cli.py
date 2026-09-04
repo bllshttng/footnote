@@ -585,10 +585,10 @@ def doctor_cmd(
     from fno.setup.doctor import run_doctor
 
     rc = run_doctor()
-    # Every report is advisory and best-effort: one that fails never crashes
-    # the diagnostic. The post-merge line runs first so bare doctor shows the
-    # gap without remembering the flag (Open Question 1). One wrapper, so the
-    # next report is a name in this tuple rather than a sixth copy of it.
+    # Every report is advisory: one that fails never crashes the diagnostic.
+    # The post-merge line runs first so bare doctor shows the gap without
+    # remembering the flag (Open Question 1). One wrapper, so the next report
+    # is a name in this tuple rather than a sixth copy of it.
     for report in (
         lambda: typer.echo(post_merge_readiness(_repo_root()).summary_line()),
         _report_gates,
@@ -791,9 +791,8 @@ def _report_band_routing() -> None:
     """Say when difficulty bands are routing nothing, and why.
 
     The grid is config-first: with no declared rows it records
-    ``grid=no-inventory-declared``, so a band is computed correctly and never
-    consulted. ``model_routing.roles`` is a DIFFERENT axis; having it set is
-    what makes that read as already on.
+    ``grid=no-inventory-declared``, so a band is computed and never consulted.
+    ``model_routing.roles`` is a DIFFERENT axis; having it set reads as already on.
     """
     from fno import route_resolve
     from fno.config import load_settings

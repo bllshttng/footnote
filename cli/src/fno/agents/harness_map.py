@@ -644,11 +644,10 @@ def normalize_command(command: str, harness: str) -> str:
         if "/" + verb in native:
             return cmd
         # The dispatch verb is footnote's own: a STATIC fact. The roster read
-        # below needs a resolvable plugin root, and a persistently unresolvable
-        # one returns an empty roster indistinguishable from "not ours" - which
-        # rendered `/target` for a codex worker and read as an ordinary
-        # pass-through. Not caching the empty answer stops that freezing; only
-        # this bypass makes the target family deterministic.
+        # below needs a resolvable plugin root, and an unresolvable one returns
+        # an empty roster indistinguishable from "not ours", which rendered
+        # `/target` for a codex worker as an ordinary pass-through. Not caching
+        # that empty answer stops it freezing; this bypass makes it impossible.
         if first_word in _TARGET_FAMILY:
             return "$fno:" + verb + cmd[len(first_word):]
         if verb not in footnote_verbs():
