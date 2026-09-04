@@ -2005,6 +2005,19 @@ fn empty_effort_is_rejected_but_opencode_values_are_passed_through() {
     assert!(validate_effort_for_spawn("opencode", "headless", Some("provider-value")).is_ok());
 }
 
+/// The effort deny set must be the same in both spelling maps: the Python
+/// lane (`effort_tokens`, `--substrate pane`) allows agy, so the Rust lane
+/// refusing it made one harness two-valued by substrate. agy carries its
+/// own `--effort (low|medium|high)`; gemini genuinely has no surface. The
+/// FLAG_OWNERS row for `--effort` names both maps.
+#[test]
+fn agy_effort_is_accepted_and_gemini_is_still_refused() {
+    assert!(validate_effort_for_spawn("agy", "headless", Some("high")).is_ok());
+    assert!(validate_effort_for_spawn("agy", "bg", Some("low")).is_ok());
+    assert!(validate_effort_for_spawn("agy", "pane", Some("nonsense-still-forwarded")).is_ok());
+    assert!(validate_effort_for_spawn("gemini", "headless", Some("high")).is_err());
+}
+
 /// ab-098967b4: render_list_json folds in the discovered lane (additive
 /// keys, schema 2); render_list_table appends a distinct DISCOVERED section.
 #[test]
