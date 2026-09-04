@@ -56,7 +56,10 @@ def _cell(row: dict, key: str) -> str:
     claim = row.get("features") or {}
     if not isinstance(claim, dict):
         return "unmeasured"
-    return str(claim.get(key, {}).get("state", "unmeasured"))
+    entry = claim.get(key)
+    if not isinstance(entry, dict):
+        return "unmeasured"
+    return str(entry.get("state", "unmeasured"))
 
 
 def render_matrix(table_path: Path) -> str:

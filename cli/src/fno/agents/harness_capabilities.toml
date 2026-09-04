@@ -485,7 +485,7 @@ resume = "native-session"
 # Launch-only: `ask` refuses (no steering over the HTTP API yet); the x-d9f9
 # journey covers spawn + one turn, not kill-survival, cold resume or review.
 # A caller routed onto thread by default got a session it could not talk to.
-# lane ships with its own unattended journey test; measured 2026-08-26.
+# False until the steering lane ships with its own unattended journey test; measured 2026-08-26.
 thread = false
 autonomous_pane = false
 route_on_pane = false
