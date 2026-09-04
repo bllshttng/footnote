@@ -1,9 +1,8 @@
 """The pr-watch tick's heal phase: the gate in front of the Rust drive loop.
 
-The loop lives in crates/fno-agents/src/heal.rs (`--all --apply`); this
-module resolves the binary and runs it once per project root. launchd starts
-the tick in ``/``, so each root is passed with ``--cwd``: gh resolves the
-repo from the working directory.
+The loop lives in crates/fno-agents/src/heal.rs (`--all --apply`); this module
+resolves the binary and runs it once per project root, each passed with
+``--cwd`` because launchd starts the tick in ``/``.
 """
 from __future__ import annotations
 
@@ -39,10 +38,7 @@ def run_heal_phase(
         resolve_binary = _resolve
     binary = resolve_binary()
     if binary is None:
-        log.warning(
-            "pr-watch: heal phase: the fno-agents binary was not found; "
-            "reinstall fno or set FNO_AGENTS_BIN"
-        )
+        log.warning("pr-watch: heal phase: the fno-agents binary was not found; reinstall fno or set FNO_AGENTS_BIN")
         return "no-binary"
     if not roots:
         # Never report a run that did not happen: an armed tick with no
