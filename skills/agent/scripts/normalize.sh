@@ -345,10 +345,13 @@ set +f
 # a failed read). Remedy for a stale install: `fno doctor update`.
 _normalize_is_family() {
   local _answer
+  # stdin is cut (</dev/null) so a STALE deployed fno that prompts for a
+  # missing parameter fails fast instead of wedging every normalize on an
+  # interactive read (CI found this: an old binary + an open stdin hung).
   if [[ -n "${FAMILY_RESOLVER:-}" ]]; then
-    _answer="$("$FAMILY_RESOLVER" "$1" 2>/dev/null)" || _answer=""
+    _answer="$("$FAMILY_RESOLVER" "$1" 2>/dev/null </dev/null)" || _answer=""
   else
-    _answer="$(fno dispatch family --message="$1" 2>/dev/null)" || _answer=""
+    _answer="$(fno dispatch family --message="$1" 2>/dev/null </dev/null)" || _answer=""
   fi
   case "$_answer" in
     family) return 0 ;;
