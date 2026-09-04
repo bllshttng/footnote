@@ -1018,6 +1018,20 @@ pub fn render_session_argv_with_ids(
 mod tests {
     use super::*;
 
+    /// Every harness whose spawn claim reads `native`: fno's own launch arm is
+    /// wired and journey-proven for each. agy joined when its keeper arm
+    /// shipped with cli/tests/agents/test_agy_spawn_journey.py. gemini stays
+    /// `absent`, which is what keeps the unseated leg from being vacuous.
+    const SEATED: &[&str] = &[
+        "claude",
+        "codex",
+        "opencode",
+        "pi",
+        "cursor-agent",
+        "grok",
+        "agy",
+    ];
+
     #[test]
     fn packaged_contract_is_complete_for_every_harness() {
         let contract = HarnessContract::packaged().unwrap();
@@ -1232,16 +1246,9 @@ mod tests {
         let claude = contract.capabilities("claude").unwrap();
         let codex = contract.capabilities("codex").unwrap();
         let opencode = contract.capabilities("opencode").unwrap();
-        // The thread seat derives from the features dimension: spawn reads
-        // `native` where fno's own launch arm is wired and journey-proven.
-        // agy joins that list here - it read `capable` for as long as it had
-        // a working `--conversation` resume and no fno arm, and the arm now
-        // ships with its own live journey
-        // (cli/tests/agents/test_agy_spawn_journey.py). gemini stays `absent`,
-        // which is what keeps the unseated leg from being vacuous.
-        for name in [
-            "claude", "codex", "opencode", "pi", "cursor-agent", "grok", "agy",
-        ] {
+        // The thread seat derives from the features dimension, never a stored
+        // bit; SEATED names who has one and why.
+        for name in SEATED {
             let claim = contract
                 .capabilities(name)
                 .unwrap()
@@ -1573,7 +1580,7 @@ mod tests {
                 .map(|claim| claim.state.as_str())
                 .unwrap_or("unmeasured")
         };
-        for harness in ["claude", "codex", "opencode", "pi", "cursor-agent", "grok", "agy"] {
+        for harness in SEATED {
             assert_eq!(state(harness, "spawn"), "native", "{harness}");
         }
         assert_eq!(state("gemini", "spawn"), "absent");
