@@ -3530,119 +3530,12 @@ pub fn remove_session_files(socket: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Marker held from socket bind until the server exits. It protects a freshly
-/// bound listener that cannot answer the query probe yet, so a concurrent
-/// starter cannot mistake that startup window for a stale socket.
-pub fn startup_sidecar_path(socket: &Path) -> PathBuf {
-    socket.with_extension("start")
-}
-
-pub fn remove_startup_guard(socket: &Path) {
-    let _ = std::fs::remove_file(startup_sidecar_path(socket));
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StartupGuard {
-    Owned,
-    ExistingLive,
-}
-
-fn startup_guard_live(pid: i32, recorded_start: Option<u64>) -> bool {
-    if pid <= 1 || pid_confirmed_dead(pid) || pid_is_zombie(pid) {
-        return false;
-    }
-    recorded_start.is_none_or(|start| pid_start_time(pid as u32) == Some(start))
-}
-
-fn create_startup_marker(marker: &Path) -> std::io::Result<()> {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let name = marker
-        .file_name()
-        .map(|value| value.to_string_lossy())
-        .unwrap_or_else(|| std::borrow::Cow::Borrowed("mux-start"));
-    let tmp = marker.with_file_name(format!(".{name}.tmp.{}.{}", std::process::id(), stamp));
-    let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp)?;
-        let pid = std::process::id();
-        let contents = match pid_start_time(pid) {
-            Some(start) => format!("{pid}:{start}"),
-            None => pid.to_string(),
-        };
-        file.write_all(contents.as_bytes())?;
-        file.sync_all()?;
-        std::fs::hard_link(&tmp, marker)
-    })();
-    let _ = std::fs::remove_file(&tmp);
-    result
-}
-
-/// Test seam, mirroring the FNO_E2E logging gate: when the env var is set,
-/// a racer pauses AFTER its create fails AlreadyExists and BEFORE it reads
-/// the marker, so a test can land the owner's exit inside that window
-/// deterministically and prove the read's NotFound retries instead of
-/// escaping. Unset in production, the read is a no-op.
-fn hold_start_marker_for_tests() {
-    if let Some(v) = std::env::var_os("FNO_TEST_MARKER_HOLD_MS") {
-        if let Ok(ms) = v.to_string_lossy().parse::<u64>() {
-            std::thread::sleep(Duration::from_millis(ms));
-        }
-    }
-}
-
-fn acquire_startup_guard(socket: &Path) -> std::io::Result<StartupGuard> {
-    let marker = startup_sidecar_path(socket);
-    loop {
-        match create_startup_marker(&marker) {
-            Ok(()) => return Ok(StartupGuard::Owned),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // The marker's owner removes it at exit. Between this racer's
-                // create-fails-AlreadyExists and the read below, that exit
-                // can land and take the marker along: NotFound there is the
-                // loop's signal to try owning the path itself, never an
-                // error. A bind race over a serving server used to escape
-                // bind_or_probe as Err(ENOENT) through exactly this seam.
-                hold_start_marker_for_tests();
-                let raw = match std::fs::read_to_string(&marker) {
-                    Ok(raw) => raw,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(read) => {
-                        return Err(std::io::Error::new(
-                            read.kind(),
-                            format!(
-                                "cannot read mux startup marker {}: {read}",
-                                marker.display()
-                            ),
-                        ))
-                    }
-                };
-                let Some((pid, recorded_start)) = parse_pid_sidecar(&raw) else {
-                    if !socket.exists() || matches!(probe_status(socket), ProbeOutcome::Dead) {
-                        // A peer reclaiming the same stale marker may have
-                        // removed it first; NotFound there is their success,
-                        // and the loop simply retries owning the path.
-                        let _ = std::fs::remove_file(&marker);
-                        continue;
-                    }
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("invalid mux startup marker {}", marker.display()),
-                    ));
-                };
-                if startup_guard_live(pid, recorded_start) {
-                    return Ok(StartupGuard::ExistingLive);
-                }
-                let _ = std::fs::remove_file(&marker);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
+// The startup-marker family lives in the child module below, named by the
+// question it answers; the file-budget gate keeps this over-budget file
+// shrink-only.
+mod startup_guard;
+use startup_guard::{acquire_startup_guard, StartupGuard};
+pub use startup_guard::{remove_startup_guard, startup_sidecar_path};
 
 pub const DEFAULT_SESSION: &str = "main";
 
@@ -3655,7 +3548,7 @@ pub enum BindOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProbeOutcome {
+pub(crate) enum ProbeOutcome {
     Alive,
     Dead,
     Unknown,
@@ -3918,7 +3811,7 @@ pub fn connect_unix_timeout(path: &Path, timeout: Duration) -> std::io::Result<U
 /// Probe the frozen pre-Attach query. A bare connect is not enough: a stale
 /// socket can still accept one residual connection after its listener dies. A
 /// timeout or a connected peer without `Info` is unknown, not proof of death.
-fn probe_status(path: &Path) -> ProbeOutcome {
+pub(crate) fn probe_status(path: &Path) -> ProbeOutcome {
     let mut uncertain = false;
     for attempt in 0..3 {
         if attempt > 0 {
