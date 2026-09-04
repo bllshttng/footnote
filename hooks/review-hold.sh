@@ -50,10 +50,19 @@ tool="$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null || true)"
 # The skill name arrives under different keys across harness versions; read the
 # ones that exist and normalize away a leading slash and a plugin prefix, so
 # `/fno:review`, `fno:review` and `review` are one name.
-skill_raw="$(printf '%s' "$input" \
+skill_name="$(printf '%s' "$input" \
   | jq -r '.tool_input.skill // .tool_input.name // .tool_input.command // empty' \
   2>/dev/null || true)"
-[[ -n "$skill_raw" ]] || exit 0
+[[ -n "$skill_name" ]] || exit 0
+# The Skill tool carries ARGUMENTS in their own field, so a name read alone
+# loses them. Reading only the name recorded `level=unset, level_source=fallback,
+# flags=[]` for every agent-invoked review, which is every autonomous one - the
+# terminal path was fine because a typed slash command carries its args inside
+# the command string. Rejoin them into the one string the parser expects.
+skill_args="$(printf '%s' "$input" \
+  | jq -r '.tool_input.args // .tool_input.arguments // empty' \
+  2>/dev/null || true)"
+skill_raw="$skill_name${skill_args:+ $skill_args}"
 skill="${skill_raw#/}"
 skill="${skill##*:}"
 skill="${skill%% *}"
