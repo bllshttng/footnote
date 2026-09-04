@@ -6,7 +6,6 @@
 
 use super::*;
 
-
 /// x-0d93: the dormant gate spends ONE subprocess per sweep, not one per
 /// idle row, and no row is dropped by a cap.
 ///

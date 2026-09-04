@@ -1479,7 +1479,10 @@ mod tests {
             ..thread_row()
         };
         assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
-        assert_eq!(keep_reason(&row, NOW, GRACE), Some(KeepReason::WorktreeDirty));
+        assert_eq!(
+            keep_reason(&row, NOW, GRACE),
+            Some(KeepReason::WorktreeDirty)
+        );
     }
 
     /// The `t-579e-discovery-pass` shape, kept as `Contradicted` for three

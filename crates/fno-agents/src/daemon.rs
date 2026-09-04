@@ -2669,10 +2669,19 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         let harness_session_gone = store_hits.as_ref().map(|m| m.is_empty());
         let transcript_fresh = if !is_live && past_grace {
             let harness_path = store_hits.as_deref().and_then(newest_by_mtime);
+            // The `log_path` fallback stays available only to rows a terminal
+            // status or a dead pid already condemned. The stamped-contradiction
+            // arm reads staleness ONLY from the session's own harness store,
+            // because a store lookup can come back empty for two reasons: the
+            // session ended, or the lookup was aimed at the wrong tree. That
+            // second one is real - a codex child that inherited a claude pane's
+            // CLAUDE_CONFIG_DIR is looked for under `<config_dir>/projects`,
+            // where codex never writes - and a stale `log_path` copy nobody
+            // updates would then read as positively stale for a LIVE session.
             match harness_path
                 .as_deref()
                 .and_then(|p| p.to_str())
-                .or_else(|| e.log_path.as_deref())
+                .or_else(|| terminal_or_dead.then_some(e.log_path.as_deref()).flatten())
             {
                 Some(path) => transcript_fresh_probe(Some(path), now, grace_secs),
                 None => None,
@@ -14354,7 +14363,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert!(reg.entries.iter().all(|e| e.name != "orph"));
     }
     mod gc_dormant_tests;
-
 
     /// AC6: a reaped row whose harness session refuses removal keeps the
     /// refusal in the report (surfaced, never swallowed), and the registry reap

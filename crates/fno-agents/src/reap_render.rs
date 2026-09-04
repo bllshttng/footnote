@@ -328,5 +328,4 @@ mod tests {
         let v: Value = serde_json::from_str(out.trim()).expect("valid json");
         assert_eq!(v["dry_run"], json!(false));
     }
-
 }
