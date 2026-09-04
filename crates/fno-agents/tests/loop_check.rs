@@ -7188,21 +7188,19 @@ fn done_pr_green_instead_of_awaiting_review_when_local_review_recovers_refusal()
 }
 
 #[test]
-fn done_awaiting_review_when_optional_app_refuses() {
+fn done_ends_unreviewed_not_awaiting_review_when_optional_app_refuses() {
+    // Old terminal: DoneAwaitingReview, a wait for a reviewer nobody owed.
+    // Unowed, the loop ends DoneUnreviewed naming the remedy; a repo with no
+    // optional lane also floors the local self-review, whose unattested
+    // reviewer blocks the stop before this terminal is ever reached.
     let d = green_refusal_decision(true, false);
     assert_eq!(d.decision, "allow");
-    assert_eq!(
-        d.termination_reason.as_deref(),
-        Some("DoneAwaitingReview"),
-        "an optional App refusal is neither silence nor review: {}",
-        d.message
-    );
-    assert!(
-        d.message.contains("chatgpt-codex-connector"),
-        "{}",
-        d.message
-    );
-    assert!(d.message.contains("refused"), "{}", d.message);
+    assert_eq!(d.termination_reason.as_deref(), Some("DoneUnreviewed"));
+    assert!(d.message.contains("chatgpt-codex-connector"));
+    assert!(d.message.contains("refused"));
+    assert!(d.message.contains("run the review verb at HEAD"));
+    assert!(d.message.contains("not owed, still not responding"));
+    assert!(d.message.contains("merge by hand"));
 }
 
 /// x-0eaf AC12-INV (negative): the coverage path must not read the `attended`

@@ -80,6 +80,37 @@ impl serde::Serialize for Freshness {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for Freshness {
+    /// The inverse of [`Freshness::as_label`], so an emitted verdict row can be
+    /// re-read by the language that wrote it. Anything unparseable - including
+    /// a label from a FUTURE variant - reads `Stale`, the fail-closed
+    /// direction: an unknown label must never count toward coverage.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let label = String::deserialize(d)?;
+        Ok(match label.as_str() {
+            "fresh" => Freshness::Fresh,
+            "carried_base_sync" => Freshness::CarriedBaseSync,
+            "carried_docs_only" => Freshness::CarriedDocsOnly,
+            "carried_subset" => Freshness::CarriedSubset,
+            "stale" => Freshness::Stale,
+            other => {
+                // "carried_interdiff(n=37, cap=100)" - the one parameterized
+                // label. A malformed render is not evidence of freshness.
+                let Some(rest) = other.strip_prefix("carried_interdiff(n=") else {
+                    return Ok(Freshness::Stale);
+                };
+                let Some((n, cap)) = rest.trim_end_matches(')').split_once(", cap=") else {
+                    return Ok(Freshness::Stale);
+                };
+                match (n.parse::<usize>(), cap.parse::<usize>()) {
+                    (Ok(lines), Ok(cap)) => Freshness::CarriedInterdiff { lines, cap },
+                    _ => Freshness::Stale,
+                }
+            }
+        })
+    }
+}
+
 /// One side's code-diff identity: the blake3 hash plus the sorted raw diff
 /// lines it was computed over. The hash answers "identical or not"; the line
 /// set also answers "is HEAD a subset of what was reviewed", which is the
@@ -596,6 +627,32 @@ mod tests {
         })
         .unwrap();
         assert_eq!(value, serde_json::json!("carried_interdiff(n=37, cap=100)"));
+    }
+
+    #[test]
+    fn every_label_round_trips_and_unknowns_fail_closed() {
+        // Deserialize is the inverse of as_label, so an emitted row is
+        // re-readable by the language that wrote it. A future or malformed
+        // label reads Stale: an unknown freshness must never count.
+        for fresh in [
+            Freshness::Fresh,
+            Freshness::CarriedBaseSync,
+            Freshness::CarriedDocsOnly,
+            Freshness::CarriedSubset,
+            Freshness::CarriedInterdiff {
+                lines: 37,
+                cap: 100,
+            },
+            Freshness::Stale,
+        ] {
+            let label = serde_json::to_value(&fresh).unwrap();
+            let back: Freshness = serde_json::from_value(label).unwrap();
+            assert_eq!(back, fresh, "{fresh:?} did not round-trip");
+        }
+        for unknown in ["carried_weekly", "carried_interdiff(n=x, cap=100)", ""] {
+            let back: Freshness = serde_json::from_value(serde_json::json!(unknown)).unwrap();
+            assert_eq!(back, Freshness::Stale, "{unknown:?} must not count");
+        }
     }
 
     #[test]

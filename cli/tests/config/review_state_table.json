@@ -1,0 +1,71 @@
+{
+  "comment": "The shared oracle for review_state derivation from per-reviewer verdicts. The Python test (_derive_review_state) and the Rust test (CoverageReport::review_state) both walk these rows, so the two derivations cannot drift on which refusals name the state. A verdict without a `required` key reads REQUIRED on both sides: that is every row emitted before the field existed.",
+  "rows": [
+    {
+      "name": "optional_refused_only_is_unreviewed",
+      "expected_state": "unreviewed",
+      "verdicts": [
+        {
+          "producer": "github_app",
+          "name": "chatgpt-codex-connector",
+          "verdict": "refused",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "required_refused_names_the_state",
+      "expected_state": "reviewer_refused",
+      "verdicts": [
+        {
+          "producer": "github_app",
+          "name": "chatgpt-codex-connector",
+          "verdict": "refused",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "local_refusal_is_always_owed",
+      "expected_state": "reviewer_refused",
+      "verdicts": [
+        {
+          "producer": "local_attestation",
+          "name": "code-review",
+          "verdict": "refused"
+        }
+      ]
+    },
+    {
+      "name": "reviewed_outranks_refused",
+      "expected_state": "reviewed",
+      "verdicts": [
+        {
+          "producer": "github_app",
+          "name": "chatgpt-codex-connector",
+          "verdict": "refused",
+          "required": true
+        },
+        {
+          "producer": "github_app",
+          "name": "gemini-code-assist",
+          "verdict": "reviewed",
+          "required": true,
+          "reviewed_sha": "head",
+          "freshness": "fresh"
+        }
+      ]
+    },
+    {
+      "name": "a_row_with_no_required_key_reads_required",
+      "expected_state": "reviewer_refused",
+      "verdicts": [
+        {
+          "producer": "github_app",
+          "name": "chatgpt-codex-connector",
+          "verdict": "refused"
+        }
+      ]
+    }
+  ]
+}
