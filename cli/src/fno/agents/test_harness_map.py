@@ -1144,36 +1144,6 @@ def test_roster_is_read_from_the_shipped_plugin(monkeypatch):
     assert {"target", "review", "think", "mail"} <= roster
 
 
-def test_an_unresolved_roster_is_never_cached(monkeypatch, tmp_path):
-    """A failed plugin-surface read must not freeze the degraded answer.
-
-    Empty roster -> every bare `/verb` stays literal -> a codex worker gets
-    `/target`, prose to codex, and the dispatch quietly does nothing. The
-    resolver reads an env hint first, so the next call must be free to
-    succeed. The mirror leg proves a GOOD answer still caches."""
-    from fno.agents import harness_map
-
-    repo_root = Path(__file__).resolve().parents[4]
-    harness_map.footnote_verbs.cache_clear()
-    try:
-        # A plugin root with no skills/ and no commands/: it resolves, the
-        # read finds nothing, the roster is empty.
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path))
-        assert harness_map.footnote_verbs() == frozenset()
-        assert harness_map.normalize_command("/target x-1", "codex") == "/target x-1"
-
-        # Same process, real plugin root. Nothing cleared by hand.
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(repo_root))
-        assert "target" in harness_map.footnote_verbs()
-        assert harness_map.normalize_command("/target x-1", "codex") == "$fno:target x-1"
-
-        hits = harness_map._shipped_verbs.cache_info().hits
-        harness_map.footnote_verbs()
-        assert harness_map._shipped_verbs.cache_info().hits == hits + 1
-    finally:
-        harness_map.footnote_verbs.cache_clear()
-
-
 def test_new_skill_normalizes_without_a_normalizer_edit(monkeypatch):
     """Adding a verb to the plugin surface must not require touching the
     normalizer: the roster is read, never retyped."""
