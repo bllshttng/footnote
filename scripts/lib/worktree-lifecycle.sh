@@ -526,22 +526,36 @@ case "${1:-status}" in
                 _wt_lock_acquired=1
                 break
             fi
+            # The inode is read BEFORE the pid on purpose: it is the identity
+            # of the directory whose stamp the pid read judges, and it is the
+            # only thing the steal below is allowed to take.
+            _observed_ino="$(ls -id "$_WT_SWEEP_LOCK" 2>/dev/null | awk '{print $1}')"
             _held_pid="$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true)"
             if [[ -n "$_held_pid" ]]; then
                 if kill -0 "$_held_pid" 2>/dev/null; then
                     echo "worktree cleanup: another sweep (pid $_held_pid) is already running; exiting (sweeps are idempotent, no need to overlap)" >&2
                     exit 0
                 fi
-                # Stamped but dead: genuinely stale, reclaim it. The reclaim
-                # must be ATOMIC. unlink+rmdir acts on a read that is already
-                # stale when it lands, and a peer reclaiming from the same
-                # stale read can rmdir the directory the winner of the race
-                # just re-created (empty, pre-pid) and acquire in that gap:
-                # two sweeps both holding the lock. rename moves the stale dir
-                # aside in one step, so the fixed path is always either the
-                # old stale lock or the winner's new one, never a vacuum.
-                if mv "$_WT_SWEEP_LOCK" "$_WT_SWEEP_LOCK.stale.$$" 2>/dev/null; then
-                    rm -rf "$_WT_SWEEP_LOCK.stale.$$"
+                # Stamped but dead: genuinely stale, reclaim it. The steal must
+                # take the directory that was OBSERVED. A blind removal (rmdir,
+                # or an unconditional mv-aside) acts on an observation that is
+                # already stale when it lands: the stale dir may have been
+                # replaced by a peer's fresh claim in between, and eating that
+                # is the ABA shape that ended with two sweeps both holding the
+                # lock. Compare the moved directory's inode against the one
+                # observed; anything else goes straight back.
+                mv "$_WT_SWEEP_LOCK" "$_WT_SWEEP_LOCK.stale.$$" 2>/dev/null || true
+                if [[ -d "$_WT_SWEEP_LOCK.stale.$$" ]]; then
+                    _moved_ino="$(ls -id "$_WT_SWEEP_LOCK.stale.$$" 2>/dev/null | awk '{print $1}')"
+                    if [[ "$_moved_ino" == "$_observed_ino" ]]; then
+                        rm -rf "$_WT_SWEEP_LOCK.stale.$$"
+                    elif [[ ! -e "$_WT_SWEEP_LOCK" ]]; then
+                        # Not what we observed and nobody has claimed the path
+                        # since: put it back untouched.
+                        mv "$_WT_SWEEP_LOCK.stale.$$" "$_WT_SWEEP_LOCK"
+                    else
+                        rm -rf "$_WT_SWEEP_LOCK.stale.$$"
+                    fi
                 fi
                 # Return to the atomic mkdir path.
                 continue

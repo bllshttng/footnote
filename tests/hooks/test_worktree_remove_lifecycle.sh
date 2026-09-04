@@ -453,6 +453,67 @@ fi
 rm -f "$OUT_A" "$OUT_B"
 rm -rf "$LOCKDIR" "$S" "$BARE"
 
+# 5h2. ABA, staged deterministically - no timing, no concurrency. The
+# reclaimer observes a stale lock (dead pid), and between that observation
+# and the reclaim step the lock is replaced by a peer's FRESH EMPTY claim
+# (the mkdir-landed, pid-not-yet-written window). The reclaimer must not eat
+# what it did not observe: the fresh claim survives and the reclaimer gives
+# up. A stub `cat` performs the swap inside the pid read, so the interleaving
+# is forced, not raced: this test failed against the blind rmdir/mv reclaim
+# and passes against the inode-checked steal.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare2.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+COMMON=$(git -C "$S" rev-parse --git-common-dir)
+case "$COMMON" in /*) ;; *) COMMON="$S/$COMMON" ;; esac
+# Physical path: macOS /var is a symlink to /private/var, and the script's
+# own git rev-parse resolves physical, so the stub's comparison must too.
+LOCKDIR="$(cd "$COMMON" && pwd -P)/fno-wt-sweep.lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+( exec true ) & DEAD=$!; wait "$DEAD" 2>/dev/null   # pid now dead
+echo "$DEAD" > "$LOCKDIR/pid"
+STUBDIR=$(mktemp -d -t aba-stub.XXXXXX)
+SWAPDONE="$STUBDIR/swap-done"
+cat > "$STUBDIR/cat" <<EOF
+#!/usr/bin/env bash
+# One-time: the FIRST pid read answers the stale pid, and the swap happens
+# AFTER that read (reading first, then swapping, is the whole staging: the
+# reclaimer observes the stale lock and acts on a path that now holds a
+# peer's fresh empty claim). Every later read passes through, so the trap
+# and the retry loop see the real world.
+if [[ "\$1" == "$LOCKDIR/pid" && ! -e "$SWAPDONE" ]]; then
+    _out=\$(/bin/cat "\$@")
+    : > "$SWAPDONE"
+    rm -rf "$LOCKDIR"
+    mkdir "$LOCKDIR"
+    printf '%s' "\$_out"
+    exit 0
+fi
+exec /bin/cat "\$@"
+EOF
+chmod +x "$STUBDIR/cat"
+OUT_ABA=$(mktemp -t aba-a.XXXXXX)
+( cd "$S" && PATH="$STUBDIR:$PATH" bash "$LIFECYCLE" cleanup --merged --dry-run >"$OUT_ABA" 2>&1 )
+if grep -q "^STATUS" "$OUT_ABA"; then
+    fail "ABA reclaim eats a fresh claim" "reclaimer proceeded over a lock it did not observe: [$(cat "$OUT_ABA")]"
+else
+    pass "ABA reclaim backs off a lock it did not observe"
+fi
+if [[ -d "$LOCKDIR" ]]; then
+    pass "ABA fresh claim survives the reclaim attempt"
+else
+    fail "ABA fresh claim eaten" "the peer's mid-acquire lock directory is gone"
+fi
+if [[ -f "$SWAPDONE" ]]; then
+    pass "ABA swap instrument ran"
+else
+    fail "ABA swap instrument never ran" "the stub cat was never consulted; a green here would be vacuous"
+fi
+rm -f "$OUT_ABA"
+rm -rf "$STUBDIR" "$LOCKDIR" "$S" "$BARE"
+
 echo ""
 echo "worktree lifecycle: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
