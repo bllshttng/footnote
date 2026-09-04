@@ -28,10 +28,6 @@ import pytest
 
 from fno.hermetic import neutralise
 
-# Same keeper hygiene as cli/tests, imported from one shared module.
-from fno.keeper_testing import _drain_exited_keepers  # noqa: F401
-from fno.keeper_testing import _reap_store_keepers  # noqa: F401
-
 _SANDBOX = tempfile.mkdtemp(prefix="fno-src-test-sandbox-")
 _hermetic_env = neutralise(os.environ, Path(_SANDBOX))
 os.environ.clear()
