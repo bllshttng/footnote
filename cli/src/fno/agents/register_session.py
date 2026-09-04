@@ -561,7 +561,7 @@ def _report_observation(
         print(
             f"register_session: warning: {name} already records two session "
             f"ids ({primary}, {related}); not recording a third "
-            f"({session_id})",
+            f"({session_id}); mint it a row with: fno agents adopt {session_id}",
             file=sys.stderr,
         )
         return

@@ -70,6 +70,11 @@ pub struct RegistryAgent {
     /// invisibly.
     pub predecessor_session_ids: Vec<String>,
     pub forked_from_session_id: Option<String>,
+    /// (x-1ab9) The one optional PARKED session id: a fork minted under
+    /// unknown evidence that owns no registry row yet. `merge_rows`
+    /// synthesizes a lineage child for it while the roster still lists it
+    /// live, so an addressable session is never invisible.
+    pub related_session_id: Option<String>,
     /// Registry status is terminal (exited/permanent-dead).
     pub exited: bool,
     /// Active do-not-disturb delivery policy. Presence only: it never changes
@@ -2152,6 +2157,11 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             harness_session_id,
             predecessor_session_ids,
             forked_from_session_id,
+            related_session_id: row
+                .get("related_session_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             exited,
             dnd,
             badge,
@@ -2247,6 +2257,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             harness_session_id: None,
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
+            related_session_id: None,
             harness: Some("claude".to_string()),
             // A roster worker carries no lane stamps; the roster records none.
             model: None,
@@ -2275,6 +2286,63 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
         });
     }
     drop(reg_ids); // release the borrow of `out` before extending it
+
+    // (x-1ab9 task 2.1) A PARKED fork id renders as a lineage child of its
+    // primary while the roster still lists it live. The second uuid a fork
+    // minted under unknown evidence is addressable but owns no registry row
+    // until the next positive SessionStart observation mints one; today it
+    // was simply invisible. The child carries `spawned_by_session` so the
+    // x-132c join indents it under its parent, `external: false` and the
+    // roster's own id as the attach target. When the real row lands, the
+    // registry owns the id and this synthesis disappears in the same tick
+    // (AC3-HP -> AC4-EDGE is the same row set one observation later).
+    let mut parked = Vec::new();
+    for r in &out {
+        let Some(id) = r.related_session_id.as_deref() else {
+            continue;
+        };
+        // The id already owning a row means the BRANCH arm minted it; nothing
+        // to synthesize (AC4's inverse).
+        if out.iter().any(|x| {
+            x.harness_session_id.as_deref() == Some(id) || x.attach_id.as_deref() == Some(id)
+        }) {
+            continue;
+        }
+        // Only a roster row that still lists the id live synthesizes a child;
+        // nothing lists it -> render nothing, exactly as today (AC4-EDGE).
+        let Some(roster_hit) = roster.iter().find(|w| w.short_id == id) else {
+            continue;
+        };
+        parked.push(RegistryAgent {
+            name: r.name.clone(),
+            cwd: r.cwd.clone(),
+            harness: r.harness.clone(),
+            model: r.model.clone(),
+            route: r.route.clone(),
+            session_id: None,
+            harness_session_id: Some(id.to_string()),
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
+            related_session_id: None,
+            exited: false,
+            dnd: false,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: Some(roster_hit.short_id.clone()),
+            external: false,
+            account: r.account.clone(),
+            claude_session_uuid: Some(id.to_string()),
+            log_path: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            spawned_by_session: r.harness_session_id.clone(),
+            liveness: Liveness::Alive,
+        });
+    }
+    out.extend(parked);
     out.extend(foreign);
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
@@ -2722,6 +2790,9 @@ impl ReaderState {
 mod tests {
     use super::*;
 
+    // (x-1ab9) The parked-fork-child test family lives in its own module;
+    // this file is shrink-only under the file-budget gate.
+    mod parked_child_tests;
     fn reg(rows: &str) -> String {
         format!(r#"{{"schema_version": 6, "agents": [{rows}]}}"#)
     }
@@ -4379,6 +4450,7 @@ config_dir = "~/.claude-alt"
             session_id: None,
             harness_session_id: None,
             predecessor_session_ids: Vec::new(),
+            related_session_id: None,
             forked_from_session_id: None,
             name: name.into(),
             cwd: "/w".into(),
