@@ -188,15 +188,30 @@ def resolve_thread_viewport(
 
     if invoke(["mux", "thread", "--session", session, thread_id], 30).returncode:
         raise RetaskTransportError("thread_view_unavailable")
-    try:
-        panes = invoke(["mux", "pane", "ls", "--session", session, "--json"], 10)
-        rows = json.loads(panes.stdout)
-    except (RetaskTransportError, ValueError) as exc:
-        raise RetaskTransportError("thread_ref_unreadable") from exc
-    matches = [row for row in rows if isinstance(row, Mapping) and row.get("name") == entry.name and row.get("fno_id") == thread_id and isinstance(row.get("pane_id"), int) and row["pane_id"] > 0] if panes.returncode == 0 and isinstance(rows, list) else []
-    if len(matches) != 1:
-        raise RetaskTransportError("thread_ref_unreadable")
-    return session, matches[0]["pane_id"]
+    # The pane opened above stays open even when the join below misses, and its
+    # name stamping can lag the open by a beat, so the join retries before
+    # giving up and the miss names the opened pane rather than the row's ref.
+    for _ in range(3):
+        try:
+            panes = invoke(["mux", "pane", "ls", "--session", session, "--json"], 10)
+            rows = json.loads(panes.stdout)
+        except RetaskTransportError:
+            raise
+        except ValueError as exc:
+            raise RetaskTransportError("thread_ref_unreadable") from exc
+        matches = [
+            row
+            for row in rows
+            if isinstance(row, Mapping)
+            and row.get("name") == entry.name
+            and row.get("fno_id") == thread_id
+            and isinstance(row.get("pane_id"), int)
+            and row["pane_id"] > 0
+        ] if panes.returncode == 0 and isinstance(rows, list) else []
+        if len(matches) == 1:
+            return session, matches[0]["pane_id"]
+        time.sleep(0.5)
+    raise RetaskTransportError("thread_view_join_missed")
 
 
 def resolve_target_coordinate(
