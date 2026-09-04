@@ -23,7 +23,7 @@ def _settings(payload: dict) -> SettingsModel:
 
 
 def test_auto_merge_grant_is_true_only_for_dispatch():
-    from fno.config import auto_merge_grant
+    from fno.config.grant import auto_merge_grant
 
     assert auto_merge_grant(_settings({"auto_merge": {"grant": "dispatch"}}))
     assert not auto_merge_grant(_settings({"auto_merge": {"grant": "none"}}))
@@ -32,7 +32,7 @@ def test_auto_merge_grant_is_true_only_for_dispatch():
 
 
 def test_auto_merge_grant_degrades_when_settings_are_incomplete_or_broken():
-    from fno.config import auto_merge_grant
+    from fno.config.grant import auto_merge_grant
 
     class Broken:
         @property

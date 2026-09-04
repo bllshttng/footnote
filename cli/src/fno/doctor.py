@@ -1488,7 +1488,8 @@ def _silent_switch_report(
     finding names the switch, a count where one exists, and the exact command.
     """
     try:
-        from fno.config import auto_merge_grant, load_settings
+        from fno.config import load_settings
+        from fno.config.grant import auto_merge_grant
 
         s = load_settings()
     except Exception:  # noqa: BLE001 - a config that won't load is not doctor's alarm

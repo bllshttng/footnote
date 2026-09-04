@@ -1362,5 +1362,4 @@ mod tests {
             write_project_settings("ams-pad", "[auto_merge]\nmerge_strategy = \" squash \"\n");
         assert_eq!(auto_merge_strategy(&cwd), "squash");
     }
-
 }

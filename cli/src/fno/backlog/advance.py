@@ -1364,7 +1364,8 @@ def _spawn_worker(
     allow_merge = False
     settings_obj = None
     try:
-        from fno.config import auto_merge_grant, load_settings, load_settings_for_repo
+        from fno.config import load_settings, load_settings_for_repo
+        from fno.config.grant import auto_merge_grant
 
         settings_obj = (
             load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()

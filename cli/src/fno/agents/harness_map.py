@@ -1382,7 +1382,7 @@ def _load_dispatch_cfg(settings: object, verb: Optional[str] = None) -> dict:
     # is read before the dispatch-block gate: a settings object carrying an
     # auto_merge block but no dispatch overlay still resolves its grant, and a
     # stub without either degrades to no-grant.
-    from fno.config import auto_merge_grant
+    from fno.config.grant import auto_merge_grant
 
     grant = auto_merge_grant(settings)
     if d is None:
