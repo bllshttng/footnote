@@ -292,9 +292,9 @@ def test_claims_dir_defaults_to_the_repo_space_without_env(tmp_path, monkeypatch
     monkeypatch.chdir(tmp_path)
     from fno.paths import space_dir, space_slug
 
-    # The slug is a cross-language wire format (fno-agents::paths pins the same
-    # sha256 prefix); a golden value here catches a one-sided drift.
-    assert space_slug(Path("/repos/web")) == "web-059f3dd5"
+    # The slug is a cross-language wire format (fno-agents::paths swaps the
+    # same separators); a golden value here catches a one-sided drift.
+    assert space_slug(Path("/repos/web")) == "-repos-web"
     assert claims_dir() == space_dir(tmp_path) / "claims"
 
 

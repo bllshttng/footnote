@@ -356,18 +356,14 @@ fn spaces_root_dir() -> PathBuf {
     state_root.join("spaces")
 }
 
-/// The per-repo space key: `<basename>-<first 8 hex of sha256(path)>`.
+/// The per-repo space key: the full canonical path with `/` swapped for `-`
+/// (Claude's project-dir shape, operator ruling 2026-09-04: self-describing in
+/// both directions -- read the dir, see the path; no hash to reverse). The
+/// input is the CANONICAL root, so every worktree of a repo mints one slug.
 /// Byte-parity with Python `paths.space_slug` -- the two languages must mint
 /// the SAME directory, so change one and check the other.
 pub fn space_slug(canonical_root: &Path) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(canonical_root.to_string_lossy().as_bytes());
-    let hex = format!("{digest:x}");
-    let name = canonical_root
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| canonical_root.to_string_lossy().into_owned());
-    format!("{name}-{}", &hex[..8])
+    canonical_root.to_string_lossy().replace('/', "-")
 }
 
 /// The space for the repository containing `cwd`, keyed on its CANONICAL root
@@ -687,18 +683,17 @@ mod tests {
     }
 
     #[test]
-    fn space_slug_is_stable_and_hash_suffixed() {
+    fn space_slug_is_the_path_with_slashes_swapped() {
         let p = Path::new("/tmp/whatever");
         let slug = space_slug(p);
-        assert!(slug.starts_with("whatever-"));
-        assert_eq!(slug.len(), "whatever-".len() + 8);
+        assert_eq!(slug, "-tmp-whatever");
         assert_eq!(slug, space_slug(p), "same root mints the same slug");
         let other = Path::new("/tmp/other/whatever");
         assert_ne!(slug, space_slug(other), "a different root must not collide");
         // Golden value pinning the cross-language wire format: Python
-        // `space_slug` is the same sha256 prefix, and the two languages must
+        // `space_slug` swaps the same separators, and the two languages must
         // mint the SAME directory. Change one and check the other.
-        assert_eq!(space_slug(Path::new("/repos/web")), "web-059f3dd5");
+        assert_eq!(space_slug(Path::new("/repos/web")), "-repos-web");
     }
 
     #[test]

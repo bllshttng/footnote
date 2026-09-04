@@ -148,7 +148,7 @@ The per-repository journal `<space>/events.jsonl` resolves through `paths.projec
 
 ## The project space (`~/.fno/spaces/<slug>/`)
 
-Project state left the checkout. One space per repository, keyed on the CANONICAL repo root (the git common dir's checkout), slug = `<basename>-<first 8 hex of sha256(canonical root path)>`. Every worktree of a repo resolves to ONE space, so cross-worktree state needs no symlink. Per-worktree state sits at `<space>/worktrees/<worktree basename>/`. A checkout keeps only `.fno/config.toml` (committed project config) and the sandbox breadcrumb below. The first resolve of a moved file renames the legacy `<repo>/.fno/<file>` into the space and leaves a `<repo>/.fno/MOVED-TO` pointer naming it.
+Project state left the checkout. One space per repository, keyed on the CANONICAL repo root (the git common dir's checkout), slug = the canonical path with `/` swapped for `-` (Claude's project-dir shape: read the directory name, see the path). Every worktree of a repo resolves to ONE space, so cross-worktree state needs no symlink. Per-worktree state sits at `<space>/worktrees/<worktree basename>/`. A checkout keeps only `.fno/config.toml` (committed project config) and the sandbox breadcrumb below. The first resolve of a moved file renames the legacy `<repo>/.fno/<file>` into the space and leaves a `<repo>/.fno/MOVED-TO` pointer naming it.
 
 | Entry | Writer | Lifetime |
 |---|---|---|

@@ -14,7 +14,6 @@ not take effect; the next subprocess sees the new value.
 """
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import shutil
@@ -228,9 +227,9 @@ def resolve_canonical_repo_root() -> Path:
 
 
 def space_slug(canonical_root: Path) -> str:
-    """``<basename>-<first 8 hex of sha256(path)>``; mirrored byte for byte in ``fno-agents::paths``."""
-    digest = hashlib.sha256(str(canonical_root).encode("utf-8")).hexdigest()[:8]
-    return f"{canonical_root.name}-{digest}"
+    """The full canonical path with ``/`` swapped for ``-`` (Claude's project-dir
+    shape: read the dir, see the path). Mirrored byte for byte in ``fno-agents::paths``."""
+    return str(canonical_root).replace("/", "-")
 
 
 def _canonical_for(root: Path) -> Path:
