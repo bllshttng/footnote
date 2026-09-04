@@ -1119,7 +1119,7 @@ fn validate_effort_for_spawn(
     if value.is_empty() {
         return Err("--effort must be non-empty".to_string());
     }
-    if matches!(provider, "gemini" | "agy") {
+    if matches!(provider, "gemini") {
         return Err(format!(
             "harness {} has no reasoning-effort surface; omit --effort",
             provider
