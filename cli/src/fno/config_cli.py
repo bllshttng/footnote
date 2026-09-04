@@ -586,9 +586,8 @@ def doctor_cmd(
 
     rc = run_doctor()
     # Every report is advisory: one that fails never crashes the diagnostic.
-    # The post-merge line runs first so bare doctor shows the gap without
-    # remembering the flag (Open Question 1). One wrapper, so the next report
-    # is a name in this tuple rather than a sixth copy of it.
+    # The post-merge line runs first so bare doctor shows the gap without the
+    # flag (Open Question 1). One wrapper, so the next report is a name here.
     for report in (
         lambda: typer.echo(post_merge_readiness(_repo_root()).summary_line()),
         _report_gates,

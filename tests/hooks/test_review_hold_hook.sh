@@ -106,6 +106,11 @@ run_hook acquire "$(skill_call "/code-review" "" "<level> --comment")"
 expect_registered "skill=/code-review with args in the args field"
 run_hook acquire "$(skill_call "/code-review <level> --comment")"
 expect_registered "skill=/code-review with args in the name (typed slash form)"
+# A colon in the ARGS must not reach the namespace trim. It used to: `##*:` ran
+# over the whole joined string, so a PR URL left `//github.com/...` as the skill
+# name and the review took no hold at all.
+run_hook acquire "$(skill_call "/code-review" "" "high --comment https://github.com/o/r/pull/7")"
+expect_registered "skill=/code-review with a colon in the args"
 
 echo "-- a review start records a positive invocation marker and joins the hold --"
 review_level="medium"

@@ -1371,8 +1371,8 @@ def _spawn_worker(
     # there instead and arrive already pinned - on a grid decline the pin is the
     # placement harness. An explicit harness therefore skips this consult: under
     # it the grid could pick a harness the caller's placement did not key for.
-    # A caller that resolved the grid hands its reason in: the consult below
-    # is skipped under an explicit harness and would otherwise blank it.
+    # A caller that resolved the grid hands its reason in; the consult below
+    # is skipped under an explicit harness. grid_reason=None on a grid PICK.
     grid_why: Optional[str] = grid_reason
     if harness is None:
         grid_harness, grid_model, grid_why = _grid_lane_for(node, model=model, provider=provider)
@@ -1449,8 +1449,7 @@ def _spawn_worker(
     target_cmd = resolved["command"]
     spawn_env = resolved.get("env") or {}
 
-    # An account record keeps its alias; the resolver owns the claude fallback.
-    prov = launch or resolved["harness"]
+    prov = launch or resolved["harness"]  # alias kept; resolver owns the default
     if launch_axis and launch_axis != resolved["harness"]:
         raise SpawnError(
             f"refusing to spawn {node_id}: --harness {prov!r} runs "
@@ -1536,7 +1535,6 @@ def _spawn_worker(
             f"fno agents spawn exited {proc.returncode}: "
             f"{(stderr or proc.stdout or '').strip()[:200]}"
         )
-
     # Receipt shape is substrate-dependent (mirrors dispatch-node.sh). A `bg`
     # spawn lands a DETACHED thread and returns a compact JSON receipt whose
     # launch identity we require as launch proof: {"name", "short_id", ...} for
@@ -1568,9 +1566,8 @@ def _spawn_worker(
                 f"fno agents spawn receipt carries a codex head-8 launch "
                 f"identity ({launch_identity}): {CODEX_SHORT_ADDRESS_RULE}"
             )
-    # One row per launch: only the spawner knows the resolved argv, and the
-    # callers' advance_dispatched rows left the four doors indistinguishable.
-    # After the guards, so the row is proof of a launch that happened.
+    # One row per launch: only the spawner knows the resolved argv, and it
+    # sits after the guards, so the row is proof of a launch that happened.
     _emit(
         EVENT_SPAWNED,
         {
@@ -1588,7 +1585,7 @@ def _spawn_worker(
             "grid": grid_why or "",
             "decision": "; ".join(resolved.get("decision") or []),
         },
-        events_path if events_path is not None else _events_path(None),
+        events_path,
     )
     return launch_identity
 
@@ -1760,10 +1757,9 @@ def _lane_harness(eff_provider: Optional[str], node_cwd: Optional[str] = None) -
     """Resolve a lane's dispatch provider to the harness the worker will run.
 
     One leg, shared with the spawn seam: a hardcoded non-claude set here read
-    every undeclared harness as claude. ``node_cwd`` scopes the read to the
-    SAME repo the seam reads, or a project with local account records places
-    for claude while the spawn resolves codex, and the one-axis guard then
-    skips the lane every tick.
+    every undeclared harness as claude. ``node_cwd`` scopes the read to the SAME
+    repo the seam reads, or placement answers claude while the spawn resolves
+    codex and the one-axis guard skips the lane every tick.
     """
     return _launch_harness_axis((eff_provider or "").strip(), node_cwd) or "claude"
 
@@ -3139,8 +3135,10 @@ def _events_path(project_root: Optional[Path]) -> Path:
     return project_events_json()
 
 
-def _emit(kind: str, data: dict, events_path: Path) -> None:
-    """Best-effort event emit. Never raises (LD#7: never wedge the host op)."""
+def _emit(kind: str, data: dict, events_path: Optional[Path]) -> None:
+    """Best-effort event emit. Never raises (LD#7: never wedge the host op).
+    ``None`` resolves inside the guard: doing it in a caller's argument list
+    puts a raising repo-root read on the post-spawn path."""
     try:
         from fno.events import _build, append_event
 

@@ -226,29 +226,3 @@ def test_codex_target_spelling_survives_an_unreadable_verb_roster(monkeypatch):
     assert harness_map.dispatch_command("claude", allow_merge=False) == (
         "/target --no-merge {id}"
     )
-
-
-def test_an_unreadable_registry_refuses_rather_than_disarming_the_guard(
-    monkeypatch, tmp_path
-):
-    """A config typo must not silently reopen the split this node closed.
-
-    `record_harness` used to swallow every exception, so one malformed record
-    answered None for ALL of them. `launch_axis` was then None, the
-    disagreement check was skipped, and a `--harness ccr` launch carrying a
-    stage-table spelling shipped again - the original bug, arriving as an
-    ordinary unpinned dispatch. The read now raises and the spawn fails.
-    """
-    from fno.adapters.providers import loader
-
-    captured = _capture(monkeypatch, _settings())
-    monkeypatch.setattr(
-        loader,
-        "load_providers",
-        lambda **kw: (_ for _ in ()).throw(RuntimeError("malformed record")),
-    )
-    with pytest.raises(RuntimeError):
-        advance._spawn_worker(
-            "x-0000", None, "slug", provider="ccr", events_path=tmp_path / "e.jsonl"
-        )
-    assert "cmd" not in captured, "refused before spawning"

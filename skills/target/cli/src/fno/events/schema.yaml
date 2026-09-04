@@ -3536,7 +3536,7 @@ event_types:
           description: "Which dispatch door fired: dispatch_lanes, advance, _converge_one, reconcile_dispatch, or unknown for a caller that has not been threaded yet. The field this row exists for."
         grid:
           type: string
-          description: "The capacity grid's terminal reason for this spawn, e.g. grid=no-inventory-declared when config.routing.models is undeclared so difficulty bands route nothing. Empty when an explicit pin skipped the grid."
+          description: "The capacity grid's terminal reason for this spawn, e.g. grid=no-inventory-declared when config.routing.models is undeclared so difficulty bands route nothing. Empty on two unlike outcomes: an explicit pin skipped the grid, or the grid PICKED this lane - a pick records no reason. The harness and model fields carry the pick."
         decision:
           type: string
           description: "The resolver's decision trail joined with '; ' (harness=config(codex); substrate=default(thread); ...): which rung supplied each axis."
