@@ -17,7 +17,7 @@ use serde_json::Value;
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 // ── public types ──────────────────────────────────────────────────────────────
 
@@ -12031,8 +12031,6 @@ fn killpg(pgid: i32) {
 /// descendant's whole lifetime - wedging the stop hook well past the 60s the
 /// gate promises. Killing the group closes the pipe and bounds the join.
 fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcome {
-    use std::os::unix::process::CommandExt;
-
     // The pipefail preamble closes the `| tail -5` trap at the runner: a
     // pipeline whose real command fails can no longer read as pass through
     // the truncating tail's exit 0. Bash-only: on Linux /bin/sh is commonly
@@ -12043,31 +12041,28 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
     // its command ran. A no-bash host falls back to plain sh with NO
     // preamble, losing only the pipeline-trap closure, not the probe.
     let bash_wrapped = format!("set -o pipefail 2>/dev/null; {cmd}");
+    // Through `spawn_bounded` for the same reason `run_bounded` goes through
+    // it: a done_probe is the strongest rung loop-check has, and a fork that
+    // answers EAGAIN under load would otherwise return Blocked and hold the
+    // gate on a probe that was never run. NotFound still returns on attempt
+    // one, so the sh fallback below fires as promptly as it did before.
     let spawned = {
         let build = |shell: &str, script: &str| {
-            Command::new(shell)
-                .arg("-c")
-                .arg(script)
-                .current_dir(cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .process_group(0)
-                .spawn()
+            crate::bounded_spawn::spawn_bounded(OsStr::new(shell), &["-c", script], cwd)
         };
         match build("bash", &bash_wrapped) {
             Ok(child) => Ok(child),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => build("sh", cmd),
-            Err(e) => Err(e),
+            Err(std::io::ErrorKind::NotFound) => build("sh", cmd),
+            Err(kind) => Err(kind),
         }
     };
 
     let mut child = match spawned {
         Ok(c) => c,
-        Err(e) => {
+        Err(kind) => {
             return ProbeOutcome::Blocked {
                 kind: "spawn",
-                why: format!("probe spawn failed: {e}"),
+                why: format!("probe spawn failed: {kind:?}"),
             }
         }
     };
@@ -17327,6 +17322,39 @@ mod tests {
         assert!(
             bypasses.is_empty(),
             "direct synchronous gh/fno/git waits outside the bounded runner: {bypasses:?}"
+        );
+    }
+
+    /// The spawn half of the same rule. A direct `.spawn()` in this file is a
+    /// transport with no retry beneath it, and a transient EAGAIN there
+    /// reports the world unreadable on a machine that was merely busy - the
+    /// exact failure `bounded_spawn` exists to delete. The bug this guard
+    /// retires was the class, not the instance: the retry landed on
+    /// `run_bounded` while `run_probe` kept its own bare `.spawn()`, so a
+    /// loaded fleet host still turned a healthy done_probe into BLOCKED and
+    /// held the stop gate. Both runners now route through the one spawner,
+    /// and exactly one direct spawn survives: `best_effort_notify`, which is
+    /// detached and non-fatal by design and has no caller to report to.
+    #[test]
+    fn no_unretried_spawn_outside_the_bounded_spawner() {
+        let source = include_str!("loopcheck.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("test module marker");
+        // Positive control first: a zero-hit scan of the wrong haystack reads
+        // identical to a clean one, so prove the routed sites are in view
+        // before trusting the count below.
+        assert!(
+            production.matches("crate::bounded_spawn::spawn_bounded(").count() >= 2,
+            "run_bounded and run_probe must both route through the one spawner"
+        );
+        assert_eq!(
+            production.matches(".spawn()").count(),
+            1,
+            "exactly one direct spawn survives (the detached notifier); a new \
+             one routes through bounded_spawn::spawn_bounded, or amends this \
+             guard with why it cannot"
         );
     }
 

@@ -22,10 +22,16 @@ use std::process::{Command, Stdio};
 const SPAWN_ATTEMPTS: u32 = 3;
 const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
 
-/// ENOENT says the binary is not there and will still not be there in 5ms;
-/// every other spawn error (EAGAIN under fork pressure, ETXTBSY while the
-/// binary is still being written, EMFILE at the fd ceiling) describes the
-/// moment, not the binary.
+/// ENOENT is the one spawn error worth classifying as stable: it says the
+/// binary is not there and will still not be there in 5ms, and it is the one
+/// the shell fallback in `run_probe` has to see on attempt one. Everything
+/// else retries. Most of that set really is moment-shaped (EAGAIN under fork
+/// pressure, ETXTBSY while the binary is still being written, EMFILE at the
+/// fd ceiling), but not all of it: EACCES on a mode-644 file is as stable as
+/// ENOENT and still burns all three attempts. That is the deliberate trade.
+/// Enumerating every stable errno is how one gets sorted into the wrong
+/// bucket; the bound is what makes guessing wrong cheap - two extra forks and
+/// 10ms on a binary that was never going to run.
 fn failure_is_transient(kind: std::io::ErrorKind) -> bool {
     kind != std::io::ErrorKind::NotFound
 }
@@ -75,8 +81,9 @@ mod tests {
 
     #[test]
     fn a_loaded_machines_eagain_is_transient() {
-        // EAGAIN maps to WouldBlock; PermissionDenied stands in for the rest
-        // of the moment-shaped kinds. Both must retry.
+        // EAGAIN maps to WouldBlock, the moment-shaped case. PermissionDenied
+        // is the deliberate over-capture: EACCES is stable, and retrying it
+        // anyway is what keeps this classifier a one-line rule.
         assert!(failure_is_transient(std::io::ErrorKind::WouldBlock));
         assert!(failure_is_transient(std::io::ErrorKind::PermissionDenied));
     }
