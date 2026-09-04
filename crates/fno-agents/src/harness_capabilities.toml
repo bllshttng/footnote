@@ -937,12 +937,10 @@ reason = "measured over 5 delays x 3 trials on a live pane; no one-shot probe re
 # stanzas answering WHAT A HARNESS CAN DO, beside the keystroke mechanics above
 # and never instead of them. Eleven keys, closed so a typo is a parse error:
 # review spawn attach rpc server plugins hooks skills_dir subagent_dispatch mcp
-# acp. A claim's only field is `state`: native (fno drives it today through a
-# wired lane: the harness's own surface where it exposes one, else the
-# daemon-kept lane fno hosts - opencode ships no attach verb and attaches all
-# the same), capable (real on the harness, no wired arm), absent (MEASURED
-# gone), unmeasured (nobody has looked) - the state the old hardcoded spawn
-# tuple could only encode as prose. A key ABSENT from a row reads unmeasured and refuses nothing at load:
+# acp. A claim's only field is `state`: native, capable, absent, unmeasured -
+# defined once in harness_capabilities.rs beside FEATURE_STATES, the parser
+# that enforces them; the per-row comments below cite the measurements,
+# never restate the vocabulary. A key ABSENT from a row reads unmeasured and refuses nothing at load:
 # the refusal lives in the consuming lane, which names the key, the state, and
 # the probe that settles it. Every key used on any row needs a
 # [probe.features.<key>] declaration below, or the table refuses to load: a
