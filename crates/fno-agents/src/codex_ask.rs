@@ -1484,7 +1484,7 @@ fn dispatch_resume(
     };
 
     // Stamp status=live + last_message_at on success, keyed on the row's
-    // identity (law d-e952ed19) captured before the write, so a same-name
+    // identity captured before the write, so a same-name
     // replacement between resolve and write cannot receive this stamp.
     let key = ("codex".to_string(), Some(session_id.clone()));
     if let Err(e) = update_registry(registry_path, |reg| {

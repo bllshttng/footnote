@@ -3292,8 +3292,8 @@ fn followup(
     ) {
         Ok(reply) => {
             // Stamp status=live + last_message_at under the registry flock,
-            // keyed on the row's identity captured before the ask (law
-            // d-e952ed19): a same-name replacement between resolve and write
+            // keyed on the row's identity captured before the ask: a same-name
+            // replacement between resolve and write
             // can no longer receive the first row's write.
             if let Err(e) = update_registry(registry_path, |reg| {
                 if let Some(en) = find_keyed_mut(reg, &key, name) {
@@ -3334,7 +3334,7 @@ fn followup(
             AskOutcome::ok_stdout(reply)
         }
         Err(AskError::Orphan { reason, .. }) => {
-            // (x-1ab9 task 4.1) The ask path NEVER writes status or liveness:
+            // The ask path NEVER writes status or liveness:
             // a stored field must not outrank the sweep's live probe, and an
             // undeliverable ask is a routing fact, not a death (the stamp this
             // arm once wrote is the t-x30c2-w1 lie: `orphaned` on a session

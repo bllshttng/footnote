@@ -1,5 +1,5 @@
-//! x-1ab9 lookup-law tests: the registry's primary key is the
-//! `(harness, harness_session_id)` pair (law d-e952ed19); a label - its own
+//! Lookup-law tests: the registry's primary key is the
+//! `(harness, harness_session_id)` pair; a label - its own
 //! name or a prior `aliases` entry - resolves, but an AMBIGUOUS label (two
 //! rows answer it) resolves to nothing rather than to the first match.
 

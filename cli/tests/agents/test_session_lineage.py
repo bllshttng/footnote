@@ -594,7 +594,7 @@ def test_non_claude_restamp_emits_the_classified_transition(
     assert classified[0]["data"]["successor_session_id"] == REMINT
 
 
-# -- x-1ab9 task 3.1: one name store (session-names fold) --------------------
+# -- one name store: the session-names fold ----------------------------------
 
 
 def _row_with_sid(name, sid, short):
@@ -616,24 +616,20 @@ def _row_with_sid(name, sid, short):
 def test_reconcile_migration_folds_a_file_alias_into_its_row_ac5_hp(
     tmp_path, monkeypatch
 ) -> None:
-    """AC5-HP: an alias the overlay file carries for a session lands on the
-    row the session answers to, the mail reader resolves it from the row, and
-    a second merge is a no-op (idempotent)."""
+    """AC5-HP: an alias folded onto the row (the Rust sweep does the fold; its
+    append + idempotence are pinned Rust-side) resolves as a mail address from
+    the row, so the operator's legible name keeps working."""
     use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.discover import _alias_to_session_ids, default_name_map_path
-    from fno.agents.registry import load_registry, merge_session_names_into_aliases
+    from fno.agents.discover import _alias_to_session_ids
+    from fno.agents.registry import append_row_alias, load_registry
 
     _row_with_sid("target-x-f0c2", BIRTH, "f0c2abcd")
-    name_map = default_name_map_path()
-    name_map.parent.mkdir(parents=True, exist_ok=True)
-    name_map.write_text(json.dumps({BIRTH: "legible-alias"}), encoding="utf-8")
 
-    assert merge_session_names_into_aliases() == 1
+    assert append_row_alias("f0c2abcd", "legible-alias") is True
     row = load_registry()[0]
     assert "legible-alias" in row.aliases, "the row carries the folded alias"
     ids, read_ok = _alias_to_session_ids("legible-alias", None)
     assert read_ok and BIRTH in ids, "mail resolution answers from the row"
-    assert merge_session_names_into_aliases() == 0, "a replay merges nothing"
 
 
 def test_append_row_alias_refuses_an_alias_another_row_answers_to(

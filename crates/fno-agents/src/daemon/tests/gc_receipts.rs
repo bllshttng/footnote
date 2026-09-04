@@ -2424,7 +2424,6 @@ fn short_id_derivation_dedups() {
 
 // --- plan_reconcile (US6.9): tri-state, status-aware transitions, budget ---
 
-
 fn claude_row(name: &str, uuid: &str, sid: &str) -> RegistryEntry {
     let mut e = rentry(name, AgentStatus::Idle, None);
     e.harness = Some("claude".into());
@@ -2435,7 +2434,7 @@ fn claude_row(name: &str, uuid: &str, sid: &str) -> RegistryEntry {
 
 #[test]
 fn a_ctrl_r_rename_emits_once_and_never_touches_the_label() {
-    // (x-1ab9 task 5.1, AC10-HP) The sweep diffs the harness's title
+    // The sweep diffs the harness's title
     // against the row's last-seen value: first observation emits with
     // `from: null`, a repeat reads NO change, and the row's `name` is
     // never written from a title.
@@ -2493,7 +2492,7 @@ fn rename_emits_ride_the_successful_write() {
 
 #[test]
 fn reconcile_budget_starts_after_truth_batch() {
-    // (x-1ab9 task 4.1) The sweep's clock must start at plan_reconcile,
+    // The sweep's clock must start at plan_reconcile,
     // NOT before batched_row_truths: the truth batch serves every verb
     // and once ate the whole 5s budget (24s wall, 0 of 79 rows probed).
     // The budget's position is structural, so pin it where the source

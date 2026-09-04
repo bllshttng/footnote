@@ -28,7 +28,7 @@ pub(crate) enum ConfirmKind {
     /// Stop a live agent row (x-76ea). The captured `name`, not the row index,
     /// commits - a row that raced out between confirm and Enter resolves to the
     /// server's stale-name refusal. (v67) The row's harness session id rides
-    /// beside the label (law d-e952ed19): `sid` is captured with the name at
+    /// beside the label: `sid` is captured with the name at
     /// gesture time so the server resolves identity-first; `None` for an old
     /// capture or a bare-identity row.
     StopAgent { name: String, sid: Option<String> },

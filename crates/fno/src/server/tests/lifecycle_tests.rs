@@ -1,4 +1,4 @@
-//! x-1ab9 lifecycle resolution (AC2-EDGE): a sideline lifecycle keypress that
+//! Lifecycle resolution (AC2-EDGE): a sideline lifecycle keypress that
 //! carries the row's harness session id resolves by that identity, never by
 //! the label. The handler then hands the subprocess the row's CURRENT label
 //! (`resolve_lifecycle_target(..).map(|a| a.name.clone())`), so a

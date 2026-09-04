@@ -1,4 +1,4 @@
-//! x-1ab9 task 2.1: a parked fork id (`related_session_id`) renders as a
+//! A parked fork id (`related_session_id`) renders as a
 //! lineage child of its primary while the roster still lists it live
 //! (AC3-HP); when nothing lists it live, nothing renders (AC4-EDGE); and the
 //! id already owning its own row never double-renders.
@@ -156,7 +156,7 @@ fn now_stamp(age: u64) -> String {
 
 #[tokio::test]
 async fn watch_registry_decodes_a_served_document_and_the_unchanged_answer() {
-    // (x-1ab9 task 6.1) A fake daemon: one accept, one framed answer per
+    // A fake daemon: one accept, one framed answer per
     // connection. The served case returns the version as a stamp (the same
     // (mtime, len) domain the file scan gates with) plus the document;
     // the unchanged case (doc null) returns the stamp with no document.

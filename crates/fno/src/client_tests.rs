@@ -175,7 +175,7 @@ fn pane_state_derives_worst_first_from_badge_and_seen() {
     assert_eq!(rollup, Some(PaneState::Blocked), "the worst state wins");
 }
 
-// (x-1ab9 shrink) The agent_hit gesture-resolution family, moved verbatim
+// The agent_hit gesture-resolution family, moved verbatim
 // into its own module (this file is shrink-only under the file budget).
 #[path = "client/tests/agent_hit_tests.rs"]
 mod agent_hit_tests;

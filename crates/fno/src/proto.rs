@@ -1238,14 +1238,14 @@ pub struct AgentRow {
     /// an old client that cannot render the third state).
     #[serde(default)]
     pub unmeasured: bool,
-    /// (v67, x-1ab9) Age of the served liveness measurement in seconds
+    /// (v67) Age of the served liveness measurement in seconds
     /// (`liveness_measured_at` on the registry row); `None` = never measured
     /// by the sweep. Lets the render say "probe older than N s" instead of a
     /// bare unmeasured glyph. `#[serde(default)]` keeps a v66 reader
     /// wire-tolerant (defaults None, nothing renders).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_age_s: Option<u64>,
-    /// (v67, x-1ab9) The last title the harness reported for this session
+    /// (v67) The last title the harness reported for this session
     /// (claude's Ctrl+R agent-name record), from the registry row. The render
     /// joins it into the subline when it differs from the label; `name` is
     /// never rewritten from it. `#[serde(default)]` keeps a v66 reader
@@ -1801,7 +1801,7 @@ pub enum Command {
     /// `external: true` roster row is refused (the claude daemon owns it, not the
     /// fno registry). The row's exited flag flips on the next registry poll.
     /// (v67) The row's harness session id rides beside the label so resolution
-    /// prefers identity over it (law d-e952ed19); `None` keeps the label-only
+    /// prefers identity over it; `None` keeps the label-only
     /// fallback for older clients and bare-identity rows.
     StopAgent {
         name: String,

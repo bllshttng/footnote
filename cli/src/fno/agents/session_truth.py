@@ -198,100 +198,36 @@ def _opencode_activity_epoch(session_id: str, db_path: Path) -> Optional[float]:
     return float(rows[0][0]) / 1000.0
 
 
-def observed_title(
-    agent: str,
-    session_id: str,
-    transcript_path: Optional[Path],
-    *,
-    projects_root: Optional[Path] = None,
-    codex_sessions_dir: Optional[Path] = None,
-) -> Optional[str]:
+def observed_title(agent: str, transcript_path: Optional[Path]) -> Optional[str]:
     """The title the HARNESS carries for this session, or ``None``.
 
-    claude keeps it in the transcript itself: a ``Ctrl+R`` rename in the agent
-    view appends a ``{"type":"agent-name","agentName":...}`` record and fires
-    no hook, so the last such record IS the current title. codex keeps a
-    ``threads.title`` in its session index store; opencode keeps
-    ``session.title`` in the shared store. ``None`` = the harness carries no
-    title for this session (or its store is unreadable): absence renders as
-    absence and never as the fno label, which is a different store's opinion.
-
-    Read-only; never raises (every read failure degrades to ``None``); the
-    caller reports it beside the label -- it is never written back anywhere.
+    claude only: a ``Ctrl+R`` rename appends a ``{"type":"agent-name",...}``
+    record and fires no hook, so the last such record IS the current title.
+    ``None`` renders as absence, never as the fno label; never written back.
     """
-    try:
-        if agent == "claude" and transcript_path is not None:
-            title: Optional[str] = None
-            with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
-                # agent-name records are rare (one per rename, ever), so the
-                # substring pre-filter skips json.loads for every line but the
-                # handful that can answer; a whole-file stream is what the
-                # tail reader already pays per probe.
-                for line in fh:
-                    if '"agent-name"' not in line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except ValueError:
-                        continue
-                    if (
-                        isinstance(rec, dict)
-                        and rec.get("type") == "agent-name"
-                        and isinstance(rec.get("agentName"), str)
-                        and rec["agentName"].strip()
-                    ):
-                        title = rec["agentName"]
-            return title
-        if agent == "codex":
-            import glob
-            import os
-            import sqlite3
-
-            home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
-            # The index store's name carries a schema version (state_5.sqlite);
-            # glob it so a future bump stays readable and today's missing
-            # store degrades to None like any other unreadable index.
-            for db in sorted(glob.glob(os.path.join(home, "sqlite", "state_*.sqlite"))):
-                try:
-                    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
-                except sqlite3.Error:
-                    continue
-                try:
-                    rows = con.execute(
-                        "SELECT title FROM threads WHERE id = ?", (session_id,)
-                    ).fetchall()
-                except sqlite3.Error:
-                    continue
-                finally:
-                    con.close()
-                if rows and isinstance(rows[0][0], str) and rows[0][0].strip():
-                    return rows[0][0]
-            return None
-        if agent == "opencode":
-            from fno.provenance.resolver import resolve_transcript
-
-            rt = resolve_transcript(
-                agent,
-                session_id,
-                "",
-                projects_root=projects_root,
-                codex_sessions_dir=codex_sessions_dir,
-            )
-            if not rt.resolved or not rt.transcript_path:
-                return None
-            from fno.agents.discover import opencode_query
-
-            rows = opencode_query(
-                Path(rt.transcript_path),
-                "SELECT title FROM session WHERE id = ?",
-                (session_id,),
-            )
-            if rows and isinstance(rows[0][0], str) and rows[0][0].strip():
-                return rows[0][0]
-            return None
-    except Exception:  # noqa: BLE001 — a title read must never break the probe
+    if agent != "claude" or transcript_path is None:
         return None
-    return None
+    try:
+        title: Optional[str] = None
+        with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
+            # agent-name records are rare: pre-filter so json.loads is rare.
+            for line in fh:
+                if '"agent-name"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if (
+                    isinstance(rec, dict)
+                    and rec.get("type") == "agent-name"
+                    and isinstance(rec.get("agentName"), str)
+                    and rec["agentName"].strip()
+                ):
+                    title = rec["agentName"]
+        return title
+    except OSError:
+        return None
 
 
 # Transcript location and the observed-model read live in fno.provenance:
@@ -318,9 +254,8 @@ def resolve_session_truth(
 
     Returns ``{handle, state, reason, last_activity_age_s, last_event_at,
     last_message, session_id, observed_model, harness_title, suggestions}``.
-    ``state`` is one
-    of done | watching | your-move | working | stalled | unknown; ``reason`` is
-    set only for ``unknown`` (``not-found`` / ``no-records``);
+    ``state`` is one of done | watching | your-move | working | stalled |
+    unknown; ``reason`` is set only for ``unknown`` (``not-found``/``no-records``);
     ``last_event_at`` is the absolute ISO8601 UTC stamp of the newest transcript
     activity and ``last_message`` the flattened text of the LAST turn (compact
     ``[tool_use: name]`` markers included, whitespace collapsed, capped at 200
@@ -437,7 +372,7 @@ def resolve_session_truth(
         "last_message": " ".join((last.text or "").split())[:200] or None,
         "session_id": sid,
         "observed_model": observed,
-        "harness_title": observed_title(agent, sid, transcript_path),
+        "harness_title": observed_title(agent, transcript_path),
         "suggestions": [],
     }
 

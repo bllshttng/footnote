@@ -4590,7 +4590,7 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
             "--session-id" => session_id = it.next(),
             "--state" => state = it.next(),
             "--reason" => reason = it.next(),
-            // (x-1ab9) The served model/effort axes, passed through verbatim.
+            // The served model/effort axes, passed through verbatim.
             "--model" => model = it.next(),
             "--effort" => effort = it.next(),
             "--seq" => {
@@ -4620,7 +4620,7 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
         Some("working") => "working",
         Some("blocked") => "blocked",
         Some("done") => "done",
-        // (x-1ab9) The PostModelSwitch posture: no inside-leg transition.
+        // The PostModelSwitch posture: no inside-leg transition.
         Some("model") => "model",
         _ => return Err("report needs --state working|blocked|done|model".into()),
     };

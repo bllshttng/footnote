@@ -247,8 +247,8 @@ fn entry_session_ids(e: &RegistryEntry) -> impl Iterator<Item = &str> {
     .chain(e.predecessor_session_ids.iter().map(String::as_str))
 }
 
-/// True when `harness`/`session_id` is the row's PRIMARY KEY (law
-/// d-e952ed19): same harness, full-id tier on any of the row's session ids.
+/// True when `harness`/`session_id` is the row's PRIMARY KEY: same harness,
+/// full-id tier on any of the row's session ids.
 fn session_key_matches(e: &RegistryEntry, harness: &str, session_id: &str) -> bool {
     e.harness_name() == harness
         && entry_session_ids(e).any(|sid| session_handle_tier(session_id, sid) == Some(0))
@@ -261,7 +261,7 @@ fn label_matches(e: &RegistryEntry, token: &str) -> bool {
 }
 
 impl Registry {
-    /// Resolve by the primary key (law d-e952ed19). The pair, never the id
+    /// Resolve by the primary key. The pair, never the id
     /// alone: id shapes differ per harness (claude uuid4, codex uuid7 whose
     /// head-8 collides inside one minute, opencode case-sensitive `ses_`).
     pub fn find_by_session(&self, harness: &str, session_id: &str) -> Option<&RegistryEntry> {
@@ -293,7 +293,7 @@ impl Registry {
     }
 
     /// Find by token: LABEL first (own name, then prior labels), then
-    /// identity (the full-id session tier). Law d-e952ed19 demotes name to a
+    /// identity (the full-id session tier). Name is demoted to a
     /// mutable alias; session id is the key this falls back for. An
     /// AMBIGUOUS label (two rows answer it) resolves to nothing: picking the
     /// first match would let one of two honest rows receive the other's
@@ -639,7 +639,7 @@ pub struct RegistryEntry {
     /// Reasoning-effort arm used by the lane, when one was selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
-    /// (x-1ab9) SERVED harness liveness, one of `alive|dead|unmeasured`,
+    /// SERVED harness liveness, one of `alive|dead|unmeasured`,
     /// written ONLY by the reconcile sweep and always paired with
     /// `liveness_measured_at`. It never replaces the stored `status` (the
     /// pane/ask arms still settle that); it exists so no reader has to
@@ -650,7 +650,7 @@ pub struct RegistryEntry {
     pub liveness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_measured_at: Option<String>,
-    /// (x-1ab9) The LAST title the harness reported for this session (claude's
+    /// The LAST title the harness reported for this session (claude's
     /// Ctrl+R agent-name record; codex/opencode's index title), kept ONLY as
     /// the diff baseline the sweep's `agent_renamed` emit compares against.
     /// The row's `name` is never written from it: the label is fno's, the
@@ -4705,7 +4705,6 @@ mod tests {
     // shrink-only line, and test motion is the sanctioned shrink.
     #[path = "x4c87_row_counts.rs"]
     mod row_count_tests;
-
 }
 
 // ---------------------------------------------------------------------------

@@ -120,6 +120,7 @@ pub mod run_outcome;
 pub mod run_state;
 pub mod scrape;
 pub mod screen;
+pub mod session_names_fold;
 pub mod session_start_bytes;
 pub mod spawn_gate;
 pub mod spawn_payload;

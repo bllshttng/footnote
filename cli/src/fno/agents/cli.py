@@ -4261,16 +4261,13 @@ def _registry_falsifier(handle: str) -> str | None:
 
 
 def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:
-    """The ``truth --json`` wire shape.
+    """The ``truth --json`` wire shape: the Python/Rust boundary.
 
-    This is the Python/Rust boundary: ``family1_truth_probe`` in
-    ``crates/fno-agents/src/claude_ask.rs`` reads this, and ``resume`` decides
-    "is live" from it. The reachability verdict has to be ON this
-    wire or Rust keeps re-deriving liveness from the raw transcript ``state``
-    and never sees the falsifier -- the same trap, one language over.
-
-    ``state`` stays exactly as it was. Existing Rust consumers parse it, and
-    overloading a field they already match on would be a silent contract break.
+    ``family1_truth_probe`` (crates/fno-agents/src/claude_ask.rs) reads this,
+    and ``resume`` decides "is live" from it. The reachability verdict has to
+    be ON this wire or Rust keeps re-deriving liveness from the raw transcript
+    ``state`` and never sees the falsifier. ``state`` stays exactly as it was;
+    overloading a field Rust already matches on is a silent contract break.
     """
     from fno.agents.reachability import classify_reachability
 

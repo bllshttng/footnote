@@ -112,7 +112,7 @@ print(f"{sid}\t{time.monotonic_ns()}\t{msg}\t{event}\t{model}\t{eff}")
 # skipped, below. A clean parse yields
 # "<session_id>\t<seq>\t<message>\t<event>\t<model>\t<effort>";
 # message is empty for every event that doesn't carry one (all but Notification),
-# model/effort only arrive on PostModelSwitch / effort-carrying inputs (x-1ab9).
+# model/effort only arrive on PostModelSwitch / effort-carrying inputs.
 SESSION_ID=""
 SEQ=""
 MESSAGE=""
@@ -310,7 +310,7 @@ fi
 # notification with no further plumbing.
 REPORT_ARGS=(--session-id "$SESSION_ID" --seq "$SEQ" --state "$STATE")
 [[ -n "$MESSAGE" ]] && REPORT_ARGS+=(--reason "$MESSAGE")
-# (x-1ab9) PostModelSwitch carries the harness-side model; every hook input
+# PostModelSwitch carries the harness-side model; every hook input
 # may carry an effort level. Optional params: the daemon diffs them against
 # the row and only stamps + emits on a real change.
 [[ -n "$MODEL" ]] && REPORT_ARGS+=(--model "$MODEL")

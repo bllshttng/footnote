@@ -2117,7 +2117,7 @@ fn probe_truth_map() -> Option<HashMap<String, TruthReading>> {
         let Some(name) = row.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
-        // Identity-first key (x-1ab9, law d-e952ed19): the full harness
+        // Identity-first key: the full harness
         // session id when the row carries one, the label otherwise (legacy
         // rows). A rename no longer orphans a row's readings.
         let key = row
@@ -2672,7 +2672,7 @@ struct Core {
     tail_by_session: HashMap<String, String>,
     /// (v48) Latest reachability-evidence map from the off-loop truth probe,
     /// joined into each agent row's `basis` / `last_activity_age_s` at layout
-    /// time. (x-1ab9) The key is the row's full harness session id when it
+    /// time. The key is the row's full harness session id when it
     /// has one, the label otherwise (legacy rows): identity first, the
     /// demoted label as the alias fallback. Kept-whole on a failed probe: the
     /// alternative (clearing on failure) would flap every row to "no reading"
@@ -10838,8 +10838,8 @@ impl Core {
 
     /// The reachability evidence halves a registry-backed row carries on the
     /// wire: `None` until a probe has answered for that row. The map key is
-    /// the row's full harness session id when it has one (identity first,
-    /// law d-e952ed19), else the label; a row with neither (bare panes,
+    /// the row's full harness session id when it has one (identity first),
+    /// else the label; a row with neither (bare panes,
     /// tombstones, external lifecycle) never calls these - there is nothing
     /// to probe.
     fn truth_basis(&self, a: &RegistryAgent) -> Option<String> {
@@ -15609,7 +15609,7 @@ fn subline_from(branch: Option<&str>, cwd: &str) -> Option<String> {
     }
 }
 
-/// (x-1ab9) The harness's own title for the session joins the subline when it
+/// The harness's own title for the session joins the subline when it
 /// differs from the row's label: the sideline keeps showing fno's label as the
 /// row name (a Ctrl+R rename never rewrites it), and the title rides the same
 /// dim slot so the rename is visible where the worker works.
@@ -15905,7 +15905,7 @@ async fn serve(
             let mut last_uuids: Vec<(String, Option<String>)> = Vec::new();
             let mut last_tails: HashMap<String, String> = HashMap::new();
             let mut last_truth = Instant::now();
-            // (x-1ab9 task 6.1) Logged ONCE on the first daemon miss, never per
+            // Logged ONCE on the first daemon miss, never per
             // tick: the fallback is a fact about the environment, and a fleet
             // with no daemon must not pay one line per second for it.
             let mut fallback_logged = false;
@@ -15976,7 +15976,7 @@ async fn serve(
                         }
                     });
                 }
-                // (x-1ab9 task 6.1) The registry leg subscribes to the daemon
+                // The registry leg subscribes to the daemon
                 // when its socket answers (AC12): rows are SERVED, the stamp
                 // domain is the same (mtime, len) the file scan gated with, and
                 // an unchanged answer costs one stat server-side and one small
@@ -17580,7 +17580,7 @@ mod tests {
     // (x-0719) The portal test family lives in its own module; the file
     // is shrink-only under the file-budget gate.
     mod portal_tests;
-    // (x-1ab9) Same treatment: the lifecycle-resolution test family.
+    // Same treatment: the lifecycle-resolution test family.
     mod lifecycle_tests;
 
     // The sideline rename test family, same treatment.
@@ -24993,7 +24993,7 @@ mod tests {
 
     #[test]
     fn subline_with_title_joins_the_harness_title_beside_the_label() {
-        // (x-1ab9 AC10-HP) A row whose harness title differs from its label
+        // A row whose harness title differs from its label
         // renders the title in the subline slot, joined onto the branch
         // subline; a title that EQUALS the label renders nothing (the label
         // already says it), and no title falls back to the base subline.

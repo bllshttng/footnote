@@ -3988,32 +3988,6 @@ def _pre_push_hook_report(src: Optional[Path]) -> dict[str, Any]:
     return {"status": "ok"}
 
 
-def _session_names_report() -> dict[str, Any]:
-    """Aliases ``~/.fno/session-names.json`` still carries that no registry
-    row does (x-1ab9 task 3.1). ``fno agents reconcile`` migrates them into
-    rows; this names what no reconcile has folded yet. Advisory."""
-    out: dict[str, Any] = {"unmerged": []}
-    try:
-        from fno.agents.discover import _load_name_map, default_name_map_path
-        from fno.agents.registry import load_registry
-
-        stored = _load_name_map(default_name_map_path())
-        if not stored:
-            return out
-        carried: set[str] = set()
-        for entry in load_registry():
-            carried.update(getattr(entry, "aliases", None) or [])
-            carried.add(entry.name)
-        out["unmerged"] = sorted(
-            alias
-            for alias in stored.values()
-            if isinstance(alias, str) and alias and alias not in carried
-        )
-    except (OSError, ValueError):
-        pass
-    return out
-
-
 def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     """Assemble the full doctor result dict: the staleness verdict plus every
     advisory report. The one place that reads the machine, so `fno doctor`
@@ -4058,10 +4032,6 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
 
     # Advisory orphan-file check (Group 3 GC); never changes status/exit.
     result["orphan_files"] = _orphan_report()
-
-    # Advisory session-names migration visibility (x-1ab9 task 3.1); never
-    # changes status/exit.
-    result["session_names"] = _session_names_report()
 
     # Advisory PR-watch liveness (x-e106): enabled-but-dead ran silently for
     # weeks with zero signal; the verdict derives from tick recency (ground

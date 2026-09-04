@@ -579,24 +579,6 @@ def _report_observation(
     )
 
 
-def _mint_default_alias(entry: object, cwd: str) -> None:
-    """Best-effort default alias ``<cwd-basename>-<short_id>`` onto the row
-    (x-1ab9 task 3.1). The row is the primary name store, so a session is
-    born addressable by a legible alias without a per-render overlay write.
-    Fail-open: an alias never blocks session start."""
-    try:
-        from fno.agents.registry import append_row_alias
-
-        short_id = getattr(entry, "short_id", "") or ""
-        name = getattr(entry, "name", "")
-        if not short_id or not name:
-            return
-        base = os.path.basename(cwd.rstrip("/")) or "session"
-        append_row_alias(name, f"{base}-{short_id}")
-    except Exception:
-        pass
-
-
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="register_session")
     # --harness is canonical; --provider is the axis-rename alias (x-bab1), kept
@@ -668,7 +650,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         session_id=args.session_id,
         cwd=entry.cwd,
     )
-    _mint_default_alias(entry, args.cwd)
+    # The default legible alias is minted by the daemon sweep (see
+    # session_names_fold.rs), so every row gains one within a tick.
     print(f"register_session: registered {entry.name} ({entry.harness})", file=sys.stderr)
     return 0
 

@@ -2757,16 +2757,10 @@ def append_row_alias(
     *,
     registry_path: Optional[Path] = None,
 ) -> bool:
-    """Append ``alias`` to the resolved row's ``aliases`` (x-1ab9 task 3.1).
+    """Append ``alias`` to the resolved row's ``aliases``.
 
-    The row is the one durable name store for its own labels; this is the
-    append-only writer behind spawn registration and the session-names
-    migration. Idempotent: an alias the row already carries is a no-op that
-    returns False. Another row answering to the alias REFUSES the append
-    (fail closed) - an ambiguous alias is no address at all, the same rule
-    the demoted Rust lookup applies. Best-effort by callers; a resolution
-    miss is a False, never a raise, because an alias is a convenience
-    address, never a truth.
+    Idempotent; a REFUSAL when another row answers to the alias (ambiguous
+    = no address). Best-effort: a miss is False - never a raise.
     """
     alias = alias.strip()
     if not alias:
@@ -2790,58 +2784,18 @@ def append_row_alias(
         )
         if target is None:
             return entries
-        if any(
-            other is not target and alias in (other.aliases or []) for other in entries
-        ) or any(other.name == alias for other in entries if other is not target):
-            return entries
-        if alias not in (target.aliases or []) and target.name != alias:
-            target.aliases.append(alias)
-            appended.append(True)
+        if target.name != alias and alias not in (target.aliases or []):
+            taken = any(
+                other is not target and (alias in (other.aliases or []) or other.name == alias)
+                for other in entries
+            )
+            if not taken:
+                target.aliases.append(alias)
+                appended.append(True)
         return entries
 
     update_registry(_updater, path=registry_path)
     return bool(appended)
-
-
-def merge_session_names_into_aliases(
-    *,
-    registry_path: Optional[Path] = None,
-    name_map_path: Optional[Path] = None,
-) -> int:
-    """One-time migration (x-1ab9 task 3.1): fold ``~/.fno/session-names.json``
-    into the rows' ``aliases``.
-
-    For each ``session_id -> alias`` the file carries, the row that session
-    answers to gains the alias. The file itself is left untouched - it keeps
-    its readers (external roster rows carry no fno row to hold an alias) and
-    its writer retirement belongs to the mail-address surface (x-c64d).
-    Idempotent: ``append_row_alias`` skips what a row already carries.
-    Returns how many rows gained an alias. Best-effort: an unreadable file or
-    registry merges nothing.
-    """
-    from fno.agents.discover import _load_name_map, default_name_map_path
-
-    path = name_map_path or default_name_map_path()
-    stored = _load_name_map(path)
-    if not stored:
-        return 0
-    try:
-        entries = load_registry(registry_path)
-    except (OSError, ValueError):
-        return 0
-    by_sid = {}
-    for entry in entries:
-        for sid in filter(None, (entry.harness_session_id, entry.short_id)):
-            by_sid.setdefault(sid, entry)
-    merged = 0
-    for sid, alias in stored.items():
-        entry = by_sid.get(sid)
-        if entry is None or not isinstance(alias, str):
-            continue
-        if append_row_alias(entry.name, alias, registry_path=registry_path):
-            merged += 1
-    return merged
-
 
 def project_verified_tier(
     name: str,

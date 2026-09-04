@@ -70,7 +70,7 @@ pub struct RegistryAgent {
     /// invisibly.
     pub predecessor_session_ids: Vec<String>,
     pub forked_from_session_id: Option<String>,
-    /// (x-1ab9) The one optional PARKED session id: a fork minted under
+    /// The one optional PARKED session id: a fork minted under
     /// unknown evidence that owns no registry row yet. `merge_rows`
     /// synthesizes a lineage child for it while the roster still lists it
     /// live, so an addressable session is never invisible.
@@ -153,12 +153,12 @@ pub struct RegistryAgent {
     /// can draw the two differently, per the repo's "assert a positive
     /// marker, never an absence" rule applied to the sideline.
     pub liveness: Liveness,
-    /// (x-1ab9) Age of the served liveness measurement in seconds, from the
+    /// Age of the served liveness measurement in seconds, from the
     /// row's `liveness_measured_at`. `None` = never measured (no served
     /// pair): the render can say "probe older than N s" instead of a bare
     /// unmeasured glyph.
     pub liveness_age_s: Option<u64>,
-    /// (x-1ab9) The LAST title the harness reported for this session
+    /// The LAST title the harness reported for this session
     /// (claude's Ctrl+R agent-name record), stored by the daemon sweep. The
     /// render joins it into the subline when it differs from the label; the
     /// row's `name` is never rewritten from it.
@@ -772,7 +772,7 @@ fn pid_confirmed_dead(pid: u64) -> bool {
 /// FILE, not types) is trusted over the status-string ladder.
 const LIVENESS_MAX_AGE_SECS: u64 = 10;
 
-/// (x-1ab9 task 4.1) The served pair decides the row's liveness when the
+/// The served pair decides the row's liveness when the
 /// measurement is fresh; an absent/stale measurement or an unknown word
 /// answers `None` and the status/pid ladder takes over exactly as before.
 fn served_liveness(
@@ -1857,7 +1857,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
         let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let exited = matches!(status, "exited" | "permanent-dead" | "permanent_dead");
         let dnd = row.get("delivery_policy").and_then(|v| v.as_str()) == Some("bus-only");
-        // (x-1ab9 task 4.1) SERVED liveness outranks the stored `status`
+        // SERVED liveness outranks the stored `status`
         // string: the sweep is its only writer and a fresh measurement
         // answers without trusting an init-time snapshot. Stale or absent,
         // the status/pid ladder answers exactly as before (a daemon-less
@@ -2248,7 +2248,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
 /// rather than guards: same rows, count discarded. One body behind both forms
 /// so the two readers cannot drift.
 ///
-/// (x-1ab9 task 6.1) This file reader is the DEGRADED PATH, not a second
+/// This file reader is the DEGRADED PATH, not a second
 /// authority. When the fno-agents daemon's socket answers, the mux subscribes
 /// through `agent.watch` and gets the rows SERVED (fresh from the sweep's
 /// own writes, one stat per idle tick); this parser then only decodes what
@@ -2259,7 +2259,7 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
     derive_rows_counted(raw, now_secs).map(|(rows, _)| rows)
 }
 
-/// (x-1ab9 task 6.1) The fno-agents daemon's supervisor socket, resolved the
+/// The fno-agents daemon's supervisor socket, resolved the
 /// same way [`registry_path`] resolves the registry home (`FNO_AGENTS_HOME` >
 /// `$HOME/.fno/agents`): the two live side by side under one agents home.
 pub fn supervisor_sock_path() -> PathBuf {
@@ -2272,7 +2272,7 @@ pub fn supervisor_sock_path() -> PathBuf {
     base.join(".fno").join("agents").join("supervisor.sock")
 }
 
-/// (x-1ab9 task 6.1) One `agent.watch` round trip against the daemon, if one
+/// One `agent.watch` round trip against the daemon, if one
 /// answers. The registry's (mtime, len) stamp is the subscription version: it
 /// travels out as `since` and back beside the document, so the caller's
 /// cached stamp gates on the daemon's answer exactly as it gated on its own
@@ -2454,7 +2454,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
     }
     drop(reg_ids); // release the borrow of `out` before extending it
 
-    // (x-1ab9 task 2.1) A PARKED fork id renders as a lineage child of its
+    // A PARKED fork id renders as a lineage child of its
     // primary while the roster still lists it live. The second uuid a fork
     // minted under unknown evidence is addressable but owns no registry row
     // until the next positive SessionStart observation mints one; today it
@@ -2959,7 +2959,7 @@ impl ReaderState {
 mod tests {
     use super::*;
 
-    // (x-1ab9) The parked-fork-child test family lives in its own module;
+    // The parked-fork-child test family lives in its own module;
     // this file is shrink-only under the file-budget gate.
     mod parked_child_tests;
     fn reg(rows: &str) -> String {

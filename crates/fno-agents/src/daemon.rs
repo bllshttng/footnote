@@ -2428,12 +2428,12 @@ pub(crate) fn batched_row_states(
     truth_tail_states(&handles)
 }
 
-/// (x-1ab9) The title diff the sweep's `agent_renamed` emits are built from:
+/// The title diff the sweep's `agent_renamed` emits are built from:
 /// one entry per row whose last-seen `harness_title` differs from the batch's
 /// reading. The tuple is `(name, harness_session_id, from, to)` - the event
 /// payload's shape, with `from` `None` on first observation. Rows without a
-/// harness session id are skipped: the event names identity (law
-/// d-e952ed19), and an identity-less rename has no addressee. The row's
+/// harness session id are skipped: the event names identity, and an
+/// identity-less rename has no addressee. The row's
 /// `name` is never written from any of this: the label is fno's, the title
 /// is the harness's.
 pub(crate) fn title_changes(
@@ -2455,8 +2455,8 @@ pub(crate) fn title_changes(
         .collect()
 }
 
-/// (x-1ab9) Apply the batch's title readings to the registry under the
-/// caller's lock. Keyed by identity (law d-e952ed19) read off the snapshot
+/// Apply the batch's title readings to the registry under the
+/// caller's lock. Keyed by identity read off the snapshot
 /// the batch planned from, so a row replaced under the same label between
 /// snapshot and locked write cannot receive the first row's title. The
 /// stored value is the DIFF BASELINE the next sweep compares against; every
@@ -4628,7 +4628,7 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
         Some("stop") => handle_stop(ctx, req).await,
         Some("rm") => handle_rm(ctx, req).await,
         Some("list") => run_blocking(ctx, req, handle_list).await,
-        // (x-1ab9 task 6.1) The subscription verb: version-gated full document,
+        // The subscription verb: version-gated full document,
         // so a subscriber pays a stat per idle tick and a read per write.
         Some("watch") => run_blocking(ctx, req, handle_watch).await,
         // status reads the in-memory drive table for the active-drives count, so
@@ -7729,12 +7729,12 @@ where
                     "last_message_at": e.last_message_at,
                     "last_message_at_basis": null,
                     "last_reconciled_at": e.last_reconciled_at,
-                    // (x-1ab9) The SERVED liveness pair, written only by the
+                    // The SERVED liveness pair, written only by the
                     // sweep: a reader trusts it while the stamp is young and
                     // reads its age honestly when it is not.
                     "liveness": e.liveness,
                     "liveness_measured_at": e.liveness_measured_at,
-                    // (x-1ab9) The harness's own title for the session, served
+                    // The harness's own title for the session, served
                     // from the probe's fresh reading with the sweep's stored
                     // last-seen value as fallback. Beside `name`, never in it:
                     // the label is fno's, the title is the harness's.
@@ -9170,7 +9170,7 @@ const RECONCILE_SWEEP_BUDGET: Duration = Duration::from_secs(5);
 struct ReconcileChange {
     name: String,
     new_status: Option<AgentStatus>,
-    /// (x-1ab9) The probe's liveness word, `alive|dead|unmeasured`, decided
+    /// The probe's liveness word, `alive|dead|unmeasured`, decided
     /// where the evidence was gathered and written beside
     /// `liveness_measured_at`. `None` = not measured this sweep (deferred or
     /// no evidence): leave the previous measurement standing, its age honest
@@ -9338,7 +9338,7 @@ where
             continue;
         }
         // One probe, two verdicts: the status transition (below) and the
-        // SERVED liveness word (x-1ab9) both come from the same measurement,
+        // SERVED liveness word both come from the same measurement,
         // so the wire can never claim an age or a word the sweep did not
         // itself just observe.
         let measured = probe(entry);
@@ -9471,7 +9471,7 @@ fn apply_reconcile_change(
 ) {
     e.last_reconciled_at = Some(now.to_string());
     if let Some(word) = new_liveness {
-        // The sweep is the ONLY writer of the served pair (x-1ab9): a probe
+        // The sweep is the ONLY writer of the served pair: a probe
         // answer is a fact about the moment it measured, so it carries its
         // stamp with it.
         e.liveness = Some(word.to_string());
@@ -10426,6 +10426,9 @@ fn run_reconcile_sweep(
             .map(Path::new)
             .is_some_and(Path::is_file)
     };
+    // The session-names overlay folds into the rows on every sweep:
+    // best-effort, one small file read, and the count is an event.
+    crate::session_names_fold::fold_session_names(home, emitter);
     let probes = batched_row_probes(&entries, &crate::claude_ask::family1_truth_probe_many);
     // One batch feeds both consumers: the ladder's truth rung reads states,
     // the title detector reads titles. The probes are keyed by the row's
@@ -10439,14 +10442,14 @@ fn run_reconcile_sweep(
         .into_iter()
         .map(|(h, p)| (h, p.harness_title))
         .collect();
-    // (x-1ab9) Title diff, computed off the SAME snapshot the write below
+    // Title diff, computed off the SAME snapshot the write below
     // applies to: the harness's own name for the session against the row's
     // last-seen value. `name` is NEVER written from it - the label is fno's,
     // the title is the harness's - and the emit rides the successful write,
     // so a failed write never announces a rename it did not persist.
     let renames = title_changes(&entries, &titles);
     let prober = live_liveness_prober(truth);
-    // (x-1ab9) The sweep budget starts HERE, after the truth batch and the
+    // The sweep budget starts HERE, after the truth batch and the
     // roster load: those reads serve every verb, and charging them to the
     // probe loop's 5s window was why 79 rows went unprobed every sweep
     // (24s wall, 0 probed). The probe loop and the roster-progress loop
@@ -10485,7 +10488,7 @@ fn run_reconcile_sweep(
     // mislead automation and hide stale lifecycle state.
     if let Err(err) = state::update_registry(&home.registry_json(), |r| {
         for ch in &changes {
-            // Keyed on the probed row's identity (law d-e952ed19) read off
+            // Keyed on the probed row's identity read off
             // the same snapshot the sweep planned from, so a row replaced
             // under the same label between snapshot and locked write cannot
             // receive the first row's status.
@@ -10504,7 +10507,7 @@ fn run_reconcile_sweep(
                 apply_reconcile_change(e, ch.new_status, ch.new_liveness, &now);
             }
         }
-        // (x-1ab9) Apply the batch's title readings in the SAME lock window:
+        // Apply the batch's title readings in the SAME lock window:
         // the row's stored title is the diff baseline the next sweep compares
         // against, so a row the reconcile changes never skipped lost its
         // rename.
@@ -10517,7 +10520,7 @@ fn run_reconcile_sweep(
         ));
     }
 
-    // (x-1ab9) The renames ride the SUCCESSFUL write: each event names the
+    // The renames ride the SUCCESSFUL write: each event names the
     // row whose stored title the write just advanced, so events.jsonl never
     // announces a rename the registry does not carry, and a failed write
     // (the early return above) never announces one either.
@@ -10592,7 +10595,7 @@ fn run_reconcile_sweep(
 }
 
 /// The agent.rename route. state.rs owns the grammar and the transaction.
-/// `agent.watch` (x-1ab9 task 6.1): the subscription face of the registry.
+/// `agent.watch`: the subscription face of the registry.
 ///
 /// `{"since": {"mtime_nanos", "len"} | null}` in; one answer out. The first
 /// call (`since` absent) serves the FULL document - connect, payload. Later
@@ -10952,7 +10955,7 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
         }
     };
     // Validate against the wire vocabulary; keep the label for the event payload
-    // and map to the typed enum for storage. (x-1ab9) `model` is the
+    // and map to the typed enum for storage. `model` is the
     // PostModelSwitch posture: no inside-leg transition, the report only
     // diffs the row's SERVED model/effort axes, and it must carry at least
     // one of them.
@@ -11025,10 +11028,10 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
     // UNDER the flock from prev-vs-new state; fired AFTER the write so a slow
     // notifier can never stall ingestion.
     let mut notify: Option<(String, String, bool)> = None;
-    // (x-1ab9) The row's label, captured under the flock for the axis-change
+    // The row's label, captured under the flock for the axis-change
     // events emitted after the write.
     let mut entry_name: Option<String> = None;
-    // (x-1ab9) Served-axis change records captured under the flock, emitted
+    // Served-axis change records captured under the flock, emitted
     // after the write: (kind, from, to). `requested_*` are never touched -
     // they stay the spawn request, which is the provenance.
     let mut axis_changes: Vec<(&str, Option<String>, String)> = Vec::new();
@@ -11105,7 +11108,7 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
                 "inside_leg_report",
                 &json!({"session_id": session_id, "seq": seq, "state": state_label}),
             );
-            // (x-1ab9) One event per served-axis change, emitted only after
+            // One event per served-axis change, emitted only after
             // the write landed.
             for (kind, from, to) in &axis_changes {
                 let _ = ctx.emitter.emit(
@@ -11145,7 +11148,7 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
         // instead of dropping it; the spawn path flushes it onto the row at
         // creation. Still fire-and-forget: every branch returns `ok`. The lock is
         // scoped to the buffer op (released before the emit) via `.map(..).ok()`;
-        // a poisoned lock -> `None` -> the old hard-drop degrade. (x-1ab9) A
+        // a poisoned lock -> `None` -> the old hard-drop degrade. A
         // model-posture report has no transition to buffer: an unknown session
         // is a plain drop.
         Outcome::Unknown => {
@@ -13734,74 +13737,73 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert!(reg.entries.iter().any(|e| e.name == "stuck"));
     }
 
-    // (x-1ab9 shrink) The gc ladder, reap-receipt gate and plan_reconcile
+    // The gc ladder, reap-receipt gate and plan_reconcile
     // families, moved verbatim into their own module (file budget: this
     // file is far over the shrink-only line; test motion is the sanctioned
     // shrink).
     #[path = "gc_receipts.rs"]
     mod gc_receipts;
 
-// --- plan_reconcile (US6.9): tri-state, status-aware transitions, budget ---
+    // --- plan_reconcile (US6.9): tri-state, status-aware transitions, budget ---
 
-fn rentry(name: &str, status: AgentStatus, last_reconciled: Option<&str>) -> RegistryEntry {
-    RegistryEntry {
-        substrate: None,
-        node: None,
-        spawned_by_session: None,
-        spawned_by_harness: None,
-        spawned_by_cwd: None,
-        launch_account: None,
-        related_session_id: None,
-        origin: None,
-        name: name.into(),
-        short_id: name.into(),
-        legacy_provider: "codex".into(),
-        provider: None,
-        model: None,
-        model_basis: None,
-        effort: None,
-        harness: None,
-        harness_session_id: None,
-        predecessor_session_ids: Vec::new(),
-        forked_from_session_id: None,
-        route_provider_id: None,
-        model_name: None,
-        account_record_id: None,
-        cwd: "/tmp".into(),
-        project_root: "/tmp".into(),
-        session_id: Some("sid".into()),
-        spawn_trigger: None,
-        legacy_claude_short_id: None,
-        claude_session_uuid: None,
-        messaging_socket_path: None,
-        codex_session_id: None,
-        gemini_session_id: None,
-        mcp_channel_id: None,
-        host_mode: None,
-        cc_session_id: None,
-        status,
-        last_message_at: None,
-        created_at: "t".into(),
-        pid: None,
-        pid_start_time: None,
-        keeper_child_pid: None,
-        log_path: None,
-        last_reconciled_at: last_reconciled.map(String::from),
-        inside_leg: None,
-        exited_at: None,
-        mux: None,
-        screen_state: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_grantor: None,
-        route_settings_path: None,
-        fno_id: None,
-        delivery_policy: None,
-        sandbox_posture: None,
-        ..Default::default()
+    fn rentry(name: &str, status: AgentStatus, last_reconciled: Option<&str>) -> RegistryEntry {
+        RegistryEntry {
+            substrate: None,
+            node: None,
+            spawned_by_session: None,
+            spawned_by_harness: None,
+            spawned_by_cwd: None,
+            launch_account: None,
+            related_session_id: None,
+            origin: None,
+            name: name.into(),
+            short_id: name.into(),
+            legacy_provider: "codex".into(),
+            provider: None,
+            model: None,
+            model_basis: None,
+            effort: None,
+            harness: None,
+            harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
+            route_provider_id: None,
+            model_name: None,
+            account_record_id: None,
+            cwd: "/tmp".into(),
+            project_root: "/tmp".into(),
+            session_id: Some("sid".into()),
+            spawn_trigger: None,
+            legacy_claude_short_id: None,
+            claude_session_uuid: None,
+            messaging_socket_path: None,
+            codex_session_id: None,
+            gemini_session_id: None,
+            mcp_channel_id: None,
+            host_mode: None,
+            cc_session_id: None,
+            status,
+            last_message_at: None,
+            created_at: "t".into(),
+            pid: None,
+            pid_start_time: None,
+            keeper_child_pid: None,
+            log_path: None,
+            last_reconciled_at: last_reconciled.map(String::from),
+            inside_leg: None,
+            exited_at: None,
+            mux: None,
+            screen_state: None,
+            crown_level: None,
+            crown_scope: None,
+            crown_grantor: None,
+            route_settings_path: None,
+            fno_id: None,
+            delivery_policy: None,
+            sandbox_posture: None,
+            ..Default::default()
+        }
     }
-}
-
 
     fn probe_err() -> crate::provider::ReachabilityProbeError {
         crate::provider::ReachabilityProbeError::new("codex", "store unavailable")
@@ -17072,7 +17074,7 @@ done
     /// breaks the build rather than silently disarming the check.
     #[test]
     fn watch_serves_on_connect_and_only_on_change() {
-        // (x-1ab9 task 6.1, AC12-HP) The subscription contract: connect serves
+        // The subscription contract: connect serves
         // the full document; the same (mtime, len) version answers "unchanged"
         // without a document; any write moves the stamp and the SAME `since`
         // then serves fresh rows. One stat per idle tick is the whole cost.
