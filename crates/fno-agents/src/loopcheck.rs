@@ -1750,6 +1750,12 @@ pub use crate::review_freshness::{
     FreshnessResolver,
 };
 
+// Child modules named by their question (the file budget's remedy): the
+// coverage row's state deriver and the receipt line live there, not here.
+mod coverage_receipt;
+mod review_state;
+pub use coverage_receipt::coverage_receipt_line;
+
 /// Whether a `review_attestation` line is about the PR under evaluation.
 ///
 /// The events journal is shared across every worktree of a repo
@@ -2922,7 +2928,6 @@ fn read_pr_info(
                 &[],
                 &events_text,
                 &[],
-                &[],
                 !(no_external && login_gate_active),
                 author_session,
                 &freshness,
@@ -3273,7 +3278,6 @@ fn read_pr_info(
             comments_arr,
             &events_text,
             &gh_logins,
-            required_bots,
             true,
             author_session,
             &freshness,
@@ -3287,6 +3291,7 @@ fn read_pr_info(
         // flips the covered state, preserving verdicts), so capture it first.
         let self_attested_alone = coverage.rests_on_self_attestation_alone();
         coverage.apply_corroboration_policy(require_corroboration);
+        mark_owed_verdicts(&mut coverage, required_bots);
         let local_recovery = local_recovery_from_refusal(
             &info.reviewer_refused,
             &info.missing_bots,
@@ -6022,34 +6027,6 @@ impl CoverageReport {
             ),
         }
     }
-
-    pub fn review_state(&self) -> Option<ReviewState> {
-        if matches!(self.coverage, Coverage::Unknown) {
-            return None;
-        }
-        if self.verdicts.iter().any(|verdict| {
-            verdict.verdict == CoverageVerdict::Reviewed
-                && human_approval_counts(verdict, self.github_approval_satisfies)
-        }) {
-            return Some(ReviewState::Reviewed);
-        }
-        if self
-            .verdicts
-            .iter()
-            .any(|verdict| verdict.verdict == CoverageVerdict::Refused && verdict.required)
-        {
-            return Some(ReviewState::ReviewerRefused);
-        }
-        Some(ReviewState::Unreviewed)
-    }
-
-    pub fn refused_reviewers(&self) -> Vec<&str> {
-        self.verdicts
-            .iter()
-            .filter(|verdict| verdict.verdict == CoverageVerdict::Refused)
-            .map(|verdict| verdict.name.as_str())
-            .collect()
-    }
 }
 
 fn is_false(b: &bool) -> bool {
@@ -7031,6 +7008,22 @@ fn local_latest_attestations(
     (out, raised_findings)
 }
 
+/// Stamp the resolved required set onto a classified report: a github_app
+/// verdict is OWED exactly when its login is in `required_logins`. The
+/// classifier itself reads only the configured list (a configured login's
+/// verdict is owed until proven otherwise), so this is the one place that may
+/// downgrade an OPTIONAL login - and an optional App that sat absent then
+/// stops owning the receipt's waiting arm or the stop gate.
+pub fn mark_owed_verdicts(coverage: &mut CoverageReport, required_logins: &[String]) {
+    for verdict in &mut coverage.verdicts {
+        if verdict.producer == CoverageProducer::GithubApp {
+            verdict.required = required_logins
+                .iter()
+                .any(|l| login_matches_bot(&verdict.name, l));
+        }
+    }
+}
+
 /// Whether an author login is a KNOWN review App (a BOT_PROFILES login or a
 /// configured github_app). A present review from such an App counts toward
 /// coverage; a random `[bot]` suffix alone does not (it may be a non-review
@@ -7125,9 +7118,6 @@ pub fn classify_coverage(
         comments,
         events_text,
         github_app_logins,
-        // The bare spelling answers "owed" from the same list, so every
-        // pre-field unit test keeps its exact verdict set.
-        github_app_logins,
         github_read_ok,
         author_session,
         freshness,
@@ -7152,7 +7142,6 @@ pub fn classify_coverage_tiled(
     comments: &[Value],
     events_text: &str,
     github_app_logins: &[String],
-    required_logins: &[String],
     github_read_ok: bool,
     author_session: Option<&str>,
     freshness: &dyn Fn(&str) -> Freshness,
@@ -7267,7 +7256,10 @@ pub fn classify_coverage_tiled(
                 scope: None,
                 refusal_reason: None,
                 reviewer_context: None,
-                required: required_logins.iter().any(|l| login_matches_bot(login, l)),
+                // A configured login's verdict was OWED until proven otherwise:
+                // the resolved required set (mark_owed_verdicts) is what may
+                // downgrade an optional login, never this scan.
+                required: true,
             });
         }
         // (3) Known-App reviewers NOT in the configured list still count
@@ -7290,7 +7282,8 @@ pub fn classify_coverage_tiled(
                     scope: None,
                     refusal_reason: None,
                     reviewer_context: None,
-                    required: required_logins.iter().any(|l| login_matches_bot(author, l)),
+                    // Not in any configured list, so a fortiori not owed.
+                    required: false,
                 });
             }
         }
@@ -7348,7 +7341,8 @@ pub fn classify_coverage_tiled(
                     scope: None,
                     refusal_reason: None,
                     reviewer_context: None,
-                    required: required_logins.iter().any(|l| login_matches_bot(author, l)),
+                    // Not in any configured list, so a fortiori not owed.
+                    required: false,
                 });
             }
         }
@@ -7755,258 +7749,6 @@ fn coverage_event_data_full(
         });
     }
     data
-}
-
-/// Whether every `github_app` verdict went stale WITHOUT naming a commit.
-///
-/// One bot with an empty `commit.oid` is a payload quirk. EVERY bot with an
-/// empty one, and none reviewed, is the signature of a `gh` too old to return
-/// the field - which makes freshness unresolvable for the whole axis, forever,
-/// so a required bot never clears and the loop has no reachable exit. Failing
-/// closed is right; reporting it as "reviewed an older commit" is not, because
-/// the fix is a gh upgrade rather than a re-read.
-///
-/// Requires at least one stale verdict, so a PR with no bot reviews at all
-/// (every verdict `Absent`) never matches: an absence of reviewers is a
-/// different fact from an absence of commits on the reviews that exist.
-fn blind_to_reviewed_commits(rep: &CoverageReport) -> bool {
-    let github: Vec<&ReviewerVerdict> = rep
-        .verdicts
-        .iter()
-        .filter(|v| v.producer == CoverageProducer::GithubApp)
-        .collect();
-    let staleness: Vec<&&ReviewerVerdict> = github
-        .iter()
-        .filter(|v| v.verdict == CoverageVerdict::Stale)
-        .collect();
-    !staleness.is_empty() && staleness.iter().all(|v| v.reviewed_sha.is_empty())
-}
-
-/// The terminal act a spent round budget names, replacing the review-verb
-/// instruction in the uncovered arm. The verb is what restarted the loop;
-/// past the cap the receipt must not teach another round. It names the
-/// decline-file-merge act and the one operator lever that reopens review.
-/// Contains no slash-verb and never the words "review verb" - the corpus
-/// asserts both absences with a positive marker for this very string.
-const CAP_SPENT_TERMINAL_ACT: &str = "decline the remainder, file it with the declining identity and the reason, then merge; the operator lever is config.review.max_rounds";
-
-/// One-line coverage summary for the terminal message and receipts (x-0eaf
-/// task 3.1). Printed from the coverage value at print time, never from a
-/// remembered gate verdict (receipts have lied before).
-///
-/// `self_review_hint` is the sized invocation from `sized_self_review_hint`
-/// (the Python single source). None keeps the levelless line - the hint is
-/// advisory, and its absence must read identically to a build without the
-/// render, never as a different verdict.
-///
-/// `round_cap` is `Some((rounds_used, max_rounds))` ONLY when the round
-/// budget is already spent. The uncovered arm then names the terminal act
-/// instead of the review verb - the instruction that restarts the loop this
-/// cap exists to bound. None (the default at every under-cap call site)
-/// renders exactly the pre-cap line.
-pub fn coverage_receipt_line(
-    rep: &CoverageReport,
-    self_review_hint: Option<&str>,
-    round_cap: Option<(i64, i64)>,
-) -> String {
-    match &rep.coverage {
-        Coverage::Unknown => "review coverage: unknown (review read failed)".to_string(),
-        Coverage::Covered(n) => {
-            let reviewed_names: Vec<&str> = rep
-                .verdicts
-                .iter()
-                .filter(|v| {
-                    v.verdict == CoverageVerdict::Reviewed
-                        && human_approval_counts(v, rep.github_approval_satisfies)
-                })
-                .map(|v| v.name.as_str())
-                .collect();
-            if *n > 0 {
-                // Origin breakdown over EVERY reviewed (non-human) verdict, folded
-                // by its attestation_origin, so the three buckets sum to `n`. The
-                // self-attestation hazard lives on the local lane; a GitHub App
-                // review has no session to compare and reads `unknown` here (it is
-                // named above, so a reader sees it reviewed - "unknown" is its
-                // origin, not its verdict). All three buckets are always shown so
-                // a reader learns the vocabulary even when two are zero; `other`
-                // is a different session, NOT "independent".
-                //
-                // "all origins counted" is load-bearing: readers took the bare
-                // tally for a subtraction and refused to merge green PRs over
-                // it. A positive claim, not a disclaimer - a denial ("not a
-                // gate") answers the question by raising it. Scoped to ORIGINS
-                // because `n` does drop human approvals, so a bare "all
-                // counted" would be false on a human-approved PR.
-                let (self_n, other_n, unknown_n) = rep
-                    .verdicts
-                    .iter()
-                    .filter(|v| {
-                        v.verdict == CoverageVerdict::Reviewed
-                            && human_approval_counts(v, rep.github_approval_satisfies)
-                    })
-                    .fold((0, 0, 0), |(s, o, u), v| match v.attestation_origin {
-                        AttestationOrigin::SelfAttested => (s + 1, o, u),
-                        AttestationOrigin::OtherSession => (s, o + 1, u),
-                        AttestationOrigin::Unknown => (s, o, u + 1),
-                    });
-                return format!(
-                    "review coverage: {} reviewed ({}) - all origins counted; self {}, other {}, unknown {}",
-                    n,
-                    reviewed_names.join(", "),
-                    self_n,
-                    other_n,
-                    unknown_n
-                );
-            }
-            let refused: Vec<&str> = rep
-                .verdicts
-                .iter()
-                .filter(|v| v.verdict == CoverageVerdict::Refused)
-                .map(|v| v.name.as_str())
-                .collect();
-            let errored = rep
-                .verdicts
-                .iter()
-                .filter(|v| v.verdict == CoverageVerdict::Errored)
-                .count();
-            // Absent reviewers are NAMED: "the reviewers above" pointed at the
-            // refused ones, the only names the line had.
-            let absent: Vec<&str> = rep
-                .verdicts
-                .iter()
-                .filter(|v| v.verdict == CoverageVerdict::Absent)
-                .map(|v| v.name.as_str())
-                .collect();
-            // The waiting-on arm fires only for absences anyone was OWED. An
-            // optional App that never responds used to own this arm, and since
-            // such an App is absent on every PR forever, the stale arm below -
-            // "your local review read an older commit", the rebase case - was
-            // unreachable: the worker was told to check config.review for a
-            // reviewer that was not the problem. Unowed absences still ride
-            // the line as a trailing clause, so the fact is named without
-            // being the blocker.
-            let absent_owed: Vec<&str> = rep
-                .verdicts
-                .iter()
-                .filter(|v| v.verdict == CoverageVerdict::Absent && v.required)
-                .map(|v| v.name.as_str())
-                .collect();
-            let absent_unowed: Vec<&str> = rep
-                .verdicts
-                .iter()
-                .filter(|v| v.verdict == CoverageVerdict::Absent && !v.required)
-                .map(|v| v.name.as_str())
-                .collect();
-            // Stale reviewers are NAMED too. Without this the receipt for the
-            // x-5b99 specimen reads "0 reviewed, 0 refused, 0 errored, 0
-            // absent" - four zeros describing a PR a bot really did review, at
-            // an older commit. That is the absence-shaped lie the Stale variant
-            // exists to delete, and dropping it from the one line a human reads
-            // puts it straight back.
-            let stale: Vec<&str> = rep
-                .verdicts
-                .iter()
-                .filter(|v| v.verdict == CoverageVerdict::Stale)
-                .map(|v| v.name.as_str())
-                .collect();
-            // Never prescribe the local verb while an OWED reviewer is absent,
-            // and never suppress the next action entirely either. Both were
-            // tried here and both were wrong: the offer walks a worker into
-            // self-attesting past a reviewer the merge gate actually waits on,
-            // and bare suppression strands an optional App that is never
-            // installed with no reachable exit. The verdict now carries
-            // required-ness, so the escape is exact: an owed absence names
-            // itself as the wait, and an unowed one is named without owning
-            // the next action.
-            let next = if !absent_owed.is_empty() {
-                format!(
-                    "waiting on {} - if a reviewer there is uninstalled or no longer configured, check config.review",
-                    absent_owed.join(", ")
-                )
-            } else if !stale.is_empty() && blind_to_reviewed_commits(rep) {
-                // EVERY github_app verdict is stale AND none carries a commit at
-                // all. That is not "the bots read an older commit", it is "we
-                // cannot see which commit any bot read", and the two need
-                // opposite responses. `gh pr view --json reviews` supplies
-                // `commit.oid`; a gh too old to return it makes every bot review
-                // stale forever, so a required bot never clears and the loop
-                // blocks with no reachable exit. Failing closed is correct, but
-                // a closed gate that reports the wrong cause is the same
-                // absence-shaped lie this whole change deletes - so say which
-                // absence it is.
-                format!(
-                    "no review carries a reviewed commit ({}) - `gh pr view --json reviews` must return `commit.oid`; upgrade gh, then ask for a re-read",
-                    stale.join(", ")
-                )
-            } else if !stale.is_empty() {
-                // A re-read by the reviewer that already responded, not a local
-                // self-attest: "run the review verb" would walk a worker past a
-                // reviewer that may be REQUIRED and has simply gone stale.
-                format!(
-                    "{} reviewed an older commit whose code no longer matches HEAD - ask for a re-read",
-                    stale.join(", ")
-                )
-            } else if let Some((used, max)) = round_cap {
-                // The round budget is spent. Naming the review verb here is
-                // the instruction that restarts the loop this cap exists to
-                // bound: every fix moves HEAD, voids the attestation, and
-                // returns the worker to this exact line. So this arm names
-                // no verb at all - it names the terminal act (decline, file,
-                // merge) and the operator lever. The absent/stale arms above
-                // are untouched: they answer reviewer configuration, which
-                // the round budget neither causes nor cures.
-                format!(
-                    "the review round budget is spent ({used}/{max}) - {CAP_SPENT_TERMINAL_ACT}"
-                )
-            } else {
-                // Both arms carry the ordering, because the verb alone does not
-                // teach it: close findings, commit, push, review at the final
-                // head, attest last. The None arm is the one a CI runner prints
-                // (no `fno` on PATH there), so it must still name a producer -
-                // a bare "run the review verb" names none.
-                match self_review_hint {
-                    Some(hint) => {
-                        format!("run the review verb at HEAD - `{hint}` - {REVIEW_ORDER}")
-                    }
-                    None => format!("run the review verb at HEAD - {REVIEW_ORDER}"),
-                }
-            };
-            // An unowed absence is named on every arm, not only the one it no
-            // longer drives: the fact that a configured App is silent belongs
-            // on the line, but it is not the blocker and must not read as one.
-            let next = if absent_unowed.is_empty() {
-                next
-            } else {
-                format!(
-                    "{next} (not owed, still not responding: {})",
-                    absent_unowed.join(", ")
-                )
-            };
-            // `stale` counts in the tally and is NAMED in the next action, like
-            // `absent`. `refused` keeps its inline names, because a refusal is
-            // terminal and never drives the next action, so the tally is the
-            // only place a reader can learn who declined.
-            //
-            // Either way the parenthetical is dropped when the list is empty.
-            // A trailing `()` is a shape a previous fix deleted from this exact
-            // line, and the refused bucket had quietly kept printing it in
-            // every case where nothing refused - which is most of them.
-            let refused_names = if refused.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", refused.join(", "))
-            };
-            format!(
-                "review coverage: 0 reviewed, {} refused{}, {} errored, {} stale, {} absent. No head-pinned pass attestation for this head - {}.",
-                refused.len(),
-                refused_names,
-                errored,
-                stale.len(),
-                absent.len(),
-                next
-            )
-        }
-    }
 }
 
 // ── inline findings (Read 4, step 2 / US2) ────────────────────────────────────
@@ -15091,7 +14833,7 @@ mod tests {
 
     /// PR #826's real payload shape: codex submitted at `8e557ccd` while the
     /// gate evaluated against head `89bc0b91`, two commits later.
-    fn pr826_reviews() -> Vec<Value> {
+    pub(super) fn pr826_reviews() -> Vec<Value> {
         vec![serde_json::json!({
             "author": {"login": "chatgpt-codex-connector"},
             "state": "COMMENTED",
@@ -15297,79 +15039,6 @@ mod tests {
     }
 
     #[test]
-    fn coverage_receipt_names_a_stale_reviewer_instead_of_four_zeros() {
-        // The receipt for the x-5b99 specimen used to read "0 reviewed, 0
-        // refused, 0 errored, 0 absent" - four zeros over a PR codex really did
-        // review, at an older commit - and then prescribed the local verb,
-        // which is the one move that does NOT get the bot to re-read.
-        let rep = classify_coverage(
-            &pr826_reviews(),
-            &[],
-            "",
-            &["chatgpt-codex-connector".to_string()],
-            true,
-            None,
-            &|_| Freshness::Stale,
-            "",
-            "",
-        );
-        let line = coverage_receipt_line(&rep, None, None);
-        // Counted in the tally, NAMED in the next action - the same split the
-        // absent bucket uses, and the reason the line carries no empty `()`.
-        assert!(line.contains("1 stale,"), "{line}");
-        assert!(line.contains("chatgpt-codex-connector"), "{line}");
-        assert!(!line.contains("()"), "{line}");
-        assert!(line.contains("ask for a re-read"), "{line}");
-        assert!(!line.contains("run the review verb"), "{line}");
-    }
-
-    #[test]
-    fn coverage_receipt_separates_an_old_commit_from_no_commit_at_all() {
-        // Both shapes are "stale", and they need OPPOSITE responses. A bot that
-        // read an older commit needs a re-read. A whole axis with no commit on
-        // any review needs a gh upgrade, because `commit.oid` is where
-        // freshness comes from and without it every bot review is stale
-        // forever - a required bot never clears and the loop has no exit.
-        let no_commit = vec![serde_json::json!({
-            "author": {"login": "chatgpt-codex-connector"}, "state": "COMMENTED"
-        })];
-        let rep = classify_coverage(
-            &no_commit,
-            &[],
-            "",
-            &["chatgpt-codex-connector".to_string()],
-            true,
-            None,
-            &|sha| review_freshness(sha, "89bc0b91", &FreshnessFacts::default()),
-            "",
-            "",
-        );
-        let line = coverage_receipt_line(&rep, None, None);
-        assert!(
-            line.contains("no review carries a reviewed commit"),
-            "{line}"
-        );
-        assert!(line.contains("upgrade gh"), "{line}");
-
-        // The ordinary stale case keeps the re-read instruction and must NOT
-        // mention gh: the payload named a commit, it is simply an older one.
-        let old_commit = classify_coverage(
-            &pr826_reviews(),
-            &[],
-            "",
-            &["chatgpt-codex-connector".to_string()],
-            true,
-            None,
-            &|_| Freshness::Stale,
-            "",
-            "",
-        );
-        let line = coverage_receipt_line(&old_commit, None, None);
-        assert!(line.contains("ask for a re-read"), "{line}");
-        assert!(!line.contains("upgrade gh"), "{line}");
-    }
-
-    #[test]
     fn the_published_status_never_names_a_harness_specific_verb() {
         // The shared commit status is read by every harness. A claude verb
         // baked in by a claude publisher is a command a codex worker does not
@@ -15403,89 +15072,6 @@ mod tests {
             "over GitHub's 140-char cap ({}): {d}",
             d.len()
         );
-    }
-
-    #[test]
-    fn coverage_receipt_embeds_the_sized_self_review_hint() {
-        // The refusal's whole job is to hand the worker the exact invocation
-        // (sized by the Python single source); the receipt line embeds whatever
-        // the bridge produced, verbatim and backticked, after the existing
-        // instruction so the phrase's other assertions keep holding.
-        let comments = vec![serde_json::json!({
-            "author": {"login": "chatgpt-codex-connector[bot]"},
-            "body": "You have reached your Codex usage limits for code reviews."
-        })];
-        let rep = classify_coverage(
-            &[],
-            &comments,
-            "",
-            &["chatgpt-codex-connector".to_string()],
-            true,
-            None,
-            &|_| Freshness::Fresh,
-            "",
-            "89bc0b91",
-        );
-        let hint = "/verb-from-the-builder --flags";
-        let line = coverage_receipt_line(&rep, Some(hint), None);
-        assert!(line.contains("run the review verb at HEAD"), "{line}");
-        assert!(line.contains(&format!("`{hint}`")), "{line}");
-        // None must read identically to a build without the render.
-        let bare = coverage_receipt_line(&rep, None, None);
-        assert!(!bare.contains("verb-from-the-builder"), "{bare}");
-    }
-
-    #[test]
-    fn coverage_receipt_past_the_cap_names_the_terminal_act_and_no_verb() {
-        // The spent-budget arm. The uncovered receipt used to answer a worker
-        // past the round cap with "run the review verb at HEAD" - the exact
-        // instruction that restarts the loop the cap exists to bound. Past the
-        // cap the line must name the terminal act instead. Absences alone
-        // pass on a line that never rendered, so the render itself is
-        // asserted first, then the positive marker, then the four needles.
-        let rep = CoverageReport {
-            github_approval_satisfies: false,
-            coverage: Coverage::Covered(0),
-            verdicts: Vec::new(),
-        };
-        // The hint is a placeholder, not a real invocation: concrete review
-        // levels live in the sized-invocation builder alone (single-source
-        // guard), and this test only needs SOME hint string to prove the
-        // past-cap arm ignores it.
-        let hint = "/verb-from-the-builder --flags";
-        let line = coverage_receipt_line(&rep, Some(hint), Some((3, 2)));
-        assert!(line.starts_with("review coverage:"), "{line}");
-        assert!(
-            line.contains("the review round budget is spent (3/2)"),
-            "{line}"
-        );
-        assert!(
-            line.contains(
-                "decline the remainder, file it with the declining identity and the reason, then merge"
-            ),
-            "{line}"
-        );
-        for needle in ["/code-review", "/review", "/fno:review", "review verb"] {
-            assert!(
-                !line.contains(needle),
-                "past-cap line names {needle}: {line}"
-            );
-        }
-    }
-
-    #[test]
-    fn coverage_receipt_under_the_cap_keeps_the_review_verb() {
-        // The same uncovered report with the budget unspent: the verb arm is
-        // untouched, so the arm swap above did not eat the normal path.
-        let rep = CoverageReport {
-            github_approval_satisfies: false,
-            coverage: Coverage::Covered(0),
-            verdicts: Vec::new(),
-        };
-        let hint = "/verb-from-the-builder --flags";
-        let line = coverage_receipt_line(&rep, Some(hint), None);
-        assert!(line.contains("run the review verb at HEAD"), "{line}");
-        assert!(line.contains(&format!("`{hint}`")), "{line}");
     }
 
     #[test]
@@ -22217,17 +21803,17 @@ git_bounded();";
         assert!(unknown_event.get("review_state").is_none());
     }
 
-    // ── the `required` bit: an OWED refusal names the state, an optional one does not ──
-
-    fn github_verdict_with_required(
-        name: &str,
-        verdict: CoverageVerdict,
-        required: bool,
-    ) -> ReviewerVerdict {
-        ReviewerVerdict {
+    #[test]
+    fn optional_only_refusal_is_not_awaiting_review() {
+        // The stop gate must not end the session DoneAwaitingReview over a
+        // refusal nobody was owed: on a repo with no required bots that
+        // terminal was trivially reachable, and the message told the worker
+        // to wait for a reviewer that will never come. The gate blocks, so
+        // the unattested local reviewer reads as the real work it is.
+        let owed = |required| ReviewerVerdict {
             producer: CoverageProducer::GithubApp,
-            name: name.to_string(),
-            verdict,
+            name: "chatgpt-codex-connector".to_string(),
+            verdict: CoverageVerdict::Refused,
             human_approval: false,
             author_approval: false,
             attestation_origin: AttestationOrigin::Unknown,
@@ -22237,232 +21823,18 @@ git_bounded();";
             refusal_reason: None,
             reviewer_context: None,
             required,
-        }
-    }
-
-    #[test]
-    fn optional_app_refusal_does_not_name_the_review_state() {
-        // The defect this bit closes: an optional App's quota bounce renamed
-        // an uncovered PR `reviewer_refused`, and `awaiting_review_only` read
-        // that as a wait for a reviewer nobody was owed. The positive marker:
-        // the state is Unreviewed - the honest "nothing has reviewed this
-        // head" - which routes the worker to the runnable local remedy.
-        let rep = CoverageReport {
-            github_approval_satisfies: false,
-            coverage: Coverage::Covered(0),
-            verdicts: vec![github_verdict_with_required(
-                "chatgpt-codex-connector",
-                CoverageVerdict::Refused,
-                false,
-            )],
         };
-        assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
-    }
-
-    #[test]
-    fn required_app_refusal_still_names_the_review_state() {
-        let rep = CoverageReport {
-            github_approval_satisfies: false,
-            coverage: Coverage::Covered(0),
-            verdicts: vec![github_verdict_with_required(
-                "chatgpt-codex-connector",
-                CoverageVerdict::Refused,
-                true,
-            )],
-        };
-        assert_eq!(rep.review_state(), Some(ReviewState::ReviewerRefused));
-        assert!(rep.refused_reviewers().contains(&"chatgpt-codex-connector"));
-    }
-
-    #[test]
-    fn local_attestation_refusal_is_always_owed() {
-        // A local refusal records an attempt that RAN and declined - real
-        // work with a real remedy - so it keeps naming itself. The wire form
-        // carries NO `required` key: true is omitted on serialize, which is
-        // byte-identical to what every pre-field row looked like.
-        let events = r#"{"type":"review_invocation","data":{"stage":"refused","head_sha":"abc12345","verb":"code-review","reason":"empty_diff"}}"#;
-        let rep = classify_coverage(
-            &[],
-            &[],
-            events,
-            &[],
-            true,
-            None,
-            &|_| Freshness::Fresh,
-            "",
-            "abc12345",
-        );
-        let verdict = rep.verdicts.first().expect("the refused verdict");
-        assert_eq!(verdict.verdict, CoverageVerdict::Refused);
-        assert!(verdict.required);
-        let wire = serde_json::to_value(verdict).unwrap();
-        assert!(wire.get("required").is_none(), "{wire}");
-        assert_eq!(rep.review_state(), Some(ReviewState::ReviewerRefused));
-    }
-
-    #[test]
-    fn a_row_with_no_required_key_reads_required() {
-        // The deserialization half of the default: a stored verdict emitted
-        // before the field existed carries no `required` key, and reading it
-        // back must keep today's semantics - the refusal was owed.
-        let stored = serde_json::json!({
-            "producer": "github_app",
-            "name": "chatgpt-codex-connector",
-            "verdict": "refused"
-        });
-        assert!(stored.get("required").is_none());
-        let verdict: ReviewerVerdict = serde_json::from_value(stored).unwrap();
-        assert!(verdict.required, "absence reads REQUIRED, never skipped");
-        let rep = CoverageReport {
-            github_approval_satisfies: false,
-            coverage: Coverage::Covered(0),
-            verdicts: vec![verdict],
-        };
-        assert_eq!(rep.review_state(), Some(ReviewState::ReviewerRefused));
-    }
-
-    #[test]
-    fn optional_only_refusal_is_not_awaiting_review() {
-        // The stop gate must not end the session DoneAwaitingReview over a
-        // refusal nobody was owed: on a repo with no required bots that
-        // terminal was trivially reachable, and the message told the worker
-        // to wait for a reviewer that will never come. The gate blocks, so
-        // the unattested local reviewer reads as the real work it is.
         let mut pr = watch_pr();
         pr.coverage = CoverageReport {
             github_approval_satisfies: false,
             coverage: Coverage::Covered(0),
-            verdicts: vec![github_verdict_with_required(
-                "chatgpt-codex-connector",
-                CoverageVerdict::Refused,
-                false,
-            )],
+            verdicts: vec![owed(false)],
         };
         assert!(!awaiting_review_only(&pr));
         // The same refusal OWED is still the terminal's case - the pre-change
         // semantics, kept: a required bot declined and nothing else is unmet.
         pr.coverage.verdicts[0].required = true;
         assert!(awaiting_review_only(&pr));
-    }
-
-    #[test]
-    fn review_state_table_rows_match_between_both_legs() {
-        // One oracle, two readers (the optional_apps_default.json pattern):
-        // `CoverageReport::review_state` here and `_derive_review_state` in
-        // cli/src/fno/pr/_reviews.py both answer these rows, so a drift on
-        // either side fails its own test against the SAME file.
-        let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cli/tests/config/review_state_table.json");
-        let text = std::fs::read_to_string(&golden)
-            .unwrap_or_else(|e| panic!("read golden {}: {e}", golden.display()));
-        let table: serde_json::Value = serde_json::from_str(&text).unwrap();
-        for row in table["rows"].as_array().expect("rows") {
-            let verdicts: Vec<ReviewerVerdict> = row["verdicts"]
-                .as_array()
-                .expect("verdicts")
-                .iter()
-                .map(|v| {
-                    serde_json::from_value(v.clone())
-                        .unwrap_or_else(|e| panic!("row {}: {e}", row["name"]))
-                })
-                .collect();
-            let rep = CoverageReport {
-                github_approval_satisfies: false,
-                coverage: Coverage::Covered(0),
-                verdicts,
-            };
-            let expected = match row["expected_state"].as_str().unwrap() {
-                "reviewed" => ReviewState::Reviewed,
-                "reviewer_refused" => ReviewState::ReviewerRefused,
-                "unreviewed" => ReviewState::Unreviewed,
-                other => panic!("unknown expected_state {other}"),
-            };
-            assert_eq!(
-                rep.review_state(),
-                Some(expected),
-                "row {} diverged",
-                row["name"].as_str().unwrap_or("?")
-            );
-        }
-    }
-
-    #[test]
-    fn an_unowed_absent_reviewer_does_not_outrank_a_stale_one() {
-        // The rebase shape: a head move staled the local review, and the
-        // absent-forever optional App owned the receipt's next action, so the
-        // worker was told to check config.review for a reviewer that was not
-        // the problem. Nobody owes the absence, so the stale arm - ask for a
-        // re-read - finally fires.
-        let events = attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x");
-        let rep = classify_coverage_tiled(
-            &[],
-            &[],
-            &events,
-            &["gemini-code-assist".to_string()],
-            &[],
-            true,
-            Some("sess-author"),
-            &|_| Freshness::Stale,
-            "feature/x",
-            "currenthead",
-            None,
-            None,
-            false,
-        );
-        let line = coverage_receipt_line(&rep, None, None);
-        assert!(line.contains("reviewed an older commit"), "{line}");
-        assert!(line.contains("code-review"), "{line}");
-        // The unowed absence is still named - as a clause, never the blocker.
-        assert!(line.contains("gemini-code-assist"), "{line}");
-    }
-
-    #[test]
-    fn an_owed_absent_reviewer_still_wins() {
-        let events = attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x");
-        let rep = classify_coverage_tiled(
-            &[],
-            &[],
-            &events,
-            &["gemini-code-assist".to_string()],
-            &["gemini-code-assist".to_string()],
-            true,
-            Some("sess-author"),
-            &|_| Freshness::Stale,
-            "feature/x",
-            "currenthead",
-            None,
-            None,
-            false,
-        );
-        let line = coverage_receipt_line(&rep, None, None);
-        assert!(line.contains("waiting on gemini-code-assist"), "{line}");
-        assert!(!line.contains("reviewed an older commit"), "{line}");
-    }
-
-    #[test]
-    fn an_unowed_absent_reviewer_is_still_named() {
-        // Dropping the absence from the line would lose the fact that a
-        // configured App is silent. It rides every arm as the trailing
-        // clause - named, but never the blocker.
-        let rep = classify_coverage_tiled(
-            &[],
-            &[],
-            "",
-            &["gemini-code-assist".to_string()],
-            &[],
-            true,
-            None,
-            &|_| Freshness::Fresh,
-            "",
-            "",
-            None,
-            None,
-            false,
-        );
-        let line = coverage_receipt_line(&rep, None, None);
-        assert!(line.contains("gemini-code-assist"), "{line}");
-        assert!(line.contains("not owed, still not responding"), "{line}");
-        assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
     }
 
     #[test]
