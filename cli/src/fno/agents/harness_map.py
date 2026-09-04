@@ -92,9 +92,7 @@ _TARGET_FAMILY = _carrier_vocab()[0]
 
 @cache
 def _shipped_verbs() -> frozenset:
-    """One read of the shipped plugin surface. Cached; see `footnote_verbs`,
-    which is the caller every consumer uses, and which declines to KEEP an
-    empty answer."""
+    """One cached read of the plugin surface; `footnote_verbs` is the caller."""
     from fno.paths import resolve_plugin_script
 
     verbs: set[str] = set()
@@ -124,14 +122,11 @@ def footnote_verbs() -> frozenset:
     the plugin-qualified ``/fno:verb`` spelling keeps working, since its
     namespace alone proves it is a footnote verb.
 
-    A non-empty answer is cached for the process; an EMPTY one is not. An
-    empty roster does not mean footnote ships no verbs, it means the plugin
-    surface did not resolve, and that condition is transient: the resolver
-    reads an env hint, then a package-relative path, then a persisted pointer,
-    so a caller whose cwd or environment moves resolves it on the next call.
-    Caching the failure froze the degraded answer for the whole process, and
-    the degradation is silent - a codex worker gets `/target`, which codex
-    reads as prose rather than a verb, so the dispatch quietly does nothing."""
+    A good answer caches; an EMPTY one does not. Empty means the plugin
+    surface did not RESOLVE, never that footnote ships no verbs, and the
+    resolver reads an env hint first, so the next call can succeed. Caching
+    the failure froze the degraded answer for the whole process, silently: a
+    codex worker gets `/target`, which codex reads as prose, not a verb."""
     verbs = _shipped_verbs()
     if not verbs:
         _shipped_verbs.cache_clear()

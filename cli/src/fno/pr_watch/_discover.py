@@ -44,10 +44,10 @@ MAX_EXACT_TERMINAL_READS = 3
 EXACT_TERMINAL_READ_TIMEOUT_S = 5.0
 
 #: Under this much budget left, `read_pr_state` does not start its reviews
-#: leg. A floor, not a zero check: a sliver spawns a gh process that is
-#: certain to time out, which spends the deadline to learn nothing. The
-#: number is the leg's own measured cost, 1.42s mean over eight real open PRs
-#: on 2026-09-03, rounded down so a faster-than-mean read is never refused.
+#: leg: a sliver spawns a gh process certain to time out, spending the
+#: deadline to learn nothing. The leg's own measured cost was 1.42s mean over
+#: eight real open PRs on 2026-09-03, rounded down so a fast read is never
+#: refused.
 REVIEWS_LEG_FLOOR_S = 1.0
 
 
@@ -291,10 +291,9 @@ def read_pr_state(
     reviews,createdAt`` to compute ``latest_review_ts``.
 
     ``timeout_s`` is the budget for the WHOLE call, not for each leg. It used
-    to bound each of the two legs separately, so one candidate could spend
-    twice the declared number. That is what let a single read walk past a tick
-    deadline that is only checked between candidates: the caller honors the
-    deadline before the call and has no say once it starts.
+    to bound each leg separately, so one candidate could spend twice the
+    declared number and walk past a tick deadline that is only checked
+    between candidates.
 
     Raises ``ReconcileError`` on any gh failure (non-zero returncode, timeout,
     parse failure, missing binary) and on a budget that the merge-state leg

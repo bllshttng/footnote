@@ -78,12 +78,10 @@ class RestReason(str):
         return self
 
 
-#: The bucket read inside `_rest_reason` only DECORATES an error the caller
-#: already has, so it may never cost more than the read it explains. Left at
-#: the 30s default it outlived every budget above it: a `read_pr_state` call
-#: declaring 3s spent 3s failing and then 30s more explaining why, because
-#: `_bucket_remaining` passes its own default and that default wins over the
-#: runner's. A caller that WANTS the full window still passes one.
+#: The bucket read here only DECORATES an error the caller already has, so it
+#: may never outlive the read it explains. At the 30s default it did: a
+#: `read_pr_state` declaring 3s spent 3s failing then 30s more explaining,
+#: because `_bucket_remaining`'s own default beats the runner's.
 _REASON_DIAGNOSTIC_TIMEOUT_S = 5.0
 
 
