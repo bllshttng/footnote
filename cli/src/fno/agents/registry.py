@@ -48,6 +48,7 @@ from typing import Any, Callable, Iterator, Literal, Optional, Tuple
 from fno import paths
 from fno.harness_identity import (
     canonical_handle,
+    claude_transport_short_id,
     legacy_suffix_handle,
     session_handle_tier,
     session_identity_key,
@@ -2108,6 +2109,8 @@ def _mint_branch_row(
     while any(candidate.name == branch_name for candidate in entries):
         branch_name = f"{branch_base}-{suffix}"
         suffix += 1
+    # A claude branch is born bg-routable (x-a457): hex-guarded like its siblings.
+    lead = claude_transport_short_id(session_id)
     branch = replace(
         entry,
         name=branch_name,
@@ -2116,7 +2119,11 @@ def _mint_branch_row(
         predecessor_session_ids=[],
         forked_from_session_id=stale or None,
         related_session_id=None,
-        short_id="",
+        short_id=(
+            lead
+            if entry.harness == "claude" and _DERIVED_SHORT_RE.match(lead)
+            else ""
+        ),
         messaging_socket_path=None,
         mcp_channel_id=None,
         cc_session_id=None,

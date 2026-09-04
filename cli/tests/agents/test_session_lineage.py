@@ -188,6 +188,52 @@ def test_branch_mint_clears_the_related_slot(tmp_path: Path, monkeypatch) -> Non
     assert not branch.related_session_id, "the branch inherits no parked id"
 
 
+def test_claude_branch_row_is_born_bg_routable(tmp_path: Path, monkeypatch) -> None:
+    """x-a457: a claude branch carries the 8-hex jobId the rv socket farm keys
+    on, derived from the new session id the way the bg spawn path mints it.
+    Left "" the live branch had no identity route and footprint read every
+    such row as an unattributed cost, fail-closing the spawn gate."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _isolate_daemon_log(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry
+
+    _spawned_row()
+    entry, outcome = _observe("target-x-f0c2", REMINT, predecessor_reachable=True)
+    assert outcome == "branch"
+    branch = next(row for row in load_registry() if row.harness_session_id == REMINT)
+    assert branch.short_id == REMINT.split("-", 1)[0]
+
+
+def test_codex_branch_row_keeps_no_transport_short_id(tmp_path: Path, monkeypatch) -> None:
+    """First-8 of a codex id is not a transport key (time-prefixed ids collide
+    across same-window sessions), so a codex branch keeps short_id empty."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _isolate_daemon_log(monkeypatch, tmp_path)
+    from fno.agents.registry import (
+        AgentEntry,
+        load_registry,
+        restamp_harness_session_id,
+        write_registry,
+    )
+
+    write_registry([
+        AgentEntry(
+            name="t-codex",
+            harness="codex",
+            harness_session_id=BIRTH,
+            cwd="/proj",
+            log_path="",
+            status="live",
+        )
+    ])
+    entry = restamp_harness_session_id(
+        name="t-codex", harness="codex", session_id=REMINT, predecessor_reachable=True
+    )
+    assert entry is not None
+    branch = next(row for row in load_registry() if row.harness_session_id == REMINT)
+    assert branch.short_id == ""
+
+
 def test_observation_unknown_evidence_parks_b_and_overwrites_nothing(
     tmp_path: Path, monkeypatch
 ) -> None:

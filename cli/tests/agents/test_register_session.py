@@ -564,7 +564,9 @@ def test_restamp_branches_a_crowned_live_row(tmp_path: Path, monkeypatch) -> Non
     assert branch.crown_level is None
     assert branch.crown_scope is None
     assert branch.crown_grantor is None
-    assert branch.short_id == ""
+    # x-a457: born bg-routable - the 8-hex jobId the rv socket farm keys on,
+    # derived from the new session id, not the predecessor's handle.
+    assert branch.short_id == REMINT.split("-", 1)[0]
 
     again = restamp_harness_session_id(
         name="target-x-f0c2", harness="claude", session_id=REMINT
@@ -572,12 +574,18 @@ def test_restamp_branches_a_crowned_live_row(tmp_path: Path, monkeypatch) -> Non
     assert again is not None
     assert again.name == branch.name
 
-    second_branch = restamp_harness_session_id(
-        name="target-x-f0c2", harness="claude", session_id=REMINT_SAME_PREFIX
-    )
-    assert second_branch is not None
-    assert second_branch.name == "target-x-f0c2-branch-08054b1d-2"
-    assert len(load_registry()) == 3
+    # x-a457 follow-through: a second claude fork whose session id shares the
+    # first-8 prefix shares the transport short_id the rv socket farm keys on,
+    # so the write REFUSES rather than minting a row the join cannot tell
+    # apart from the first branch. The -2 name suffix stays reachable for
+    # harnesses whose first-8 is not a transport key (codex keeps short_id "").
+    from fno.agents.registry import AgentResolutionError
+
+    with pytest.raises(AgentResolutionError, match="collides with row"):
+        restamp_harness_session_id(
+            name="target-x-f0c2", harness="claude", session_id=REMINT_SAME_PREFIX
+        )
+    assert len(load_registry()) == 2
 
 
 def test_restamp_succession_preserves_a_crowned_dead_predecessor(

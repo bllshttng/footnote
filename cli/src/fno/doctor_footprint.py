@@ -205,10 +205,7 @@ def _root_pid_is_live(pid: int, pid_start: int | None) -> bool | None:
 class AttributionGap:
     """Live worker rows this reading could not attribute to processes.
 
-    Not an error: the machine-level measurement stands, and the gap text
-    names what is missing so a reader can tell an undercount from a clean
-    reading. A spawn gate must treat a gapped fleet share as unknown, never
-    as headroom (x-e040).
+    Not an error: the measurement stands and the gap names what is missing; a spawn gate reads a gapped share as unknown, never headroom (x-e040).
     """
 
     def __init__(self, text: str) -> None:
@@ -221,19 +218,62 @@ class AttributionGap:
 def _pidless_route(row: Any) -> str | None:
     """Name the route that can resolve this pidless row, or None.
 
-    A route names the MECHANISM it drives, and may legitimately mention the
-    harness whose machinery that is. What it must never do is gate a
-    capability on a harness name: the predicate callers care about is the
-    PROPERTY - "this row carries an identity handle some route accepts" -
-    and a new harness gets resolution by adding a route entry here, never by
-    editing a hardcoded-name list somewhere else (x-e040, the seventh
-    specimen of that family).
+    Never a harness-name gate: the predicate is the property - an identity handle some route accepts (x-e040). A short_id is the claude bg rv-map handle; a claude row without one derives it from the session id, while a codex first-8 collides, so its handle has no accepting route here.
     """
-    # The claude bg socket farm: an 8-hex jobId resolves through the rv
-    # socket map. short_id is that handle.
     if getattr(row, "short_id", None):
         return "bg-socket"
+    if str(getattr(row, "harness", "")) == "claude" and getattr(row, "harness_session_id", None):
+        return "bg-socket"
     return None
+
+
+def _claim_witness(name: str) -> str | None:
+    """The ``worker:<name>`` claim state, or None when the store cannot answer.
+
+    free/stale positively report no live holder; an unreadable store or a claim file that never existed proves nothing.
+    """
+    try:
+        from fno.agents.spawn_gate import _gate_claims_root
+        from fno.claims.core import claim_path, claim_status
+
+        key = f"worker:{name}"
+        root = _gate_claims_root()
+        state = (
+            claim_status(key, root=root).get("state")
+            if claim_path(key, root=root).exists()
+            else None
+        )
+    except Exception:  # noqa: BLE001 - an unreadable store proves nothing
+        return None
+    return str(state) if state else None
+
+
+def _row_transport_key(row: Any) -> str:
+    from fno.agents.session_procs import transport_join_key
+
+    return transport_join_key(
+        getattr(row, "short_id", ""), getattr(row, "harness_session_id", "")
+    )
+
+
+def _unrouted_row_costs_fleet(row: Any, deadline: float | None = None) -> bool:
+    """Whether an unrouted live row's cost is plausibly real and unattributed.
+    Fail closed: only a POSITIVE dead answer drops the row; the pane probe inherits the reading's remaining budget.
+    """
+    if deadline is not None and time.monotonic() >= deadline:
+        return True
+    mux = getattr(row, "mux", None)
+    if isinstance(mux, dict) and mux:
+        try:
+            from fno.agents.mux_spawn import _mux_pane_alive
+
+            budget = None if deadline is None else max(0.01, deadline - time.monotonic())
+            pane = _mux_pane_alive(mux, timeout=budget)
+        except Exception:  # noqa: BLE001 - an unanswered probe proves nothing
+            pane = None
+        return pane is None
+    state = _claim_witness(str(getattr(row, "name", "")))
+    return state not in ("free", "stale")
 
 
 def _terminal_row_changed_after_snapshot(row: Any, snapshot_at: float) -> bool:
@@ -265,7 +305,7 @@ def _live_root_pids(
     roots: set[int] = set()
     try:
         from fno.agents.registry import load_registry
-        from fno.agents.session_procs import bg_socket_pid_map
+        from fno.agents.session_procs import bg_socket_pid_map, roster_pid_map
         from fno.agents.spawn_gate import LIVE_STATUSES
 
         rows = load_registry()
@@ -311,33 +351,50 @@ def _live_root_pids(
         ]
         unrouted_rows = [row for row in pidless_rows if _pidless_route(row) is None]
         routed_rows = [row for row in pidless_rows if _pidless_route(row) is not None]
-        # A pidless row NO route accepts is an attribution gap, not a dead
-        # reading: one such row used to suppress the entire report (x-e040,
-        # measured: six pidless codex rows kept the sensor returning
-        # "worker root discovery unavailable" at rest). The machine-level
-        # measurement stands; the gap names what is unattributed.
+        routed_keys = [(_row_transport_key(row), row) for row in routed_rows]
+        # x-e040: a routless row is a NAMED gap, not a dead reading - x-a457:
+        # only while a witness says the cost is real; past it all stay gaps.
+        fleet_unrouted = [
+            row for row in unrouted_rows if _unrouted_row_costs_fleet(row, deadline)
+        ]
         gap_rows: list[str] = [
-            f"{len(unrouted_rows)} pidless row(s) with no identity route "
-            f"({', '.join(sorted({str(row.harness) for row in unrouted_rows}))})"
-        ] if unrouted_rows else []
+            f"{len(fleet_unrouted)} pidless row(s) with no identity route "
+            f"({', '.join(sorted({str(row.harness) for row in fleet_unrouted}))})"
+        ] if fleet_unrouted else []
         if not routed_rows:
             return roots, AttributionGap("; ".join(gap_rows)) if gap_rows else None
         if deadline is not None and time.monotonic() >= deadline:
             gap_rows.append("bg-socket resolution timed out")
             return roots, AttributionGap("; ".join(gap_rows))
-        socket_timeout = (
-            15.0
-            if deadline is None
-            else max(0.01, deadline - time.monotonic())
+        socket_pids = bg_socket_pid_map(
+            timeout=15.0 if deadline is None else max(0.01, deadline - time.monotonic())
         )
-        socket_pids = bg_socket_pid_map(timeout=socket_timeout)
-        missing = [row for row in routed_rows if row.short_id not in socket_pids]
+        missing = [pair for pair in routed_keys if pair[0] not in socket_pids]
+        if missing:
+            # x-a457: the socket map is the FIRST oracle; a key in neither is a
+            # corpse, an unreadable roster stays a gap, the read may spend the deadline.
+            spent = deadline is not None and time.monotonic() >= deadline
+            roster_pids = None if spent else roster_pid_map()
+            still_missing: list[Any] = []
+            for key, row in missing:
+                if roster_pids is not None and key not in roster_pids:
+                    continue  # absent from a readable oracle: a corpse drops
+                pid = (roster_pids or {}).get(key)
+                if pid is None:
+                    # An unreadable oracle and a held row without a usable pid both stay gaps.
+                    still_missing.append(row)
+                    continue
+                if not _root_pid_is_live(pid, None):
+                    return roots, "worker root liveness unavailable"
+                roots.add(pid)
+            missing = still_missing
         if missing:
             gap_rows.append(
                 f"{len(missing)} bg-socket row(s) missing from the socket map"
+                + ("" if roster_pids is not None else " (roster oracle unavailable)")
             )
-        for row in routed_rows:
-            pid = socket_pids.get(row.short_id)
+        for key, row in routed_keys:
+            pid = socket_pids.get(key)
             if pid is None:
                 continue
             root_live = _root_pid_is_live(pid, None)
@@ -643,18 +700,16 @@ def _emit_result(
     cause_only: bool = False,
     note: str | None = None,
 ) -> NoReturn:
-    capacity = "unknown"
     leak = "unknown"
     exit_code = 0
-    # cause_only keeps passing None (never the sentinel) so _payload does not
-    # compute a load snapshot the cause-only contract promises not to spend.
-    load_snapshot = None if cause_only else _spawn_load_snapshot()
+    # Cause-only answers the capacity question too (x-a457): a None snapshot
+    # can only say unknown. Exit codes stay 0/4 for the Rust gate's 0-only read.
+    load_snapshot = _spawn_load_snapshot()
+    capacity = capacity_verdict(load_snapshot)
     if not cause_only:
         leak = leak_verdict(reading.direct_process_count, process_threshold)
-        capacity = capacity_verdict(load_snapshot)
-        # Capacity keeps the historical exit (callers depend on 3); the leak
-        # alarm gets its own code. When BOTH fire, capacity wins the exit as
-        # the more urgent alarm and the leak still prints.
+        # Capacity keeps the historical exit (callers depend on 3); when BOTH
+        # alarms fire, capacity wins the exit and the leak still prints.
         if capacity == "over":
             exit_code = EXIT_CAPACITY_OVER
         elif leak == "unexplained":

@@ -13,6 +13,13 @@ from typer.testing import CliRunner
 from fno.footprint import parse_footprint
 from fno.cli import app
 
+# Import the mux_spawn -> dispatch chain at collection, before any test
+# patches anything: patching `fno.agents.registry.load_registry` first and
+# importing mux_spawn later would bind the patched loader into dispatch's
+# `from registry import load_registry` permanently, poisoning every later
+# test in the process. One module-level import pins that order for the file.
+import fno.agents.mux_spawn  # noqa: F401,E402
+
 
 runner = CliRunner()
 
@@ -399,11 +406,331 @@ def test_live_root_pids_refuses_unavailable_pidless_worker_discovery(monkeypatch
         "fno.agents.session_procs.bg_socket_pid_map",
         lambda **_kwargs: {},
     )
+    # x-a457: the map missing the row is no longer proof of death on its own;
+    # an UNREADABLE roster oracle is what keeps this row in the gap.
+    monkeypatch.setattr("fno.agents.session_procs.roster_pid_map", lambda: None)
 
     roots, error = doctor_footprint._live_root_pids()
     assert roots == set()
     assert isinstance(error, doctor_footprint.AttributionGap)
     assert "socket map" in error.text
+
+
+def test_live_root_pids_drops_routed_corpse_row_dead_in_both_daemon_oracles(
+    monkeypatch,
+) -> None:
+    """x-a457: a routed row in NEITHER the rv socket farm nor the claude roster
+    names a session the daemon no longer holds. It is a corpse the registry
+    never retired, not an unattributed live process, so the reading stops
+    calling its (nonexistent) cost a gap."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="deadbee",
+        name="corpse",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr("fno.agents.session_procs.roster_pid_map", lambda: {})
+
+    assert doctor_footprint._live_root_pids() == (set(), None)
+
+
+def test_live_root_pids_attributes_routed_row_through_roster_pid(monkeypatch) -> None:
+    """The roster is the second oracle AND a fallback attribution: its pid is
+    the PTY host hosting the session, a real process the reading should
+    attribute when the rv socket farm missed it."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="alive123",
+        name="hosted",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {"alive123": 903}
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: pid == 903,
+    )
+
+    assert doctor_footprint._live_root_pids() == ({903}, None)
+
+
+def test_live_root_pids_joins_a_full_uuid_short_id_through_the_derived_key(
+    monkeypatch,
+) -> None:
+    """register_existing_session writes the FULL session uuid into a claude
+    row's short_id when no transport key was given at birth (the SessionStart
+    hook passes none). The daemon maps key on the DERIVED 8-hex, so the join
+    must derive, or a live hook-registered session reads as a corpse."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="idle",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
+        harness_session_id="e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
+        name="e6f78b98",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {"e6f78b98": 903}
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: pid == 903,
+    )
+
+    assert doctor_footprint._live_root_pids() == ({903}, None)
+
+
+def test_resolve_session_pid_derives_the_join_key_from_a_full_uuid_short_id() -> None:
+    """The cost view joins the same rv map as the gate: a hook-registered row
+    whose short_id holds the full uuid must derive the 8-hex key, or the
+    session resolves to its recorded (absent) pid and its cost vanishes."""
+    from fno.agents.session_procs import resolve_session_pid
+
+    assert (
+        resolve_session_pid(
+            harness="claude",
+            short_id="e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
+            session_id="e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
+            socket_map={"e6f78b98": 903},
+        )
+        == 903
+    )
+
+
+def test_live_root_pids_routes_a_claude_row_with_an_empty_short_id(
+    monkeypatch,
+) -> None:
+    """Rows minted before the birth fix carry an empty short_id but a real
+    session id: the claude daemon maps can still answer for them, so the row
+    routes and its derived key joins - it must not sit unrouted forever."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="",
+        harness_session_id="2529b52b-2477-4c1e-9d3a-1a2b3c4d5e6f",
+        name="king-119e-reap-branch-2529b52b",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {"2529b52b": 903}
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: pid == 903,
+    )
+
+    assert doctor_footprint._live_root_pids() == ({903}, None)
+
+
+def test_live_root_pids_keeps_a_roster_held_row_whose_pid_entry_is_not_usable(
+    monkeypatch,
+) -> None:
+    """The daemon writes a roster worker's pid optional and has drifted field
+    types before. A session the roster HOLDS with no usable pid exists: that
+    is no answer, not a death certificate."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="deadbee",
+        name="hosted",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {"deadbee": None}
+    )
+
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+
+
+def test_live_root_pids_suppresses_on_a_roster_held_row_with_a_dead_pid(
+    monkeypatch,
+) -> None:
+    """A daemon-held record whose pid died is the same fact as a dead
+    socket-map pid: the socket arm suppresses the report for it, so the
+    roster arm must not answer "corpse" instead - the keeper may be mid
+    re-adoption."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="deadbee",
+        name="hosted",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {"deadbee": 404}
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: False,
+    )
+
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    assert error == "worker root liveness unavailable"
+
+
+def test_live_root_pids_drops_unrouted_row_with_expired_claim(monkeypatch) -> None:
+    """x-a457: an unrouted row whose worker claim store positively reports no
+    live holder is a corpse row. The 14 rows that kept this box's spawn gate
+    refusing were exactly this population - claims expired, rows still live."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="codex",
+        short_id="",
+        name="t-stale-lane",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(doctor_footprint, "_claim_witness", lambda _name: "stale")
+
+    assert doctor_footprint._live_root_pids() == (set(), None)
+
+
+def test_claim_witness_answers_nothing_for_a_row_that_never_claimed(
+    tmp_path, monkeypatch
+) -> None:
+    """claim_status reports "free" for a claim file that never existed, and a
+    lane that never claimed (an operator-registered session) is not dead on
+    that account: no file means the store has no answer, not a death
+    certificate."""
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._gate_claims_root", lambda: tmp_path
+    )
+
+    assert doctor_footprint._claim_witness("never-registered") is None
+
+
+def test_live_root_pids_keeps_unrouted_row_whose_claim_is_live(monkeypatch) -> None:
+    """The fail-closed half: a live codex thread lane holds a live claim and
+    its cost sits in the unattributed app-server, so it stays a NAMED gap."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="codex",
+        short_id="",
+        name="t-live-lane",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(doctor_footprint, "_claim_witness", lambda _name: "live")
+
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "codex" in error.text
+
+
+def test_live_root_pids_keeps_unrouted_row_on_unreadable_claim_store(monkeypatch) -> None:
+    """An unreadable claim store proves nothing: fail closed, gap row."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="codex",
+        short_id="",
+        name="t-unreadable",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(doctor_footprint, "_claim_witness", lambda _name: None)
+
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+
+
+def test_live_root_pids_pane_row_costs_the_attributed_mux_server(monkeypatch) -> None:
+    """A pane burns CPU inside the mux server process the reading attributes;
+    whatever the probe answers, the pane adds no unattributed cost. Only an
+    answer the mux could NOT give leaves the cost unproven."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="codex",
+        short_id="",
+        name="t-pane",
+        mux={"session": "main", "pane_id": 7},
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.mux_spawn._mux_pane_alive", lambda _mux, **_kwargs: True
+    )
+
+    assert doctor_footprint._live_root_pids() == (set(), None)
 
 
 def test_live_root_pids_refuses_pidless_live_pane(monkeypatch) -> None:
@@ -419,6 +746,11 @@ def test_live_root_pids_refuses_pidless_live_pane(monkeypatch) -> None:
         mux={"session": "main", "pane_id": 7},
     )
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    # x-a457: the pane's cost rides the attributed mux server, so only a probe
+    # the mux could not ANSWER (None) leaves the row a gap row.
+    monkeypatch.setattr(
+        "fno.agents.mux_spawn._mux_pane_alive", lambda _mux, **_kwargs: None
+    )
 
     # x-e040: one pidless non-claude row is a NAMED attribution gap, not a
     # dead reading. The old contract killed the whole report here.
@@ -1120,6 +1452,7 @@ def test_pidless_nonclaude_row_is_a_named_gap_not_a_dead_reading(monkeypatch):
     monkeypatch.setattr(
         "fno.agents.registry.load_registry", lambda: [_pidless_row("codex")]
     )
+    monkeypatch.setattr(doctor_footprint, "_claim_witness", lambda _name: "live")
     roots, error = doctor_footprint._live_root_pids()
     assert roots == set()
     assert isinstance(error, doctor_footprint.AttributionGap)
@@ -1134,6 +1467,7 @@ def test_pidless_unknown_harness_row_is_the_same_named_gap(monkeypatch):
     monkeypatch.setattr(
         "fno.agents.registry.load_registry", lambda: [_pidless_row("luna")]
     )
+    monkeypatch.setattr(doctor_footprint, "_claim_witness", lambda _name: "live")
     roots, error = doctor_footprint._live_root_pids()
     assert roots == set()
     assert isinstance(error, doctor_footprint.AttributionGap)
@@ -1164,6 +1498,7 @@ def test_gap_reading_still_prints_the_measurement_and_exits_four(monkeypatch):
     monkeypatch.setattr(
         doctor_footprint, "cause_reading", lambda: (reading, None)
     )
+    _pin_load(monkeypatch, status="within")
     result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
     assert result.exit_code == 4, result.output
     payload = json.loads(result.stdout)
@@ -1171,6 +1506,31 @@ def test_gap_reading_still_prints_the_measurement_and_exits_four(monkeypatch):
     assert "fleet_cpu_cores" in payload
     assert "codex" in payload["attribution_gap"]
     assert payload["exit_code"] == 4
+
+
+def test_cause_only_reports_a_real_capacity_verdict(monkeypatch):
+    """x-a457's done probe: a clean cause-only reading answers the capacity
+    question (within/near/over) instead of a structural unknown, and carries
+    no attribution_gap key. Exit codes do not move: 0 clean, 4 gapped - the
+    Rust gate reads stdout only on exit 0."""
+    from fno import doctor_footprint
+
+    reading = doctor_footprint.parse_footprint(
+        "PID PPID ELAPSED %CPU RSS COMMAND\n100 1 01:00:00 0.5 1024 fno daemon\n",
+        excluded_root_pids=set(),
+        attributed_root_pids=set(),
+        threshold_excluded_root_pids=set(),
+    )
+    monkeypatch.setattr(
+        doctor_footprint, "cause_reading", lambda: (reading, None)
+    )
+    _pin_load(monkeypatch, status="within")
+    result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["capacity_verdict"] == "within"
+    assert "attribution_gap" not in payload
+    assert payload["exit_code"] == 0
 
 
 def test_spawn_gate_treats_a_gap_reading_as_not_headroom(monkeypatch):
