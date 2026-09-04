@@ -566,6 +566,7 @@ def escalate_cmd(
     """
     from fno.carveout.core import resolve_carveout_root, resolve_session_id
     from fno.king.escalate import escalate
+    from fno.king.state import reign_state
     from fno.paths import resolve_repo_root
 
     ids = [part.strip() for part in stalled.split(",") if part.strip()]
@@ -573,6 +574,15 @@ def escalate_cmd(
         session_id = resolve_session_id(resolve_repo_root())
     except Exception:  # noqa: BLE001 - an unresolvable session never blocks the ask
         session_id = None
+    # The caller's own liveness, read not asserted: a live king that reads
+    # "It has exited" in its own escalation is handed "crown a new king" as a
+    # remedy - the double-crown failure court exists to end. Unknown reads as
+    # dead inside question_text, with the reason named.
+    try:
+        state = reign_state(session_id=session_id)
+        live, unknown_reason = state.live, state.unknown_reason
+    except Exception as exc:  # noqa: BLE001 - escalation must still fire
+        live, unknown_reason = None, f"reign_state unreadable: {exc}"
     try:
         outcome, qid = escalate(
             ids,
@@ -580,6 +590,8 @@ def escalate_cmd(
             root=resolve_carveout_root(),
             session_id=session_id,
             cwd=Path.cwd(),
+            live=live,
+            unknown_reason=unknown_reason,
         )
     except Exception as exc:  # noqa: BLE001 - named, never swallowed
         typer.echo(f"king: escalation failed: {exc}", err=True)

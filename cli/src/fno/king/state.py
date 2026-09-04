@@ -442,7 +442,7 @@ def reign_state(
         if not isinstance(scope, str) or not scope.strip():
             return ReignState(
                 crowned=False, scope=None, shape=None, manifest_session=None,
-                registry_session=registry_session, live=True, split=None,
+                registry_session=registry_session, live=False, split=None,
                 unknown_reason="row holds no crown",
             )
         crowned, live = True, True
