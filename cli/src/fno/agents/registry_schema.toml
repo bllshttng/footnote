@@ -3,4 +3,11 @@
 # this file byte-for-byte to cli/src/fno/agents/registry_schema.toml, which
 # registry.py reads as package data. Bump `version` here and rebuild: both
 # languages move together, so there is no second constant to drift.
-version = 26
+#
+# v27 (x-04ce): additive `launch_account_source` - WHO chose the row's
+# `launch_account`: "caller" (a flag on this spawn's argv) or "config"
+# (accounts.quota.pick_on_launch picked it). None on every other row:
+# launch_account "default" already says nobody chose, a revive inherits the
+# source row's stamp, and mints that cannot attribute stay silent. Rationale
+# lives beside the column in state.rs / registry.py.
+version = 27

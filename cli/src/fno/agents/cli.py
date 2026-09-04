@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import typer
+from fno.agents.spawn_flag_owners import owner_panel
 
 from fno.agents.rust_runtime import make_agents_group_cls
 
@@ -1186,6 +1187,7 @@ def cmd_spawn(
     name: str = typer.Option(
         "",
         "--name",
+        rich_help_panel=owner_panel("--name"),
         help=(
             "Agent name (optional; an adjective-noun slug is minted when omitted). "
             "A name is a handle you rarely care about, so it moved off the "
@@ -1196,6 +1198,7 @@ def cmd_spawn(
         None,
         "--harness",
         "-H",
+        rich_help_panel=owner_panel("--harness"),
         help=(
             "The CLI binary to launch. The declared harnesses - claude, codex, "
             "gemini, opencode, agy, pi, cursor-agent - get the full lane. Any "
@@ -1209,6 +1212,7 @@ def cmd_spawn(
         None,
         "--provider",
         "-P",
+        rich_help_panel=owner_panel("--provider"),
         help=(
             "The model VENDOR the harness talks to: zai, or any "
             "model_routing.providers name. Pairs with --model to name the route "
@@ -1220,6 +1224,7 @@ def cmd_spawn(
         None,
         "--recorded-provider",
         hidden=True,
+        rich_help_panel=owner_panel("--recorded-provider"),
         help=(
             "Machine-recorded model-vendor identity for a recovery spawn. "
             "Unlike --provider, this does not configure a Claude route."
@@ -1229,6 +1234,7 @@ def cmd_spawn(
         False,
         "--once",
         "-o",
+        rich_help_panel=owner_panel("--once"),
         help=(
             "Ephemeral one-shot: create + exchange + teardown. "
             "Supported for codex and gemini only. "
@@ -1238,6 +1244,7 @@ def cmd_spawn(
     substrate: str = typer.Option(
         "pane",
         "--substrate",
+        rich_help_panel=owner_panel("--substrate"),
         help=(
             "Session substrate (x-2c27): pane (mux-hosted PTY, the default; "
             "4a-G2) | thread (claude --bg / opencode serve; bg is a deprecated "
@@ -1250,6 +1257,7 @@ def cmd_spawn(
         False,
         "--headless",
         "-p",
+        rich_help_panel=owner_panel("--headless"),
         help=(
             "Shortcut for --substrate headless: a one-shot worker. Wins over "
             "--substrate; equivalent to --once/-o. `-p` mirrors the harnesses' own "
@@ -1260,6 +1268,7 @@ def cmd_spawn(
     sandbox_write_policy: str | None = typer.Option(
         None,
         "--sandbox-write-policy",
+        rich_help_panel=owner_panel("--sandbox-write-policy"),
         help=(
             "Path to a JSON policy file whose `sandbox` block composes into "
             "the worker's ONE --settings file (the OS-layer write allowlist, "
@@ -1270,33 +1279,41 @@ def cmd_spawn(
         ),
     ),
     cwd: str | None = typer.Option(
-        None, "--cwd", "-c", help="Working directory for the agent subprocess."
+        None,
+        "--cwd",
+        "-c",
+        rich_help_panel=owner_panel("--cwd"),
+        help="Working directory for the agent subprocess.",
     ),
     timeout: int | None = typer.Option(
         None,
         "--timeout",
         "-t",
+        rich_help_panel=owner_panel("--timeout"),
         help="Per-spawn timeout in seconds (default 600).",
     ),
     from_name: str = typer.Option(
         "fno",
         "--from-name",
+        rich_help_panel=owner_panel("--from-name"),
         help=("Identity advertised in the message envelope. Must be XML-attribute-safe."),
     ),
     yolo: bool = typer.Option(
         False,
         "--yolo",
         "-Y",
+        rich_help_panel=owner_panel("--yolo"),
         help=(
             "Provider-specific dangerous-mode bypass. For codex: passes "
             "--dangerously-bypass-approvals-and-sandbox. "
             "For claude: maps to --permission-mode bypassPermissions. "
-            "Mutually exclusive with --permission-mode (pass one; exit 2)."
+            "Mutually exclusive with --permission-mode (pass one; exit 2). harness-owned; the harness's own spelling also works after `--` on the pane substrate."
         ),
     ),
     fresh: bool = typer.Option(
         False,
         "--fresh",
+        rich_help_panel=owner_panel("--fresh"),
         help=(
             "Accepted no-op alias: the worker cwd already defaults to the "
             "canonical (main) repo root (x-85fe). Kept for dispatcher compat."
@@ -1306,6 +1323,7 @@ def cmd_spawn(
         False,
         "--here",
         "--in-place",
+        rich_help_panel=owner_panel("--here"),
         help=(
             "Keep the worker in the caller's cwd instead of the canonical-root "
             "default. The explicit opt-in for extending WIP right here."
@@ -1314,6 +1332,7 @@ def cmd_spawn(
     role: str | None = typer.Option(
         None,
         "--role",
+        rich_help_panel=owner_panel("--role"),
         help=(
             "Routing role for per-spawn model selection (x-d2fe). Auxiliary "
             "roles (coordinate|tidy|orient|consolidate|post-merge) and the "
@@ -1327,6 +1346,7 @@ def cmd_spawn(
     route: str | None = typer.Option(
         None,
         "--route",
+        rich_help_panel=owner_panel("--route"),
         help=(
             "Explicit per-dispatch model route as provider/model (e.g. "
             "zai/glm-5.3; legacy comma zai,glm-5.3 also accepted). Bypasses the "
@@ -1339,6 +1359,7 @@ def cmd_spawn(
     monitor: str | None = typer.Option(
         None,
         "--monitor",
+        rich_help_panel=owner_panel("--monitor"),
         help=(
             "Expose this spawn through a monitor. Initial support is exactly "
             "'happy' with --harness claude --provider zai on the pane substrate."
@@ -1347,6 +1368,7 @@ def cmd_spawn(
     account: str | None = typer.Option(
         None,
         "--account",
+        rich_help_panel=owner_panel("--account"),
         help=(
             "Pin this ONE worker to a registered claude account (x-d012) without "
             "touching the daemon-wide active ~/.claude slot. Resolves a "
@@ -1363,6 +1385,7 @@ def cmd_spawn(
     dispatch_account: str | None = typer.Option(
         None,
         "--dispatch-account",
+        rich_help_panel=owner_panel("--dispatch-account"),
         help=(
             "The destination provider RECORD of an autonomous quota cutover, as "
             "chosen by `fno agents dispatch resolve --autonomous`. Unlike --account "
@@ -1376,6 +1399,7 @@ def cmd_spawn(
         None,
         "--model",
         "-m",
+        rich_help_panel=owner_panel("--model"),
         help=(
             "Model for the worker, forwarded as --model <m> to the provider's "
             "own CLI (exact passthrough, no fuzzy resolution). On the default "
@@ -1387,6 +1411,7 @@ def cmd_spawn(
     permission_mode: str | None = typer.Option(
         None,
         "--permission-mode",
+        rich_help_panel=owner_panel("--permission-mode"),
         help=(
             "Permission/approval mode forwarded to the provider (x-dfa4). "
             "Provider-native values, fail-closed: claude default|acceptEdits|"
@@ -1397,21 +1422,23 @@ def cmd_spawn(
             "before spawn. Mutually exclusive "
             "with --yolo. Honored on claude thread/headless (Rust or Python "
             "fallback); codex/gemini thread/headless one-shots reject it (use "
-            "--substrate pane)."
+            "--substrate pane). harness-owned; the harness's own spelling also works after `--` on the pane substrate."
         ),
     ),
     effort: str | None = typer.Option(
         None,
         "--effort",
+        rich_help_panel=owner_panel("--effort"),
         help=(
             "Reasoning effort, passed through to the selected provider/model; "
-            "unset uses its default."
+            "unset uses its default. harness-owned; the harness's own spelling also works after `--` on the pane substrate."
         ),
     ),
     resume: str | None = typer.Option(
         None,
         "--resume",
         "-r",
+        rich_help_panel=owner_panel("--resume"),
         help=(
             "Seed a NEW claude session from an existing transcript. The content "
             "carries over; the session id does NOT. `claude --bg --resume` always "
@@ -1419,52 +1446,58 @@ def cmd_spawn(
             "binding. To bring a session back under its OWN id, use "
             "`fno agents resume <name>`. Accepts a full session uuid OR the 8-hex "
             "short-id shown in receipts (x-f76e); with no --substrate it implies "
-            "thread. claude + thread only."
+            "thread. claude + thread only. harness-owned; the harness's own spelling also works after `--` on the pane substrate."
         ),
     ),
     add_dir: str | None = typer.Option(
         None,
         "--add-dir",
+        rich_help_panel=owner_panel("--add-dir"),
         help=(
             "Grant the worker extra write access to a directory (x-b6e2). Maps to "
             "the harness's own --add-dir on claude/codex/agy/cursor-agent (additive "
-            "to the worker's own workspace); opencode/gemini reject it (fail-closed)."
+            "to the worker's own workspace); opencode/gemini reject it (fail-closed). harness-owned; the harness's own spelling also works after `--` on the pane substrate."
         ),
     ),
     agent: str | None = typer.Option(
         None,
         "--agent",
+        rich_help_panel=owner_panel("--agent"),
         help=(
             "Pin the worker's sub-agent by name (x-b6e2). Maps to --agent on "
-            "claude/opencode; codex/agy/gemini reject it (fail-closed)."
+            "claude/opencode; codex/agy/gemini reject it (fail-closed). harness-owned; the harness's own spelling also works after `--` on the pane substrate."
         ),
     ),
     tools: str | None = typer.Option(
         None,
         "--tools",
+        rich_help_panel=owner_panel("--tools"),
         help=(
             "Scope the worker's allowed tools (x-b6e2). Opaque list forwarded to "
-            "claude --allowedTools; other providers reject it (fail-closed)."
+            "claude --allowedTools; other providers reject it (fail-closed). harness-owned; the harness's own spelling also works after `--` on the pane substrate."
         ),
     ),
     deny_tools: str | None = typer.Option(
         None,
         "--deny-tools",
+        rich_help_panel=owner_panel("--deny-tools"),
         help=(
             "Scope the worker's disallowed tools (x-b6e2). Opaque list forwarded "
-            "to claude --disallowedTools; other providers reject it (fail-closed)."
+            "to claude --disallowedTools; other providers reject it (fail-closed). harness-owned; the harness's own spelling also works after `--` on the pane substrate."
         ),
     ),
     output_format: str | None = typer.Option(
         None,
         "--output-format",
         hidden=True,
+        rich_help_panel=owner_panel("--output-format"),
         help="Internal headless Claude output format; only 'json' is supported.",
     ),
     squad: str | None = typer.Option(
         None,
         "--workspace",
         "-s",
+        rich_help_panel=owner_panel("--workspace"),
         help=(
             "Pane placement (x-3e38): send the new pane to a workspace by its visible "
             "name instead of the cwd-derived default. --substrate pane only."
@@ -1474,12 +1507,14 @@ def cmd_spawn(
         None,
         "--squad",
         hidden=True,
+        rich_help_panel=owner_panel("--squad"),
         help="Deprecated alias for --workspace.",
     ),
     split: str | None = typer.Option(
         None,
         "--split",
         "-x",
+        rich_help_panel=owner_panel("--split"),
         help=(
             "Pane placement (x-3e38): tile the new pane left|right|up|down of the "
             "squad's focused pane instead of a new tab. --substrate pane only."
@@ -1488,6 +1523,7 @@ def cmd_spawn(
     at: str | None = typer.Option(
         None,
         "--at",
+        rich_help_panel=owner_panel("--at"),
         help=(
             "Exact origin placement (x-6928): pin the new pane next to the calling "
             "pane. `--at current` resolves the caller from FNO_PANE (run inside a "
@@ -1498,6 +1534,7 @@ def cmd_spawn(
     tab: str | None = typer.Option(
         None,
         "--tab",
+        rich_help_panel=owner_panel("--tab"),
         help=(
             "Place a pane in a mux tab selector. A bare number is the visible "
             "1-based ordinal the tab bar shows; id:<n> is the stable tab id "
@@ -1506,10 +1543,21 @@ def cmd_spawn(
             "with room, or create the next. --substrate pane only."
         ),
     ),
+    portal: int | None = typer.Option(
+        None,
+        "--portal",
+        help=(
+            "Portal placement (x-9b60): open portal N (0-255) showing the new "
+            "worker, in one call. --substrate thread only. Makes the placement "
+            "flags meaningful for a thread: a fresh portal open honors them; "
+            "a portal that already has a live viewer keeps its geometry."
+        ),
+    ),
     bounded_placement: bool = typer.Option(
         False,
         "--bounded-placement",
         hidden=True,
+        rich_help_panel=owner_panel("--bounded-placement"),
         help=(
             "Spawn-side lane for automated placement (the outage handoff's "
             "successor spawn): serialize placement under the mux lease, select "
@@ -1520,6 +1568,7 @@ def cmd_spawn(
         [],
         "--crown",
         "-k",
+        rich_help_panel=owner_panel("--crown"),
         help=(
             "Grant an orchestrator crown on the spawned worker, over the "
             "territory named here. Repeatable: pass ONE epic id (a Director), "
@@ -1538,6 +1587,7 @@ def cmd_spawn(
     succeed: bool = typer.Option(
         False,
         "--succeed",
+        rich_help_panel=owner_panel("--succeed"),
         help=(
             "Explicitly transfer a caller-held --crown territory to the spawned "
             "heir. Without this flag, a same-scope crown is refused and the "
@@ -1547,6 +1597,7 @@ def cmd_spawn(
     node: str | None = typer.Option(
         None,
         "--node",
+        rich_help_panel=owner_panel("--node"),
         help=(
             "Backlog node id (or slug) this pane is working (x-84a8). Node-driven "
             "pane spawns export FNO_NODE/FNO_SLUG/FNO_PLAN into the pane so the "
@@ -1555,14 +1606,21 @@ def cmd_spawn(
         ),
     ),
     slug: str | None = typer.Option(
-        None, "--slug", help="Provenance FNO_SLUG override (skips the graph read)."
+        None,
+        "--slug",
+        rich_help_panel=owner_panel("--slug"),
+        help="Provenance FNO_SLUG override (skips the graph read).",
     ),
     plan: str | None = typer.Option(
-        None, "--plan", help="Provenance FNO_PLAN override (skips the graph read)."
+        None,
+        "--plan",
+        rich_help_panel=owner_panel("--plan"),
+        help="Provenance FNO_PLAN override (skips the graph read).",
     ),
     session_phase: str = typer.Option(
         "",
         "--session-phase",
+        rich_help_panel=owner_panel("--session-phase"),
         help=(
             "Lifecycle phase for the sessions row a node-bearing spawn opens on "
             "the node (x-4342): a spawned contributor that never holds the claim "
@@ -1577,6 +1635,7 @@ def cmd_spawn(
         False,
         "--force",
         "-F",
+        rich_help_panel=owner_panel("--force"),
         help=(
             "Spawn-gate bypass (x-c5cc): skip the max_live cap AND the "
             "min_free_gb RAM floor. Workers are still QoS-demoted and still "
@@ -1586,6 +1645,7 @@ def cmd_spawn(
     no_wait: bool = typer.Option(
         False,
         "--no-wait",
+        rich_help_panel=owner_panel("--no-wait"),
         help=("Fail immediately when max_live is reached instead of queueing for a free slot."),
     ),
 ) -> None:
@@ -2575,8 +2635,14 @@ def cmd_spawn(
                 receipt_obj["permission_mode_requested"] = permission_mode
             # x-d012: name the pinned account so a mis-pin is visible at spawn
             # time, not at billing time. Only when set (receipt byte-stable else).
-            if account is not None:
-                receipt_obj["account"] = account
+            # x-04ce: the account fact carries WHO chose it. A config pick
+            # reached the row but never the receipt, so an injected account
+            # printed identically to a caller decision; now the effective
+            # account and its source ("caller" / "config") both surface.
+            if pane_result.launch_account not in (None, "default"):
+                receipt_obj["account"] = pane_result.launch_account
+                if pane_result.launch_account_source is not None:
+                    receipt_obj["account_source"] = pane_result.launch_account_source
             if dispatch_account is not None:
                 receipt_obj["dispatch_account"] = dispatch_account
                 # Name the credential provenance and the env keys actually
@@ -2784,7 +2850,15 @@ def cmd_spawn(
         # x-d012: name the pinned account. Only when set, so a non-account bg
         # receipt stays byte-identical to the Rust client's (which never emits
         # it - an --account spawn always re-execs into this Python path).
-        account_field = f', "account": {json.dumps(account)}' if account else ""
+        # x-04ce: when the row carries provenance, the source rides the
+        # account, so a config pick cannot read as a caller decision.
+        if getattr(result, "launch_account_source", None) is not None:
+            account_field = (
+                f', "account": {json.dumps(result.launch_account)}, '
+                f'"account_source": {json.dumps(result.launch_account_source)}'
+            )
+        else:
+            account_field = f', "account": {json.dumps(account)}' if account else ""
         # x-8552: the composed spawn's live credential and payer, from the
         # composed env (see the pane branch); composed-only so an account-only
         # bg receipt stays byte-identical (AC3).

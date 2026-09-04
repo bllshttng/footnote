@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 from fno import paths
 from fno.agents import events
 from fno.agents import rm_notice
+from fno.agents import spawn_flag_owners
 from fno.agents.context import EventContext, build_context
 from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
@@ -2298,6 +2299,14 @@ class SpawnResult:
     # fabricated negative (a fresh spawn whose transcript has no sample yet
     # says nothing).
     model_substituted: Optional[dict] = None
+    # x-04ce: the bg row's launch-account fact and WHO chose it, so the
+    # receipt can answer the question the row answers. `launch_account`
+    # mirrors the row's three-valued axis verbatim (an id, "default", or
+    # None on lanes that cannot know); `launch_account_source` is the shared
+    # provenance vocabulary ("caller" / "config") or None when there is no
+    # concrete account to attribute.
+    launch_account: Optional[str] = None
+    launch_account_source: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Convert the prose contract into a runtime trip-wire (sigma-review
@@ -2462,7 +2471,7 @@ def _pick_account_overlay(
     spawn seams stamp the picked id on the row's ``launch_account`` (x-d285);
     the env alone drops the one fact re-entry needs.
 
-    Advisory in every direction: opt-in via ``providers.quota.pick_on_launch``,
+    Advisory in every direction: opt-in via ``accounts.quota.pick_on_launch``,
     and any refusal or failure returns None so the spawn proceeds exactly as it
     does today. The receipt is always printed, because a launch silently landing
     on a different account than the operator expects is a billing surprise.
@@ -2509,7 +2518,7 @@ def pick_account_id(
     ``--account`` flag so the Rust client inherits the same choice. One decision,
     so those two can never disagree about which account a worker is billing.
 
-    Advisory in every direction: opt-in via ``providers.quota.pick_on_launch``,
+    Advisory in every direction: opt-in via ``accounts.quota.pick_on_launch``,
     and any refusal or failure returns None so the spawn proceeds exactly as it
     does today. A routed spawn is never picked for: it bills the route's
     vendor, not an Anthropic account, so there is no quota to manage.
@@ -2533,7 +2542,9 @@ def pick_account_id(
             )
             return None
         print(
-            f"account: {verdict.account} (picked, {_picked_headroom_note(verdict.account)})",
+            f"account: {verdict.account} "
+            f"(picked by accounts.quota.pick_on_launch, "
+            f"{_picked_headroom_note(verdict.account)})",
             file=sys.stderr,
         )
         return verdict.account
@@ -2688,11 +2699,15 @@ def dispatch_spawn(
     # never picked for (the transcript lives under its birth config dir).
     # x-d285: a picked overlay names its account id; launch_account wins.
     effective_launch_account = launch_account
+    launch_account_source = (
+        spawn_flag_owners.CALLER if launch_account is not None else None
+    )
     if account_env is None and harness == "claude" and not resume_session_id:
         picked_overlay = _pick_account_overlay(role=role, route_env=route_env)
         if picked_overlay is not None:
             account_env = picked_overlay.env
             effective_launch_account = picked_overlay.account_id
+            launch_account_source = spawn_flag_owners.CONFIG
 
     launch_role = role
     resolved_providers: list[str] = []
@@ -2999,6 +3014,7 @@ def dispatch_spawn(
             # evidence means unknown (None), never "default": stamping default
             # on a revive is the silent wrong-account re-entry.
             row_launch_account = effective_launch_account
+            row_launch_account_source = launch_account_source
             if resume_session_id and row_launch_account is None:
                 account_source = existing if revive else next(
                     (
@@ -3009,8 +3025,16 @@ def dispatch_spawn(
                     None,
                 )
                 row_launch_account = getattr(account_source, "launch_account", None)
+                # A revive inherits the source row's account, so it inherits
+                # the source row's provenance too; rows written before the
+                # column exist have none, and None is honest there.
+                row_launch_account_source = getattr(
+                    account_source, "launch_account_source", None
+                )
             elif not resume_session_id:
                 row_launch_account = effective_launch_account or "default"
+                if row_launch_account == "default":
+                    row_launch_account_source = None
             if resume_session_id and source_row is not None and not sandbox_settings:
                 from fno.agents.model_routing import read_recorded_sandbox_block
 
@@ -3220,6 +3244,8 @@ def dispatch_spawn(
                         # getattr: `created` is any ask-path result, including
                         # duck-typed stubs minted before the field existed.
                         model_substituted=getattr(created, "model_substituted", None),
+                        launch_account=row_launch_account,
+                        launch_account_source=row_launch_account_source,
                     )
 
                 # 4b2. opencode bg: delegate to the Rust serve lane. This arm

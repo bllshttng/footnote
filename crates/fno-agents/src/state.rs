@@ -172,6 +172,18 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // bump is what makes a pre-v26 reader degrade (drop the keys, refuse the
 // write) instead of TypeError on the unknown AgentEntry kwargs at an equal
 // version number. Accepted set widens to 1..=26.
+//
+// v27 (x-04ce) adds `launch_account_source` - WHO chose the row's
+// `launch_account`: "caller" (a flag on this spawn's argv) or "config"
+// (accounts.quota.pick_on_launch picked it). None on every other row:
+// launch_account "default" already says nobody chose, a revive inherits the
+// source row's stamp, and mints that cannot attribute stay silent. The
+// provenance vocabulary is shared with the spawn receipt (`account_source`)
+// and defined once in Python's `spawn_flag_owners`. Before it, a config
+// injection read as a caller decision - the exact misread this column ends.
+// Same writer-protection rationale as v22-v25: a pre-v27 writer accepts the
+// unknown keys and erases them on its next read-modify-write. Accepted set
+// widens to 1..=27.
 // Rendered by build.rs from src/registry_schema.toml (the version's single
 // owner); see that file for the bump protocol.
 include!(concat!(env!("OUT_DIR"), "/registry_schema.rs"));
@@ -722,6 +734,17 @@ pub struct RegistryEntry {
     /// drops a Python-stamped account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_account: Option<String>,
+    /// WHO chose `launch_account` (x-04ce, v26): `"caller"` (a flag on this
+    /// spawn's argv) or `"config"` (`accounts.quota.pick_on_launch` picked
+    /// it). `None` when launch_account is `"default"` (nobody chose - the
+    /// value already says so), when a revive inherited the account, and on
+    /// rows whose mint cannot attribute the choice. Mirrors Python's
+    /// `AgentEntry.launch_account_source`; same X3 passthrough so a daemon
+    /// write-back preserves the stamp. The vocabulary is shared with the
+    /// spawn receipt's `account_source` and defined once in Python's
+    /// `spawn_flag_owners`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_account_source: Option<String>,
     /// The SECOND valid session id an additive fork/background minted on this
     /// row (x-d285, v20). Both ids stay valid forever and resolve to the same
     /// row and launch binding; neither replaces the other, and at most ONE
@@ -1063,6 +1086,34 @@ pub fn launch_account_from_env() -> Option<String> {
         return None;
     }
     Some("default".to_string())
+}
+
+/// The carrier for launch-account PROVENANCE across the exec seam. The
+/// Python seam that injects a headroom-picked `--account`
+/// (`_pick_account_at_seam`) sets it to `"config"` in the same breath, so
+/// the Rust mint can tell an injected pick from a flag the operator typed.
+/// An id-adjacent adjective, never a credential.
+pub const LAUNCH_ACCOUNT_SOURCE_ENV_KEY: &str = "FNO_LAUNCH_ACCOUNT_SOURCE";
+
+/// WHO chose the row's launch account (x-04ce). Three answers, in order:
+/// the provenance carrier wins (an injected pick names itself `"config"`);
+/// else `FNO_LAUNCH_ACCOUNT` means the flag was on this spawn's argv
+/// (`"caller"` - the seam that sets it runs only for an explicit
+/// `--account`); else `None` - launch_account is `"default"` or the mint
+/// cannot attribute the choice, and `launch_account` already carries the
+/// value axis.
+pub fn launch_account_source_from_env() -> Option<String> {
+    if let Ok(src) = std::env::var(LAUNCH_ACCOUNT_SOURCE_ENV_KEY) {
+        if !src.is_empty() {
+            return Some(src);
+        }
+    }
+    if let Ok(id) = std::env::var(LAUNCH_ACCOUNT_ENV_KEY) {
+        if !id.is_empty() {
+            return Some("caller".to_string());
+        }
+    }
+    None
 }
 /// `host_mode` value for an ADOPTED `claude --bg` session footnote holds live via
 /// a daemon `control.sock` attach (G1 held-attach substrate, x-26df). Distinct
