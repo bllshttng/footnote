@@ -518,8 +518,8 @@ def live_registry_rows() -> tuple[list | None, str | None]:
     """The live registry rows, read in process. ONE reader, two consumers.
 
     ``None`` is a distinct answer from ``[]``: an unreadable registry must not
-    read as an empty fleet. Why this is not a shell-out, and what the old one
-    cost: docs/architecture/resource-meter.md.
+    read as an empty fleet. Why not a shell-out, and how the count changed:
+    docs/architecture/resource-meter.md.
     """
     try:
         from fno.agents.registry import load_registry

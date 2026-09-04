@@ -291,9 +291,8 @@ def _power_arm(sample: Optional[dict], reason: Optional[str]) -> ArmReading:
 
 def _fleet_snapshot() -> tuple[Any, Optional[list], Optional[str], int]:
     """One footprint reading, the live rows, why they are missing, and how long
-    both took. The rows come from the same reader the leak threshold uses: a
-    second registry read here would be two implementations of one question,
-    free to disagree."""
+    both took. The rows come from the reader the leak threshold uses, so the
+    two can never describe different fleets."""
     from fno.doctor_footprint import cause_reading, live_registry_rows
 
     started = time.monotonic()
@@ -320,18 +319,17 @@ def _census(
 ) -> dict:
     """The court census: kings, workers, tests.
 
-    Kings and workers are ROW counts, tests is a PROCESS count, and the two
-    are never folded together. The attribution gap rides as its own field for
-    the same reason (x-e040). Full rule: docs/architecture/resource-meter.md.
+    Kings and workers are ROW counts, tests is a PROCESS count, never folded
+    together. The gap rides as its own field for the same reason (x-e040).
+    Full rule: docs/architecture/resource-meter.md.
     """
     census: dict[str, Any] = {
         "kings": None, "king_conflicts": None, "workers": None,
         "tests": None if reading is None else reading.test_process_count,
         "roster_rows": None if rows is None else len(rows),
         "attribution_gap": None if reading is None else reading.attribution_gap,
-        # An unread count NAMES why, the same rule every arm follows. Without
-        # it the panel prints "unknown rows" and the reader cannot tell an
-        # unreadable registry from an incomplete one.
+        # An unread count NAMES why, the rule every arm follows: without it
+        # "unknown rows" cannot be told from an incomplete registry.
         "roster_error": rows_error,
         "read_ms": read_ms,
     }

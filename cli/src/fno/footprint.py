@@ -40,7 +40,7 @@ class Footprint(NamedTuple):
     attribution_gap: str | None = None
     # Whole-machine count of processes whose OWN program is a test runner.
     # Whole-machine on purpose: a test a person started competes for the same
-    # box as a lane, and the operator asked to see it beside the load.
+    # box as a lane.
     test_process_count: int = 0
 
 
@@ -51,10 +51,9 @@ _TEST_RUNNER_NAMES = frozenset({"pytest", "py.test"})
 def is_test_runner(command: str) -> bool:
     """True when a process's OWN program is a test runner.
 
-    Matched on argv[0] plus the first non-flag arguments, never on the whole
+    Matched on argv[0] plus the first non-flag arguments, never the whole
     command line: a substring scan counts a leaked keeper whose socket path
-    sits under ``pytest-of-<user>``. The measured decoys are pinned in
-    ``cli/tests/unit/test_footprint.py``.
+    sits under ``pytest-of-<user>``. Decoys pinned in test_footprint.py.
     """
     argv = command.split()
     if not argv:
