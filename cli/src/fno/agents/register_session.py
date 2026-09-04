@@ -31,7 +31,11 @@ if TYPE_CHECKING:
     from fno.agents.reachability import Reachability
 
 from fno.agents import events
-from fno.agents.registry import register_existing_session, restamp_harness_session_id
+from fno.agents.registry import (
+    heal_mux_ref,
+    register_existing_session,
+    restamp_harness_session_id,
+)
 from fno.agents.spawn_defaults import resolve_lane_vendor
 
 #: How long a spawned worker waits for its own row to appear before giving up.
@@ -132,6 +136,71 @@ def _predecessor_observation(
     return recorded, _verdict_bool(reading)
 
 
+def _mux_pair_from_env(env: "Optional[dict[str, str]]" = None) -> Optional[tuple[str, int]]:
+    """The hosting pair a pane worker reads from its own environment.
+
+    ``FNO_SESSION`` (the mux session) and ``FNO_PANE`` (the pane's own id)
+    are in every pane child's env, so a worker can name the pane it runs in
+    with no new IPC. A bg/headless worker has neither var and must never
+    gain a mux ref, so anything less than BOTH vars present is None, as is a
+    non-numeric or negative ``FNO_PANE`` (a u64 as a string is never
+    coerced).
+    """
+    env = os.environ if env is None else env
+    session = (env.get("FNO_SESSION") or "").strip()
+    pane_raw = (env.get("FNO_PANE") or "").strip()
+    if not session or not pane_raw:
+        return None
+    try:
+        pane = int(pane_raw)
+    except ValueError:
+        return None
+    if pane < 0:
+        return None
+    return session, pane
+
+
+def _heal_own_mux_ref(agent_self: str, harness: str) -> None:
+    """x-0345 W2 (identity OUT): heal this worker's row to the pane it runs in.
+
+    Runs inside the fail-open restamp path, before the per-harness arms (the
+    claude arm returns early) and independent of the id restamp: a resumed
+    pane keeps its uuid but gets a NEW pane, so "id already current" must
+    not skip the pane heal. Every door that can put a spawned worker on a
+    pane routes through here - resume, a pasted `--print-command` line, a
+    hand-written `mux pane run` - because the hook runs INSIDE the pane
+    rather than beside it. The success event is emitted only on a verified
+    write (heal_mux_ref confirms the persisted row); a swallowed failure
+    leaves `session_pane_rebound_failed` on the event log.
+    """
+    pair = _mux_pair_from_env()
+    if pair is None:
+        return
+    try:
+        moved = heal_mux_ref(
+            name=agent_self, harness=harness, mux_session=pair[0], pane_id=pair[1]
+        )
+    except Exception as exc:  # fail-open: never block session start (AC7-ERR)
+        events.emit(
+            "session_pane_rebound_failed",
+            provider=harness,
+            name=agent_self,
+            session=f"{pair[0]}:{pair[1]}",
+            error=str(exc),
+        )
+        print(f"register_session: warning: {exc}", file=sys.stderr)
+        return
+    if moved is not None:
+        old_mux, new_mux = moved
+        events.emit(
+            "session_pane_rebound",
+            provider=harness,
+            name=agent_self,
+            old=old_mux,
+            new=new_mux,
+        )
+
+
 def _restamp(agent_self: str, harness: str, session_id: str, source: str = "") -> int:
     """Bind a SPAWNED worker's SessionStart id observation to its own row.
 
@@ -161,6 +230,12 @@ def _restamp(agent_self: str, harness: str, session_id: str, source: str = "") -
     perfectly healthy. The wait is bounded and still fail-soft: exhausting it
     returns 0 exactly as a genuine no-row miss always did.
     """
+    # x-0345 W2 (identity OUT): heal the row's pane ref from the hosting pair
+    # this session reads from its own env, before the per-harness arms (the
+    # claude arm returns early) and independent of the id restamp - a resumed
+    # pane keeps its uuid but gets a NEW pane, so an id that is already
+    # current must not skip the pane heal.
+    _heal_own_mux_ref(agent_self, harness)
     # Only the pane substrate writes its row after the child starts, and it says
     # so by name. Every other spawn either has its row already or never gets one -
     # a headless one-shot sets FNO_AGENT_SELF and deliberately has no row, so

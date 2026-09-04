@@ -2267,6 +2267,95 @@ def restamp_harness_session_id(
     return restamped[0] if restamped else None
 
 
+def heal_mux_ref(
+    *,
+    name: str,
+    harness: str,
+    mux_session: str,
+    pane_id: int,
+    registry_path: Optional[Path] = None,
+) -> Optional[tuple[Optional[dict], dict]]:
+    """Re-point a spawned worker's row at the pane it actually runs in.
+
+    A recovered or re-hosted pane worker boots inside a pane whose
+    ``(session, pane_id)`` pair the row cannot know at write time: resume
+    reuses the row's recorded pair, which points at the DEAD pane, and drift
+    that predates any recovery (a row whose pane id was recycled) lies the
+    same way. The worker itself reads its hosting pair from its own
+    environment - ``FNO_SESSION`` and ``FNO_PANE`` are in every pane child's
+    env (pty.rs) - so the session-start restamp path, which already re-points
+    ``harness_session_id`` keyed on the row NAME, also heals the mux ref.
+    Keyed on the name for the same reason the restamp is: the one identity a
+    harness cannot re-mint.
+
+    ``mux`` is written and ``short_id`` cleared in ONE ``update_registry``
+    transaction: ``_validate_single_live_ref`` enforces mux XOR worker XOR bg
+    at write time, so a heal that set ``mux`` while leaving a non-empty
+    ``short_id`` would raise into the caller's fail-open hook and persist
+    nothing - the silent no-op this write exists to prevent. A worker that is
+    now hosted in a pane genuinely has no bg/worker transport key, so
+    clearing it is the invariant, not a workaround.
+
+    Returns ``(old_mux, new_mux)`` when the row moved, else ``None`` (no such
+    row, harness mismatch, or already on the pair - the idempotent no-op that
+    must not write or emit). The write is VERIFIED, not assumed: the returned
+    entries of ``update_registry`` are what was persisted under the lock, and
+    the caller emits ``session_pane_rebound`` only after this function
+    confirms the persisted row carries the new pair - so a heal that raised
+    and was swallowed by the fail-open hook is never indistinguishable from
+    one that landed; the event log is where that difference stays visible.
+    """
+    if not name or not harness or not mux_session:
+        return None
+    if isinstance(pane_id, bool) or not isinstance(pane_id, int) or pane_id < 0:
+        return None
+
+    new_mux = {"session": mux_session, "pane_id": pane_id}
+    # Decide from a pre-read so the idempotent no-op never rewrites the file
+    # byte-for-byte (the same rule record_session_observation holds). The
+    # updater below re-decides under the lock, so a concurrent writer landing
+    # between the two reads cannot double-write.
+    current = load_registry(path=registry_path)
+    row = next(
+        (
+            e
+            for e in current
+            if (e.name == name or name in e.aliases) and e.harness == harness
+        ),
+        None,
+    )
+    if row is None or row.mux == new_mux:
+        return None  # no such row, or already on the pair: no write, no event
+    before = dict(row.mux) if row.mux else None
+
+    def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
+        for entry in entries:
+            if (
+                entry.name != name and name not in entry.aliases
+            ) or entry.harness != harness:
+                continue
+            if entry.mux != new_mux:
+                entry.mux = dict(new_mux)
+                entry.short_id = ""
+            return entries
+        return entries
+
+    persisted = update_registry(_updater, path=registry_path)
+    healed = next(
+        (
+            e
+            for e in persisted
+            if (e.name == name or name in e.aliases) and e.harness == harness
+        ),
+        None,
+    )
+    if healed is None or healed.mux != new_mux:
+        # The write did not land (or a concurrent writer replaced the row
+        # inside the lock cycle): report nothing rather than a false success.
+        return None
+    return before, new_mux
+
+
 #: Outcome of one SessionStart id observation (see
 #: :func:`record_session_observation`).
 SESSION_OBSERVATION_OUTCOMES = (

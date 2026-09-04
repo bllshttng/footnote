@@ -1190,3 +1190,159 @@ def test_non_claude_restamp_keeps_its_lineage_path(
     assert entry is not None
     assert row.harness_session_id == REMINT
     assert row.predecessor_session_ids == [BIRTH], "the lineage path still runs"
+
+
+# ---------------------------------------------------------------------------
+# x-0345 W2: the worker heals its own mux ref from FNO_SESSION / FNO_PANE
+# ---------------------------------------------------------------------------
+
+
+def _write_pane_row(name: str, harness: str, **overrides):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    row = AgentEntry(
+        name=name,
+        harness=harness,
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+        cwd="/proj",
+        log_path="",
+        status="live",
+    )
+    for key, value in overrides.items():
+        setattr(row, key, value)
+    write_registry([row])
+    return row
+
+
+def test_heal_mux_ref_persists_pair_and_clears_short_id(tmp_path, monkeypatch):
+    """A stale pair is persisted with the new pair AND an empty short_id, in
+    one transaction - asserted on the row RE-READ FROM DISK. A row carrying a
+    non-empty short_id before the heal is persisted afterwards, proving the
+    clear happens in the same transaction instead of raising into the
+    hook's fail-open (mux XOR worker XOR bg)."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import heal_mux_ref, load_registry
+
+    _write_pane_row(
+        "x-f75e-mux-chrome",
+        "claude",
+        mux={"session": "main", "pane_id": 16},
+    )
+    moved = heal_mux_ref(name="x-f75e-mux-chrome", harness="claude", mux_session="main", pane_id=31)
+    assert moved == (
+        {"session": "main", "pane_id": 16},
+        {"session": "main", "pane_id": 31},
+    )
+    row = load_registry()[0]
+    assert row.mux == {"session": "main", "pane_id": 31}
+    assert row.short_id == ""
+
+
+def test_heal_mux_ref_adopts_a_pane_from_a_bg_row(tmp_path, monkeypatch):
+    """The recovery case at its worst: a bg row (worker transport, no pane)
+    whose session is re-hosted on a pane. mux is written and short_id is
+    cleared in the SAME transaction - setting mux alone would raise in
+    write_registry and the fail-open hook would swallow it into a no-op."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import heal_mux_ref, load_registry
+
+    _write_pane_row("t-bg-worker", "claude", short_id="deadbeef")
+    moved = heal_mux_ref(name="t-bg-worker", harness="claude", mux_session="main", pane_id=7)
+    assert moved == (None, {"session": "main", "pane_id": 7})
+    row = load_registry()[0]
+    assert row.mux == {"session": "main", "pane_id": 7}
+    assert row.short_id == ""
+
+
+def test_heal_mux_ref_idempotent_noop_writes_nothing(tmp_path, monkeypatch):
+    """A row already on the right pair performs no write and emits nothing."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents import events
+    from fno.agents.registry import heal_mux_ref
+
+    _write_pane_row("t-worker", "claude", mux={"session": "main", "pane_id": 31})
+    from fno.agents.registry import _registry_path
+
+    registry_path = _registry_path(None)
+    before = registry_path.read_bytes()
+    emitted: list = []
+    monkeypatch.setattr(events, "emit", lambda *a, **k: emitted.append((a, k)))
+
+    moved = heal_mux_ref(name="t-worker", harness="claude", mux_session="main", pane_id=31)
+
+    assert moved is None
+    assert registry_path.read_bytes() == before, "an idempotent heal rewrote the file"
+    assert emitted == []
+
+
+def test_heal_mux_ref_refuses_bad_pane_and_wrong_harness(tmp_path, monkeypatch):
+    """A non-numeric/negative pane id is ignored, never coerced; a harness
+    mismatch matches nothing. Neither writes."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import heal_mux_ref, load_registry
+
+    _write_pane_row("t-worker", "claude", mux={"session": "main", "pane_id": 16})
+    assert heal_mux_ref(name="t-worker", harness="claude", mux_session="main", pane_id=-1) is None
+    assert heal_mux_ref(name="t-worker", harness="codex", mux_session="main", pane_id=31) is None
+    row = load_registry()[0]
+    assert row.mux == {"session": "main", "pane_id": 16}, "a refused heal rewrote the row"
+
+
+def test_mux_pair_from_env_requires_both_vars_and_a_u64_pane():
+    """FNO_PANE absent (not in a pane) leaves mux untouched - a bg/headless
+    worker must never gain a mux ref; non-numeric or empty is ignored, not
+    coerced; negative is not a u64."""
+    from fno.agents.register_session import _mux_pair_from_env
+
+    assert _mux_pair_from_env({}) is None
+    assert _mux_pair_from_env({"FNO_SESSION": "main"}) is None
+    assert _mux_pair_from_env({"FNO_PANE": "31"}) is None
+    assert _mux_pair_from_env({"FNO_SESSION": "main", "FNO_PANE": ""}) is None
+    assert _mux_pair_from_env({"FNO_SESSION": "main", "FNO_PANE": "pane-31"}) is None
+    assert _mux_pair_from_env({"FNO_SESSION": "main", "FNO_PANE": "-3"}) is None
+    assert _mux_pair_from_env({"FNO_SESSION": "main", "FNO_PANE": "31"}) == ("main", 31)
+    assert _mux_pair_from_env({"FNO_SESSION": "main", "FNO_PANE": " 31 "}) == ("main", 31)
+
+
+def test_register_verb_refuses_when_fno_agent_self_row_exists(tmp_path: Path, monkeypatch) -> None:
+    """x-0345 T2.2: /fno-me inside a spawned or recovered pane worker must
+    refuse instead of minting a SECOND row named by the bare short-id beside
+    the worker's real row. The refusal names the row; nothing is written."""
+    use_tmpdir(monkeypatch, tmp_path)
+    for m in _MARKERS:
+        monkeypatch.delenv(m, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cafe1111-2222-3333-4444-555566667777")
+    monkeypatch.setenv("FNO_AGENT_SELF", "x-f75e-mux-chrome")
+    _write_pane_row("x-f75e-mux-chrome", "claude")
+    from typer.testing import CliRunner
+
+    from fno.agents.cli import agents_app
+    from fno.agents.registry import load_registry
+
+    result = CliRunner().invoke(agents_app, ["register"])
+    assert result.exit_code == 2, result.output
+    assert "x-f75e-mux-chrome" in result.output
+    assert "duplicate row" in result.output
+    names = [row.name for row in load_registry()]
+    assert names == ["x-f75e-mux-chrome"], names
+
+
+def test_register_verb_allows_fno_agent_self_without_a_row(tmp_path: Path, monkeypatch) -> None:
+    """The guard keys on an EXISTING row: a spawned worker whose row was never
+    written (the FNO_AGENT_ROW_PENDING race) can still self-register."""
+    use_tmpdir(monkeypatch, tmp_path)
+    for m in _MARKERS:
+        monkeypatch.delenv(m, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "dead2222-3333-4444-5555-666677778888")
+    monkeypatch.setenv("FNO_AGENT_SELF", "t-orphan-worker")
+    from typer.testing import CliRunner
+
+    from fno.agents.cli import agents_app
+    from fno.agents.registry import load_registry
+
+    result = CliRunner().invoke(agents_app, ["register"])
+    assert result.exit_code == 0, result.output
+    # No existing row under FNO_AGENT_SELF: the historical mint-a-row path
+    # (canonical bare short-id handle) still runs - the guard keys on an
+    # existing row, not on the marker's presence.
+    assert load_registry()[0].name == "dead2222"
