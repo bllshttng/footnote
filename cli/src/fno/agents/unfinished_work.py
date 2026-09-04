@@ -1080,7 +1080,11 @@ def collect_observations(
         # deadline, so a clamped budget is the deadline reaching INSIDE one
         # call - the checkpoint above only ever fires between them.
         budget = PR_READ_BUDGET_S if left is None else min(PR_READ_BUDGET_S, left)
-        clamped = budget < PR_READ_BUDGET_S
+        # Only the default reader is handed the budget. An injected reader
+        # keeps its own signature, so a failure there says nothing about a
+        # budget nobody applied, and naming one in the warning would print a
+        # number the reader never saw.
+        clamped = budget < PR_READ_BUDGET_S and pr_state_reader is None
         pr_node_id = getattr(candidate, "node_id", None)
         number = getattr(candidate, "pr_number", None)
         pr_state: Optional[str] = None

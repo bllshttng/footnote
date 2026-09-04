@@ -5455,13 +5455,21 @@ def test_a_budget_under_the_floor_stops_the_scan_without_reading():
     assert obs.github_ok is True, "running short of time is not a GitHub outage"
 
 
-def test_a_clamped_read_that_fails_reads_unscanned_not_broken():
-    def reader(cand, *, reviewers):
-        raise RuntimeError("gh pr view timed out after 4.0s")
+def test_a_clamped_read_that_fails_reads_unscanned_not_broken(monkeypatch):
+    """Through the DEFAULT reader, which is the only one the budget reaches.
+    An injected reader keeps its own signature and never sees the budget, so
+    a failure there must not be attributed to one."""
+
+    def fake_read_pr_state(cand, *, reviewers, timeout_s=30.0):
+        raise RuntimeError(f"gh pr view timed out after {timeout_s}s")
+
+    import fno.pr_watch._discover as discover_mod
+
+    monkeypatch.setattr(discover_mod, "read_pr_state", fake_read_pr_state)
 
     obs = _collect_prs(
         [_pr_cand()],
-        reader,
+        None,
         # Above the floor, below the full budget: the read is worth starting
         # and its timeout is the deadline, not read_pr_state's own default.
         deadline_monotonic=time.monotonic() + (uw.PR_READ_BUDGET_S / 2),
@@ -5470,6 +5478,24 @@ def test_a_clamped_read_that_fails_reads_unscanned_not_broken():
     assert obs.prs_unscanned is True
     assert obs.github_ok is True
     assert any("tick budget" in w for w in obs.warnings)
+
+
+def test_an_injected_reader_failure_is_never_blamed_on_a_budget_it_never_saw():
+    """The seam only passes the budget to the default reader. Attributing an
+    injected reader's failure to a clamped budget would print a number the
+    reader was never handed."""
+
+    def reader(cand, *, reviewers):
+        raise RuntimeError("gh: could not resolve host")
+
+    obs = _collect_prs(
+        [_pr_cand()],
+        reader,
+        deadline_monotonic=time.monotonic() + (uw.PR_READ_BUDGET_S / 2),
+    )
+
+    assert obs.github_ok is False
+    assert not any("tick budget" in w for w in obs.warnings)
 
 
 def test_a_failure_on_the_full_budget_still_reads_as_a_github_outage():
