@@ -4489,6 +4489,22 @@ class AccountsBlock(BaseModel):
         return None
 
 
+#: The texts a reign self-injects as native commands (x-7b36). Module
+#: constants, not literals in the field defaults, so the fail-safe validators
+#: can return the same default the field was born with.
+KING_CHECKIN_TEXT = (
+    "reign check-in: run the check-in body of the reign skill "
+    "(skills/reign/SKILL.md); journal reign_checkin; if nothing changed "
+    "since the last check-in, print 'no change' and stop"
+)
+KING_GOAL_TEXT = (
+    "reign goal: fno inbox board --json reports no actionable rows for the "
+    "crown scope, fno agents court --json shows no split, and the operator "
+    "has not ordered a stand-down; until then keep reigning and never "
+    "/goal clear on NoProgress"
+)
+
+
 class KingBlock(BaseModel):
     """The king loop (nested under 'config.king').
 
@@ -4520,6 +4536,41 @@ class KingBlock(BaseModel):
     wake_ceiling: int = 32
     wake_debounce_seconds: int = 900
     wake_backstop_seconds: int = 1800
+    # The texts a reign self-injects as native commands (x-7b36). The skill
+    # carries these defaults verbatim so a fresh install works with no config;
+    # these keys are the one place an operator edits them.
+    checkin_interval: str = "30m"
+    checkin_text: str = KING_CHECKIN_TEXT
+    goal_text: str = KING_GOAL_TEXT
+
+    @field_validator("checkin_interval", mode="before")
+    @classmethod
+    def _coerce_checkin_interval(cls, v: object) -> str:
+        """Fail-safe to 30m on anything but ``<digits>[smhd]``.
+
+        A bad value degrades to the default and is named by
+        ``fno config doctor``, never raised: the interval arms a self-injected
+        /loop, and a typo there must not kill a reign at config load.
+        """
+        if isinstance(v, str) and re.fullmatch(r"\d+[smhd]?", v.strip()):
+            return v.strip()
+        return "30m"
+
+    @field_validator("checkin_text", mode="before")
+    @classmethod
+    def _coerce_checkin_text(cls, v: object) -> str:
+        """Fail-safe to the block default on a non-string or blank value."""
+        if isinstance(v, str) and v.strip():
+            return v
+        return KING_CHECKIN_TEXT
+
+    @field_validator("goal_text", mode="before")
+    @classmethod
+    def _coerce_goal_text(cls, v: object) -> str:
+        """Fail-safe to the block default on a non-string or blank value."""
+        if isinstance(v, str) and v.strip():
+            return v
+        return KING_GOAL_TEXT
 
 
 class PreflightBlock(BaseModel):

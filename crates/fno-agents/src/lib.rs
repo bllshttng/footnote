@@ -40,6 +40,11 @@
 //!   (the per-CLI [`readiness::ReadinessDetector`] impls now live in
 //!   [`readiness`]).
 
+// daemon.rs's `agent.list` row is one json! literal with a key set pinned by
+// schemas/agents-list-row.json; it outgrew the default macro recursion limit
+// the day `spawned_by_session` joined the contract (x-7b36).
+#![recursion_limit = "256"]
+
 pub mod active_backlog;
 mod agent_lock;
 pub mod agents_config;

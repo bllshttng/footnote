@@ -609,6 +609,9 @@ FIELD_META: dict[str, Meta] = {
     "king.wake_backstop_seconds": Meta("advanced", "Timer-backstop interval (default 1800). An approximation of the mail and board-change triggers, kept so a missed event cannot strand a scope forever; the interval is a policy choice, not a measurement."),
     # --- config.auto_heal.* (the pr-watch tick's heal drive loop; default off) ---
     "auto_heal.enabled": Meta("advanced", "Arm the pr-watch tick's heal phase: run the CI heal drive loop (pr-heal --all --apply, in Rust) over every red open PR each tick. Default false until the loop is measured on real PRs."),
+    "king.checkin_interval": Meta("advanced", "The /loop interval a reign self-injects (default 30m). Fail-safe: a value that is not <digits>[smhd] degrades to 30m at load, never raises."),
+    "king.checkin_text": Meta("advanced", "The /loop prompt text a reign self-injects at each check-in (default: run the reign skill's check-in body, journal reign_checkin, print 'no change' when idle)."),
+    "king.goal_text": Meta("advanced", "The /goal conditions a reign self-injects (default: board clean for the scope, court unsplit, no stand-down order; never /goal clear on NoProgress)."),
     # --- config.accounts.* (account rotation; managed by `fno config accounts`) ---
     "accounts.active": Meta("never", "Name of the account record currently active for provider rotation."),
     "accounts.auto_switch": Meta("never", "Swap to a failover account automatically when the active one is locked out."),
