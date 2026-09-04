@@ -89,23 +89,3 @@ def test_AC9_EDGE_malformed_pytest_shard_fails_loudly(spec: str) -> None:
 def test_AC6_ERR_empty_pytest_shard_fails_loudly() -> None:
     with pytest.raises(pytest.UsageError, match="selected no tests"):
         partition_pytest_nodeids(["tests/unit/test_real.py::test_case"], "2/2")
-
-
-def test_AC2_HP_worker_configure_strips_the_selector(monkeypatch) -> None:
-    """A worker must not forward the shard selector to nested probes."""
-    from tests.conftest import pytest_configure
-
-    monkeypatch.setenv("FNO_PYTEST_SHARD", "3/8")
-    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
-    pytest_configure(None)
-    assert "FNO_PYTEST_SHARD" not in os.environ
-
-
-def test_AC2_INV_controller_configure_keeps_the_selector(monkeypatch) -> None:
-    """The controller's copy must survive configure for collection to read."""
-    from tests.conftest import pytest_configure
-
-    monkeypatch.setenv("FNO_PYTEST_SHARD", "3/8")
-    monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
-    pytest_configure(None)
-    assert os.environ["FNO_PYTEST_SHARD"] == "3/8"

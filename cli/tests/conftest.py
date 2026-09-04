@@ -195,22 +195,6 @@ def _drain_exited_keepers():
     yield
     drain_exited_keepers()
 
-
-def pytest_configure(config: pytest.Config) -> None:
-    """Strip the shard selector in xdist workers, where nothing consumes it.
-
-    Only the controller's collection reads FNO_PYTEST_SHARD, and the pop above
-    runs in the controller alone: workers spawn with the parent environment
-    BEFORE that pop and would otherwise forward the selector to a nested
-    pytest probe, silently slicing the probe's own collection to this leg's
-    fraction (or emptying it). PYTEST_XDIST_WORKER is set in workers only, so
-    the controller's copy survives to collection.
-    """
-    del config
-    if os.environ.get("PYTEST_XDIST_WORKER") is not None:
-        os.environ.pop("FNO_PYTEST_SHARD", None)
-
-
 @pytest.fixture(autouse=True)
 def _stable_fno_py_cmd(monkeypatch):
     """Pin source self-shellouts to a bare ``["fno-py"]`` prefix (x-69b3).
