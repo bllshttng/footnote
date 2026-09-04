@@ -1557,17 +1557,7 @@ def _spawn_worker(
             f"fno agents spawn exited {proc.returncode}: "
             f"{(stderr or proc.stdout or '').strip()[:200]}"
         )
-    # Receipt shape is substrate-dependent (mirrors dispatch-node.sh). A `bg`
-    # spawn lands a DETACHED thread and returns a compact JSON receipt whose
-    # launch identity we require as launch proof: {"name", "short_id", ...} for
-    # claude, and for a codex thread {"short_id": "", "harness_session_id"/
-    # "session_id": <full id>} - codex has no short id, so the FULL session id
-    # is the launch proof (x-de10; the old short_id-only parse raised
-    # SpawnError for every codex thread dispatch). A `headless` one-shot (a
-    # codex/others failover) already ran to completion on exit 0 - no detached
-    # thread, no id - so the clean exit IS the proof and we skip the
-    # requirement (else the parse below would raise SpawnError, release the
-    # reservation, and redispatch a node whose headless worker already ran).
+
     def _receipt(short_id: str) -> str:
         """One ``dispatch_spawned`` row per launch, then hand back the identity.
 
@@ -1598,6 +1588,17 @@ def _spawn_worker(
         )
         return short_id
 
+    # Receipt shape is substrate-dependent (mirrors dispatch-node.sh). A `bg`
+    # spawn lands a DETACHED thread and returns a compact JSON receipt whose
+    # launch identity we require as launch proof: {"name", "short_id", ...} for
+    # claude, and for a codex thread {"short_id": "", "harness_session_id"/
+    # "session_id": <full id>} - codex has no short id, so the FULL session id
+    # is the launch proof (x-de10; the old short_id-only parse raised
+    # SpawnError for every codex thread dispatch). A `headless` one-shot (a
+    # codex/others failover) already ran to completion on exit 0 - no detached
+    # thread, no id - so the clean exit IS the proof and we skip the
+    # requirement (else the parse below would raise SpawnError, release the
+    # reservation, and redispatch a node whose headless worker already ran).
     if substrate != "thread":
         return _receipt("headless")
     # Keep scanning past a line that merely MENTIONS an id field but is not the
