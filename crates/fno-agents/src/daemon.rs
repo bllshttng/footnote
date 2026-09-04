@@ -2686,12 +2686,14 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         // shortfall. Removing it means every escalated row is judged this
         // sweep, and the count spent is reported.
         let mut dormant_handle = None;
-        // A thread row owns no pid by design, so a restarted daemon reads it as
-        // not live and never probed its tail - the one reading that can say the
-        // work is over. A one-shot ask is excluded by name, not by shape: since
-        // v9 it carries the claude jobId in `short_id`, so the pid-less test
-        // alone would pull it into an eviction route it never used before.
-        if is_live || (e.pid.is_none() && !e.short_id.is_empty() && !e.is_one_shot_ask()) {
+        // Every pid-less row gets its tail read. The two identity clauses this
+        // gate used to demand (a short_id the harness issued, not-a-one-shot)
+        // said nothing about whether the tail is worth reading, and they held
+        // 31 of 32 kept-not-terminal rows out of the probe while their
+        // transcripts sat on disk unread. This gate only answers "should we
+        // READ this tail"; removal stays with gc_action, which requires a
+        // positive `done` tail plus past-grace and its own corroboration gates.
+        if is_live || e.pid.is_none() {
             // The idle gate's transcript read comes from the same store index
             // (in memory after the first build), never a fresh walk, through the
             // same shared rule the contradiction arm uses - the unconditional
