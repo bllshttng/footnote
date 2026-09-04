@@ -5468,7 +5468,8 @@ fn build_codex_thread_entry(
         crown_scope: None,
         crown_grantor: None,
         route_settings_path: None,
-        fno_id: Some(session_id), delivery_policy: None,
+        fno_id: Some(session_id),
+        delivery_policy: None,
         // v19: the launch posture is the resume posture. The doc's old warning
         // that "a registry row records no sandbox posture" died here.
         sandbox_posture: Some(
@@ -16493,7 +16494,11 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             });
         let yolo = build_codex_thread_entry("t", worktree.path(), &start, None, None, true);
         assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
-        assert!(entry_posture_is_full_access(&yolo) && yolo.fno_id.as_deref() == Some("thread-p") && yolo.mux.is_none());
+        assert!(
+            entry_posture_is_full_access(&yolo)
+                && yolo.fno_id.as_deref() == Some("thread-p")
+                && yolo.mux.is_none()
+        );
         let bounded = build_codex_thread_entry("t", worktree.path(), &start, None, None, false);
         assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
         assert!(!entry_posture_is_full_access(&bounded));

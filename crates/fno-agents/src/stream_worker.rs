@@ -1817,8 +1817,13 @@ cat >/dev/null
         // a race. Proven by a ping surviving well after the grace.
         let home = tmp_home("midturn");
         // One turn ends at an assistant frame (no result), then blocks on stdin.
+        // A user echo rides before the loop so the setup window is NOT at rest:
+        // with only the init system frame, a runner-starved test process can
+        // miss the grace between connect and the first write_turn, and the
+        // worker correctly idle-exits before ever reading the turn.
         let script = r#"
 printf '%s\n' '{"type":"system","subtype":"init"}'
+printf '%s\n' '{"type":"user","message":{"role":"user"}}'
 while IFS= read -r line; do
   printf '%s\n' '{"type":"user","message":{"role":"user"}}'
   printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"mid"}]}}'
