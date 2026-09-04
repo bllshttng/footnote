@@ -13,6 +13,7 @@ from fno.bundle import bundle_app
 from fno.codemap_cli import app as codemap_app
 from fno.doctor import doctor_command, plugin_file_command
 from fno.doctor_bash_census import bash_census_command
+from fno.paths import resolve_plugin_script
 from fno.agents.harness_probe import harness_probe_command
 from fno.doctor_footprint import footprint_command
 from fno.doctor_lanes import lanes_command
@@ -85,9 +86,8 @@ def harness_matrix_command(
     """Render the features capability matrix from the capability table."""
     import subprocess
     import sys
-    from pathlib import Path
 
-    script = Path(__file__).resolve().parents[3] / "scripts/diagnostics/render-harness-matrix.py"
+    script = resolve_plugin_script("scripts/diagnostics/render-harness-matrix.py")
     argv = [sys.executable, str(script)]
     if write:
         argv.append("--write")
