@@ -14,12 +14,10 @@ from pydantic import BaseModel, ConfigDict
 
 class WatchdogBlock(BaseModel):
     """The lane's four settings. The per-key text an operator reads is
-    `FIELD_META` in `registry.py` (it feeds `fno config` and the generated
-    guide); a second copy here would drift from it. One rule belongs beside
-    the fields: ``reap`` is the only lane that ships off, because it runs
-    ``stop`` then ``rm`` and deletes the session's worktree. A wrong wake can
-    be undone and a wrong reap cannot. Verdicts are computed, reported and
-    mailed either way.
+    `FIELD_META` in `registry.py`; a copy here would drift from it. One rule
+    belongs beside the fields: ``reap`` is the only lane that ships off,
+    because it runs ``stop`` then ``rm`` and deletes the session's worktree.
+    A wrong wake can be undone and a wrong reap cannot.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -38,7 +36,12 @@ def coerce_legacy(data: object) -> object:
     if not isinstance(data, dict):
         return data
     flat = data.get("watchdog")
-    block = dict(flat) if isinstance(flat, dict) else {}
+    if isinstance(flat, WatchdogBlock):
+        # An already-built block beside a legacy sibling: seed from it, or the
+        # sibling replaces the whole block and silently disarms the lane.
+        block = flat.model_dump()
+    else:
+        block = dict(flat) if isinstance(flat, dict) else {}
     if isinstance(flat, str):
         word = flat.strip().lower()
         block["enabled"] = word not in {"", "off"}

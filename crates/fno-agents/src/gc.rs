@@ -208,6 +208,40 @@ pub struct GcRow {
 /// terminal-or-dead question the policy will rule on, and two local spellings
 /// of one set is how they drifted apart the first time (Orphaned joined the
 /// policy's set while the sweep's copy kept the old three).
+/// A stamped row whose STORED STATUS still reads live-ish while the liveness
+/// ladder answers `Unknown`: the contradiction the policy has to rule on.
+fn is_stamped_contradiction(row: &GcRow) -> bool {
+    row.exited_at.is_some()
+        && row.probe == RowLiveness::Unknown
+        && matches!(
+            row.status,
+            AgentStatus::Live
+                | AgentStatus::Ready
+                | AgentStatus::Idle
+                | AgentStatus::Busy
+                | AgentStatus::Spawning
+        )
+}
+
+/// One reading breaks that tie: a transcript POSITIVELY stale for the whole
+/// window. `status` is a snapshot nothing updates at exit and `exited_at` is a
+/// write only an exit produces, so neither can settle the other. `None` never
+/// grants permission; an unread transcript is not a stale one.
+fn stamp_is_corroborated(row: &GcRow) -> bool {
+    is_stamped_contradiction(row) && row.transcript_fresh == Some(false)
+}
+
+/// Whether the policy will treat this row as terminal, spelled ONCE.
+///
+/// The sweep gates its worktree probe on this same question, and a probe gate
+/// narrower than the policy strands exactly the rows the policy would remove:
+/// `worktree_clean` stays `None`, the fail-closed arm keeps the row, and it is
+/// reported as a worktree problem when the probe never ran. Two local spellings
+/// is how they drifted the first time.
+pub fn treated_as_terminal(row: &GcRow) -> bool {
+    status_is_terminal(row.status) || row.pid_confirmed_dead || stamp_is_corroborated(row)
+}
+
 pub fn status_is_terminal(status: AgentStatus) -> bool {
     matches!(
         status,
@@ -317,21 +351,8 @@ fn gc_decide(row: &GcRow, now: i64, grace_secs: i64) -> (GcAction, Option<KeepRe
     // the blanket this group exists to break open. A stamped row the ladder
     // answers Unknown on keeps - named as the contradiction it is - instead
     // of silently resolving in favour of the status field.
-    let stamped_contradiction = row.exited_at.is_some()
-        && row.probe == RowLiveness::Unknown
-        && matches!(
-            row.status,
-            AgentStatus::Live
-                | AgentStatus::Ready
-                | AgentStatus::Idle
-                | AgentStatus::Busy
-                | AgentStatus::Spawning
-        );
-    // One reading breaks the tie: a transcript POSITIVELY stale for the whole
-    // window. `status` is a snapshot nothing updates at exit and `exited_at` is
-    // a write only an exit produces, so neither can settle the other. `None`
-    // never grants permission; an unread transcript is not a stale one.
-    let stamp_corroborated = stamped_contradiction && row.transcript_fresh == Some(false);
+    let stamped_contradiction = is_stamped_contradiction(row);
+    let stamp_corroborated = stamp_is_corroborated(row);
     if stamped_contradiction && !stamp_corroborated {
         return (GcAction::Keep, Some(KeepReason::Contradicted));
     }
@@ -345,9 +366,7 @@ fn gc_decide(row: &GcRow, now: i64, grace_secs: i64) -> (GcAction, Option<KeepRe
     // path as `Exited`. Before this, an Orphaned row with no pid never got an
     // `exited_at` stamp, never entered the grace path, and the backstop (which
     // hangs off `exited_at`) never fired: Orphaned rows were immortal.
-    let terminal_or_dead =
-        status_is_terminal(row.status) || row.pid_confirmed_dead || stamp_corroborated;
-    if !terminal_or_dead {
+    if !treated_as_terminal(row) {
         return (GcAction::Keep, Some(KeepReason::NotTerminal));
     }
     match row.exited_at {
@@ -1502,6 +1521,21 @@ mod tests {
             ..contradicted_row()
         };
         assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Reap);
+    }
+
+    #[test]
+    fn the_probe_gate_and_the_policy_ask_the_same_terminal_question() {
+        // The sweep gates its worktree probe on `treated_as_terminal`. A row
+        // this answers false for is never probed, so `worktree_clean` stays
+        // `None` and the fail-closed arm keeps it - stuck, and reported as a
+        // worktree problem. It must be true for every shape the policy reaps.
+        let corroborated = GcRow {
+            transcript_fresh: Some(false),
+            ..contradicted_row()
+        };
+        assert!(treated_as_terminal(&corroborated));
+        assert_eq!(gc_action(&corroborated, NOW, GRACE), GcAction::Reap);
+        assert!(!treated_as_terminal(&contradicted_row()));
     }
 
     #[test]

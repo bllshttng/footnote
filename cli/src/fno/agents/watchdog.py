@@ -1635,6 +1635,10 @@ def _verdict_one(
         node_state_for=node_state_for,
     )
     if retire_yes:
+        # The held non-answer rides along: this row is about to be STOPPED, and
+        # dropping it would hide the unread reap in the one case that acts.
+        if reap_unknown_basis:
+            retire_basis += f" (reap did not answer: {reap_unknown_basis})"
         return Verdict(row.row_id, row.name, row.state, RETIRE,
                        retire_basis, "stop")
 
@@ -2260,15 +2264,11 @@ def _is_linked_worktree(cwd: str) -> bool:
 
 
 class _Unreadable:
-    """A seam read that FAILED, which is not the same fact as one that
-    answered empty.
+    """A seam read that FAILED, which is not the fact an empty answer states.
 
-    Both seams below answered ``{}`` on any exception, so an unreadable claims
-    root and a node with no claim produced one value, and `reap_decision`'s
-    documented UNKNOWN-on-a-raise contract held only for injected test seams.
-    `run_sweep` raises on this sentinel so the production path answers UNKNOWN
-    with the failure in its basis; retire meets the same raise through
-    `_shipped_work_basis`, which is already no marker and no stop.
+    Both seams answered ``{}`` on any exception, so an unreadable claims root
+    and a node with no claim produced one value, and `reap_decision`'s
+    UNKNOWN-on-a-raise contract held only for injected test seams.
     """
 
     __slots__ = ("detail",)
@@ -3000,6 +3000,13 @@ def run_sweep(
 
     def node_state_for(node: str) -> Optional[dict]:
         return _answered(graph_fn()).get(node)
+
+    # ONE graph read serves every row, so one failed read turns the whole fleet
+    # STALE. The per-row verdicts stay honest; this names the single cause once
+    # instead of leaving it to be inferred from N identical bases.
+    graph_state = graph_fn()
+    if isinstance(graph_state, _Unreadable):
+        warnings = [*warnings, f"graph unreadable for every row: {graph_state.detail}"]
     try:
         from fno.config import load_settings
 

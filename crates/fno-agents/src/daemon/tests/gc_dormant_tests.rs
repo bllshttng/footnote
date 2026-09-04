@@ -151,6 +151,11 @@ fn gc_sweep_reaps_a_finished_pid_less_thread_row_and_keeps_the_live_one() {
         thread.short_id = "thr1".into();
         thread.last_message_at = Some(two_days_ago.clone());
         thread.pid = None;
+        // A real THREAD row, not a one-shot ask. Without the host mode this
+        // fixture is a claude shellout (`is_one_shot_ask`), which the dormant
+        // gate excludes by name - and an ask fixture would test a population
+        // this arm does not serve.
+        thread.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
         r.entries.push(thread);
 
         let mut live = ask_row("t-still-working", None);

@@ -391,8 +391,7 @@ def tick() -> None:
                         _fleet_refused += 1
                     _emit_event(event_type, data)
 
-                # Imported here, not at module scope: the watchdog package
-                # pulls the harness layer and this module is on the hot path.
+                # Local import: the watchdog package pulls the harness layer.
                 from fno.agents.watchdog import handoff_armed as _wd_handoff
 
                 _fleet_candidates = run_recovery_sweep(

@@ -2,7 +2,6 @@
 //! because the file-budget gate makes that file shrink-only.
 
 use super::*;
-use fno_agents::reap_render::render_reap;
 use fno_agents::{emit_schema_json, state::AgentState, AgentStatus, KNOWN_EVENT_KINDS};
 use std::path::Path;
 

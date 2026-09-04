@@ -2711,9 +2711,10 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         let mut dormant_handle = None;
         // A thread row owns no pid by design, so a restarted daemon reads it as
         // not live and never probed its tail - the one reading that can say the
-        // work is over. A one-shot ask row carries no short_id, so it has no
-        // handle to probe and stays out.
-        if is_live || (e.pid.is_none() && !e.short_id.is_empty()) {
+        // work is over. A one-shot ask is excluded by name, not by shape: since
+        // v9 it carries the claude jobId in `short_id`, so the pid-less test
+        // alone would pull it into an eviction route it never used before.
+        if is_live || (e.pid.is_none() && !e.short_id.is_empty() && !e.is_one_shot_ask()) {
             // The idle gate's transcript read comes from the same store index
             // (in memory after the first build), never a fresh walk.
             let transcript = store_matches(e)
@@ -2776,8 +2777,12 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         // never opens for the worktree-owning rows it was ordered for.
         let past_backstop = matches!(exited_at,
             Some(t) if now.saturating_sub(t) > crate::gc::backstop_horizon_secs(grace_secs));
+        // `treated_as_terminal`, never a local copy: a stamped row a stale
+        // transcript corroborates is terminal to the POLICY while its status
+        // field and pid still say otherwise, and gating the probe on the
+        // narrow question stranded exactly the rows the policy would remove.
         let needs_probe = !is_live
-            && terminal_or_dead
+            && crate::gc::treated_as_terminal(&row)
             && past_grace
             && owns_worktree
             && (crate::gc::removal_is_corroborated(&row) || past_backstop);
