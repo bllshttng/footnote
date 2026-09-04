@@ -138,9 +138,7 @@ def auto_continue_enabled(
 EVENT_DISPATCHED = "advance_dispatched"
 EVENT_SKIPPED = "advance_skipped"
 EVENT_FAILED = "advance_failed"
-# One row per launch, emitted inside _spawn_worker: the only place that knows
-# the resolved argv.
-EVENT_SPAWNED = "dispatch_spawned"
+EVENT_SPAWNED = "dispatch_spawned"  # one row per launch, from _spawn_worker
 # x-0676: paired receipt (not a decision) emitted just before an advance_dispatched
 # when on_exhaustion=failover rotates off an exhausted provider.
 EVENT_FAILOVER = "dispatch_failover"
@@ -1286,11 +1284,9 @@ def _launch_harness_axis(launch: str, node_cwd: Optional[str] = None) -> Optiona
     An ACCOUNT RECORD (ccm, ccr) is a real binary but not a harness, so it
     answers through its registry row. None means unverifiable: pins nothing.
 
-    A row may name a roster harness that carries no capability row (hermes,
-    openclaw - both admissible record values). The resolver refuses such a
-    harness outright, so pinning it would turn every dispatch on that record
-    into a hard DispatchResolveError. An answer the resolver cannot honor is
-    as unverifiable as no answer, so it degrades the same way.
+    A record may name a roster harness with no capability row (hermes,
+    openclaw). The resolver refuses those, so an answer it cannot honor is as
+    unverifiable as no answer and degrades the same way.
     """
     if not launch:
         return None
@@ -1376,8 +1372,7 @@ def _spawn_worker(
     # there instead and arrive already pinned - on a grid decline the pin is the
     # placement harness. An explicit harness therefore skips this consult: under
     # it the grid could pick a harness the caller's placement did not key for.
-    # A caller that resolved the grid itself (the lane door, which needs the
-    # harness before it can place a worktree) hands its reason in; the consult
+    # A caller that resolved the grid itself hands its reason in: the consult
     # below is skipped under an explicit harness and would otherwise blank it.
     grid_why: Optional[str] = grid_reason
     if harness is None:
@@ -1769,11 +1764,9 @@ def _lane_harness(eff_provider: Optional[str], node_cwd: Optional[str] = None) -
     second answer to `_spawn_worker`'s question, and it read every undeclared
     harness as claude.
 
-    ``node_cwd`` scopes the registry read to the SAME repo the spawn seam reads
-    from. Without it the two legs answer from different roots, and a project
-    that declares its account records locally would place the worktree for
-    claude while the spawn resolves codex - which the spawn seam's one-axis
-    guard then refuses, skipping the lane on every tick.
+    ``node_cwd`` scopes the read to the SAME repo the spawn seam reads. Without
+    it a project with local account records places for claude while the spawn
+    resolves codex, and the one-axis guard then skips the lane every tick.
     """
     return _launch_harness_axis((eff_provider or "").strip(), node_cwd) or "claude"
 
@@ -2067,10 +2060,8 @@ def dispatch_lanes(
                 node=node,
                 caller="dispatch_lanes",
                 events_path=ev_path,
-                # The lane door resolves the grid itself, so _spawn_worker's own
-                # consult never runs and the receipt would carry no reason at
-                # all - the one field that names a config gap, blank on the door
-                # that fires most.
+                # The door resolved the grid, so the seam's own consult never
+                # runs and the reason field would be blank on the busiest door.
                 grid_reason=lane_grid_why,
             )
         except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
