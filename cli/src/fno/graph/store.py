@@ -351,14 +351,13 @@ def sweep_orphaned_keepers(timeout: float = 10.0) -> "list[int]":
     """SIGTERM every live store keeper whose ``--graph`` tree is gone, wait
     `timeout`, SIGKILL the rest, and return the pids that refused to die.
 
-    The spawn ledger only knows keepers THIS process spawned, so the sweep
-    covers the ledger-blind populations: keepers a CLI subprocess spawned,
-    and keepers that outlived a session with no reaper wired (measured
-    2026-09-04: 8-10 live keepers against deleted pytest graph paths). The
-    kill decision is the graph path's existence, never the command line -
-    canonical and leaked keepers share an argv. Every probe and kill is
-    guarded: an unreadable process table degrades to a no-op, never an
-    error.
+    Covers the populations the spawn ledger is blind to: keepers a CLI
+    subprocess spawned, and keepers that outlived a session with no reaper
+    wired (measured 2026-09-04: 8-10 live keepers against deleted pytest
+    graph paths). The kill decision is the graph path's existence, never the
+    command line - canonical and leaked keepers share an argv. Every probe
+    and kill is guarded: an unreadable process table degrades to a no-op,
+    never an error.
     """
     import signal
 

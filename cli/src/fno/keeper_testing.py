@@ -3,9 +3,8 @@
 Bare ``pytest`` from ``cli/`` collects both trees (no ``testpaths``), and a
 fixture in one conftest protects nothing in the other: the ``cli/src`` tree
 had no idle bound, no drain, and no reaper, so its keepers outlived the
-worker as live orphans against graph paths pytest had deleted (measured
-2026-09-04). Both conftests import the fixtures here so the trees cannot
-drift.
+worker as live orphans against graph paths pytest had deleted. Both
+conftests import from here so the trees cannot drift.
 """
 import os
 
@@ -14,12 +13,9 @@ import pytest
 
 @pytest.fixture(autouse=True, scope="session")
 def _reap_store_keepers():
-    """Every spawned keeper dies with the session: the idle bound caps even
-    keepers the reaper never hears about, the teardown asserts the ledger
-    drains (a teardown that merely runs is decoration), and the sweep reaps
-    the ledger-blind population by graph existence, never argv - canonical
-    and leaked keepers share a command line.
-    """
+    """Every spawned keeper dies with the session: idle bound for keepers the
+    reaper never hears about, ledger SIGTERM with a drain assert, sweep for
+    the ledger-blind population by graph existence, never argv."""
     os.environ.setdefault("FNO_STORE_KEEPER_IDLE_SECS", "5")
     yield
     from fno.graph.store import reap_spawned_keepers, sweep_orphaned_keepers
@@ -35,7 +31,7 @@ def _reap_store_keepers():
 @pytest.fixture(autouse=True)
 def _drain_exited_keepers():
     """poll() exited keepers around every test: an exited child is a zombie
-    under the worker pid until collected, and the session reaper runs once."""
+    until collected, and the session reaper runs once."""
     from fno.graph.store import drain_exited_keepers
 
     drain_exited_keepers()
