@@ -5558,27 +5558,13 @@ def cmd_dispatch_lanes(
             harness = harness.strip()
             if not harness:
                 raise DispatchFlagError("--harness must not be empty")
-            from fno.harness_names import SPAWN_HARNESSES, pane_only_harnesses
+            from fno.harness_names import SPAWN_HARNESSES, thread_spawn_refusal
 
             if harness not in SPAWN_HARNESSES:
-                # Two different refusals share this branch and the words
-                # matter: a DECLARED harness without a spawn arm is not an
-                # unknown name, and its answer derives from the same table
-                # the accepted list derives from, so the two can never
-                # disagree again.
-                if harness in pane_only_harnesses():
-                    raise DispatchFlagError(
-                        f"harness {harness!r} is refused on the thread "
-                        "substrate: features.spawn is not native in "
-                        "harness_capabilities.toml; it launches on --substrate "
-                        "pane only."
-                    )
-                accepted = ", ".join(SPAWN_HARNESSES)
-                raise DispatchFlagError(
-                    f"unknown harness {harness!r} on the thread substrate "
-                    f"(--harness names the CLI BINARY); accepted here: {accepted}.\n"
-                    "If you meant a model VENDOR, that is -P/--provider."
-                )
+                # The refusal's two shapes (a declared pane-only harness is
+                # not an unknown name) are built beside the roster they
+                # derive from, so every surface renders the same words.
+                raise DispatchFlagError(thread_spawn_refusal(harness))
         if provider is not None:
             provider = provider.strip()
             if not provider:

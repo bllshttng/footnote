@@ -942,6 +942,36 @@ def feature_claim(harness: str, key: str) -> str:
     return claim.get(key, {}).get("state", "unmeasured") if isinstance(claim, dict) else "unmeasured"
 
 
+_FEATURE_CAPABILITY = {
+    "absent": "ships no such command this lane could fire",
+    "capable": "has such a surface, but fno has wired no arm for it",
+    "unmeasured": "has not had this surface measured",
+}
+
+
+def feature_refusal_reason(harness: str, key: str) -> Optional[str]:
+    """Why a consuming lane must refuse ``key`` on ``harness``, or ``None``
+    when the row reads native and the lane proceeds (x-a3e8). An undeclared
+    harness reads unmeasured, never an exception: the honest answer to a
+    row that does not exist is that nobody has measured it. The reason
+    names the key, the state, and the probe that settles it, so every
+    consuming lane refuses in the same words."""
+    try:
+        state = feature_claim(harness, key)
+    except DispatchResolveError:
+        state = "unmeasured"
+        harness_label = f"{harness or 'an undeclared harness'}"
+    else:
+        harness_label = harness
+    if state == "native":
+        return None
+    return (
+        f"capability row records features.{key} = {state!r}: it "
+        f"{_FEATURE_CAPABILITY[state]}. Settle the row with "
+        f"'fno agents harness probe {harness_label}'."
+    )
+
+
 def capabilities(harness: str) -> dict:
     """Capability dict for ``harness``. Raises :class:`DispatchResolveError`
     naming the map module when unknown - never silently defaults to claude."""

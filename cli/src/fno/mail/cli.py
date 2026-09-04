@@ -3622,27 +3622,19 @@ def _raw_send(
     # return a delivery receipt, so a review dispatched at a harness with no
     # review command delivered nothing and looked delivered. Only the review
     # SUBJECT is gated: every other payload rides the lane exactly as before,
-    # and a row reading native (claude, codex) is unaffected.
+    # and a row reading native (claude, codex) is unaffected. The row answer
+    # itself comes from the map's shared reason builder, so every consuming
+    # lane refuses in the same words.
     verb = stripped.split(maxsplit=1)[0]
     if _REVIEW_VERB_RE.match(verb):
-        from fno.agents.harness_map import DispatchResolveError, feature_claim
+        from fno.agents.harness_map import feature_refusal_reason
 
         harness = getattr(entry, "harness", None) or ""
-        try:
-            review_state = feature_claim(harness, "review")
-        except DispatchResolveError:
-            review_state = "unmeasured"
-        if review_state != "native":
-            capability = {
-                "absent": "ships no review command this lane could fire",
-                "capable": "has a review surface fno has no wired arm for",
-                "unmeasured": "has not had its review surface measured",
-            }[review_state]
+        row_reason = feature_refusal_reason(harness, "review")
+        if row_reason:
             reason = (
                 f"{name!r} runs {harness or 'an undeclared harness'}, whose "
-                f"capability row records features.review = {review_state!r}: "
-                f"it {capability}. Settle the row with "
-                f"'fno agents harness probe {harness}'.\n"
+                f"{row_reason}\n"
                 "  - to have the model READ this anyway, drop --raw (a wrapped "
                 "send delivers it as text, which is all this lane could do with "
                 "it)\n"

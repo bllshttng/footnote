@@ -104,7 +104,7 @@ def test_an_absent_review_row_refuses_in_absent_words(mailbox, monkeypatch, caps
     assert refused.value.exit_code != 0
     err = capsys.readouterr().err
     assert "'absent'" in err
-    assert "ships no review command" in err
+    assert "ships no such command this lane could fire" in err
 
 
 def test_a_native_review_row_lets_the_send_proceed_unchanged(

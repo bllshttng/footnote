@@ -86,3 +86,21 @@ def pane_only_harnesses() -> tuple[str, ...]:
         sorted(name for name in table if _spawn_state(name, table) != "native")
     )
 
+
+def thread_spawn_refusal(harness: str) -> str:
+    """The thread-substrate refusal for a harness outside the derived
+    roster, built HERE so every refusal surface renders the same words from
+    the same table and can never disagree again. A declared pane-only
+    harness is not an unknown name; its answer says what the row says."""
+    if harness in pane_only_harnesses():
+        return (
+            f"harness {harness!r} is refused on the thread substrate: "
+            "features.spawn is not native in harness_capabilities.toml; "
+            "it launches on --substrate pane only."
+        )
+    return (
+        f"unknown harness {harness!r} on the thread substrate (--harness "
+        f"names the CLI BINARY); accepted here: {', '.join(SPAWN_HARNESSES)}.\n"
+        "If you meant a model VENDOR, that is -P/--provider."
+    )
+
