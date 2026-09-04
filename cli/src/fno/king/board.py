@@ -864,8 +864,8 @@ def _read_claimed_nodes(claims: SourceRead) -> tuple[SourceRead, set[str], list[
 
     Measured 2026-09-03: 13 per-claim `fno backlog get` subprocesses cost
     30.8s against this read's 30s stop-gate ceiling, so the lookup reads the
-    graph in process through the same tiers `cmd_get` applies. `fno backlog
-    get <id>` stays the reproducible hand command for any row here.
+    graph in process through the same tiers `cmd_get` applies; `fno backlog
+    get <id>` stays the hand repro for any row here.
     """
     if not claims.ok:
         return SourceRead(error=claims.error), set(), []
@@ -885,9 +885,7 @@ def _read_claimed_nodes(claims: SourceRead) -> tuple[SourceRead, set[str], list[
     from fno.graph.fuzzy import resolve_node
     from fno.graph.statuses import TERMINAL_RUNGS
     from fno.graph.store import (
-        GraphUnreadableError,
-        read_archive_entries,
-        read_graph_strict,
+        GraphUnreadableError, read_archive_entries, read_graph_strict,
         resolve_node_with_archive,
     )
 
@@ -920,9 +918,8 @@ def _read_claimed_nodes(claims: SourceRead) -> tuple[SourceRead, set[str], list[
         if node is None:
             warnings.append(f"stalled_holder: {node_id} unreadable: no node matching in graph")
             continue
-        # A terminal node's claim is a leak the closure release or the
-        # node-aware reaper owns. Drop it at the source so it never reaches a
-        # queue AND its holder never costs an activity transcript read.
+        # A terminal node's claim is a leak for the reaper; dropping it at the
+        # source also keeps its holder out of the transcript reads.
         if node.get("status") in TERMINAL_RUNGS:
             continue
         nodes.append(node)

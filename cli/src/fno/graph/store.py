@@ -717,12 +717,9 @@ def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
 
 
 def read_archive_entries() -> list[dict]:
-    """The archived nodes, best-effort: an absent archive is [].
-
-    One read of the terminal-node archive beside the working graph. Callers
-    that may test many ids against it read once and pass the list to
-    :func:`resolve_node_with_archive`.
-    """
+    """The archived nodes, best-effort: an absent archive is []. Callers that
+    may test many ids read once and pass the list to
+    :func:`resolve_node_with_archive`."""
     from fno.paths import graph_archive_json
 
     archive_path = graph_archive_json()
