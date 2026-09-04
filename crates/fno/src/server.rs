@@ -3743,30 +3743,6 @@ fn e2e_log(msg: std::fmt::Arguments<'_>) {
     }
 }
 
-/// Shell `fno-agents claim sweep --json`, bounded + fail-open (the digest
-/// idiom, x-4e2d): returns the live-claim map (node id -> holder) for the
-/// work-queue overlay (x-54fa), or `None` on missing binary / non-zero exit /
-/// timeout / unparseable output — the caller keeps its last-good sweep, so a
-/// single flaky tick never downgrades an in-flight card.
-async fn run_claim_sweep() -> Option<HashMap<String, String>> {
-    const SWEEP_TIMEOUT: Duration = Duration::from_millis(800);
-    let mut command =
-        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
-    command
-        .args(["claim", "sweep", "--json"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        // On timeout the future is dropped; kill_on_drop reaps the child so a
-        // hung sweep can't accumulate an orphan per tick.
-        .kill_on_drop(true);
-    let fut = crate::process_admission::tokio_output(&mut command);
-    let output = tokio::time::timeout(SWEEP_TIMEOUT, fut).await.ok()?.ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    backlog_view::live_claims_from_sweep(&String::from_utf8_lossy(&output.stdout))
-}
-
 /// Whether `node` (an id or slug) names a READY card in the server's backlog
 /// snapshot (x-a496, codex peer review). A targeted card dispatch must refuse a
 /// blocked / in-flight / unknown node - the same nodes `prefix+g` would never
@@ -15821,6 +15797,10 @@ async fn serve(
             // map pushed, so an unchanged result stays off the wire.
             let mut last_uuids: Vec<(String, Option<String>)> = Vec::new();
             let mut last_tails: HashMap<String, String> = HashMap::new();
+            // Shared so the path cache survives across blocking-pool passes.
+            let tail_reader = std::sync::Arc::new(std::sync::Mutex::new(
+                crate::transcript_tail::TailReader::new(),
+            ));
             let mut last_truth = Instant::now();
             // (v48) Launch order for AgentTruth probes, so an out-of-order
             // completion cannot clobber a fresher result (see CoreMsg::AgentTruth).
@@ -15937,17 +15917,17 @@ async fn serve(
                         })
                         .collect();
                 }
-                // (x-b186) Message tails are resolved on EVERY tick, not only
-                // when the registry row set moved. A transcript grows (or first
-                // becomes readable) independently of the registry, so gating
-                // this on a row change would leave the column stale or blank
-                // indefinitely while the agent kept talking. Still one scan for
-                // the whole batch, on the blocking pool, and only while a viewer
-                // is attached (the zero-viewer guard above skips the tick).
+                // (x-b186) Tails resolve on EVERY tick (a transcript grows
+                // with no registry change); TailReader re-reads known paths
+                // each tick and paces only the discovery walk, which at 1Hz
+                // was most of this loop's CPU.
                 let uuids = last_uuids.clone();
-                let tails = tokio::task::spawn_blocking(move || agents_view::session_tails(&uuids))
-                    .await
-                    .unwrap_or_default();
+                let reader = tail_reader.clone();
+                let tails = tokio::task::spawn_blocking(move || {
+                    reader.lock().expect("tail reader lock").tails(&uuids)
+                })
+                .await
+                .unwrap_or_default();
                 if let Some(rows) = changed {
                     // (x-cd67 US4) Resolve the git branch per UNIQUE row cwd,
                     // off the core loop, on the blocking pool - bounded file
@@ -16030,7 +16010,9 @@ async fn serve(
             // success (render un-overlaid), then only ever replaced by a
             // fresher success — a sweep failure keeps this tick's overlay.
             let mut last_live: Option<HashMap<String, String>> = None;
-            let mut sweep_failing = false;
+            let mut sweep_gate = backlog_view::SweepLogGate::default();
+            // Due immediately: the first gated tick lands a fresh overlay.
+            let mut sweep_next = tokio::time::Instant::now();
             // Snapshot-mode pacing: the current minted stamp and when the next
             // refresh is due. A fresh stamp is minted only when the window
             // opens, and the exec is attempted at most once per window (a
@@ -16060,22 +16042,23 @@ async fn serve(
                 if *count_rx.borrow() == 0 {
                     continue; // no viewer -> no sweep subprocess, no read
                 }
-                // Claims change without graph.json mtime changes (release, TTL
-                // expiry, new dispatch), so the sweep runs every tick, bounded
-                // + fail-open. Failure is logged once per state change, not
-                // per tick (a permanently-missing fno-agents is one line).
-                match run_claim_sweep().await {
-                    Some(live) => {
-                        if sweep_failing {
-                            eprintln!("fno mux: claim sweep recovered");
+                // The sweep is not mtime-gated (claims move without a graph
+                // write) but it is paced: one fno-agents process per
+                // SWEEP_EVERY, due at once on the first attach. Log lines
+                // are flap-gated in SweepLogGate.
+                if sweep_next <= tokio::time::Instant::now() {
+                    sweep_next = tokio::time::Instant::now() + backlog_view::SWEEP_EVERY;
+                    match backlog_view::run_claim_sweep().await {
+                        Some(live) => {
+                            if sweep_gate.success() {
+                                eprintln!("fno mux: claim sweep recovered");
+                            }
+                            last_live = Some(live);
                         }
-                        sweep_failing = false;
-                        last_live = Some(live);
-                    }
-                    None => {
-                        if !sweep_failing {
-                            eprintln!("fno mux: claim sweep failed; keeping last-good overlay");
-                            sweep_failing = true;
+                        None => {
+                            if sweep_gate.failure() {
+                                eprintln!("fno mux: claim sweep failed; keeping last-good overlay");
+                            }
                         }
                     }
                 }

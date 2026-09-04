@@ -307,28 +307,112 @@ pub(crate) fn compose_tail(text: &str) -> Option<String> {
 ///
 /// Blocking I/O. Callers run it off the UI loop, gated on the row set moving.
 pub fn session_tails(keys: &[(String, Option<String>)]) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    let mut fallback: Vec<&str> = Vec::new();
-    for (uuid, log_path) in keys {
-        let direct = log_path
-            .as_deref()
-            .and_then(|p| compose_tail(&read_tail(Path::new(p), TRANSCRIPT_TAIL_BYTES)?));
-        match direct {
-            Some(tail) => {
+    // The stateless front: the root walk runs on every call, which is the
+    // documented contract of this fn and what a one-shot caller wants.
+    TailReader::with_rescan_every(std::time::Duration::ZERO).tails(keys)
+}
+
+/// How often a repeated reader re-walks the transcript roots for uuids that
+/// still have no cached path. A transcript file appears once and then only
+/// grows, so discovery is rare and re-reading the KNOWN paths is the whole
+/// steady-state cost; pacing the walk keeps a 1s viewer tick from re-walking
+/// hundreds of project dirs per second (one such walk is ~60ms, and a single
+/// unfindable uuid defeats the walk's early exit, so the fleet case always
+/// pays it in full). A new session's column waits at most this long.
+const TRANSCRIPT_RESCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A session-tails reader that remembers where each uuid's transcript lives.
+///
+/// The mux's 1s sideline tick calls [`TailReader::tails`] repeatedly with the
+/// same rows. Content freshness is per call (x-b186: a transcript grows
+/// independently of the registry, so cached paths are re-read every tick);
+/// only DISCOVERY is paced - the filename walk runs when a uuid has no cached
+/// path and the rescan clock is due. Entries for uuids no longer in `keys`
+/// are dropped so a churning fleet cannot grow the cache without bound.
+pub(crate) struct TailReader {
+    paths: HashMap<String, PathBuf>,
+    last_scan: Option<std::time::Instant>,
+    rescan_every: std::time::Duration,
+    /// Test-only: how many root walks this reader has performed.
+    scans: u32,
+}
+
+impl TailReader {
+    /// A paced reader: the default rescan cadence for a repeating viewer tick.
+    pub(crate) fn new() -> Self {
+        Self::with_rescan_every(TRANSCRIPT_RESCAN_EVERY)
+    }
+
+    /// A reader with an explicit rescan cadence (tests pin it at ZERO to force
+    /// walks, or past heat-death to suppress them).
+    pub(crate) fn with_rescan_every(rescan_every: std::time::Duration) -> Self {
+        Self {
+            paths: HashMap::new(),
+            last_scan: None,
+            rescan_every,
+            scans: 0,
+        }
+    }
+
+    /// How many root walks this reader has run (test assertions).
+    #[cfg(test)]
+    pub(crate) fn scans(&self) -> u32 {
+        self.scans
+    }
+
+    fn scan_due(&mut self) -> bool {
+        let due = self
+            .last_scan
+            .map_or(true, |t| t.elapsed() >= self.rescan_every);
+        if due {
+            self.last_scan = Some(std::time::Instant::now());
+            self.scans += 1;
+        }
+        due
+    }
+
+    /// [`session_tails`] over the cached reader; same output shape, paced
+    /// discovery.
+    pub(crate) fn tails(&mut self, keys: &[(String, Option<String>)]) -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        let mut missing: Vec<&str> = Vec::new();
+        for (uuid, log_path) in keys {
+            let direct = log_path
+                .as_deref()
+                .and_then(|p| compose_tail(&read_tail(Path::new(p), TRANSCRIPT_TAIL_BYTES)?));
+            if let Some(tail) = direct {
                 out.insert(uuid.clone(), tail);
+                continue;
             }
-            None => fallback.push(uuid.as_str()),
+            if let Some(path) = self.paths.get(uuid) {
+                // Known path: read it fresh every call. No prose (yet) means
+                // no cell this round, never a re-walk to "fix" it.
+                if let Some(text) = read_tail(path, TRANSCRIPT_TAIL_BYTES) {
+                    if let Some(tail) = compose_tail(&text) {
+                        out.insert(uuid.clone(), tail);
+                    }
+                }
+                continue;
+            }
+            missing.push(uuid.as_str());
         }
-    }
-    for (uuid, path) in find_transcripts(&fallback) {
-        let Some(text) = read_tail(&path, TRANSCRIPT_TAIL_BYTES) else {
-            continue;
-        };
-        if let Some(tail) = compose_tail(&text) {
-            out.insert(uuid, tail);
+        if !missing.is_empty() && self.scan_due() {
+            for (uuid, path) in find_transcripts(&missing) {
+                self.paths.insert(uuid, path);
+            }
+            for uuid in &missing {
+                if let Some(path) = self.paths.get(*uuid) {
+                    if let Some(text) = read_tail(path, TRANSCRIPT_TAIL_BYTES) {
+                        if let Some(tail) = compose_tail(&text) {
+                            out.insert(uuid.to_string(), tail);
+                        }
+                    }
+                }
+            }
         }
+        self.paths.retain(|u, _| keys.iter().any(|(k, _)| k == u));
+        out
     }
-    out
 }
 
 #[cfg(test)]
@@ -338,6 +422,126 @@ mod tests {
     /// One transcript line for an assistant turn carrying `blocks`.
     fn turn(blocks: &str) -> String {
         format!(r#"{{"type":"assistant","message":{{"content":[{blocks}]}}}}"#)
+    }
+
+    /// A scratch projects dir holding ONE transcript for `uuid` with `text`
+    /// as its newest prose, plus the test hook pointing the reader at it.
+    fn scratch(uuid: &str, text: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("fno-tailreader-{}-{uuid}", std::process::id()));
+        let proj = dir.join("-Users-someone-repo");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join(format!("{uuid}.jsonl")),
+            format!(
+                "{}\n",
+                turn(&format!(r#"{{"type":"text","text":"{text}"}}"#))
+            ),
+        )
+        .unwrap();
+        set_test_projects_dir(Some(&dir));
+        dir
+    }
+
+    #[test]
+    fn tail_reader_paces_the_discovery_walk() {
+        let uuid = "346f5d0d-9840-473c-af21-eaf100ca9ec2";
+        let dir = scratch(uuid, "hello");
+        // Cadence past heat death: the walk runs once, then never again.
+        let mut reader = TailReader::with_rescan_every(std::time::Duration::from_secs(86400));
+        let keys = vec![(uuid.to_string(), None)];
+        assert_eq!(
+            reader.tails(&keys).get(uuid).map(String::as_str),
+            Some("hello")
+        );
+        reader.tails(&keys);
+        reader.tails(&keys);
+        assert_eq!(reader.scans(), 1, "cached paths must not re-walk the roots");
+        set_test_projects_dir(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tail_reader_rereads_cached_paths_every_call() {
+        // x-b186 freshness under the cache: a transcript GROWS between ticks
+        // and the next call picks up the newer prose with no new walk.
+        let uuid = "346f5d0d-9840-473c-af21-eaf100ca9ec3";
+        let dir = scratch(uuid, "older");
+        let file = dir
+            .join("-Users-someone-repo")
+            .join(format!("{uuid}.jsonl"));
+        let mut reader = TailReader::with_rescan_every(std::time::Duration::from_secs(86400));
+        let keys = vec![(uuid.to_string(), None)];
+        assert_eq!(
+            reader.tails(&keys).get(uuid).map(String::as_str),
+            Some("older")
+        );
+        std::fs::write(
+            &file,
+            format!(
+                "{}\n{}\n",
+                turn(r#"{"type":"text","text":"older"}"#),
+                turn(r#"{"type":"text","text":"newer"}"#)
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            reader.tails(&keys).get(uuid).map(String::as_str),
+            Some("newer"),
+            "content freshness is per call, only discovery is paced"
+        );
+        assert_eq!(reader.scans(), 1);
+        set_test_projects_dir(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tail_reader_walks_again_after_the_cadence() {
+        // A uuid with NO transcript stays missing every call, so the cadence
+        // is what decides whether it re-walks: ZERO walks each call (the
+        // stateless `session_tails` behavior), a long cadence walks once.
+        let dir = scratch("ffffffff-0000-0000-0000-000000000000", "decoy");
+        let uuid = "346f5d0d-9840-473c-af21-eaf100ca9ec4";
+        let keys = vec![(uuid.to_string(), None)];
+        let mut eager = TailReader::with_rescan_every(std::time::Duration::ZERO);
+        eager.tails(&keys);
+        eager.tails(&keys);
+        eager.tails(&keys);
+        assert_eq!(eager.scans(), 3);
+        let mut paced = TailReader::with_rescan_every(std::time::Duration::from_secs(86400));
+        paced.tails(&keys);
+        paced.tails(&keys);
+        paced.tails(&keys);
+        assert_eq!(paced.scans(), 1);
+        set_test_projects_dir(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tail_reader_finds_a_late_appearing_transcript_within_the_cadence() {
+        let uuid = "346f5d0d-9840-473c-af21-eaf100ca9ec5";
+        let dir = scratch("ffffffff-0000-0000-0000-000000000000", "decoy");
+        let mut reader = TailReader::with_rescan_every(std::time::Duration::from_secs(86400));
+        let keys = vec![(uuid.to_string(), None)];
+        // First walk: no transcript for the uuid yet, and the cadence bars an
+        // immediate second walk.
+        assert!(reader.tails(&keys).get(uuid).is_none());
+        // The transcript appears; ZERO-cadence reader (a fresh reader models
+        // the next rescan window) finds it on its next walk.
+        let proj = dir.join("-Users-someone-repo");
+        std::fs::write(
+            proj.join(format!("{uuid}.jsonl")),
+            format!("{}\n", turn(r#"{"type":"text","text":"appeared"}"#)),
+        )
+        .unwrap();
+        let mut fresh = TailReader::with_rescan_every(std::time::Duration::ZERO);
+        assert_eq!(
+            fresh.tails(&keys).get(uuid).map(String::as_str),
+            Some("appeared")
+        );
+        set_test_projects_dir(None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

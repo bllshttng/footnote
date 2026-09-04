@@ -878,10 +878,74 @@ pub fn live_claims_from_sweep(stdout: &str) -> Option<HashMap<String, String>> {
     Some(live)
 }
 
-/// The reader's between-tick memory (mtime-gated document cache + last-sent
-/// cards), mirroring [`crate::agents_view::ReaderState`]. The interval task
-/// lives in server.rs (it owns the `CoreMsg` sender); this keeps the derivation
-/// pure and unit-testable.
+/// How often the reader re-shells the claim sweep while a viewer is attached.
+/// Claims do not change sixty times a minute - a card flip, release, or TTL
+/// expiry landing this late is invisible next to the lane it feeds - and each
+/// sweep is a whole `fno-agents` process. Under load (parallel test runs)
+/// those subprocesses stretch toward their timeout, so pacing them is what
+/// keeps a busy machine from paying a spawn per second for an overlay that
+/// moves a few times an hour. Same reasoning as the x-4e30 client gate.
+pub(crate) const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Shell `fno-agents claim sweep --json`, bounded + fail-open (the digest
+/// idiom, x-4e2d): returns the live-claim map (node id -> holder) for the
+/// work-queue overlay (x-54fa), or `None` on missing binary / non-zero exit /
+/// timeout / unparseable output - the caller keeps its last-good sweep, so a
+/// single flaky tick never downgrades an in-flight card.
+pub(crate) async fn run_claim_sweep() -> Option<HashMap<String, String>> {
+    const SWEEP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(800);
+    let mut command =
+        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    command
+        .args(["claim", "sweep", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        // On timeout the future is dropped; kill_on_drop reaps the child so a
+        // hung sweep can't accumulate an orphan per tick.
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
+    let output = tokio::time::timeout(SWEEP_TIMEOUT, fut).await.ok()?.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    live_claims_from_sweep(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// A failure must persist this many consecutive sweeps before it is logged.
+const SWEEP_LOG_AFTER_FAILURES: u32 = 3;
+
+/// Log-once-per-real-outage gate for the claim sweep. A plain `failing` bool
+/// assumes failure is sticky, and intermittent failure (a loaded machine
+/// stretching every sweep toward its timeout) flaps two lines per blip - one
+/// log carried 5237 failed and 5218 recovered lines, a third of it. The
+/// first line waits for [`SWEEP_LOG_AFTER_FAILURES`] consecutive failures;
+/// recovery logs only when a failure was actually logged.
+#[derive(Default)]
+pub(crate) struct SweepLogGate {
+    consecutive_failures: u32,
+    logged: bool,
+}
+
+impl SweepLogGate {
+    /// Record a success; `true` when a logged failure just ended (print the
+    /// recovery line).
+    pub(crate) fn success(&mut self) -> bool {
+        let was_logged = self.logged;
+        *self = Self::default();
+        was_logged
+    }
+
+    /// Record a failure; `true` when this is the failure worth a log line.
+    pub(crate) fn failure(&mut self) -> bool {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if !self.logged && self.consecutive_failures >= SWEEP_LOG_AFTER_FAILURES {
+            self.logged = true;
+            true
+        } else {
+            false
+        }
+    }
+}
 #[derive(Default)]
 pub struct ReaderState {
     cached_raw: Option<String>,
@@ -1038,6 +1102,42 @@ impl ReaderState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sweep_log_gate_holds_the_first_line_until_failures_persist() {
+        let mut gate = SweepLogGate::default();
+        assert!(!gate.failure(), "first failure is silent");
+        assert!(!gate.failure(), "second failure is silent");
+        assert!(gate.failure(), "third consecutive failure logs");
+        assert!(!gate.failure(), "already logged: no second failure line");
+        assert!(gate.success(), "recovery after a LOGGED failure logs");
+        assert!(!gate.success(), "a second success is silent");
+    }
+
+    #[test]
+    fn sweep_log_gate_ignores_flapping() {
+        // The shape that filled a third of one server log: intermittent
+        // failures that never persist long enough to be an outage.
+        let mut gate = SweepLogGate::default();
+        for _ in 0..5 {
+            assert!(!gate.failure());
+            assert!(!gate.failure());
+            assert!(!gate.success(), "nothing was logged, no recovery line");
+        }
+    }
+
+    #[test]
+    fn sweep_log_gate_resets_the_threshold_after_recovery() {
+        let mut gate = SweepLogGate::default();
+        for _ in 0..3 {
+            gate.failure();
+        }
+        assert!(gate.success());
+        // A new outage starts counting from zero, not from the logged flag.
+        assert!(!gate.failure());
+        assert!(!gate.failure());
+        assert!(gate.failure());
+    }
 
     fn graph(nodes: &str) -> String {
         format!(r#"{{"entries": [{nodes}]}}"#)
