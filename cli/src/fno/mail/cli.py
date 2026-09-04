@@ -3078,6 +3078,13 @@ def _escalate_to_human(
 # same place the verb normalizer reads native_verbs): a second hand-written
 # enumeration would drift the first time a verb is added.
 _CODEX_REVIEW_VERBS = frozenset(_harness_capabilities("codex")["review_verbs"])
+# The review SUBJECT, not a verb inventory: any namespace-qualified or
+# code-qualified spelling of /review gates the keystroke lane against the
+# recipient row's features.review. The codex-daemon lane keeps its exact
+# _CODEX_REVIEW_VERBS membership test above.
+_REVIEW_VERB_RE = re.compile(r"^/(?:[a-z][a-z0-9-]*:)?(?:code-)?review$", re.IGNORECASE)
+
+
 def _codex_default_review_base(cwd: str | None) -> str | None:
     """Return the repository-declared origin default branch, never a guessed name."""
     if not cwd:
@@ -3609,6 +3616,44 @@ def _raw_send(
             "keystroke path; a raw slash payload would reach the model as text, "
             "not fire"
         )
+
+    # A review verb on a keystroke lane is asked of the TABLE before it is
+    # typed (x-a3e8). This branch used to paste whatever it was given and
+    # return a delivery receipt, so a review dispatched at a harness with no
+    # review command delivered nothing and looked delivered. Only the review
+    # SUBJECT is gated: every other payload rides the lane exactly as before,
+    # and a row reading native (claude, codex) is unaffected.
+    verb = stripped.split(maxsplit=1)[0]
+    if _REVIEW_VERB_RE.match(verb):
+        from fno.agents.harness_map import DispatchResolveError, feature_claim
+
+        harness = getattr(entry, "harness", None) or ""
+        try:
+            review_state = feature_claim(harness, "review")
+        except DispatchResolveError:
+            review_state = "unmeasured"
+        if review_state != "native":
+            capability = {
+                "absent": "ships no review command this lane could fire",
+                "capable": "has a review surface fno has no wired arm for",
+                "unmeasured": "has not had its review surface measured",
+            }[review_state]
+            reason = (
+                f"{name!r} runs {harness or 'an undeclared harness'}, whose "
+                f"capability row records features.review = {review_state!r}: "
+                f"it {capability}. Settle the row with "
+                f"'fno agents harness probe {harness}'.\n"
+                "  - to have the model READ this anyway, drop --raw (a wrapped "
+                "send delivers it as text, which is all this lane could do with "
+                "it)\n"
+                "  - run the review on a harness whose row reads native: "
+                "/code-review on a claude worker, /review on a codex daemon "
+                "thread"
+            )
+            if check:
+                print(f"not-injectable: {reason}")
+                raise typer.Exit(code=1)
+            _refused(reason)
 
     # --check stops here, one step short of the keystroke. Each lane is asked the
     # strongest question it can answer cheaply, and neither answer is a promise the
