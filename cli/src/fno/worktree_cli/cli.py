@@ -295,8 +295,8 @@ def _continuation_base(
     verdict reads the resolved refs; the exit code only feeds the failure
     note. Returns (kind, receipt_ref, count, create_target) or None - the
     remote salvage ref exists on origin only (git refuses to fetch into a
-    non-standard namespace), so its create target is the fetched sha, not
-    the ref name."""
+    non-standard namespace), so its create target is the per-name tracking
+    ref the fetch writes, never the shared FETCH_HEAD."""
     remote_branch = base.split("/", 1)[1]
     salvage = f"refs/fno/salvage/{name}"
     fetch: Optional[subprocess.CompletedProcess[str]]
@@ -313,20 +313,25 @@ def _continuation_base(
     if count:
         return ("continued", feat, count, feat)
     # git refuses to fetch into a non-standard namespace like refs/fno/*, so
-    # the remote salvage ref comes back bare: FETCH_HEAD only, then the sha.
+    # the remote salvage ref lands under refs/remotes/fno-salvage/<name>.
+    # A per-name ref, not FETCH_HEAD: .git/FETCH_HEAD is one repo-wide file,
+    # and two parallel ensures would race its fetch-then-read window.
+    remote_salvage = f"refs/remotes/fno-salvage/{name}"
     try:
         sal_fetch = subprocess.run(
-            ["git", "-C", str(repo), "fetch", "--quiet", "origin", salvage],
+            ["git", "-C", str(repo), "fetch", "--quiet", "origin",
+             f"{salvage}:{remote_salvage}"],
             capture_output=True, text=True, timeout=60,
         )
     except subprocess.TimeoutExpired:
         sal_fetch = None
-    sal_sha = ""
-    if sal_fetch is not None and sal_fetch.returncode == 0:
-        sal_sha = _git(repo, "rev-parse", "--verify", "--quiet", "FETCH_HEAD").stdout.strip()
-    count = _ahead_count(repo, base, sal_sha) if sal_sha else None
+    count = (
+        _ahead_count(repo, base, remote_salvage)
+        if sal_fetch is not None and sal_fetch.returncode == 0
+        else None
+    )
     if count:
-        return ("salvaged", salvage, count, sal_sha)
+        return ("salvaged", salvage, count, remote_salvage)
     count = _ahead_count(repo, base, salvage)
     if count:
         return ("salvaged", salvage, count, salvage)
