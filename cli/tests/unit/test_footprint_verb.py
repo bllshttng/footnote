@@ -491,7 +491,7 @@ def test_ac9_edge_cause_text_output_is_bounded(capsys) -> None:
     assert all("... (" in ln for ln in consumers)
 
 
-def test_ac1_hp_roster_count_reads_the_registry_in_process(monkeypatch) -> None:
+def test_ac1_hp_live_rows_read_the_registry_in_process(monkeypatch) -> None:
     # AC1-HP: the count comes from load_registry, not from a subprocess whose
     # 8.5s-to-21.7s answer never fit the 5.0s budget it was given.
     from types import SimpleNamespace
@@ -510,10 +510,10 @@ def test_ac1_hp_roster_count_reads_the_registry_in_process(monkeypatch) -> None:
 
     monkeypatch.setattr(doctor_footprint.subprocess, "run", no_subprocess)
 
-    count, error = doctor_footprint._roster_count()
+    rows, error = doctor_footprint.live_registry_rows()
 
     assert error is None
-    assert count == 2
+    assert len(rows) == 2
 
 
 def test_ac1_edge_incomplete_registry_names_the_registry_not_a_timeout(
@@ -531,9 +531,9 @@ def test_ac1_edge_incomplete_registry_names_the_registry_not_a_timeout(
     rows = _Incomplete([SimpleNamespace(status="live")])
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
 
-    count, error = doctor_footprint._roster_count()
+    rows, error = doctor_footprint.live_registry_rows()
 
-    assert count is None
+    assert rows is None
     assert error == "roster unavailable: worker registry incomplete"
     assert "timed out" not in error
 
@@ -548,9 +548,9 @@ def test_ac1_edge_unreadable_registry_degrades_with_a_named_reason(
 
     monkeypatch.setattr("fno.agents.registry.load_registry", boom)
 
-    count, error = doctor_footprint._roster_count()
+    rows, error = doctor_footprint.live_registry_rows()
 
-    assert count is None
+    assert rows is None
     assert error is not None and "registry unreadable" in error
 
 

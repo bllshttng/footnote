@@ -535,11 +535,6 @@ def live_registry_rows() -> tuple[list | None, str | None]:
     return [row for row in rows if row.status in LIVE_STATUSES], None
 
 
-def _roster_count() -> tuple[int | None, str | None]:
-    rows, error = live_registry_rows()
-    return (None if rows is None else len(rows)), error
-
-
 def capacity_verdict(load_snapshot: Any) -> str:
     """``within`` | ``near`` | ``over`` | ``unknown`` from the spawn-load
     ceiling - the only reading here derived from hardware.
@@ -789,8 +784,8 @@ def footprint_command(
             cause_only=True,
         )
 
-    roster_count, error = _roster_count()
-    if error is not None or roster_count is None:
+    roster_rows, error = live_registry_rows()
+    if error is not None or roster_rows is None:
         # The roster is an ENRICHMENT: it sets the process threshold. On
         # roster failure the measurement still prints, with the threshold
         # degraded away and the reason named - a 5s roster timeout under load
@@ -805,6 +800,6 @@ def footprint_command(
 
     _emit_result(
         reading,
-        process_threshold=roster_count + DAEMON_ALLOWANCE,
+        process_threshold=len(roster_rows) + DAEMON_ALLOWANCE,
         json_output=json_output,
     )
