@@ -209,9 +209,15 @@ def _file_evidence(node: dict[str, Any]) -> list[str]:
 
 
 def _stale_reason_still_true(node: dict[str, Any]) -> bool:
+    from fno.graph.maintain import _STALE_IDEAS_DEFERRED_REASON_RE
+
     reason = node.get("deferred_reason")
     deferred_at = node.get("deferred_at")
-    if reason != "stale >30d, drained by maintain" or not isinstance(deferred_at, str):
+    if (
+        not isinstance(reason, str)
+        or not _STALE_IDEAS_DEFERRED_REASON_RE.match(reason)
+        or not isinstance(deferred_at, str)
+    ):
         return False
     try:
         parked = datetime.fromisoformat(deferred_at.replace("Z", "+00:00"))
@@ -263,7 +269,7 @@ def assess(
     if _stale_reason_still_true(node):
         return Assessment(
             "still_real",
-            ["deferred reason: stale >30d, drained by maintain"],
+            [f"deferred reason: {node.get('deferred_reason')}"],
             "the exact expiry condition remains true",
         )
 

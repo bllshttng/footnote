@@ -121,6 +121,23 @@ def test_discover_reports_when_the_positive_control_fires(monkeypatch, tmp_path)
     assert '"undecided"' in result.output
 
 
+def test_still_real_reads_any_drain_day_count():
+    # The drain command interpolates config.backlog.staleness_days into the
+    # reason, so the reader matches the day count tolerantly, never literally.
+    node = _node(
+        deferred_reason="stale >21d, drained by maintain",
+        deferred_at="2026-07-01T00:00:00Z",
+    )
+    assert assess(node, []).verdict == "still_real"
+
+
+def test_undecided_when_the_deferred_reason_is_not_a_drain():
+    node = _node(
+        deferred_reason="waiting on operator", deferred_at="2026-07-01T00:00:00Z"
+    )
+    assert assess(node, []).verdict == "undecided"
+
+
 def test_candidate_shape_is_stable():
     c = Candidate("a", 0.5, frozenset({"fts"}))
     assert CandidateResults([c])[0].as_dict()["id"] == "a"
