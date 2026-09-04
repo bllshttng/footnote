@@ -731,9 +731,9 @@ def read_archive_entries() -> list[dict]:
 def resolve_node_with_archive(node_id: str, archived: list[dict]) -> Optional[dict]:
     """Read-through resolve against the archive: exact id, else a previous_id hit.
 
-    The read-only half of `backlog get`'s miss path: a node the sweep archived
-    still resolves, stamped ``_archived`` so a consumer can tell. Soft by
-    contract - ``archived`` comes from :func:`read_archive_entries`.
+    The read-only half of `backlog get`'s miss path: an archived node still
+    resolves, stamped ``_archived``. Soft by contract - ``archived`` comes
+    from :func:`read_archive_entries`.
     """
     from fno.graph.fuzzy import resolve_node
 
