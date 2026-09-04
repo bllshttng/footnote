@@ -315,6 +315,11 @@ fn default_true() -> bool {
 /// "idle now" reading the used-shell prune sweep needs. A new verb is not
 /// additive-tolerant; the field rides the same generation.
 /// v66 (sideline rename): `Command::RenameAgent` - a new verb, this generation.
+/// The same generation also adds `ControlVerb::ThreadPane`'s
+/// `#[serde(default)]` `placement` - the tab/split/at/target a FRESH portal
+/// open honors, now that the geometry refusal lives inside `reach_portal`
+/// where the slot lookup knows occupancy. Additive, so the compatibility
+/// floor does not move; a repoint keeps owning its geometry and says so.
 pub const PROTO_VERSION: u32 = 66;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
@@ -907,6 +912,15 @@ pub enum ControlVerb {
         /// additive and the compatibility floor does not move.
         #[serde(default)]
         portal: Option<u8>,
+        /// (v66, x-9b60) The placement a FRESH portal open honors (`tab`,
+        /// `split`, `at`, `target`). Additive and `#[serde(default)]`: a
+        /// pre-v66 client sends no placement and decodes to the default,
+        /// wire-identical to v65, so the compatibility floor does not move.
+        /// A portal that already exists keeps owning its geometry - the
+        /// server ignores these fields on a repoint and says so; `here` is
+        /// refused outright, exactly as it always was.
+        #[serde(default)]
+        placement: PanePlacement,
     },
     /// Join a whole source tab into the anchor pane's tab as a split, removing
     /// the now-empty source tab -> [`ServerMsg::Ok`]. Refuses join-into-self up
@@ -4248,7 +4262,8 @@ mod tests {
         // workspace-restore verb (x-7b5e) re-bumped it 59 -> 60 (second to
         // merge); DND presence (x-7d02) bumps it 60 -> 61; the sideline lane
         // axes (x-1b35) bump it 62 -> 63; the portals fields (x-8f9d) bump it
-        // 63 -> 64; the tab-organization pair (x-cf97) bumps it 64 -> 65.
+        // 63 -> 64; the tab-organization pair (x-cf97) bumps it 64 -> 65; the
+        // ThreadPane placement field (x-9b60) bumps it 65 -> 66.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -4923,41 +4938,10 @@ mod tests {
         assert!(matches!(res, Err(ProtoError::Closed)), "{res:?}");
     }
 
-    #[test]
-    fn proto_version_match_is_accepted() {
-        assert!(check_attach_version(PROTO_VERSION, BUILD_VERSION).is_ok());
-    }
-
-    #[test]
-    fn compatible_proto_versions_are_accepted() {
-        for version in [
-            MIN_COMPAT_PROTO,
-            MIN_COMPAT_PROTO + 1,
-            PROTO_VERSION,
-            PROTO_VERSION + 1,
-        ] {
-            assert!(
-                check_attach_version(version, BUILD_VERSION).is_ok(),
-                "compatible version {version} should attach"
-            );
-        }
-    }
-
-    #[test]
-    fn proto_version_below_floor_names_both_versions() {
-        let err = check_attach_version(MIN_COMPAT_PROTO - 1, "9.9.9").unwrap_err();
-        assert!(err.contains("9.9.9"), "{err}");
-        assert!(
-            err.contains(&format!("v{}", MIN_COMPAT_PROTO - 1)),
-            "client proto version missing: {err}"
-        );
-        assert!(
-            err.contains(&format!("v{PROTO_VERSION}")),
-            "server proto version missing: {err}"
-        );
-        assert!(err.contains(BUILD_VERSION), "server build missing: {err}");
-    }
-
+    // (x-9b60) The version-pin family lives in the child module below, named
+    // by the question it answers; the file-budget gate keeps this over-budget
+    // file shrink-only.
+    mod version_pin;
     #[test]
     fn proto_frame_geometry_check_catches_cell_count_mismatch() {
         let mut f = test_frame();

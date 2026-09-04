@@ -114,6 +114,8 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
         "--route", "--account", "--crown", "-k", "--dispatch-account",
         # x-6928: --at's value (current|<pane>) must not read as a positional.
         "--at",
+        # x-9b60: --portal's index is a value, never a prompt word.
+        "--portal",
         # x-4342: the sessions-row phase names a phase, not a prompt word.
         "--session-phase",
         # The join call site's per-worker policy file: its PATH is a value,
@@ -157,6 +159,75 @@ _SLUG_NOUN = (
     "heron", "ibis", "jaguar", "koala", "lemur", "marten", "newt", "osprey",
     "puffin", "raven", "shrew", "tapir", "urchin", "viper", "wombat", "finch",
 )
+
+
+def placement_refusal(
+    *,
+    substrate: str,
+    once: bool,
+    squad: Optional[str],
+    split: Optional[str],
+    at: Optional[str],
+    tab: Optional[str],
+    portal: Optional[int],
+    bounded_placement: bool,
+) -> Optional[str]:
+    """The pane/portal placement contract (x-3e38; portal lane x-9b60) as one
+    named refusal, or None when the combination is legal. A portal is the
+    pane a thread hosts: the placement flags are legal for a thread WHEN
+    --portal names it, refused for a bare thread where they mean nothing."""
+    placement_requested = (
+        bounded_placement
+        or squad is not None
+        or split is not None
+        or at is not None
+        or tab is not None
+    )
+    if squad is not None and not squad.strip():
+        return "--workspace/-s needs a nonblank workspace name"
+    if portal is not None and not 0 <= portal <= 255:
+        return "--portal takes an index 0-255"
+    if portal is not None and substrate != "bg":
+        return (
+            "--portal applies only to --substrate thread; a pane hosts its "
+            "own geometry and headless hosts no session at all"
+        )
+    if portal is not None and once:
+        return "--portal places a persistent thread worker; --once hosts no session to show"
+    if bounded_placement and substrate == "bg":
+        return "--bounded-placement selects its own tab for a pane; a thread cannot be bounded"
+    if at is not None and substrate == "bg":
+        return "--at applies only to --substrate pane (a thread has no calling pane)"
+    if placement_requested and substrate == "bg" and portal is None:
+        # AC8-EDGE: a placement with nothing to place; name the missing piece.
+        return (
+            "--workspace/-s, --split/-x, and --tab on --substrate "
+            "thread need --portal N: a thread hosts no pane until a portal "
+            "opens one, so the placement has nothing to place"
+        )
+    if placement_requested and portal is None and (substrate != "pane" or once):
+        return (
+            "--workspace/-s, --split/-x, --at, and --tab apply only to --substrate pane "
+            "(bg/headless have no pane geometry)"
+        )
+    if split is not None and split not in ("left", "right", "up", "down"):
+        return f"--split/-x must be left, right, up, or down (got {split!r})"
+    if tab is not None and not tab.strip():
+        return "--tab needs a nonblank selector or pane-group name"
+    if bounded_placement and any(value is not None for value in (split, at, tab)):
+        return (
+            "--bounded-placement selects its own stable tab and cannot be combined "
+            "with --split, --at, or --tab"
+        )
+    if at is not None:
+        # `--at current` is the exact-anchor spelling (the mux CLI resolves it
+        # from FNO_PANE, strict Refuse fallback). A numeric anchor is a
+        # low-level `mux pane run` concern, never exposed here.
+        if at != "current":
+            return "--at must be `current` (the exact-anchor spelling)"
+        if split is None:
+            return "--at requires --split (the side to place on)"
+    return None
 
 
 def _has_explicit_substrate(toks: Sequence[str]) -> Optional[str]:

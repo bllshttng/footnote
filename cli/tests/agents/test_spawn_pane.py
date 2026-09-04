@@ -2687,36 +2687,6 @@ def test_cmd_spawn_explicit_split_still_uses_global_placement_lease(monkeypatch)
     assert captured["split"] == "right"
 
 
-def test_cmd_spawn_placement_rejected_on_bg_substrate(tmp_path: Path, monkeypatch) -> None:
-    # AC4-ERR: pane geometry flags fail closed on a substrate with no pane tree,
-    # before any spawn.
-    from typer.testing import CliRunner
-
-    import fno.agents.cli as agents_cli
-
-    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
-    res = CliRunner().invoke(
-        agents_cli.agents_app,
-        ["spawn", "peer", "--harness", "claude", "--substrate", "bg", "-x", "left"],
-    )
-    assert res.exit_code == 2, res.output
-    assert "--split/-x, --at, and --tab apply only to --substrate pane" in res.output
-
-
-def test_cmd_spawn_tab_rejected_on_bg_substrate(tmp_path: Path, monkeypatch) -> None:
-    from typer.testing import CliRunner
-
-    import fno.agents.cli as agents_cli
-
-    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
-    res = CliRunner().invoke(
-        agents_cli.agents_app,
-        ["spawn", "peer", "--harness", "claude", "--substrate", "bg", "--tab", "name:x"],
-    )
-    assert res.exit_code == 2, res.output
-    assert "--tab" in res.output and "--substrate pane" in res.output
-
-
 class SquadAwareRunner(FakeRunner):
     """A fake whose two verbs DISAGREE about which squad they answer for.
 

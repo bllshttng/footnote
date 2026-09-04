@@ -1505,6 +1505,16 @@ def cmd_spawn(
             "with room, or create the next. --substrate pane only."
         ),
     ),
+    portal: int | None = typer.Option(
+        None,
+        "--portal",
+        help=(
+            "Portal placement (x-9b60): open portal N (0-255) showing the new "
+            "worker, in one call. --substrate thread only. Makes the placement "
+            "flags meaningful for a thread: a fresh portal open honors them; "
+            "a portal that already has a live viewer keeps its geometry."
+        ),
+    ),
     bounded_placement: bool = typer.Option(
         False,
         "--bounded-placement",
@@ -1846,55 +1856,15 @@ def cmd_spawn(
             )
             raise typer.Exit(code=2)
 
-    # x-3e38 pane placement: squad/split name mux geometry, which only the
-    # pane substrate has. bg/headless have no pane tree, so the controls are
-    # refused fail-closed before any spawn (mirrors the tier-3 guard shape above).
-    placement_requested = (
-        bounded_placement
-        or squad is not None
-        or split is not None
-        or at is not None
-        or tab is not None
+    from fno.agents.spawn_defaults import placement_refusal
+
+    refusal = placement_refusal(
+        substrate=substrate, once=once, squad=squad, split=split, at=at,
+        tab=tab, portal=portal, bounded_placement=bounded_placement,
     )
-    if squad is not None and not squad.strip():
-        print("--workspace/-s needs a nonblank workspace name", file=sys.stderr)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
         raise typer.Exit(code=2)
-    if placement_requested and (substrate != "pane" or once):
-        print(
-            "--workspace/-s, --split/-x, --at, and --tab apply only to --substrate pane "
-            "(bg/headless have no pane geometry)",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if split is not None and split not in ("left", "right", "up", "down"):
-        print(
-            f"--split/-x must be left, right, up, or down (got {split!r})",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if tab is not None and not tab.strip():
-        print("--tab needs a nonblank selector or pane-group name", file=sys.stderr)
-        raise typer.Exit(code=2)
-    if bounded_placement and any(value is not None for value in (split, at, tab)):
-        print(
-            "--bounded-placement selects its own stable tab and cannot be combined "
-            "with --split, --at, or --tab",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if at is not None:
-        # `--at current` is the exact-anchor spelling: the mux CLI resolves the
-        # calling pane from FNO_PANE and sets the strict (Refuse) policy, so the
-        # spawn always carries the placement receipt and the readiness gate. A
-        # numeric anchor is a low-level `mux pane run` concern (it keeps the
-        # legacy new-tab fallback) and is intentionally not exposed here, where
-        # every `--at` value implies the exact-placement contract.
-        if at != "current":
-            print("--at must be `current` (the exact-anchor spelling)", file=sys.stderr)
-            raise typer.Exit(code=2)
-        if split is None:
-            print("--at requires --split (the side to place on)", file=sys.stderr)
-            raise typer.Exit(code=2)
 
     # --crown/-k <scope>... : the operator names the TERRITORY and the ladder
     # altitude is derived from it (crown.derive_crown_level). The grantor is
@@ -2883,6 +2853,22 @@ def cmd_spawn(
             from fno.agents.spawn_gate import qos_demote_bg_worker
 
             qos_demote_bg_worker(result.short_id)
+        # x-9b60: one call places a portal. The bg lane owns no pane geometry,
+        # so the portal is opened through the one door that creates one (the
+        # `fno mux thread` reach), carrying the placement flags. After the
+        # receipt flush so line-parsing consumers never wait on it.
+        if substrate == "bg" and portal is not None:
+            from fno.agents.thread_portal import place_thread_portal
+
+            try:
+                landing = place_thread_portal(
+                    name, portal, workspace=squad, split=split, at=at, tab=tab
+                )
+            except DispatchAskError as exc:
+                print(str(exc), file=sys.stderr)
+                raise typer.Exit(code=exc.exit_code) from exc
+            if landing:
+                print(landing, flush=True)
     else:
         # once path: reply verbatim on stdout (no added newline per ask contract).
         sys.stdout.write(result.reply or "")
