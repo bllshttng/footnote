@@ -8151,8 +8151,7 @@ impl View {
         // an agent row indents by the depth computed over exactly the set that
         // paints - never a re-derivation over a different visibility set.
         let (display, row_depths) = self.display_rows_with_depths();
-        // (x-aeab) The court block reserves the bottom rows; its lines are
-        // rendered once here and the reservation is their count.
+        // (x-aeab) The reservation is the court block's rendered line count.
         let (block_rows, block_lines) = self.court_block_layout(rows);
         let list_rows = rows - block_rows;
         for (i, drow) in display.into_iter().enumerate().skip(off) {
@@ -11382,8 +11381,7 @@ async fn attach_and_run(
         // spotlight animates on an otherwise idle terminal (nothing else
         // redraws there). Re-armed each loop pass, so the cadence holds until
         // the overlay closes; closed -> no deadline, no wakeups.
-        // (x-aeab) The block is painted every frame, so its refresh is a
-        // timer; None while a fold runs (the landing redraws).
+        // (x-aeab) Refresh timer; the deadline is None while a fold runs.
         let court_tick = view.court.refresh_deadline();
         // (x-b2bf) The yard's frame cycling is a flavour channel on a timer:
         // while the overlay is open, wake at the next frame boundary so the
