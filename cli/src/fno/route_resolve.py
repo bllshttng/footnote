@@ -318,10 +318,10 @@ def _candidate_supported(
     harness's journey-proven lane (its spawn claim reads native), a mapped
     permission mode is claude's on every substrate and a non-claude harness's
     only on the pane lane. An unset substrate reads as the spawn parser's own
-    default (pane),
-    so a lone permission pin does not filter out non-claude rows the gate
-    would accept. An unknown harness degrades open (kept) so the spawn's own
-    gate, which names the value, stays the authority on refusal.
+    default (pane), so a lone permission pin does not filter out non-claude
+    rows the gate would accept. An unknown harness degrades open (kept) so
+    the spawn's own gate, which names the value, stays the authority on
+    refusal.
     """
     sub = (substrate or "").strip()
     if sub == "bg":

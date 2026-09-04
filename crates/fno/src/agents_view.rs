@@ -532,7 +532,8 @@ fn lane_forms_still_parse(candidate: &toml::Value) -> Result<(), String> {
 /// The whole-row override gate for a bundled row: every top-level key the
 /// override carries must already exist on the bundled row, or be one of the
 /// x-6678 shallow lane keys. Rows do NOT share one key set (gemini carries
-/// no `slash_prefix`, only codex carries `native_verbs`), so the vocabulary
+/// no `slash_prefix`, rows without a measured palette carry no
+/// `native_verbs`), so the vocabulary
 /// is per row: a key another row carries is still refused here, and an
 /// unknown key is a typo that must not silently widen this harness's row.
 /// Top level only - a typo'd key NESTED under a known table rides along
