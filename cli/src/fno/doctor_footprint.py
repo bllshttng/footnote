@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import subprocess
 import tempfile
 import time
@@ -219,9 +218,13 @@ class AttributionGap:
 def _pidless_route(row: Any) -> str | None:
     """Name the route that can resolve this pidless row, or None.
 
-    Never a harness-name gate: the predicate is the property - an identity handle some route accepts (x-e040). A short_id is the claude bg rv-map handle.
+    Never a harness-name gate: the predicate is the property - an identity handle some route accepts (x-e040). A short_id is the claude bg rv-map handle; a claude row without one derives it from the session id, while a codex first-8 collides, so its handle has no accepting route here.
     """
     if getattr(row, "short_id", None):
+        return "bg-socket"
+    if str(getattr(row, "harness", "")) == "claude" and getattr(
+        row, "harness_session_id", None
+    ):
         return "bg-socket"
     return None
 
@@ -247,15 +250,12 @@ def _claim_witness(name: str) -> str | None:
     return str(state) if state else None
 
 
-def _bg_transport_key(row: Any) -> str:
-    """The 8-hex key the rv farm and roster join on; a longer stored short_id derives it from the session id."""
-    short = str(getattr(row, "short_id", "") or "")
-    session_id = str(getattr(row, "harness_session_id", "") or "")
-    if re.fullmatch(r"[0-9a-f]{8}", short) or not session_id:
-        return short
-    from fno.harness_identity import claude_transport_short_id
+def _row_transport_key(row: Any) -> str:
+    from fno.agents.session_procs import transport_join_key
 
-    return claude_transport_short_id(session_id)
+    return transport_join_key(
+        getattr(row, "short_id", ""), getattr(row, "harness_session_id", "")
+    )
 
 
 def _unrouted_row_costs_fleet(row: Any, deadline: float | None = None) -> bool:
@@ -354,7 +354,7 @@ def _live_root_pids(
         ]
         unrouted_rows = [row for row in pidless_rows if _pidless_route(row) is None]
         routed_rows = [row for row in pidless_rows if _pidless_route(row) is not None]
-        routed_keys = [(_bg_transport_key(row), row) for row in routed_rows]
+        routed_keys = [(_row_transport_key(row), row) for row in routed_rows]
         # x-e040: a routless row is a NAMED gap, not a dead reading - x-a457:
         # only while a witness says the cost is real; past it all stay gaps.
         fleet_unrouted = [
@@ -371,7 +371,7 @@ def _live_root_pids(
             return roots, AttributionGap("; ".join(gap_rows))
         budget = None if deadline is None else max(0.01, deadline - time.monotonic())
         socket_pids = bg_socket_pid_map(timeout=15.0 if budget is None else budget)
-        missing = [row for key, row in routed_keys if key not in socket_pids]
+        missing = [pair for pair in routed_keys if pair[0] not in socket_pids]
         if missing:
             # x-a457: the socket map is the FIRST oracle, not the last word.
             # A key in neither map is a corpse; an unreadable roster stays a
@@ -379,8 +379,7 @@ def _live_root_pids(
             spent = deadline is not None and time.monotonic() >= deadline
             roster_pids = None if spent else roster_pid_map()
             still_missing: list[Any] = []
-            for row in missing:
-                key = _bg_transport_key(row)
+            for key, row in missing:
                 if roster_pids is not None and key not in roster_pids:
                     continue  # absent from a readable oracle: a corpse drops
                 pid = (roster_pids or {}).get(key)

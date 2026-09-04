@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,17 @@ from typing import Optional
 from fno.harness_identity import claude_transport_short_id
 
 _MIB = 1024 * 1024
+
+
+def transport_join_key(short_id: Optional[str], session_id: Optional[str]) -> str:
+    """The 8-hex key the rv farm and roster join on.
+    A longer stored short_id (a hook registration minted a full uuid) derives
+    from the session id; anything else passes through as-is.
+    """
+    short = str(short_id or "")
+    if re.fullmatch(r"[0-9a-f]{8}", short) or not session_id:
+        return short
+    return claude_transport_short_id(str(session_id))
 
 
 def rv_socket_root() -> Path:
@@ -124,7 +136,7 @@ def resolve_session_pid(
     are their own process); every other harness returns ``pid`` unchanged.
     """
     if harness == "claude":
-        key = short_id or (session_id or "")[:8]
+        key = transport_join_key(short_id, session_id)
         if key:
             m = bg_socket_pid_map() if socket_map is None else socket_map
             hit = m.get(key)

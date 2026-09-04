@@ -510,6 +510,57 @@ def test_live_root_pids_joins_a_full_uuid_short_id_through_the_derived_key(
     assert doctor_footprint._live_root_pids() == ({903}, None)
 
 
+def test_resolve_session_pid_derives_the_join_key_from_a_full_uuid_short_id() -> None:
+    """The cost view joins the same rv map as the gate: a hook-registered row
+    whose short_id holds the full uuid must derive the 8-hex key, or the
+    session resolves to its recorded (absent) pid and its cost vanishes."""
+    from fno.agents.session_procs import resolve_session_pid
+
+    assert (
+        resolve_session_pid(
+            harness="claude",
+            short_id="e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
+            session_id="e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
+            socket_map={"e6f78b98": 903},
+        )
+        == 903
+    )
+
+
+def test_live_root_pids_routes_a_claude_row_with_an_empty_short_id(
+    monkeypatch,
+) -> None:
+    """Rows minted before the birth fix carry an empty short_id but a real
+    session id: the claude daemon maps can still answer for them, so the row
+    routes and its derived key joins - it must not sit unrouted forever."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="",
+        harness_session_id="2529b52b-2477-4c1e-9d3a-1a2b3c4d5e6f",
+        name="king-119e-reap-branch-2529b52b",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {"2529b52b": 903}
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: pid == 903,
+    )
+
+    assert doctor_footprint._live_root_pids() == ({903}, None)
+
+
 def test_live_root_pids_keeps_a_roster_held_row_whose_pid_entry_is_not_usable(
     monkeypatch,
 ) -> None:
