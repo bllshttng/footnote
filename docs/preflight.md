@@ -8,7 +8,9 @@ This is a different thing from the environment preflight (`fno do target` Step 3
 
 ### `fno doctor test smoke` - the step registry
 
-One ordered list of the cli-ci smoke job's test and lint steps is code-owned in `cli/src/fno/test_cmd.py` (`_STRUCTURAL_STEPS`) plus auto-discovered owned shell harnesses. The workflow calls `uv run --project cli fno-py doctor test smoke` from each of its two shard jobs, `smoke-pytest` and `smoke-rest`, which a third job named `smoke` aggregates into the required check. `fno doctor test smoke` is the same runner locally, so there is no second list to drift. Environment provisioning (checkout, Python/uv setup, the Rust toolchain install, the cargo cache, the system PyYAML install) stays in the workflow yaml. Those are CI-runner concerns, and that divergence is deliberate. Everything a test needs at run time (the `uv sync` / `uv build`, the `fno-agents` debug build) lives in the runner.
+One ordered list of the cli-ci smoke job's test and lint steps is code-owned in `cli/src/fno/test_cmd.py` (`_STRUCTURAL_STEPS`) plus auto-discovered owned shell harnesses. The workflow calls `uv run --project cli fno-py doctor test smoke` from twelve full-gate matrix legs: eight `smoke-pytest` legs and four `smoke-rest` legs. A third job named `smoke` aggregates both matrices into the required check. `fno doctor test smoke` is the same runner locally, so there is no second list to drift. Environment provisioning (checkout, Python/uv setup, the Rust toolchain install, the cargo cache, the system PyYAML install) stays in the workflow yaml. Those are CI-runner concerns, and that divergence is deliberate. Everything a test needs at run time (the `uv sync` / `uv build`, the `fno-agents` debug build) lives in the runner.
+
+Coverage boundary: the `smoke-pytest` and `smoke-rest` matrices are the full-gate shards on main and pull requests. `changed-smoke` has `if: github.event_name == 'pull_request'`, so it is skipped on main and its changed-subset selector never supplies main-branch coverage.
 
 Modes:
 
@@ -17,14 +19,15 @@ Modes:
 | `fno doctor test smoke` | Fail-fast. Exactly the pre-extraction CI semantics. |
 | `fno doctor test smoke --keep-going` | Run every step, print a summary table, record failures, exit non-zero if any failed. |
 | `fno doctor test smoke --only '<globs>'` | Run only steps whose name matches. Takes one glob, or a comma-separated list. The whole value is tried before the split, so a step whose own name has a comma still selects exactly. |
-| `fno doctor test smoke --skip '<globs>'` | The exact complement of `--only`: run every step matching none of the globs. This is how CI shards the suite; the two selections must cover the registry, which `cli/tests/unit/test_smoke_shards.py` reads out of the workflow and asserts. |
+| `fno doctor test smoke --skip '<globs>'` | The exact complement of `--only`: run every step matching none of the globs. This supplies the rest lane's base selection before its shard partition. |
+| `fno doctor test smoke --shard I/N` | Partition the selected registry after `--only` or `--skip`. `Sync + build` runs in every leg; pytest runs in every pytest leg with `FNO_PYTEST_SHARD=I/N`; other steps use registry-index round robin, with the Rust build added where later Rust steps land. |
 | `fno doctor test smoke --retry-failed` | Re-run only the steps recorded by the last `--keep-going` run; full run if the record is missing or corrupt. |
 | `fno doctor test smoke --list [--verbose]` | Print the registry (names; with `--verbose`, working dir + command) and exit. |
 | `fno doctor test smoke --changed [--base REV --head REV]` | Run only the work the changed paths map to. Explicitly partial: see below. |
 
-The four subset modes (`--changed`, `--only`, `--skip`, `--retry-failed`) are mutually exclusive. The runner refuses combinations instead of silently mislabeling evidence.
+`--only` and `--skip` remain mutually exclusive. `--changed` and `--retry-failed` cannot combine with `--shard`. The shard flag is compatible with full-gate `--only` and `--skip` selections. A malformed shard, a shard with no selected steps, or a conflicting partial mode fails non-zero instead of silently mislabeling evidence.
 
-Prerequisites are asserted up front and named on failure with exit 2. They include `uv`, `python3` with `yaml`, and `cargo` for selected steps. The runner never installs system packages. Install PyYAML once by hand for local runs. A subset run (`--only` / `--skip` / `--retry-failed`) labels itself in both the header and the summary, so a partial green cannot look full. Preflight records `mode=FULL verdict=green` only after a full, all-green run. A subset pass cannot mint or satisfy that attestation. A zero-step run exits non-zero instead of reading as green.
+Prerequisites are asserted up front and named on failure with exit 2. They include `uv`, `python3` with `yaml`, and `cargo` for selected steps. The runner never installs system packages. Install PyYAML once by hand for local runs. A subset or sharded run labels itself in both the header and the summary, so a partial green cannot look full. `--shard 1/1` preserves the unsharded selection and `FULL` header. `N > 1` uses `SHARD SUBSET` and includes `shard=I/N`. Preflight records `mode=FULL verdict=green` only after a full, all-green run. A subset pass cannot mint or satisfy that attestation. A zero-step run exits non-zero instead of reading as green.
 
 ### `--changed` - the changed-surface packet
 
@@ -64,8 +67,13 @@ And the exit codes separate evidence quality:
 
 Every executing run (not `--list`, which is a dry run) writes `.fno/changed-last-receipt.json` with the candidate and base identity, the selections and their rules, the unmapped paths, the verdict, and the timings (selection, execution, time to first signal).
 
-Sharding the full suite is out of scope *here*, not ruled out: this node targets first-signal latency, and the merge gate is a separate lever with its own node.
-The workflow guard permits a sharded smoke job, but requires an aggregating job that `needs` it, because each shard reports its own check and branch protection pointed at one of them would pass on a fraction of the suite.
+### Full-gate sharding and the changed-smoke boundary
+
+The full gate uses eight pytest legs and four rest legs. `smoke-pytest` selects `Sync + build` and the pytest registry step in every leg, and exports `FNO_PYTEST_SHARD=I/8` only while that pytest step runs. `smoke-rest` selects the complementary non-pytest registry and partitions it by registry index. The runner repeats `Sync + build` in every leg. It adds `Build fno-agents debug binary (for journey tests)` to legs with later Rust steps, preserving binary-absent ordering before that build.
+
+The `smoke` aggregator is the required check. It positively asserts that every matrix lane result is `success`. A single failed, cancelled, or missing leg therefore keeps the required check non-green. `cli/tests/unit/test_smoke_shards.py` reads the selectors, shard denominator, matrix indices, and registry from the checked-in workflow and fails on a missing leg or uncovered step.
+
+`changed-smoke` remains early, partial feedback for pull requests only. It is skipped on main. No test reached only through its `--changed` selector is counted as main coverage. Widening that selector can widen the existing out-of-tree coverage hole. Main coverage comes from all `smoke-pytest` and `smoke-rest` matrix legs through the `smoke` aggregator.
 
 ### `scripts/ci/preflight.sh` - the hermetic runner
 

@@ -94,6 +94,9 @@ jobs:
   # never in front of it: no `needs:` edge in either direction, so both start at
   # once and this one cannot add merge latency. Only `smoke` satisfies the merge
   # gate - a green here means the selected packet passed and nothing more.
+  # Coverage boundary: `smoke-pytest` and `smoke-rest` are the full-gate shards
+  # on main and pull requests. `changed-smoke` is PR-only and is skipped on
+  # main; its changed-subset selector never supplies main-branch coverage.
   changed-smoke:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -156,7 +159,8 @@ jobs:
           fi
           exit $rc
 
-  # The suite outgrew one runner, so it now runs as two. Read this before
+  # The suite outgrew two runners, so the pytest full-gate lane now runs as
+  # eight matrix shards and the rest lane as four. Read this before
   # raising a ceiling again.
   #
   # History: 20 left no margin and cancelled green runs. Measured 2026-08-06,
@@ -165,8 +169,9 @@ jobs:
   # with every test passing. Raised to 30. On 2026-08-21 it hit 30 too, and the
   # comment then standing said that at 30 the suite is the thing to fix. It was
   # raised to 45 anyway, as an unblock for a stalled fleet, on the condition
-  # that the suite got fixed. This is that fix, and it is why the ceiling is
-  # back at 30 rather than climbing to a third number.
+  # that the suite got fixed. This is that fix. Eight pytest legs and four rest
+  # legs bring the measured work below the 15-minute cap instead of raising the
+  # ceiling again.
   #
   # What was measured, so the next reader can re-measure rather than guess. One
   # main-push job ran 2095 seconds: 64s of runner setup, 1036s in the single
@@ -179,23 +184,28 @@ jobs:
   # The seam is also the only clean cut in the registry. `fno doctor test smoke`
   # deletes the fno-agents debug binary when pytest is selected, so the
   # @requires_rust parity tests skip; a later step rebuilds it for the rust
-  # journey steps. So pytest belongs in the shard without the build step, and
-  # every rust step belongs in the shard with it.
+  # journey steps. The runner keeps pytest in every pytest matrix leg and adds
+  # the build step to every rest leg whose bin contains a later rust step.
   #
   # The two selections below must keep COVERING the registry. They are exact
   # complements over one glob, so a step added later lands in smoke-rest on its
   # own, and cli/tests/unit/test_smoke_shards.py fails if that ever stops being
-  # true. `Sync + build` deliberately runs in both: it costs about 3s and it
+  # true. `Sync + build` deliberately runs in every leg: it costs about 3s and
   # removes any question of whether pytest can rely on `uv build`.
   #
-  # If a shard approaches 30, split again or cut work. Do not raise this.
+  # The last four-way pytest run reached only 38%, 42%, 39% and 54% before its
+  # 15-minute cap. The pytest lane therefore doubles; the rest lane stays at
+  # four because its measured legs already finish below the cap.
+  # If a shard approaches 15, split again or cut work. Do not raise this.
   smoke-pytest:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     runs-on: ubuntu-latest
-    # 40, not 30: main's green run measures 27m35s on this shard (92% of the
-    # old cap), so one slow runner kills it at 95% progress with no defect
-    # (PR 1432's 2026-09-04 run: both shards ~5.5min over main's, pytest
-    # cancelled a minute short).
-    timeout-minutes: 40
+    # The latest two-leg main run measured 27m35s for pytest. Four matrix legs
+    # are the planned remedy, and each leg remains capped at 15 minutes.
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -203,8 +213,8 @@ jobs:
       - name: Provision the smoke runner
         uses: ./.github/actions/smoke-setup
 
-      - name: "Smoke shard: pytest"
-        # ponytail: this shard throws away the fno-agents binary smoke-setup
+      - name: "Smoke shard: pytest (${{ matrix.shard }}/8)"
+        # This shard throws away the fno-agents binary smoke-setup
         # just built (the runner clears it so @requires_rust tests skip) and
         # never rebuilds it, because the build step lives in the other shard.
         # Both shards share one cargo cache key, so on a Cargo.lock change this
@@ -236,12 +246,16 @@ jobs:
         # away from the real ceiling.
         run: |
           start=$SECONDS
-          trap 'bash scripts/ci/smoke-duration-report.sh smoke-pytest "$(( SECONDS - start ))" 40 || true' EXIT
-          uv run --project cli fno-py doctor test smoke --only 'Sync + build,Pytest*'
+          trap 'bash scripts/ci/smoke-duration-report.sh smoke-pytest-${{ matrix.shard }} "$(( SECONDS - start ))" 15 || true' EXIT
+          uv run --project cli fno-py doctor test smoke --only 'Sync + build,Pytest*' --shard ${{ matrix.shard }}/8
 
   smoke-rest:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -249,7 +263,7 @@ jobs:
       - name: Provision the smoke runner
         uses: ./.github/actions/smoke-setup
 
-      - name: "Smoke shard: everything except pytest"
+      - name: "Smoke shard: everything except pytest (${{ matrix.shard }}/4)"
         # Same trap, same reason as the pytest shard above.
         #
         # Measured on the 1750s run that hit the cap, not guessed: of 1733s of
@@ -266,8 +280,8 @@ jobs:
           STRESS_TRIALS: "3"
         run: |
           start=$SECONDS
-          trap 'bash scripts/ci/smoke-duration-report.sh smoke-rest "$(( SECONDS - start ))" 40 || true' EXIT
-          uv run --project cli fno-py doctor test smoke --skip 'Pytest*'
+          trap 'bash scripts/ci/smoke-duration-report.sh smoke-rest-${{ matrix.shard }} "$(( SECONDS - start ))" 15 || true' EXIT
+          uv run --project cli fno-py doctor test smoke --skip 'Pytest*' --shard ${{ matrix.shard }}/4
 
       # Static dead-import guard: a module move down a layer can leave
       # test-only callers on the old `from fno.agents import moved` path that

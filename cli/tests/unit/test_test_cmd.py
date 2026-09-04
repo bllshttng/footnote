@@ -11,6 +11,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from fno.test_cmd import (
     _STRUCTURAL_STEPS,
     changed_snapshot,
@@ -446,6 +448,96 @@ def test_empty_flag_values_are_refused(tmp_path: Path) -> None:
     # Real values still parse.
     opts = _parse_smoke_args(["--changed", "--base", "HEAD~1", "--head", "HEAD"])
     assert opts["changed"] and opts["base"] == "HEAD~1" and opts["head"] == "HEAD"
+
+
+def test_smoke_shard_argument_allows_selector_and_rejects_partial_modes() -> None:
+    from fno.test_cmd import _parse_smoke_args
+
+    opts = _parse_smoke_args(["--only", "Pytest*", "--shard", "2/4"])
+    assert opts["shard"] == "2/4"
+    for argv in (
+        ["--changed", "--shard", "1/4"],
+        ["--retry-failed", "--shard", "1/4"],
+    ):
+        with pytest.raises(ValueError, match="separate subset modes"):
+            _parse_smoke_args(argv)
+
+
+def test_smoke_shard_partitions_steps_and_scopes_pytest_env(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import fno.test_cmd as tc
+
+    registry = tmp_path / "registry.py"
+    registry.write_text(
+        "STEPS = [\n"
+        " ('Sync + build', '.', 'true'),\n"
+        " ('Pytest (unit + integration)', '.', 'true'),\n"
+        " ('before', '.', 'true'),\n"
+        " ('Build fno-agents debug binary (for journey tests)', '.', 'true'),\n"
+        " ('after-a', '.', 'true'),\n"
+        " ('after-b', '.', 'true'),\n"
+        "]\n"
+    )
+    monkeypatch.setenv("SMOKE_REGISTRY_FILE", str(registry))
+    monkeypatch.setenv("SMOKE_FAILURE_RECORD", str(tmp_path / "failures.txt"))
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    calls: list[tuple[str, str | None]] = []
+
+    class _Completed:
+        returncode = 0
+
+    def run(command, *, cwd, env):
+        del cwd
+        calls.append((command[-1], env.get("FNO_PYTEST_SHARD")))
+        return _Completed()
+
+    monkeypatch.setattr(tc.subprocess, "run", run)
+
+    assert tc._run_smoke(["--shard", "2/4"]) == 0
+
+    assert [command for command, _shard in calls] == [
+        "true", "true", "true", "true"
+    ]
+    assert [shard for _command, shard in calls] == [None, "2/4", None, None]
+
+
+def test_smoke_shard_empty_bin_is_nonzero(tmp_path: Path, monkeypatch) -> None:
+    import fno.test_cmd as tc
+
+    registry = tmp_path / "registry.py"
+    registry.write_text("STEPS = [('only step', '.', 'true')]\n")
+    monkeypatch.setenv("SMOKE_REGISTRY_FILE", str(registry))
+
+    assert tc._run_smoke(["--shard", "2/2"]) != 0
+
+
+def test_smoke_shard_one_of_one_keeps_full_header(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import fno.test_cmd as tc
+
+    registry = tmp_path / "registry.py"
+    registry.write_text("STEPS = [('only step', '.', 'true')]\n")
+    monkeypatch.setenv("SMOKE_REGISTRY_FILE", str(registry))
+
+    class _Completed:
+        returncode = 0
+
+    monkeypatch.setattr(tc.subprocess, "run", lambda *args, **kwargs: _Completed())
+
+    assert tc._run_smoke(["--shard", "1/1"]) == 0
+    output = capsys.readouterr().out
+    assert "smoke: mode=FULL steps=1/1" in output
+    assert "shard=" not in output
+
+
+@pytest.mark.parametrize("spec", ["0/4", "5/4", "1/0", "four/4", "1/4/2"])
+def test_smoke_shard_invalid_spec_is_refused(spec: str) -> None:
+    from fno.test_cmd import _parse_smoke_args
+
+    with pytest.raises(ValueError, match="--shard"):
+        _parse_smoke_args(["--shard", spec])
 
 
 def test_pytest_smoke_caps_auto_workers() -> None:

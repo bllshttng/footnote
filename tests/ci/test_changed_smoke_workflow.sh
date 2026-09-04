@@ -13,9 +13,10 @@
 # The gate IS sharded now. Sharding was deferred until measurement said final
 # merge latency was the bottleneck, and it did: one job ran 2095s, half of it
 # a single pytest step and half a tail serial behind it. So `smoke` no longer
-# runs the suite itself; it aggregates the shard jobs that do. The protection
-# that mattered is unchanged and is asserted below: no shard may stand in for
-# the whole gate, and the aggregator must require EVERY shard to pass.
+# runs the suite itself; it aggregates the eight matrix legs that do. The
+# protection that mattered is unchanged and is asserted below: no shard may
+# stand in for the whole gate, and the aggregator must require EVERY shard to
+# pass.
 #
 # What this guard cannot see is whether the shard selectors still COVER the
 # registry. cli/tests/unit/test_smoke_shards.py owns that, reading the same
@@ -58,6 +59,16 @@ if fails:
     sys.exit(1)
 
 changed, smoke = jobs["changed-smoke"], jobs["smoke"]
+
+# Main coverage and PR-only changed coverage are separate contracts. The full
+# matrix jobs have no event guard, so they run on main; changed-smoke has the
+# explicit pull-request guard and is never a main-branch coverage shard.
+for name in ("smoke-pytest", "smoke-rest"):
+    check("if" not in jobs[name], f"{name} runs on main and pull requests",
+          f"{name} has an event guard and may not cover main")
+check(changed.get("if") == "github.event_name == 'pull_request'",
+      "changed-smoke is PR-only",
+      f"changed-smoke event guard is {changed.get('if')!r}, not pull_request")
 
 # --- AC8: started together, no dependency edge either way -------------------
 check("needs" not in changed, "changed-smoke has no needs (starts immediately)",

@@ -121,3 +121,14 @@ def test_classify_agrees_with_the_scrub():
             assert out.get(name) != "ambient-value", (
                 f"{name} classifies as ambient but survived neutralise()"
             )
+
+
+def test_smoke_pytest_shard_survives_the_child_environment():
+    """The CI-selected pytest slice must reach the spawned test process."""
+    import tempfile
+
+    from fno.hermetic import neutralise
+
+    out = neutralise({"FNO_PYTEST_SHARD": "3/8"}, Path(tempfile.mkdtemp()))
+
+    assert out.get("FNO_PYTEST_SHARD") == "3/8"

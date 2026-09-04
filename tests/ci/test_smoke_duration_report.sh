@@ -11,12 +11,11 @@
 #    keep matching.
 # 2. The reporter lives in an EXIT trap, so it must never be the thing that
 #    reddens a green suite. It exits 0 on every input, including garbage.
-# 3. The two shards run in PARALLEL, so wall clock is the MAX of the two and
-#    never the total. Their sum is 36m45s against a 32m unsharded baseline, so
-#    a summing consumer would report the suite got SLOWER when it got 41
-#    percent faster. The script therefore takes exactly one duration and
-#    refuses a second, and this file asserts that refusal so a later edge
-#    cannot quietly enable the sum.
+# 3. The eight matrix legs run in PARALLEL, so wall clock is the MAX of the
+#    legs and never their total. A summing consumer would report the suite got
+#    slower when it got faster. The script therefore takes exactly one
+#    duration per leg and refuses a second, and this file asserts that refusal
+#    so a later edge cannot quietly enable the sum.
 
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
