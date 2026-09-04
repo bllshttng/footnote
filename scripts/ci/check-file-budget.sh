@@ -12,6 +12,12 @@
 # (never server2.rs), and the code the change touched moves with it. A gate
 # that only says "too big" produces server2.rs.
 #
+# Operator law (subject file-budget): a refusal is answered by REFACTORING in
+# the same PR, never by raising a budget and never by splitting the PR. Both
+# of those move the number and leave the bloat. Attack what the growth is made
+# of: bloaters, object-oriented abusers, change preventers, dispensables
+# (comments, duplicate code, dead code) and excessive couplers.
+#
 # New test files born over budget WARN instead of failing, for one reason: a
 # pure test-motion change moves test blocks out of oversized production files
 # into files of their own, and refusing those would refuse the very move that
@@ -21,8 +27,10 @@
 # The Python tree under cli/src/fno is shrink-only as a TREE, net: Python is
 # the compatibility shell, Rust is the product. Net growth above the allowance
 # is refused, so a bug fix never has to port a verb to land, while a feature -
-# larger than the allowance - does. The remedy is to port the verb to crates/
-# or land the feature in Rust.
+# larger than the allowance - does. The remedy is to port the verb to crates/,
+# land the feature in Rust, or refactor the growth away: per-harness DATA
+# belongs in the capability contract, long prose belongs in docs/, and
+# duplicate blocks belong behind one loop.
 #
 # Run: bash scripts/ci/check-file-budget.sh [--quiet]
 # Exit: 0 pass, 1 a refused grow (a grown over-budget file, a new over-budget
@@ -190,7 +198,7 @@ while IFS=$'\t' read -r added deleted path; do
                 echo "  ($head_lines lines, budget $BUDGET). This landed without the gate running on its PR head." >> "$findings"
                 echo "  The next change touching this file must shrink it by at least $net lines." >> "$findings"
             else
-                echo "check-file-budget: $path is $head_lines lines (budget $BUDGET) and this change grows it by +$added/-$deleted. A file over budget may only shrink. Put the new code in a module named by the question it answers (never server2.rs), and move the code you touched with it. Files over budget today: $(live_count); each shrink is banked." >> "$findings"
+                echo "check-file-budget: $path is $head_lines lines (budget $BUDGET) and this change grows it by +$added/-$deleted. A file over budget may only shrink. Put the new code in a module named by the question it answers (never server2.rs), and move the code you touched with it. Then refactor the rest away here: duplicate code, dead code, comment bloat, and anything a data file or a doc should hold. Splitting the PR is not a remedy. Files over budget today: $(live_count); each shrink is banked." >> "$findings"
             fi
             fails=1
         elif [[ "$QUIET" -eq 0 ]]; then
@@ -204,7 +212,7 @@ while IFS=$'\t' read -r added deleted path; do
     elif is_test_path "$path"; then
         echo "check-file-budget: WARN $path is a new test file at $head_lines lines (budget $BUDGET). Tests are warned, not refused, for one reason: a pure test-motion change lands test blocks moved out of oversized production files, and refusing them would refuse the move that shrinks those files. New tests still belong in a module named by the question they answer." >&2
     else
-        echo "check-file-budget: $path is a new file at $head_lines lines (budget $BUDGET). A production file is not born over budget. Put the new code in a module named by the question it answers (never server2.rs), and move the code you touched with it. Files over budget today: $(live_count); each shrink is banked." >> "$findings"
+        echo "check-file-budget: $path is a new file at $head_lines lines (budget $BUDGET). A production file is not born over budget. Put the new code in a module named by the question it answers (never server2.rs), and move the code you touched with it. Then refactor the rest away here: duplicate code, dead code, comment bloat, and anything a data file or a doc should hold. Splitting the PR is not a remedy. Files over budget today: $(live_count); each shrink is banked." >> "$findings"
         fails=1
     fi
 # Two-dot, deliberately: the diff must measure from BASE exactly. On the
@@ -216,7 +224,7 @@ done < <(git -c core.quotepath=off diff --numstat -M "$BASE"..HEAD -- '*.rs' '*.
 
 py_net=$((py_added - py_deleted))
 if [[ "$py_net" -gt "$PY_ALLOWANCE" ]]; then
-    echo "check-file-budget: cli/src/fno grew by +$py_added/-$py_deleted net +$py_net (allowance $PY_ALLOWANCE). Python is the compatibility shell; port the verb you touched to crates/ or land the feature in Rust." >> "$findings"
+    echo "check-file-budget: cli/src/fno grew by +$py_added/-$py_deleted net +$py_net (allowance $PY_ALLOWANCE). Python is the compatibility shell; port the verb you touched to crates/ or land the feature in Rust. Or refactor the growth away in THIS PR: move data to the capability contract or another data file, move the long prose to docs/, cut duplicate and dead code, and extract or compose what is left. Raising $PY_ALLOWANCE and splitting the PR are both refused: they move the number and leave the bloat." >> "$findings"
     fails=1
 fi
 
