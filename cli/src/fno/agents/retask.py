@@ -279,7 +279,7 @@ def detect_retask(
     ):
         return {"outcome": "refused", "reason": "worker_has_no_thread_ref"}
     mux_ref = (
-        {"session": mux["session"], "pane_id": mux["pane_id"]} if substrate == "pane" else None
+        {"session": mux["session"], "pane_id": mux["pane_id"]} if mux else None
     )
     if not entry.harness_session_id:
         return {"outcome": "refused", "reason": "worker_has_no_session_id"}
