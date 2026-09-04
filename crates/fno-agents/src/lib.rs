@@ -89,6 +89,7 @@ pub mod heal;
 mod identity;
 pub mod interrupt_classify;
 pub mod kill_criteria;
+pub mod king_board;
 pub mod logs;
 pub mod logs_client;
 pub mod loop_dispatch;

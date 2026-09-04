@@ -127,6 +127,20 @@ fn resolve<T>(cwd: &Path, extract: impl Fn(&toml::Table) -> Option<T>) -> Option
     None
 }
 
+/// Walk a dotted key path (`["paths", "graph_json"]`) through the candidate
+/// configs, first hit wins. `pub(crate)` so sibling modules (the king board)
+/// read the same candidates Python's loader reads instead of re-deriving the
+/// precedence a third time.
+pub(crate) fn config_lookup(cwd: &Path, keys: &[&str]) -> Option<toml::Value> {
+    resolve(cwd, |t| {
+        let mut cur = t.get(keys[0])?;
+        for k in &keys[1..] {
+            cur = cur.get(k)?;
+        }
+        Some(cur.clone())
+    })
+}
+
 fn table_headless_yolo(t: &toml::Table, provider: &str) -> Option<bool> {
     t.get("agents")?
         .as_table()?
