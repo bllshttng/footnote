@@ -27,10 +27,7 @@ _MIB = 1024 * 1024
 
 
 def transport_join_key(short_id: Optional[str], session_id: Optional[str]) -> str:
-    """The 8-hex key the rv farm and roster join on.
-    A longer stored short_id (a hook registration minted a full uuid) derives
-    from the session id; anything else passes through as-is.
-    """
+    """The 8-hex key the rv farm and roster join on; a longer stored short_id derives from the session id."""
     short = str(short_id or "")
     if re.fullmatch(r"[0-9a-f]{8}", short) or not session_id:
         return short

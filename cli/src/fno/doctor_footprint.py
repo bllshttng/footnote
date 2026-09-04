@@ -222,9 +222,7 @@ def _pidless_route(row: Any) -> str | None:
     """
     if getattr(row, "short_id", None):
         return "bg-socket"
-    if str(getattr(row, "harness", "")) == "claude" and getattr(
-        row, "harness_session_id", None
-    ):
+    if str(getattr(row, "harness", "")) == "claude" and getattr(row, "harness_session_id", None):
         return "bg-socket"
     return None
 
@@ -260,7 +258,6 @@ def _row_transport_key(row: Any) -> str:
 
 def _unrouted_row_costs_fleet(row: Any, deadline: float | None = None) -> bool:
     """Whether an unrouted live row's cost is plausibly real and unattributed.
-
     Fail closed: only a POSITIVE dead answer drops the row; the pane probe inherits the reading's remaining budget.
     """
     if deadline is not None and time.monotonic() >= deadline:
@@ -369,13 +366,13 @@ def _live_root_pids(
         if deadline is not None and time.monotonic() >= deadline:
             gap_rows.append("bg-socket resolution timed out")
             return roots, AttributionGap("; ".join(gap_rows))
-        budget = None if deadline is None else max(0.01, deadline - time.monotonic())
-        socket_pids = bg_socket_pid_map(timeout=15.0 if budget is None else budget)
+        socket_pids = bg_socket_pid_map(
+            timeout=15.0 if deadline is None else max(0.01, deadline - time.monotonic())
+        )
         missing = [pair for pair in routed_keys if pair[0] not in socket_pids]
         if missing:
-            # x-a457: the socket map is the FIRST oracle, not the last word.
-            # A key in neither map is a corpse; an unreadable roster stays a
-            # gap. Re-check the deadline HERE: the map read may have spent it.
+            # x-a457: the socket map is the FIRST oracle; a key in neither is a
+            # corpse, an unreadable roster stays a gap, the read may spend the deadline.
             spent = deadline is not None and time.monotonic() >= deadline
             roster_pids = None if spent else roster_pid_map()
             still_missing: list[Any] = []
@@ -384,11 +381,9 @@ def _live_root_pids(
                     continue  # absent from a readable oracle: a corpse drops
                 pid = (roster_pids or {}).get(key)
                 if pid is None:
-                    # An unreadable oracle and a held row without a usable pid
-                    # both stay gaps: neither proves death.
+                    # An unreadable oracle and a held row without a usable pid both stay gaps.
                     still_missing.append(row)
                     continue
-                # A dead pid on a daemon-held record suppresses like the socket arm.
                 if not _root_pid_is_live(pid, None):
                     return roots, "worker root liveness unavailable"
                 roots.add(pid)

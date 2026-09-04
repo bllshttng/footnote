@@ -2109,8 +2109,7 @@ def _mint_branch_row(
     while any(candidate.name == branch_name for candidate in entries):
         branch_name = f"{branch_base}-{suffix}"
         suffix += 1
-    # A claude branch is born bg-routable (x-a457): short_id is the 8-hex
-    # jobId the rv farm keys on, hex-guarded like every sibling fill site.
+    # A claude branch is born bg-routable (x-a457): hex-guarded like its siblings.
     lead = claude_transport_short_id(session_id)
     branch = replace(
         entry,
