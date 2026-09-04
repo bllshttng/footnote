@@ -526,10 +526,6 @@ case "${1:-status}" in
                 _wt_lock_acquired=1
                 break
             fi
-            # The inode is read BEFORE the pid on purpose: it is the identity
-            # of the directory whose stamp the pid read judges, and it is the
-            # only thing the steal below is allowed to take.
-            _observed_ino="$(ls -id "$_WT_SWEEP_LOCK" 2>/dev/null | awk '{print $1}')"
             _held_pid="$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true)"
             if [[ -n "$_held_pid" ]]; then
                 if kill -0 "$_held_pid" 2>/dev/null; then
@@ -537,17 +533,25 @@ case "${1:-status}" in
                     exit 0
                 fi
                 # Stamped but dead: genuinely stale, reclaim it. The steal must
-                # take the directory that was OBSERVED. A blind removal (rmdir,
-                # or an unconditional mv-aside) acts on an observation that is
-                # already stale when it lands: the stale dir may have been
-                # replaced by a peer's fresh claim in between, and eating that
-                # is the ABA shape that ended with two sweeps both holding the
-                # lock. Compare the moved directory's inode against the one
-                # observed; anything else goes straight back.
+                # take the directory that was OBSERVED, and the observed
+                # directory's identity is its pid file, byte for byte. A blind
+                # removal acts on an observation that is already stale when it
+                # lands: the stale dir may have been replaced by a peer's fresh
+                # claim in between, and eating that is the ABA shape that ended
+                # with two sweeps both holding the lock. An inode match is NOT
+                # identity either: on Linux the directory created right after
+                # one is deleted can reuse the freed inode, and CI proved it -
+                # the moved FRESH claim matched and was eaten. A successor
+                # carries no pid file (fresh claim) or its own live pid, never
+                # the observed dead one; and if that pid has been recycled to
+                # a live process by the time the comparison runs, the
+                # liveness re-check keeps the steal off. Anything else moves
+                # straight back.
                 mv "$_WT_SWEEP_LOCK" "$_WT_SWEEP_LOCK.stale.$$" 2>/dev/null || true
                 if [[ -d "$_WT_SWEEP_LOCK.stale.$$" ]]; then
-                    _moved_ino="$(ls -id "$_WT_SWEEP_LOCK.stale.$$" 2>/dev/null | awk '{print $1}')"
-                    if [[ "$_moved_ino" == "$_observed_ino" ]]; then
+                    _moved_stamp="$(cat "$_WT_SWEEP_LOCK.stale.$$/pid" 2>/dev/null || true)"
+                    if [[ -n "$_moved_stamp" && "$_moved_stamp" == "$_held_pid" ]] \
+                        && ! kill -0 "$_held_pid" 2>/dev/null; then
                         rm -rf "$_WT_SWEEP_LOCK.stale.$$"
                     elif [[ ! -e "$_WT_SWEEP_LOCK" ]]; then
                         # Not what we observed and nobody has claimed the path

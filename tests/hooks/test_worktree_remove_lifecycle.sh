@@ -459,8 +459,9 @@ rm -rf "$LOCKDIR" "$S" "$BARE"
 # (the mkdir-landed, pid-not-yet-written window). The reclaimer must not eat
 # what it did not observe: the fresh claim survives and the reclaimer gives
 # up. A stub `cat` performs the swap inside the pid read, so the interleaving
-# is forced, not raced: this test failed against the blind rmdir/mv reclaim
-# and passes against the inode-checked steal.
+# is forced, not raced: this test failed against the blind rmdir on main,
+# failed against the mv-only reclaim, and passes against the steal that
+# compares the moved directory's pid stamp against the one it observed.
 S=$(new_sandbox)
 git -C "$S" branch -M main >/dev/null 2>&1
 BARE=$(mktemp -d -t wt-bare2.XXXXXX); rmdir "$BARE"
