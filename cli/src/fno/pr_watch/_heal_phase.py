@@ -1,12 +1,9 @@
 """The pr-watch tick's heal phase: the gate in front of the Rust drive loop.
 
-`fno do pr heal` classifies a red check and applies the mechanical fix, but
-until this phase nothing called it on a timer, so every red open PR waited
-for a hand. The loop itself lives in Rust beside the classifier
-(crates/fno-agents/src/heal.rs, `--all --apply`); this module only resolves
-the binary and runs it once per project root. launchd starts the tick in
-``/``, so each root is passed explicitly with ``--cwd``: gh resolves the
-repo from the working directory, and a bare invocation would read nothing.
+The loop lives in crates/fno-agents/src/heal.rs (`--all --apply`); this
+module resolves the binary and runs it once per project root. launchd starts
+the tick in ``/``, so each root is passed with ``--cwd``: gh resolves the
+repo from the working directory.
 """
 from __future__ import annotations
 
