@@ -15924,7 +15924,13 @@ async fn serve(
                 let uuids = last_uuids.clone();
                 let reader = tail_reader.clone();
                 let tails = tokio::task::spawn_blocking(move || {
-                    reader.lock().expect("tail reader lock").tails(&uuids)
+                    // Poison-recover rather than expect: a panic in one pass
+                    // must not blank the column on every later tick (the
+                    // cache is a HashMap, safe to reuse mid-poison).
+                    reader
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .tails(&uuids)
                 })
                 .await
                 .unwrap_or_default();

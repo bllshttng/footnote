@@ -384,15 +384,18 @@ impl TailReader {
                 out.insert(uuid.clone(), tail);
                 continue;
             }
-            if let Some(path) = self.paths.get(uuid) {
-                // Known path: read it fresh every call. No prose (yet) means
-                // no cell this round, never a re-walk to "fix" it.
-                if let Some(text) = read_tail(path, TRANSCRIPT_TAIL_BYTES) {
+            if let Some(path) = self.paths.get(uuid).cloned() {
+                // Known path: read it fresh every call. A readable file with
+                // no prose means no cell this round, never a re-walk; an
+                // UNREADABLE one drops the cache entry so the paced rescan
+                // can re-resolve a transcript that moved.
+                if let Some(text) = read_tail(&path, TRANSCRIPT_TAIL_BYTES) {
                     if let Some(tail) = compose_tail(&text) {
                         out.insert(uuid.clone(), tail);
                     }
+                    continue;
                 }
-                continue;
+                self.paths.remove(uuid);
             }
             missing.push(uuid.as_str());
         }
@@ -501,7 +504,9 @@ mod tests {
         // A uuid with NO transcript stays missing every call, so the cadence
         // is what decides whether it re-walks: ZERO walks each call (the
         // stateless `session_tails` behavior), a long cadence walks once.
-        let dir = scratch("ffffffff-0000-0000-0000-000000000000", "decoy");
+        // Distinct scratch uuid from every other test: scratch() keys the
+        // temp dir on it, and a shared dir races two tests' teardowns.
+        let dir = scratch("ffffffff-0000-0000-0000-00000000000a", "decoy");
         let uuid = "346f5d0d-9840-473c-af21-eaf100ca9ec4";
         let keys = vec![(uuid.to_string(), None)];
         let mut eager = TailReader::with_rescan_every(std::time::Duration::ZERO);
@@ -514,6 +519,41 @@ mod tests {
         paced.tails(&keys);
         paced.tails(&keys);
         assert_eq!(paced.scans(), 1);
+        set_test_projects_dir(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tail_reader_re_resolves_a_moved_transcript() {
+        // A cached path that stops reading (the file moved) must drop from
+        // the cache and re-resolve on the next walk, not stay blank while
+        // the uuid stays in keys.
+        let uuid = "346f5d0d-9840-473c-af21-eaf100ca9ec6";
+        let dir = scratch(uuid, "before move");
+        let old_proj = dir.join("-Users-someone-repo");
+        let mut reader = TailReader::with_rescan_every(std::time::Duration::from_secs(86400));
+        let keys = vec![(uuid.to_string(), None)];
+        assert_eq!(
+            reader.tails(&keys).get(uuid).map(String::as_str),
+            Some("before move")
+        );
+        // The transcript "moves": old path unreadable, same uuid under a new
+        // project dir.
+        let _ = std::fs::remove_dir_all(&old_proj);
+        let new_proj = dir.join("-Users-someone-elsewhere");
+        std::fs::create_dir_all(&new_proj).unwrap();
+        std::fs::write(
+            new_proj.join(format!("{uuid}.jsonl")),
+            format!("{}\n", turn(r#"{"type":"text","text":"after move"}"#)),
+        )
+        .unwrap();
+        // Paced reader: blank this tick (no walk due), recovered next walk.
+        assert!(reader.tails(&keys).get(uuid).is_none());
+        let mut fresh = TailReader::with_rescan_every(std::time::Duration::ZERO);
+        assert_eq!(
+            fresh.tails(&keys).get(uuid).map(String::as_str),
+            Some("after move")
+        );
         set_test_projects_dir(None);
         let _ = std::fs::remove_dir_all(&dir);
     }
