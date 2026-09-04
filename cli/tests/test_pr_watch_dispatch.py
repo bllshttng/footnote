@@ -3268,6 +3268,30 @@ def _arm_durable_grant(
     )
 
 
+def _store_keeper_absent() -> bool:
+    """True when no `fno-agents-worker` binary can back the graph store.
+
+    NOT the `find_dev_binary()` used by the `@requires_rust` convention
+    elsewhere, and the difference is load-bearing. That helper answers for
+    `fno-agents`, which the full smoke shard DELETES so the parity suites
+    skip; the worker survives that delete on purpose, so keying on it here
+    would skip these tests in the one job that can actually run them.
+    """
+    from fno.graph.store import _worker_binary
+
+    return _worker_binary() is None
+
+
+@pytest.mark.skipif(
+    _store_keeper_absent(),
+    reason=(
+        "the durable-grant resolver reads the graph through the store keeper, "
+        "which spawns `fno-agents-worker`; the changed-subset CI job installs "
+        "the Rust toolchain but never builds it, so this class fails there for "
+        "an absent runtime rather than a defect. The full smoke gate builds it "
+        "and runs these."
+    ),
+)
 class TestDurableGrantExecution:
     """The OPEN-granted action: reserved -> canonical merge -> executed/held/failed."""
 
