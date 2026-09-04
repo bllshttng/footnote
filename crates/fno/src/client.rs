@@ -8180,11 +8180,25 @@ impl View {
         // paints - never a re-derivation over a different visibility set.
         let (display, row_depths) = self.display_rows_with_depths();
         // (x-aeab) The court block owns the bottom rows of the column, so
-        // the row list stops above it; when the terminal cannot hold the
-        // block beside at least one row, the block yields entirely
-        // (court_block_rows returned 0) and the list runs to the full height
-        // exactly as before this change.
-        let block_rows = self.court_block_rows();
+        // the row list stops above it. The block's lines are rendered ONCE
+        // here and their count is the reserved height: the same function of
+        // (fold, ages) that `court_block_rows` computes for the layout, so
+        // the paint can never disagree with the reservation. When the
+        // terminal cannot hold the block beside at least one row, the block
+        // yields entirely and the list runs to the full height exactly as
+        // before this change.
+        let block_ages = self.agent_ages();
+        let mut block_lines = if self.court.is_expanded() {
+            self.court.expanded_lines(&block_ages)
+        } else {
+            self.court.minimized_lines(&block_ages)
+        };
+        let block_available = rows.saturating_sub(self.bottom_row_is_chrome() as usize);
+        let block_rows = if block_available > block_lines.len() {
+            block_lines.len()
+        } else {
+            0
+        };
         let list_rows = rows - block_rows;
         for (i, drow) in display.into_iter().enumerate().skip(off) {
             // (x-cd67 US1) The sideline owns the full column height including
@@ -8648,13 +8662,7 @@ impl View {
         // chrome beside the live rows, and the painter truncates to the panel
         // width - the same rule every sideline row follows.
         if block_rows > 0 {
-            let ages = self.agent_ages();
-            let lines = if self.court.is_expanded() {
-                self.court.expanded_lines(&ages)
-            } else {
-                self.court.minimized_lines(&ages)
-            };
-            for (k, text) in lines.into_iter().enumerate() {
+            for (k, text) in block_lines.into_iter().enumerate() {
                 let r = list_rows + k;
                 if r >= rows {
                     break;

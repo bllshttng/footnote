@@ -482,14 +482,7 @@ impl Panel {
             Some(consumers) => {
                 let items = consumers
                     .iter()
-                    .map(|c| {
-                        format!(
-                            "{} {} procs {:.0}%",
-                            c.name,
-                            count_or_unknown(Some(c.procs)),
-                            c.cpu_pct
-                        )
-                    })
+                    .map(|c| format!("{} {} procs {:.0}%", c.name, c.procs, c.cpu_pct))
                     .collect::<Vec<_>>()
                     .join(" · ");
                 lines.push(format!("  {label:<8} {items}", label = "top"));
