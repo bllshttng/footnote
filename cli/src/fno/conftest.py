@@ -28,6 +28,12 @@ import pytest
 
 from fno.hermetic import neutralise
 
+# Same keeper hygiene as cli/tests, imported from one shared module: a
+# fixture in one root protects nothing in the other, and bare pytest from
+# cli/ collects both, so hygiene must live in both.
+from fno.keeper_testing import _drain_exited_keepers  # noqa: F401
+from fno.keeper_testing import _reap_store_keepers  # noqa: F401
+
 _SANDBOX = tempfile.mkdtemp(prefix="fno-src-test-sandbox-")
 _hermetic_env = neutralise(os.environ, Path(_SANDBOX))
 os.environ.clear()
@@ -58,3 +64,11 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ANN001
     import shutil
 
     shutil.rmtree(_SANDBOX, ignore_errors=True)
+    # The sandbox graph paths die HERE, after session-scope fixture teardown
+    # already ran, so keepers serving them are still alive with graphs that
+    # are about to be gone. Sweeping after the rmtree is the only ordering
+    # that catches them (measured 2026-09-04: keepers live against graph
+    # paths this hook was about to delete).
+    from fno.graph.store import sweep_orphaned_keepers
+
+    sweep_orphaned_keepers(timeout=15.0)
