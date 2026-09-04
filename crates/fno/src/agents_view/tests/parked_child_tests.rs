@@ -166,7 +166,7 @@ async fn watch_registry_decodes_a_served_document_and_the_unchanged_answer() {
     let sock_path = dir.join("supervisor.sock");
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
     let server = tokio::spawn(async move {
-        use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         for answer in [
             r#"{"id":1,"result":{"version":{"mtime_nanos":123,"len":4},"doc":{"schema_version":6,"agents":[{"name":"served-row","cwd":"/w"}]}}}"#,
             r#"{"id":1,"result":{"version":{"mtime_nanos":123,"len":4},"doc":null}}"#,

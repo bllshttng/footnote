@@ -2079,6 +2079,15 @@ event_types:
         to:
           type: string
 
+  - name: session_aliases_merged
+    description: "The reconcile sweep folded legible aliases onto registry rows (the session-names overlay, plus default aliases minted for rows that had none). Count-only: the row is the name store, this says how many addresses moved."
+    sources: [daemon]
+    data:
+      required: [count]
+      properties:
+        count:
+          type: integer
+
   - name: agent_exited
     description: "An agent worker process exited (child process exit detected)."
     sources: [subagent]

@@ -763,6 +763,18 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_stop_refused",
     "agent_exited",
     "agent_removed",
+    // Served facts (daemon-emitted): the sweep is the only writer of the
+    // registry's measured surfaces, so each of these announces a change that
+    // a reader would otherwise learn from a snapshot field. `agent_renamed`
+    // is the harness's title moving against the row's last-seen baseline
+    // (the label is never rewritten); `agent_model_changed` /
+    // `agent_effort_changed` are PostModelSwitch axis changes verified by
+    // the report write; `session_aliases_merged` is the session-names
+    // overlay folding legible aliases onto rows.
+    "agent_renamed",
+    "agent_model_changed",
+    "agent_effort_changed",
+    "session_aliases_merged",
     "merge_cleanup_requested",
     "merge_cleanup_completed",
     "merge_cleanup_refused",
