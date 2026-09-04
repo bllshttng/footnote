@@ -188,9 +188,9 @@ The optional OpenRouter snapshot can supply a percentile for a row whose `band` 
 
 `[[routing.models]]` is the band inventory the difficulty grid reads (`route_resolve.resolve_grid`). `model_routing.roles` is the per-role provider map spawn-env applies. They are different axes and neither seeds the other.
 
-The grid stays config-first, so an undeclared inventory routes nothing: `resolve_grid` records `grid=no-inventory-declared`, which the `dispatch_spawned` receipt carries, and every banded plan lands on the ambient default. Having `model_routing.roles` set does not change that, and is exactly what makes an undeclared inventory read as working. `fno config doctor` prints a `band routing inactive:` line when the inventory is undeclared, and names the roles key as the other axis when it is set.
+The grid stays config-first, so an undeclared inventory routes nothing. `resolve_grid` records `grid=no-inventory-declared`, the `dispatch_spawned` receipt carries that reason, and every banded plan lands on the ambient default. Having `model_routing.roles` set does not change it. That key is exactly what makes an undeclared inventory read as working. When the inventory is undeclared, `fno config doctor` prints a `band routing inactive:` line. When the roles key is also set, the line names it as the other axis.
 
-Open ruling: whether roles should seed the inventory, or whether the two keys stay separate for good. Until it is made, the doctor line is what keeps the gap visible.
+One ruling is open: whether roles can seed the inventory, or whether the two keys stay separate. Until it is made, the doctor line keeps the gap visible.
 
 ## `fno config route` - legibility + on-the-fly switching
 
