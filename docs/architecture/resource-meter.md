@@ -24,7 +24,7 @@ Swap is the pressure signal, but only for a machine that has a swap file. On the
 
 ## The court panel
 
-Press `prefix` then `C` in the mux. The panel shows the 1-minute load against the cap, whole-machine CPU and free memory, the census, the lane advisor's own answer, and the age of the reading. Every number on it comes from one `fno doctor lanes --json` call. The panel adds no capacity model of its own, because two estimators that disagree is a worse problem than an invisible one.
+Press `prefix` then `C` in the mux. The panel shows the 1-minute load against the cap, whole-machine CPU, and free memory. Below those it shows the census, the lane advisor's own answer, and the age of the reading. Every number comes from one `fno doctor lanes --json` call. The panel adds no capacity model of its own, because two estimators that disagree is a worse problem than an invisible one.
 
 The cap is the thing the panel exists to make visible. It is `max_load_per_cpu` times the CPU count, and it is the only gate on a spawn. Before this panel, only an agent running a hidden verb saw it.
 
@@ -32,7 +32,7 @@ Three render rules keep the panel honest, and each closes a way a monitor can li
 
 The `read` line always shows the fold's age. A reading past the cache TTL renders with its age and the word `stale`, never as `unknown`. An operator watching `unknown` every second learns nothing from the panel and reaches for `--force`, which is how a guard becomes a formality.
 
-The attribution gap gets its own line and is never folded into a count. The gap is a failure to attribute a PROCESS to a registry ROW, so it cannot change how many rows exist: every row carries its crown level whether or not it carries a pid. It belongs beside the CPU reading it qualifies, where it says what it means, which is that the fleet CPU share is an undercount rather than headroom.
+The attribution gap gets its own line and is never folded into a count. The gap is a failure to attribute a PROCESS to a registry ROW. It cannot change how many rows exist, because every row carries its crown level with or without a pid. The gap belongs beside the CPU reading it qualifies. There it says what it means: the fleet CPU share is an undercount, not headroom.
 
 A refusal prints the advisor's own words with no lane number beside them. A dark sensor is not headroom, and only the advisor knows which sensor went dark.
 
@@ -54,6 +54,6 @@ A running test is a process whose OWN program is a test runner, matched on `argv
 
 ## The roster count is read in process
 
-`fno doctor footprint` sets its leak threshold from the count of live registry rows. That count used to arrive over a `fno agents list --status live --json` subprocess under a 5.0 second budget. The read measured 8.5 seconds at rest and 21.7 seconds under load. So the roster went dark exactly when the reading mattered. The report printed `roster unavailable`, and then `unexplained processes: unknown`.
+`fno doctor footprint` sets its leak threshold from the count of live registry rows. That count used to arrive over a `fno agents list --status live --json` subprocess under a 5.0 second budget. The read measured 8.5 seconds at rest and 21.7 seconds under load. When the reading mattered, the roster was already dark. The report printed `roster unavailable`, and then `unexplained processes: unknown`.
 
 It now reads `load_registry` in process, which answers the same question from the same file in well under a second. There is no budget left to miss and no cache to age. An incomplete or unreadable registry still degrades the threshold away. Its reason names the registry, not a timeout that no longer happens.
