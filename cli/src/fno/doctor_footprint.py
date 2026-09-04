@@ -245,8 +245,8 @@ def _claim_witness(name: str) -> str | None:
 
     The liveness oracle for rows with no pid and no route - a codex thread
     lane holds no process of its own. free/stale positively report no witness
-    (x-a457: 14 routless rows, every claim expired, kept the reading
-    fail-closed); an unreadable store proves nothing.
+    (x-a457: 14 routless rows, every claim expired, kept the gate refusing);
+    an unreadable store proves nothing.
     """
     try:
         from fno.agents.spawn_gate import _gate_claims_root
@@ -262,10 +262,10 @@ def _claude_roster_pids() -> dict[str, int] | None:
     """The claude daemon roster as ``{8-hex jobId: host pid}``, or None when unreadable.
 
     The second daemon-side oracle for a routed row the socket map missed: a
-    short_id in NEITHER the rv farm NOR the daemon's own worker list is a
-    corpse row (x-a457, measured: all 21 map-missed rows were roster-absent
-    too). A roster pid is the PTY HOST hosting that session. Missing file:
-    definitive {}; other read failure: None (fail closed).
+    short_id in NEITHER the rv farm NOR the daemon's worker list is a corpse
+    row (x-a457, measured: all 21 map-missed rows were roster-absent too). A
+    roster pid is the PTY HOST hosting that session. Missing file: definitive
+    {}; other read failure: None (fail closed).
     """
     try:
         from fno.agents.spawn_gate import _roster_path
@@ -284,7 +284,6 @@ def _claude_roster_pids() -> dict[str, int] | None:
         for w in workers.values()
         if isinstance(w, dict)
         and isinstance(w.get("sessionId"), str)
-        and w["sessionId"]
         and isinstance(w.get("pid"), int)
         and not isinstance(w.get("pid"), bool)
     }
@@ -295,7 +294,7 @@ def _unrouted_row_costs_fleet(row: Any) -> bool:
 
     Fail closed: every unreadable witness answers True (gap row); only a
     POSITIVE dead answer drops the row. A pane's cost rides the attributed
-    mux server, so only an unanswered pane probe stays a gap.
+    mux server, so only an unanswered probe stays a gap.
     """
     mux = getattr(row, "mux", None)
     if isinstance(mux, dict) and mux:
@@ -385,10 +384,9 @@ def _live_root_pids(
         ]
         unrouted_rows = [row for row in pidless_rows if _pidless_route(row) is None]
         routed_rows = [row for row in pidless_rows if _pidless_route(row) is not None]
-        # A pidless row NO route accepts is an attribution gap, not a dead
-        # reading (x-e040). x-a457: but only while a witness says the cost is
-        # real - a corpse row's claim is expired, and counting it kept the
-        # gate refusing for hours. Only a POSITIVE dead answer drops a row.
+        # x-e040: a routless row is a NAMED gap, not a dead reading - x-a457:
+        # but only while a witness says the cost is real; a corpse row's
+        # expired claim kept the gate refusing for hours.
         fleet_unrouted = [
             row for row in unrouted_rows if _unrouted_row_costs_fleet(row)
         ]
@@ -738,16 +736,14 @@ def _emit_result(
     cause_only: bool = False,
     note: str | None = None,
 ) -> NoReturn:
-    capacity = "unknown"
     leak = "unknown"
     exit_code = 0
     # Cause-only answers the capacity question too (x-a457): a None snapshot
-    # can only ever say unknown. Exit codes stay 0/4 - the Rust gate reads
-    # stdout only on exit 0 and its own thresholds decide admission.
+    # can only say unknown. Exit codes stay 0/4 for the Rust gate's 0-only read.
     load_snapshot = _spawn_load_snapshot()
+    capacity = capacity_verdict(load_snapshot)
     if not cause_only:
         leak = leak_verdict(reading.direct_process_count, process_threshold)
-        capacity = capacity_verdict(load_snapshot)
         # Capacity keeps the historical exit (callers depend on 3); the leak
         # alarm gets its own code. When BOTH fire, capacity wins the exit as
         # the more urgent alarm and the leak still prints.

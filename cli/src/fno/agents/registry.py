@@ -48,6 +48,7 @@ from typing import Any, Callable, Iterator, Literal, Optional, Tuple
 from fno import paths
 from fno.harness_identity import (
     canonical_handle,
+    claude_transport_short_id,
     legacy_suffix_handle,
     session_handle_tier,
     session_identity_key,
@@ -2116,7 +2117,13 @@ def _mint_branch_row(
         predecessor_session_ids=[],
         forked_from_session_id=stale or None,
         related_session_id=None,
-        short_id="",
+        # A claude branch is born bg-routable: short_id is the 8-hex jobId the
+        # rv socket farm keys on; left "", footprint read the branch as
+        # unattributed cost (x-a457). Others keep "": first-8 is not a
+        # transport key there.
+        short_id=(
+            claude_transport_short_id(session_id) if entry.harness == "claude" else ""
+        ),
         messaging_socket_path=None,
         mcp_channel_id=None,
         cc_session_id=None,
