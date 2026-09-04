@@ -1444,6 +1444,11 @@ def _preserve_claim_door(root: Path, env: dict[str, str]) -> None:
     preserved = preserved_dir / "fno-agents"
     shutil.copyfile(source, preserved)
     preserved.chmod(source.stat().st_mode & 0o777)
+    # The scrub unlinks the target/ copies this function may have been handed,
+    # so a BIN inherited from the job env goes dead at exactly the moment the
+    # claim consumers run. Re-point it at the preserved copy: resolve_binary
+    # checks the env name first, and hermetic children forward it by name.
+    env["FNO_AGENTS_BIN"] = str(preserved)
     env["PATH"] = str(preserved_dir) + os.pathsep + env.get("PATH", "")
 
 
