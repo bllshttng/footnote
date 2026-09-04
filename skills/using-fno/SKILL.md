@@ -93,7 +93,7 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 | "Mark node `<id>` done" | `fno backlog done <id>` (NOT a skill) |
 | "Review my changes" | `/fno:review` |
 | "Which task next?" | `fno backlog next` / `ready` |
-| "Reign over a territory as the crowned king" | `/fno:reign <scope>` |
+| "Reign as the crowned king" | `/fno:reign <scope>` |
 | "What state am I in after compaction?" | `fno whoami` then `fno whoami status` |
 | "Open a PR" | `/fno:pr create` |
 | "Wait for external review" | `/fno:pr check` |

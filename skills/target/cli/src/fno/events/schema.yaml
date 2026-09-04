@@ -2373,7 +2373,7 @@ event_types:
 
   - name: reign_armed
     description: "A crowned reign finished arming its beat: six monitors plus the self-injected /loop and /goal. Journaled by the reigning session through fno doctor event emit."
-    sources: [loop]
+    sources: [loop, daemon]
     data:
       required: []
       properties:
@@ -2386,7 +2386,7 @@ event_types:
 
   - name: reign_checkin
     description: "One completed check-in body of a reign: indicators printed, levers pulled (if any)."
-    sources: [loop]
+    sources: [loop, daemon]
     data:
       required: []
       properties:
@@ -2397,7 +2397,7 @@ event_types:
 
   - name: reign_dispatch_exception
     description: "A reign spawned despite the no-dispatch rule, justified by a red dispatching arm in fno agents status. Names the arm and the node."
-    sources: [loop]
+    sources: [loop, daemon]
     data:
       required: []
       properties:
