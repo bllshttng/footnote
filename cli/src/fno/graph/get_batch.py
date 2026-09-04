@@ -14,8 +14,7 @@ def resolve_or_dispatch(ids: List[str], *, field: object, grouped: bool, strict:
     if field or grouped or strict:
         typer.echo(
             "fno backlog get: --field/--grouped/--strict take exactly one id; "
-            "pass one id at a time for those, or drop them for a plain batch read.",
-            err=True,
+            "pass one id at a time for those, or drop them for a plain batch read.", err=True,
         )
         raise typer.Exit(code=2)
     from fno._subprocess_util import propagate_returncode
@@ -24,11 +23,9 @@ def resolve_or_dispatch(ids: List[str], *, field: object, grouped: bool, strict:
     binary = resolve_binary()
     if binary is None:
         typer.echo(
-            "fno backlog get: the fno-agents binary was not found, and a batch "
-            "read of several ids needs it. Reinstall fno, run `fno doctor update "
-            "--rust`, or set FNO_AGENTS_BIN. Pass one id at a time to use the "
-            "all-Python path instead.",
-            err=True,
+            "fno backlog get: the fno-agents binary was not found, and a batch read of "
+            "several ids needs it. Reinstall fno, run `fno doctor update --rust`, or set "
+            "FNO_AGENTS_BIN. Pass one id at a time to use the all-Python path instead.", err=True,
         )
         raise typer.Exit(code=2)
     result = subprocess.run([str(binary), "graph-get", *ids, "--json"], check=False)

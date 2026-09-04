@@ -21,8 +21,7 @@ def bash_census_command(
     if binary is None:
         typer.echo(
             "fno doctor bash-census: the fno-agents binary was not found. "
-            "Reinstall fno, run `fno doctor update --rust`, or set FNO_AGENTS_BIN.",
-            err=True,
+            "Reinstall fno, run `fno doctor update --rust`, or set FNO_AGENTS_BIN.", err=True,
         )
         raise typer.Exit(code=2)
 
