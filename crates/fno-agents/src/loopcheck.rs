@@ -17,7 +17,7 @@ use serde_json::Value;
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 // ── public types ──────────────────────────────────────────────────────────────
 
@@ -11246,20 +11246,9 @@ fn run_bounded(
     cwd: &Path,
     timeout: std::time::Duration,
 ) -> BoundedRun {
-    use std::os::unix::process::CommandExt;
-
-    let spawned = Command::new(fno_bin)
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn();
-
-    let mut child = match spawned {
+    let mut child = match crate::bounded_spawn::spawn_bounded(fno_bin, args, cwd) {
         Ok(c) => c,
-        Err(e) => return BoundedRun::SpawnFailed(e.kind()),
+        Err(kind) => return BoundedRun::SpawnFailed(kind),
     };
     let pgid = child.id() as i32;
 
@@ -11567,7 +11556,7 @@ pub(crate) fn bounded_read(
         BoundedRun::SpawnFailed(kind) => Err(GhReadError::unrunnable_spawn(
             read_name,
             kind,
-            "spawn failed",
+            &format!("spawn failed ({kind:?})"),
         )),
         BoundedRun::WaitFailed => Err(GhReadError::unrunnable(read_name, "wait failed")),
     }
@@ -11697,8 +11686,12 @@ pub(crate) fn git_bounded(git_bin: &str, args: &[&str], cwd: &Path) -> Option<Bo
             log_bounded_read_error("git", &error);
             None
         }
-        BoundedRun::SpawnFailed(_) => {
-            let error = GhReadError::unrunnable(&read_name, "spawn failed");
+        BoundedRun::SpawnFailed(kind) => {
+            let error = GhReadError::unrunnable_spawn(
+                &read_name,
+                kind,
+                &format!("spawn failed ({kind:?})"),
+            );
             log_bounded_read_error("git", &error);
             None
         }
@@ -12038,8 +12031,6 @@ fn killpg(pgid: i32) {
 /// descendant's whole lifetime - wedging the stop hook well past the 60s the
 /// gate promises. Killing the group closes the pipe and bounds the join.
 fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcome {
-    use std::os::unix::process::CommandExt;
-
     // The pipefail preamble closes the `| tail -5` trap at the runner: a
     // pipeline whose real command fails can no longer read as pass through
     // the truncating tail's exit 0. Bash-only: on Linux /bin/sh is commonly
@@ -12050,31 +12041,28 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
     // its command ran. A no-bash host falls back to plain sh with NO
     // preamble, losing only the pipeline-trap closure, not the probe.
     let bash_wrapped = format!("set -o pipefail 2>/dev/null; {cmd}");
+    // Through `spawn_bounded` for the same reason `run_bounded` goes through
+    // it: a done_probe is the strongest rung loop-check has, and a fork that
+    // answers EAGAIN under load would otherwise return Blocked and hold the
+    // gate on a probe that was never run. NotFound still returns on attempt
+    // one, so the sh fallback below fires as promptly as it did before.
     let spawned = {
         let build = |shell: &str, script: &str| {
-            Command::new(shell)
-                .arg("-c")
-                .arg(script)
-                .current_dir(cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .process_group(0)
-                .spawn()
+            crate::bounded_spawn::spawn_bounded(OsStr::new(shell), &["-c", script], cwd)
         };
         match build("bash", &bash_wrapped) {
             Ok(child) => Ok(child),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => build("sh", cmd),
-            Err(e) => Err(e),
+            Err(std::io::ErrorKind::NotFound) => build("sh", cmd),
+            Err(kind) => Err(kind),
         }
     };
 
     let mut child = match spawned {
         Ok(c) => c,
-        Err(e) => {
+        Err(kind) => {
             return ProbeOutcome::Blocked {
                 kind: "spawn",
-                why: format!("probe spawn failed: {e}"),
+                why: format!("probe spawn failed: {kind:?}"),
             }
         }
     };
