@@ -3681,11 +3681,7 @@ fn x2219_covered_pr_skips_the_reviews_read_uncovered_pays_for_it() {
         "ts": "2026-06-05T00:10:00Z",
         "data": {"reviewer": "code-review", "head_sha": X2219_HEAD, "verdict": "pass"}
     });
-    fs::write(
-        project_events(&cwd),
-        attestation.to_string() + "\n",
-    )
-    .unwrap();
+    fs::write(project_events(&cwd), attestation.to_string() + "\n").unwrap();
     let record = cwd.join("reviews-reads.log");
     let bins = TempDir::new().unwrap();
     let (gh, git) = x2219_reviews_gh(bins.path(), Some(&record), &x2219_oids(1));
