@@ -120,6 +120,54 @@ The lower-level equivalent is `fno mux pane run --at current --split down -- <ar
 
 For a multi-pane topology instead of one adjacent pane, `fno mux layout graft` realizes a typed H/V subtree at the calling pane while preserving the rest of the tab. See [mux-layout-templates.md](../architecture/mux-layout-templates.md) for the schema and the `apply` vs `graft` ownership split.
 
+## Place a thread through a portal (`--portal`)
+
+A thread hosts no pane until a portal opens one. Before `--portal`, that took two calls: spawn the worker, then `fno mux thread <name> --portal N`. `--portal N` folds both calls into one, so one command creates the worker and puts it on screen.
+
+### Spawn and place in one call
+
+```bash
+fno agents spawn "review the failing test" --name w2 --substrate thread --portal 1
+```
+
+When the command completes, portal 1 is open and already shows the new worker. Omit `--portal` and the spawn creates a thread with no portal, so nothing appears on screen. The index runs from 0 to 255. Each index holds one portal, and each portal shows one thread.
+
+### Choose the geometry
+
+```bash
+fno agents spawn "review the failing test" --name w2 --substrate thread --portal 1 --tab 2 --split right
+```
+
+If the portal at index 1 does not exist yet, the worker lands in tab 2, tiled right of that tab's focused pane. `--workspace` and `--split` name the destination the same way they do for a pane.
+
+If the portal at index 1 already shows a live viewer, the portal keeps its geometry. The server prints the notice `a portal takes no split, target, or anchor`, so you see the refusal instead of a silent move.
+
+A replacement viewer prefers the remembered tab. If an old portal's seat died but its tab still exists, the new viewer lands in that tab, and your `--tab` loses. This keeps a replacement where the operator last looked.
+
+`--at` is refused for a thread before anything spawns. A thread has no calling pane to anchor to, so strict anchoring has no meaning here.
+
+### What the spawn refuses
+
+Every refusal below exits 2 before the worker starts, and each message names the fix.
+
+| You passed | The refusal says |
+|---|---|
+| `--portal` with a pane or headless substrate | a pane hosts its own geometry, and headless hosts no session |
+| placement flags on a thread with no `--portal` | names `--portal N` as the missing piece |
+| `--portal` with `--once` | a one-shot hosts no session to show |
+| `--portal` with `--bounded-placement` | a thread cannot be bounded |
+| `--at` on a thread | a thread has no calling pane |
+| an index outside 0 to 255 | the index range |
+| `--tab 7` when tab 7 is gone | refuses before any pane exists |
+
+### Give a running worker a portal
+
+A thread that already runs gets a portal later with `fno mux thread <name> --portal N`. Omit the index there and the verb uses portal 0. In the sideline, Enter on a paneless live row opens portal 0, and `P` opens the next free index.
+
+Portals are never persisted. If the mux server restarts, every portal is gone and every thread keeps running. Spawn again with `--portal`, or open a portal by hand.
+
+The index map, the one-row-one-viewer rule, and restore pruning live in [portals.md](../architecture/portals.md).
+
 ## Reasoning effort (`--effort`)
 
 `--effort` tunes reasoning without changing the selected model. Omit it to keep

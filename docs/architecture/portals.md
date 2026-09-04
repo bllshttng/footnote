@@ -24,10 +24,12 @@ The tiling primitive already existed. The tab menu offers Join Left, Join Right,
 
 | Door | Gesture |
 |---|---|
-| CLI, spawn, mail | `fno mux thread <name> --portal N`. Omitted is portal 0. |
+| CLI, spawn | `fno agents spawn --substrate thread --portal N` (one call; `--tab`/`--split` honored on a fresh open), or `fno mux thread <name> --portal N`. Omitted is portal 0. |
 | Sideline, portal 0 | Enter (or a click) on a paneless live row. |
 | Sideline, a new portal | `P` opens the next free index. |
 | Layout | The existing Join actions tile open portals. |
+
+The one-call spawn form, its geometry rules, and its refusals are documented in [fno-agents-spawn.md](../guides/fno-agents-spawn.md).
 
 A bare digit is deliberately NOT the sideline gesture for an index. `0`..`9` on the peek overlay is the answerable-prompt path. So `P` pairs with `p` (the placement picker) the way `X` pairs with `x`.
 
