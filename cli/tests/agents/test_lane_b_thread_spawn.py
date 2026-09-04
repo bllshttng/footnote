@@ -202,6 +202,7 @@ def test_lane_b_spawn_renders_the_contract_argv_and_registers_the_row(
     assert row.messaging_socket_path == receipt["keeper_socket"]
     assert row.pid == 4242
     assert row.mux is None, "a thread row is pane-less: no mux ref"
+    assert row.fno_id == session_id
     assert row.origin == "spawn"
 
 

@@ -5406,7 +5406,7 @@ fn build_codex_thread_entry(
         legacy_claude_short_id: None,
         claude_session_uuid: None,
         messaging_socket_path: None,
-        codex_session_id: Some(session_id),
+        codex_session_id: Some(session_id.clone()),
         gemini_session_id: None,
         mcp_channel_id: None,
         cc_session_id: None,
@@ -5435,7 +5435,7 @@ fn build_codex_thread_entry(
         crown_scope: None,
         crown_grantor: None,
         route_settings_path: None,
-        fno_id: None,
+        fno_id: Some(session_id),
         delivery_policy: None,
         // v19: the launch posture is the resume posture. The doc's old warning
         // that "a registry row records no sandbox posture" died here.
@@ -11158,6 +11158,8 @@ fn fill_random(buf: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
+    #[path = "store_socket_sweep_tests.rs"]
+    mod store_socket_sweep_tests;
     use super::*;
     use std::io::Write;
 
@@ -16225,7 +16227,11 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             });
         let yolo = build_codex_thread_entry("t", worktree.path(), &start, None, None, true);
         assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
-        assert!(entry_posture_is_full_access(&yolo));
+        assert!(
+            entry_posture_is_full_access(&yolo)
+                && yolo.fno_id.as_deref() == Some("thread-p")
+                && yolo.mux.is_none()
+        );
         let bounded = build_codex_thread_entry("t", worktree.path(), &start, None, None, false);
         assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
         assert!(!entry_posture_is_full_access(&bounded));
@@ -17318,6 +17324,9 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         static C: AtomicU32 = AtomicU32::new(0);
         let n = C.fetch_add(1, Ordering::Relaxed);
         let base = PathBuf::from(format!("/tmp/fnokswp{tag}{}_{n}", std::process::id()));
+        // Pids recycle, so a prior run may own this path; a stale socket file
+        // in it fails fixture binds with EADDRINUSE. Start from an empty base.
+        let _ = std::fs::remove_dir_all(&base);
         let home = AgentsHome::at(base.join("agents"));
         home.ensure_root().unwrap();
         std::fs::create_dir_all(lane_b_keeper_dir(&home)).unwrap();
@@ -17684,57 +17693,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
             apply_keeper_sweep_changes(&mut matching, &changes, "2026-09-01T00:00:00Z");
         assert!(superseded.is_empty(), "identity-held change applies");
         assert_eq!(matching.entries[0].status, AgentStatus::Exited);
-    }
-
-    #[test]
-    fn store_socket_sweep_unlinks_the_dead_and_leaves_the_live() {
-        // Sibling sockets whose graph still lives stay for the client's
-        // connect-before-bind; orphaned sockets (graph gone) and hashed-root
-        // litter are unlinked; a live listener is left exactly as found.
-        let home = keeper_sweep_home("storesock");
-        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let state_root = home.root().parent().unwrap().to_path_buf();
-        let temp_root = state_root.join("hashed");
-
-        // A dead sibling whose graph still exists: NOT ours to unlink. A
-        // client rebind is one connection away, and unlinking here is the
-        // steal race this rule exists to close.
-        let shielded_sock = state_root.join("graph.json.store.sock");
-        let corpse = std::os::unix::net::UnixListener::bind(&shielded_sock).unwrap();
-        drop(corpse);
-        let shielded_graph = state_root.join("graph.json");
-        std::fs::write(&shielded_graph, b"{}").unwrap();
-
-        // An orphaned sibling: same dead shape, but its graph is gone, so no
-        // keeper can ever be behind the path again.
-        let orphan_sock = state_root.join("deleted-graph.json.store.sock");
-        let corpse2 = std::os::unix::net::UnixListener::bind(&orphan_sock).unwrap();
-        drop(corpse2);
-
-        let dead_hashed = temp_root.join(".fno-store-abcdef1234567890.sock");
-        std::fs::create_dir_all(&temp_root).unwrap();
-        // The hashed root is ours by construction, so its litter can also be
-        // a bare file (ENOTSOCK) - covered on this fixture.
-        std::fs::write(&dead_hashed, b"").unwrap();
-
-        // A live listener: a bound unix socket in the state root.
-        let live_sock = state_root.join("other.store.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&live_sock).unwrap();
-
-        let unlinked = store_socket_sweep_in(&home, temp_root, &emitter);
-        assert_eq!(unlinked, 2, "the orphan and the hashed litter unlinked");
-        assert!(
-            shielded_sock.exists(),
-            "a shielded sibling is never unlinked"
-        );
-        assert!(!orphan_sock.exists(), "an orphaned socket is unlinked");
-        assert!(!dead_hashed.exists());
-        assert!(live_sock.exists(), "a live listener is never unlinked");
-        assert!(shielded_graph.exists(), "non-socket files are untouched");
-        drop(listener);
-        let _ = std::fs::remove_file(&live_sock);
-        let _ = std::fs::remove_file(&shielded_sock);
-        let _ = std::fs::remove_file(&shielded_graph);
     }
 
     #[test]

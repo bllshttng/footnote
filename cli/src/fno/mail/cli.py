@@ -74,6 +74,7 @@ from fno.inbox.store import (
     write_new_thread,
 )
 from fno import paths
+from fno.mail.thread_force import resolve_pane_entry as _resolve_pane_entry
 
 
 class DaemonState(str, Enum):
@@ -2003,30 +2004,6 @@ def _codex_daemon_socket_absent() -> bool:
     return not _codex_app_server_report().get("present", False)
 
 
-def _resolve_pane_entry(resolved, recipient: Optional[str], token: Optional[str]):
-    """The registry row behind a name-lane address, or None.
-
-    Tries the resolved session id first (the strongest address), then the token
-    the caller typed, then the canonical recipient handle. None means no row
-    claims this address, which for ``--force`` is a refusal, not a fallback.
-    """
-    from fno.agents.registry import AgentResolutionError, resolve_agent
-
-    candidates = [
-        getattr(resolved, "session_id", None) if resolved is not None else None,
-        token,
-        recipient,
-    ]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            return resolve_agent(candidate).entry
-        except (AgentResolutionError, OSError):
-            continue
-    return None
-
-
 def _forced_pane_send(
     wrapped: str,
     *,
@@ -2063,9 +2040,11 @@ def _forced_pane_send(
     from fno.agents.dispatch import _mux_pane_send
     from fno.bus.log import record_typed_delivery
 
-    mux = getattr(entry, "mux", None) or {}
-    pane_id = mux.get("pane_id")
-    mux_session = mux.get("session")
+    from fno.mail.thread_force import prepare_forced_entry
+
+    entry, mux_session, pane_id, thread_viewport = prepare_forced_entry(
+        entry, recipient=recipient, reservation=reservation
+    )
     # Liveness, on the same rule the resolved lane states: an exited row keeps
     # its mux ref, and pane ids are reused across a mux restart, so a stale ref
     # types into whatever pane now holds that number. --force needs this MORE
@@ -2164,7 +2143,8 @@ def _forced_pane_send(
             file=sys.stderr,
         )
     corr = f" re:{reply_to}" if reply_to else ""
-    print(f"typed (pane {pane_id}) to {recipient} id:{msg_id}{corr}")
+    label = f"thread viewport {mux_session}:{pane_id}" if thread_viewport else f"pane {pane_id}"
+    print(f"typed ({label}) to {recipient} id:{msg_id}{corr}")
     return True
 
 
@@ -4506,6 +4486,13 @@ def cmd_send(
         from fno.agents import discover as discover_mod
         from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
 
+        from fno.mail.thread_force import send_by_thread_identity
+
+        if send_by_thread_identity(
+            name, message=message, from_name=from_name, harness=harness,
+            style_exception=style_exception, origin=mail_origin,
+        ):
+            return
         forced_resolved, forced_suggestions = discover_mod.resolve_or_suggest(name)
         try:
             _name_lane_send(

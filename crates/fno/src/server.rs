@@ -47,6 +47,7 @@ use crate::proto::{
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
 use crate::squad_store::StoredTabTree;
+use crate::thread_viewer::Portal;
 use crate::tree::{self, Axis, Dir, Node, Rect, Tab, TabId};
 use crate::vt::BlockJumpOutcome;
 use crate::vt::{self, frame_text, Modes};
@@ -2163,22 +2164,6 @@ struct DetachedPane {
     squad_key: String,
     origins: Vec<String>,
     tab_name: Option<String>,
-}
-
-/// (x-8f9d) One open portal: the row it shows, the pane seating it, and the
-/// tab that pane lives in. Named rather than a 3-tuple because 31 production
-/// readers of `(String, u64, TabId)` already sat at the edge of legibility
-/// and the portal index is one more thing to carry.
-///
-/// `row_key` is the attach id (claude) or the registry name (every other
-/// harness - the command's `id` field). `seat` is a live viewer iff
-/// `panes[seat].cmd` is `Some`; after a stand-in swap it names the idle
-/// shell, not the dead viewer.
-#[derive(Clone)]
-struct Portal {
-    row_key: String,
-    seat: u64,
-    tab: TabId,
 }
 
 impl DetachedPane {
@@ -4394,11 +4379,18 @@ impl Core {
         // point at the pre-restart pane, so the join above misses and the
         // pane read `-` while doing real work. This map is fno's own record,
         // not an argv heuristic: the id was stamped at birth by the code that
-        // built the resume command. Single-identity rule unchanged.
+        // built the resume command.
         for ((_, session_id), pane) in &self.worker_session_pane {
             if *pane == pid {
                 ids.insert(session_id.clone());
             }
+        }
+        if ids.is_empty() {
+            ids.extend(crate::thread_viewer::identity_for_pane(
+                &self.portals,
+                pid,
+                agents,
+            ));
         }
         (ids.len() == 1).then(|| ids.into_iter().next()).flatten()
     }
@@ -11771,6 +11763,10 @@ impl Core {
                     })
                 })
                 .collect();
+            let viewer_row = matches
+                .is_empty()
+                .then(|| crate::thread_viewer::row_for_pane(&self.portals, pane, rows))
+                .flatten();
             let mut occupants: Vec<&RegistryAgent> = Vec::new();
             for row in matches {
                 let equivalent = occupants.iter().any(|existing| {
@@ -11784,10 +11780,15 @@ impl Core {
             let registry_identity = occupants
                 .first()
                 .and_then(|row| row.effective_identity())
+                .or_else(|| viewer_row.and_then(|row| row.effective_identity()))
                 .unwrap_or("<unknown>");
-            if occupants.len() != 1
+            if (occupants.len() != 1 && viewer_row.is_none())
                 || registry_identity != expected
-                || occupants.first().is_some_and(|row| row.name != host)
+                || occupants
+                    .first()
+                    .copied()
+                    .or(viewer_row)
+                    .is_some_and(|row| row.name != host)
             {
                 let registry = occupants
                     .iter()
@@ -12860,15 +12861,10 @@ impl Core {
         Flow::Continue
     }
 
-    /// (x-07c2) Title a freshly-opened thread-viewer pane. A Drive pane is
-    /// named by [`Self::name_attached_pane`] semantics (the registry name);
-    /// a Follow/Locate pane carries the row's name so the tab reads as the
-    /// worker it views, not as `sh` or `fno`.
+    /// Title a freshly-opened thread-viewer pane by its registry row.
     fn name_thread_viewer_pane(&mut self, pid: u64, row: &RegistryAgent, tier: &Reach) {
-        // (x-6678) `name_attached_pane` resolves a name through the claude
-        // attach catalog, so only a claude Drive pane goes that way. A codex
-        // Drive pane takes the row's name, the way Follow and Locate panes
-        // already do.
+        self.claim_eligible.insert(pid);
+        // Claude Drive panes use attach lookup; other tiers use the row name.
         if matches!(tier, Reach::Drive) && row.harness.as_deref() == Some("claude") {
             // The attach argv carries no FNO_AGENT_SELF; name_attached_pane
             // resolves the name from the live catalog the same way.
@@ -17465,6 +17461,9 @@ async fn client_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[path = "../server_thread_viewer_tests.rs"]
+    mod thread_viewer_tests;
     use crate::proto::TemplateName; // x-c4d4 tests; not referenced by name in non-test code
 
     // (x-0719) The portal test family lives in its own module; this file

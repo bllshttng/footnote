@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import io
+import os
 import re
 import subprocess
 import time
@@ -32,7 +33,7 @@ class RetaskCoordinate:
     provider: Optional[str]
     model: Optional[str]
     effort: Optional[str]
-    substrate: str
+    substrate: Optional[str]
     permission_mode: Optional[str]
     route: Optional[str]
     account: Optional[str]
@@ -54,13 +55,7 @@ def _resolve_retask_node(node: str) -> str:
 
 
 def _source_node_for_entry(entry: AgentEntry) -> tuple[Optional[dict], Optional[str]]:
-    """Join a live registry row to exactly one graph node.
-
-    One node can legitimately carry several session rows under the same
-    (harness, session_id) - think and blueprint phases of one session - so
-    matching rows are deduplicated by node id and only DISTINCT nodes count
-    as ambiguity.
-    """
+    """Join a live registry row to exactly one graph node."""
     from fno.graph.load import load_graph
 
     session_id = entry.harness_session_id
@@ -170,6 +165,54 @@ def _flag_value(args: Sequence[str], *names: str) -> Optional[str]:
     return None
 
 
+def resolve_thread_viewport(
+    entry: AgentEntry,
+    *,
+    runner: Optional[Callable[..., subprocess.CompletedProcess[str]]] = None,
+) -> tuple[str, int]:
+    """Open a thread's dedicated viewport and return its positive pane id."""
+    runner = runner or subprocess.run
+    thread_id = entry.fno_id
+    session = (os.environ.get("FNO_SESSION") or "main").strip()
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        raise RetaskTransportError("thread_ref_unreadable")
+    if not session:
+        raise RetaskTransportError("thread_view_unavailable")
+    fno_bin = os.environ.get("FNO_BIN") or "fno"
+
+    def invoke(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+        try:
+            return runner([fno_bin, *args], capture_output=True, text=True, timeout=timeout, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RetaskTransportError("thread_view_open_timeout") from exc
+
+    if invoke(["mux", "thread", "--session", session, thread_id], 30).returncode:
+        raise RetaskTransportError("thread_view_unavailable")
+    # The pane opened above stays open on a join miss and its name stamping
+    # can lag the open, so the join retries; the miss names the opened pane.
+    for _ in range(3):
+        try:
+            panes = invoke(["mux", "pane", "ls", "--session", session, "--json"], 10)
+            rows = json.loads(panes.stdout)
+        except RetaskTransportError:
+            raise
+        except ValueError as exc:
+            raise RetaskTransportError("thread_ref_unreadable") from exc
+        matches = [
+            row
+            for row in rows
+            if isinstance(row, Mapping)
+            and row.get("name") == entry.name
+            and row.get("fno_id") == thread_id
+            and isinstance(row.get("pane_id"), int)
+            and row["pane_id"] > 0
+        ] if panes.returncode == 0 and isinstance(rows, list) else []
+        if len(matches) == 1:
+            return session, matches[0]["pane_id"]
+        time.sleep(0.5)
+    raise RetaskTransportError("thread_view_join_missed")
+
+
 def resolve_target_coordinate(
     node: str,
     *,
@@ -209,7 +252,7 @@ def resolve_target_coordinate(
         provider=provider,
         model=resolved_model,
         effort=_flag_value(resolved, "--effort"),
-        substrate=_flag_value(resolved, "--substrate") or "pane",
+        substrate=_flag_value(resolved, "--substrate"),
         permission_mode=_flag_value(resolved, "--permission-mode"),
         route=route,
         account=_flag_value(resolved, "--account"),
@@ -224,9 +267,20 @@ def detect_retask(
 ) -> dict:
     if entry.status != "live":
         return {"outcome": "refused", "reason": "worker_not_live"}
+    substrate = entry.substrate
+    if substrate not in {"pane", "thread"}:
+        return {"outcome": "refused", "reason": "worker_substrate_unknown"}
     mux = entry.mux if isinstance(entry.mux, dict) else None
-    if not mux or not mux.get("session") or not mux.get("pane_id"):
+    thread_id = entry.fno_id
+    if substrate == "pane" and (not mux or not mux.get("session") or not mux.get("pane_id")):
         return {"outcome": "refused", "reason": "worker_has_no_mux_ref"}
+    if substrate == "thread" and (
+        mux is not None or not isinstance(thread_id, str) or not thread_id.strip()
+    ):
+        return {"outcome": "refused", "reason": "worker_has_no_thread_ref"}
+    mux_ref = (
+        {"session": mux["session"], "pane_id": mux["pane_id"]} if mux else None
+    )
     if not entry.harness_session_id:
         return {"outcome": "refused", "reason": "worker_has_no_session_id"}
 
@@ -237,12 +291,12 @@ def detect_retask(
     current_axes = {
         "harness": entry.harness,
         "provider": entry.provider,
-        "substrate": "pane",
+        "substrate": substrate,
     }
     target_axes = {
         "harness": target.harness,
         "provider": target.provider if target.provider is not None else entry.provider,
-        "substrate": target.substrate,
+        "substrate": target.substrate if target.substrate is not None else substrate,
     }
     for axis in ("harness", "provider", "substrate"):
         if current_axes[axis] != target_axes[axis]:
@@ -263,9 +317,10 @@ def detect_retask(
         "schema_version": 1,
         "worker": entry.name,
         "source_session_id": entry.harness_session_id,
-        "mux": {"session": mux["session"], "pane_id": mux["pane_id"]},
+        "mux": mux_ref,
+        "thread_id": entry.fno_id,
         "node": node,
-        "target": asdict(target),
+        "target": {**asdict(target), "substrate": target_axes["substrate"]},
         "target_command": dispatch_command(target.harness).format(id=node),
         "switch": switch,
         "execution": {"mode": "read_only_plan"},
@@ -351,13 +406,7 @@ def execute_retask(
     settle: Callable[[], None] = lambda: None,
     source_preflight: Optional[Callable[[AgentEntry], Mapping[str, object]]] = None,
 ) -> dict:
-    """Run the bounded retask transaction through injected pane seams.
-
-    ``settle`` runs after each mutating send, before the read that consumes
-    its result: a TUI redraws asynchronously, so a bare read can beat the
-    redraw and see the pre-send frame (the race behind intermittent
-    status_unreadable / model_row_missing refusals).
-    """
+    """Run the bounded retask transaction through injected pane seams."""
 
     def settled_read() -> str:
         settle()
@@ -591,9 +640,13 @@ def run_retask(
         effort=effort,
         env=env,
     )
-    mux = entry.mux or {}
-    session = str(mux.get("session"))
-    pane = str(mux.get("pane_id"))
+    if entry.substrate == "thread":
+        session, pane_id = resolve_thread_viewport(entry)
+        pane = str(pane_id)
+    else:
+        mux = entry.mux or {}
+        session = str(mux.get("session"))
+        pane = str(mux.get("pane_id"))
     renamed_name = [entry.name]
     restamped_session = [entry.harness_session_id]
     clear_sent = [False]
@@ -612,9 +665,7 @@ def run_retask(
         return result.stdout if result.returncode == 0 else ""
 
     def settle() -> None:
-        # Wait out the TUI redraw after a mutating send: quiet until no new
-        # frame for 400ms, bounded at 8s, so the following read sees the
-        # post-send screen instead of racing it.
+        # Wait for the TUI redraw before the next read.
         try:
             subprocess.run(
                 [
@@ -661,8 +712,7 @@ def run_retask(
                 "reason": "clear_predecessor_mismatch",
                 "predecessor_session_id": match.group("predecessor"),
             }
-        # Verdicts ride x-dfe7's shared classifier so the succession/branch
-        # rules cannot drift from the registry writer that stamps lineage.
+        # Use the shared transition classifier for lineage decisions.
         for _ in range(40):
             rows = load_registry(path=registry_path)
             branch = next(
@@ -773,9 +823,7 @@ def run_retask(
             source_preflight=_source_preflight,
         )
     except RetaskTransportError as exc:
-        # A timeout mid-transaction must not claim the pane is untouched: the
-        # trackers hold what actually happened, so the receipt names a cleared
-        # pane as cleared even though the transport died after the clear.
+        # Preserve the partial transaction state in the refusal receipt.
         restamped = restamped_session[0] != entry.harness_session_id
         receipt = {
             "status": "refused",

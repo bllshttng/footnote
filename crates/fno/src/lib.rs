@@ -38,6 +38,7 @@ pub mod squad_store;
 pub mod store_client;
 pub mod templates;
 pub mod theme;
+pub(crate) mod thread_viewer;
 pub mod transcript_tail;
 pub mod tree;
 pub mod version;

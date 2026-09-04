@@ -853,7 +853,7 @@ fn dispatch_opencode_serve_inner(
         crown_scope: None,
         crown_grantor: None,
         route_settings_path: None,
-        fno_id: None,
+        fno_id: Some(session_id.clone()),
         delivery_policy: None,
         sandbox_posture: None,
         ..Default::default()

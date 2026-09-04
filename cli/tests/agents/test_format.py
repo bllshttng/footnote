@@ -441,6 +441,15 @@ def test_serialize_entry_emits_identity_and_hosting_fields() -> None:
     assert row["crown"] == "L1 epic-x"
 
 
+def test_serialize_entry_emits_thread_identity_without_a_mux_pane() -> None:
+    entry = _codex_entry(fno_id="codex-thread", mux=None, substrate="thread")
+
+    row = serialize_entry(entry, live_status=None)
+
+    assert row["thread_id"] == "codex-thread"
+    assert row["mux"] is None
+
+
 def test_serialize_entry_emits_the_persisted_node() -> None:
     """A list row preserves the node already stored on the registry entry."""
     row = serialize_entry(_claude_entry(node="x-cafe"), live_status=None)

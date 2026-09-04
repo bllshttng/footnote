@@ -27,7 +27,6 @@ pytestmark = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 # Unit tests (AC1-*)
 # ---------------------------------------------------------------------------
-
 class TestAcquireReviewLockUnit:
     """Unit tests that run in a single process via threading."""
 
@@ -290,4 +289,3 @@ class TestAcquireReviewLockSubprocess:
 
 
 # ---------------------------------------------------------------------------
-
