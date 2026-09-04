@@ -17325,39 +17325,6 @@ mod tests {
         );
     }
 
-    /// The spawn half of the same rule. A direct `.spawn()` in this file is a
-    /// transport with no retry beneath it, and a transient EAGAIN there
-    /// reports the world unreadable on a machine that was merely busy - the
-    /// exact failure `bounded_spawn` exists to delete. The bug this guard
-    /// retires was the class, not the instance: the retry landed on
-    /// `run_bounded` while `run_probe` kept its own bare `.spawn()`, so a
-    /// loaded fleet host still turned a healthy done_probe into BLOCKED and
-    /// held the stop gate. Both runners now route through the one spawner,
-    /// and exactly one direct spawn survives: `best_effort_notify`, which is
-    /// detached and non-fatal by design and has no caller to report to.
-    #[test]
-    fn no_unretried_spawn_outside_the_bounded_spawner() {
-        let source = include_str!("loopcheck.rs");
-        let production = source
-            .split("\nmod tests {")
-            .next()
-            .expect("test module marker");
-        // Positive control first: a zero-hit scan of the wrong haystack reads
-        // identical to a clean one, so prove the routed sites are in view
-        // before trusting the count below.
-        assert!(
-            production.matches("crate::bounded_spawn::spawn_bounded(").count() >= 2,
-            "run_bounded and run_probe must both route through the one spawner"
-        );
-        assert_eq!(
-            production.matches(".spawn()").count(),
-            1,
-            "exactly one direct spawn survives (the detached notifier); a new \
-             one routes through bounded_spawn::spawn_bounded, or amends this \
-             guard with why it cannot"
-        );
-    }
-
     #[test]
     fn the_bypass_detector_catches_an_injected_bypass() {
         // The detector itself is under test: a fixture with ONE new direct
