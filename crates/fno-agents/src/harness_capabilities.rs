@@ -1101,14 +1101,16 @@ mod tests {
         let opencode = contract.capabilities("opencode").unwrap();
         // The thread bit asserts fno's OWN driver for the harness (driver +
         // unattended journey test), never the harness's resume primitive.
-        // agy and opencode both have measured-working primitives yet read
-        // false: agy has no driver, opencode's serve lane is launch-only
-        // (ask refuses, steering unbuilt). claude and codex are the
-        // journey-proven lanes, and they must stay true so the false bits are
-        // not vacuous.
+        // agy read false on that rule for as long as it had a working
+        // `--conversation` resume and no driver; it reads TRUE now because the
+        // driver shipped with its own live journey
+        // (cli/tests/agents/test_agy_spawn_journey.py). opencode still reads
+        // false with a measured-working primitive: its serve lane is
+        // launch-only (ask refuses, steering unbuilt), which is what keeps the
+        // false bit from being vacuous.
         assert!(claude.thread);
         assert!(codex.thread);
-        assert!(!contract.capabilities("agy").unwrap().thread);
+        assert!(contract.capabilities("agy").unwrap().thread);
         assert!(!opencode.thread);
         assert_eq!(claude.ready_marker, "live_prompt_box");
         assert_eq!(codex.ready_marker, "idle_prompt");

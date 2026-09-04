@@ -1532,13 +1532,17 @@ def _keeper_seed_submit(
             if clear_modal is not None and not modal_answered:
                 pattern, keys = clear_modal
                 if re.search(pattern, bytes(text).decode("utf-8", "replace"), re.I):
-                    # Answer ONCE, then drop what painted: the composer marker
-                    # is the read-back proving it cleared, and a second answer
-                    # would be typed into whatever replaced the modal.
+                    # Answer ONCE and keep both buffers. `raw_pending` can hold
+                    # the head of a partial frame, so clearing it would make the
+                    # next recv parse a tag/length out of mid-payload and the
+                    # decoder break on a garbage length forever - a wedge that
+                    # reads exactly like a TUI that never painted. `text` keeps
+                    # its bytes because the composer marker can arrive in the
+                    # SAME recv as the modal; `modal_answered` is what stops a
+                    # second answer, so the clear bought nothing and cost the
+                    # marker.
                     conn.sendall(frame(tag_input, keys))
                     modal_answered = True
-                    text.clear()
-                    raw_pending.clear()
                     _time.sleep(0.5)
                     continue
             now = _time.monotonic()

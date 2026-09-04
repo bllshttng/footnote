@@ -23,7 +23,11 @@ AGY_BINARY = "agy"
 # conversation's first message harmless; the seed arrives at the composer once
 # the keeper has the TUI up.
 MINT_PROMPT = "Reply with exactly: OK"
-MINT_TIMEOUT_S = 120.0
+# Inside the row's declared binding window (timeout_ms = 60000) and inside the
+# daemon's own dispatch timeout, so a wedged `agy` raises the refusal below
+# rather than being killed mid-mint by a caller with a shorter fuse. The
+# measured mint is 1.5s, so this is a ceiling, not a budget.
+MINT_TIMEOUT_S = 45.0
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"

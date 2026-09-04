@@ -960,3 +960,105 @@ def test_agy_is_a_keeper_lane_harness() -> None:
     attach unsupported, resume supported), the lane pi, grok and cursor-agent
     resolve onto."""
     assert thread_lane("agy") == "keeper"
+
+
+# ---------------------------------------------------------------------------
+# The seed submit's modal answer must not desync the frame decoder
+# ---------------------------------------------------------------------------
+
+def _serve_frames(sock_path: Path, chunks: list[bytes]) -> threading.Thread:
+    """A fake keeper: accept one connection, write ``chunks`` in order, record
+    every Input frame the client sends, and ECHO each one back the way a real
+    TUI repaints a submitted line - that repaint is the seed's landing proof.
+    """
+    received: list[bytes] = []
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock_path))
+    server.listen(1)
+
+    def _run() -> None:
+        conn, _ = server.accept()
+        try:
+            for chunk in chunks:
+                conn.sendall(chunk)
+                time.sleep(0.15)
+            deadline = time.monotonic() + 10
+            conn.settimeout(0.3)
+            pending = bytearray()
+            while time.monotonic() < deadline:
+                try:
+                    data = conn.recv(65536)
+                except socket.timeout:
+                    continue
+                if not data:
+                    break
+                received.append(data)
+                pending.extend(data)
+                while len(pending) >= 5:
+                    length = int.from_bytes(pending[1:5], "little")
+                    if len(pending) < 5 + length:
+                        break
+                    payload = bytes(pending[5 : 5 + length])
+                    del pending[: 5 + length]
+                    if pending[:0] == b"" and payload not in (b"\r",):
+                        conn.sendall(_frame(1, payload))
+        finally:
+            conn.close()
+            server.close()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.received = received  # type: ignore[attr-defined]
+    return thread
+
+
+def _frame(tag: int, payload: bytes) -> bytes:
+    return bytes([tag]) + len(payload).to_bytes(4, "little") + payload
+
+
+def test_answering_a_modal_keeps_the_frame_decoder_in_sync() -> None:
+    """The modal answer must not drop either buffer.
+
+    `raw_pending` can hold the HEAD of a partial frame. Clearing it makes the
+    next recv parse a tag and length out of mid-payload, and one garbage length
+    over the 1 MiB cap breaks the decode loop for good - a wedge that reads
+    exactly like a TUI that never painted its composer. `text` matters for a
+    quieter reason: agy repaints the composer right behind the trust dialog, so
+    the marker can arrive in the SAME recv as the modal.
+
+    The stream here is split mid-frame on purpose: the modal frame's payload is
+    delivered in two writes, and the composer marker rides the second.
+    """
+    from fno.agents.dispatch import _keeper_seed_submit
+
+    # AF_UNIX caps sun_path at 104 bytes and the pytest basetemp does not fit,
+    # the same short-path move the keeper spawn itself makes.
+    short = Path(tempfile.mkdtemp(prefix="fnok-"))
+    sock_path = short / "k.sock"
+    modal = _frame(1, b"Do you trust the contents of this project?\n")
+    ready = _frame(1, b"? for shortcuts")
+    # The split point is the whole point: the modal frame arrives COMPLETE (so
+    # the regex matches and the answer fires) carrying the first three bytes of
+    # the NEXT frame behind it. Those three bytes are what `raw_pending` holds
+    # when the answer fires, and dropping them makes the marker's tail parse as
+    # a header. A split inside the modal frame instead would leave the buffer
+    # empty at that moment and the bug would be a no-op - which is how this
+    # test first passed against the defect it exists to catch.
+    server = _serve_frames(sock_path, [modal + ready[:3], ready[3:]])
+
+    _keeper_seed_submit(
+        name="wk-modal",
+        session_id="7a64a981-b33c-4e94-861f-bb66a13c9f01",
+        sock=sock_path,
+        message="hello",
+        ready_marker=b"? for shortcuts",
+        clear_modal=(r"trust (?:this )?folder|do you trust", b"\r"),
+    )
+    server.join(timeout=10)
+
+    shutil.rmtree(short, ignore_errors=True)
+    sent = b"".join(server.received)  # type: ignore[attr-defined]
+    # The modal answer AND the seed both landed: a decoder that desynced on the
+    # partial frame would never have seen the marker and would have raised.
+    assert sent.count(_frame(1, b"\r")) >= 1, "the modal was never answered"
+    assert b"hello" in sent, "the seed never reached the composer"

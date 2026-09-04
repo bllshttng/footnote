@@ -60,6 +60,7 @@ class KeeperArm:
 LAUNCH_AXES: tuple[tuple[str, str], ...] = (
     ("--model", "model"),
     ("--yolo", "yolo"),
+    ("--permission-mode", "permission_mode"),
     ("--effort", "effort"),
     ("--add-dir", "add_dir"),
     ("--role", "launch_role"),

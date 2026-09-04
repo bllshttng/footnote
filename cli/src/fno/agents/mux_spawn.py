@@ -1460,8 +1460,11 @@ def build_pane_argv(
         effort_argv = effort_tokens("agy", effort) if effort else []
         # agy (Antigravity) interactive pane (x-8f7f US1). Mirrors AgyProvider in
         # provider.rs: `--dangerously-skip-permissions` is the never-prompt lane
-        # so an unattended pane can't wedge on its first approval. agy is
-        # stateless (no session id, no JSON envelope), so no --session-id pin;
+        # so an unattended pane can't wedge on its first approval. This LANE is
+        # stateless: agy takes no id on the command line and the pane arm mints
+        # none, so there is no --session-id pin. That is a property of the arm,
+        # not of the binary - the thread lane mints a conversation id from a
+        # print-mode turn and launches on `--conversation <id>`;
         # `-p`/`--print` is agy's HEADLESS form (exits after printing) and must
         # NOT be used for a pane. The shared readiness gate submits the seed
         # after trust and the composer are ready.

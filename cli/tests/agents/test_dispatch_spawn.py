@@ -707,6 +707,32 @@ def test_spawn_agy_headless_refuses_by_name(workdir, monkeypatch) -> None:
     )
 
 
+def test_a_keeper_lane_refuses_the_permission_axis_it_does_not_carry() -> None:
+    """The permission axis is an axis like any other. pi's lane driver takes no
+    permission mode, so passing one used to be dropped in silence - a security-
+    adjacent surprise, and a flat contradiction of the row's own claim that
+    every axis it does not carry is refused BY NAME."""
+    from fno.agents import dispatch
+    from fno.agents.keeper_thread import KEEPER_ARMS, LAUNCH_AXES
+
+    assert ("--permission-mode", "permission_mode") in LAUNCH_AXES
+    assert "permission_mode" not in KEEPER_ARMS["pi"].carries
+    for harness in ("cursor-agent", "grok", "agy"):
+        assert "permission_mode" in KEEPER_ARMS[harness].carries, harness
+
+    with pytest.raises(dispatch.DispatchAskError) as caught:
+        dispatch.dispatch_spawn(
+            name="wkpiperm",
+            message="hello",
+            harness="pi",
+            cwd=Path("/tmp"),
+            permission_mode="yolo",
+        )
+    assert "--permission-mode is not supported on the pi thread lane" in str(
+        caught.value
+    )
+
+
 def test_spawn_agy_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) -> None:
     """`dispatch_spawn -H agy --substrate thread` reaches
     `_lane_b_thread_spawn` and returns its minted conversation id - the

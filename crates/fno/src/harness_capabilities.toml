@@ -372,7 +372,15 @@ remove_strategy = "registry-only"
 # agy mints its own conversation id and takes none on the command line, so the
 # spawn runs one print-mode turn and reads the id back out of its JSON envelope
 # - cursor-agent's shape, minus the fd dance, because `agy -p` exits on its own.
-session_binding = { strategy = "callee-minted-read-back", required = true, timeout_ms = 60000 }
+#
+# `required` stays FALSE, and the asymmetry is the reason: this field is a
+# whole-row claim, and only the THREAD lane binds an id today. The pane arm
+# still launches a bare `agy` and mints nothing, so `true` would assert a
+# binding for a lane that makes none - and would add agy to
+# `_SESSION_BINDING_HARNESSES` (harness_probe._required_registrations), where
+# its pane receipts would then report `bound: false` for healthy workers.
+# Minting on the pane lane too is what makes this `true`.
+session_binding = { strategy = "callee-minted-read-back", required = false, timeout_ms = 60000 }
 
 [harness.agy.state_root_grant]
 # `--add-dir` (writable_dirs.ADD_DIR_PROVIDERS).
