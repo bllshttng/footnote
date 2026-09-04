@@ -1822,6 +1822,123 @@ class TestReadPrStateJsonGuards:
         assert obs.latest_review_ts is None
 
 
+class TestReadPrStateBudget:
+    """One read spends one budget. Measured 2026-09-03 over eight real open
+    PRs: the merge-state leg means 1.07s and the reviews leg 1.42s, so neither
+    leg is the cost. The cost was that ``timeout_s`` bounded EACH leg, so one
+    candidate could spend 60s against a tick deadline checked only between
+    candidates."""
+
+    def _cand(self, tmp_path):
+        from fno.pr_watch._discover import PrCandidate
+
+        return PrCandidate(
+            node_id="x-abc",
+            pr_number=7,
+            pr_url="https://github.com/owner/repo/pull/7",
+            repo_dir=tmp_path,
+            repo_slug="owner/repo",
+        )
+
+    @staticmethod
+    def _info_stdout():
+        return json.dumps(
+            {
+                "state": "open",
+                "number": 7,
+                "html_url": "https://github.com/owner/repo/pull/7",
+                "merged": False,
+                "merged_at": None,
+                "head": {"sha": "head", "ref": "feature/test"},
+                "base": {"ref": "main"},
+            }
+        )
+
+    @staticmethod
+    def _view_stdout():
+        return (
+            '{"reviews":[],"comments":[],"createdAt":"2026-06-01T00:00:00Z",'
+            '"number":7,"state":"OPEN","url":"","mergedAt":null}'
+        )
+
+    def test_reviews_leg_gets_only_what_the_merge_leg_left(self, tmp_path, monkeypatch):
+        from fno.pr_watch import _discover
+        from fno.pr_watch._discover import read_pr_state
+
+        clock = [100.0]
+        monkeypatch.setattr(_discover.time, "monotonic", lambda: clock[0])
+        seen = {}
+
+        def runner(cmd, **kw):
+            cmd_str = " ".join(str(c) for c in cmd)
+            if "comments" in cmd_str:
+                seen["reviews_timeout"] = kw.get("timeout")
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout=self._view_stdout(), stderr=""
+                )
+            seen["merge_timeout"] = kw.get("timeout")
+            clock[0] += 4.0  # the merge leg burns 4 of the 10s budget
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=self._info_stdout(), stderr=""
+            )
+
+        read_pr_state(self._cand(tmp_path), reviewers=[], runner=runner, timeout_s=10.0)
+
+        assert seen["merge_timeout"] == pytest.approx(10.0)
+        # The whole point: the second leg may not restart the clock at 10.
+        assert seen["reviews_timeout"] == pytest.approx(6.0)
+
+    def test_a_spent_budget_refuses_the_second_leg(self, tmp_path, monkeypatch):
+        from fno.graph._reconcile import ReconcileError
+        from fno.pr_watch import _discover
+        from fno.pr_watch._discover import read_pr_state
+
+        clock = [100.0]
+        monkeypatch.setattr(_discover.time, "monotonic", lambda: clock[0])
+        launched = []
+
+        def runner(cmd, **kw):
+            cmd_str = " ".join(str(c) for c in cmd)
+            if "comments" in cmd_str:
+                launched.append(cmd_str)
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout=self._view_stdout(), stderr=""
+                )
+            clock[0] += 10.0  # the merge leg eats the entire budget
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=self._info_stdout(), stderr=""
+            )
+
+        with pytest.raises(ReconcileError) as exc:
+            read_pr_state(self._cand(tmp_path), reviewers=[], runner=runner, timeout_s=10.0)
+
+        assert "budget" in str(exc.value).lower()
+        assert launched == [], "gh pr view ran with no budget left to bound it"
+
+    def test_the_default_path_still_reads(self, tmp_path):
+        """A fast merge leg leaves nearly the whole default budget, so the
+        ordinary case keeps working and is only capped in total."""
+        from fno.pr_watch._discover import read_pr_state
+
+        seen = {}
+
+        def runner(cmd, **kw):
+            cmd_str = " ".join(str(c) for c in cmd)
+            if "comments" in cmd_str:
+                seen["reviews_timeout"] = kw.get("timeout")
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=0, stdout=self._view_stdout(), stderr=""
+                )
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=self._info_stdout(), stderr=""
+            )
+
+        obs = read_pr_state(self._cand(tmp_path), reviewers=[], runner=runner)
+
+        assert obs.state == "OPEN"
+        assert 0 < seen["reviews_timeout"] <= 30.0
+
+
 class TestDispatchEntryGuards:
     """AC-gemini-medium _dispatch.py:352 and :410: corrupt store entry + retry increment."""
 

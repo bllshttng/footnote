@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -282,13 +283,21 @@ def read_pr_state(
     merge state. Additionally reads reviews from ``gh pr view --json
     reviews,createdAt`` to compute ``latest_review_ts``.
 
+    ``timeout_s`` is the budget for the WHOLE call, not for each leg. It used
+    to bound each of the two legs separately, so one candidate could spend
+    twice the declared number. That is what let a single read walk past a tick
+    deadline that is only checked between candidates: the caller honors the
+    deadline before the call and has no say once it starts.
+
     Raises ``ReconcileError`` on any gh failure (non-zero returncode, timeout,
-    parse failure, missing binary). The caller is responsible for catching and
-    skipping this candidate; the error is NOT swallowed here so the tick loop
-    (task 1.2) can record it cleanly.
+    parse failure, missing binary) and on a budget that the merge-state leg
+    consumed on its own. The caller is responsible for catching and skipping
+    this candidate; the error is NOT swallowed here so the tick loop can
+    record it cleanly.
     """
     repo_slug = candidate.repo_slug
     cwd_str = str(candidate.repo_dir) if candidate.repo_dir else None
+    started = time.monotonic()
 
     # Step 1: Get merge state via the existing reconcile helper.
     merge_state: PrMergeState = query_pr_merge_state(
@@ -299,6 +308,13 @@ def read_pr_state(
         timeout_s=timeout_s,
         include_files=False,
     )
+
+    remaining = timeout_s - (time.monotonic() - started)
+    if remaining <= 0:
+        raise ReconcileError(
+            f"read_pr_state #{candidate.pr_number} spent its {timeout_s:.1f}s budget "
+            "on the merge-state read; the reviews read was not started"
+        )
 
     # Step 2: Get reviews + comments + PR metadata for latest_review_ts and opened_at.
     # We include 'comments' (issue/review comments) in addition to 'reviews' so
@@ -315,12 +331,13 @@ def read_pr_state(
             capture_output=True,
             text=True,
             check=False,
-            timeout=timeout_s,
+            timeout=remaining,
             cwd=cwd_str,
         )
     except subprocess.TimeoutExpired as exc:
         raise ReconcileError(
-            f"gh pr view #{candidate.pr_number} (reviews) timed out after {timeout_s}s"
+            f"gh pr view #{candidate.pr_number} (reviews) timed out after {remaining:.1f}s, "
+            f"what was left of a {timeout_s:.1f}s call budget"
         ) from exc
     except OSError as exc:
         raise ReconcileError(f"gh subprocess failed to launch: {exc}") from exc
