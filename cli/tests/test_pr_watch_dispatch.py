@@ -2566,6 +2566,8 @@ class TestTickRecordsAndDeadline:
         )
         settings.autonomy = SimpleNamespace(enabled=True)
         monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+        # The tick must read THIS object; a patch that silently missed would
+        # send every assertion below against real config.
         assert prcli.load_settings() is settings
         monkeypatch.setattr(
             "fno.pr_watch._dispatch.tick", lambda **kw: TickResult(open_prs=0, acted=0)
@@ -2596,6 +2598,10 @@ class TestTickRecordsAndDeadline:
             lines.append(f"stage:{name}")
             return value
 
+        def _stage_armed(armed):
+            """One call to the real gate, recorded and returned."""
+            return _stage(f"lane_armed={armed}", armed)
+
         # The gate is NOT forced. With the right shape it arms on its own, and
         # forcing it would hide the next shape change exactly as MagicMock hid
         # this one. The stage marker records what it decided.
@@ -2603,7 +2609,7 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setattr(
             watchdog,
             "lane_armed",
-            lambda s: _stage(f"lane_armed={real_lane_armed(s)}", real_lane_armed(s)),
+            lambda s: _stage_armed(real_lane_armed(s)),
         )
         monkeypatch.setattr(
             uw,
