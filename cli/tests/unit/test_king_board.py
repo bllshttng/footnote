@@ -1256,10 +1256,26 @@ def _graph_file(tmp_path, entries):
 
 
 def _isolate_graph(monkeypatch, tmp_path, entries):
-    from fno import paths
+    """Point the board at a fixture graph and bypass the store transport.
 
-    monkeypatch.setattr(paths, "graph_json", lambda: _graph_file(tmp_path, entries))
+    The store client spawns the fno-agents keeper worker, which the CI pytest
+    shard does not build (StoreUnavailable: fno-agents-worker not found), so
+    the reads go straight to the fixture file: these tests exercise resolution
+    and degrade behavior, not the transport, which the store tests own.
+    """
+    from fno import paths
+    from fno.graph import store
+    from pathlib import Path
+
+    graph_path = _graph_file(tmp_path, entries)
+    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
     monkeypatch.setattr(paths, "graph_archive_json", lambda: tmp_path / "no-archive.json")
+    monkeypatch.setattr(
+        store,
+        "read_graph_strict",
+        lambda path: json.loads(Path(path).read_text())["entries"],
+    )
+    monkeypatch.setattr(store, "read_archive_entries", lambda: [])
 
 
 def test_a_live_claim_resolves_without_a_single_subprocess(monkeypatch, tmp_path):
