@@ -38,6 +38,41 @@ class Footprint(NamedTuple):
     # attributed to processes: the fleet share above is then an UNDERCOUNT,
     # which a spawn gate must read as unknown, never as headroom (x-e040).
     attribution_gap: str | None = None
+    # Whole-machine count of processes whose OWN program is a test runner.
+    # Whole-machine on purpose: a test a person started competes for the same
+    # box as a lane, and the operator asked to see it beside the load.
+    test_process_count: int = 0
+
+
+#: argv[0] basenames that are a test runner on their own.
+_TEST_RUNNER_NAMES = frozenset({"pytest", "py.test"})
+
+
+def is_test_runner(command: str) -> bool:
+    """True when a process's OWN program is a test runner.
+
+    Matched on argv[0] plus the first non-flag arguments, never on the whole
+    command line. A naive substring scan for ``pytest`` reported four running
+    tests on a machine running none: the four were leaked
+    ``fno-agents-worker --keeper`` processes whose socket paths sat under
+    ``/private/var/folders/.../T/pytest-of-<user>/pytest-470/...``. The
+    substring was in the path, not in the program.
+    """
+    argv = command.split()
+    if not argv:
+        return False
+    program = argv[0].rsplit("/", 1)[-1]
+    rest = argv[1:]
+    if program in _TEST_RUNNER_NAMES:
+        return True
+    if program.startswith("python") and rest[:2] == ["-m", "pytest"]:
+        return True
+    positional = [arg for arg in rest if not arg.startswith("-")]
+    if program == "cargo":
+        return positional[:1] in (["test"], ["nextest"])
+    if program in {"fno", "fno-py"}:
+        return positional[:1] == ["test"] or positional[:2] == ["doctor", "test"]
+    return False
 
 
 class _Process(NamedTuple):
@@ -207,9 +242,12 @@ def parse_footprint(
     rss_kb = 0
     measured_cpu_percent = 0.0
     sustained: list[tuple[float, str]] = []
+    test_process_count = 0
     for pid, process in processes.items():
         if not is_excluded(pid):
             measured_cpu_percent += process.cpu_percent
+            if is_test_runner(process.command):
+                test_process_count += 1
         if not is_attributed(pid):
             continue
 
@@ -246,4 +284,5 @@ def parse_footprint(
         measured_cpu_cores=measured_cpu_percent / 100,
         top=sustained,
         unparsed_lines=unparsed_lines,
+        test_process_count=test_process_count,
     )

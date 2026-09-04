@@ -34,6 +34,7 @@ import json
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -89,6 +90,7 @@ class LaneReading:
     per_lane_mem_gb: Optional[float] = None
     cost_source: str = ""
     refusal_reason: str = ""
+    census: dict = field(default_factory=dict)
 
     @property
     def refused(self) -> bool:
@@ -104,6 +106,7 @@ class LaneReading:
             "per_lane_mem_gb": self.per_lane_mem_gb,
             "cost_source": self.cost_source,
             "refused_reason": self.refusal_reason,
+            "census": self.census,
             "arms": [a.to_json() for a in self.arms],
         }
 
@@ -286,25 +289,93 @@ def _power_arm(sample: Optional[dict], reason: Optional[str]) -> ArmReading:
     )
 
 
-def _fleet_cost() -> tuple[float, float, int, str]:
+def _live_registry_rows() -> tuple[Optional[list], Optional[str]]:
+    """The live roster rows, read in process.
+
+    ``None`` is a distinct answer from ``[]``: an unreadable registry must not
+    render as an empty fleet. The two consumers below - the per-lane cost
+    divisor and the census - both take their rows from this one read, so the
+    kings, the workers and the divisor can never describe different fleets.
+    """
+    try:
+        from fno.agents.registry import load_registry
+        from fno.agents.spawn_gate import LIVE_STATUSES
+
+        rows = load_registry()
+    except Exception:
+        return None, "registry unreadable"
+    if not getattr(rows, "complete", True):
+        return None, "worker registry incomplete"
+    return [row for row in rows if row.status in LIVE_STATUSES], None
+
+
+def _fleet_snapshot() -> tuple[Any, Optional[list], int]:
+    """One footprint reading, the live rows, and how long both took."""
+    from fno.doctor_footprint import cause_reading
+
+    started = time.monotonic()
+    reading, error = cause_reading()
+    rows, _rows_error = _live_registry_rows()
+    read_ms = int((time.monotonic() - started) * 1000)
+    return (None if error is not None else reading), rows, read_ms
+
+
+def _fleet_cost(reading: Any, rows: Optional[list]) -> tuple[float, float, int, str]:
     """Per-lane CPU cores and GB, measured from the fleet's own attributed
     footprint over the live roster; the documented seed when no row is live."""
-    from fno.doctor_footprint import _roster_count, cause_reading
-
-    reading, error = cause_reading()
-    rows, _roster_error = _roster_count()
-    if error is not None or reading is None:
+    if reading is None:
         return SEED_PER_LANE_CORES, SEED_PER_LANE_GB, 0, "seed (footprint unavailable)"
-    if not rows:
+    count = len(rows) if rows else 0
+    if not count:
         return (
             SEED_PER_LANE_CORES,
             SEED_PER_LANE_GB,
             0,
             "seed (no live roster rows to measure)",
         )
-    per_cpu = max(0.01, reading.fleet_cpu_cores / rows)
-    per_gb = max(0.01, reading.rss_gb / rows)
-    return per_cpu, per_gb, rows, "measured from the live roster's attributed footprint"
+    per_cpu = max(0.01, reading.fleet_cpu_cores / count)
+    per_gb = max(0.01, reading.rss_gb / count)
+    return per_cpu, per_gb, count, "measured from the live roster's attributed footprint"
+
+
+def _census(reading: Any, rows: Optional[list], read_ms: int) -> dict:
+    """The court census the operator asked for: kings, workers, tests.
+
+    Kings and workers are ROW counts and tests is a PROCESS count, and the
+    two must never be folded together. The attribution gap is a process-to-row
+    failure, so it cannot corrupt a row count: every registry row carries its
+    crown level whether or not it carries a pid. The gap therefore rides here
+    as its own field, qualifying the CPU reading it belongs to and never the
+    counts it does not (x-e040).
+    """
+    census: dict[str, Any] = {
+        "kings": None,
+        "king_conflicts": None,
+        "workers": None,
+        "tests": None if reading is None else reading.test_process_count,
+        "roster_rows": None,
+        "attribution_gap": None if reading is None else reading.attribution_gap,
+        "read_ms": read_ms,
+    }
+    if rows is None:
+        return census
+    census["roster_rows"] = len(rows)
+    try:
+        from fno.agents.court import gather_court
+
+        court = gather_court(rows)
+    except Exception:
+        return census
+    kings = (court.get("summary") or {}).get("total")
+    if not isinstance(kings, int):
+        # An unreadable court leaves the crown counts null rather than
+        # reporting a kingless fleet from a read that saw nothing.
+        return census
+    conflicts = court.get("conflicts")
+    census["kings"] = kings
+    census["king_conflicts"] = len(conflicts) if isinstance(conflicts, list) else None
+    census["workers"] = len(rows) - kings
+    return census
 
 
 def read_lanes(
@@ -327,6 +398,12 @@ def read_lanes(
     power_arm = _power_arm(sample, macmon_reason)
     reading.arms.extend([load_arm, cpu_arm, mem_arm, power_arm])
 
+    # One fleet read serves the census and the per-lane divisor, and it is
+    # taken BEFORE the refusal branch: a refused lane number is exactly when
+    # a person most wants to see what the machine is holding.
+    footprint, rows, read_ms = _fleet_snapshot()
+    reading.census = _census(footprint, rows, read_ms)
+
     dark = [a for a in reading.arms if a.state == DARK]
     if cpu_arm.state == DARK or mem_arm.state == DARK:
         working = [a.name for a in reading.arms if a.state == MEASURED]
@@ -338,7 +415,7 @@ def read_lanes(
         return reading
 
     assert cpu_arm.value is not None and mem_arm.value is not None  # measured arms
-    per_cpu, per_gb, rows, cost_source = _fleet_cost()
+    per_cpu, per_gb, row_count, cost_source = _fleet_cost(footprint, rows)
     busy = cpu_arm.value["busy_fraction"]
     capacity = cpu_arm.value["capacity_cores"]
     free_cores = capacity * (1.0 - busy)
@@ -368,9 +445,42 @@ def read_lanes(
     reading.per_lane_cpu_cores = round(per_cpu, 3)
     reading.per_lane_mem_gb = round(per_gb, 3)
     reading.cost_source = (
-        f"{cost_source} ({rows} live row(s))" if rows else cost_source
+        f"{cost_source} ({row_count} live row(s))" if row_count else cost_source
     )
     return reading
+
+
+def _census_lines(census: dict) -> list[str]:
+    """The census, rendered so an unread count says so.
+
+    ``unknown`` is printed only where the read genuinely failed. A count the
+    reader can act on and a count nobody took must never look the same.
+    """
+    if not census:
+        return []
+
+    def count(key: str) -> str:
+        value = census.get(key)
+        return "unknown" if value is None else str(value)
+
+    lines = [
+        f"  court: {count('kings')} king(s), {count('workers')} worker(s), "
+        f"{count('tests')} running test(s) "
+        f"({count('roster_rows')} live roster row(s), {count('read_ms')} ms)"
+    ]
+    conflicts = census.get("king_conflicts")
+    if conflicts:
+        lines.append(
+            f"  court conflicts: {conflicts} scope(s) held by more than one live "
+            "crown - a bare king count hides this"
+        )
+    gap = census.get("attribution_gap")
+    if gap:
+        lines.append(
+            f"  attribution gap: {gap} - the fleet CPU share is an undercount, "
+            "not headroom"
+        )
+    return lines
 
 
 def render(reading: LaneReading) -> str:
@@ -384,6 +494,7 @@ def render(reading: LaneReading) -> str:
                 lines.append(f"  {arm.name}: dark - {arm.reason}")
             else:
                 lines.append(f"  {arm.name}: measured ({arm.source})")
+        lines.extend(_census_lines(reading.census))
         return "\n".join(lines)
     lines.append(f"lanes: {reading.lane_count} more fit")
     for arm in reading.arms:
@@ -392,6 +503,7 @@ def render(reading: LaneReading) -> str:
         f"  per-lane cost: {reading.per_lane_cpu_cores} cores, "
         f"{reading.per_lane_mem_gb} GB - {reading.cost_source}"
     )
+    lines.extend(_census_lines(reading.census))
     return "\n".join(lines)
 
 

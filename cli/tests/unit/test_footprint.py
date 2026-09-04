@@ -179,3 +179,80 @@ def test_review_p2_python_launched_fno_and_agents_worker_are_attributed() -> Non
         (18.0, "fno-agents-worker --stream"),
         (12.0, "/opt/python/bin/python /opt/fno-py agents list --json"),
     ]
+
+
+#: Command lines measured on one machine at 2026-09-04. A naive
+#: `ps | grep -i pytest` reported four running tests here; two were real.
+_REAL_CARGO_TEST = (
+    "/Users/bb16/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test "
+    "--manifest-path crates/fno/Cargo.toml --lib portal_tests"
+)
+_LEAKED_KEEPER = (
+    "/Users/bb16/.cargo/bin/fno-agents-worker --keeper --sock "
+    "/private/var/folders/ch/T/fno-laneb-6nkmletp/mux/threads/wk-journey.sock "
+    "--session wk-journey --cwd "
+    "/private/var/folders/ch/T/pytest-of-bb16/pytest-313/test_lane_b_journey0"
+)
+_ZSH_WRAPPER = (
+    "/bin/zsh -c -l eval 'cargo test --manifest-path crates/fno-agents/Cargo.toml "
+    "--lib gc 2>&1 | tail -3'"
+)
+
+
+def test_ac3_hp_a_real_test_runner_is_counted() -> None:
+    from fno.footprint import is_test_runner
+
+    assert is_test_runner(_REAL_CARGO_TEST)
+    assert is_test_runner("pytest cli/tests -k lanes")
+    assert is_test_runner("/opt/homebrew/bin/py.test -x")
+    assert is_test_runner("/usr/bin/python3.12 -m pytest cli/tests")
+    assert is_test_runner("cargo nextest run --workspace")
+    assert is_test_runner("fno doctor test cli/tests")
+    assert is_test_runner("/opt/homebrew/bin/fno-py test")
+
+
+def test_ac3_edge_a_pytest_path_in_the_command_line_is_not_a_test() -> None:
+    """The trap this predicate closes, pinned to the measured command line: a
+    leaked keeper whose SOCKET PATH sits under pytest-of-<user>. The substring
+    is in the path, never in the program."""
+    from fno.footprint import is_test_runner
+
+    assert not is_test_runner(_LEAKED_KEEPER)
+    assert not is_test_runner(_ZSH_WRAPPER)
+    assert not is_test_runner("")
+    assert not is_test_runner("cargo build --release")
+    assert not is_test_runner("fno doctor lanes")
+    assert not is_test_runner("vim test_pytest_helpers.py")
+
+
+def test_ac3_hp_the_parser_counts_only_the_real_runners() -> None:
+    """The positive control over one snapshot: four rows carry the word, two
+    are tests. A count that read the whole command line would say four."""
+    from fno.footprint import parse_footprint
+
+    snapshot = "\n".join(
+        [
+            "PID PPID ELAPSED %CPU RSS COMMAND",
+            f"100 1 01:00:00 10.0 1024 {_REAL_CARGO_TEST}",
+            "101 1 01:00:00 10.0 1024 /usr/bin/python3 -m pytest cli/tests",
+            f"102 1 01:00:00 10.0 1024 {_LEAKED_KEEPER}",
+            f"103 1 01:00:00 10.0 1024 {_ZSH_WRAPPER}",
+        ]
+    )
+
+    assert parse_footprint(snapshot).test_process_count == 2
+
+
+def test_the_test_count_is_whole_machine_not_fleet_attributed() -> None:
+    """A test a person started competes for the same box as a lane, so it is
+    counted even though nothing attributes it to the fleet."""
+    from fno.footprint import parse_footprint
+
+    snapshot = (
+        "PID PPID ELAPSED %CPU RSS COMMAND\n"
+        "100 1 01:00:00 10.0 1024 pytest cli/tests\n"
+    )
+    reading = parse_footprint(snapshot)
+
+    assert reading.process_count == 0
+    assert reading.test_process_count == 1
