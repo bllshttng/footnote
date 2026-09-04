@@ -255,10 +255,10 @@ async fn run(args: Vec<String>) -> i32 {
     // loop_reign.rs doc). Direct dispatch, daemon-free reads; the Python
     // `fno agents king shape` shell and escalate's client invoke the binary
     // directly rather than routing through the agents verb set.
-    if verb == "reign-state" {
+    if matches!(verb, "reign-state") {
         return fno_agents::loop_reign::run_reign_state(&args[1..]);
     }
-    if verb == "reign-shape" {
+    if matches!(verb, "reign-shape") {
         return fno_agents::loop_reign::run_reign_shape(&args[1..]);
     }
 
