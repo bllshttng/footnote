@@ -89,7 +89,9 @@ def _resolve_path(row: dict, dotted: str):
     return node
 
 
-def _declared_field(field: str, harness: str, row: dict, decl: dict) -> FieldReport:
+def _declared_field(
+    field: str, harness: str, row: dict, decl: dict, authority_cache: dict
+) -> FieldReport:
     """Read the vendor's own statement and compare it with the row."""
     if field not in _DECLARED_CHECKS:
         return FieldReport(
@@ -103,7 +105,16 @@ def _declared_field(field: str, harness: str, row: dict, decl: dict) -> FieldRep
             field, "declared", "UNKNOWN",
             f"{argv[0]} binary is not on PATH: an absent instrument is not a measurement",
         )
-    code, output = _run_authority(argv)
+    # One authority run per distinct command, not per field: the features
+    # dimension multiplied the declared keys sharing one `{bin} --help`, and
+    # re-running it nine times per probe is nine processes reading the same
+    # answer. The cache lives for one probe_harness call only.
+    key = tuple(argv)
+    if key in authority_cache:
+        code, output = authority_cache[key]
+    else:
+        code, output = _run_authority(argv)
+        authority_cache[key] = (code, output)
     if code != 0:
         return FieldReport(
             field, "declared", "UNKNOWN",
@@ -256,6 +267,7 @@ def probe_harness(
             "warnings": warnings,
         }
     fields: list[FieldReport] = []
+    authority_cache: dict = {}
     for field, decl in sorted(probe_declarations().items()):
         kind = decl["kind"]
         if kind == "unprobeable":
@@ -263,7 +275,7 @@ def probe_harness(
                 FieldReport(field, kind, "UNPROBEABLE", decl["reason"])
             )
         elif kind == "declared":
-            fields.append(_declared_field(field, harness, row, decl))
+            fields.append(_declared_field(field, harness, row, decl, authority_cache))
         elif kind == "behavioral":
             fields.append(
                 _behavioral_field(field, harness, decl, live=live, row=row)

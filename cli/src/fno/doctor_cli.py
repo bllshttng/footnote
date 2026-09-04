@@ -6,8 +6,6 @@ routing, while the group callback preserves the bare diagnostic command.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import typer
 import typer.core
 
