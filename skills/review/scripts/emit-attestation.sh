@@ -196,12 +196,11 @@ fi
 # read" (the 2026-08-30 shape: open PRs sat uncovered while their reviews
 # reported clean over empty diffs).
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
-# Journal resolution mirrors every other writer: the repo's space via the
-# binary verb (which honors the runner's pins), legacy checkout path only when
-# the verb is unavailable. A hand-built .fno/events.jsonl splits the emitter
-# from the readers once the checkout copy has migrated.
-events_file="$(fno-agents state path events 2>/dev/null || true)"
-[[ -n "$events_file" ]] || events_file="$repo_root/.fno/events.jsonl"
+# The emits below pass NO --events: the writer's default resolution keys on
+# the cwd's repo and routes through the same space accessors (and the same
+# pins) as every reader. Naming a path here would fork this emitter from
+# whichever algorithm computed it - a binary with an older slug shape would
+# file the attestation in a directory no reader of this source resolves.
 session_id=""; harness_session_id=""; harness=""
 if [[ -f "$repo_root/.fno/target-state.md" ]]; then
   session_id=$(grep '^session_id:' "$repo_root/.fno/target-state.md" \
@@ -255,7 +254,6 @@ if [[ -z "$reviewed_base_sha" ]]; then
   # an unrecorded one. A failed journal is reported AS a failure, never hidden.
   refusal_row_note="the refused review_invocation row could NOT be journaled (the event writer failed); the attempt is unrecorded"
   if "${FNO:-fno}" doctor event emit -t review_invocation -s daemon \
-    --events "$events_file" \
     -d "$(jq -cn \
       --arg invocation_id "$invocation_id" \
       --arg stage refused \
@@ -288,7 +286,6 @@ if (( reviewed_file_count == 0 )); then
   # unresolvable-base refusal above).
   refusal_row_note="the refused review_invocation row could NOT be journaled (the event writer failed); the attempt is unrecorded"
   if "${FNO:-fno}" doctor event emit -t review_invocation -s daemon \
-    --events "$events_file" \
     -d "$(jq -cn \
       --arg invocation_id "$invocation_id" \
       --arg stage refused \
@@ -465,8 +462,7 @@ if [[ -n "$findings_file" ]]; then
   fi
 fi
 if [[ -n "$review_event_data" ]]; then
-  "${FNO:-fno}" doctor event emit -t review_invocation -s daemon -d "$review_event_data" \
-    --events "$events_file" >/dev/null 2>&1 || true
+  "${FNO:-fno}" doctor event emit -t review_invocation -s daemon -d "$review_event_data" >/dev/null 2>&1 || true
 fi
 data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
   --arg session_id "$session_id" --arg harness "$harness" \

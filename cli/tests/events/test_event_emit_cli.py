@@ -350,12 +350,14 @@ def test_pr270_gemini_default_paths_anchor_to_repo_root(
     )
     assert result.exit_code == 0, f"stderr={result.stderr!r} stdout={result.output!r}"
 
-    # The event must land in <repo_root>/.fno/events.jsonl, NOT in the
-    # subdir's own .fno/.
-    anchored_events = repo_root / ".fno" / "events.jsonl"
+    # The event must land in the REPO's one journal (the space journal, keyed
+    # on the canonical root), NOT in the subdir's own .fno/.
+    from fno.paths import project_log
+
+    anchored_events = project_log("events.jsonl", project_root=repo_root)
     subdir_events = subdir / ".fno" / "events.jsonl"
     assert anchored_events.exists(), (
-        f"event should land in repo root .fno, not subdir; "
+        f"event should land in the repo's journal, not a subdir's; "
         f"anchored={anchored_events!r} subdir={subdir_events!r}"
     )
     assert not subdir_events.exists(), (
