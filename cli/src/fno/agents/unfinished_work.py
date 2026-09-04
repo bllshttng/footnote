@@ -624,6 +624,16 @@ def _run_git(
 #: the same verdict as any other failed fetch.
 FETCH_TIMEOUT_S = 120.0
 
+#: The ceiling on ONE PR read, and the floor under which the next one is not
+#: started. Measured 2026-09-03 over eight real open PRs: 1.07s for the
+#: merge-state leg plus 1.42s for the reviews leg, so 2.49s per PR on an idle
+#: machine and about four times that under fleet load. The budget matches
+#: read_pr_state's own default, so an unbudgeted tick behaves exactly as it
+#: did; the floor sits just above the idle cost, because a read handed less
+#: than one costs cannot finish and only spends the deadline failing.
+PR_READ_BUDGET_S = 30.0
+PR_READ_FLOOR_S = 3.0
+
 
 def fetch_origin_main(repo: Path, *, runner=None) -> bool:
     """One ``git fetch origin main`` per repository. Failure is a verdict
@@ -1058,12 +1068,19 @@ def collect_observations(
     node_probes: dict[str, tuple] = {n.node_id: n.owner_probes for n in nodes}
     for candidate in candidates:
         left = _budget_left()
-        if left is not None and left <= 0:
+        if left is not None and left < PR_READ_FLOOR_S:
             # Out of budget mid-scan: the unread candidates stay unread, and
             # the dimension reads unknown rather than counting only what
-            # fit before the deadline.
+            # fit before the deadline. The floor, not zero: a read started
+            # with a sliver of budget cannot finish, and a read that cannot
+            # finish is an unscanned candidate wearing a failure's costume.
             prs_unscanned = True
             break
+        # A single read may not outlive the tick. `left` is the remaining
+        # deadline, so a clamped budget is the deadline reaching INSIDE one
+        # call - the checkpoint above only ever fires between them.
+        budget = PR_READ_BUDGET_S if left is None else min(PR_READ_BUDGET_S, left)
+        clamped = budget < PR_READ_BUDGET_S
         pr_node_id = getattr(candidate, "node_id", None)
         number = getattr(candidate, "pr_number", None)
         pr_state: Optional[str] = None
@@ -1073,15 +1090,25 @@ def collect_observations(
             if reader is None:
                 from fno.pr_watch._discover import read_pr_state
 
-                def reader(cand, *, reviewers):
-                    return read_pr_state(cand, reviewers=reviewers)
+                def reader(cand, *, reviewers, timeout_s=budget):
+                    return read_pr_state(cand, reviewers=reviewers, timeout_s=timeout_s)
 
             observation = reader(candidate, reviewers=[])
             pr_state = str(getattr(observation, "state", "") or "") or None
             opened_epoch = _parse_iso_epoch(getattr(observation, "opened_at", None))
         except Exception as exc:  # noqa: BLE001 - one failed read degrades the dim
-            github_ok = False
-            warnings.append(f"pr read failed for {number}: {exc}")
+            if clamped:
+                # The budget was the binding constraint, so this says nothing
+                # about GitHub. Reading it as an outage would report the API
+                # broken every time a tick ran short, which is the opposite
+                # of what github_ok is for.
+                prs_unscanned = True
+                warnings.append(
+                    f"pr read for {number} ran out of tick budget ({budget:.1f}s): {exc}"
+                )
+            else:
+                github_ok = False
+                warnings.append(f"pr read failed for {number}: {exc}")
         prs.append(
             PrObs(
                 pr_number=int(number) if number is not None else 0,
