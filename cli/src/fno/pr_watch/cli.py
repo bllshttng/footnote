@@ -249,6 +249,12 @@ _WAKE_APPLY_FLOOR_S = 200
 #: sweeps from scratch, there is no partial state to lose.
 _STRANDED_FLOOR_S = 10.0
 
+#: One Codex recovery scan measured 0.8s per root on 2026-09-02, over 18 roots
+#: and 3113 rollouts, so 14.9s for the leg. The floor carries headroom for a
+#: root with more rollouts than the mean. Skipping under it costs nothing: a
+#: refused scan is already a `continue`, and the next tick starts over.
+_RECOVERY_ROOT_FLOOR_S = 3.0
+
 
 class TickDeadlineExceeded(BaseException):
     """The tick's wall-clock deadline fired; the phase marker names where.
@@ -641,7 +647,24 @@ def tick() -> None:
                                     },
                                 )
                         recovery_scans = []
+                        recovery_roots_done = 0
                         for recovery_root in roots:
+                            # Per root, not once before the loop: the stranded
+                            # sweep learned this from a review finding, and
+                            # this leg never got the same check. Measured
+                            # 2026-09-02 at 0.8s per root over 18 roots.
+                            recovery_left = deadline - (time.monotonic() - started)
+                            if recovery_left < _RECOVERY_ROOT_FLOOR_S:
+                                log.info(
+                                    "pr-watch: Codex recovery scan stopped after %d "
+                                    "root(s), %.1fs left, under the %.0fs a scan "
+                                    "costs - remaining roots retry next tick",
+                                    recovery_roots_done,
+                                    recovery_left,
+                                    _RECOVERY_ROOT_FLOOR_S,
+                                )
+                                break
+                            recovery_roots_done += 1
                             try:
                                 (
                                     recovery_payload,

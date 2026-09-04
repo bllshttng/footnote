@@ -2485,6 +2485,138 @@ class TestTickRecordsAndDeadline:
         assert ("publish", "tick", "") in published
         assert ("roots", [str(tmp_path)]) in published
 
+    def _arm_watchdog_tick(self, monkeypatch, tmp_path, roots):
+        """The minimum scaffolding that reaches the recovery-root loop."""
+        from unittest.mock import MagicMock
+
+        from fno.agents import watchdog
+        from fno.pr_watch import cli as prcli
+        from fno.pr_watch._dispatch import TickResult
+
+        settings = MagicMock()
+        settings.pr_watch.enabled = True
+        settings.pr_watch.max_age_days = 30
+        settings.pr_watch.retries = 3
+        settings.pr_watch.graphql_min_remaining = 200
+        settings.recovery.enabled = True
+        # wake, not report: the recovery-root loop is inside the wake branch,
+        # so a report-mode fixture would make every assertion here pass on an
+        # empty list for the wrong reason.
+        settings.recovery.watchdog = "wake"
+        settings.recovery.watchdog_mail_to = ""
+        settings.autonomy.enabled = True
+        monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+        monkeypatch.setattr(
+            "fno.pr_watch._dispatch.tick", lambda **kw: TickResult(open_prs=0, acted=0)
+        )
+        monkeypatch.setattr("fno.recovery.run_recovery_sweep", lambda *a, **k: 0)
+        monkeypatch.setattr("fno.agents.sweep.run_sweep", lambda **kw: ([], 0))
+        monkeypatch.setattr(prcli, "_emit_event", lambda *a, **k: True)
+        monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: list(roots))
+        monkeypatch.setattr("fno.worktree_stranded.sweep", lambda **kw: [])
+        monkeypatch.setattr("fno.worktree_stranded.apply_sweep", lambda *a, **kw: [])
+
+        from fno.agents import unfinished_work as uw
+
+        class _Snap:
+            generated_at = "2026-08-27T00:00:00Z"
+            findings = ()
+            complete = True
+            warnings = ()
+            dimensions = {
+                dim: uw.DimensionState(uw.MEASURED, 0, None) for dim in uw.DIMENSIONS
+            }
+
+        monkeypatch.setattr(uw, "build_report", lambda roots, *, now_s=None, **kw: _Snap())
+        monkeypatch.setattr(
+            uw,
+            "publish_report",
+            lambda snapshot, *, source, now_s, mail_to, log=None: {
+                "counts": {}, "findings": [], "warnings": []
+            },
+        )
+        monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: ({"verdicts": [], "counts": {}, "warnings": []}, []))
+        monkeypatch.setattr(watchdog, "_last_recovery_events_signature", lambda: "")
+        monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: None)
+        monkeypatch.setattr(watchdog, "fresh_non_leave", lambda *a, **k: set())
+        monkeypatch.setattr(watchdog, "emit_event", lambda *a, **k: None)
+        monkeypatch.setattr(watchdog, "apply_recoverable", lambda *a, **kw: [])
+
+        scanned = []
+
+        class _Scan:
+            complete = True
+            recoverable = ()
+
+        def _sweep(**kw):
+            scanned.append(kw.get("cwd"))
+            return (
+                {
+                    "generated_at": "2026-09-03T00:00:00Z",
+                    "verdicts": [],
+                    "counts": {},
+                    "warnings": [],
+                    "complete": True,
+                    "cwd": str(kw.get("cwd")),
+                },
+                [],
+                _Scan(),
+            )
+
+        monkeypatch.setattr(watchdog, "run_recoverable_sweep", _sweep)
+        return scanned
+
+    def test_recovery_root_loop_stops_when_the_tick_budget_runs_out(
+        self, monkeypatch, tmp_path
+    ):
+        """Measured 2026-09-02 at 0.8s per root over 18 roots. The stranded
+        sweep already re-checks per root; this leg had no check at all, so a
+        multi-root tick walked past the deadline and SIGALRM killed every leg
+        behind it."""
+        import typer
+        from typer.testing import CliRunner
+
+        from fno.pr_watch import cli as prcli
+
+        roots = [tmp_path / "a", tmp_path / "b", tmp_path / "c"]
+        for root in roots:
+            root.mkdir()
+        scanned = self._arm_watchdog_tick(monkeypatch, tmp_path, roots)
+
+        # A floor larger than the whole tick: every root is unaffordable after
+        # the first check, so the loop must stop rather than scan all three.
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "60")
+        monkeypatch.setattr(prcli, "_RECOVERY_ROOT_FLOOR_S", 10_000.0)
+
+        app = typer.Typer()
+        app.command()(prcli.tick)
+        result = CliRunner().invoke(app, [])
+
+        assert result.exit_code == 0, result.output
+        assert scanned == [], "the loop scanned a root it had no budget for"
+
+    def test_recovery_root_loop_scans_every_root_when_the_budget_holds(
+        self, monkeypatch, tmp_path
+    ):
+        """The mirror: an ample budget must not lose a root."""
+        import typer
+        from typer.testing import CliRunner
+
+        from fno.pr_watch import cli as prcli
+
+        roots = [tmp_path / "a", tmp_path / "b", tmp_path / "c"]
+        for root in roots:
+            root.mkdir()
+        scanned = self._arm_watchdog_tick(monkeypatch, tmp_path, roots)
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "600")
+
+        app = typer.Typer()
+        app.command()(prcli.tick)
+        result = CliRunner().invoke(app, [])
+
+        assert result.exit_code == 0, result.output
+        assert [str(p) for p in scanned] == [str(r) for r in roots]
+
     def test_watchdog_tick_publishes_a_refused_recovery_once(self, monkeypatch, tmp_path):
         """An unusable recoverable is refound every tick until it ages out.
 
