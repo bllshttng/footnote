@@ -55,7 +55,7 @@ tokens = ["pi", "--session", "{session_id}"]
 route_on_pane = true
 
 [harness.brandnewharness]
-thread = true
+unheard_of_field = true
 """
 
 

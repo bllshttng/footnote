@@ -315,21 +315,22 @@ def _candidate_supported(
 
     Posture flags FILTER the candidate set (t3.2); they never cancel the
     routing decision. Mirrors the spawn parser's own gates: thread needs the
-    harness's journey-proven lane (claude today), a mapped permission mode is
-    claude's on every substrate and a non-claude harness's only on the pane
-    lane. An unset substrate reads as the spawn parser's own default (pane),
-    so a lone permission pin does not filter out non-claude rows the gate
-    would accept. An unknown harness degrades open (kept) so the spawn's own
-    gate, which names the value, stays the authority on refusal.
+    harness's journey-proven lane (its spawn claim reads native), a mapped
+    permission mode is claude's on every substrate and a non-claude harness's
+    only on the pane lane. An unset substrate reads as the spawn parser's own
+    default (pane), so a lone permission pin does not filter out non-claude
+    rows the gate would accept. An unknown harness degrades open (kept) so
+    the spawn's own gate, which names the value, stays the authority on
+    refusal.
     """
     sub = (substrate or "").strip()
     if sub == "bg":
         sub = "thread"
     if sub == "thread":
         try:
-            from fno.agents.harness_map import capabilities
+            from fno.agents.harness_map import thread_seatable
 
-            if not capabilities(harness)["thread"]:
+            if not thread_seatable(harness):
                 return False
         except Exception:  # noqa: BLE001 - unknown harness keeps the candidate
             pass

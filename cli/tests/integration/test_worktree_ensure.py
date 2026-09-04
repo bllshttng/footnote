@@ -88,6 +88,111 @@ def test_ensure_branches_from_origin_main_not_local_head(
     assert wt_head == origin_main_sha  # based on origin/main, not local HEAD
 
 
+def _bare_origin(main_repo: Path, tmp_path: Path) -> Path:
+    """Bare origin with `main` pushed from main_repo; returns the origin path."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    _git("remote", "add", "origin", str(origin), cwd=main_repo)
+    _git("push", "-q", "origin", "main", cwd=main_repo)
+    return origin
+
+
+def test_ensure_continues_origin_feature_branch_ahead_of_main(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """AC2-HP (x-28ff): origin/feature/<name> ahead of main -> the new worktree
+    tracks that branch at its tip, and the receipt names it as continued."""
+    origin = _bare_origin(main_repo, tmp_path)
+    _git("checkout", "-qb", "feature/x-1234", cwd=main_repo)
+    (main_repo / "a.txt").write_text("one\n")
+    _git("add", "a.txt", cwd=main_repo)
+    _git("commit", "-qm", "one", cwd=main_repo)
+    (main_repo / "b.txt").write_text("two\n")
+    _git("add", "b.txt", cwd=main_repo)
+    _git("commit", "-qm", "two", cwd=main_repo)
+    _git("push", "-q", "origin", "feature/x-1234", cwd=main_repo)
+    tip = _git("rev-parse", "feature/x-1234", cwd=main_repo).stdout.strip()
+    # Delete the LOCAL branch: the continued path fires when only origin has
+    # the work (a fresh checkout, or a branch that never came back). A local
+    # branch present in the canonical repo takes today's checkout path.
+    _git("checkout", "-q", "main", cwd=main_repo)
+    _git("branch", "-qD", "feature/x-1234", cwd=main_repo)
+
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "x-1234"])
+    assert res.exit_code == 0, res.stderr
+    wt = Path(res.stdout.strip())
+    assert _git("rev-parse", "HEAD", cwd=wt).stdout.strip() == tip
+    upstream = _git("rev-parse", "--abbrev-ref", "feature/x-1234@{upstream}", cwd=wt).stdout.strip()
+    assert upstream == "origin/feature/x-1234"
+    assert "base=continued:origin/feature/x-1234:+2" in res.stderr
+
+
+def test_ensure_salvages_remote_salvage_ref_when_no_branch(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """AC3-HP (x-28ff): only refs/fno/salvage/<name> on origin ahead of main ->
+    the new branch starts at that commit and the receipt names it as salvaged."""
+    _bare_origin(main_repo, tmp_path)
+    _git("checkout", "-qb", "spill", cwd=main_repo)
+    (main_repo / "c.txt").write_text("salvage me\n")
+    _git("add", "c.txt", cwd=main_repo)
+    _git("commit", "-qm", "unpushed work", cwd=main_repo)
+    spill_tip = _git("rev-parse", "HEAD", cwd=main_repo).stdout.strip()
+    _git("push", "-q", "origin", f"{spill_tip}:refs/fno/salvage/x-5555", cwd=main_repo)
+    _git("checkout", "-q", "main", cwd=main_repo)
+
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "x-5555"])
+    assert res.exit_code == 0, res.stderr
+    wt = Path(res.stdout.strip())
+    assert _git("rev-parse", "HEAD", cwd=wt).stdout.strip() == spill_tip
+    assert "base=salvaged:refs/fno/salvage/x-5555:+1" in res.stderr
+
+
+def test_ensure_merged_branch_cuts_fresh(main_repo: Path, tmp_path: Path) -> None:
+    """AC4-EDGE (x-28ff): the branch exists on origin but carries zero commits
+    ahead of main (it merged) -> fresh cut from origin/main, and the receipt
+    says so. Name existence never reads as ahead."""
+    origin = _bare_origin(main_repo, tmp_path)
+    _git("checkout", "-qb", "feature/x-7777", cwd=main_repo)
+    (main_repo / "d.txt").write_text("merged later\n")
+    _git("add", "d.txt", cwd=main_repo)
+    _git("commit", "-qm", "merged later", cwd=main_repo)
+    _git("push", "-q", "origin", "feature/x-7777", cwd=main_repo)
+    _git("checkout", "-q", "main", cwd=main_repo)
+    _git("merge", "-q", "--ff-only", "feature/x-7777", cwd=main_repo)
+    _git("push", "-q", "origin", "main", cwd=main_repo)
+    # Only origin keeps the (now merged) branch, so ensure resolves the
+    # remote refs instead of today's local-branch checkout path.
+    _git("branch", "-qD", "feature/x-7777", cwd=main_repo)
+    main_tip = _git("rev-parse", "origin/main", cwd=main_repo).stdout.strip()
+    del origin
+
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "x-7777"])
+    assert res.exit_code == 0, res.stderr
+    wt = Path(res.stdout.strip())
+    assert _git("rev-parse", "HEAD", cwd=wt).stdout.strip() == main_tip
+    assert "base=fresh:origin/main" in res.stderr
+    assert "continued" not in res.stderr
+
+
+def test_ensure_unreachable_origin_cuts_fresh_and_names_failure(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """AC4-EDGE (x-28ff): the fetch cannot reach origin at all -> fresh cut,
+    and the receipt's stderr names the fetch failure instead of silently
+    blessing a possibly stale main."""
+    origin = _bare_origin(main_repo, tmp_path)
+    origin.rename(tmp_path / "origin-gone")  # unreachable: fetch must fail
+
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "x-9999"])
+    assert res.exit_code == 0, res.stderr
+    wt = Path(res.stdout.strip())
+    main_tip = _git("rev-parse", "origin/main", cwd=main_repo).stdout.strip()
+    assert _git("rev-parse", "HEAD", cwd=wt).stdout.strip() == main_tip
+    assert "base=fresh:origin/main" in res.stderr
+    assert "base fetch failed" in res.stderr
+
+
 def test_ensure_idempotent_reuse(main_repo: Path, tmp_path: Path) -> None:
     """AC1-EDGE: a second ensure for the same name reuses the worktree."""
     first = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "dup"])
@@ -402,3 +507,88 @@ def test_policy_verb_reports_never_and_default(main_repo: Path, tmp_path: Path) 
     lines = res2.stdout.strip().splitlines()
     assert lines[0] == "harness-native"
     assert lines[1].startswith("base=")
+
+
+def test_ensure_reuses_the_branch_checkout_when_the_policy_path_moves(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """A relocated policy path must reuse the branch's existing checkout.
+
+    A branch has exactly one checkout. When the resolved path moves under an
+    existing lane (a node whose harness stopped resolving to claude, or a
+    `worktrees_base` edit), `git worktree add` refuses with "already used by
+    worktree at ..." and the lane wedges on every tick, because its tree is
+    unmerged and nothing reaps it.
+    """
+    first = runner.invoke(
+        app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "lane-a"]
+    )
+    assert first.exit_code == 0, first.stderr
+    original = Path(first.stdout.strip())
+    assert original == _default_wt(tmp_path, main_repo, "lane-a")
+
+    # Same node, a harness whose policy resolves somewhere else.
+    moved = runner.invoke(
+        app,
+        ["worktree", "ensure", "--repo", str(main_repo), "--name", "lane-a",
+         "--harness", "claude"],
+    )
+    assert moved.exit_code == 0, moved.stderr
+    assert Path(moved.stdout.strip()) == original
+    assert "a branch has one checkout" in moved.stderr
+
+
+def test_ensure_refuses_a_prunable_registration_instead_of_a_missing_path(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """A worktree whose directory was deleted by hand is still LISTED.
+
+    `git worktree list --porcelain` keeps the row and only adds a `prunable`
+    line, which the parser drops. Handing that path back with exit 0 sends
+    `spawn --cwd` and `target start`'s setup hook at a directory that is not
+    there. The old failure exited 1 with empty stdout, so every caller's
+    `${wt:-<repo-root>}` fallback took over; exit 0 with a dead path is worse.
+    """
+    import shutil
+
+    first = runner.invoke(
+        app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "lane-p"]
+    )
+    assert first.exit_code == 0, first.stderr
+    original = Path(first.stdout.strip())
+    shutil.rmtree(original)
+    assert not original.exists()
+
+    # The RELOCATED call is the one that consults the branch, so the prunable
+    # row can only be handed back on this path.
+    second = runner.invoke(
+        app,
+        ["worktree", "ensure", "--repo", str(main_repo), "--name", "lane-p",
+         "--harness", "claude"],
+    )
+    assert not (
+        second.exit_code == 0 and Path(second.stdout.strip() or ".") == original
+    ), "handed back a path that does not exist"
+
+
+def test_ensure_never_hands_back_the_canonical_checkout(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """The main checkout is one of the porcelain rows.
+
+    With `feature/<name>` checked out in canonical, reuse-by-branch would
+    return the repo root with exit 0. `target start` reads that as
+    `in_place` and silently launches on the canonical checkout, which is the
+    contradiction the `never` policy arm refuses in the mirror case.
+    """
+    subprocess.run(
+        ["git", "-C", str(main_repo), "checkout", "-b", "feature/lane-c"],
+        check=True, capture_output=True,
+    )
+    out = runner.invoke(
+        app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "lane-c"]
+    )
+    assert not (
+        out.exit_code == 0
+        and Path(out.stdout.strip() or ".").resolve() == main_repo.resolve()
+    ), "handed back the canonical checkout"

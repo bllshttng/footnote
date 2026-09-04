@@ -89,13 +89,16 @@ def lane_b_home(tmp_path, monkeypatch):
 # AC4-ERR: the public dispatch surface still refuses
 # ---------------------------------------------------------------------------
 
-def test_agy_thread_dispatch_resolves_on_the_journey_backed_bit(lane_b_home) -> None:
-    """agy's `thread` row is true behind its own journey
+def test_agy_thread_dispatch_resolves_on_the_journey_backed_seat(lane_b_home) -> None:
+    """agy's spawn claim reads native behind its own journey
     (test_agy_spawn_journey.py), so the keeper lane built here IS reachable
     through the public dispatch surface. agy participates in the loop
     natively (a Stop handler in its own hooks.json), so unlike pi it needs no
     installed extension for the autonomous `/target` template to resolve."""
-    assert capabilities("agy")["thread"] is True
+    from fno.agents.harness_map import spawn_state, thread_seatable
+
+    assert spawn_state("agy") == "native"
+    assert thread_seatable("agy") is True
     resolved = resolve_dispatch(harness="agy", substrate="thread", command="agy --version")
     assert resolved["substrate"] == "thread"
     assert resolved["thread"] is True
@@ -106,18 +109,20 @@ def test_agy_thread_dispatch_resolves_on_the_journey_backed_bit(lane_b_home) -> 
 
 def test_gemini_thread_dispatch_still_refuses_at_the_gate(lane_b_home) -> None:
     """The refusal this file used to assert through agy still has a subject.
-    gemini carries a capability row and no thread lane, so nothing resolves
-    onto a keeper lane nobody built for it. Its DEPRECATION gate fires before
-    the substrate gate, so that is the message asserted - the point is that
-    the row alone never buys the lane."""
-    assert capabilities("gemini")["thread"] is False
+    gemini carries a capability row and no seat, so nothing resolves onto a
+    keeper lane nobody built for it. Its DEPRECATION gate fires before the
+    substrate gate, so that is the message asserted - the point is that the
+    row alone never buys the lane."""
+    from fno.agents.harness_map import thread_seatable
+
+    assert thread_seatable("gemini") is False
     with pytest.raises(DispatchResolveError) as exc_info:
         resolve_dispatch(harness="gemini", substrate="thread")
     assert "no maintained footnote dispatch lane" in str(exc_info.value)
 
 
 def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit(monkeypatch) -> None:
-    """pi's `thread` row is true behind its passing restart journey
+    """pi's spawn claim reads native behind its passing restart journey
     (test_thread_keeper_journey.py), so a one-shot dispatch resolves onto the
     lane this file builds. The autonomous `/target` template resolves too
     since x-43bd shipped pi's loop extension - the loop gate that used to
@@ -126,7 +131,9 @@ def test_pi_thread_dispatch_resolves_on_the_journey_backed_bit(monkeypatch) -> N
     import fno.agents.harness_map as harness_map
 
     monkeypatch.setattr(harness_map, "_loop_extension_installed", lambda h: True)
-    assert capabilities("pi")["thread"] is True
+    from fno.agents.harness_map import thread_seatable
+
+    assert thread_seatable("pi") is True
     resolved = resolve_dispatch(harness="pi", substrate="thread", command="pi --version")
     assert resolved["substrate"] == "thread"
     assert resolved["thread"] is True

@@ -140,6 +140,21 @@ def test_lane_harness_resolution():
     assert advance._lane_harness("opencode") == "opencode"
 
 
+def test_a_declared_harness_outside_the_old_hardcoded_set_keeps_itself():
+    """Membership is "the harness map declares it", not a literal set.
+
+    `pi` is declared and is not claude, so a pi lane belongs at the external
+    base. The hardcoded `{codex, gemini, agy, opencode}` this replaced answered
+    claude for it, and a pi worker would have been handed a claude-native
+    worktree. Any harness the map declares is a valid specimen here; pi is the
+    one that was declared and missing from the set.
+    """
+    from fno.agents import harness_map
+
+    assert harness_map.is_declared("pi"), "specimen must be a declared harness"
+    assert advance._lane_harness("pi") == "pi"
+
+
 def test_dispatch_spawns_one_isolated_worker_per_lane(
     tmp_path, monkeypatch
 ):

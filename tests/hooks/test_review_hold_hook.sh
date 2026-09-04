@@ -81,10 +81,14 @@ expect_silent() {
 }
 
 skill_call() {
-  # $1 = skill name, $2 = cwd (default $WORK)
-  jq -nc --arg cwd "${2:-$WORK}" --arg s "$1" \
+  # $1 = skill name, $2 = cwd (default $WORK), $3 = args (the Skill tool's own
+  # field). The tool sends {skill:"code-review", args:"high --comment"}; every
+  # fixture here used to bake the args into `skill`, a shape the tool never
+  # sends, so the suite proved a parse that could not happen in production.
+  jq -nc --arg cwd "${2:-$WORK}" --arg s "$1" --arg a "${3:-}" \
     '{hook_event_name:"PreToolUse", tool_name:"Skill", cwd:$cwd,
-      session_id:"sess-1", tool_input:{skill:$s}}'
+      session_id:"sess-1",
+      tool_input:({skill:$s} + (if $a == "" then {} else {args:$a} end))}'
 }
 
 echo "-- the review verbs register a hold --"
@@ -98,14 +102,22 @@ run_hook acquire "$(skill_call "fno:review")"
 expect_registered "skill=fno:review"
 run_hook acquire "$(skill_call "/code-review")"
 expect_registered "skill=/code-review"
+run_hook acquire "$(skill_call "/code-review" "" "<level> --comment")"
+expect_registered "skill=/code-review with args in the args field"
 run_hook acquire "$(skill_call "/code-review <level> --comment")"
-expect_registered "skill=/code-review with args"
+expect_registered "skill=/code-review with args in the name (typed slash form)"
+# A colon in the ARGS must not reach the namespace trim. It used to: `##*:` ran
+# over the whole joined string, so a PR URL left `//github.com/...` as the skill
+# name and the review took no hold at all.
+run_hook acquire "$(skill_call "/code-review" "" "high --comment https://github.com/o/r/pull/7")"
+expect_registered "skill=/code-review with a colon in the args"
 
 echo "-- a review start records a positive invocation marker and joins the hold --"
 review_level="medium"
 run_hook acquire "$(jq -nc --arg cwd "$WORK" --arg level "$review_level" \
   '{hook_event_name:"PreToolUse", tool_name:"Skill", cwd:$cwd,
-    session_id:"sess-started", tool_input:{skill:("/code-review " + $level + " --comment")}}')"
+    session_id:"sess-started",
+    tool_input:{skill:"/code-review", args:($level + " --comment")}}')"
 expect_registered "review start telemetry: hold"
 if grep -q 'review_invocation' "$EVENTS"; then
   pass "review start telemetry: invocation event"
@@ -138,7 +150,8 @@ printf '{"invocation_id":"%s","target_session_id":"sess-join"}' "$SEEDED_ID" \
 join_level="medium"
 printf '%s' "$(jq -nc --arg cwd "$WORK" --arg level "$join_level" \
   '{hook_event_name:"PreToolUse", tool_name:"Skill", cwd:$cwd,
-    session_id:"sess-join", tool_input:{skill:("/code-review " + $level + " --comment")}}')" \
+    session_id:"sess-join",
+    tool_input:{skill:"/code-review", args:($level + " --comment")}}')" \
   | FNO="$BIN/fno-stub" FNO_RECORD="$RECORDED" FNO_EVENTS="$EVENTS" \
     FNO_HOME="$JOIN_HOME" bash "$HOOK" acquire >/dev/null 2>&1
 if grep -q "$SEEDED_ID" "$EVENTS" && grep -q "$SEEDED_ID" "$RECORDED"; then

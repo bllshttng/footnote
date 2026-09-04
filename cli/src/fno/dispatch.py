@@ -298,6 +298,7 @@ def _autonomous_route_for(
     if node and rec is None:
         return None
     try:
+        from fno.adapters.providers.loader import record_harness
         from fno.agents.autonomous_route import (
             launch_is_pinned,
             select_autonomous_route,
@@ -309,9 +310,14 @@ def _autonomous_route_for(
         # and deferring it on the ACTIVE record's quota would hold a codex launch
         # because a claude account is walled. Those are unrelated pools, so when
         # the pin does not match the probed record's harness there is nothing
-        # here worth probing: proceed as configured.
-        if (harness or "").strip() and not _record_is_harness(provider_id, harness, cwd):
-            return None
+        # here worth probing: proceed as configured. An unknown record still
+        # gets probed: skipping quota policy on a read failure is the change
+        # that could dispatch onto a walled account.
+        pinned_harness = (harness or "").strip()
+        if pinned_harness:
+            rec_harness = record_harness(provider_id, Path(cwd) if cwd else None)
+            if rec_harness and rec_harness != pinned_harness:
+                return None
         return select_autonomous_route(
             provider_id=provider_id,
             priority=(rec or {}).get("priority"),
@@ -322,29 +328,6 @@ def _autonomous_route_for(
         )
     except Exception:  # noqa: BLE001 - a quota read must never block a dispatch
         return None
-
-
-def _record_is_harness(
-    provider_id: str, harness: Optional[str], node_cwd: Optional[str]
-) -> bool:
-    """True when ``provider_id``'s record runs on ``harness``.
-
-    Unknown answers True so the probe still happens: skipping quota policy on a
-    read failure is the change that could dispatch onto a walled account, and
-    fail-open here means "keep the existing behaviour", not "skip the check".
-    """
-    try:
-        from pathlib import Path as _Path
-
-        from fno.adapters.providers.loader import load_providers
-
-        rec = load_providers(
-            repo_root=_Path(node_cwd) if node_cwd else None
-        ).by_id.get(provider_id)
-        rec_harness = (getattr(rec, "harness", "") or "").strip()
-        return not rec_harness or rec_harness == (harness or "").strip()
-    except Exception:  # noqa: BLE001 - an unreadable registry keeps today's path
-        return True
 
 
 def _lookup_node(node_ref: str) -> Optional[dict]:

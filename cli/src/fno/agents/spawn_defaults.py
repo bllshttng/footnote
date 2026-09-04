@@ -788,7 +788,7 @@ def _grid_node(toks: Sequence[str], env: Optional[Mapping[str, str]] = None) -> 
 def _substrate_compatible(substrate: str, provider: str) -> bool:
     """A config-sourced substrate must be a KNOWN value AND honored by the
     resolved provider. ``thread`` requires the harness's journey-proven fno
-    driver (claude and codex today); ``pane``/``headless`` are universal.
+    driver (its spawn claim reads native); ``pane``/``headless`` are universal.
     ``bg`` is accepted as a deprecated alias for ``thread``.
     An unknown value (or ``thread`` on a non-thread provider) degrades open (warn, skip) -
     never injected to fail at the spawn parser (both exit 2 there otherwise)."""
@@ -799,9 +799,9 @@ def _substrate_compatible(substrate: str, provider: str) -> bool:
     if substrate != "thread":
         return True
     try:
-        from fno.agents.harness_map import capabilities
+        from fno.agents.harness_map import thread_seatable
 
-        return bool(capabilities(provider)["thread"])
+        return thread_seatable(provider)
     except Exception:
         return provider == "claude"
 
@@ -1687,7 +1687,7 @@ def inject_spawn_defaults(
         # The effective substrate this spawn resolves to: an explicit pin, else a
         # config value injected this run, else the `fno agents spawn` default -
         # PANE (cli.py, not the autonomous-dispatch substrate_default, which picks
-        # headless for providers without a thread capability and would wrongly
+        # headless for providers whose spawn claim is not native and would wrongly
         # skip a pane-mappable mode).
         eff_substrate = explicit_substrate or injected_substrate or "pane"
         if prov and _permission_mappable(prov, cfg_permission, eff_substrate):
@@ -2013,9 +2013,8 @@ def link_to_spawn_flags(link) -> List[str]:
 
     No new axis vocabulary: harness is ``-H``, the vendor/model route is
     ``--route``, and model, effort, substrate, permission-mode and account keep
-    their own flags. ``--substrate bg`` is the deprecated thread alias; the Rust
-    client supports it for claude and codex, while opencode remains
-    ``thread=false``/unearned and the dispatch resolver refuses it,
+    their own flags. ``--substrate bg`` is the deprecated thread alias; the
+    dispatch resolver seats it from the harness's spawn claim (``native``),
     so a codex link that left substrate unset resolves to a pane rather than
     being handed a substrate its harness rejects.
     """

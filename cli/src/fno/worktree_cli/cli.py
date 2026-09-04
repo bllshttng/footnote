@@ -235,6 +235,18 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _worktree_for_branch(repo: Path, branch: str) -> Optional[Path]:
+    """The worktree that already has ``branch`` checked out, or None.
+
+    Through the porcelain parser three other modules already share, which also
+    gets `bare` and `detached` right - a second hand-rolled reader of the same
+    output is the shape the dual-implementation rule refuses.
+    """
+    from fno.worktree_status import _worktrees
+
+    return next((Path(p) for b, p in _worktrees(repo) if b == branch), None)
+
+
 def _abs_git_path(repo: Path, which: str) -> Optional[Path]:
     """Absolute path of a repo's git-dir or git-common-dir (symlink-resolved)."""
     out = _git(repo, "rev-parse", f"--{which}")
@@ -254,6 +266,86 @@ def _base_ref(repo: Path) -> Optional[str]:
     for ref in ("origin/main", "origin/master"):
         if _git(repo, "rev-parse", "--verify", "--quiet", ref).returncode == 0:
             return ref
+    return None
+
+
+def _ahead_count(repo: Path, base: str, ref: str) -> Optional[int]:
+    """Commits in `base..ref`, or None when `ref` does not resolve."""
+    if _git(repo, "rev-parse", "--verify", "--quiet", ref).returncode != 0:
+        return None
+    out = _git(repo, "rev-list", "--count", f"{base}..{ref}")
+    if out.returncode != 0 or not out.stdout.strip().isdigit():
+        return None
+    return int(out.stdout.strip())
+
+
+def _fetch_failure(fetch: Optional[subprocess.CompletedProcess[str]]) -> str:
+    """The one fatal line meaning origin itself was unreachable. A missing
+    optional ref also fails the fetch, but that is the NORMAL shape here:
+    the feature branch and salvage ref usually do not exist yet."""
+    if fetch is None:
+        return "git fetch origin timed out after 60s"
+    for line in (fetch.stderr or "").splitlines():
+        if "fatal" in line and "couldn't find remote ref" not in line:
+            return line.strip()
+    return ""
+
+
+def _continuation_base(
+    repo: Path, name: str, base: str
+) -> Optional[tuple]:
+    """What a re-dispatch should continue (x-28ff): origin/feature/<name>
+    ahead of base wins, then a salvage ref ahead of base (remote, then the
+    local one a dead worker's hook wrote). Ahead-of-base by rev-list count,
+    never name existence. Returns (kind, receipt_ref, count, create_target)."""
+    remote_branch = base.split("/", 1)[1]
+    salvage = f"refs/fno/salvage/{name}"
+    feat = f"origin/feature/{name}"
+    feat_ref = f"refs/remotes/origin/feature/{name}"
+    fetch: Optional[subprocess.CompletedProcess[str]]
+    try:
+        fetch = subprocess.run(
+            ["git", "-C", str(repo), "fetch", "--quiet", "origin",
+             remote_branch, f"feature/{name}:{feat_ref}"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        fetch = None
+    # Full-path dst: materializes the tracking ref even on a --single-branch
+    # clone, and a short `origin/feature/<name>` would land at refs/origin/
+    # and make every later rev-parse ambiguous.
+    count = _ahead_count(repo, base, feat_ref)
+    if count:
+        return ("continued", feat, count, feat_ref)
+    # git refuses fetch destinations under refs/fno/*, so the remote salvage
+    # ref lands per-name under refs/remotes/ - never the repo-wide
+    # FETCH_HEAD, which parallel ensures would race.
+    remote_salvage = f"refs/remotes/fno-salvage/{name}"
+    try:
+        sal_fetch = subprocess.run(
+            ["git", "-C", str(repo), "fetch", "--quiet", "origin",
+             f"{salvage}:{remote_salvage}"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        sal_fetch = None
+    count = (
+        _ahead_count(repo, base, remote_salvage)
+        if sal_fetch is not None and sal_fetch.returncode == 0
+        else None
+    )
+    if count:
+        return ("salvaged", salvage, count, remote_salvage)
+    count = _ahead_count(repo, base, salvage)
+    if count:
+        return ("salvaged", salvage, count, salvage)
+    failed = _fetch_failure(fetch)
+    if failed:
+        # Fresh AND why: a stale main reads as cuttable when it is not.
+        typer.echo(
+            f"worktree ensure: base fetch failed ({failed}); cutting fresh from {base}",
+            err=True,
+        )
     return None
 
 
@@ -364,17 +456,59 @@ def _worktree_ensure(
         )
         return 1
 
-    wt.parent.mkdir(parents=True, exist_ok=True)
     br = branch or f"feature/{name}"
+    # base= stays ONE whitespace-free token: the orientation line is a
+    # key=value contract.
+    base_note = ""
+    # A branch has exactly ONE checkout, so anything that MOVES the resolved
+    # path - a harness that stopped resolving to claude, a `worktrees_base`
+    # edit - hit `git worktree add`'s "already used by worktree at ..." and
+    # wedged that lane forever, the old tree being unmerged. Reuse keyed on the
+    # path alone made a relocation fatal; the contract is create-or-reuse.
+    # Only a REAL linked worktree may be handed back. Two rows look like a
+    # reusable checkout and are not: a prunable registration whose directory was
+    # removed by hand (the porcelain still lists it), and the CANONICAL checkout
+    # itself when the branch is checked out there. Returning either with exit 0
+    # is worse than refusing, because the old failure exited 1 with empty stdout
+    # and every caller's `${wt:-<repo-root>}` fallback took over. Falling
+    # through instead reaches `git worktree add`, whose "already used by
+    # worktree at ..." is the honest refusal.
+    existing = _worktree_for_branch(top, br)
+    if (
+        existing is not None
+        and existing.resolve() != wt.resolve()
+        and existing.resolve() != top.resolve()
+        and existing.exists()
+    ):
+        typer.echo(
+            f"worktree ensure: {policy_receipt}; reusing {br} at {existing} "
+            f"(policy resolves {wt}; a branch has one checkout)",
+            err=True,
+        )
+        typer.echo(str(existing))
+        return 0
+    wt.parent.mkdir(parents=True, exist_ok=True)
     if _git(top, "show-ref", "--verify", "--quiet", f"refs/heads/{br}").returncode == 0:
         # Branch already exists (e.g. a re-dispatch after archive) -> check it out.
         add = _git(top, "worktree", "add", str(wt), br)
     else:
         base = _base_ref(top)
-        add_args = ["worktree", "add", str(wt), "-b", br]
-        if base:
-            add_args.append(base)
-        add = _git(top, *add_args)
+        # Continue the node's own work when it reached origin. An explicit
+        # --branch (batch lane) is the caller's choice; default path only.
+        cont = _continuation_base(top, name, base) if base and branch is None else None
+        if cont is not None:
+            kind, source, count, target = cont
+            if kind == "continued":
+                add = _git(top, "worktree", "add", "-b", br, "--track", str(wt), target)
+            else:
+                add = _git(top, "worktree", "add", str(wt), "-b", br, target)
+            base_note = f" base={kind}:{source}:+{count}"
+        else:
+            add_args = ["worktree", "add", str(wt), "-b", br]
+            if base:
+                add_args.append(base)
+            add = _git(top, *add_args)
+            base_note = f" base=fresh:{base}" if base else ""
     if add.returncode != 0:
         typer.echo(
             f"worktree ensure: git worktree add failed: {add.stderr.strip() or add.stdout.strip()}",
@@ -393,7 +527,7 @@ def _worktree_ensure(
     # location, incl. a harness-native->external degradation - the resolver already
     # collapsed a non-native harness to `external`, so pol.policy is the true mode).
     typer.echo(
-        f"worktree ensure: {policy_receipt}; worktree at {wt}",
+        f"worktree ensure: {policy_receipt}; worktree at {wt}{base_note}",
         err=True,
     )
     typer.echo(str(wt))  # the ONLY stdout line -> the caller's $wt

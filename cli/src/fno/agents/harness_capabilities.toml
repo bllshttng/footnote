@@ -4,12 +4,11 @@
 # resync BOTH copies, not just the first:
 #   bash scripts/ci/check-harness-capabilities-fresh.sh --write
 # scripts/ci/check-harness-capabilities-fresh.sh fails CI when any copy differs.
-map_version = 15
+map_version = 18
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-session"
-thread = true
 autonomous_pane = false
 route_on_pane = true
 # LOOP PARTICIPATION. Can the fno target loop CLOSE on this harness?
@@ -47,6 +46,12 @@ loop_participation = "native"
 loop_extension = ""
 command_surface = "slash"
 slash_prefix = ""
+# The claude TUI's own slash verbs, measured 2026-09-04 against the
+# installed CLI's palette and the vendor docs. The verb normalizer skips
+# a leading-slash token naming one of these, so a native verb driven
+# through dispatch reaches the TUI verb instead of a footnote skill that
+# does not exist.
+native_verbs = ["/agents", "/code-review", "/compact", "/doctor", "/memory", "/model", "/rename", "/resume", "/status"]
 ready_marker = "live_prompt_box"
 ready_rule_ids = ["live_prompt_box", "osc_title_idle"]
 manifest_rules = [
@@ -127,6 +132,28 @@ effort_labels = {}
 status_command = "/status"
 status_pattern = 'Model:\s+(?P<model>\S+).*?(?:reasoning|effort)\s+(?P<effort>minimal|low|medium|high|xhigh|max)'
 
+# FEATURES. All three states are measured. spawn: one of the two journey-proven
+# thread lanes. review: Claude Code ships /code-review, and the fno review
+# lane drives it on claude workers today. attach: the subcommand above IS the
+# native verb, and resume_cli renders it.
+[harness.claude.features.review]
+state = "native"
+verbs = ["/code-review"]
+
+[harness.claude.features.spawn]
+state = "native"
+
+# Reachability, not verb inventory: the form field above answers "ships a
+# native attach subcommand"; this answers "can fno attach". They happen to
+# agree on claude and disagree on codex (x-a3e8).
+[harness.claude.features.attach]
+state = "native"
+
+# Subagent dispatch rides the Task/Agent tool; the review lane's registry
+# reviewers resolve their `requires: subagent-dispatch` from this row.
+[harness.claude.features.subagent_dispatch]
+state = "native"
+
 [harness.codex]
 permission_bypass = ["--dangerously-bypass-approvals-and-sandbox"]
 resume = "native-thread"
@@ -137,7 +164,6 @@ resume = "native-thread"
 # That child did survive mux death and did not obviously survive its own
 # parent's, so the bit promised more than it delivered; measured 2026-08-27,
 # corrected 2026-08-28 (docs/architecture/codex-thread-driver.md).
-thread = true
 autonomous_pane = true
 route_on_pane = false
 # codex, measured 2026-08-28: hooks/codex-hooks.json declares a `Stop` group
@@ -250,10 +276,29 @@ effort_labels = { low = "Low", medium = "Medium (default)", high = "High", xhigh
 status_command = "/status"
 status_pattern = 'Model:\s+(?P<model>\S+).*?reasoning\s+(?P<effort>minimal|low|medium|high|xhigh|max)'
 
+# FEATURES. All three states are measured. spawn: the second journey-proven
+# thread lane. review: `review_verbs` above map onto the app-server daemon's
+# review RPC, which the mail lane's --check exercises. attach: the proof the
+# two questions split. The row's form is `codex resume --remote` against the
+# app-server daemon, not a dedicated attach verb - fno drives it today, so
+# the reachability answer reads native.
+[harness.codex.features.review]
+state = "native"
+verbs = ["/code-review", "/review"]
+
+[harness.codex.features.spawn]
+state = "native"
+
+[harness.codex.features.attach]
+state = "native"
+
+# Codex reaches subagent dispatch through project custom agents / spawn_agent.
+[harness.codex.features.subagent_dispatch]
+state = "native"
+
 [harness.gemini]
 permission_bypass = ["--yolo"]
 resume = "native-continue"
-thread = false
 autonomous_pane = false
 route_on_pane = false
 # gemini, measured 2026-08-28, and the old "native" was WRONG. Nothing in this
@@ -270,6 +315,8 @@ route_on_pane = false
 loop_participation = "none"
 loop_extension = ""
 command_surface = "refused"
+# A deprecated harness with a refused command surface declares no native
+# verbs: there is no TUI palette left to measure.
 ready_marker = "unsupported"
 ready_rule_ids = []
 manifest_rules = []
@@ -333,16 +380,23 @@ effort_labels = {}
 status_command = ""
 status_pattern = ""
 
+# FEATURES. spawn reads absent as a measurement of GEMINI, not of this
+# table: the deprecated CLI exposes no spawn surface to wire - its command
+# surface is refused and the lane it once hinted at moved to its successor,
+# agy - so there is no harness-side surface left to measure. That is the
+# absent definition, not a seating decision.
+[harness.gemini.features.spawn]
+state = "absent"
+
+# Textbook `capable`: the experimental project-agent mode exists on the
+# binary and fno drives no lane into it; a registry reviewer resolves
+# unavailable here, not assumed-yes.
+[harness.gemini.features.subagent_dispatch]
+state = "capable"
+
 [harness.agy]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-continue"
-# TRUE behind a live journey (cli/tests/agents/test_agy_spawn_journey.py,
-# journey wk-x-d145): fno's keeper hosts the agy TUI and `dispatch_spawn`'s agy
-# branch drives it. Measured 2026-09-03 on agy 1.1.24 - one `agy -p
-# --output-format json` turn returned a conversation_id in 1.5s, the id named a
-# real db under ~/.gemini/antigravity-cli/conversations, and a FRESH process
-# resumed that conversation interactively with its transcript restored.
-thread = true
 autonomous_pane = false
 route_on_pane = false
 # agy, measured 2026-08-28: hooks/agy-target-stop-hook.sh is a real adapter that
@@ -356,6 +410,10 @@ loop_participation = "native"
 loop_extension = ""
 command_surface = "slash"
 slash_prefix = ""
+# The agy TUI's own slash verbs, measured 2026-09-04 from the vendor
+# reference's slash-command table (aliases folded into their canonical
+# name; argument-taking verbs listed by name).
+native_verbs = ["/add-dir", "/agents", "/artifact", "/btw", "/clear", "/config", "/context", "/copy", "/credits", "/diff", "/exit", "/fast", "/feedback", "/fork", "/help", "/hooks", "/keybindings", "/logout", "/mcp", "/model", "/open", "/permissions", "/planning", "/rename", "/resume", "/rewind", "/skills", "/statusline", "/tasks", "/title", "/usage"]
 ready_marker = "unsupported"
 ready_rule_ids = []
 manifest_rules = []
@@ -438,6 +496,16 @@ effort_labels = {}
 status_command = ""
 status_pattern = ""
 
+# FEATURES. spawn reads native: the harness-side surface was already measured
+# (agy's resume primitive, quoted-token recall from a fresh process,
+# 2026-08-26) and the thread arm now exists behind its own journey
+# (cli/tests/agents/test_agy_spawn_journey.py, journey wk-x-d145). Measured
+# 2026-09-03 on agy 1.1.24: one `agy -p --output-format json` turn returned a
+# conversation_id in 1.5s, the id named a real db under
+# ~/.gemini/antigravity-cli/conversations, and a FRESH process resumed that
+# conversation interactively with its transcript restored.
+[harness.agy.features.spawn]
+state = "native"
 
 # The keeper-lane spawn arm (docs/architecture/thread-lanes.md). state_root_grant
 # above records a write-access MECHANISM per lane, never whether a lane was
@@ -462,13 +530,12 @@ clear_modal = ["trust (?:this )?folder|do you trust", "\r"]
 [harness.opencode]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-session"
-# The serve lane is launch-only: `ask` refuses (no steering over the HTTP
-# API yet), the x-d9f9 journey test covers spawn + one turn but not the
-# server-kill survival, cold resume, or review steps of the bar in
-# docs/architecture/codex-thread-driver.md. A caller routed onto thread by
-# default got a session it could not talk to. False until the steering
-# lane ships with its own unattended journey test; measured 2026-08-26.
-thread = false
+# Launch-only: `ask` refuses (no steering over the HTTP API yet). That gap
+# belongs to the attach and steer claims, not to the seat: the 2026-09-03
+# spawn measurement below (unattended launch, one full turn, clean stop -
+# opencode_serve_journey.rs) is what seats the thread lane now. Kill-survival,
+# cold resume and review remain unproven here and no claim above says
+# otherwise.
 autonomous_pane = false
 route_on_pane = false
 # opencode, measured 2026-08-28, and the old "native" was WRONG. opencode has no
@@ -483,6 +550,10 @@ loop_participation = "extension"
 loop_extension = "cli/src/fno/setup/assets/opencode/footnote.js"
 command_surface = "slash"
 slash_prefix = "fno:"
+# The opencode TUI's own slash verbs, measured 2026-09-04 from the vendor
+# commands doc: five built-ins ship, and a custom command can override a
+# built-in by name.
+native_verbs = ["/help", "/init", "/redo", "/share", "/undo"]
 ready_marker = "unsupported"
 ready_rule_ids = []
 manifest_rules = [{ id = "permission_required", state = "blocked" }]
@@ -549,6 +620,20 @@ effort_labels = {}
 status_command = ""
 status_pattern = ""
 
+# FEATURES. spawn: the thread/headless launch seam is wired and accepted -
+# the seam-arm evidence that seats opencode in the spawn roster. The serve
+# lane's steering gap is a mechanics question the pane keys above still
+# answer honestly; it does not demote the arm.
+[harness.opencode.features.spawn]
+state = "native"
+
+# MEASURED 2026-09-03, live daemon-owned session: no native verb
+# (interactive_attach reads unsupported), yet `fno agents attach` landed in
+# the session's own pane through the daemon-kept lane. Reachability yes,
+# verb inventory no: the split this key exists to record.
+[harness.opencode.features.attach]
+state = "native"
+
 # pi (@earendil-works/pi-coding-agent 0.84.2), a DUAL-LANE harness. Which lane
 # a session gets is a choice fno makes at exec, never a property of pi:
 #
@@ -599,7 +684,6 @@ resume = "native-session"
 # driver spawns and a keeper process hosts. The spawn arm shipped (x-43bd):
 # pi is in SPAWN_HARNESSES, dispatch_spawn has a pi branch, and the public
 # surface brings its own journey (cli/tests/agents/test_pi_spawn_journey.py).
-thread = true
 autonomous_pane = false
 route_on_pane = false
 # pi, measured 2026-08-28, replacing the inherited value this row refused to
@@ -617,6 +701,10 @@ loop_participation = "extension"
 loop_extension = "cli/src/fno/setup/assets/pi/footnote.ts"
 command_surface = "slash"
 slash_prefix = ""
+# pi's in-TUI slash surface is composed at runtime from extensions, prompt
+# templates and skills; the vendor docs name /name as the built-in that
+# names a session. Measured 2026-09-04 from the vendor docs.
+native_verbs = ["/name"]
 # Read off a live pi TUI on 2026-08-28, not inherited: the status bar carries
 # the cost, the subscription tag, the context percentage and the compaction
 # tag, and it is the lowest-priority rule in manifests/pi.toml precisely
@@ -744,6 +832,13 @@ effort_labels = {}
 status_command = ""
 status_pattern = ""
 
+# FEATURES. spawn: the keeper-hosted thread lane survived the double-SIGKILL
+# restart journey (first green 2026-09-01 on pi 0.84.2,
+# cli/tests/agents/test_thread_keeper_journey.py) - the same journey evidence
+# that seats pi in the spawn roster.
+[harness.pi.features.spawn]
+state = "native"
+
 # cursor-agent is a pane-only fno harness. Its --print stream-json mode is
 # output-only: it has no input-format, rpc, acp, serve, or stdio drive lane.
 
@@ -769,7 +864,6 @@ resume = "native-session"
 # prior turn's codeword. The row is a statement about the lane dispatch
 # resolves onto - the same field pi's row carries - never a claim that the
 # harness grew a transport.
-thread = true
 autonomous_pane = false
 route_on_pane = false
 loop_participation = "extension"
@@ -778,6 +872,10 @@ loop_participation = "extension"
 loop_extension = ""
 command_surface = "slash"
 slash_prefix = ""
+# The cursor-agent TUI's own slash verbs, measured 2026-09-04 from the
+# vendor slash-commands reference (aliases folded into their canonical
+# name).
+native_verbs = ["/about", "/ask", "/bedrock", "/clear", "/config", "/copy", "/copy-conversation-id", "/copy-request-id", "/debug", "/exit", "/feedback", "/fork", "/help", "/line-numbers", "/logs", "/max-mode", "/mcp", "/model", "/open", "/plan", "/plugin", "/quit", "/rename", "/resume", "/rewind", "/run-everything", "/sandbox", "/setup-terminal", "/shell", "/show-thinking", "/status-indicators", "/summarize", "/update", "/vim"]
 ready_marker = "idle_plan_build"
 ready_rule_ids = ["idle_plan_build"]
 manifest_rules = [{ id = "idle_plan_build", state = "idle" }]
@@ -861,6 +959,13 @@ tokens = []
 effort_labels = {}
 status_command = ""
 status_pattern = ""
+
+# FEATURES. spawn: the create-chat lane mints the chat id and hosts the TUI
+# under the keeper, journey-backed - the same evidence that seats
+# cursor-agent in the spawn roster.
+[harness.cursor-agent.features.spawn]
+state = "native"
+
 # HOW EACH FIELD CAN BE SETTLED (x-244c). A capability question is one of two
 # kinds. A DECLARED fact - does this flag exist, what values does it take - is
 # the vendor's own statement about its own interface, so its authority is a
@@ -897,6 +1002,75 @@ marker = "the resumed conversation's store record gains the token planted in the
 kind = "unprobeable"
 reason = "measured over 5 delays x 3 trials on a live pane; no one-shot probe recovers it"
 
+# THE FEATURES DIMENSION (x-a3e8). A row may carry [harness.<name>.features.<key>]
+# stanzas answering WHAT A HARNESS CAN DO, beside the keystroke mechanics above
+# and never instead of them. Eleven keys, closed so a typo is a parse error:
+# review spawn attach rpc server plugins hooks skills_dir subagent_dispatch mcp
+# acp. A claim's only field is `state`: native, capable, absent, unmeasured -
+# defined once in harness_capabilities.rs beside FEATURE_STATES, the parser
+# that enforces them; the per-row comments below cite the measurements,
+# never restate the vocabulary. A key ABSENT from a row reads unmeasured and refuses nothing at load:
+# the refusal lives in the consuming lane, which names the key, the state, and
+# the probe that settles it. Every key used on any row needs a
+# [probe.features.<key>] declaration below, or the table refuses to load: a
+# claim without an instrument is a guess with extra steps. The thread seat
+# derives from features.spawn = native; no row carries a routing boolean.
+
+[probe."features.review"]
+kind = "behavioral"
+marker = "a review verb dispatched on the harness's lane returns a structured verdict artifact, not a delivery receipt"
+
+[probe."features.spawn"]
+kind = "behavioral"
+marker = "an unattended spawn on the harness's thread lane starts, drives a turn to completion, and ends in a clean stop, never at a timeout (keeper journeys prove it across supervisor death; the serve-lane harnesses prove launch, turn and cleanup on the live lane)"
+
+# attach is measured on the LIVE session, never from a row (agy, opencode, pi
+# prove it through the mux-thread portal). The marker is the positive-marker
+# rule itself: the session's own interface, not a refusal or a receipt.
+[probe."features.attach"]
+kind = "behavioral"
+marker = "a real attach to a live session lands in that session's own interface and returns its lines - the native verb where one ships, else the daemon-kept lane (mux-thread portal) against a session the keeper holds"
+
+[probe."features.rpc"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\b(app-server|rpc|daemon)\b'
+
+[probe."features.server"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\b(serve|server|listen)\b'
+
+[probe."features.plugins"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\bplugins?\b'
+
+[probe."features.hooks"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\bhooks?\b'
+
+[probe."features.skills_dir"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\bskills?\b'
+
+[probe."features.subagent_dispatch"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\bsubagents?\b'
+
+[probe."features.mcp"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\bmcp\b'
+
+[probe."features.acp"]
+kind = "declared"
+authority = "{bin} --help"
+pattern = '(?i)\bacp\b'
+
 # grok joins on the same keeper lane pi and cursor-agent use (x-fd31). Its
 # drive transports (leader daemon on a unix socket, WebSocket listener, ACP
 # stdio) are built and unit-tested in the Python driver
@@ -926,7 +1100,6 @@ resume = "native-session"
 # the cross-process recall the caller-assigned binding claims. The keeper
 # machinery itself (survive both supervisors, restart re-bind) is pi's
 # wk-x61bc journey and is not re-proven per harness.
-thread = true
 autonomous_pane = false
 route_on_pane = false
 # grok HAS a lifecycle hook surface - the live TUI fires `session_start` and
@@ -937,6 +1110,10 @@ loop_participation = "extension"
 loop_extension = ""
 command_surface = "slash"
 slash_prefix = ""
+# The grok TUI's own slash verbs, measured 2026-09-04 from the vendor
+# user guide's slash-command sections. Skill-provided verbs (/commit and
+# the like) are excluded: they ride enabled skills, not the harness.
+native_verbs = ["/always-approve", "/compact", "/hooks-add", "/hooks-list", "/hooks-remove", "/hooks-trust", "/hooks-untrust", "/model", "/new"]
 # Read off a live grok TUI (2026-09-02): the idle composer carries the status
 # bar `Shift+Tab:mode | Ctrl+x:shortcuts` and the footer
 # `Grok 4.6 (high) · always-approve`; while a turn runs the mode hint is
@@ -1039,6 +1216,12 @@ effort_labels = {}
 status_command = ""
 status_pattern = ""
 
+# FEATURES. spawn: the caller-assigned --session-id lane is measured live
+# (2026-09-02, grok 1.0.13: create adopted the id, SIGKILL ended the
+# process, --resume recalled the planted token) - the same measurement that
+# seats grok in the spawn roster.
+[harness.grok.features.spawn]
+state = "native"
 
 # The keeper-lane spawn arm (docs/architecture/thread-lanes.md). Re-using a
 # spent `--session-id` is a grok refusal, never a resume, so the arm refuses

@@ -18,11 +18,12 @@ Verified facts, each dated where it differs from the 2026-07-13 spike:
 - permission_bypass tokens mirror the provider adapters (claude.py,
   codex.py, gemini.py) - the flag a headless/bg worker needs so it never wedges
   on an approval prompt (the concrete cause of the manual-approve pain).
-- thread is claude and codex today (``claude --bg`` and the verified Codex
-  app-server thread). opencode's serve lane is launch-only (``ask`` refuses,
-  no steering over the HTTP API), so its bit reads false until the steering
-  lane ships with its own unattended journey test; every false-bit harness
-  falls back to ``headless`` (Locked Decision 3, HARNESSES.md).
+- the thread seat is derived, never stored: ``features.spawn`` reads ``native``
+  where fno's own launch arm is wired and journey-proven (claude, codex,
+  opencode, pi, cursor-agent, grok), and every other harness falls back to
+  ``headless`` (Locked Decision 3, HARNESSES.md). opencode's serve lane stays
+  launch-only (``ask`` refuses, no steering over the HTTP API); its spawn row
+  is what seats the lane.
 - loop_participation REPLACED stop_hook (2026-08-28). The old field read
   "native" on every row and had no consumer. The paragraph that stood here
   recorded a 2026-07-13 verification of THREE harnesses, and six rows ended up
@@ -239,10 +240,10 @@ def _refused_reason(harness: str) -> str:
 # capability -> per-harness value, keyed by the READABLE_PROVIDERS set. Each
 # harness carries a `command_surface` (x-a5e4): the invocation form its native
 # footnote skill takes, or `refused` where the harness is deprecated. A slash
-# harness also carries `slash_prefix` (the plugin namespace). `thread` asserts
-# fno's OWN driver for that harness (driver + unattended journey test, never a
-# bare resume primitive): claude and codex today. `bg` remains a one-release
-# input alias.
+# harness also carries `slash_prefix` (the plugin namespace). The thread seat
+# is not stored: it derives from `features.spawn` reading `native` (fno's own
+# driver + unattended journey test, never a bare resume primitive). `bg`
+# remains a one-release input alias.
 #
 # Two pane capabilities, both EVIDENCE-GATED and read fail-closed (a missing key
 # reads false), because each one used to be a blanket rule that was true of at
@@ -302,7 +303,7 @@ def _validate_row(harness: str, caps: dict) -> None:
     Raises :class:`DispatchResolveError` naming harness + field on the
     first bad field."""
     required = {
-        "permission_bypass", "resume", "thread", "autonomous_pane", "route_on_pane",
+        "permission_bypass", "resume", "autonomous_pane", "route_on_pane",
         "loop_participation", "command_surface", "permission_response", "resume_strategy",
         "model_switch_strategy",
         "ready_marker", "ready_rule_ids", "send_keys_enter_delay_ms", "submit_keys",
@@ -641,7 +642,16 @@ def normalize_command(command: str, harness: str) -> str:
         # ``/review`` on codex is the NATIVE verb, and the fno lane is reached
         # namespaced, as ``/fno:review``.
         native = {v for v in caps.get("native_verbs") or () if isinstance(v, str)}
-        if "/" + verb in native or verb not in footnote_verbs():
+        if "/" + verb in native:
+            return cmd
+        # The dispatch verb is footnote's own: a STATIC fact. The roster read
+        # below needs a resolvable plugin root, and an unresolvable one returns
+        # an empty roster indistinguishable from "not ours", which rendered
+        # `/target` for a codex worker as an ordinary pass-through. Not caching
+        # that empty answer stops it freezing; this bypass makes it impossible.
+        if first_word in _TARGET_FAMILY:
+            return "$fno:" + verb + cmd[len(first_word):]
+        if verb not in footnote_verbs():
             return cmd
         return "$fno:" + verb + cmd[len(first_word):]
     if surface == _SLASH and cmd.startswith("/"):
@@ -657,6 +667,15 @@ def normalize_command(command: str, harness: str) -> str:
         # Idempotent over the builtin rung: the resolve seam re-normalizes the
         # already-namespaced `/fno:verb`, so re-applying would double it.
         if prefix and cmd.startswith("/" + prefix):
+            return cmd
+        # A native verb of the harness stays literal: `/undo` on opencode is
+        # opencode's own palette verb, and namespacing it would mint a phantom
+        # `/fno:undo` plugin skill. Same `native_verbs` roster the codex-skill
+        # branch reads; the claude/agy rows are inert here only because their
+        # prefix is empty. The roster names verbs, so the guard reads the
+        # first token of the remainder, never the message tail.
+        native = {v for v in caps.get("native_verbs") or () if isinstance(v, str)}
+        if "/" + verb.split(maxsplit=1)[0] in native:
             return cmd
         return "/" + prefix + verb
     return cmd
@@ -913,7 +932,6 @@ def capabilities(harness: str) -> dict:
 # than inheriting claude's defaults (the x-ea37 shape).
 UNDECLARED_POSTURE: dict = {
     "declared": False,
-    "thread": False,
     "autonomous_pane": False,
     "route_on_pane": False,
     "resume": "unsupported",
@@ -1024,11 +1042,30 @@ def permission_response_keys(harness: str, action: str, rule_id: str) -> list[st
     return list(response["keys"])
 
 
+def spawn_state(harness: str) -> str:
+    """The features dimension's spawn claim for ``harness``: ``native`` (fno's
+    launch arm is wired and journey-proven), ``capable`` (real on the harness,
+    no fno arm), ``absent``, or ``unmeasured``. A row without a features
+    stanza reads ``unmeasured`` - the fail-closed answer, never a guess."""
+    features = capabilities(harness).get("features") or {}
+    claim = features.get("spawn") or {}
+    return claim.get("state") or "unmeasured"
+
+
+def thread_seatable(harness: str) -> bool:
+    """Whether fno's thread lane exists for ``harness``: the features
+    dimension's spawn claim reads ``native``. The seat is DERIVED, never
+    stored - the routing boolean this answer replaced sat beside resume
+    mechanics it had no relationship to and drifted (opencode measured
+    native in its spawn row while its boolean still read false)."""
+    return spawn_state(harness) == "native"
+
+
 def substrate_default(harness: str) -> str:
-    """Per-harness default substrate: ``thread`` where fno's own driver is
-    journey-proven (claude, codex), else ``headless``. Pane permission is
-    independent from substrate preference."""
-    return "thread" if capabilities(harness)["thread"] else "headless"
+    """Per-harness default substrate: ``thread`` where the spawn claim reads
+    ``native`` (a journey-proven launch seam), else ``headless``. Pane
+    permission is independent from substrate preference."""
+    return "thread" if thread_seatable(harness) else "headless"
 
 
 def thread_lane(harness: str) -> str:
@@ -1198,12 +1235,12 @@ def resolve_dispatch(
             f"unknown substrate {chosen_substrate!r}; "
             f"valid: {', '.join(_VALID_SUBSTRATES)}"
         )
-    if chosen_substrate == "thread" and not caps["thread"]:
+    if chosen_substrate == "thread" and not thread_seatable(chosen_harness):
         raise DispatchResolveError(
             f"substrate 'thread' is unsupported on harness {chosen_harness!r}: "
-            f"fno has not built this harness's {thread_lane(chosen_harness)} lane "
-            f"yet, and a false `thread` row records that gap in fno, never a "
-            f"harness limitation (bg is a deprecated alias); use 'headless'"
+            f"its features.spawn state reads {spawn_state(chosen_harness)!r}, "
+            f"so fno has not built the {thread_lane(chosen_harness)} lane yet "
+            f"(bg is a deprecated alias); use 'headless'"
         )
     # Only an explicit attended trigger bypasses the autonomy capability check.
     # A missing key is false so newly added or partially specified harnesses stay
@@ -1216,7 +1253,7 @@ def resolve_dispatch(
         raise DispatchResolveError(
             f"harness {chosen_harness!r} does not have the evidence-backed "
             "autonomous_pane capability; use 'headless' (or 'thread' on "
-            f"{', '.join(h for h in known_harnesses() if capabilities(h)['thread'])})"
+            f"{', '.join(h for h in known_harnesses() if thread_seatable(h))})"
         )
 
     # 3. command template. Precedence: explicit --command > node verb > config
@@ -1362,7 +1399,7 @@ def resolve_dispatch(
         "stop_strategy": caps["stop_strategy"],
         "remove_strategy": caps["remove_strategy"],
         "session_binding": deepcopy(caps["session_binding"]),
-        "thread": caps["thread"],
+        "thread": thread_seatable(chosen_harness),
         "effort_values": effort_values(chosen_harness),
         "env": env,
         "decision": decision,

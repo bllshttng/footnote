@@ -84,7 +84,7 @@ def test_override_for_unknown_roster_name_is_refused_by_name(
 ) -> None:
     _write(
         tmp_path / "project/.fno/config.toml",
-        "[harness.brandnewharness]\nthread = true\n",
+        "[harness.brandnewharness]\nunheard_of_field = true\n",
     )
     monkeypatch.chdir(tmp_path / "project")
     monkeypatch.delenv("FNO_GLOBAL_SETTINGS_PATH", raising=False)

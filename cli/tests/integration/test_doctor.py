@@ -240,15 +240,16 @@ def test_check_agent_profiles_flags_incompatible_substrate() -> None:
     from fno.config import SettingsModel
     from fno.setup.doctor import check_agent_profiles
 
-    # opencode stands in for a harness with no MEASURED thread lane now that
-    # agy has one: its serve lane is launch-only, so the bit reads false.
+    # gemini is the one rowed harness left with no seat: its spawn claim
+    # reads `absent`. agy and opencode both stood here and both earned their
+    # arms, which is why the subject is the claim rather than a favourite name.
     settings = SettingsModel(
-        agents={"profiles": {"target": _lane("opencode", substrate="bg", permission_mode="yolo")}}
+        agents={"profiles": {"target": _lane("gemini", substrate="bg", permission_mode="yolo")}}
     )
     problems = check_agent_profiles(settings)
     assert len(problems) == 1
     assert "agents.profiles.target.substrate" in problems[0]
-    assert "bg" in problems[0] and "opencode" in problems[0]
+    assert "bg" in problems[0] and "gemini" in problems[0]
 
 
 def test_check_agent_profiles_accepts_claude_bg_lane() -> None:
@@ -293,19 +294,20 @@ def test_check_agent_profiles_no_longer_flags_a_bare_codex_lane() -> None:
 
 def test_check_agent_profiles_still_flags_an_impossible_substrate() -> None:
     """The substrate/provider compatibility half stays: bg excludes a harness
-    whose thread lane is unmeasured. The bit records what fno has BUILT, never
-    a harness verdict, and agy's flipped, so the subject is opencode."""
+    with no seat. The seat records what fno has BUILT, never a harness
+    verdict, and both agy and opencode have earned theirs, so the subject is
+    gemini - the one rowed harness whose spawn claim still reads absent."""
     from fno.config import SettingsModel
     from fno.setup.doctor import check_agent_profiles
 
     settings = SettingsModel(
         agents={"profiles": {"target": {"lanes": [
-            _lane("opencode", substrate="bg"),
+            _lane("gemini", substrate="bg"),
         ]}}}
     )
     problems = check_agent_profiles(settings)
     assert len(problems) == 1
-    assert "substrate" in problems[0] and "opencode" in problems[0]
+    assert "substrate" in problems[0] and "gemini" in problems[0]
 
 
 def test_check_worktree_policy_flags_out_of_enum(

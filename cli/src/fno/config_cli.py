@@ -585,29 +585,21 @@ def doctor_cmd(
     from fno.setup.doctor import run_doctor
 
     rc = run_doctor()
-    # Open Question 1: bare doctor carries a one-line post-merge summary so the
-    # gap is visible without remembering the flag. Best-effort; never crashes
-    # the diagnostic.
-    try:
-        typer.echo(post_merge_readiness(_repo_root()).summary_line())
-    except Exception:  # noqa: BLE001 - the summary is advisory, not the command
-        pass
-    try:
-        _report_gates()
-    except Exception:  # noqa: BLE001 - a report, not the diagnostic itself
-        pass
-    try:
-        _report_state_roots()
-    except Exception:  # noqa: BLE001 - a report, not the diagnostic itself
-        pass
-    try:
-        _report_deprecated_auto_merge()
-    except Exception:  # noqa: BLE001 - advisory, same wrap as the three above
-        pass
-    try:
-        _report_deprecated_dispatch_harness()
-    except Exception:  # noqa: BLE001 - advisory, same wrap as the three above
-        pass
+    # Every report is advisory: one that fails never crashes the diagnostic.
+    # The post-merge line runs first so bare doctor shows the gap without the
+    # flag (Open Question 1). One wrapper, so the next report is a name here.
+    for report in (
+        lambda: typer.echo(post_merge_readiness(_repo_root()).summary_line()),
+        _report_gates,
+        _report_state_roots,
+        _report_deprecated_auto_merge,
+        _report_deprecated_dispatch_harness,
+        _report_band_routing,
+    ):
+        try:
+            report()
+        except Exception:  # noqa: BLE001 - a report, not the diagnostic itself
+            pass
     raise typer.Exit(rc)
 
 
@@ -792,6 +784,39 @@ def _report_deprecated_dispatch_harness() -> None:
             f"      Migrate: fno config set agents.profiles.target.provider {reads_as}{scope_flag} && "
             f"fno config unset dispatch.harness{scope_flag}"
         )
+
+
+def _report_band_routing() -> None:
+    """Say when difficulty bands are routing nothing, and why.
+
+    The grid is config-first: with no declared rows it records
+    ``grid=no-inventory-declared``, so a band is computed and never consulted.
+    ``model_routing.roles`` is a DIFFERENT axis; having it set reads as already on.
+    """
+    from fno import route_resolve
+    from fno.config import load_settings
+
+    inventory = route_resolve.resolve_inventory()
+    if inventory.declared:
+        return
+    try:
+        roles = getattr(getattr(load_settings(), "model_routing", None), "roles", None)
+    except Exception:  # noqa: BLE001 - the note is a hint on top of the line
+        roles = None
+    typer.echo(
+        "band routing inactive: config.routing.models is undeclared, so "
+        "difficulty bands never pick a lane.\n"
+        f"      The built-in rows keep a tier request answerable: "
+        f"{', '.join(sorted(inventory.rows)) or 'none'}\n"
+        "      Declare [[routing.models]] rows to activate "
+        "(docs/architecture/role-based-model-routing.md)"
+        + (
+            "\n      Note: model_routing.roles is set, but it routes by ROLE, "
+            "not by band."
+            if roles
+            else ""
+        )
+    )
 
 
 @app.command("active-backlog")

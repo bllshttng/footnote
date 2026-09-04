@@ -486,6 +486,21 @@ def known_account_ids(repo_root: Path | None = None) -> set[str]:
     return ids
 
 
+def record_harness(record_id: str, repo_root: Path | None = None) -> str | None:
+    """The harness ``record_id``'s account record runs on, or None.
+
+    None is "could not answer": no record, no harness field, or an unreadable
+    config. Merging those three is a KNOWN gap - a config typo answers None for
+    every record, so the one-axis guard stops guarding. Splitting them must keep
+    `test_an_unreadable_registry_keeps_probing` green.
+    """
+    try:
+        rec = load_providers(repo_root=repo_root).by_id.get(record_id)
+    except Exception:  # noqa: BLE001 - an unreadable registry answers nothing
+        return None
+    return (getattr(rec, "harness", "") or "").strip() or None
+
+
 def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
     """Read config.providers.combos from project-local and global settings.
 

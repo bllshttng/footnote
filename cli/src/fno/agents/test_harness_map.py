@@ -14,8 +14,10 @@ from fno.agents.harness_map import (
     permission_response_keys,
     render_session_argv,
     resolve_dispatch,
+    spawn_state,
     substrate_default,
     thread_lane,
+    thread_seatable,
 )
 
 # Config read is stubbed to empty in every resolve so the tests exercise the
@@ -362,7 +364,6 @@ def test_undeclared_posture_answers_declared_false_without_reading_any_row(
     for name in ("openclaw", "nanoclaw"):
         posture = hm.capabilities_or_undeclared(name)
         assert posture["declared"] is False, name
-        assert posture["thread"] is False, name
         assert posture["autonomous_pane"] is False, name
         assert posture["route_on_pane"] is False, name
         assert posture["resume"] == "unsupported", name
@@ -402,11 +403,33 @@ def test_dispatch_command_refuses_undeclared_without_naming_a_neighbour():
     assert "gemini" not in msg
 
 
-def test_explicit_bg_on_unearned_harness_is_rejected():
-    """thread (and its bg alias) is earned by claude and codex; an explicit
-    bg on opencode is a hard error -> headless."""
+@pytest.fixture
+def unseated(monkeypatch):
+    """A harness whose spawn claim is not native, without depending on one.
+
+    Every rowed harness but deprecated gemini reads native today, so a test
+    that names a real unseated subject goes vacuous the day that harness earns
+    its arm. That has now happened three times (pi, opencode, agy). Patch the
+    claim instead: the subject under test is the refusal PATH, never which
+    harness happens to be waiting for a driver."""
+    import fno.agents.harness_map as hm
+
+    real = hm.spawn_state
+    monkeypatch.setattr(
+        hm, "spawn_state", lambda h: "capable" if h == "agy" else real(h)
+    )
+    return "agy"
+
+
+def test_explicit_bg_resolves_where_the_spawn_claim_is_native(unseated):
+    """thread (and its bg alias) is seated by the spawn claim: opencode's
+    row reads native (measured 2026-09-03 on the live daemon-owned session),
+    so bg resolves onto the thread lane. A harness whose claim is only
+    `capable` still refuses - real on the harness, no fno arm."""
+    out = _resolve(harness="opencode", substrate="bg")
+    assert out["substrate"] == "thread"
     with pytest.raises(DispatchResolveError, match="headless"):
-        _resolve(harness="opencode", substrate="bg")
+        _resolve(harness=unseated, substrate="bg")
 
 
 def test_thread_lane_is_derived_from_the_attach_declaration():
@@ -447,14 +470,12 @@ def test_thread_lane_resolver_carries_no_harness_name():
         assert name not in source, name
 
 
-def test_thread_refusal_names_the_missing_lane():
+def test_thread_refusal_names_the_missing_lane(unseated):
     """The gate keeps its condition and loses its name list: the refusal
     names which lane fno has not built for THIS harness, and points at
-    headless. Minting nothing is structural - resolve_dispatch is pure.
-    opencode stands in for every still-refused harness now that pi's and agy's
-    keeper lanes are journey-proven."""
+    headless. Minting nothing is structural - resolve_dispatch is pure."""
     with pytest.raises(DispatchResolveError) as exc:
-        _resolve(harness="opencode", substrate="thread")
+        _resolve(harness=unseated, substrate="thread")
     msg = str(exc.value)
     assert "keeper" in msg
     assert "headless" in msg
@@ -589,12 +610,12 @@ def test_codex_normalization_accepts_plugin_qualified_slash_and_native_skill():
 
 def test_opencode_default_dispatch_renders_fno_slash():
     """AC1-HP: a default opencode dispatch renders the plugin-namespaced palette
-    invocation `/fno:target ...` - no prose brief. The serve lane is
-    launch-only, so the substrate falls back to headless rather than riding a
-    session nothing can steer."""
+    invocation `/fno:target ...` - no prose brief. The spawn claim reads
+    native (measured 2026-09-03 on the live daemon-owned session), so the
+    default substrate is the thread lane."""
     out = _resolve(harness="opencode", node_id="x-4d85")
     assert out["command"] == "/fno:target --no-merge x-4d85"
-    assert out["substrate"] == "headless"
+    assert out["substrate"] == "thread"
     assert out["command_surface"] == "slash"
 
 
@@ -714,33 +735,33 @@ def test_substrate_default_table():
     assert substrate_default("claude") == "thread"
     assert substrate_default("codex") == "thread"
     # pi's keeper lane survived the seven-step restart journey
-    # (test_thread_keeper_journey.py) and agy's earned its own spawn-seam
-    # journey (test_agy_spawn_journey.py), so both bits read true.
+    # (test_thread_keeper_journey.py), so its spawn claim reads native.
     assert substrate_default("pi") == "thread"
+    # opencode's spawn claim read native 2026-09-03 (live daemon-owned
+    # session); its serve lane stays launch-only for steering, which is not
+    # what the seat gate measures.
+    assert substrate_default("opencode") == "thread"
+    # agy's arm landed with its own spawn-seam journey
+    # (test_agy_spawn_journey.py), which is what flipped it off this list.
     assert substrate_default("agy") == "thread"
-    # opencode's serve lane is launch-only (ask refuses, no steering), so its
-    # bit remains false until its steering lane earns an unattended journey.
-    for h in ("gemini", "opencode"):
-        assert substrate_default(h) == "headless"
+    assert substrate_default("gemini") == "headless"
 
 
-def test_thread_bit_asserts_fnos_own_driver_not_the_resume_primitive():
-    """The bit is a claim about FNO's lane, never about the harness CLI: a
-    working resume primitive is necessary and not sufficient. Codex earned the
-    bit through its live six-step journey. pi earned it through the seven-step
-    restart journey: both supervisors SIGKILLed, the keeper child kept its pid,
-    cwd and session id, and the session store gained nothing
-    (test_thread_keeper_journey.py). agy earned it through its own spawn-seam
-    journey (test_agy_spawn_journey.py). OpenCode remains launch-only with a
-    resume primitive measured working since 2026-08-26, so a true bit there
-    would route autonomous spawns onto a session the caller cannot steer, which
-    is worse than refusing - and it is what keeps this assertion from being
-    vacuous."""
-    assert capabilities("claude")["thread"] is True
-    assert capabilities("codex")["thread"] is True
-    assert capabilities("pi")["thread"] is True
-    assert capabilities("agy")["thread"] is True
-    assert capabilities("opencode")["thread"] is False
+def test_thread_seat_is_derived_from_the_spawn_claim():
+    """The seat is a claim about FNO's lane, never about the harness CLI, and
+    it is DERIVED from the features dimension rather than stored: spawn reads
+    native where fno's own launch arm is wired and journey-proven. Codex
+    earned it through its live six-step journey; pi through the seven-step
+    restart journey (both supervisors SIGKILLed, the keeper child kept its
+    pid, cwd and session id, and the session store gained nothing). agy read
+    `capable` - real on the harness, no fno arm - until that arm shipped here
+    with its own journey. gemini reads `absent`, which is what keeps the
+    unseated leg from being vacuous."""
+    for h in ("claude", "codex", "opencode", "pi", "cursor-agent", "grok", "agy"):
+        assert thread_seatable(h) is True, h
+        assert spawn_state(h) == "native", h
+    assert thread_seatable("gemini") is False
+    assert spawn_state("gemini") == "absent"
     # the resume primitives themselves are all recorded as working
     for h in ("codex", "agy", "opencode"):
         assert capabilities(h)["resume_strategy"]["forms"]["interactive_resume"]["kind"] != (
@@ -748,11 +769,49 @@ def test_thread_bit_asserts_fnos_own_driver_not_the_resume_primitive():
         )
 
 
-def test_explicit_thread_on_partial_lane_refused_with_the_reason():
-    """An explicit thread request on a launch-only lane is a hard error naming
-    the missing lane, never a silent ride onto a half-working session."""
+def test_native_verbs_roster_is_filled_from_measured_sources():
+    """A slash harness with a TUI palette declares its native verbs; the
+    normalizer needs them so a native verb typed at a worker is not rewritten
+    into a footnote skill that does not exist. gemini is refused (deprecated)
+    and so declares none; pi's surface is extension-composed and declares the
+    one built-in its docs name."""
+    assert capabilities("claude")["native_verbs"]
+    assert capabilities("agy")["native_verbs"]
+    assert capabilities("opencode")["native_verbs"]
+    assert capabilities("cursor-agent")["native_verbs"]
+    assert capabilities("grok")["native_verbs"]
+    assert capabilities("codex")["native_verbs"] == [
+        "/review",
+        "/code-review",
+        "/model",
+        "/status",
+        "/compact",
+    ]
+    assert capabilities("pi")["native_verbs"] == ["/name"]
+    assert capabilities("gemini").get("native_verbs") is None
+
+
+def test_native_verb_stays_literal_on_the_slash_surface():
+    """The slash branch guards on the same roster the codex branch reads:
+    `/undo` on opencode is opencode's own palette verb, so it must reach the
+    palette verbatim, never a phantom `/fno:undo` plugin skill. Footnote verbs
+    still namespace, and an unknown verb keeps the AC4-EDGE behavior."""
+    from fno.agents.harness_map import normalize_command
+
+    assert normalize_command("/undo", "opencode") == "/undo"
+    assert normalize_command("/init", "opencode") == "/init"
+    assert normalize_command("/share x", "opencode") == "/share x"
+    assert normalize_command("/target x-1", "opencode") == "/fno:target x-1"
+    assert normalize_command("/zzz", "opencode") == "/fno:zzz"
+
+
+def test_explicit_thread_on_unbuilt_lane_refused_with_the_reason(unseated):
+    """An explicit thread request where fno has no arm is a hard error naming
+    the spawn state and the missing lane, never a silent ride onto a
+    half-working session."""
     with pytest.raises(DispatchResolveError, match="keeper") as exc:
-        _resolve(harness="opencode", substrate="thread")
+        _resolve(harness=unseated, substrate="thread")
+    assert "capable" in str(exc.value)
     assert "headless" in str(exc.value)
 
 

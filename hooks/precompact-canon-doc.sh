@@ -229,8 +229,8 @@ _session_block() {
   fi
 }
 
-DEFAULT_MERGE="_Merge order and the reason for it. Nothing external knows this; the session fills it at full context._"
-DEFAULT_DECISIONS="_Open decisions awaiting the operator. Nothing external knows this; the session fills it at full context._"
+DEFAULT_MERGE="_Merge order and the reason for it. Nothing external knows this. The session fills it at full context._"
+DEFAULT_DECISIONS="_Open decisions awaiting the operator. Nothing external knows this. The session fills it at full context._"
 
 # Capture the preserved-or-defaulted session blocks BEFORE opening the doc for
 # write. The assembly below redirects to $DOC_PATH, which truncates it on open;
@@ -262,7 +262,11 @@ mkdir -p "$(dirname "$DOC_PATH")" 2>/dev/null || true
   echo "# Canon doc: session ${SHORT}"
   echo ""
   echo "Session id (authoritative): \`${SID}\`  |  refreshed ${ISO} by precompact-canon-doc.sh."
-  echo "Mechanical sections below are auto-generated; the two judgment sections are filled by the session."
+  # Blank line, deliberately: a paragraph is one physical line, so two echoes
+  # in a row read as a wrapped paragraph and `fno doctor lint style` refuses
+  # the doc this hook just wrote.
+  echo ""
+  echo "Mechanical sections below are auto-generated. The two judgment sections are filled by the session."
   echo ""
   echo "<!-- fno:auto -->"
   printf '%s\n' "$AUTO_BLOCK"
