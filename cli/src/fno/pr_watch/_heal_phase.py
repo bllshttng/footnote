@@ -29,8 +29,8 @@ def run_heal_phase(
 
     Unarmed (``auto_heal.enabled`` falsy or the block absent) answers
     ``"unarmed"`` without resolving the binary: the launchd hot path pays
-    nothing. Armed, returns ``"ran"`` or ``"no-binary"``; one failing root
-    logs and never stops the rest.
+    nothing. Armed, returns ``"ran"``, ``"no-binary"``, or ``"no-roots"``;
+    one failing root logs and never stops the rest.
     """
     if not getattr(getattr(settings, "auto_heal", None), "enabled", False):
         return "unarmed"
@@ -44,6 +44,11 @@ def run_heal_phase(
             "reinstall fno or set FNO_AGENTS_BIN"
         )
         return "no-binary"
+    if not roots:
+        # Never report a run that did not happen: an armed tick with no
+        # project roots mints no pr_heal_tick row, and the log must not read
+        # as though the loop executed.
+        return "no-roots"
     if run is None:
         import subprocess
 

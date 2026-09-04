@@ -929,21 +929,34 @@ fn rest_bucket(run: &Value) -> &'static str {
     }
 }
 
-/// Classify every failing row of one PR.
-fn findings_for(a: &Args, pr: &str, head: &str) -> Result<Vec<Finding>, String> {
+/// Classify every failing row of one PR. `cached_inherited` carries a
+/// drive-loop invocation's one shared read of main's failing checks, so a
+/// fleet of N PRs costs ONE main-HEAD read instead of N; `None` means "read
+/// it here" and is what the single-PR path passes.
+fn findings_for(
+    a: &Args,
+    pr: &str,
+    head: &str,
+    cached_inherited: Option<&Vec<String>>,
+) -> Result<Vec<Finding>, String> {
     let checks = read_checks(a, head)?;
     // `None` means the main-head read did not answer, which is NOT the same
     // as "main is green". Defaulting it to an empty set silently reclassified
     // every inherited failure as this PR's own, so the caller is told instead
     // and the report says the classification was unavailable.
-    let inherited = crate::loopcheck::main_head_failing_checks(&a.gh_bin, &a.cwd, 20);
-    if inherited.is_none() {
-        println!(
-            "note: could not read main's HEAD, so no row can be shown as inherited; \
-             a failure below may be main's rather than this PR's"
-        );
-    }
-    let inherited = inherited.unwrap_or_default();
+    let inherited = match cached_inherited {
+        Some(v) => v.clone(),
+        None => {
+            let read = crate::loopcheck::main_head_failing_checks(&a.gh_bin, &a.cwd, 20);
+            if read.is_none() {
+                println!(
+                    "note: could not read main's HEAD, so no row can be shown as inherited; \
+                     a failure below may be main's rather than this PR's"
+                );
+            }
+            read.unwrap_or_default()
+        }
+    };
     let mut out = Vec::new();
     for row in failing_rows(&checks) {
         let check = row["name"].as_str().unwrap_or("").to_string();
@@ -1033,14 +1046,7 @@ fn apply_auto(a: &Args, findings: &mut [Finding]) -> Vec<String> {
         for cmd in cmds.iter().chain(verify.iter()) {
             let dir = a.cwd.join(&cmd.cwd);
             let argv: Vec<&str> = cmd.argv.iter().map(|s| s.as_str()).collect();
-            let bin = if a.bin_dir.is_empty() {
-                argv[0].to_string()
-            } else {
-                std::path::Path::new(&a.bin_dir)
-                    .join(argv[0])
-                    .to_string_lossy()
-                    .into_owned()
-            };
+            let bin = seam_bin(a, argv[0]);
             let ok = run(&bin, &argv[1..], &dir, REMEDY_TIMEOUT)
                 .map(|(ok, _, _)| ok)
                 .unwrap_or(false);
@@ -1415,7 +1421,7 @@ fn escalate_unknown_signature(a: &Args, pr: &str, check: &str, head_ref: &str) -
 /// One `pr_heal_tick` row per drive-loop invocation: the arm's visibility
 /// (x-1b88's shared row widens onto this later). Written to the global
 /// `~/.fno/events.jsonl`, the same default journal the tick's own
-/// `_emit_event` writes, so `fno doctor event audit` reads one place.
+/// `_emit_event` writes, so `fno doctor event find` reads one place.
 fn emit_tick_event(
     a: &Args,
     counts: &std::collections::BTreeMap<&'static str, usize>,
@@ -1457,6 +1463,16 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
         }
     };
     let worktrees = worktrees_by_branch(&a.git_bin, &a.cwd);
+    // One main-HEAD read per invocation, shared by every PR: the failing
+    // checks of origin/main do not change between PRs in one cycle, and N
+    // reads per tick is exactly the shared-quota spend the broker refuses.
+    let inherited_once = crate::loopcheck::main_head_failing_checks(&a.gh_bin, &a.cwd, 20);
+    if inherited_once.is_none() {
+        println!(
+            "note: could not read main's HEAD, so no row can be shown as inherited; \
+             a failure below may be main's rather than this PR's"
+        );
+    }
     let claims_root = if a.claims_root.is_empty() {
         None
     } else {
@@ -1491,7 +1507,14 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
             bump(&mut counts, "skip_claim_held");
             continue;
         }
-        let findings = match findings_for(a, &pr, &head) {
+        let findings = match findings_for(
+            a,
+            &pr,
+            &head,
+            // A failed shared read classifies with an empty set, same as the
+            // per-PR read it replaces; the note above already named it.
+            inherited_once.as_ref().or(Some(&Vec::new())),
+        ) {
             Ok(f) => f,
             Err(msg) => {
                 eprintln!("pr-heal: {msg}");
@@ -1526,6 +1549,10 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
         if dry_run {
             report(&findings, true, true);
             bump(&mut counts, "would_heal");
+            // A rehearsal reports work the way the report-only --all does:
+            // red PRs exist, so a preflight reading exit 0 must mean "nothing
+            // red", never "the rehearsal ran".
+            worst = worse_of(worst, EXIT_ESCALATIONS);
             continue;
         }
         // Applying needs the PR's own checkout: every remedy runs in it and
@@ -1551,7 +1578,6 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
             EXIT_CLEAN => bump(&mut counts, "healed"),
             EXIT_IN_FLIGHT => bump(&mut counts, "skip_in_flight"),
             EXIT_CWD_REFUSAL => bump(&mut counts, "skip_dirty_tree"),
-            EXIT_ESCALATIONS | EXIT_READ_ERROR => bump(&mut counts, "still_red"),
             _ => bump(&mut counts, "still_red"),
         }
         worst = worse_of(worst, code);
@@ -1598,7 +1624,7 @@ fn run_one(a: &Args, pr: &str) -> i32 {
             return EXIT_CWD_REFUSAL;
         }
     }
-    let mut findings = match findings_for(a, pr, &head) {
+    let mut findings = match findings_for(a, pr, &head, None) {
         Ok(f) => f,
         Err(msg) => {
             eprintln!("pr-heal: {msg}");
@@ -2578,7 +2604,10 @@ exit 0
         hold_claim(d);
         std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
         let code = run_heal(&drive_args(d, &["--dry-run"]));
-        assert_eq!(code, EXIT_CLEAN, "a rehearsal never exits as a real heal");
+        assert_eq!(
+            code, EXIT_ESCALATIONS,
+            "a rehearsal over a would-heal PR reports the work, exactly like the report-only --all"
+        );
         let out = log_of(d, "gh.log");
         assert!(out.contains("pulls/2"), "the claimed PR was read: {out}");
         assert_eq!(log_of(d, "cargo.log"), "", "a dry run runs no remedy");

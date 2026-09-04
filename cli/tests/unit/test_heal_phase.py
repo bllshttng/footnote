@@ -104,3 +104,14 @@ def test_one_failing_root_never_stops_the_rest(tmp_path):
 
     assert outcome == "ran"
     assert len(rec.runs) == 2, "the second root still ran"
+
+
+def test_an_armed_tick_with_no_roots_never_claims_a_run(tmp_path):
+    # "ran" without a run is the false receipt this phase exists not to
+    # print: no root means no pr_heal_tick row, and the log must say so.
+    rec = Recorder()
+    outcome = run_heal_phase(
+        _settings(armed=True), [], resolve_binary=rec.resolve, run=rec.run
+    )
+    assert outcome == "no-roots"
+    assert rec.runs == []
