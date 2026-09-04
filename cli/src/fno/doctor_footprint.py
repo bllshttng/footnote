@@ -514,15 +514,12 @@ def _spawn_load_snapshot():
     return _load_snapshot(max_load_per_cpu)
 
 
-def _roster_count() -> tuple[int | None, str | None]:
-    """Live registry rows, read in process.
+def live_registry_rows() -> tuple[list | None, str | None]:
+    """The live registry rows, read in process. ONE reader, two consumers.
 
-    This used to shell out to ``fno agents list --status live --json`` under a
-    5.0s budget. That read measured 8.5s at rest and 21.7s under load, so the
-    roster was always unavailable exactly when the reading mattered: the
-    report printed "roster unavailable" and then "unexplained processes:
-    unknown". ``load_registry`` answers the same question from the same file
-    in 0.42s, so there is no budget left to miss and no cache to age.
+    ``None`` is a distinct answer from ``[]``: an unreadable registry must not
+    read as an empty fleet. Why this is not a shell-out, and what the old one
+    cost: docs/architecture/resource-meter.md.
     """
     try:
         from fno.agents.registry import load_registry
@@ -532,11 +529,15 @@ def _roster_count() -> tuple[int | None, str | None]:
     except Exception as exc:
         return None, f"roster unavailable: registry unreadable ({exc})"
     if not getattr(rows, "complete", True):
-        # An incomplete registry is a different fact from an unreadable one:
-        # the rows present are real but the count would undercount. Name the
-        # registry rather than a timeout that no longer happens.
+        # Incomplete is not unreadable: the rows present are real, but a count
+        # over them undercounts. Name the registry, not a dead timeout.
         return None, "roster unavailable: worker registry incomplete"
-    return sum(1 for row in rows if row.status in LIVE_STATUSES), None
+    return [row for row in rows if row.status in LIVE_STATUSES], None
+
+
+def _roster_count() -> tuple[int | None, str | None]:
+    rows, error = live_registry_rows()
+    return (None if rows is None else len(rows)), error
 
 
 def capacity_verdict(load_snapshot: Any) -> str:
@@ -646,7 +647,6 @@ def _emit_result(
     json_output: bool,
     cause_only: bool = False,
     note: str | None = None,
-    live_roster_rows: int | None = None,
 ) -> NoReturn:
     capacity = "unknown"
     leak = "unknown"
@@ -680,7 +680,6 @@ def _emit_result(
         command_limit=command_limit,
         load_snapshot=load_snapshot,
     )
-    payload["live_roster_rows"] = live_roster_rows
     if note is not None:
         payload["degraded"] = note
     if json_output:
@@ -808,5 +807,4 @@ def footprint_command(
         reading,
         process_threshold=roster_count + DAEMON_ALLOWANCE,
         json_output=json_output,
-        live_roster_rows=roster_count,
     )

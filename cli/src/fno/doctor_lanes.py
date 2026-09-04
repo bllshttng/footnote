@@ -289,33 +289,15 @@ def _power_arm(sample: Optional[dict], reason: Optional[str]) -> ArmReading:
     )
 
 
-def _live_registry_rows() -> tuple[Optional[list], Optional[str]]:
-    """The live roster rows, read in process.
-
-    ``None`` is a distinct answer from ``[]``: an unreadable registry must not
-    render as an empty fleet. The two consumers below - the per-lane cost
-    divisor and the census - both take their rows from this one read, so the
-    kings, the workers and the divisor can never describe different fleets.
-    """
-    try:
-        from fno.agents.registry import load_registry
-        from fno.agents.spawn_gate import LIVE_STATUSES
-
-        rows = load_registry()
-    except Exception:
-        return None, "registry unreadable"
-    if not getattr(rows, "complete", True):
-        return None, "worker registry incomplete"
-    return [row for row in rows if row.status in LIVE_STATUSES], None
-
-
 def _fleet_snapshot() -> tuple[Any, Optional[list], int]:
-    """One footprint reading, the live rows, and how long both took."""
-    from fno.doctor_footprint import cause_reading
+    """One footprint reading, the live rows, and how long both took. The rows
+    come from the same reader the leak threshold uses: a second registry read
+    here would be two implementations of one question, free to disagree."""
+    from fno.doctor_footprint import cause_reading, live_registry_rows
 
     started = time.monotonic()
     reading, error = cause_reading()
-    rows, _rows_error = _live_registry_rows()
+    rows, _rows_error = live_registry_rows()
     read_ms = int((time.monotonic() - started) * 1000)
     return (None if error is not None else reading), rows, read_ms
 
@@ -327,49 +309,37 @@ def _fleet_cost(reading: Any, rows: Optional[list]) -> tuple[float, float, int, 
         return SEED_PER_LANE_CORES, SEED_PER_LANE_GB, 0, "seed (footprint unavailable)"
     count = len(rows) if rows else 0
     if not count:
-        return (
-            SEED_PER_LANE_CORES,
-            SEED_PER_LANE_GB,
-            0,
-            "seed (no live roster rows to measure)",
-        )
+        seed = "seed (no live roster rows to measure)"
+        return SEED_PER_LANE_CORES, SEED_PER_LANE_GB, 0, seed
     per_cpu = max(0.01, reading.fleet_cpu_cores / count)
     per_gb = max(0.01, reading.rss_gb / count)
     return per_cpu, per_gb, count, "measured from the live roster's attributed footprint"
 
 
 def _census(reading: Any, rows: Optional[list], read_ms: int) -> dict:
-    """The court census the operator asked for: kings, workers, tests.
+    """The court census: kings, workers, tests.
 
-    Kings and workers are ROW counts and tests is a PROCESS count, and the
-    two must never be folded together. The attribution gap is a process-to-row
-    failure, so it cannot corrupt a row count: every registry row carries its
-    crown level whether or not it carries a pid. The gap therefore rides here
-    as its own field, qualifying the CPU reading it belongs to and never the
-    counts it does not (x-e040).
+    Kings and workers are ROW counts, tests is a PROCESS count, and the two
+    are never folded together. The attribution gap rides as its own field for
+    the same reason (x-e040). Full rule: docs/architecture/resource-meter.md.
     """
     census: dict[str, Any] = {
-        "kings": None,
-        "king_conflicts": None,
-        "workers": None,
+        "kings": None, "king_conflicts": None, "workers": None,
         "tests": None if reading is None else reading.test_process_count,
-        "roster_rows": None,
+        "roster_rows": None if rows is None else len(rows),
         "attribution_gap": None if reading is None else reading.attribution_gap,
         "read_ms": read_ms,
     }
-    if rows is None:
-        return census
-    census["roster_rows"] = len(rows)
     try:
         from fno.agents.court import gather_court
 
-        court = gather_court(rows)
+        court = gather_court(rows) if rows is not None else {}
     except Exception:
         return census
     kings = (court.get("summary") or {}).get("total")
     if not isinstance(kings, int):
-        # An unreadable court leaves the crown counts null rather than
-        # reporting a kingless fleet from a read that saw nothing.
+        # An unreadable court nulls the crown counts rather than reporting a
+        # kingless fleet from a read that saw nothing.
         return census
     conflicts = court.get("conflicts")
     census["kings"] = kings
@@ -398,9 +368,9 @@ def read_lanes(
     power_arm = _power_arm(sample, macmon_reason)
     reading.arms.extend([load_arm, cpu_arm, mem_arm, power_arm])
 
-    # One fleet read serves the census and the per-lane divisor, and it is
-    # taken BEFORE the refusal branch: a refused lane number is exactly when
-    # a person most wants to see what the machine is holding.
+    # One fleet read serves both the census and the per-lane divisor, taken
+    # BEFORE the refusal branch: a refused lane number is exactly when a
+    # person most wants to see what the machine is holding.
     footprint, rows, read_ms = _fleet_snapshot()
     reading.census = _census(footprint, rows, read_ms)
 
@@ -451,34 +421,25 @@ def read_lanes(
 
 
 def _census_lines(census: dict) -> list[str]:
-    """The census, rendered so an unread count says so.
-
-    ``unknown`` is printed only where the read genuinely failed. A count the
-    reader can act on and a count nobody took must never look the same.
-    """
+    """Rendered so an unread count says so: a count the reader can act on and
+    a count nobody took must never look the same."""
     if not census:
         return []
-
-    def count(key: str) -> str:
-        value = census.get(key)
-        return "unknown" if value is None else str(value)
-
+    n = {k: ("unknown" if v is None else v) for k, v in census.items()}
     lines = [
-        f"  court: {count('kings')} king(s), {count('workers')} worker(s), "
-        f"{count('tests')} running test(s) "
-        f"({count('roster_rows')} live roster row(s), {count('read_ms')} ms)"
+        f"  court: {n['kings']} king(s), {n['workers']} worker(s), "
+        f"{n['tests']} running test(s) "
+        f"({n['roster_rows']} live roster row(s), {n['read_ms']} ms)"
     ]
-    conflicts = census.get("king_conflicts")
-    if conflicts:
+    if census.get("king_conflicts"):
         lines.append(
-            f"  court conflicts: {conflicts} scope(s) held by more than one live "
-            "crown - a bare king count hides this"
+            f"  court conflicts: {n['king_conflicts']} scope(s) held by more than "
+            "one live crown - a bare king count hides this"
         )
-    gap = census.get("attribution_gap")
-    if gap:
+    if census.get("attribution_gap"):
         lines.append(
-            f"  attribution gap: {gap} - the fleet CPU share is an undercount, "
-            "not headroom"
+            f"  attribution gap: {n['attribution_gap']} - the fleet CPU share is "
+            "an undercount, not headroom"
         )
     return lines
 

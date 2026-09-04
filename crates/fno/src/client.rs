@@ -1134,16 +1134,9 @@ struct View {
     yard_want: bool,
     yard_inflight: bool,
     yard_gen: u64,
-    /// (x-3cb3) The court panel. `Some(opened_at)` while it is on screen; the
-    /// fold beside it follows the yard's discipline exactly - gen-tagged,
-    /// one in flight, TTL-cached, degraded loud.
-    court: Option<Instant>,
-    court_fold: Option<crate::court_overlay::Court>,
-    court_fold_at: Option<Instant>,
-    court_degraded: bool,
-    court_want: bool,
-    court_inflight: bool,
-    court_gen: u64,
+    /// (x-3cb3) The court panel. The whole thing - open flag, cached fold,
+    /// generation - lives in its own module, so this is one field.
+    court: crate::court_overlay::Panel,
     /// Catch-up "while you were gone" digest lines (x-4e2d), set on attach after
     /// an absence; the next keypress dismisses it (like [`View::overlay`]).
     digest: Option<Vec<String>>,
@@ -2929,13 +2922,7 @@ impl View {
             yard_want: false,
             yard_inflight: false,
             yard_gen: 0,
-            court: None,
-            court_fold: None,
-            court_fold_at: None,
-            court_degraded: false,
-            court_want: false,
-            court_inflight: false,
-            court_gen: 0,
+            court: crate::court_overlay::Panel::default(),
             digest: None,
             notice: None,
             row_stamp: None,
@@ -3385,122 +3372,6 @@ impl View {
         self.answers = Some(idx);
     }
 
-    /// (x-3cb3) The court panel's lines: load against the cap, the machine,
-    /// the census, the lane advisor's own answer, and the age of the reading.
-    ///
-    /// Three rules this render keeps, each closing a way a panel can lie:
-    /// the `read` line always shows the fold's age and says `stale` rather
-    /// than `unknown`; the attribution gap gets its own line and is never
-    /// folded into a count; and a refusal prints the advisor's own words
-    /// verbatim with no lane number beside them.
-    fn court_overlay_lines(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        let Some(court) = self.court_fold.as_ref() else {
-            lines.push(if self.court_degraded {
-                "  fold failed - `fno doctor lanes` did not answer inside 10s".to_string()
-            } else {
-                "  reading the machine...".to_string()
-            });
-            return lines;
-        };
-
-        // load against the cap: the operator's own question, first.
-        match (
-            court.arm_num("spawn load", "load_1m"),
-            court.arm_num("spawn load", "ceiling"),
-        ) {
-            (Some(load), Some(ceiling)) => {
-                let status = court.arm_str("spawn load", "status").unwrap_or("unknown");
-                lines.push(format!("  load    {load:.1} / {ceiling:.1}   {status}"));
-            }
-            _ => {
-                let reason = court
-                    .arm("spawn load")
-                    .map_or("arm absent", |a| a.reason.as_str());
-                lines.push(format!("  load    unknown - {reason}"));
-            }
-        }
-
-        // the machine the lanes compete for, not the fleet alone.
-        match (
-            court.arm_num("whole-machine cpu", "busy_fraction"),
-            court.arm_num("whole-machine cpu", "capacity_cores"),
-        ) {
-            (Some(busy), Some(cores)) => lines.push(format!(
-                "  cpu     {:.0}% busy of {cores:.0} cores",
-                busy * 100.0
-            )),
-            _ => lines.push("  cpu     unknown".to_string()),
-        }
-        if let Some(free) = court.arm_num("memory", "available_gb") {
-            lines.push(format!("  memory  {free:.1} GB available"));
-        }
-
-        // the court itself.
-        let census = &court.census;
-        lines.push(format!(
-            "  court   {} kings · {} workers · {} tests ({} rows)",
-            count_or_unknown(census.kings),
-            count_or_unknown(census.workers),
-            count_or_unknown(census.tests),
-            count_or_unknown(census.roster_rows),
-        ));
-        if census.king_conflicts.is_some_and(|c| c > 0) {
-            lines.push(format!(
-                "  warn    {} scope(s) held by more than one crown",
-                census.king_conflicts.unwrap_or(0)
-            ));
-        }
-
-        // the advisor's answer, or the advisor's refusal in its own words.
-        match court.lane_count {
-            Some(count) => {
-                let cost = match (court.per_lane_cpu_cores, court.per_lane_mem_gb) {
-                    (Some(c), Some(g)) => format!(" · {c:.3} cores, {g:.2} GB per lane"),
-                    _ => String::new(),
-                };
-                lines.push(format!("  lanes   {count} more fit{cost}"));
-                if !court.cost_source.is_empty() {
-                    lines.push(format!("          {}", court.cost_source));
-                }
-            }
-            None => {
-                let reason = if court.refused_reason.is_empty() {
-                    "no lane number: the advisor refused without naming a reason"
-                } else {
-                    court.refused_reason.as_str()
-                };
-                lines.push(format!("  lanes   REFUSED - {reason}"));
-            }
-        }
-
-        if let Some(gap) = census.attribution_gap.as_ref() {
-            lines.push(format!("  gap     {gap}"));
-            lines.push("          fleet share is an undercount, not headroom".to_string());
-        }
-
-        // the age line, always. A stale reading says stale; it never says
-        // unknown, and it never silently passes itself off as fresh.
-        let age = self.court_fold_at.map_or_else(
-            || "age unknown".to_string(),
-            |t| {
-                let secs = t.elapsed().as_secs_f32();
-                if t.elapsed() > COURT_CACHE_TTL {
-                    format!("{secs:.1}s ago (stale, refreshing)")
-                } else {
-                    format!("{secs:.1}s ago")
-                }
-            },
-        );
-        let degraded = if self.court_degraded {
-            " · last refresh failed"
-        } else {
-            ""
-        };
-        lines.push(format!("  read    {age}{degraded}"));
-        lines
-    }
-
     /// Open the new-workspace name overlay modally (x-9e5e): clear any
     /// keyboard-opened overlay first. `create_keys` is routed AFTER
     /// selector/answers in `handle_stdin`, so a lingering selector would
@@ -3509,7 +3380,7 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.yard = None;
-        self.court = None;
+        self.court.close();
         self.search = None;
         self.rename = None;
         self.move_pick = None;
@@ -3530,7 +3401,7 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.yard = None;
-        self.court = None;
+        self.court.close();
         self.search = None;
         self.rename = None;
         self.create = None;
@@ -3554,7 +3425,7 @@ impl View {
         self.sel_hover_armed = false;
         self.answers = None;
         self.yard = None;
-        self.court = None;
+        self.court.close();
         self.search = None;
         // A half-typed workspace name is dropped too (gemini review): the
         // confirm owns the bottom row, and resuming a hidden create overlay
@@ -3586,7 +3457,7 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.yard = None;
-        self.court = None;
+        self.court.close();
         self.search = None;
         self.move_pick = None;
         self.attach_place = None;
@@ -4026,7 +3897,7 @@ impl View {
         self.menu_usurping_open()
             || self.answers.is_some()
             || self.yard.is_some()
-            || self.court.is_some()
+            || self.court.is_open()
             || self.peek.is_some()
             || self.digest.is_some()
     }
@@ -4060,7 +3931,7 @@ impl View {
             || self.nav.is_some()
             || self.answers.is_some()
             || self.yard.is_some()
-            || self.court.is_some()
+            || self.court.is_open()
             || self.digest.is_some()
     }
 
@@ -6981,11 +6852,11 @@ impl View {
                 &self.theme,
                 None,
             );
-        } else if self.court.is_some() {
+        } else if self.court.is_open() {
             // (x-3cb3) The court: what the machine is holding, and the cap
             // that decides whether another lane fits. Read-only - every key
             // closes it.
-            let lines = self.court_overlay_lines();
+            let lines = self.court.lines();
             let chrome = chrome::Chrome::new("the court", Anchor::Center)
                 .footer("any key closes · prefix+C reopens");
             draw_lines_overlay(
@@ -9699,20 +9570,6 @@ const NEEDS_CACHE_TTL: Duration = Duration::from_secs(5);
 /// on merge cadence, not keystroke cadence).
 const YARD_CACHE_TTL: Duration = Duration::from_secs(60);
 
-/// (x-3cb3) Fifteen seconds, not the yard's sixty. The yard renders identity,
-/// which does not move; this renders load, which does.
-///
-/// The floor is measured, not chosen: `fno doctor lanes --json` took 8.07s on
-/// this machine at 1-minute load 107. A TTL under the read's own cost means
-/// every open refetches and every reading is already stale on arrival, which
-/// is a busy loop wearing a cache's clothes. Fifteen seconds sits above that
-/// cost and below the horizon where load has moved enough to mislead.
-///
-/// A reading older than this still RENDERS, with its age and the word
-/// `stale` - never as `unknown`. An operator watching `unknown` every second
-/// learns nothing and reaches for `--force`, which is how a guard becomes a
-/// formality.
-const COURT_CACHE_TTL: Duration = Duration::from_secs(15);
 /// Default fold window: the last 24h (the fold also windows server-side).
 const NEEDS_WINDOW_SECS: u64 = 24 * 60 * 60;
 
@@ -10161,7 +10018,7 @@ const ANSWER_OVERLAY_W: usize = 54;
 /// The footer state of the needs-me overlay: whether the event-fold leg is
 /// still in flight, failed (loud degrade, AC2-ERR), or landed.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum NeedsFooter {
+pub(crate) enum NeedsFooter {
     Folding,
     Degraded,
     AsOf,
@@ -10319,9 +10176,13 @@ struct YardSel {
     opened_at: Instant,
 }
 
+/// The yard's line builder moved into the module named for it; the alias
+/// keeps the one call site and its tests reading the same as before.
+use crate::yard_overlay::overlay_lines as yard_overlay_lines;
+
 /// The yard overlay body width: the 12-column sprite plus a label margin,
 /// padded to a block rectangle like the needs overlay.
-const YARD_OVERLAY_W: usize = 48;
+pub(crate) const YARD_OVERLAY_W: usize = 48;
 /// Frame period for the flavour leg: frames advance on a timer, never on a
 /// state change (a pose carries no reading, which is exactly why cycling it
 /// is legal where cycling the eye would not be).
@@ -10353,101 +10214,6 @@ fn yard_eye(a: &AgentRow, need: Option<NeedKind>) -> crate::sprites::Eye {
         None if !a.exited && a.badge == Some(AgentBadge::Working) => Eye::Working,
         None => Eye::Reserved,
     }
-}
-
-/// Build the yard overlay lines (x-b2bf): the CROWD as one glyph per citizen
-/// (the cheap layer - many cats, one cell each, the only multi-citizen
-/// render) and the SPOTLIGHT as exactly one 12-column sprite for the
-/// selected citizen. One sprite at a time is the capacity ruling: a
-/// simultaneous field of full sprites fits no panel width the sideline
-/// publishes (`PANEL_W` 28 fits one sprite plus a label, two plus nothing).
-/// Without an identity payload the spotlight shows its pending notice and
-/// NO sprite - a species with no reading is a guessed cat, and the yard does
-/// not guess. The hat reads the ROW's `crown_level` (the same wire value the
-/// sideline orders by), never a payload copy.
-/// (x-3cb3) One count, rendered so an unread number says so. `unknown` is
-/// printed ONLY where the read genuinely failed; a fabricated zero read as
-/// headroom is the failure this panel exists to prevent.
-fn count_or_unknown(value: Option<u32>) -> String {
-    value.map_or_else(|| "unknown".to_string(), |v| v.to_string())
-}
-
-fn yard_overlay_lines(
-    crowd: &[(&str, crate::sprites::Eye, u32)],
-    sel: usize,
-    identity: Option<&crate::yard_overlay::YardItem>,
-    frame: usize,
-    footer: NeedsFooter,
-) -> Vec<String> {
-    let mut lines = vec![pad_to(" the yard · n/N pick · q close", YARD_OVERLAY_W)];
-    if crowd.is_empty() {
-        // The true failure state of a dispatch system: nothing was sent out.
-        lines.push(pad_to(
-            "   the yard is empty - nothing was dispatched",
-            YARD_OVERLAY_W,
-        ));
-    } else {
-        // Crowd row: one eye glyph per citizen, wrapped to the body width.
-        let glyphs: String = crowd.iter().map(|(_, e, _)| e.glyph()).collect();
-        for chunk in glyphs
-            .chars()
-            .collect::<Vec<_>>()
-            .chunks(YARD_OVERLAY_W - 3)
-        {
-            lines.push(pad_to(
-                &format!("   {}", chunk.iter().collect::<String>()),
-                YARD_OVERLAY_W,
-            ));
-        }
-        lines.push(pad_to("", YARD_OVERLAY_W));
-        let sel = sel.min(crowd.len() - 1);
-        let (name, eye, crown) = crowd[sel];
-        match identity {
-            Some(id) => {
-                let mut caption =
-                    format!(" ▸ {name} · {}", crate::sprites::species_name(id.species));
-                if !id.rarity.is_empty() {
-                    caption.push_str(&format!(" · {}", id.rarity));
-                }
-                if crown >= 1 {
-                    caption.push_str(&format!(" · crown {crown}"));
-                }
-                if id.first_sighting {
-                    caption.push_str(" · NEW");
-                }
-                lines.push(pad_to(&caption, YARD_OVERLAY_W));
-                if crown >= 1 {
-                    lines.push(pad_to(
-                        &format!("  {}", crate::sprites::HAT_CROWN),
-                        YARD_OVERLAY_W,
-                    ));
-                }
-                for row in crate::sprites::render_frame(id.species, frame, eye) {
-                    lines.push(pad_to(&format!("  {row}"), YARD_OVERLAY_W));
-                }
-            }
-            None => {
-                // No identity for this row. What that MEANS depends on the
-                // fold: still folding says pending; landed says the row has
-                // no registry citizen behind it (a bare shell, a tombstone,
-                // an external roster row) - never "pending" forever, and
-                // never a guessed species either way.
-                let why = match footer {
-                    NeedsFooter::Folding => "identity fold pending".to_string(),
-                    NeedsFooter::Degraded => "identity fold unavailable".to_string(),
-                    NeedsFooter::AsOf => "no yard identity (not a registry citizen)".to_string(),
-                };
-                lines.push(pad_to(&format!(" ▸ {name} · {why}"), YARD_OVERLAY_W));
-            }
-        }
-    }
-    let footer_line = match footer {
-        NeedsFooter::Folding => "   folding identities...".to_string(),
-        NeedsFooter::Degraded => "   identity fold unavailable - readings only".to_string(),
-        NeedsFooter::AsOf => format!("   {} citizens", crowd.len()),
-    };
-    lines.push(pad_to(&footer_line, YARD_OVERLAY_W));
-    lines
 }
 
 /// The navigator overlay content width (x-653d): labels truncate to it and pad
@@ -11063,7 +10829,7 @@ fn pad_cols(s: &str, w: usize) -> String {
     out
 }
 
-fn pad_to(s: &str, w: usize) -> String {
+pub(crate) fn pad_to(s: &str, w: usize) -> String {
     let count = s.chars().count();
     if count > w {
         let mut t: String = s.chars().take(w.saturating_sub(1)).collect();
@@ -11506,14 +11272,10 @@ async fn attach_and_run(
                 let _ = tx.send((gen, result));
             });
         }
-        if view.court_want && !view.court_inflight {
-            view.court_want = false;
-            view.court_inflight = true;
+        if let Some(gen) = view.court.take_want() {
             let tx = court_tx.clone();
-            let gen = view.court_gen;
             tokio::spawn(async move {
-                let result = crate::court_overlay::fold_now().await;
-                let _ = tx.send((gen, result));
+                let _ = tx.send((gen, crate::court_overlay::fold_now().await));
             });
         }
         // x-84d7: kick a wanted Connections read off the UI loop, at most one in
@@ -11958,21 +11720,10 @@ async fn attach_and_run(
                 }
             }
             Some((gen, result)) = court_rx.recv() => {
-                // (x-3cb3) The court fold landed. Same merge discipline as
-                // the yard's: gen-guarded, degraded-loud on None, and a
-                // FAILED fold never stamps court_fold_at, so the age line
-                // keeps describing the last real reading rather than the
-                // moment the failure arrived.
-                view.court_inflight = false;
-                if gen == view.court_gen && view.court.is_some() {
-                    match result {
-                        Some(court) => {
-                            view.court_fold = Some(court);
-                            view.court_degraded = false;
-                            view.court_fold_at = Some(Instant::now());
-                        }
-                        None => view.court_degraded = true,
-                    }
+                // (x-3cb3) The court fold landed. `apply` owns the merge
+                // discipline (gen guard, degrade-loud, no age restamp on a
+                // failure) and answers whether anything changed on screen.
+                if view.court.apply(gen, result) {
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }
@@ -13142,8 +12893,13 @@ async fn handle_stdin(
     if view.yard.is_some() {
         return yard_keys(view, &passthrough, sock_w).await;
     }
-    if view.court.is_some() {
-        return court_keys(view, &passthrough).await;
+    if view.court.is_open() {
+        // Read-only overlay: ANY key closes it, and no byte leaks into a
+        // pane (the answer-overlay invariant).
+        if !passthrough.is_empty() {
+            view.court.close();
+        }
+        return Ok(StdinFlow::Continue);
     }
     if view.create.is_some() {
         return create_keys(view, &passthrough, sock_w).await;
@@ -13332,26 +13088,7 @@ async fn dispatch_event(
                 view.yard_want = true;
             }
         }
-        Event::OpenCourt => {
-            // (x-3cb3) Open the court. It ALWAYS opens: a fold that is
-            // pending, stale or failed renders its own line, never a blank
-            // panel. Within the TTL the cached reading is served with its
-            // age shown, which is what keeps a repaint off the slow read.
-            view.court = Some(Instant::now());
-            view.court_gen = view.court_gen.wrapping_add(1);
-            let fresh = view
-                .court_fold_at
-                .is_some_and(|t| t.elapsed() < COURT_CACHE_TTL);
-            if fresh {
-                view.court_degraded = false;
-            } else {
-                // The stale reading is KEPT so the panel can render it as
-                // stale while the refresh runs. Dropping it here is what
-                // would put `unknown` on screen.
-                view.court_degraded = false;
-                view.court_want = true;
-            }
-        }
+        Event::OpenCourt => view.court.open(),
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;
             // Chrome changed size: report the new content area so rects
@@ -17219,16 +16956,6 @@ async fn answer_keys(
             }
             _ => {}
         }
-    }
-    Ok(StdinFlow::Continue)
-}
-
-/// (x-3cb3) Court-overlay key routing: the panel is read-only, so ANY key
-/// closes it and no byte leaks into a pane (the answer-overlay invariant).
-async fn court_keys(view: &mut View, bytes: &[u8]) -> Result<StdinFlow, String> {
-    if !bytes.is_empty() {
-        view.court = None;
-        view.court_gen = view.court_gen.wrapping_add(1);
     }
     Ok(StdinFlow::Continue)
 }

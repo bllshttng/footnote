@@ -52,11 +52,9 @@ def is_test_runner(command: str) -> bool:
     """True when a process's OWN program is a test runner.
 
     Matched on argv[0] plus the first non-flag arguments, never on the whole
-    command line. A naive substring scan for ``pytest`` reported four running
-    tests on a machine running none: the four were leaked
-    ``fno-agents-worker --keeper`` processes whose socket paths sat under
-    ``/private/var/folders/.../T/pytest-of-<user>/pytest-470/...``. The
-    substring was in the path, not in the program.
+    command line: a substring scan counts a leaked keeper whose socket path
+    sits under ``pytest-of-<user>``. The measured decoys are pinned in
+    ``cli/tests/unit/test_footprint.py``.
     """
     argv = command.split()
     if not argv:
