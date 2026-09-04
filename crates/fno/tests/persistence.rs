@@ -242,9 +242,20 @@ fn persistence_dead_server_respawns_fresh_instead_of_hanging() {
 
     let mut h2 = ClientHarness::spawn(&scratch);
     h2.wait_prompt(15);
-    // Fresh shell: the old environment is gone.
+    // Fresh shell: the old environment is gone. The VALUE is the guarantee -
+    // the variable reads unset in the respawned shell - not the line layout:
+    // under runner load the output row can carry the prompt prefix ("$
+    // old=[]"), because the harness's own bare-CR probes and readline's
+    // redraws interleave with the output, and an exact-line match then spins
+    // the whole timeout against a screen that already holds the answer.
+    // Observed once in CI on this test: the screen at panic carried "$
+    // old=[]" and nothing but the layout kept it from matching.
     h2.type_bytes(b"echo old=[$OLD_WORLD]\r");
-    h2.wait_screen(15, |s| s.lines().any(|l| l.trim() == "old=[]"));
+    let final_screen = h2.wait_screen(15, |s| s.contains("old=[]") && !s.contains("old=[yes]"));
+    assert!(
+        !final_screen.contains("old=[yes]"),
+        "the respawned shell inherited the dead server's environment:\n{final_screen}"
+    );
     // The one-line notice reached the user (printed before the TUI).
     assert!(
         h2.raw_output().contains("previous session ended"),

@@ -292,6 +292,50 @@ fn proto_bind_race_converges_on_exactly_one_server() {
 }
 
 #[test]
+fn proto_startup_marker_removed_mid_acquire_is_a_retry_not_an_error() {
+    // The guard's owner removes its marker at exit. A racer parked between
+    // its own create-AlreadyExists and the marker read used to escape
+    // bind_or_probe as Err(ENOENT) when the owner's exit landed inside that
+    // window - observed once in CI on the cold-start race above. The
+    // FNO_TEST_MARKER_HOLD_MS seam (test-only, never set in production)
+    // parks the racer IN the window; the holder's exit lands there by
+    // construction; the NotFound read must retry the loop, which then owns
+    // the path and binds. Without the fix this test errors ENOENT every
+    // run; with it, deterministically green.
+    let scratch = Scratch::new("guard-exit");
+    let sock = scratch.path("gx.sock");
+    let listener = match bind_or_probe(&sock) {
+        Ok(BindOutcome::Bound(l)) => l,
+        Ok(BindOutcome::AlreadyRunning) => panic!("fresh path reported a live server"),
+        Err(e) => panic!("fresh path errored: {e}"),
+    };
+    // The holder exits 250ms in, while the racer below is parked until
+    // 400ms: the marker+socket removal always lands inside the read window.
+    // A real server's exit removes its marker and socket (SocketGuard); a
+    // bare listener drop does neither, so this staging holder removes them
+    // by hand to play the exit faithfully.
+    let holder_sock = sock.clone();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(250));
+        drop(listener);
+        let _ = std::fs::remove_file(&holder_sock);
+        let _ = std::fs::remove_file(fno::proto::startup_sidecar_path(&holder_sock));
+    });
+    // The seam below is process-global env, so this test assumes the serial
+    // run the CI contract already pins (--test-threads=1); a parallel run of
+    // this binary would race the env read inside other tests' servers.
+    std::env::set_var("FNO_TEST_MARKER_HOLD_MS", "400");
+    let outcome = bind_or_probe(&sock);
+    std::env::remove_var("FNO_TEST_MARKER_HOLD_MS");
+    holder.join().unwrap();
+    match outcome {
+        Ok(BindOutcome::Bound(l)) => drop(l),
+        Ok(BindOutcome::AlreadyRunning) => {}
+        Err(e) => panic!("a marker removed mid-acquire must retry, not error: {e}"),
+    }
+}
+
+#[test]
 fn proto_non_tty_bare_fno_prints_notice_and_exits_zero() {
     // AC1-EDGE / exit criterion 6: `fno < /dev/null` never opens a TUI.
     let out = Command::new(env!("CARGO_BIN_EXE_fno"))
