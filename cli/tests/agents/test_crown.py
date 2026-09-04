@@ -454,6 +454,13 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
         ],
     )
     monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
+    import fno.agents.crown as crown_mod
+
+    # The receipt's delivery line is asserted by its own tests below; pin it
+    # here so this exact-dict assertion stays about the crown fields.
+    monkeypatch.setattr(
+        crown_mod, "_send_reign_verb", lambda address, verb: "msg-t delivered (hosted)"
+    )
     result = _invoke_crown("worker", "--scope", "alpha")
 
     assert result.exit_code == 0, result.output
@@ -466,6 +473,7 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
         "vacated_level": None,
         "stranded_subordinates": [],
         "king_loop_armed": True,
+        "reign_delivery": "msg-t delivered (hosted)",
     }
     row = load_registry()[0]
     assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
@@ -1588,3 +1596,69 @@ def test_spawn_crown_declined_when_scope_already_occupied(tmp_path: Path, monkey
     assert inc.crown_level == 1
     assert inc.crown_scope == "epic-x"
     assert not (tmp_path / ".fno" / "kings" / "epic-x.md").exists()
+
+
+# --- the crown types the verb (x-7b36 change 11): raw mail names the delivery
+
+
+def test_in_place_crown_mails_the_reign_verb_and_names_the_delivery(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import fno.agents.crown as crown_mod
+    from fno.agents.crown import promote_existing_session
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [_entry("worker", harness_session_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", status="idle")],
+    )
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        crown_mod, "_send_reign_verb", lambda address, verb: sent.append((address, verb)) or "msg-1 delivered (hosted)"
+    )
+
+    receipt = promote_existing_session("worker", ["alpha"])
+
+    assert receipt["reign_delivery"] == "msg-1 delivered (hosted)"
+    # AC28: the holder receives the plugin-qualified verb by raw mail,
+    # addressed by the full session id (the ADDRESS, never the spawn label).
+    assert sent == [("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "/fno:reign alpha")]
+
+
+def test_reign_verb_send_failure_is_named_not_silent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import fno.agents.crown as crown_mod
+    from fno.agents.crown import promote_existing_session
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [_entry("worker", harness_session_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", status="idle")],
+    )
+    monkeypatch.setattr(
+        crown_mod, "_send_reign_verb", lambda address, verb: "not delivered (rc=16: no such agent)"
+    )
+
+    receipt = promote_existing_session("worker", ["alpha"])
+
+    # The crown still commits; the receipt names the miss instead of silence.
+    assert receipt["crowned"] == "worker"
+    assert receipt["reign_delivery"].startswith("not delivered")
+
+
+def test_send_reign_verb_reports_subprocess_failure(monkeypatch) -> None:
+    import fno.agents.crown as crown_mod
+
+    class _Proc:
+        returncode = 16
+        stdout = ""
+        stderr = "resolve failed: no such agent"
+
+    # _send_reign_verb imports subprocess locally, so patch the module it
+    # resolves from at call time.
+    import subprocess as real_subprocess
+
+    monkeypatch.setattr(real_subprocess, "run", lambda *a, **k: _Proc())
+    verdict = crown_mod._send_reign_verb("worker", "/fno:reign alpha")
+    assert verdict == "not delivered (rc=16: resolve failed: no such agent)"

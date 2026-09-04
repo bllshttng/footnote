@@ -880,6 +880,24 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
     return identity.session_id, identity.harness, parent_cwd
 
 
+def _reign_typed_message(
+    message: str,
+    crown_level: Optional[int],
+    crown_scope: Optional[str],
+    revive: bool,
+) -> tuple[str, bool]:
+    """A crowned spawn's payload opens with the plugin-qualified reign verb.
+
+    The claude lane is the measured case: the crown stamp said nothing and the
+    king improvised the ritual by hand for a hundred turns. A revival keeps its
+    own payload - the session already knows what it is - and the receipt names
+    the not-typed case with the remedy instead of silence.
+    """
+    if crown_level is not None and crown_scope and not revive:
+        return f"/fno:reign {crown_scope}\n{message}", True
+    return message, False
+
+
 def _report_unlinked_parent(session_id: Optional[str]) -> None:
     """Name an unrecorded parent edge in the spawn output.
 
@@ -1837,6 +1855,13 @@ def _claude_create_path(
     # _capture_spawn_trigger's own docstring for what that mislabels).
     spawn_trigger = _capture_spawn_trigger()
 
+    # x-7b36 change 11: a crowned spawn TYPES the reign verb as the payload's
+    # first line, so the king's first turn is the skill itself rather than a
+    # hand-improvised ritual. Measured on the first crowned king: the stamp
+    # said nothing, the king improvised for a hundred turns, and nothing
+    # warned. The operator's brief follows the verb as the payload's body.
+    message, reign_typed = _reign_typed_message(message, crown_level, crown_scope, revive)
+
     try:
         result: ProviderResult = claude_mod.bg_create(
             name=name,
@@ -2171,6 +2196,22 @@ def _claude_create_path(
                 f"manifest was NOT armed{why}",
                 file=sys.stderr,
             )
+        if crown_scope and not crown_declined:
+            # The typed/not-typed fact rides the receipt either way: an
+            # untyped ritual is visible in the receipt, never inferred from
+            # silence.
+            if reign_typed:
+                print(
+                    f"spawn: crown over {crown_scope!r} recorded; reign typed",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"spawn: crown over {crown_scope!r} recorded; NOT typed "
+                    "(revived session keeps its own payload; send "
+                    f"'/fno:reign {crown_scope}' by raw mail if it should reign)",
+                    file=sys.stderr,
+                )
     except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
         # Birth's failure counterpart (x-8cd5 Wave 6): the supervisor launched
         # but no registry row names it, so without this the orphan's later

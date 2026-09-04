@@ -946,7 +946,61 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     except Exception:
         # Advisory receipt data must never crash a crown that committed.
         receipt["stranded_subordinates"] = None
+    # x-7b36 change 11: the crown TYPES the verb. The holder learns it reigns
+    # through the one channel it reads anyway - raw mail typed as the operator
+    # would - instead of discovering the crown on its next `fno whoami`.
+    # Plugin-qualified per harness: `/fno:` on claude and opencode, `$fno:` on
+    # codex because `/` is reserved there.
+    target_row = next((r for r in rows_after if r.name == target_name), None)
+    target_harness = getattr(target_row, "harness", None) if target_row else None
+    address = target_name
+    if target_row is not None:
+        address = (
+            getattr(target_row, "harness_session_id", None)
+            or getattr(target_row, "cc_session_id", None)
+            or getattr(target_row, "short_id", None)
+            or target_name
+        )
+    prefix = "$fno:" if target_harness == "codex" else "/fno:"
+    receipt["reign_delivery"] = _send_reign_verb(address, f"{prefix}reign {scope}")
     return receipt
+
+
+def _send_reign_verb(address: str, verb: str) -> str:
+    """Mail the reign verb to a freshly crowned holder; never raises.
+
+    Advisory receipt data: a delivery failure is named on the receipt, because
+    a crowned session that never receives the verb improvises the ritual by
+    hand - the exact silence this typing exists to end. `--raw` types the
+    payload as the operator would, so a leading slash arrives as a command.
+    """
+    import subprocess
+    import sys
+
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [
+                sys.executable,
+                "-m",
+                "fno.cli",
+                "agents",
+                "mail",
+                "send",
+                address,
+                verb,
+                "--raw",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"not delivered ({exc})"
+    if proc.returncode == 0 and proc.stdout.strip():
+        return proc.stdout.strip().splitlines()[-1]
+    detail = (proc.stderr.strip() or proc.stdout.strip() or "no output").splitlines()[-1]
+    return f"not delivered (rc={proc.returncode}: {detail})"
 
 
 def _stranded_subordinates(
