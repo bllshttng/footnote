@@ -299,19 +299,25 @@ def _continuation_base(
     ref the fetch writes, never the shared FETCH_HEAD."""
     remote_branch = base.split("/", 1)[1]
     salvage = f"refs/fno/salvage/{name}"
+    feat = f"origin/feature/{name}"
+    feat_ref = f"refs/remotes/origin/feature/{name}"
     fetch: Optional[subprocess.CompletedProcess[str]]
     try:
         fetch = subprocess.run(
             ["git", "-C", str(repo), "fetch", "--quiet", "origin",
-             remote_branch, f"feature/{name}"],
+             remote_branch, f"feature/{name}:{feat_ref}"],
             capture_output=True, text=True, timeout=60,
         )
     except subprocess.TimeoutExpired:
         fetch = None
-    feat = f"origin/feature/{name}"
-    count = _ahead_count(repo, base, feat)
+    # The explicit `feature/<name>:<full tracking path>` above materializes
+    # the tracking ref even on a --single-branch clone, whose configured
+    # refspec alone would leave origin/feature/<name> absent and miss the
+    # continue. The dst is the FULL path: a short `origin/feature/<name>`
+    # lands at refs/origin/... and makes every later rev-parse ambiguous.
+    count = _ahead_count(repo, base, feat_ref)
     if count:
-        return ("continued", feat, count, feat)
+        return ("continued", feat, count, feat_ref)
     # git refuses to fetch into a non-standard namespace like refs/fno/*, so
     # the remote salvage ref lands under refs/remotes/fno-salvage/<name>.
     # A per-name ref, not FETCH_HEAD: .git/FETCH_HEAD is one repo-wide file,
