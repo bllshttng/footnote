@@ -26,6 +26,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "ask",
     "attach",
     "bash-census",
+    "board",
     "claim",
     "codex-loaded-threads",
     "detect",
