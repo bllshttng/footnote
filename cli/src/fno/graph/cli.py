@@ -6033,43 +6033,26 @@ def cmd_get(
 
     # Read-through fallback: a node the sweep archived still resolves here
     # (read-only). Mutating verbs stay working-graph-only and error instead.
-    from fno.paths import graph_archive_json
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_archive_entries, resolve_node_with_archive
 
-    archive_path = graph_archive_json()
-    if archive_path.exists():
-        # Best-effort, read-only: an unreadable archive degrades to the final
-        # miss below rather than erroring, so keep the soft reader here.
-        archived = read_graph(archive_path)
-        amatch = resolve_node(id, archived)
-        matched_entry = amatch.candidates[0] if amatch.kind == "exact" else None
-        if matched_entry is None:
-            # x-f69b: an archive-side id collision with the working graph gets
-            # reminted, and the old id is kept as `previous_id` so a reference
-            # made before the remint (a doc, a mail thread, a stale branch
-            # name) still resolves instead of reading as a plain miss.
-            matched_entry = next(
-                (e for e in archived if isinstance(e, dict) and e.get("previous_id") == id),
-                None,
-            )
-        if matched_entry is not None:
-            e = dict(matched_entry)
-            e["_archived"] = True
-            if field:
-                value = e.get(field)
-                if value is None:
-                    typer.echo("null")
-                elif isinstance(value, (list, dict)):
-                    typer.echo(json.dumps(value))
-                else:
-                    typer.echo(value)
-            elif grouped:
-                from fno.graph.grouped import render_grouped
-
-                typer.echo(render_grouped(e))
+    matched_entry = resolve_node_with_archive(id, read_archive_entries())
+    if matched_entry is not None:
+        e = matched_entry
+        if field:
+            value = e.get(field)
+            if value is None:
+                typer.echo("null")
+            elif isinstance(value, (list, dict)):
+                typer.echo(json.dumps(value))
             else:
-                typer.echo(json.dumps(e, indent=2))
-            return
+                typer.echo(value)
+        elif grouped:
+            from fno.graph.grouped import render_grouped
+
+            typer.echo(render_grouped(e))
+        else:
+            typer.echo(json.dumps(e, indent=2))
+        return
 
     typer.echo(f"No node matching '{id}' (id/slug/bare-hex) in {_graph_path()}", err=True)
     raise typer.Exit(code=1)

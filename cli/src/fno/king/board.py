@@ -854,21 +854,18 @@ def _resolve_holder_activity(holders: set[str]) -> dict[str, dict]:
     return out
 
 
-#: Live node claims resolved per board read. Each costs one `fno backlog get`,
-#: and the read feeds a stop hook, so the count is capped and the cut is
-#: reported rather than swallowed.
-MAX_CLAIMED_NODE_READS = 20
-
-
-def _read_claimed_nodes(
-    claims: SourceRead, timeout: int
-) -> tuple[SourceRead, set[str], list[str]]:
+def _read_claimed_nodes(claims: SourceRead) -> tuple[SourceRead, set[str], list[str]]:
     """Look up the backlog row behind each LIVE node claim.
 
     This is the read that makes `stalled_holder` reachable at all. Every other
     queue starts from a list of nodes; this one starts from a list of LOCKS,
     because `fno backlog ready` has already removed exactly the nodes a wedged
     worker is holding.
+
+    Measured 2026-09-03: 13 per-claim `fno backlog get` subprocesses cost
+    30.8s against this read's 30s stop-gate ceiling, so the lookup reads the
+    graph in process through the same tiers `cmd_get` applies; the verb
+    stays the hand repro for any row here.
     """
     if not claims.ok:
         return SourceRead(error=claims.error), set(), []
@@ -885,30 +882,44 @@ def _read_claimed_nodes(
             held.append((key[len("node:") :], holder))
 
     warnings: list[str] = []
-    if len(held) > MAX_CLAIMED_NODE_READS:
-        warnings.append(
-            f"stalled_holder: capped at {MAX_CLAIMED_NODE_READS} of {len(held)} live claims"
+    from fno.graph.fuzzy import resolve_node
+    from fno.graph.statuses import TERMINAL_RUNGS
+    from fno.graph.store import (
+        GraphUnreadableError, read_archive_entries, read_graph_strict,
+        resolve_node_with_archive,
+    )
+
+    try:
+        entries = read_graph_strict(paths.graph_json())
+    except GraphUnreadableError as exc:
+        # One unreadable node is not an unreadable queue: degrade loudly.
+        return (
+            SourceRead(payload=[]),
+            set(),
+            [f"stalled_holder: nodes unreadable, graph unreadable: {exc}"],
         )
-        held = held[:MAX_CLAIMED_NODE_READS]
+
+    archived: Optional[list[dict]] = None
+
+    def _resolve(node_id: str) -> Optional[dict]:
+        nonlocal archived
+        match = resolve_node(node_id, entries)
+        if match.kind == "exact":
+            return dict(match.candidates[0])
+        # The archive read is paid once per board read, not once per miss.
+        if archived is None:
+            archived = read_archive_entries()
+        return resolve_node_with_archive(node_id, archived)
 
     nodes: list[dict] = []
     holders: set[str] = set()
-    from fno.graph.statuses import TERMINAL_RUNGS
-
     for node_id, holder in held:
-        read = _run_json([*_fno(), "backlog", "get", node_id], timeout=timeout)
-        if not read.ok:
-            # One unreadable node is not an unreadable queue: the other claims
-            # still answer. It is reported so a silent gap never reads as a
-            # clean lane.
-            warnings.append(f"stalled_holder: {node_id} unreadable: {read.error}")
+        node = _resolve(node_id)
+        if node is None:
+            warnings.append(f"stalled_holder: {node_id} unreadable: no node matching in graph")
             continue
-        node = read.payload if isinstance(read.payload, dict) else None
-        if not node:
-            continue
-        # A terminal node's claim is a leak the closure release or the
-        # node-aware reaper owns. Drop it at the source so it never reaches a
-        # queue AND its holder never costs an activity transcript read.
+        # A terminal claim is a reaper leak; dropping it here also keeps its
+        # holder out of the transcript reads.
         if node.get("status") in TERMINAL_RUNGS:
             continue
         nodes.append(node)
@@ -918,27 +929,91 @@ def _read_claimed_nodes(
 
 
 def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
-    """Fetch every source. Never raises; every failure lands in a SourceRead."""
-    undispatched = _read_undispatched(timeout)
-    claims = _run_json([*_fno(), "agents", "claim", "list", "-J", "--include-stale", "--prefix", "node:"],
-        timeout=timeout,
-    )
-    prs, pr_nodes, warnings = _read_prs(timeout, max_pr_reads)
-    claimed_nodes, holders, claimed_warnings = _read_claimed_nodes(claims, timeout)
+    """Fetch every source. Never raises; every failure lands in a SourceRead.
+
+    The sources are independent shellouts, so they run concurrently: measured
+    2026-09-03, the sequential collect summed to the stop-gate ceiling under
+    ordinary load with every source individually healthy; the wall clock is
+    now the slowest source. The one dependency chain (claims -> claimed-nodes
+    -> holder activity) runs on the calling thread: a pool task waiting on a
+    sibling future can deadlock when every worker is busy on a queued future.
+    """
+    def _run(fn, *args, on_error=None):
+        try:
+            return fn(*args)
+        except Exception as exc:  # noqa: BLE001 - the degrade-not-crash promise
+            if on_error is not None:
+                return on_error(exc)
+            return SourceRead(error=f"{getattr(fn, '__name__', 'source')}: {exc}")
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        undispatched_f = pool.submit(_run, _read_undispatched, timeout)
+        claims_f = pool.submit(
+            _run,
+            lambda: _run_json(
+                [*_fno(), "agents", "claim", "list", "-J", "--include-stale", "--prefix", "node:"],
+                timeout=timeout,
+            ),
+        )
+        # _read_prs returns (SourceRead, SourceRead, warnings); its error
+        # fallback must keep that shape or the unpack crashes the collect.
+        prs_f = pool.submit(
+            _run,
+            _read_prs,
+            timeout,
+            max_pr_reads,
+            on_error=lambda exc: (
+                SourceRead(error=f"_read_prs: {exc}"),
+                SourceRead(error=f"undriven_pr: {exc}"),
+                [f"mergeable_pr: unreadable: {exc}"],
+            ),
+        )
+        ready_f = pool.submit(
+            _run,
+            lambda: _run_json([*_fno(), "backlog", "ready", "--json", "-A"], timeout=timeout),
+        )
+        outstanding_f = pool.submit(_run, _read_outstanding, timeout)
+        needs_f = pool.submit(
+            _run,
+            lambda: _run_json([*_fno(), "agents", "needs", "--json"], timeout=timeout),
+        )
+
+        # The claims chain runs HERE, inside the with-block: the executor's
+        # exit joins every worker, so a chain placed after it ran strictly
+        # after all six sources. Waiting on a pool future from the calling
+        # thread is safe: no worker waits back, so the wait cannot cycle.
+        claims = _run(lambda: claims_f.result())
+        try:
+            claimed_nodes, holders, claimed_warnings = _read_claimed_nodes(claims)
+        except Exception as exc:  # noqa: BLE001 - the degrade-not-crash promise
+            claimed_nodes, holders, claimed_warnings = (
+                SourceRead(error=f"stalled_holder: claimed nodes unreadable: {exc}"),
+                set(),
+                [],
+            )
+        holder_activity: dict[str, dict] = {}
+        try:
+            holder_activity = _resolve_holder_activity(holders)
+        except Exception as exc:  # noqa: BLE001 - an unresolved holder is a stalled one
+            claimed_warnings.append(f"stalled_holder: holder activity unreadable: {exc}")
+
+    prs, pr_nodes, warnings = prs_f.result()
     warnings.extend(claimed_warnings)
 
     return BoardInputs(
-        ready=_run_json([*_fno(), "backlog", "ready", "--json", "-A"], timeout=timeout),
+        ready=ready_f.result(),
         claims=claims,
         claimed_nodes=claimed_nodes,
-        holder_activity=_resolve_holder_activity(holders),
+        holder_activity=holder_activity,
         prs=prs,
         pr_nodes=pr_nodes,
-        outstanding=_read_outstanding(timeout),
-        needs=_run_json([*_fno(), "agents", "needs", "--json"], timeout=timeout),
+        outstanding=outstanding_f.result(),
+        needs=needs_f.result(),
         lane=_read_lane(),
         warnings=warnings,
-        undispatched=undispatched,
+        undispatched=undispatched_f.result(),
     )
 
 
@@ -985,7 +1060,11 @@ def autonomous_merge_enabled() -> bool:
         return False
 
 
-DEFAULT_BOARD_TIMEOUT = 60
+#: Per-source timeout. Must sit UNDER the 30s stop-gate ceiling
+#: (loopcheck.rs STOPGATE_READ_TIMEOUT): a hung source then degrades to an
+#: unreadable-queue warning with the payload intact instead of outliving the
+#: stop fire as "king board unreadable". Raise the outer ceiling first.
+DEFAULT_BOARD_TIMEOUT = 25
 
 
 def _board_timeout() -> int:

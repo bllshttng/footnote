@@ -45,7 +45,7 @@ import tempfile
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
 from pathlib import Path
 
 from fno.graph._constants import (  # noqa: F401  GRAPH_MD re-exported: patched via store.GRAPH_MD
@@ -714,6 +714,42 @@ def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
     is written on this path.
     """
     return _client_for(path).read(path, strict=True)["entries"]
+
+
+def read_archive_entries() -> list[dict]:
+    """The archived nodes, best-effort: an absent archive is []. Callers that
+    may test many ids read once and pass the list to
+    :func:`resolve_node_with_archive`."""
+    from fno.paths import graph_archive_json
+
+    archive_path = graph_archive_json()
+    if not archive_path.exists():
+        return []
+    return read_graph(archive_path)
+
+
+def resolve_node_with_archive(node_id: str, archived: list[dict]) -> Optional[dict]:
+    """Read-through resolve against the archive: exact id, else a previous_id hit.
+
+    The read-only half of `backlog get`'s miss path: an archived node still
+    resolves, stamped ``_archived``. Soft by contract - ``archived`` comes
+    from :func:`read_archive_entries`.
+    """
+    from fno.graph.fuzzy import resolve_node
+
+    match = resolve_node(node_id, archived)
+    if match.kind == "exact":
+        return dict(match.candidates[0]) | {"_archived": True}
+    # A reminted id keeps the old one as `previous_id`, so a reference made
+    # before the remint still resolves instead of reading as a plain miss.
+    return next(
+        (
+            dict(e) | {"_archived": True}
+            for e in archived
+            if isinstance(e, dict) and e.get("previous_id") == node_id
+        ),
+        None,
+    )
 
 
 def entries_with_archive(entries: list) -> list:
