@@ -948,6 +948,12 @@ _FEATURE_CAPABILITY = {
     "unmeasured": "has not had this surface measured",
 }
 
+# The review SUBJECT, not a verb inventory: any namespace-qualified or
+# code-qualified spelling of /review gates a keystroke lane against the
+# recipient row's features.review. The codex-daemon lane keeps its exact
+# review_verbs membership test in the mail lane.
+_REVIEW_SUBJECT_RE = re.compile(r"^/(?:[a-z][a-z0-9-]*:)?(?:code-)?review$", re.IGNORECASE)
+
 
 def feature_refusal_reason(harness: str, key: str) -> Optional[str]:
     """Why a consuming lane must refuse ``key`` on ``harness``, or ``None``
@@ -970,6 +976,17 @@ def feature_refusal_reason(harness: str, key: str) -> Optional[str]:
         f"{_FEATURE_CAPABILITY[state]}. Settle the row with "
         f"'fno agents harness probe {harness_label}'."
     )
+
+
+def review_lane_block(harness: str, first_token: str) -> Optional[str]:
+    """The full refusal reason when a raw ``first_token`` names the review
+    subject and the harness's row does not read ``features.review = native``
+    (x-a3e8); ``None`` when the payload is not a review verb or the row is
+    native. The keystroke lane asks this before it types, so a review can
+    never again deliver a receipt over a verb the harness cannot fire."""
+    if not _REVIEW_SUBJECT_RE.match(first_token):
+        return None
+    return feature_refusal_reason(harness or "", "review")
 
 
 def capabilities(harness: str) -> dict:

@@ -84,12 +84,15 @@ def test_raw_review_check_answers_not_injectable_without_injecting(
 
 
 def test_the_gate_matches_every_review_spelling_and_only_review():
-    from fno.mail.cli import _REVIEW_VERB_RE
+    from fno.agents.harness_map import review_lane_block
 
+    # A native row (codex) proceeds for review spellings and the gate is
+    # silent for non-review payloads; the subject match itself is pinned
+    # through the block function against an unmeasured row ("" harness).
     for verb in ("/review", "/code-review", "/fno:review", "/CODE-REVIEW", "/codex:review"):
-        assert _REVIEW_VERB_RE.match(verb), verb
+        assert review_lane_block("", verb), verb
     for verb in ("/preview", "/compact", "/reviewx", "/model", "review", "/rev"):
-        assert not _REVIEW_VERB_RE.match(verb), verb
+        assert not review_lane_block("", verb), verb
 
 
 def test_an_absent_review_row_refuses_in_absent_words(mailbox, monkeypatch, capsys):

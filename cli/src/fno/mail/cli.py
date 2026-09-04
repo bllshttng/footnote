@@ -55,6 +55,7 @@ from typing import Optional, TypedDict
 import typer
 
 from fno.agents.harness_map import capabilities as _harness_capabilities
+from fno.agents.harness_map import review_lane_block as _review_lane_block
 from fno.mail.codex_review_target import (
     explicit_review_pr_number,
     resolve_codex_review_target as _codex_review_target,
@@ -3618,34 +3619,27 @@ def _raw_send(
         )
 
     # A review verb on a keystroke lane is asked of the TABLE before it is
-    # typed (x-a3e8). This branch used to paste whatever it was given and
-    # return a delivery receipt, so a review dispatched at a harness with no
-    # review command delivered nothing and looked delivered. Only the review
-    # SUBJECT is gated: every other payload rides the lane exactly as before,
-    # and a row reading native (claude, codex) is unaffected. The row answer
-    # itself comes from the map's shared reason builder, so every consuming
-    # lane refuses in the same words.
+    # typed (x-a3e8): this branch used to paste whatever it was given and
+    # return a delivery receipt. The subject match and the row answer live
+    # beside the table (harness_map.review_lane_block); only the remedy
+    # bullets are mail's.
     verb = stripped.split(maxsplit=1)[0]
-    if _REVIEW_VERB_RE.match(verb):
-        from fno.agents.harness_map import feature_refusal_reason
-
-        harness = getattr(entry, "harness", None) or ""
-        row_reason = feature_refusal_reason(harness, "review")
-        if row_reason:
-            reason = (
-                f"{name!r} runs {harness or 'an undeclared harness'}, whose "
-                f"{row_reason}\n"
-                "  - to have the model READ this anyway, drop --raw (a wrapped "
-                "send delivers it as text, which is all this lane could do with "
-                "it)\n"
-                "  - run the review on a harness whose row reads native: "
-                "/code-review on a claude worker, /review on a codex daemon "
-                "thread"
-            )
-            if check:
-                print(f"not-injectable: {reason}")
-                raise typer.Exit(code=1)
-            _refused(reason)
+    row_reason = _review_lane_block(getattr(entry, "harness", None) or "", verb)
+    if row_reason:
+        reason = (
+            f"{name!r} runs {getattr(entry, 'harness', None) or 'an undeclared harness'}, whose "
+            f"{row_reason}\n"
+            "  - to have the model READ this anyway, drop --raw (a wrapped "
+            "send delivers it as text, which is all this lane could do with "
+            "it)\n"
+            "  - run the review on a harness whose row reads native: "
+            "/code-review on a claude worker, /review on a codex daemon "
+            "thread"
+        )
+        if check:
+            print(f"not-injectable: {reason}")
+            raise typer.Exit(code=1)
+        _refused(reason)
 
     # --check stops here, one step short of the keystroke. Each lane is asked the
     # strongest question it can answer cheaply, and neither answer is a promise the
