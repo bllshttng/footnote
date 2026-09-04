@@ -94,7 +94,7 @@ TMP_DIR="$(mktemp -d)"
 TMP_DIR="$(cd "$TMP_DIR" && pwd -P)"
 HOME_DIR="${TMP_DIR}/home"
 STUB_BIN="${TMP_DIR}/stubs"
-EVENTS_FILE="$(cd "$TMP_DIR" && HOME="$HOME_DIR" env -u FNO_EVENTS_PATH -u FNO_SPACES_DIR "$REAL_BIN" state path events)"
+EVENTS_FILE="$(cd "$TMP_DIR" && HOME="$HOME_DIR" env -u FNO_EVENTS_PATH "$REAL_BIN" state path events)"
 
 mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno" "$STUB_BIN"
 

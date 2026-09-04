@@ -174,7 +174,8 @@ link_dir "internal"
 # ~/.fno/spaces/<slug>/ (keyed on the canonical root), which every worktree
 # resolves identically, so there is nothing to link: config.toml is found by
 # the config loader's climb to canonical, the events journal is ONE space
-# file, and carveouts/wake-signals/codemap resolve through the space too.
+# file, and the carveouts, wake-signals and codebase map resolve through the
+# space too.
 # The only checkout-local fno file is .fno/config.toml (committed project
 # config), and a per-worktree override layer (config.local.toml) stays
 # per-worktree by ABSENCE of a link, as before.

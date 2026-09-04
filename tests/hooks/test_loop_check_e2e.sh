@@ -306,7 +306,7 @@ PY
 
 assert_delivery_artifacts() {
     local dir="$1" session_id="$2" events
-    events="$(cd "$dir" && HOME="$dir/home" env -u FNO_EVENTS_PATH -u FNO_SPACES_DIR "$REAL_BIN" state path events)"
+    events="$(cd "$dir" && HOME="$dir/home" env -u FNO_EVENTS_PATH "$REAL_BIN" state path events)"
     grep -q '^status: done$' "$dir/plan.md" || return 1
     grep -q '"type":"delivery_verdict_evaluated"' "$events" || return 1
     grep -q 'DoneDelivery' "$events" || return 1
@@ -424,7 +424,7 @@ STATE
         ca_ok=false
     fi
 
-    PROJ_EVENTS="$(cd "$TMP_DIR" && HOME="$HOME_DIR" env -u FNO_EVENTS_PATH -u FNO_SPACES_DIR "$REAL_BIN" state path events)"
+    PROJ_EVENTS="$(cd "$TMP_DIR" && HOME="$HOME_DIR" env -u FNO_EVENTS_PATH "$REAL_BIN" state path events)"
     if [[ ! -f "$PROJ_EVENTS" ]]; then
         fail "Case A: project events.jsonl not created at $PROJ_EVENTS"
         ca_ok=false
@@ -623,7 +623,7 @@ STATE
         cc_ok=false
     fi
 
-    PROJ_EVENTS="$(cd "$TMP_DIR" && HOME="$HOME_DIR" env -u FNO_EVENTS_PATH -u FNO_SPACES_DIR "$REAL_BIN" state path events)"
+    PROJ_EVENTS="$(cd "$TMP_DIR" && HOME="$HOME_DIR" env -u FNO_EVENTS_PATH "$REAL_BIN" state path events)"
     if [[ ! -f "$PROJ_EVENTS" ]]; then
         fail "Case C: project events.jsonl not created"
         cc_ok=false

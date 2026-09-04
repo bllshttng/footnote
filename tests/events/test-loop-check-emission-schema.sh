@@ -353,7 +353,7 @@ MANIFEST
 
     # The run log lives in the worktree slice of the repo's space now; ask the
     # binary under test where that is (same HOME + cwd it will resolve with).
-    RUN_LOG="$(cd "$TMP_DIR" && HOME="$HOME_DIR" "$REAL_BIN" state path run-log 2>/dev/null)" \
+    RUN_LOG="$(cd "$TMP_DIR" && HOME="$HOME_DIR" env -u FNO_EVENTS_PATH "$REAL_BIN" state path run-log 2>/dev/null)" \
         || RUN_LOG="${TMP_DIR}/.fno/run-log.jsonl"
     mkdir -p "$(dirname "$RUN_LOG")"
     cat > "$RUN_LOG" <<'RUNLOG'
