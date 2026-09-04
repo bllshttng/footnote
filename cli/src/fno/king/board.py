@@ -935,10 +935,9 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
     2026-09-03, the sequential collect summed to the stop-gate ceiling under
     ordinary load with every source individually healthy; the wall clock is
     now the slowest source. The one dependency chain (claims -> claimed-nodes
-    -> holder activity) runs on the calling thread: a pool task that waits on
-    a sibling future can deadlock when every worker is busy waiting on a
-    queued future, and running it here overlaps the pool's slowest source, so
-    the wall clock is unchanged.
+    -> holder activity) runs on the calling thread: a pool task waiting on a
+    sibling future can deadlock when every worker is busy on a queued future;
+    here it overlaps the pool's slowest source instead.
     """
     def _run(fn, *args, on_error=None):
         try:
