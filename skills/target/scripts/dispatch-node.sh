@@ -681,12 +681,18 @@ for id in "${NODES[@]}"; do
   if [[ -n "$node_cwd" && -d "$node_cwd" ]]; then
     resolved_json="$( ( cd "$node_cwd" && fno "${resolve_args[@]}" 2>/dev/null ) )"; resolve_rc=$?
   else
-    # The node's own dir is gone (stale worktree, fake/mocked path): a from-config
-    # read there could only answer from the wrong cwd, so thread no-merge - the
-    # node's posture is unreadable, and Locked Decision 6 never grants on a
+    # NO recorded cwd: the node lives in THIS project, so from-config reads the
+    # caller's own config - thread it unchanged. A RECORDED cwd whose dir is
+    # gone (stale worktree, fake/mocked path) is a failed read of the node's
+    # own config: thread no-merge instead - Locked Decision 6 never grants on a
     # failed read. The dispatch itself still proceeds from the caller's cwd.
-    if [[ "${posture_args[*]}" == *from-config* ]]; then
-      resolve_args=("${resolve_args[@]/--merge-posture from-config/--merge-posture no-merge}")
+    if [[ -n "$node_cwd" && "${posture_args[*]}" == *from-config* ]]; then
+      # Element-wise: ${arr[@]/pat/rep} matches ONE element at a time, so the
+      # two-word "--merge-posture from-config" pattern can never match (review
+      # round on this PR). Only the posture VALUE element is rewritten.
+      for _i in "${!resolve_args[@]}"; do
+        [[ "${resolve_args[$_i]}" == "from-config" ]] && resolve_args[$_i]="no-merge"
+      done
     fi
     resolved_json="$(fno "${resolve_args[@]}" 2>/dev/null)"; resolve_rc=$?
   fi

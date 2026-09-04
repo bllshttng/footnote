@@ -279,7 +279,7 @@ set_agent_live() { printf '{"agents":[{"name":"%s","status":"%s"}]}\n' "$1" "$2"
 set_cwd() { echo "$2" > "$MOCKSTATE/cwd_$1"; }
 set_resolved_cwd() { echo "$2" > "$MOCKSTATE/resolved_cwd_$1"; }
 set_pr() { echo "$2" > "$MOCKSTATE/pr_$1"; }   # node carries an open (unmerged) PR
-reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/claim_garbage "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair "$MOCKSTATE"/verb_* "$MOCKSTATE"/slug_* "$MOCKSTATE"/cfg_auto_merge "$MOCKSTATE"/cfg_auto_merge_err "$MOCKSTATE"/repo_ensure.log "$MOCKSTATE"/ensure_fail "$MOCKSTATE"/ensure_policy_never 2>/dev/null || true; }
+reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/claim_garbage "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair "$MOCKSTATE"/verb_* "$MOCKSTATE"/slug_* "$MOCKSTATE"/cfg_auto_merge "$MOCKSTATE"/cfg_auto_merge_err "$MOCKSTATE"/repo_ensure.log "$MOCKSTATE"/ensure_fail "$MOCKSTATE"/ensure_policy_never 2>/dev/null || true; }
 ask_count()  { [[ -f "$MOCKSTATE/ask.log" ]] && wc -l < "$MOCKSTATE/ask.log" | tr -d ' ' || echo 0; }
 
 echo "=============================================="
@@ -384,6 +384,22 @@ bash "$DISPATCH" ab-aaaa1111 >/dev/null 2>&1
 grep -q -- "--merge-posture from-config" "$MOCKSTATE/resolve.log" \
   && pass "x-8151 wiring: the default threads --merge-posture from-config" \
   || fail "x-8151 wiring default: $(cat "$MOCKSTATE/resolve.log" 2>/dev/null)"
+
+# x-8151 AC: the node's project dir is GONE (stale worktree, fake path) -> a
+# from-config read there could only answer from the wrong cwd, so the launcher
+# must degrade the threaded posture to no-merge (Locked Decision 6: never grant
+# on a failed read). The dispatcher's own config opting in must NOT leak in.
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+set_resolved_cwd ab-aaaa1111 "$TMP/gone-project"
+echo dispatch > "$MOCKSTATE/cfg_auto_merge"
+bash "$DISPATCH" ab-aaaa1111 >/dev/null 2>&1
+if grep -q -- "--merge-posture no-merge" "$MOCKSTATE/resolve.log" \
+   && ! grep -q -- "--merge-posture from-config" "$MOCKSTATE/resolve.log" \
+   && grep -q '/target --no-merge ab-aaaa1111' "$MOCKSTATE/ask.log"; then
+  pass "x-8151 AC: missing node project dir degrades from-config to no-merge"
+else
+  fail "x-8151 missing-cwd degrade: resolve=$(cat "$MOCKSTATE/resolve.log" 2>/dev/null) ask=$(cat "$MOCKSTATE/ask.log" 2>/dev/null)"
+fi
 
 # AC2-EDGE (codex P2): per-node posture reads THIS node's project cwd, not the
 # dispatcher's. Node B's project opts in via its own .fno/auto_merge while the

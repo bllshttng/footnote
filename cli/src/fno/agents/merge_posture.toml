@@ -23,9 +23,9 @@ spellings = ["/target", "/fno:target", "$fno:target"]
 [carrier]
 # The flag is the deterministic merge-POSTURE carrier; the bare token is its
 # legacy spelling, migrated only in the two positions the legacy injectors
-# produced (directly after the verb, or trailing). `env` is the bookkeeping
-# key that crosses process boundaries (spawn lanes) once the flag has decided
-# the posture.
+# produced (directly after the verb, or trailing). The env key that carries
+# the decided posture across process boundaries (spawn lanes) is
+# TARGET_NO_MERGE, hardcoded beside each engine - deliberately NOT a table
+# key, so the table only carries what the engines actually read.
 flag = "--no-merge"
 legacy_token = "no-merge"
-env = "TARGET_NO_MERGE"

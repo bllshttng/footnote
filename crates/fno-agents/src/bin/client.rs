@@ -1038,8 +1038,9 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // spawn` gets the same posture as a Python-fronted one. It is applied to
     // this process's env and every child env below inherits it (model_env_scrub
     // keeps TARGET_NO_MERGE as protected bookkeeping). Idempotent with the
-    // Python lane's application, which runs the same verdict through the
-    // `dispatch-posture` verb.
+    // Python lane's application (`harness_map.apply_merge_posture_env` in
+    // `cmd_spawn`): both answer from the same table, so running twice
+    // converges.
     if let Some(message) = params.get("message").and_then(|v| v.as_str()) {
         fno_agents::merge_posture::apply_env_from_message(message);
     }

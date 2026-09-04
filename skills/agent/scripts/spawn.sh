@@ -449,8 +449,9 @@ cmd+=(--name "$NAME")
 [[ -n "$MESSAGE" ]] && cmd+=("$MESSAGE")
 # x-8151: the x-9d11 refusal-carrier case block that lived here is deleted.
 # This wrapper's `fno agents spawn` call re-derives the identical verdict one
-# process later (cmd_spawn, or the rust_runtime exec door on the binary lane)
-# from harness_map.apply_merge_posture_env - one owner, three copies retired.
+# process later (cmd_spawn in-process, or the fno-agents binary's own spawn
+# handler once the front door execs it) from the one carrier table - one
+# owner, three copies retired.
 
 err_file="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/agents-spawn-$$.err")"
 # EXIT trap guarantees cleanup even if interrupted (SIGINT) mid-spawn; the manual
