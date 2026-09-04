@@ -20,7 +20,7 @@ Every non-native cell settles the same way: `fno agents harness probe <harness>`
 | claude | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `native` |
 | codex | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `native` |
 | gemini | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `absent` | `capable` |
-| agy | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `absent` | `unmeasured` |
+| agy | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `capable` | `unmeasured` |
 | opencode | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
 | pi | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
 | hermes | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |

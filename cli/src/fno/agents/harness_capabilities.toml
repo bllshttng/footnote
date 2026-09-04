@@ -373,10 +373,11 @@ effort_labels = {}
 status_command = ""
 status_pattern = ""
 
-# FEATURES. spawn reads absent, not unmeasured, and that is a measurement of
-# this table, not of gemini: the lane is pane-only and the harness is
-# deprecated (its command_surface is refused; the successor is agy), so no
-# thread arm exists to wire and none will be.
+# FEATURES. spawn reads absent as a measurement of GEMINI, not of this
+# table: the deprecated CLI exposes no spawn surface to wire - its command
+# surface is refused and the lane it once hinted at moved to its successor,
+# agy - so there is no harness-side surface left to measure. That is the
+# absent definition, not a seating decision.
 [harness.gemini.features.spawn]
 state = "absent"
 
@@ -471,14 +472,14 @@ effort_labels = {}
 status_command = ""
 status_pattern = ""
 
-# FEATURES. spawn reads absent, and the distinction from unmeasured is the
-# whole point: agy's resume primitive IS measured working (2026-08-26,
-# quoted-token recall from a fresh process), but fno ships no thread arm for
-# it - the pane lane is the only wired transport. `capable` would claim a
-# harness-side exposure whose driver question fno has not answered; `absent`
-# states what a spawn dispatch hits today. Re-measure the day the arm lands.
+# FEATURES. spawn reads capable, and the legend says so exactly: the
+# harness-side surface is MEASURED working (agy's resume primitive, quoted-
+# token recall from a fresh process, 2026-08-26) and fno ships no thread arm
+# for it - the pane lane is the only wired transport. Capable makes no claim
+# about a driver; it marks the unwired arm, which is fno's gap. Flip to
+# native the day the arm lands with its journey.
 [harness.agy.features.spawn]
-state = "absent"
+state = "capable"
 
 [harness.opencode]
 permission_bypass = ["--dangerously-skip-permissions"]

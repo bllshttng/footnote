@@ -1484,7 +1484,7 @@ mod tests {
         for harness in ["claude", "codex", "opencode", "pi", "cursor-agent", "grok"] {
             assert_eq!(state(harness, "spawn"), "native", "{harness}");
         }
-        assert_eq!(state("agy", "spawn"), "absent");
+        assert_eq!(state("agy", "spawn"), "capable");
         assert_eq!(state("gemini", "spawn"), "absent");
         assert_eq!(state("claude", "review"), "native");
         assert_eq!(state("codex", "review"), "native");
@@ -1546,7 +1546,7 @@ mod tests {
 
     #[test]
     fn a_row_without_a_features_table_loads_with_no_refusal() {
-        let stanza = "[harness.agy.features.spawn]\nstate = \"absent\"\n";
+        let stanza = "[harness.agy.features.spawn]\nstate = \"capable\"\n";
         let stripped = CAPABILITY_TOML.replacen(stanza, "", 1);
         let contract = HarnessContract::parse(&stripped).unwrap();
         assert!(contract.capabilities("agy").unwrap().features.is_empty());
