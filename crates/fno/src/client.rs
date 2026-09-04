@@ -52,6 +52,9 @@ use crate::view_store::{
 };
 use crate::vt::ShellActivity;
 
+mod row_stamp;
+use self::row_stamp::{no_pane_notice, paint_notice_overlay, paint_row_stamp, RowArm, RowStamp};
+
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -266,66 +269,6 @@ const CHORD_FLUSH_AFTER: Duration = Duration::from_millis(40);
 /// inter-keystroke gap (so `3` then `4` lands tab 34, never 3 then 4), short
 /// enough that a one-digit jump feels immediate. Enter always resolves now.
 const DIGIT_FLUSH_AFTER: Duration = Duration::from_millis(400);
-/// Transient notice lifetime on the tab bar.
-const NOTICE_TTL: Duration = Duration::from_secs(3);
-
-/// (x-f191) How long a row-scoped outcome stamp stays on its sideline row.
-/// Outlives NOTICE_TTL on purpose: the tab-bar notice expires first, and the
-/// stamp at the row is what the operator falls back to finding.
-const ROW_STAMP_TTL: Duration = Duration::from_secs(8);
-/// How long an armed row stamp waits for the action's outcome notice. Must
-/// exceed the longest row action: stop can fall through to rm, two bounded
-/// subprocesses of 20s each.
-const ROW_STAMP_ARM_TTL: Duration = Duration::from_secs(60);
-/// The substrings that mark an outcome notice a FAILURE. Positive success is
-/// everything else that resolves the arm - a stamp on an unclassified
-/// outcome reads as success, which is the safe polarity: the row is still
-/// there to be pressed again either way.
-const ROW_FAILURE_MARKS: [&str; 8] = [
-    ": timed out",
-    ": failed",
-    ": unavailable",
-    "no such agent",
-    "is still live",
-    "is ambiguous",
-    "is external",
-    "no longer a live external row",
-];
-
-/// (x-f191) A row-scoped action outcome, stamped ON the sideline row it
-/// names. The tab-bar notice stays the full-text channel (x-0175); the stamp
-/// is the placement fix: the outcome renders at the row the operator acted
-/// on, not the far corner of the screen.
-struct RowStamp {
-    name: String,
-    text: String,
-    failure: bool,
-    expires: Instant,
-}
-
-/// The armed half: an action dispatched at a named row, waiting for the
-/// notice that resolves it. At most one at a time - a second arm replaces
-/// the first, whose outcome then lands in the tab bar only.
-struct RowArm {
-    name: String,
-    expires: Instant,
-}
-
-/// (x-f191) Whether a notice names `row_name` tightly enough to be its
-/// verdict: the name must sit at a token boundary, and the notice must not
-/// be an in-flight progress line (those end in `…` and never resolve the
-/// arm - the external verbs emit "stopping X…" long before the verdict).
-fn notice_names_row(text: &str, row_name: &str) -> bool {
-    if text.ends_with('…') {
-        return false;
-    }
-    let Some(i) = text.find(row_name) else {
-        return false;
-    };
-    let before = text[..i].chars().next_back();
-    let after = text[i + row_name.len()..].chars().next();
-    !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
-}
 
 /// The client-side pane identity overlay follows the scanner's repeat grace.
 pub const PANE_ID_REVEAL_WINDOW: Duration = PANE_IDS_REPEAT_WINDOW;
@@ -6012,92 +5955,6 @@ impl View {
         self.maybe_prompt_new_tab_name();
     }
 
-    fn set_notice(&mut self, text: String) {
-        self.notice = Some((text, Instant::now() + NOTICE_TTL));
-    }
-
-    /// (x-f191) Arm the row stamp for a row-scoped confirm commit: the next
-    /// notice naming this row renders beside the row, not only in the tab
-    /// bar. No-op for bulk and non-row confirms (reap, squad, close-tab).
-    fn arm_row_stamp(&mut self, action: &ConfirmKind) {
-        let name = match action {
-            ConfirmKind::StopAgent { name }
-            | ConfirmKind::RemoveAgent { name }
-            | ConfirmKind::StopExternal { name, .. }
-            | ConfirmKind::RemoveExternal { name, .. } => Some(name.clone()),
-            _ => None,
-        };
-        if let Some(name) = name {
-            self.row_arm = Some(RowArm {
-                name,
-                expires: Instant::now() + ROW_STAMP_ARM_TTL,
-            });
-        }
-    }
-
-    /// (x-f191) Resolve an armed row stamp against an incoming notice: a
-    /// notice naming the armed row stamps that row (success or failure) and
-    /// disarms. An unrelated or late notice leaves the arm alone.
-    fn resolve_row_stamp(&mut self, text: &str) {
-        let now = Instant::now();
-        let Some(arm) = self.row_arm.as_ref() else {
-            return;
-        };
-        if now >= arm.expires {
-            self.row_arm = None;
-            return;
-        }
-        let name = arm.name.clone();
-        if !notice_names_row(text, &name) {
-            return;
-        }
-        let failure = ROW_FAILURE_MARKS.iter().any(|m| text.contains(m));
-        self.row_arm = None;
-        self.row_stamp = Some(RowStamp {
-            name,
-            text: text.to_string(),
-            failure,
-            expires: now + ROW_STAMP_TTL,
-        });
-    }
-
-    /// The live stamp for the row being painted, if it names this row.
-    /// `None` past expiry, so the stamp self-clears without a timer.
-    fn row_stamp_for(&self, drow: &DisplayRow) -> Option<(bool, &str)> {
-        let stamp = self.row_stamp.as_ref()?;
-        if Instant::now() >= stamp.expires {
-            return None;
-        }
-        match drow {
-            DisplayRow::Agent(a) if a.name == stamp.name => {
-                Some((stamp.failure, stamp.text.as_str()))
-            }
-            _ => None,
-        }
-    }
-
-    /// (x-f191 scope a+c) A row-scoped commit keeps the sideline open and
-    /// the selection on the acted row: the operator opened the sideline to
-    /// act, and nothing about the action says they are done. Resolve by row
-    /// identity so the cursor follows the row through its state flip; a row
-    /// the action removed falls back to the slot it was armed from, clamped -
-    /// the neighbour, never a reset to nothing.
-    fn reanchor_after_row_commit(&mut self, name: Option<&str>) {
-        let slot = self.row_slot.take();
-        let Some(name) = name else {
-            return;
-        };
-        let rows = self.display_rows();
-        let idx = rows
-            .iter()
-            .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == name))
-            .or(slot);
-        if let Some(i) = idx {
-            let last = rows.len().saturating_sub(1);
-            self.selector = Some(i.min(last));
-        }
-    }
-
     /// A section's effective view, resolved live every frame (x-c5ee). The one
     /// authority behind both the caret glyph and the row filter, so they can
     /// never disagree. Order:
@@ -7922,42 +7779,8 @@ impl View {
             }
         }
         // Transient notice, right-aligned, INVERSE (paired with the BEL the
-        // event handler already sounded).
-        if let Some((start, text)) = self.notice_overlay(cols) {
-            for (i, ch) in text.chars().enumerate() {
-                let idx = start + i;
-                if idx < cols {
-                    cells[idx] = Cell {
-                        c: ch,
-                        fg: Color::Default,
-                        bg: Color::Default,
-                        flags: cell_flags::INVERSE,
-                    };
-                }
-            }
-        }
-    }
-
-    /// The transient notice, right-aligned, clipped to the strip.
-    ///
-    /// Clipping ELLIPSIZES. A silently cut notice reads as a whole sentence, so
-    /// on a 40-column strip "…is not TOML, keys are on defaults" became a path
-    /// fragment that looked like the entire message. Write notices meaning-first
-    /// for the same reason: whatever the strip cannot hold is what a narrow
-    /// terminal loses.
-    fn notice_overlay(&self, cols: usize) -> Option<(usize, String)> {
-        let (full, _) = self.notice.as_ref()?;
-        let room = cols.saturating_sub(1);
-        let text: String = if full.chars().count() > room {
-            full.chars()
-                .take(room.saturating_sub(1))
-                .chain(std::iter::once('…'))
-                .collect()
-        } else {
-            full.clone()
-        };
-        let start = cols.saturating_sub(text.chars().count() + 1);
-        Some((start, text))
+        // event handler already sounded); painted by row_stamp.
+        paint_notice_overlay(cells, cols, self.notice_overlay(cols));
     }
 
     /// The hosting-tab context for an agent row, resolved inside-out (x-0f9d
@@ -8812,58 +8635,9 @@ impl View {
             if mark_caret && text_w >= 1 {
                 cells[r * cols].fg = self.theme.accent;
             }
-            // (x-f191) A row-scoped outcome stamp: right-aligned INVERSE on
-            // the row, the same grammar as the tab-bar notice, so the outcome
-            // of the action the operator just confirmed renders AT the row
-            // they acted on instead of the opposite corner. Skipped on the
-            // pinned top row, whose right edge the density button owns.
-            if r > 0 {
-                if let Some((failure, stamp_text)) = row_stamp {
-                    let mark = if failure { "✗ " } else { "✓ " };
-                    // (x-f191 review) Ellipsize to leave the row's leading
-                    // identity cells: a stamp that swallows the name is a
-                    // placement fix that eats its own target.
-                    let cap = text_w.saturating_sub(4);
-                    let full = format!("{mark}{stamp_text}");
-                    let mut stamp: Vec<(char, usize)> = Vec::new();
-                    let mut width = 0usize;
-                    let mut truncated = false;
-                    for ch in full.chars() {
-                        let w = glyph_cols(ch);
-                        if width + w > cap {
-                            truncated = true;
-                            break;
-                        }
-                        width += w;
-                        stamp.push((ch, w));
-                    }
-                    if truncated && width < cap {
-                        stamp.push(('…', 1));
-                        width += 1;
-                    }
-                    let mut start = text_w.saturating_sub(width);
-                    for (ch, w) in stamp {
-                        if start + w > text_w {
-                            break;
-                        }
-                        cells[r * cols + start] = Cell {
-                            c: ch,
-                            fg: Color::Default,
-                            bg: Color::Default,
-                            flags: cell_flags::INVERSE,
-                        };
-                        if w == 2 {
-                            cells[r * cols + start + 1] = Cell {
-                                c: ' ',
-                                fg: Color::Default,
-                                bg: Color::Default,
-                                flags: cell_flags::INVERSE | cell_flags::WIDE_SPACER,
-                            };
-                        }
-                        start += w;
-                    }
-                }
-            }
+            // (x-f191) A row-scoped outcome stamp renders AT the row the
+            // operator acted on; the paint lives in row_stamp.
+            paint_row_stamp(cells, r, cols, text_w, row_stamp);
         }
         // (x-b186) The density button, painted LAST over the sideline's top row.
         // Overlaying is what keeps it pinned to row 0 while the rows beneath it
@@ -9454,34 +9228,6 @@ enum ChromeHit {
         row: u16,
         col: u16,
     },
-}
-
-fn no_pane_notice(a: &AgentRow) -> String {
-    match a.no_pane_reason {
-        Some(AgentNoPaneReason::LivePaneless) => format!(
-            "fno agents peek {} --follow — worker {} is live but has no pane; resume refused because it would create a second writer",
-            a.name, a.name
-        ),
-        Some(AgentNoPaneReason::BackendNotLive) => format!(
-            "worker {} has no pane here: registry backend is not live; inspect its state before resuming",
-            a.name
-        ),
-        Some(AgentNoPaneReason::LivenessUnmeasured) => format!(
-            "worker {} has no pane here: liveness reading is absent (neither confirmed dead nor confirmed live); run fno agents peek {} to see before resuming",
-            a.name, a.name
-        ),
-        Some(AgentNoPaneReason::MissingHarness) => {
-            format!("worker {} has no pane here: no harness recorded", a.name)
-        }
-        Some(AgentNoPaneReason::MissingSessionId) => format!(
-            "worker {} has no pane here: supported harness has no session id",
-            a.name
-        ),
-        Some(AgentNoPaneReason::UnsupportedHarness) => {
-            format!("worker {} has no pane here: unsupported harness", a.name)
-        }
-        None => "agent has no pane here".into(),
-    }
 }
 
 /// The [`ChromeHit`] for an agent row: focus its pane, else reach a paneless

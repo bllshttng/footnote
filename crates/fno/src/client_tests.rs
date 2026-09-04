@@ -862,7 +862,7 @@ fn text_frame(rows: u16, cols: u16, ch: char) -> Frame {
     }
 }
 
-fn two_pane_view() -> View {
+pub(super) fn two_pane_view() -> View {
     // 30x100 terminal, panel visible (100 >= 28+40). Content = 28x72
     // (tab bar + status row). Two panes split H: 35 + divider + 36 cols.
     let mut view = View::new(
@@ -1197,7 +1197,7 @@ fn focus_outline_wraps_both_seams_of_a_2x2_pane() {
 }
 
 // An agent row hosting a given pane, under squad 1.
-fn focus_agent(pane: u64) -> AgentRow {
+pub(super) fn focus_agent(pane: u64) -> AgentRow {
     AgentRow {
         portal: None,
         harness: None,
@@ -11456,7 +11456,7 @@ fn blank_spacers_separate_groups_only_when_multi_squad() {
     );
 }
 
-fn agent_row_at(v: &View, pred: impl Fn(&AgentRow) -> bool) -> usize {
+pub(super) fn agent_row_at(v: &View, pred: impl Fn(&AgentRow) -> bool) -> usize {
     v.display_rows()
         .iter()
         .position(|r| matches!(r, DisplayRow::Agent(a) if pred(a)))
@@ -12102,7 +12102,7 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
 // -- x-76ea agent-row lifecycle -------------------------------------
 
 /// A plain (non-tombstone) registry agent row under squad 1, varied by state.
-fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRow {
+pub(super) fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRow {
     AgentRow {
         portal: None,
         harness: None,
@@ -12143,10 +12143,8 @@ fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRow {
 
 #[tokio::test]
 async fn selector_x_on_live_agent_arms_remove_confirm() {
-    // US1 / AC1-HP (client half), x-f191 scope b: x on a live (non-tombstone)
-    // agent row arms ONE remove confirm carrying the row's name - the server
-    // orchestrates stop-then-rm behind it. Nothing is sent until the confirm
-    // commits, and the selector closes (open_confirm).
+    // x-f191 scope b: x on a live row arms ONE remove confirm (the server
+    // composes stop-then-rm); nothing sends until the confirm commits.
     let mut v = view_with_agents(vec![lifecycle_row("worker-a", false, false)]);
     v.set_squad_view(1, SectionView::Expanded);
     v.selector = Some(agent_row_at(&v, |a| a.name == "worker-a"));
@@ -12161,26 +12159,6 @@ async fn selector_x_on_live_agent_arms_remove_confirm() {
         }
         _ => panic!("expected a RemoveAgent confirm"),
     }
-}
-
-#[tokio::test]
-async fn selector_x_commit_reanchors_the_selector_on_the_row() {
-    // (x-f191 scope a+c) The sideline comes back after the commit: the
-    // selection resolves onto the acted row by identity, so the operator is
-    // never thrown out to re-find a greyed row.
-    let mut v = view_with_agents(vec![lifecycle_row("worker-a", false, false)]);
-    v.set_squad_view(1, SectionView::Expanded);
-    let idx = agent_row_at(&v, |a| a.name == "worker-a");
-    v.selector = Some(idx);
-    let mut buf: Vec<u8> = Vec::new();
-    selector_keys(&mut v, b"x", &mut buf).await.unwrap();
-    assert_eq!(v.selector, None, "the confirm closes the selector at arm");
-    confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    assert_eq!(
-        v.selector,
-        Some(idx),
-        "the commit re-anchors the selector on the acted row"
-    );
 }
 
 #[tokio::test]
@@ -15155,7 +15133,7 @@ fn density_button_glyph_sits_one_column_off_the_divider() {
     );
 }
 
-fn view_with_agents(agents: Vec<AgentRow>) -> View {
+pub(super) fn view_with_agents(agents: Vec<AgentRow>) -> View {
     let mut v = two_pane_view();
     v.layout.agents = agents;
     v
@@ -18966,145 +18944,5 @@ fn ux_shot_twenty_tabs_before() {
         &frame,
         "00-twenty-tabs-before",
         "twenty tabs (before: clipped)",
-    );
-}
-
-// (x-f191) Row-scoped outcome stamps: armed at a row-scoped confirm
-// commit, resolved by the notice naming the row, painted ON the row.
-
-fn corpse_row() -> AgentRow {
-    let mut a = focus_agent(0);
-    a.pane_id = None;
-    a.name = "corpse".into();
-    a
-}
-
-#[test]
-fn row_stamp_resolves_from_the_outcome_notice() {
-    // An unrelated notice does not resolve the arm; the outcome notice
-    // stamps the named row with its failure.
-    let mut view = two_pane_view();
-    view.arm_row_stamp(&ConfirmKind::StopAgent {
-        name: "corpse".into(),
-    });
-    assert!(view.row_arm.is_some(), "a row-scoped commit arms the stamp");
-    view.resolve_row_stamp("reaping exited agents…");
-    assert!(
-        view.row_stamp.is_none(),
-        "an unrelated notice leaves the arm"
-    );
-    view.resolve_row_stamp("stop corpse: failed: claude stop corpse failed: agent not found");
-    let stamp = view.row_stamp.as_ref().expect("the outcome stamps the row");
-    assert!(stamp.failure, "a failure reason reads as a failure");
-    assert!(view.row_arm.is_none(), "the arm disarms on resolution");
-    let row = corpse_row();
-    let (failure, text) = view
-        .row_stamp_for(&DisplayRow::Agent(&row))
-        .expect("the named row carries the stamp");
-    assert!(failure);
-    assert!(text.contains("failed"), "the row carries the reason");
-}
-
-#[test]
-fn row_stamp_success_reads_as_success() {
-    let mut view = two_pane_view();
-    view.arm_row_stamp(&ConfirmKind::RemoveAgent {
-        name: "corpse".into(),
-    });
-    view.resolve_row_stamp("removed corpse");
-    let row = corpse_row();
-    let (failure, _) = view
-        .row_stamp_for(&DisplayRow::Agent(&row))
-        .expect("success stamps the named row too");
-    assert!(!failure, "a clean outcome is not a failure stamp");
-}
-
-#[test]
-fn row_stamp_arm_expires_without_a_notice() {
-    // A lost outcome must not stamp some LATER notice onto the row.
-    let mut view = two_pane_view();
-    view.arm_row_stamp(&ConfirmKind::StopAgent {
-        name: "corpse".into(),
-    });
-    view.row_arm.as_mut().unwrap().expires = Instant::now();
-    view.resolve_row_stamp("some later notice naming corpse");
-    assert!(view.row_arm.is_none(), "an expired arm disarms");
-    assert!(view.row_stamp.is_none(), "an expired arm stamps nothing");
-}
-
-#[test]
-fn row_stamp_skips_progress_lines_and_resolves_on_the_verdict() {
-    // (x-f191 review) The external verbs emit "stopping X…" long before
-    // the verdict; the arm must survive it and resolve on the outcome.
-    let mut view = two_pane_view();
-    view.arm_row_stamp(&ConfirmKind::StopExternal {
-        attach_id: "abcd1234".into(),
-        name: "corpse".into(),
-    });
-    view.resolve_row_stamp("stopping corpse…");
-    assert!(view.row_stamp.is_none(), "a progress line never stamps");
-    assert!(view.row_arm.is_some(), "the arm survives a progress line");
-    // A name embedded in a larger word is not the row's verdict either.
-    view.resolve_row_stamp("the corpseflower squad was renamed");
-    assert!(view.row_stamp.is_none(), "a substring hit is not the row");
-    view.resolve_row_stamp("stop corpse: timed out");
-    let row = corpse_row();
-    let (failure, _) = view
-        .row_stamp_for(&DisplayRow::Agent(&row))
-        .expect("the verdict stamps the row");
-    assert!(failure);
-}
-
-#[test]
-fn sideline_paints_the_failure_stamp_on_the_row() {
-    // The placement fix itself: the outcome renders at the row the
-    // operator acted on, not only the tab bar's opposite corner.
-    let mut view = two_pane_view();
-    view.layout.agents.push(corpse_row());
-    view.row_stamp = Some(RowStamp {
-        name: "corpse".into(),
-        text: "stop corpse: timed out".into(),
-        failure: true,
-        expires: Instant::now() + ROW_STAMP_TTL,
-    });
-    let frame = view.compose();
-    let cols = frame.cols as usize;
-    let agent_row_cells = |r: usize| frame.cells[r * cols..r * cols + cols].to_vec();
-    let has_stamp = |cells: &[Cell]| {
-        cells
-            .iter()
-            .any(|c| c.c == '✗' && c.flags & cell_flags::INVERSE == cell_flags::INVERSE)
-    };
-    assert!(
-        has_stamp(&agent_row_cells(1)),
-        "the agent row carries the ✗ stamp"
-    );
-    assert!(
-        !has_stamp(&agent_row_cells(0)),
-        "the pinned header row never carries the stamp"
-    );
-}
-
-#[test]
-fn sideline_stamp_ellipsizes_and_keeps_the_row_identity() {
-    // (x-f191 review) A stamp longer than the row must not swallow the
-    // name: it ellipsizes and leaves the row's leading cells alone.
-    let mut view = two_pane_view();
-    view.layout.agents.push(corpse_row());
-    view.row_stamp = Some(RowStamp {
-        name: "corpse".into(),
-        text: "stop corpse: failed: a very long daemon reason that cannot fit any sideline".into(),
-        failure: true,
-        expires: Instant::now() + ROW_STAMP_TTL,
-    });
-    let frame = view.compose();
-    let cols = frame.cols as usize;
-    let row = &frame.cells[cols..cols * 2];
-    assert!(row.iter().any(|c| c.c == '✗'), "the stamp still renders");
-    let lead = row[0];
-    assert!(
-        lead.c != '✗' && lead.c != '…',
-        "the row's leading identity cell survives: got {:?}",
-        lead.c
     );
 }
