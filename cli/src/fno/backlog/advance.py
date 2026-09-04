@@ -1389,10 +1389,10 @@ def _spawn_worker(
     # (Locked Decision 6). The same settings object feeds the resolver
     # (config.dispatch.*) and the permission-mode read below, so all three
     # config reads are node-consistent.
-    allow_merge = False
     settings_obj = None
     try:
         from fno.config import load_settings, load_settings_for_repo
+        from fno.config.grant import auto_merge_grant
 
         settings_obj = (
             load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
@@ -1402,14 +1402,7 @@ def _spawn_worker(
     # Read the grant in its OWN guard so a missing/odd block never disables the
     # independent permission-mode read that also consumes settings_obj. Only the
     # literal "dispatch" grants (a typo or a stub settings object never does).
-    if settings_obj is not None:
-        try:
-            allow_merge = (
-                getattr(getattr(settings_obj, "auto_merge", None), "grant", None)
-                == "dispatch"
-            )
-        except Exception:  # noqa: BLE001 - fail-safe to no-merge (never grant on error)
-            allow_merge = False
+    allow_merge = auto_merge_grant(settings_obj)
 
     # x-0676: resolve substrate + normalized command. A node dispatch_verb takes the
     # verb path (never a merge); reconcile stays explicit and spells its own posture.

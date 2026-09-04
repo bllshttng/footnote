@@ -1489,6 +1489,7 @@ def _silent_switch_report(
     """
     try:
         from fno.config import load_settings
+        from fno.config.grant import auto_merge_grant
 
         s = load_settings()
     except Exception:  # noqa: BLE001 - a config that won't load is not doctor's alarm
@@ -1504,7 +1505,7 @@ def _silent_switch_report(
     # Actor scope (x-4be1): the grant key replaces the dispatch.auto_merge
     # bool. Read through getattr so a stub settings object in tests degrades
     # to None (not armed) rather than raising.
-    grant = getattr(getattr(s, "auto_merge", None), "grant", None)
+    grant = "dispatch" if auto_merge_grant(s) else None
 
     findings: list[dict[str, Any]] = []
     missions = _mission_active_count()
