@@ -122,7 +122,6 @@ impl Finding {
 /// human sees in the job's own output.
 pub(crate) struct Ctx<'a> {
     pub check: &'a str,
-    pub workflow: &'a str,
     pub log: &'a str,
     /// The `gh pr checks` bucket. Some classes are decided by the check's
     /// STATE, never by its log: a cancelled run leaves a log with nothing in
@@ -948,7 +947,6 @@ fn findings_for(a: &Args, pr: &str, head: &str) -> Result<Vec<Finding>, String> 
     let mut out = Vec::new();
     for row in failing_rows(&checks) {
         let check = row["name"].as_str().unwrap_or("").to_string();
-        let workflow = row["workflow"].as_str().unwrap_or("").to_string();
         let log = match job_id(row["link"].as_str().unwrap_or("")) {
             Some(id) => gh_api(
                 a,
@@ -966,7 +964,6 @@ fn findings_for(a: &Args, pr: &str, head: &str) -> Result<Vec<Finding>, String> 
         out.push(classify(
             &Ctx {
                 check: &check,
-                workflow: &workflow,
                 log: &stripped,
                 bucket: &bucket,
             },
@@ -1711,10 +1708,9 @@ mod tests {
         "2026-09-03T03:06:04.8929731Z ##[error]Process completed with exit code 1.\n",
     );
 
-    fn ctx<'a>(check: &'a str, workflow: &'a str, log: &'a str) -> Ctx<'a> {
+    fn ctx<'a>(check: &'a str, log: &'a str) -> Ctx<'a> {
         Ctx {
             check,
-            workflow,
             log,
             bucket: "fail",
         }
@@ -1723,7 +1719,6 @@ mod tests {
     fn cancelled_ctx<'a>(check: &'a str, log: &'a str) -> Ctx<'a> {
         Ctx {
             check,
-            workflow: "",
             log,
             bucket: "cancel",
         }
@@ -1742,7 +1737,7 @@ mod tests {
     #[test]
     fn a_fmt_red_row_classifies_as_rustfmt_drift_in_the_crate_the_log_named() {
         let log = strip_timestamps(FMT_LOG);
-        let f = classify(&ctx("cargo fmt --check (pinned)", "rust-ci", &log), false);
+        let f = classify(&ctx("cargo fmt --check (pinned)", &log), false);
         assert_eq!(f.signature, "rustfmt-drift");
         match f.remedy {
             Remedy::Auto { run, verify } => {
@@ -1760,7 +1755,7 @@ mod tests {
         let log = strip_timestamps(&format!(
             "{FMT_LOG}2026-09-03T03:06:03Z Diff in /home/runner/work/footnote/footnote/crates/fno-agents/src/heal.rs:1:\n"
         ));
-        let f = classify(&ctx("cargo fmt --check (pinned)", "rust-ci", &log), false);
+        let f = classify(&ctx("cargo fmt --check (pinned)", &log), false);
         match f.remedy {
             Remedy::Auto { run, .. } => {
                 let dirs: Vec<&str> = run.iter().map(|c| c.cwd.as_str()).collect();
@@ -1773,7 +1768,7 @@ mod tests {
     #[test]
     fn a_fmt_check_whose_log_named_no_path_sweeps_both_crates() {
         let f = classify(
-            &ctx("cargo fmt --check (pinned)", "rust-ci", "log unavailable"),
+            &ctx("cargo fmt --check (pinned)", "log unavailable"),
             false,
         );
         assert_eq!(f.signature, "rustfmt-drift");
@@ -1792,7 +1787,7 @@ mod tests {
             "2026-09-03T07:15:29.7322711Z Found 1 error.\n",
         ));
         let f = classify(
-            &ctx("Python static correctness (495 sources)", "cli-ci", &log),
+            &ctx("Python static correctness (495 sources)", &log),
             false,
         );
         assert_eq!(f.signature, "ruff-lint");
@@ -1814,7 +1809,7 @@ mod tests {
     #[test]
     fn a_mypy_error_is_mypy_not_ruff_lint() {
         let log = "src/fno/x.py:12: error: Incompatible return value type";
-        let f = classify(&ctx("Python static correctness", "cli-ci", log), false);
+        let f = classify(&ctx("Python static correctness", log), false);
         assert_eq!(f.signature, "mypy");
         assert!(
             matches!(&f.remedy, Remedy::Escalate { repro } if repro.contains("mypy")),
@@ -1830,7 +1825,7 @@ mod tests {
             "and the exact trailer claims none of them.\n",
             "  Add a line reading:\n",
         );
-        let f = classify(&ctx("check-pr-node-closure", "pr-node-closure", log), false);
+        let f = classify(&ctx("check-pr-node-closure", log), false);
         assert_eq!(f.signature, "closure-trailer");
         assert_eq!(
             f.remedy,
@@ -1847,7 +1842,7 @@ mod tests {
             "FAILED tests/unit/test_agents_cli_fold.py::test_paths - assert\n",
             "3 failed, 19455 passed, 301 skipped\n",
         );
-        let f = classify(&ctx("smoke-pytest", "guards", log), false);
+        let f = classify(&ctx("smoke-pytest", log), false);
         assert_eq!(f.signature, "pytest");
         match f.remedy {
             Remedy::Escalate { repro } => {
@@ -1868,7 +1863,7 @@ mod tests {
             "FAILED tests/unit/test_a.py::test_one - x\n",
             "FAILED cli/tests/unit/test_b.py::test_two - y\n",
         );
-        let f = classify(&ctx("smoke-pytest", "guards", log), false);
+        let f = classify(&ctx("smoke-pytest", log), false);
         match f.remedy {
             Remedy::Escalate { repro } => {
                 assert!(repro.contains("tests/unit/test_b.py::test_two"), "{repro}");
@@ -1884,7 +1879,7 @@ mod tests {
             .map(|n| format!("FAILED tests/unit/t.py::test_{n} - x"))
             .collect::<Vec<_>>()
             .join("\n");
-        let f = classify(&ctx("smoke-pytest", "guards", &log), false);
+        let f = classify(&ctx("smoke-pytest", &log), false);
         match f.remedy {
             Remedy::Escalate { repro } => {
                 assert!(repro.contains("test_5"), "{repro}");
@@ -1905,7 +1900,7 @@ mod tests {
             "smoke-pytest=failure smoke-rest=failure\n",
             "##[error]Process completed with exit code 1.\n",
         );
-        let f = classify(&ctx("smoke", "guards", log), false);
+        let f = classify(&ctx("smoke", log), false);
         assert_eq!(f.signature, "shard-rollup");
         match f.remedy {
             Remedy::Escalate { repro } => {
@@ -1935,7 +1930,7 @@ mod tests {
             "smoke-pytest=cancelled smoke-rest=success\n",
             "##[error]Process completed with exit code 1.\n",
         );
-        let f = classify(&ctx("smoke", "guards", log), false);
+        let f = classify(&ctx("smoke", log), false);
         assert_eq!(f.signature, "shard-rollup");
         match f.remedy {
             Remedy::Escalate { repro } => {
@@ -1954,7 +1949,7 @@ mod tests {
         // 13 unrecognized checks across every open PR buried the --all report
         // in 40-line log tails. Terse keeps the first line only.
         let findings = vec![classify(
-            &ctx("mystery", "w", "line one\nline two\nline three"),
+            &ctx("mystery", "line one\nline two\nline three"),
             false,
         )];
         assert_eq!(findings[0].signature, "unknown");
@@ -1969,7 +1964,7 @@ mod tests {
     fn a_cargo_test_failure_escalates_naming_the_failing_test() {
         let log = "test stream_worker::tests::mid_turn_silence ... FAILED\n\
                    test result: FAILED. 1948 passed; 1 failed;\n";
-        let f = classify(&ctx("cargo test + schema parity", "rust-ci", log), false);
+        let f = classify(&ctx("cargo test + schema parity", log), false);
         assert_eq!(f.signature, "cargo-test");
         match f.remedy {
             Remedy::Escalate { repro } => {
@@ -1986,7 +1981,7 @@ mod tests {
     #[test]
     fn a_guard_refusal_escalates_with_the_guards_own_script() {
         let log = "check-file-budget: cli/src/fno/mail/cli.py is 6105 lines (budget 5000)";
-        let f = classify(&ctx("guards", "guards", log), false);
+        let f = classify(&ctx("guards", log), false);
         assert_eq!(f.signature, "guard-script");
         assert_eq!(
             f.remedy,
@@ -2008,7 +2003,7 @@ mod tests {
             "smoke: step failed, stopping (fail-fast): Verb-surface ratchet (real count)\n",
             "##[error]Process completed with exit code 1.\n",
         );
-        let f = classify(&ctx("smoke-rest", "guards", log), false);
+        let f = classify(&ctx("smoke-rest", log), false);
         assert_eq!(f.signature, "smoke-step");
         match f.remedy {
             Remedy::Escalate { repro } => {
@@ -2032,7 +2027,7 @@ mod tests {
             "##[error]Process completed with exit code 1.\n",
             "check-package-path-escapes: OK\n",
         );
-        let f = classify(&ctx("guards", "guards", log), false);
+        let f = classify(&ctx("guards", log), false);
         assert_eq!(f.signature, "guard-script");
         assert_eq!(
             f.remedy,
@@ -2044,7 +2039,7 @@ mod tests {
 
     #[test]
     fn a_red_review_coverage_status_is_the_gate_not_a_defect() {
-        let f = classify(&ctx("fno/review-coverage", "", ""), false);
+        let f = classify(&ctx("fno/review-coverage", ""), false);
         assert_eq!(f.signature, "review-gate");
         assert!(
             matches!(&f.remedy, Remedy::Escalate { repro } if repro.contains("not a CI failure")),
@@ -2082,7 +2077,7 @@ mod tests {
     #[test]
     fn a_check_red_on_main_reads_inherited_even_when_its_log_matches() {
         let log = strip_timestamps(FMT_LOG);
-        let f = classify(&ctx("cargo fmt --check (pinned)", "rust-ci", &log), true);
+        let f = classify(&ctx("cargo fmt --check (pinned)", &log), true);
         assert_eq!(f.signature, "inherited");
         assert_eq!(f.remedy, Remedy::Inherited);
         assert!(!f.counts_against_pr());
@@ -2094,7 +2089,7 @@ mod tests {
             .map(|n| format!("line {n}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let f = classify(&ctx("mystery", "somewhere", &log), false);
+        let f = classify(&ctx("mystery", &log), false);
         assert_eq!(f.signature, "unknown");
         match f.remedy {
             Remedy::Escalate { repro } => {
@@ -2109,7 +2104,7 @@ mod tests {
 
     #[test]
     fn an_unavailable_log_is_unknown_never_dropped() {
-        let f = classify(&ctx("some-check", "guards", ""), false);
+        let f = classify(&ctx("some-check", ""), false);
         assert_eq!(f.signature, "unknown");
         assert!(f.counts_against_pr());
     }
@@ -2387,7 +2382,7 @@ exit 0
         stub_cargo_noop(d);
 
         let mut findings = vec![classify(
-            &ctx("cargo fmt --check (pinned)", "rust-ci", "log unavailable"),
+            &ctx("cargo fmt --check (pinned)", "log unavailable"),
             false,
         )];
         let args = parse_args(&args_for(d, &["--apply"])).unwrap();
@@ -2729,7 +2724,7 @@ exit 0
             "check-pr-node-closure: HEAD ref 'feature/x-a1-x-b2' names x-a1,x-b2, ",
             "and the exact trailer claims none of them.\n",
         );
-        let f = classify(&ctx("check-pr-node-closure", "pr-node-closure", log), false);
+        let f = classify(&ctx("check-pr-node-closure", log), false);
         assert_eq!(
             f.remedy,
             Remedy::EditBody {
