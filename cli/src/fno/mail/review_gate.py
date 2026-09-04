@@ -1,17 +1,16 @@
 """The review machinery of the raw-send lane, in the module its question names.
 
 Everything here answers one question: may THIS review fire at THAT
-recipient. The codex half resolves the structured review target and
-measures the recipient's checkout so a review can never complete cleanly
-over an empty diff; the keystroke half asks the capability table whether
-the recipient's harness can fire a review verb at all (x-a3e8). Extracted
-from mail/cli, which was over the shrink budget and had grown a second
-review question inside itself.
+recipient. The codex half measures the recipient's checkout so a review
+can never complete cleanly over an empty diff (the structured target
+resolver lives in codex_review_target.py); the keystroke half asks the
+capability table whether the recipient's harness can fire a review verb
+at all (x-a3e8). Extracted from mail/cli, which was over the shrink
+budget and had grown a second review question inside itself.
 """
 
 from __future__ import annotations
 
-import re
 import subprocess
 
 from fno.agents.harness_map import capabilities as _harness_capabilities
@@ -20,11 +19,6 @@ from fno.agents.harness_map import capabilities as _harness_capabilities
 # same place the verb normalizer reads native_verbs): a second hand-written
 # enumeration would drift the first time a verb is added.
 _CODEX_REVIEW_VERBS = frozenset(_harness_capabilities("codex")["review_verbs"])
-_COMMIT_SHA = re.compile(r"[0-9a-fA-F]{7,64}")
-_EXPLICIT_PR_REVIEW = re.compile(
-    r"^HEAD (?P<head>[0-9a-fA-F]{7,64}) of PR (?P<pr>[1-9][0-9]*) "
-    r"against origin/(?P<base>[A-Za-z0-9][A-Za-z0-9._/-]*)$"
-)
 
 
 def codex_default_review_base(cwd: str | None) -> str | None:
@@ -126,48 +120,6 @@ def codex_review_subject_nonempty(cwd: str | None, base_ref: str) -> tuple[bool,
             "empty diff, complete cleanly, and attest nothing"
         )
     return True, f"{count} changed files against {base_ref} at HEAD {head[:8]}"
-
-
-def codex_review_target(
-    payload: str, *, default_base: str | None = None
-) -> tuple[str | None, bool]:
-    """Resolve the structured review target without inventing custom instructions."""
-    parts = payload.split(maxsplit=1)
-    if len(parts) == 1:
-        target = f"baseBranch:{default_base}" if default_base else None
-        return target, False
-    remainder = parts[1].strip()
-    explicit_pr = _EXPLICIT_PR_REVIEW.fullmatch(remainder)
-    if explicit_pr:
-        # The PR/HEAD identity remains in the raw payload for the author and
-        # audit trail. Codex review/start receives the PR's explicit base
-        # scope; that scopes the BASE side only - codex still computes the
-        # diff in the recipient session's cwd, so the head side is whatever
-        # checkout the recipient sits in. The fire-side guard in _raw_send
-        # measures that checkout and refuses an empty subject (2026-08-30:
-        # open PRs sat uncovered because their recipients lived on the base
-        # branch and honestly reviewed nothing).
-        return f"baseBranch:origin/{explicit_pr.group('base')}", False
-    if remainder.startswith("HEAD "):
-        # A malformed explicit target must not fall through to
-        # uncommittedChanges, which would review a different diff.
-        return None, False
-    base = remainder.split()
-    if base[0] == "--base":
-        # A named base is an explicit scope request: a malformed form (dangling
-        # flag, a flag-like value, trailing tokens) must refuse rather than
-        # fall through to uncommittedChanges, which silently reviews a
-        # different diff than the one the operator asked for.
-        if len(base) == 2 and not base[1].startswith("--"):
-            return f"baseBranch:{base[1]}", False
-        return None, False
-    if remainder == "--uncommitted":
-        return "uncommittedChanges", False
-    if _COMMIT_SHA.fullmatch(remainder):
-        return f"commit:{remainder}", False
-    if remainder.startswith("custom:") and remainder != "custom:":
-        return remainder, False
-    return "uncommittedChanges", True
 
 
 def keystroke_review_refusal(name: str, harness: str, first_token: str) -> str | None:
