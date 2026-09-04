@@ -3424,7 +3424,7 @@ ready_marker_typo = "live_prompt_box"
 route_on_pane = true
 
 [harness.brandnewharness]
-thread = true
+unheard_of_field = true
 "#,
         )
         .unwrap();
@@ -5268,7 +5268,7 @@ config_dir = "~/.claude-alt"
             assert_eq!(
                 thread_reach(row.harness.as_deref(), row.attach_id.as_deref()),
                 Reach::Drive,
-                "{name} carries an attach id, so its thread row must reach Drive"
+                "{name} carries an attach id, so its row must reach Drive"
             );
         }
 

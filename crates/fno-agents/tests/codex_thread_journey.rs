@@ -1,8 +1,8 @@
-//! The six-step unattended journey that earns Codex `thread = true`.
+//! The six-step unattended journey that earns Codex a `native` spawn claim.
 //!
 //! This is opt-in because it uses the installed Codex account and deliberately
 //! kills a private mux server. A default run skips the live journey and must
-//! not be used as evidence for flipping the capability bit.
+//! not be used as evidence for a capability claim.
 
 use fno_agents::paths::AgentsHome;
 use serde_json::Value;

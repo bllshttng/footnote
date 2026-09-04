@@ -14,8 +14,10 @@ from fno.agents.harness_map import (
     permission_response_keys,
     render_session_argv,
     resolve_dispatch,
+    spawn_state,
     substrate_default,
     thread_lane,
+    thread_seatable,
 )
 
 # Config read is stubbed to empty in every resolve so the tests exercise the
@@ -362,7 +364,6 @@ def test_undeclared_posture_answers_declared_false_without_reading_any_row(
     for name in ("openclaw", "nanoclaw"):
         posture = hm.capabilities_or_undeclared(name)
         assert posture["declared"] is False, name
-        assert posture["thread"] is False, name
         assert posture["autonomous_pane"] is False, name
         assert posture["route_on_pane"] is False, name
         assert posture["resume"] == "unsupported", name
@@ -402,11 +403,15 @@ def test_dispatch_command_refuses_undeclared_without_naming_a_neighbour():
     assert "gemini" not in msg
 
 
-def test_explicit_bg_on_unearned_harness_is_rejected():
-    """thread (and its bg alias) is earned by claude and codex; an explicit
-    bg on opencode is a hard error -> headless."""
+def test_explicit_bg_resolves_where_the_spawn_claim_is_native():
+    """thread (and its bg alias) is seated by the spawn claim: opencode's
+    row reads native (measured 2026-09-03 on the live daemon-owned session),
+    so the stale false bit is gone and bg resolves onto the thread lane. agy
+    still refuses - its spawn claim reads capable, no fno arm."""
+    out = _resolve(harness="opencode", substrate="bg")
+    assert out["substrate"] == "thread"
     with pytest.raises(DispatchResolveError, match="headless"):
-        _resolve(harness="opencode", substrate="bg")
+        _resolve(harness="agy", substrate="bg")
 
 
 def test_thread_lane_is_derived_from_the_attach_declaration():
@@ -589,12 +594,12 @@ def test_codex_normalization_accepts_plugin_qualified_slash_and_native_skill():
 
 def test_opencode_default_dispatch_renders_fno_slash():
     """AC1-HP: a default opencode dispatch renders the plugin-namespaced palette
-    invocation `/fno:target ...` - no prose brief. The serve lane is
-    launch-only, so the substrate falls back to headless rather than riding a
-    session nothing can steer."""
+    invocation `/fno:target ...` - no prose brief. The spawn claim reads
+    native (measured 2026-09-03 on the live daemon-owned session), so the
+    default substrate is the thread lane."""
     out = _resolve(harness="opencode", node_id="x-4d85")
     assert out["command"] == "/fno:target --no-merge x-4d85"
-    assert out["substrate"] == "headless"
+    assert out["substrate"] == "thread"
     assert out["command_surface"] == "slash"
 
 
@@ -714,29 +719,32 @@ def test_substrate_default_table():
     assert substrate_default("claude") == "thread"
     assert substrate_default("codex") == "thread"
     # pi's keeper lane survived the seven-step restart journey
-    # (test_thread_keeper_journey.py), so its bit reads true.
+    # (test_thread_keeper_journey.py), so its spawn claim reads native.
     assert substrate_default("pi") == "thread"
-    # opencode's serve lane is launch-only (ask refuses, no steering), so its
-    # bit remains false until its steering lane earns an unattended journey.
-    for h in ("gemini", "agy", "opencode"):
+    # opencode's spawn claim read native 2026-09-03 (live daemon-owned
+    # session); its serve lane stays launch-only for steering, which is not
+    # what the seat gate measures.
+    assert substrate_default("opencode") == "thread"
+    for h in ("gemini", "agy"):
         assert substrate_default(h) == "headless"
 
 
-def test_thread_bit_asserts_fnos_own_driver_not_the_resume_primitive():
-    """The bit is a claim about FNO's lane, never about the harness CLI: every
-    harness here has a working resume primitive (agy and opencode both measured
-    2026-08-26), but only claude has the driver + journey-proven lane the bit
-    asserts. Codex earned the bit through its live six-step journey. pi earned
-    it through the seven-step restart journey: both supervisors SIGKILLed, the
-    keeper child kept its pid, cwd and session id, and the session store
-    gained nothing (test_thread_keeper_journey.py). OpenCode remains
-    launch-only, so a true bit there would route autonomous spawns onto a
-    session the caller cannot steer, which is worse than refusing."""
-    assert capabilities("claude")["thread"] is True
-    assert capabilities("codex")["thread"] is True
-    assert capabilities("pi")["thread"] is True
-    for h in ("agy", "opencode"):
-        assert capabilities(h)["thread"] is False
+def test_thread_seat_is_derived_from_the_spawn_claim():
+    """The seat is a claim about FNO's lane, never about the harness CLI, and
+    it is DERIVED from the features dimension rather than stored: spawn reads
+    native where fno's own launch arm is wired and journey-proven. Codex
+    earned it through its live six-step journey; pi through the seven-step
+    restart journey (both supervisors SIGKILLed, the keeper child kept its
+    pid, cwd and session id, and the session store gained nothing). agy reads
+    capable - real on the harness, no fno arm - which a stored boolean could
+    not say."""
+    for h in ("claude", "codex", "opencode", "pi", "cursor-agent", "grok"):
+        assert thread_seatable(h) is True, h
+        assert spawn_state(h) == "native", h
+    for h in ("agy", "gemini"):
+        assert thread_seatable(h) is False, h
+    assert spawn_state("agy") == "capable"
+    assert spawn_state("gemini") == "absent"
     # the resume primitives themselves are all recorded as working
     for h in ("codex", "agy", "opencode"):
         assert capabilities(h)["resume_strategy"]["forms"]["interactive_resume"]["kind"] != (
@@ -744,11 +752,14 @@ def test_thread_bit_asserts_fnos_own_driver_not_the_resume_primitive():
         )
 
 
-def test_explicit_thread_on_partial_lane_refused_with_the_reason():
-    """An explicit thread request on a launch-only lane is a hard error naming
-    the missing lane, never a silent ride onto a half-working session."""
+def test_explicit_thread_on_unbuilt_lane_refused_with_the_reason():
+    """An explicit thread request where fno has no arm is a hard error naming
+    the spawn state and the missing lane, never a silent ride onto a
+    half-working session. agy stands in: capable on the harness, no fno arm,
+    so the seat refuses."""
     with pytest.raises(DispatchResolveError, match="keeper") as exc:
-        _resolve(harness="opencode", substrate="thread")
+        _resolve(harness="agy", substrate="thread")
+    assert "capable" in str(exc.value)
     assert "headless" in str(exc.value)
 
 

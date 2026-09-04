@@ -66,9 +66,9 @@ const FEATURE_KEYS: [&str; 11] = [
 /// attach` still lands, through the daemon-kept portal. Exposure and
 /// reachability are different answers, and conflating them is the defect
 /// this dimension exists to delete. `capable` is the load-bearing third
-/// state: real on the harness, and fno has NO wired arm for it. `thread =
-/// false` could not say that, and `SPAWN_HARNESSES` could only encode it as
-/// a tuple plus prose.
+/// state: real on the harness, and fno has NO wired arm for it - the
+/// routing boolean and name tuple this dimension replaced could not say
+/// that.
 const FEATURE_STATES: [&str; 4] = ["native", "capable", "absent", "unmeasured"];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -111,7 +111,6 @@ pub struct ProbeDecl {
 pub struct HarnessCapabilities {
     pub permission_bypass: Vec<String>,
     pub resume: String,
-    pub thread: bool,
     pub autonomous_pane: bool,
     pub route_on_pane: bool,
     /// One of [`LOOP_PARTICIPATION`]. Read at the dispatch seam, not at load.
@@ -1183,17 +1182,18 @@ mod tests {
         let claude = contract.capabilities("claude").unwrap();
         let codex = contract.capabilities("codex").unwrap();
         let opencode = contract.capabilities("opencode").unwrap();
-        // The thread bit asserts fno's OWN driver for the harness (driver +
-        // unattended journey test), never the harness's resume primitive.
-        // agy and opencode both have measured-working primitives yet read
-        // false: agy has no driver, opencode's serve lane is launch-only
-        // (ask refuses, steering unbuilt). claude and codex are the
-        // journey-proven lanes, and they must stay true so the false bits are
-        // not vacuous.
-        assert!(claude.thread);
-        assert!(codex.thread);
-        assert!(!contract.capabilities("agy").unwrap().thread);
-        assert!(!opencode.thread);
+        // The thread seat derives from the features dimension: spawn reads
+        // `native` where fno's own launch arm is wired and journey-proven.
+        // agy reads `capable` (real on the harness, no fno arm) and gemini
+        // `absent`; claude, codex and opencode are journey-proven native.
+        for name in ["claude", "codex", "opencode", "pi", "cursor-agent", "grok"] {
+            let claim = contract.capabilities(name).unwrap().features.get("spawn").unwrap();
+            assert_eq!(claim.state, "native", "{name} is seated");
+        }
+        for name in ["agy", "gemini"] {
+            let claim = contract.capabilities(name).unwrap().features.get("spawn").unwrap();
+            assert_ne!(claim.state, "native", "{name} is unseated");
+        }
         assert_eq!(claude.ready_marker, "live_prompt_box");
         assert_eq!(codex.ready_marker, "idle_prompt");
         assert_eq!(claude.send_keys_enter_delay_ms, 800);

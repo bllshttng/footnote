@@ -74,11 +74,11 @@ What the protocol adds over `codex exec resume` is narrower than a feature list 
 
 Pick by the question being asked. A human coming back to a session wants `codex resume`. A worker taking one more turn wants `codex exec resume`. A worker that must be steered and reviewed unattended wants the protocol.
 
-## The bit is true, and what it now promises
+## The seat is native, and what it now promises
 
-`harness_capabilities.toml` holds `thread = true` for codex. The bit is evidence of a working driver, never an aspiration, and `harness_map.py`'s rule is that it is never inherited.
+Codex's features row claims `spawn = native`: fno's own launch arm for the thread lane is wired and journey-proven. The claim is evidence of a working driver, never an aspiration, and the seat derives from it rather than from a stored boolean.
 
-The claim it carries was measured wrong in both directions before the shared-daemon move. The bit was flipped to make a codex thread survive mux death, and a private app-server did survive that. It was a child of `fno-agents-daemon`, so it did not obviously survive THAT daemon's death, and the durability was narrower than advertised. Against the shared daemon the thread survives both, because neither process owns it.
+The claim was measured wrong in both directions before the shared-daemon move. The seat was granted to make a codex thread survive mux death, and a private app-server did survive that. It was a child of `fno-agents-daemon`, so it did not obviously survive THAT daemon's death, and the durability was narrower than advertised. Against the shared daemon the thread survives both, because neither process owns it.
 
 That is now a promise the implementation keeps rather than one it overstates.
 

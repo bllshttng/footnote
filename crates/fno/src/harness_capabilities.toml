@@ -4,12 +4,11 @@
 # resync BOTH copies, not just the first:
 #   bash scripts/ci/check-harness-capabilities-fresh.sh --write
 # scripts/ci/check-harness-capabilities-fresh.sh fails CI when any copy differs.
-map_version = 16
+map_version = 17
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-session"
-thread = true
 autonomous_pane = false
 route_on_pane = true
 # LOOP PARTICIPATION. Can the fno target loop CLOSE on this harness?
@@ -158,7 +157,6 @@ resume = "native-thread"
 # That child did survive mux death and did not obviously survive its own
 # parent's, so the bit promised more than it delivered; measured 2026-08-27,
 # corrected 2026-08-28 (docs/architecture/codex-thread-driver.md).
-thread = true
 autonomous_pane = true
 route_on_pane = false
 # codex, measured 2026-08-28: hooks/codex-hooks.json declares a `Stop` group
@@ -293,7 +291,6 @@ state = "native"
 [harness.gemini]
 permission_bypass = ["--yolo"]
 resume = "native-continue"
-thread = false
 autonomous_pane = false
 route_on_pane = false
 # gemini, measured 2026-08-28, and the old "native" was WRONG. Nothing in this
@@ -390,7 +387,6 @@ state = "capable"
 [harness.agy]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-continue"
-thread = false
 autonomous_pane = false
 route_on_pane = false
 # agy, measured 2026-08-28: hooks/agy-target-stop-hook.sh is a real adapter that
@@ -487,8 +483,8 @@ resume = "native-session"
 # Launch-only: `ask` refuses (no steering over the HTTP API yet); the x-d9f9
 # journey covers spawn + one turn, not kill-survival, cold resume or review.
 # A caller routed onto thread by default got a session it could not talk to.
-# False until the steering lane ships with its own unattended journey test; measured 2026-08-26.
-thread = false
+# The steering lane still owes its own unattended journey test; the 2026-09-03
+# spawn measurement below is what seats the thread lane now.
 autonomous_pane = false
 route_on_pane = false
 # opencode, measured 2026-08-28, and the old "native" was WRONG. opencode has no
@@ -633,7 +629,6 @@ resume = "native-session"
 # driver spawns and a keeper process hosts. The spawn arm shipped (x-43bd):
 # pi is in SPAWN_HARNESSES, dispatch_spawn has a pi branch, and the public
 # surface brings its own journey (cli/tests/agents/test_pi_spawn_journey.py).
-thread = true
 autonomous_pane = false
 route_on_pane = false
 # pi, measured 2026-08-28, replacing the inherited value this row refused to
@@ -800,7 +795,6 @@ resume = "native-session"
 # prior turn's codeword. The row is a statement about the lane dispatch
 # resolves onto - the same field pi's row carries - never a claim that the
 # harness grew a transport.
-thread = true
 autonomous_pane = false
 route_on_pane = false
 loop_participation = "extension"
@@ -946,7 +940,8 @@ reason = "measured over 5 delays x 3 trials on a live pane; no one-shot probe re
 # the refusal lives in the consuming lane, which names the key, the state, and
 # the probe that settles it. Every key used on any row needs a
 # [probe.features.<key>] declaration below, or the table refuses to load: a
-# claim without an instrument is a guess with extra steps.
+# claim without an instrument is a guess with extra steps. The thread seat
+# derives from features.spawn = native; no row carries a routing boolean.
 
 [probe."features.review"]
 kind = "behavioral"
@@ -1018,7 +1013,6 @@ resume = "native-session"
 # the cross-process recall the caller-assigned binding claims. The keeper
 # machinery itself (survive both supervisors, restart re-bind) is pi's
 # wk-x61bc journey and is not re-proven per harness.
-thread = true
 autonomous_pane = false
 route_on_pane = false
 # grok HAS a lifecycle hook surface - the live TUI fires `session_start` and

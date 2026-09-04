@@ -28,8 +28,8 @@ assertion is that the RESTART mints nothing, and that strength is unchanged.
 The live test is opt-in (``FNO_PI_LIVE=1``) because it spends real
 subscription tokens and needs this machine's pi credentials. It is never to
 be deleted: the plan's kill_criteria names ``proof_test_deleted`` because a
-worker stuck on this proof deleting the test that demands it - or flipping
-``thread = true`` to make a suite go green - is the exact failure this epic
+worker stuck on this proof deleting the test that demands it - or minting a
+``native`` spawn claim to make a suite go green - is the exact failure this epic
 exists to prevent. If no real terminal is reachable, the journey STOPS and
 reports; a green unit suite proves the frame protocol and nothing about
 survival.

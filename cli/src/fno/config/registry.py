@@ -274,7 +274,7 @@ FIELD_META: dict[str, Meta] = {
     "target.auto_launch_on_blueprint": Meta(
         "advanced",
         "Auto-launch a /target worker when a node reaches ready via /blueprint. "
-        "Harness and substrate come from the dispatch capability map, never a claude hardcode: claude and codex resolve to a native interactive thread, opencode and agy degrade to headless. "
+        "Harness and substrate come from the dispatch capability map, never a claude hardcode: a harness whose spawn claim reads native resolves to a native interactive thread, the rest degrade to headless. "
         "The worker defaults to no-merge and lands a PR for review; merge posture resolves per node from auto_merge.grant. "
         "It never fires on a node that is not ready, one under a live claim, an epic with no ready child, a plan stamped source: claude-plan-mode, or a fleet at agents.max_live past the dispatch wait ceiling (FNO_AUTOLAUNCH_TIMEOUT, default 180s).",
     ),
