@@ -240,13 +240,15 @@ def test_check_agent_profiles_flags_incompatible_substrate() -> None:
     from fno.config import SettingsModel
     from fno.setup.doctor import check_agent_profiles
 
+    # opencode stands in for a harness with no thread lane now that agy's
+    # earned one: its serve lane is launch-only, so the bit reads false.
     settings = SettingsModel(
-        agents={"profiles": {"target": _lane("agy", substrate="bg", permission_mode="yolo")}}
+        agents={"profiles": {"target": _lane("opencode", substrate="bg", permission_mode="yolo")}}
     )
     problems = check_agent_profiles(settings)
     assert len(problems) == 1
     assert "agents.profiles.target.substrate" in problems[0]
-    assert "bg" in problems[0] and "agy" in problems[0]
+    assert "bg" in problems[0] and "opencode" in problems[0]
 
 
 def test_check_agent_profiles_accepts_claude_bg_lane() -> None:
@@ -290,18 +292,20 @@ def test_check_agent_profiles_no_longer_flags_a_bare_codex_lane() -> None:
 
 
 def test_check_agent_profiles_still_flags_an_impossible_substrate() -> None:
-    """The substrate/provider compatibility half stays: bg excludes agy."""
+    """The substrate/provider compatibility half stays: bg excludes a harness
+    with no thread lane. agy used to be the example and has one now, so the
+    subject is opencode, whose serve lane is launch-only."""
     from fno.config import SettingsModel
     from fno.setup.doctor import check_agent_profiles
 
     settings = SettingsModel(
         agents={"profiles": {"target": {"lanes": [
-            _lane("agy", substrate="bg"),
+            _lane("opencode", substrate="bg"),
         ]}}}
     )
     problems = check_agent_profiles(settings)
     assert len(problems) == 1
-    assert "substrate" in problems[0] and "agy" in problems[0]
+    assert "substrate" in problems[0] and "opencode" in problems[0]
 
 
 def test_check_worktree_policy_flags_out_of_enum(
