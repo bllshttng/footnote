@@ -745,6 +745,7 @@ def test_us2_schema_version_is_three() -> None:
     # v23 (x-3837): additive `substrate` - the lane a row was spawned on.
     # v24 (x-2019): additive `requested_model`/`requested_provider`/
     # `requested_effort` - the spawn request verbatim beside the effect.
+    # v27 (x-04ce): additive `launch_account_source` - WHO chose the account.
     assert SCHEMA_VERSION == 27
 
 
