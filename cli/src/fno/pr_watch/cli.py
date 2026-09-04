@@ -878,22 +878,18 @@ def tick() -> None:
             except Exception as exc:  # noqa: BLE001 - never let a wake break the tick
                 log.warning("pr-watch: king wake phase failed: %s", exc)
 
-        # The heal drive loop (x-974c): `fno do pr heal` classifies a red
-        # check and applies the fix, but no timer ever called it, so every red
-        # open PR waited for a hand. The loop lives in Rust beside the
-        # classifier; this phase is only the gate, and it runs BEFORE stranded
-        # so a PR the healer fixes this tick is not reported stranded in the
-        # same breath. Guard first, import inside: the launchd hot path pays
-        # nothing when unarmed, and the double getattr reads a settings stub
-        # with no auto_heal block (the tick's own test harnesses) as unarmed.
+        # The heal drive loop (x-974c): nothing called the healer on a timer,
+        # so every red open PR waited for a hand. The loop lives in Rust; this
+        # phase is only the gate, before stranded so a PR healed this tick is
+        # not reported stranded in the same breath. Guard first, import
+        # inside: the launchd hot path pays nothing unarmed, and the double
+        # getattr reads a settings stub with no auto_heal block as unarmed.
         set_tick_phase("heal")
         if getattr(getattr(settings, "auto_heal", None), "enabled", False):
             try:
                 from fno.pr_watch._heal_phase import run_heal_phase
 
-                outcome = run_heal_phase(settings, _catchup_roots())
-                if outcome != "unarmed":
-                    typer.echo(f"pr heal: {outcome}")
+                typer.echo(f"pr heal: {run_heal_phase(settings, _catchup_roots())}")
             except Exception as exc:  # noqa: BLE001 - never let heal break the tick
                 log.warning("pr-watch: heal phase failed: %s", exc)
 
