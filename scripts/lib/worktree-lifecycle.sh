@@ -532,15 +532,18 @@ case "${1:-status}" in
                     echo "worktree cleanup: another sweep (pid $_held_pid) is already running; exiting (sweeps are idempotent, no need to overlap)" >&2
                     exit 0
                 fi
-                # Stamped but dead: genuinely stale, reclaim it. rmdir only
-                # succeeds on an empty dir, so a concurrent reclaimer that
-                # wins the race makes ours fail here - loop and re-check
-                # rather than mkdir blindly over a peer that just won.
-                unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
-                rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true
-                # Return to the atomic mkdir path. Recreating the directory
-                # in this branch leaves a gap where two reclaimers can both
-                # believe they acquired the lock before either writes its PID.
+                # Stamped but dead: genuinely stale, reclaim it. The reclaim
+                # must be ATOMIC. unlink+rmdir acts on a read that is already
+                # stale when it lands, and a peer reclaiming from the same
+                # stale read can rmdir the directory the winner of the race
+                # just re-created (empty, pre-pid) and acquire in that gap:
+                # two sweeps both holding the lock. rename moves the stale dir
+                # aside in one step, so the fixed path is always either the
+                # old stale lock or the winner's new one, never a vacuum.
+                if mv "$_WT_SWEEP_LOCK" "$_WT_SWEEP_LOCK.stale.$$" 2>/dev/null; then
+                    rm -rf "$_WT_SWEEP_LOCK.stale.$$"
+                fi
+                # Return to the atomic mkdir path.
                 continue
             fi
             # Dir exists but carries no pid yet: a peer may be mid-acquire
