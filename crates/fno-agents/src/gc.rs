@@ -304,13 +304,10 @@ fn gc_decide(row: &GcRow, now: i64, grace_secs: i64) -> (GcAction, Option<KeepRe
         }
         return apply_worktree_guard(row, GcAction::ReapDormant);
     }
-    // The SAME positive done reading, for a row the process surface cannot
-    // vouch for. A thread row owns no pid by design, so after a daemon restart
-    // it is not live, is never tail-probed, and `NotTerminal` holds it
-    // forever: 28 of 58 rows on the machine this was measured on, and the
-    // whole of the registry's growth. `dormant_done` is only ever true when a
-    // tail read said `done` on a row already idle past grace, so this arm is a
-    // positive marker by construction and a `stalled` tail never reaches it.
+    // The same positive done reading, for a row no pid can vouch for. A thread
+    // row owns no pid by design, so a restarted daemon reads it as not live and
+    // `NotTerminal` held it forever. `dormant_done` is true only when a tail
+    // read said `done` on a row already idle past grace.
     if row.dormant_done {
         return apply_worktree_guard(row, GcAction::ReapDormant);
     }
@@ -330,13 +327,10 @@ fn gc_decide(row: &GcRow, now: i64, grace_secs: i64) -> (GcAction, Option<KeepRe
                 | AgentStatus::Busy
                 | AgentStatus::Spawning
         );
-    // One reading breaks the tie, and only one: a transcript POSITIVELY stale
-    // for the whole window. `status` is a snapshot nothing updates at exit,
-    // `exited_at` is a write only an exit produces, and a transcript nobody
-    // has touched since is the independent third party that says which one is
-    // current. `None` never grants permission - an unreadable transcript and a
-    // stale one are not the same fact - so the row stays `Contradicted` unless
-    // the staleness was actually read.
+    // One reading breaks the tie: a transcript POSITIVELY stale for the whole
+    // window. `status` is a snapshot nothing updates at exit and `exited_at` is
+    // a write only an exit produces, so neither can settle the other. `None`
+    // never grants permission; an unread transcript is not a stale one.
     let stamp_corroborated = stamped_contradiction && row.transcript_fresh == Some(false);
     if stamped_contradiction && !stamp_corroborated {
         return (GcAction::Keep, Some(KeepReason::Contradicted));
@@ -1454,6 +1448,25 @@ mod tests {
         assert_eq!(
             keep_reason(&thread_row(), NOW, GRACE),
             Some(KeepReason::NotTerminal)
+        );
+    }
+
+    #[test]
+    fn ac2_edge_an_unprobed_worktree_holds_a_done_tail_fail_closed() {
+        // The shape a MISSED probe produces, kept as its own test because the
+        // sweep's probe gate is computed a pass earlier than `dormant_done`:
+        // when the caller does not probe on this arm, every worktree-owning
+        // row the arm exists for lands here instead of leaving.
+        let row = GcRow {
+            dormant_done: true,
+            owns_worktree: true,
+            worktree_clean: None,
+            ..thread_row()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+        assert_eq!(
+            keep_reason(&row, NOW, GRACE),
+            Some(KeepReason::WorktreeUnprobed)
         );
     }
 

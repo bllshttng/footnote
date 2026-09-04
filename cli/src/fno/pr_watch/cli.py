@@ -391,6 +391,10 @@ def tick() -> None:
                         _fleet_refused += 1
                     _emit_event(event_type, data)
 
+                # Imported here, not at module scope: the watchdog package
+                # pulls the harness layer and this module is on the hot path.
+                from fno.agents.watchdog import handoff_armed as _wd_handoff
+
                 _fleet_candidates = run_recovery_sweep(
                     settings.recovery,
                     emit=emit_recovery,
@@ -399,7 +403,7 @@ def tick() -> None:
                     # "report" and "wake" still need it: neither mode arms the
                     # supervisor, so gating this on "off" alone would silently
                     # drop the old safety net the moment either is turned on.
-                    provider_failover=(settings.recovery.watchdog.mode != "handoff"),
+                    provider_failover=not _wd_handoff(settings),
                 )
                 _fleet_swept = True
                 typer.echo(f"recovery sweep: candidates={_fleet_candidates}")

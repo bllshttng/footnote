@@ -3399,19 +3399,7 @@ class RecoveryBlock(BaseModel):
     @classmethod
     def _coerce_legacy_watchdog(cls, data: object) -> object:
         return _watchdog.coerce_legacy(data)
-        flat = data.get("watchdog")
-        block = dict(flat) if isinstance(flat, dict) else {}
-        if isinstance(flat, str):
-            word = flat.strip().lower()
-            block["enabled"] = word not in {"", "off"}
-            if block["enabled"]:
-                block["mode"] = word
-        for legacy, key in (("watchdog_mail_to", "mail_to"), ("watchdog_reap", "reap")):
-            if legacy in data and key not in block:
-                block[key] = data[legacy]
-        if block or isinstance(flat, str):
-            data = {**data, "watchdog": block}
-        return data
+
     retire_grace_s: int = Field(default=900, ge=0)
     provider_outage_quorum: int = Field(default=2, ge=1)
     provider_outage_fup_window_seconds: int = Field(default=300, ge=300)

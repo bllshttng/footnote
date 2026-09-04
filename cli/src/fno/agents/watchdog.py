@@ -1610,13 +1610,11 @@ def _verdict_one(
             return Verdict(row.row_id, row.name, row.state, REAP,
                            reap_basis, "stop+rm", cotenants)
         if answer is REAP_UNKNOWN:
-            # HELD, not returned. Returning STALE here (above retire) reported
-            # every row whose liveness probe stayed silent instead of stopping
-            # it - 55 of 55 measured, because a row with no pid and no
-            # heartbeat can only answer UNKNOWN - including rows whose node was
-            # done AND merged. Retire is strictly weaker and carries its own
-            # probe and state guards, so it inherits none of reap's protection
-            # by being asked first. Returned below if retire also declines.
+            # HELD, not returned. A row with no pid and no heartbeat can only
+            # answer UNKNOWN, so returning STALE here reported the whole fleet
+            # instead of stopping it. Retire is weaker and carries its own probe
+            # and state guards, so it inherits none of reap's protection by
+            # answering first. Returned below if retire also declines.
             reap_unknown_basis = reap_basis
 
     # retire: below a reap that ANSWERED yes, above one that did not answer, and
@@ -2992,7 +2990,7 @@ def run_sweep(
     if graph_fn is None:
         index = _graph_index()
 
-        def graph_fn() -> dict[str, dict]:
+        def graph_fn() -> dict[str, dict] | _Unreadable:
             return index
 
     # Passing the sentinel through instead would read as "no claim" and "no

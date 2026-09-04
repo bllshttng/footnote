@@ -2658,11 +2658,9 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         // session id.
         // ONE store lookup answers both the existence question (gone?) and
         // the freshness question (newest match's mtime) for this row.
-        // `terminal_or_dead` is deliberately NOT part of this gate. A row
-        // carrying an exit stamp whose STATUS still reads live-ish is the
-        // contradiction the policy has to rule on, and the transcript is the
-        // only independent party that can: gating the read on the status
-        // field meant the one row shape that needs it never got it.
+        // `terminal_or_dead` is deliberately not in this gate: the row shape
+        // that needs the transcript most is the one whose status disagrees
+        // with its exit stamp, and that gate read the status field.
         let store_hits = if !is_live && past_grace {
             store_matches(e)
         } else {
@@ -2702,14 +2700,10 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         // shortfall. Removing it means every escalated row is judged this
         // sweep, and the count spent is reported.
         let mut dormant_handle = None;
-        // A thread row owns no pid BY DESIGN (the shared daemon's pid is not
-        // the worker's to hold), so after a daemon restart it is absent from
-        // `live_workers`, `is_live` is false, and the tail probe below never
-        // ran for it. Its tail is the only reading that can ever say the work
-        // is over, so a row the process surface cannot vouch for but whose
-        // identity IS probeable is asked the same question a live row is. The
-        // one-shot ask row is still excluded: it carries no short_id, so there
-        // is no handle to probe and nothing to resume it with.
+        // A thread row owns no pid by design, so a restarted daemon reads it as
+        // not live and never probed its tail - the one reading that can say the
+        // work is over. A one-shot ask row carries no short_id, so it has no
+        // handle to probe and stays out.
         if is_live || (e.pid.is_none() && !e.short_id.is_empty()) {
             // The idle gate's transcript read comes from the same store index
             // (in memory after the first build), never a fresh walk.
@@ -2825,6 +2819,14 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         // unanswered per-row probe did: staleness never reaps.
         let tail_state = dormant_handle.as_ref().and_then(|h| tails.get(h)).cloned();
         row.dormant_done = tail_state.as_deref() == Some("done");
+        // The probe condition mirrors the removal condition, and pass one
+        // cannot see this one: `dormant_done` is known only after the tail read
+        // above. Without this, a worktree-owning row the dormant arm earns a
+        // removal for fails closed into `Keep(WorktreeUnprobed)` - stuck, and
+        // named as a worktree problem when the probe never ran.
+        if row.dormant_done && row.owns_worktree && row.worktree_clean.is_none() {
+            row.worktree_clean = worktree_clean_probe(&e.cwd);
+        }
         match crate::gc::gc_action(&row, now, grace_secs) {
             crate::gc::GcAction::Reap => {
                 if stage_reap_receipt(
@@ -2904,10 +2906,6 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
                         // majority verdict. Reported like `kept_live` so a
                         // pass names every row it held and the gate that held
                         // it.
-                        // The tail state rides the id when one was read: a row
-                        // held here because it died mid-turn reads differently
-                        // from one whose transcript nobody could find, and the
-                        // operator cannot act on a bare name.
                         Some(crate::gc::KeepReason::NotTerminal) => {
                             summary.kept_not_terminal.push((
                                 id,

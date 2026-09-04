@@ -160,7 +160,6 @@ mod tests {
     //! `render_reap`: the binary is over the file budget, and a renderer's
     //! tests belong beside the renderer.
     use super::*;
-    use crate::daemon::GcSummary;
     use serde_json::{json, Value};
 
     fn summary(reaped: &[&str], backstop: &[&str]) -> crate::daemon::GcSummary {
