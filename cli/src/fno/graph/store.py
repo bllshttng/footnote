@@ -321,17 +321,12 @@ def drain_exited_keepers() -> int:
 
 
 def _orphaned_keeper_pids() -> "list[int]":
-    """Live pids whose argv advertises a store keeper against a graph path
-    that no longer exists AND whose parent directory is gone too. The
-    candidate scan of sweep_orphaned_keepers(), factored out so a test can
-    census the SAME probe before the sweep acts: a zero-after fix read is
-    meaningless unless the probe read non-zero first (the zero-filter rule).
-
-    The parent-directory conjunct is what keeps the scan from racing a live
-    test: a keeper spawned against a graph file that has not been written
-    yet has an existing parent and must never be a candidate, while every
-    measured orphan lost its whole tree at once (pytest root GC, the
-    sessionfinish sandbox rmtree).
+    """Live pids advertising a store keeper whose graph tree (file AND parent
+    dir) is gone: the sweep's candidate scan, factored out so a test can
+    census the SAME probe before the sweep acts. The parent-dir conjunct
+    keeps the scan off a live test - a keeper spawned against a graph file
+    not written yet has an existing parent; every measured orphan lost its
+    whole tree at once.
     """
     import psutil
 
@@ -342,9 +337,7 @@ def _orphaned_keeper_pids() -> "list[int]":
             cmd = proc.info["cmdline"] or []
         except psutil.Error:  # noqa: BLE001 - a vanished pid owns no argv
             continue
-        if "--store-keeper" not in cmd or "--graph" not in cmd:
-            continue
-        if proc.info["pid"] == me:
+        if proc.info["pid"] == me or "--store-keeper" not in cmd or "--graph" not in cmd:
             continue
         idx = cmd.index("--graph") + 1
         graph = cmd[idx] if idx < len(cmd) else None
@@ -355,30 +348,19 @@ def _orphaned_keeper_pids() -> "list[int]":
 
 
 def sweep_orphaned_keepers(timeout: float = 10.0) -> "list[int]":
-    """SIGTERM every live store keeper whose ``--graph`` tree is gone.
+    """SIGTERM every live store keeper whose ``--graph`` tree is gone, wait
+    `timeout`, SIGKILL the rest, and return the pids that refused to die.
 
-    The spawn ledger only knows keepers THIS process spawned, so it is blind
-    to two populations: keepers a CLI subprocess spawned (children of the
-    subprocess, never the test session), and keepers that outlived a session
-    that had no reaper wired. Measured 2026-09-04 during a bounded real run:
-    8-10 live ``fno-agents-worker --store-keeper`` processes against graph
-    paths pytest had already deleted, plus a stale debug-binary keeper from
-    another worktree's run.
-
-    The kill decision is the graph path's EXISTENCE, never the command line:
-    the canonical keepers and the leaked ones share a command line, and an
-    argv match killed the two processes serving the real graph on
-    2026-09-04. argv only nominates candidates here; a keeper whose graph
-    tree still exists belongs to a live test or the canonical graph and
-    survives.
-
-    Returns the pids that refused to die inside `timeout`. A janitor can
-    never crash the session it cleans up after: every probe and kill is
-    individually guarded, so an unreadable process table degrades to a
-    no-op sweep, never an error.
+    The spawn ledger only knows keepers THIS process spawned, so the sweep
+    covers the ledger-blind populations: keepers a CLI subprocess spawned,
+    and keepers that outlived a session with no reaper wired (measured
+    2026-09-04: 8-10 live keepers against deleted pytest graph paths). The
+    kill decision is the graph path's existence, never the command line -
+    canonical and leaked keepers share an argv. Every probe and kill is
+    guarded: an unreadable process table degrades to a no-op, never an
+    error.
     """
     import signal
-    import time as _time
 
     import psutil
 
@@ -389,8 +371,7 @@ def sweep_orphaned_keepers(timeout: float = 10.0) -> "list[int]":
 
     def _alive(pid: int) -> bool:
         # kill(pid, 0) cannot be the probe: a zombie answers it, so a keeper
-        # that died on TERM under a live parent reads as a survivor. The
-        # status read distinguishes Z, which is what "died" means here.
+        # that died on TERM under a live parent reads as a survivor.
         try:
             return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
         except psutil.NoSuchProcess:
@@ -403,10 +384,10 @@ def sweep_orphaned_keepers(timeout: float = 10.0) -> "list[int]":
             os.kill(pid, signal.SIGTERM)
         except OSError:  # noqa: BLE001 - gone between scan and kill, or not ours
             pass
-    deadline = _time.monotonic() + timeout
+    deadline = time.monotonic() + timeout
     pending = {pid for pid in candidates if _alive(pid)}
-    while pending and _time.monotonic() < deadline:
-        _time.sleep(0.05)
+    while pending and time.monotonic() < deadline:
+        time.sleep(0.05)
         pending = {pid for pid in pending if _alive(pid)}
     for pid in sorted(pending):
         try:

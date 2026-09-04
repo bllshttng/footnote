@@ -1798,9 +1798,8 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         root, env, [steps[i] for i in selected], keep_going,
         pytest_shard=shard_spec if shard_total > 1 else "",
     )
-    # Every step above can leak a keeper through a CLI subprocess no pytest
-    # conftest can reach (journey, rust, bash harnesses), so sweep the
-    # graph-dead orphans once before the runner exits.
+    # Journey, rust and bash steps leak keepers through CLI subprocesses no
+    # pytest conftest can reach; sweep graph-dead orphans before exiting.
     from fno.graph.store import sweep_orphaned_keepers
 
     sweep_orphaned_keepers(timeout=15.0)
