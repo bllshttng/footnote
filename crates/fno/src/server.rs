@@ -52,6 +52,7 @@ use crate::vt::BlockJumpOutcome;
 use crate::vt::{self, frame_text, Modes};
 
 mod agent_actions;
+mod agent_rows_join;
 
 use self::agent_actions::{
     run_agent_action, run_agent_rename, run_mail_send, run_reap, run_reentry_plan,
@@ -10859,43 +10860,17 @@ impl Core {
         for squad in &self.session.squads {
             for tab in &squad.tabs {
                 for pid in tree::leaves(&tab.root) {
-                    // The registry entry hosting this pane, if any: a
-                    // same-session mux match, else a watch-only row the attach
-                    // map reconciled onto this pane (x-0090). Pane ids recycle
-                    // across server restarts (pty.rs), so two rows can record
-                    // one (session, pane_id): first-match bound a LIVE worker
-                    // behind an exited row that recycled onto the id first
-                    // (observed live 2026-08-12 - an exited codex row at a
-                    // lower index won the bind, and the live claude worker
-                    // rendered in the watch-only appendix marked exited). The
-                    // bind is a total order - live mux, live attach, any mux,
-                    // any attach - so a live row of EITHER kind outranks an
-                    // exited one, and the appendix below still renders the
-                    // loser. Two rows both live (or both exited) within one
-                    // kind stay first-match: settling those needs a
-                    // generation token on the mux ref, a schema bump.
-                    let mux_match = |a: &RegistryAgent| matches!(&a.mux, Some((sess, pane)) if sess == &self.session_name && *pane == pid);
-                    let attach_match = |a: &RegistryAgent| {
-                        a.mux.is_none()
-                            && (a
-                                .attach_id
-                                .as_deref()
-                                .and_then(|id| self.attached.get(id))
-                                .copied()
-                                == Some(pid)
-                                || self.worker_pane_for_agent(a) == Some(pid))
-                    };
-                    let matched = self
-                        .agents
-                        .iter()
-                        .position(|a| mux_match(a) && !a.exited)
-                        .or_else(|| {
-                            self.agents
-                                .iter()
-                                .position(|a| attach_match(a) && !a.exited)
-                        })
-                        .or_else(|| self.agents.iter().position(mux_match))
-                        .or_else(|| self.agents.iter().position(attach_match));
+                    // The registry entry hosting this pane, if any: the join
+                    // lives in agent_rows_join (extracted from this
+                    // budget-capped file); its module doc carries the
+                    // recycled-pane-id rationale and the total order.
+                    let matched = agent_rows_join::bind_agent_to_pane(
+                        &self.agents,
+                        &self.session_name,
+                        pid,
+                        &self.attached,
+                        &|a| self.worker_pane_for_agent(a),
+                    );
                     // One lookup: liveness AND the bare-pane label read the same
                     // entry (a tree leaf reaped from `panes` is dying, so it
                     // forces `exited` - the fact-beats-report rule the old join
@@ -24715,57 +24690,6 @@ mod tests {
     }
 
     #[test]
-    fn agent_rows_binds_a_live_row_over_an_exited_row_on_one_recycled_pane() {
-        // x-0345: pane ids recycle across server restarts (pty.rs), so two
-        // rows can record one (session, pane_id). Measured live 2026-08-12:
-        // an EXITED codex row at a lower index won the first-match bind, pane
-        // 26 rendered under its name, and the LIVE claude worker sat in the
-        // watch-only appendix marked exited. The bind prefers the non-exited
-        // row. Assert the BOUND name, never the absence of the loser.
-        let (mut core, _c, p1, _p2, _rx) = seen_test_core();
-        let mut stale = agent_in("test", p1, None, true);
-        stale.name = "exited-older".into();
-        let mut live = agent_in("test", p1, None, false);
-        live.name = "live-worker".into();
-        core.agents = vec![stale, live];
-        let rows = core.agent_rows();
-        let pane_row = rows
-            .iter()
-            .find(|r| r.pane_id == Some(p1))
-            .expect("the recycled pane renders a row");
-        assert_eq!(pane_row.name, "live-worker", "the LIVE row binds the pane");
-        // The loser still renders - paneless in the watch-only appendix.
-        let loser = rows
-            .iter()
-            .find(|r| r.name == "exited-older")
-            .expect("the exited row still renders");
-        assert!(loser.pane_id.is_none(), "the loser lost the pane");
-    }
-
-    #[test]
-    fn agent_rows_attach_rows_still_bind_when_no_mux_row_matches() {
-        // x-0090's attach-map reconciliation must survive the live-preference
-        // reordering: a paneless bg row whose attach map names this pane
-        // binds it when no mux row claims the id - AND a LIVE attach row
-        // outranks an EXITED mux row on the same recycled id (the total
-        // order: live mux, live attach, any mux, any attach).
-        let (mut core, _c, p1, _p2, _rx) = seen_test_core();
-        core.attached.insert("attach-1".into(), p1);
-        let mut stale = agent_in("test", p1, None, true);
-        stale.name = "exited-older".into();
-        core.agents = vec![stale, bg_row("bg-mapped", "/tmp/seen", Some("attach-1"))];
-        let rows = core.agent_rows();
-        let mapped = rows
-            .iter()
-            .find(|r| r.name == "bg-mapped")
-            .expect("the mapped row renders");
-        assert_eq!(
-            mapped.pane_id,
-            Some(p1),
-            "the live attach row binds the pane over the exited mux row"
-        );
-    }
-
     #[test]
     fn card_ready_gate_only_passes_ready_cards() {
         // x-a496 (codex peer review): a targeted dispatch only proceeds for a

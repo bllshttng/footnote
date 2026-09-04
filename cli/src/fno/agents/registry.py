@@ -1844,6 +1844,19 @@ def register_existing_session(
         )
     if not session_id:
         raise ValueError("session_id must be non-empty")
+
+    # x-0345: refusal IS the docs; see the raise message below.
+    self_name = os.environ.get("FNO_AGENT_SELF", "")
+    if self_name and (
+        os.environ.get("FNO_AGENT_ROW_PENDING") == self_name
+        or any(row.name == self_name for row in load_registry(path=registry_path))
+    ):
+        raise ValueError(
+            f"this session already IS mesh worker {self_name!r} (FNO_AGENT_SELF); "
+            "registering would mint a duplicate row for one worker - the "
+            "session-start restamp keeps the existing row pointed at this session"
+        )
+
     session_field = HARNESS_SESSION_ID_FIELDS[harness]
 
     # A hand-started session has NO live messaging transport (no daemon PTY,
@@ -2278,72 +2291,29 @@ def heal_mux_ref(
 ) -> Optional[tuple[Optional[dict], dict]]:
     """Re-point a spawned worker's row at the pane it actually runs in.
 
-    A recovered or re-hosted pane worker boots inside a pane whose
-    ``(session, pane_id)`` pair the row cannot know at write time: resume
-    reuses the row's recorded pair, which points at the DEAD pane, and drift
-    that predates any recovery (a row whose pane id was recycled) lies the
-    same way. The worker itself reads its hosting pair from its own
-    environment - ``FNO_SESSION`` and ``FNO_PANE`` are in every pane child's
-    env (pty.rs) - so the session-start restamp path, which already re-points
-    ``harness_session_id`` keyed on the row NAME, also heals the mux ref.
-
-    The target row prefers ``session_id``: the row whose
-    ``harness_session_id`` names THIS session is the row this worker moved,
-    which matters when the id restamp BRANCHED (a reachable predecessor kept
-    its row and this session minted its own) - keying on the name alone
-    would heal the predecessor and strand the successor paneless. With no id
-    (or no row carrying it yet) the name is the key, for the same reason the
-    restamp keys on it: the one identity a harness cannot re-mint.
-
-    ``mux`` is written and ``short_id`` cleared in ONE ``update_registry``
-    transaction: ``_validate_single_live_ref`` enforces mux XOR worker XOR bg
-    at write time, so a heal that set ``mux`` while leaving a non-empty
-    ``short_id`` would raise into the caller's fail-open hook and persist
-    nothing - the silent no-op this write exists to prevent. A worker that is
-    now hosted in a pane genuinely has no bg/worker transport key, so
-    clearing it is the invariant, not a workaround.
-
-    Returns ``(old_mux, new_mux)`` when the row moved, else ``None`` (no such
-    row, harness mismatch, or already on the pair - the idempotent no-op that
-    must not write or emit). The write is VERIFIED, not assumed: the returned
-    entries of ``update_registry`` are what was persisted under the lock, and
-    the caller emits ``session_pane_rebound`` only after this function
-    confirms the persisted row carries the new pair - so a heal that raised
-    and was swallowed by the fail-open hook is never indistinguishable from
-    one that landed; the event log is where that difference stays visible.
+    Target prefers ``session_id`` so a branched session heals its own row.
+    ``mux`` is written and ``short_id`` cleared in ONE transaction (mux XOR
+    worker XOR bg; the clear is what makes the write land inside the
+    fail-open hook). Returns ``(old_mux, new_mux)`` when the row moved,
+    else ``None`` (the idempotent no-op never rewrites the file); the write
+    is verified against what persisted before the caller emits the event.
     """
-    if not name or not harness or not mux_session:
-        return None
-    if isinstance(pane_id, bool) or not isinstance(pane_id, int) or pane_id < 0:
+    if not name or not harness or not mux_session or type(pane_id) is not int or pane_id < 0:
         return None
 
     new_mux = {"session": mux_session, "pane_id": pane_id}
 
     def _find(entries: list[AgentEntry]) -> Optional[AgentEntry]:
-        if session_id:
-            by_id = next(
-                (
-                    e
-                    for e in entries
-                    if e.harness == harness and e.harness_session_id == session_id
-                ),
-                None,
-            )
-            if by_id is not None:
-                return by_id
-        return next(
-            (
-                e
-                for e in entries
-                if e.harness == harness and (e.name == name or name in e.aliases)
-            ),
-            None,
-        )
+        for e in entries:
+            if session_id and e.harness == harness and e.harness_session_id == session_id:
+                return e
+        for e in entries:
+            if e.harness == harness and (e.name == name or name in e.aliases):
+                return e
+        return None
 
-    # Decide from a pre-read so the idempotent no-op never rewrites the file
-    # byte-for-byte (the same rule record_session_observation holds). The
-    # updater below re-decides under the lock, so a concurrent writer landing
-    # between the two reads cannot double-write.
+    # Pre-read so the idempotent no-op never rewrites the file; the updater
+    # re-decides under the lock so a racing writer cannot double-write.
     row = _find(load_registry(path=registry_path))
     if row is None or row.mux == new_mux:
         return None  # no such row, or already on the pair: no write, no event
@@ -2359,9 +2329,7 @@ def heal_mux_ref(
     persisted = update_registry(_updater, path=registry_path)
     healed = _find(persisted)
     if healed is None or healed.mux != new_mux:
-        # The write did not land (or a concurrent writer replaced the row
-        # inside the lock cycle): report nothing rather than a false success.
-        return None
+        return None  # write did not land, or a racing writer replaced the row
     return before, new_mux
 
 

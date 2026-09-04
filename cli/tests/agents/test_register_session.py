@@ -1288,20 +1288,34 @@ def test_heal_mux_ref_refuses_bad_pane_and_wrong_harness(tmp_path, monkeypatch):
     assert row.mux == {"session": "main", "pane_id": 16}, "a refused heal rewrote the row"
 
 
-def test_mux_pair_from_env_requires_both_vars_and_a_u64_pane():
+def test_heal_own_mux_ref_env_contract(tmp_path, monkeypatch):
     """FNO_PANE absent (not in a pane) leaves mux untouched - a bg/headless
-    worker must never gain a mux ref; non-numeric or empty is ignored, not
-    coerced; negative is not a u64."""
-    from fno.agents.register_session import _mux_pair_from_env
+    worker must never gain a mux ref; non-numeric, empty, or negative is
+    ignored, not coerced; a valid pair heals the row."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry
 
-    assert _mux_pair_from_env({}) is None
-    assert _mux_pair_from_env({"FNO_SESSION": "main"}) is None
-    assert _mux_pair_from_env({"FNO_PANE": "31"}) is None
-    assert _mux_pair_from_env({"FNO_SESSION": "main", "FNO_PANE": ""}) is None
-    assert _mux_pair_from_env({"FNO_SESSION": "main", "FNO_PANE": "pane-31"}) is None
-    assert _mux_pair_from_env({"FNO_SESSION": "main", "FNO_PANE": "-3"}) is None
-    assert _mux_pair_from_env({"FNO_SESSION": "main", "FNO_PANE": "31"}) == ("main", 31)
-    assert _mux_pair_from_env({"FNO_SESSION": "main", "FNO_PANE": " 31 "}) == ("main", 31)
+    for env in (
+        {},
+        {"FNO_SESSION": "main"},
+        {"FNO_PANE": "31"},
+        {"FNO_SESSION": "main", "FNO_PANE": ""},
+        {"FNO_SESSION": "main", "FNO_PANE": "pane-31"},
+        {"FNO_SESSION": "main", "FNO_PANE": "-3"},
+    ):
+        for key in ("FNO_SESSION", "FNO_PANE"):
+            monkeypatch.delenv(key, raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        _write_pane_row("t-worker", "claude")
+        from fno.agents.register_session import _heal_own_mux_ref
+
+        _heal_own_mux_ref("t-worker", "claude", "11111111-2222-3333-4444-555555555555")
+        assert load_registry()[0].mux is None, f"env {env} gained a mux ref"
+    monkeypatch.setenv("FNO_SESSION", "main")
+    monkeypatch.setenv("FNO_PANE", " 31 ")
+    _heal_own_mux_ref("t-worker", "claude", "11111111-2222-3333-4444-555555555555")
+    assert load_registry()[0].mux == {"session": "main", "pane_id": 31}
 
 
 def test_register_verb_refuses_when_fno_agent_self_row_exists(tmp_path: Path, monkeypatch) -> None:
@@ -1320,7 +1334,7 @@ def test_register_verb_refuses_when_fno_agent_self_row_exists(tmp_path: Path, mo
     from fno.agents.registry import load_registry
 
     result = CliRunner().invoke(agents_app, ["register"])
-    assert result.exit_code == 2, result.output
+    assert result.exit_code == 1, result.output
     assert "x-f75e-mux-chrome" in result.output
     assert "duplicate row" in result.output
     names = [row.name for row in load_registry()]
@@ -1343,7 +1357,7 @@ def test_register_verb_refuses_in_the_row_pending_window(tmp_path: Path, monkeyp
     from fno.agents.registry import load_registry
 
     result = CliRunner().invoke(agents_app, ["register"])
-    assert result.exit_code == 2, result.output
+    assert result.exit_code == 1, result.output
     assert load_registry() == [], "a refused pending-window register wrote a row"
 
 

@@ -3918,31 +3918,6 @@ def cmd_register(
         )
         raise typer.Exit(code=3)
 
-    # x-0345: a spawned or recovered pane worker carries FNO_AGENT_SELF, and a
-    # row keyed on that name already exists. Registering here would mint a
-    # SECOND row named by the bare short-id beside the row the operator and
-    # the graph already use - one worker split across rows, the exact
-    # duplicate-identity confusion this guard exists to close. The refusal is
-    # the documentation: the session-start restamp keeps the existing row
-    # pointed at the live session id, and its mux ref self-heals from
-    # FNO_SESSION/FNO_PANE.
-    self_name = os.environ.get("FNO_AGENT_SELF", "")
-    if self_name:
-        from fno.agents.registry import load_registry
-
-        # The row-pending marker names the row being written just after the
-        # pane starts; refusing on it too closes the seconds-wide window
-        # where /fno-me would still mint the duplicate ahead of the spawner.
-        pending = os.environ.get("FNO_AGENT_ROW_PENDING") == self_name
-        if pending or any(row.name == self_name for row in load_registry()):
-            sys.stderr.write(
-                f"cannot register: this session already IS mesh worker {self_name!r} "
-                "(FNO_AGENT_SELF). Its row exists and the session-start restamp "
-                "keeps it pointed at this session; registering would mint a "
-                "duplicate row for one worker.\n"
-            )
-            raise typer.Exit(code=2)
-
     try:
         entry = register_existing_session(
             harness=harness, session_id=session_id, cwd=os.getcwd(),
