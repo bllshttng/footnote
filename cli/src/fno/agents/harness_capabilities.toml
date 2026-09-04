@@ -272,12 +272,10 @@ status_command = "/status"
 status_pattern = 'Model:\s+(?P<model>\S+).*?reasoning\s+(?P<effort>minimal|low|medium|high|xhigh|max)'
 
 # FEATURES. All three states are measured. spawn: the second journey-proven
-# thread lane. review: the only structured review path in the table -
-# `review_verbs` above map onto the app-server daemon's review RPC, which
-# the mail lane's own --check exercises. attach: the proof the two questions
-# split. Codex ships NO attach subcommand - the form field above is really
-# resume plus a daemon endpoint - yet fno attaches today through exactly
-# that form, so verb inventory says no and reachability says yes.
+# thread lane. review: `review_verbs` above map onto the app-server daemon's
+# review RPC, which the mail lane's --check exercises. attach: the proof the
+# two questions split. Codex ships NO attach subcommand - the form field is
+# resume plus a daemon endpoint - so verb inventory says no, reachability yes.
 [harness.codex.features.review]
 state = "native"
 
@@ -381,10 +379,9 @@ status_pattern = ""
 [harness.gemini.features.spawn]
 state = "absent"
 
-# The experimental project-agent mode exists on the binary and fno drives no
-# lane into it, so this is the textbook `capable`: exposed, unwired. A
-# registry reviewer demanding subagent-dispatch resolves unavailable here,
-# not assumed-yes.
+# Textbook `capable`: the experimental project-agent mode exists on the
+# binary and fno drives no lane into it; a registry reviewer resolves
+# unavailable here, not assumed-yes.
 [harness.gemini.features.subagent_dispatch]
 state = "capable"
 
@@ -485,11 +482,9 @@ state = "absent"
 [harness.opencode]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-session"
-# The serve lane is launch-only: `ask` refuses (no steering over the HTTP
-# API yet), the x-d9f9 journey test covers spawn + one turn but not the
-# server-kill survival, cold resume, or review steps of the bar in
-# docs/architecture/codex-thread-driver.md. A caller routed onto thread by
-# default got a session it could not talk to. False until the steering
+# Launch-only: `ask` refuses (no steering over the HTTP API yet); the x-d9f9
+# journey covers spawn + one turn, not kill-survival, cold resume or review.
+# A caller routed onto thread by default got a session it could not talk to.
 # lane ships with its own unattended journey test; measured 2026-08-26.
 thread = false
 autonomous_pane = false
@@ -579,11 +574,10 @@ status_pattern = ""
 [harness.opencode.features.spawn]
 state = "native"
 
-# MEASURED 2026-09-03 on a live daemon-owned session: the row ships no
-# native attach verb (interactive_attach above reads unsupported) and a real
-# `fno agents attach` still landed in the session's own pane - "thread pane
-# -> <name>", exit 0 - through the daemon-kept lane. Reachability yes, verb
-# inventory no: the exact split this key exists to record.
+# MEASURED 2026-09-03, live daemon-owned session: no native verb
+# (interactive_attach reads unsupported), yet `fno agents attach` landed in
+# the session's own pane through the daemon-kept lane. Reachability yes,
+# verb inventory no: the split this key exists to record.
 [harness.opencode.features.attach]
 state = "native"
 
@@ -939,29 +933,18 @@ marker = "the resumed conversation's store record gains the token planted in the
 kind = "unprobeable"
 reason = "measured over 5 delays x 3 trials on a live pane; no one-shot probe recovers it"
 
-# THE FEATURES DIMENSION (x-a3e8). Each per-harness row may carry a
-# [harness.<name>.features.<key>] stanza answering WHAT A HARNESS CAN DO, held
-# beside the keystroke mechanics above and never instead of them. Eleven keys,
-# closed so a typo is a parse error rather than a silent new dimension:
-#
-#   review  spawn  attach  rpc  server  plugins  hooks  skills_dir
-#   subagent_dispatch  mcp  acp
-#
-# A claim's only field is `state`, one of four:
-#
-#   native      the harness exposes it AND fno drives it; a wired lane exists
-#   capable     the harness exposes it and fno has NO wired arm
-#   absent      MEASURED not to exist on this harness
-#   unmeasured  nobody has looked
-#
-# `capable` is the state `thread = false` could not say and the old hardcoded
-# spawn tuple could only encode as prose beside a literal. A key ABSENT from a
-# row reads unmeasured and refuses nothing at load: the refusal lives in the
-# lane that consumes the feature, which names the key, the state, and the
-# probe that would settle it. Every key used on any row must carry a
-# [probe.features.<key>] declaration below, or the table refuses to load -
-# a claim without an instrument is a guess with extra steps. Declarations are
-# written once and applied to every harness.
+# THE FEATURES DIMENSION (x-a3e8). A row may carry [harness.<name>.features.<key>]
+# stanzas answering WHAT A HARNESS CAN DO, beside the keystroke mechanics above
+# and never instead of them. Eleven keys, closed so a typo is a parse error:
+# review spawn attach rpc server plugins hooks skills_dir subagent_dispatch mcp
+# acp. A claim's only field is `state`: native (exposed AND fno drives it),
+# capable (exposed, no wired arm), absent (MEASURED gone), unmeasured (nobody
+# has looked) - the state the old hardcoded spawn tuple could only encode as
+# prose. A key ABSENT from a row reads unmeasured and refuses nothing at load:
+# the refusal lives in the consuming lane, which names the key, the state, and
+# the probe that settles it. Every key used on any row needs a
+# [probe.features.<key>] declaration below, or the table refuses to load: a
+# claim without an instrument is a guess with extra steps.
 
 [probe."features.review"]
 kind = "behavioral"
@@ -971,11 +954,9 @@ marker = "a review verb dispatched on the harness's lane returns a structured ve
 kind = "behavioral"
 marker = "an unattended spawn, drive and stop on the harness's thread lane ends at the loop's own stop gate, not at a timeout (the keeper-journey template)"
 
-# attach is measured on the LIVE session, never from a row: a harness whose
-# resume form is the only verb still attaches when the daemon is the keeper
-# (agy, opencode, pi prove it through the mux-thread portal). The marker is
-# the positive-marker rule itself - an attach that returns the session's own
-# interface, not a refusal or a delivery receipt.
+# attach is measured on the LIVE session, never from a row (agy, opencode, pi
+# prove it through the mux-thread portal). The marker is the positive-marker
+# rule itself: the session's own interface, not a refusal or a receipt.
 [probe."features.attach"]
 kind = "behavioral"
 marker = "a real attach to a live session lands in that session's own interface and returns its lines - the native verb where one ships, else the daemon-kept lane (mux-thread portal) against a session the keeper holds"
