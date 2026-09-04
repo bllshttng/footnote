@@ -671,6 +671,86 @@ def test_spawn_pi_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) -> 
     assert seed["ready_marker"] == b"(sub)"
 
 
+def test_spawn_agy_thread_passes_the_seam_and_headless_refuses_unmeasured() -> None:
+    """agy passes on thread (its keeper lane is journey-proven) and refuses on
+    headless. The refusal cannot come from the seam here: agy's
+    state_root_grant records the write-access MECHANISM per lane
+    (--add-dir on all three), never whether a lane has been run, so the
+    unmeasured-stance check passes for headless too. dispatch_spawn states it
+    instead, and the message must name the lane rather than call agy
+    pane-only."""
+    from fno.agents import dispatch
+
+    # Positive marker: the accepted name RETURNS rather than raising.
+    dispatch._check_spawn_harness("agy", headless=False)
+    dispatch._check_spawn_harness("agy")
+
+
+def test_spawn_agy_headless_refuses_by_name(workdir, monkeypatch) -> None:
+    from fno.agents import dispatch
+
+    monkeypatch.setattr(
+        dispatch,
+        "_lane_b_thread_spawn",
+        lambda **kw: pytest.fail("headless must never reach the keeper lane"),
+    )
+    with pytest.raises(dispatch.DispatchAskError) as caught:
+        dispatch.dispatch_spawn(
+            name="wkagyh", message="hello", harness="agy", cwd=workdir, headless=True
+        )
+    message = str(caught.value)
+    assert "unmeasured" in message
+    assert "--substrate thread" in message
+    assert "pane only" not in message, (
+        "the merged measurement disproved that sentence for agy"
+    )
+
+
+def test_spawn_agy_thread_branch_drives_the_keeper_lane(workdir, monkeypatch) -> None:
+    """`dispatch_spawn -H agy --substrate thread` reaches
+    `_lane_b_thread_spawn` and returns its minted conversation id - the
+    refusal text `unknown harness 'agy' on the thread substrate` never
+    renders. The seed rides the keeper paste, keyed to that id and agy's own
+    composer-ready marker."""
+    from fno.agents import dispatch
+
+    calls: list[dict] = []
+    seeds: list[dict] = []
+
+    def _fake_lane_b(**kwargs):
+        calls.append(kwargs)
+        return {
+            "name": kwargs["name"],
+            "harness": kwargs["harness"],
+            "session_id": "c5661b28-bcba-4690-8b2e-4a4a88541e8c",
+            "keeper_socket": "/tmp/does-not-matter.sock",
+            "keeper_pid": 1,
+            "child_pid": 2,
+            "argv": ["agy"],
+        }
+
+    def _fake_seed(*, name, session_id, sock, message, ready_marker):
+        seeds.append({"session_id": session_id, "message": message, "marker": ready_marker})
+
+    monkeypatch.setattr(dispatch, "_lane_b_thread_spawn", _fake_lane_b)
+    monkeypatch.setattr(dispatch, "_keeper_seed_submit", _fake_seed)
+
+    result = dispatch.dispatch_spawn(
+        name="wkagy", message="hello", harness="agy", cwd=workdir, model="gemini-3-pro"
+    )
+
+    assert result.kind == "created"
+    assert result.provider == "agy"
+    assert result.short_id == "c5661b28-bcba-4690-8b2e-4a4a88541e8c"
+    assert len(calls) == 1, "the agy branch must drive the keeper lane exactly once"
+    assert calls[0]["harness"] == "agy"
+    assert calls[0]["model"] == "gemini-3-pro", "the model axis rides the lane"
+    assert len(seeds) == 1, f"exactly one seed paste, got {seeds!r}"
+    assert seeds[0]["session_id"] == "c5661b28-bcba-4690-8b2e-4a4a88541e8c"
+    assert seeds[0]["message"].startswith("hello")
+    assert seeds[0]["marker"] == b"? for shortcuts"
+
+
 def test_spawn_seam_refuses_an_absent_stance(monkeypatch) -> None:
     """A future SPAWN_HARNESSES member whose row records no stance for the
     requested substrate is refused beside the \"unmeasured\" one: silence

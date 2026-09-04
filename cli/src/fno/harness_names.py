@@ -41,7 +41,8 @@ KNOWN_HARNESSES: tuple[str, ...] = (
 # Thread/headless accepts opencode through its launch seam, and the
 # keeper-hosted lanes: cursor-agent through `create-chat`'s callee-minted
 # chat id, pi through the caller-assigned id the restart journey proved.
-# agy and gemini are pane-only and stay out of this tuple.
+# gemini is pane-only and stays out of this tuple: it is deprecated and has no
+# maintained dispatch lane at all.
 #
 # pi joins on journey evidence, not roster growth: its keeper-hosted thread
 # lane survived a double SIGKILL (journey wk-x61bc,
@@ -65,6 +66,16 @@ KNOWN_HARNESSES: tuple[str, ...] = (
 # mint lane is built and unit-tested, but the binary refuses every turn
 # until its provider is configured (the operator's who-pays axis), so no
 # row and no SPAWN_HARNESSES seat can stand behind an unmeasured lane.
+#
+# agy joins the same keeper lane. It takes no id on the command line, so the
+# dispatch_spawn arm mints one from a print-mode turn whose JSON envelope
+# carries `conversation_id`, and every later process rejoins with
+# `--conversation <id>` - cursor-agent's callee-minted-read-back shape.
+# Measured 2026-09-03 on agy 1.1.24: the mint returned in 1.5s, the id named a
+# real db under ~/.gemini/antigravity-cli/conversations, and a fresh process
+# resumed that conversation INTERACTIVELY with its transcript restored. agy's
+# HEADLESS lane stays unmeasured and `_check_spawn_harness` refuses it by the
+# row's stance, not by absence from this tuple.
 SPAWN_HARNESSES: tuple[str, ...] = (
     "claude",
     "codex",
@@ -72,6 +83,7 @@ SPAWN_HARNESSES: tuple[str, ...] = (
     "cursor-agent",
     "pi",
     "grok",
+    "agy",
 )
 
 

@@ -148,6 +148,7 @@ def test_lane_b_spawn_wiring_names_every_wired_keeper_harness() -> None:
     assert 'harness="cursor-agent"' in source
     assert 'harness="pi"' in source
     assert 'harness="grok"' in source
+    assert 'harness="agy"' in source
 
 
 # ---------------------------------------------------------------------------
@@ -861,3 +862,100 @@ def test_lane_b_cursor_agent_refuses_a_truncated_resume_id(lane_b_home) -> None:
     assert "74db359a" in message
     assert "8 hex characters" in message
     assert "an fno session handle, not a chat id" in message
+
+
+# ---------------------------------------------------------------------------
+# agy: the second callee-minted keeper harness
+# ---------------------------------------------------------------------------
+
+def test_lane_b_agy_mints_through_a_print_mode_turn(lane_b_home, monkeypatch) -> None:
+    """agy's id is CALLEE-minted: the print-mode envelope returns it before
+    launch, and it is never fno's uuid4."""
+    _fake_keeper(monkeypatch, lane_b_home)
+    minted = "c5661b28-bcba-4690-8b2e-4a4a88541e8c"
+
+    from fno.agents.harnesses import agy
+
+    monkeypatch.setattr(agy, "create_conversation", lambda cwd, **kw: minted)
+    receipt = _lane_b_thread_spawn(name="wk-agy", harness="agy", cwd=lane_b_home)
+
+    assert receipt["session_id"] == minted
+    row = next(e for e in load_registry() if e.name == "wk-agy")
+    assert row.harness == "agy"
+    assert row.harness_session_id == minted
+
+
+def test_lane_b_agy_keeper_argv_matches_the_pane_lane_completion(
+    lane_b_home, monkeypatch
+) -> None:
+    """The keeper tail is the declared `--conversation` form plus the axes
+    build_pane_argv's agy arm appends. The two lanes host the same TUI, so a
+    disagreement here is a worker that launches differently depending on which
+    substrate asked for it."""
+    recorded = _fake_keeper(monkeypatch, lane_b_home)
+    minted = "3b0a7e21-4c55-4f0e-9a2c-8de1f4a90b77"
+
+    from fno.agents import dispatch as d
+
+    monkeypatch.setattr(
+        d, "_mint_thread_session_id", lambda harness, cwd, requested=None: minted
+    )
+    _lane_b_thread_spawn(
+        name="wk-agy-argv",
+        harness="agy",
+        cwd=lane_b_home,
+        model="gemini-3-pro",
+        effort="high",
+    )
+    argv = list(recorded["argv"])  # type: ignore[arg-type]
+    tail = argv[argv.index("--") + 1 :]
+    assert tail[:3] == ["agy", "--conversation", minted]
+    # An unattended keeper has nobody to answer a tool approval, so the bypass
+    # is not optional here.
+    assert "--dangerously-skip-permissions" in tail
+    assert tail[tail.index("--effort") + 1] == "high"
+    assert tail[tail.index("--model") + 1] == "gemini-3-pro"
+    assert "--add-dir" in tail, "the computed state-root grant rides the keeper argv"
+    assert "-p" not in tail and "--print" not in tail, (
+        "print mode exits after one turn; a keeper thread must host the TUI"
+    )
+    assert argv[argv.index("--pane-key") + 1] == minted
+
+
+def test_lane_b_agy_trusts_the_cwd_before_the_keeper_launches(
+    lane_b_home, monkeypatch
+) -> None:
+    """A folder agy does not trust puts a modal in front of the composer, and
+    the keeper has nobody to answer it. The upsert runs on the launch path, not
+    only inside the mint, so a caller-supplied resume id gets it too."""
+    _fake_keeper(monkeypatch, lane_b_home)
+    trusted: list = []
+
+    from fno.agents import mux_spawn
+
+    monkeypatch.setattr(
+        mux_spawn, "_ensure_agy_folder_trusted", lambda cwd: trusted.append(cwd) or True
+    )
+    _lane_b_thread_spawn(
+        name="wk-agy-trust",
+        harness="agy",
+        cwd=lane_b_home,
+        resume_session_id="8e2c0b41-19a7-4c3d-b0f5-6d7e2a3b9c10",
+    )
+    assert lane_b_home in trusted
+
+
+def test_lane_b_agy_refuses_a_truncated_resume_id(lane_b_home) -> None:
+    """agy resumes by EXACT id, so a partial one silently opens a different
+    conversation under a name fno believes is occupied."""
+    with pytest.raises(DispatchAskError) as caught:
+        _mint_thread_session_id("agy", lane_b_home, requested="c5661b28")
+    assert "c5661b28" in str(caught.value)
+    assert "not a full UUID" in str(caught.value)
+
+
+def test_agy_is_a_keeper_lane_harness() -> None:
+    """The row's resume forms make agy a keeper-lane harness (interactive
+    attach unsupported, resume supported), the lane pi, grok and cursor-agent
+    resolve onto."""
+    assert thread_lane("agy") == "keeper"

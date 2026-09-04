@@ -427,9 +427,12 @@ def test_dispatch_lanes_refuses_pane_only_harness_before_selection(monkeypatch):
     assert result.exit_code == 2
     assert "accepted here: claude, codex, opencode" in result.output
     # The pane sentence derives from SPAWN_HARNESSES now (x-d145), so it names
-    # the harness that was actually refused. agy is no longer that harness.
+    # the harness that was actually refused rather than a hardcoded roster.
     assert "gemini launches on --substrate pane only" in result.output
-    assert "agy" not in result.output
+    # agy appears exactly once, in the ACCEPT list it joined - never in the
+    # pane-only sentence, which is the contradiction this derivation removes.
+    assert "accepted here: " in result.output
+    assert "agy launches on --substrate pane only" not in result.output
     assert called is False
 
 

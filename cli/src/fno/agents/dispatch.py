@@ -1197,6 +1197,10 @@ def _mint_thread_session_id(
                 return _require_chat_id(requested)
             except CursorAgentSessionError as exc:
                 raise DispatchAskError(str(exc), exit_code=2) from exc
+        if harness == "agy":
+            from fno.agents.harnesses.agy import require_conversation_id
+
+            return require_conversation_id(requested)
         return requested
     if harness == "cursor-agent":
         from fno.agents.harnesses.cursor_agent import (
@@ -1208,6 +1212,16 @@ def _mint_thread_session_id(
             return create_chat(cwd)
         except CursorAgentSessionError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
+    if harness == "agy":
+        # agy has no id-only mint verb, so the id comes from one print-mode
+        # turn's JSON envelope. The turn runs in the spawn's own cwd, which is
+        # why the trust upsert has to happen before this call and not at
+        # launch: an untrusted folder puts a modal in front of the mint too.
+        from fno.agents.harnesses.agy import create_conversation
+        from fno.agents.mux_spawn import _ensure_agy_folder_trusted
+
+        _ensure_agy_folder_trusted(Path(cwd))
+        return create_conversation(cwd)
     return str(uuid.uuid4())
 
 
@@ -1369,6 +1383,44 @@ def _lane_b_thread_spawn(
                 argv = [*argv, "--model", model]
             if effort:
                 argv = [*argv, "--reasoning-effort", effort]
+        elif harness == "agy":
+            # The same axes build_pane_argv's agy arm appends. The keeper hosts
+            # the same TUI the pane does, so the two lanes must not disagree
+            # about how the worker launches. The bypass is load-bearing here:
+            # an unattended keeper has nobody to answer a tool approval.
+            from fno.agents.mux_spawn import (
+                _ensure_agy_folder_trusted,
+                effort_tokens,
+                permission_pane_tokens,
+            )
+            from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
+
+            argv = [*argv, "--dangerously-skip-permissions"]
+            if permission_mode:
+                argv = [*argv, *permission_pane_tokens("agy", permission_mode)]
+            if effort:
+                argv = [*argv, *effort_tokens("agy", effort)]
+            if model:
+                argv = [*argv, "--model", model]
+            argv = [
+                *argv,
+                *add_dir_tokens(
+                    "agy",
+                    add_dir,
+                    worker_writable_dirs(cwd),
+                    unsupported=lambda flag: (_ for _ in ()).throw(
+                        DispatchAskError(
+                            f"{flag} is not supported on the agy thread lane",
+                            exit_code=2,
+                        )
+                    ),
+                ),
+            ]
+            # A folder agy does not trust puts a modal in front of the composer,
+            # and the keeper has nobody to answer it. The mint already upserted
+            # this cwd; a caller-supplied resume id skips the mint, so the
+            # upsert has to happen on this path too.
+            _ensure_agy_folder_trusted(cwd)
 
         sock = _lane_b_keeper_socket(name)
         log_path = paths.state_dir() / "agents" / name / "keeper.log"
@@ -3178,6 +3230,92 @@ def dispatch_spawn(
             kind="created",
             name=name,
             provider="grok",
+            short_id=session_id,
+            effective_message=effective_message,
+        )
+
+    # 3b-5. agy thread spawns ride the same keeper lane. agy mints its own
+    # conversation id and adopts none from the command line, so the lane
+    # driver reads one back from a print-mode turn before the TUI launches -
+    # cursor-agent's shape. Model, effort, add-dir and the permission axis are
+    # carried because the pane arm carries all four; everything else the lane
+    # has no measured spelling for is refused by name, the pi branch's posture.
+    if harness == "agy":
+        if headless:
+            # agy's state_root_grant records the WRITE-ACCESS mechanism per
+            # lane (--add-dir on all three), never whether a lane has been
+            # run, so joining SPAWN_HARNESSES passed agy through the seam's
+            # unmeasured-stance check for headless as well. Nothing has driven
+            # `agy -p` unattended, so the refusal is stated here rather than
+            # inherited from the thread lane that was measured.
+            raise DispatchAskError(
+                "agy's headless lane is unmeasured: `agy -p` prints and exits, "
+                "and nothing has run it as an fno worker. Use --substrate "
+                "thread for a persistent worker or --substrate pane for an "
+                "attended one.",
+                exit_code=2,
+            )
+        unsupported = next(
+            (
+                flag
+                for flag, value in (
+                    ("--role", launch_role),
+                    ("--agent", agent),
+                    ("--tools", tools),
+                    ("--deny-tools", deny_tools),
+                )
+                if value
+            ),
+            None,
+        )
+        if unsupported is not None:
+            raise DispatchAskError(
+                f"{unsupported} is not supported on the agy thread lane; "
+                "drop it or use --substrate pane",
+                exit_code=2,
+            )
+        if once:
+            raise DispatchAskError(
+                "--once is not supported on the agy thread lane (it is "
+                "persistent); agy's one-shot form is `agy -p`, whose lane is "
+                "unmeasured",
+                exit_code=2,
+            )
+        receipt = _lane_b_thread_spawn(
+            name=name,
+            harness="agy",
+            cwd=cwd,
+            model=model,
+            yolo=yolo,
+            permission_mode=permission_mode,
+            add_dir=add_dir,
+            effort=effort,
+            resume_session_id=resume_session_id,
+            lock_timeout=lock_timeout,
+        )
+        session_id = receipt["session_id"]
+        if message.strip():
+            # The seed rides the keeper paste; the hint bar's shortcut prompt
+            # is agy's composer-ready paint (measured 2026-09-03 on 1.1.24,
+            # after the restored transcript finishes painting).
+            _keeper_seed_submit(
+                name=name,
+                session_id=session_id,
+                sock=Path(receipt["keeper_socket"]),
+                message=message,
+                ready_marker=b"? for shortcuts",
+            )
+        _emit_ev(
+            "agent_ask_done",
+            stage="dispatch",
+            name=name,
+            provider="agy",
+            substrate="thread",
+        )
+        return SpawnResult(
+            kind="created",
+            name=name,
+            provider="agy",
             short_id=session_id,
             effective_message=effective_message,
         )
