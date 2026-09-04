@@ -717,11 +717,11 @@ def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
 
 
 def read_archive_entries() -> list[dict]:
-    """The archived nodes, best-effort: an absent or unreadable archive is [].
+    """The archived nodes, best-effort: an absent archive is [].
 
-    One read of the terminal-node archive that lives beside the working graph.
-    Callers that may test many ids against it should read once and pass the
-    list to :func:`resolve_node_with_archive`.
+    One read of the terminal-node archive beside the working graph. Callers
+    that may test many ids against it read once and pass the list to
+    :func:`resolve_node_with_archive`.
     """
     from fno.paths import graph_archive_json
 
@@ -736,8 +736,7 @@ def resolve_node_with_archive(node_id: str, archived: list[dict]) -> Optional[di
 
     The read-only half of `backlog get`'s miss path: a node the sweep archived
     still resolves, stamped ``_archived`` so a consumer can tell. Soft by
-    contract - the caller read ``archived`` through :func:`read_archive_entries`,
-    which degrades to [] rather than raising.
+    contract - ``archived`` comes from :func:`read_archive_entries`.
     """
     from fno.graph.fuzzy import resolve_node
 

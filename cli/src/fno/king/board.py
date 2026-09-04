@@ -862,14 +862,10 @@ def _read_claimed_nodes(claims: SourceRead) -> tuple[SourceRead, set[str], list[
     because `fno backlog ready` has already removed exactly the nodes a wedged
     worker is holding.
 
-    The lookup reads the graph in process instead of shelling out one
-    `fno backlog get` per claim. Measured 2026-09-03: 13 claims cost 30.8s
-    through the per-claim subprocess loop (2.37s per call) against this read's
-    30s stop-gate ceiling, while the same graph read in process is one file
-    read. `fno backlog get <id>` remains the reproducible hand command for any
-    row here; this resolves ids through the same exact tiers
-    (`fno.graph.fuzzy.resolve_node`) plus the archive read-through `cmd_get`
-    applies, so a row is identical either way.
+    Measured 2026-09-03: 13 per-claim `fno backlog get` subprocesses cost
+    30.8s against this read's 30s stop-gate ceiling, so the lookup reads the
+    graph in process through the same tiers `cmd_get` applies. `fno backlog
+    get <id>` stays the reproducible hand command for any row here.
     """
     if not claims.ok:
         return SourceRead(error=claims.error), set(), []
@@ -898,9 +894,7 @@ def _read_claimed_nodes(claims: SourceRead) -> tuple[SourceRead, set[str], list[
     try:
         entries = read_graph_strict(paths.graph_json())
     except GraphUnreadableError as exc:
-        # One unreadable node is not an unreadable queue: the other claims
-        # still answer. It is reported so a silent gap never reads as a
-        # clean lane.
+        # One unreadable node is not an unreadable queue: degrade loudly.
         return (
             SourceRead(payload=[]),
             set(),
@@ -914,9 +908,7 @@ def _read_claimed_nodes(claims: SourceRead) -> tuple[SourceRead, set[str], list[
         match = resolve_node(node_id, entries)
         if match.kind == "exact":
             return dict(match.candidates[0])
-        # The archive read is paid once per board read, not once per miss: a
-        # burst of absent-from-graph claims (a leak, exactly when the board is
-        # most needed) must not turn into one file read per claim.
+        # The archive read is paid once per board read, not once per miss.
         if archived is None:
             archived = read_archive_entries()
         return resolve_node_with_archive(node_id, archived)
@@ -944,18 +936,13 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
 
     The sources are independent shellouts, so they run concurrently: measured
     2026-09-03, the sequential collect summed to the stop-gate ceiling under
-    ordinary machine load even with every single source individually healthy
-    (needs alone swung 6.3s to 9.9s between runs). The wall clock is now the
-    slowest source, not the sum. The one dependency chain (claims ->
-    claimed-nodes -> holder activity) runs on the calling thread, waiting on
-    the pool's claims future rather than inside it.
+    ordinary load with every source individually healthy. The wall clock is
+    now the slowest source, not the sum. The one dependency chain (claims ->
+    claimed-nodes -> holder activity) runs on the calling thread: a pool task
+    that waits on a sibling future can deadlock when every worker is busy
+    waiting on a queued future, and running it here overlaps the pool's
+    slowest source, so the wall clock is unchanged.
     """
-    def _fetch_claims() -> SourceRead:
-        return _run_json(
-            [*_fno(), "agents", "claim", "list", "-J", "--include-stale", "--prefix", "node:"],
-            timeout=timeout,
-        )
-
     def _run(fn, *args, on_error=None):
         try:
             return fn(*args)
@@ -968,11 +955,15 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
 
     with ThreadPoolExecutor(max_workers=6) as pool:
         undispatched_f = pool.submit(_run, _read_undispatched, timeout)
-        claims_f = pool.submit(_run, _fetch_claims)
+        claims_f = pool.submit(
+            _run,
+            lambda: _run_json(
+                [*_fno(), "agents", "claim", "list", "-J", "--include-stale", "--prefix", "node:"],
+                timeout=timeout,
+            ),
+        )
         # _read_prs returns (SourceRead, SourceRead, warnings); its error
-        # fallback must keep that shape or the unpack below crashes the
-        # collect. A failed read doubles for both PR queues, matching
-        # _read_prs's own failure return.
+        # fallback must keep that shape or the unpack crashes the collect.
         prs_f = pool.submit(
             _run,
             _read_prs,
@@ -994,11 +985,6 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
             lambda: _run_json([*_fno(), "agents", "needs", "--json"], timeout=timeout),
         )
 
-    # The claims chain runs on THIS thread, waiting on the claims future. A
-    # pool task that waits on a sibling future of the same pool can deadlock
-    # when every worker is busy waiting on another queued future, and the main
-    # thread pays no concurrency cost here: the chain's ~4s overlaps the pool's
-    # slowest source, so the wall clock is unchanged.
     claims = _run(lambda: claims_f.result())
     try:
         claimed_nodes, holders, claimed_warnings = _read_claimed_nodes(claims)
@@ -1076,12 +1062,9 @@ def autonomous_merge_enabled() -> bool:
 
 
 #: Per-source timeout. Must sit UNDER the 30s stop-gate ceiling
-#: (loopcheck.rs STOPGATE_READ_TIMEOUT): the ceiling exists so a hung source
-#: can never outlive a stop fire, and a 60s inner cap admitted exactly that -
-#: one hung source reproduced the whole "king board unreadable" symptom the
-#: fast collect exists to prevent, where a 25s cap degrades it to an
-#: unreadable-queue warning with the payload intact. Raise the outer ceiling
-#: first if this ever needs to grow.
+#: (loopcheck.rs STOPGATE_READ_TIMEOUT): a hung source then degrades to an
+#: unreadable-queue warning with the payload intact instead of outliving the
+#: stop fire as "king board unreadable". Raise the outer ceiling first.
 DEFAULT_BOARD_TIMEOUT = 25
 
 
