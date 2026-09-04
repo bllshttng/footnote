@@ -2587,11 +2587,19 @@ class TestTickRecordsAndDeadline:
             return value
 
         real_lane_armed = watchdog.lane_armed
-        monkeypatch.setattr(
-            watchdog,
-            "lane_armed",
-            lambda s: _stage(f"lane_armed={real_lane_armed(s)}", real_lane_armed(s)),
-        )
+
+        def _armed_spy(s):
+            armed = real_lane_armed(s)
+            return _stage(
+                f"lane_armed={armed} type={type(s).__name__} "
+                f"wd={getattr(s.recovery, 'watchdog', '<none>')!r} "
+                f"rec={getattr(s.recovery, 'enabled', '<none>')!r} "
+                f"auto={getattr(s.autonomy, 'enabled', '<none>')!r} "
+                f"same={s is settings}",
+                armed,
+            )
+
+        monkeypatch.setattr(watchdog, "lane_armed", _armed_spy)
         monkeypatch.setattr(
             uw,
             "build_report",
