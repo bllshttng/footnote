@@ -1464,8 +1464,7 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
     };
     let mut counts: std::collections::BTreeMap<&'static str, usize> =
         std::collections::BTreeMap::new();
-    let bump = |counts: &mut std::collections::BTreeMap<&'static str, usize>,
-                    key: &'static str| {
+    let bump = |counts: &mut std::collections::BTreeMap<&'static str, usize>, key: &'static str| {
         *counts.entry(key).or_default() += 1;
     };
     let mut unknown: Vec<(String, String, String)> = Vec::new();
@@ -1767,10 +1766,7 @@ mod tests {
 
     #[test]
     fn a_fmt_check_whose_log_named_no_path_sweeps_both_crates() {
-        let f = classify(
-            &ctx("cargo fmt --check (pinned)", "log unavailable"),
-            false,
-        );
+        let f = classify(&ctx("cargo fmt --check (pinned)", "log unavailable"), false);
         assert_eq!(f.signature, "rustfmt-drift");
         match f.remedy {
             Remedy::Auto { run, .. } => assert_eq!(run.len(), 2, "{run:?}"),
@@ -1786,10 +1782,7 @@ mod tests {
             "2026-09-03T07:15:29.7310931Z    --> src/fno/king/board.py:886:21\n",
             "2026-09-03T07:15:29.7322711Z Found 1 error.\n",
         ));
-        let f = classify(
-            &ctx("Python static correctness (495 sources)", &log),
-            false,
-        );
+        let f = classify(&ctx("Python static correctness (495 sources)", &log), false);
         assert_eq!(f.signature, "ruff-lint");
         match f.remedy {
             Remedy::Auto { run, verify } => {
