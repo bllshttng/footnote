@@ -3465,14 +3465,75 @@ mod tests {
     }
 
     #[test]
+    fn pid_dies_with_session_is_a_denylist_of_measured_harnesses() {
+        // AC4-EDGE. Only a harness MEASURED to share one host process is
+        // denied. Unknown and absent keep today's behavior on purpose: 1808 of
+        // 3404 claim records on the filing machine carried no harness, the
+        // native daemon's own long-lived claims among them, and an allow-list
+        // would have stripped TTL extension from every one of them.
+        assert!(!pid_dies_with_session(Some("codex")));
+        assert!(!pid_dies_with_session(Some("  CODEX  ")));
+        for forks_per_session in [
+            Some("claude"),
+            Some("gemini"),
+            Some("opencode"),
+            Some("agy"),
+            Some("unknown"),
+            Some(""),
+            None,
+        ] {
+            assert!(
+                pid_dies_with_session(forks_per_session),
+                "{forks_per_session:?} is unmeasured and must keep today's behavior"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_host_harness_stales_an_expired_prover_claim_by_name() {
+        // AC2-HP, the specimen: node:x-fa8b, expired 3h45m earlier, stamped
+        // session-prover, its pid answering as `codex app-server
+        // --remote-control` up 9h20m. The record is built as a PRE-FIX binary
+        // wrote it, because the fix must reach records already on disk.
+        let me = std::process::id() as i32;
+        let now = now_ms();
+        let host = hostname();
+        let mut codex = record(me, now, Some(now - 1), &host);
+        codex.pid_provenance = Some("session-prover".into());
+        codex.harness = Some("codex".into());
+        // By NAME, both halves. `!= Live` would also pass for a missing pid.
+        assert_eq!(
+            classify_with_basis(&codex, Some(now), &|pid| probe_pid(pid)),
+            (ClaimState::Stale, basis::TTL_EXPIRED)
+        );
+
+        // AC3-HP, the must-not-break twin: identical but for the harness. A
+        // suspended claude session keeps its claim, or this fix is the
+        // over-reap wearing the specimen's clothes.
+        let mut claude = record(me, now, Some(now - 1), &host);
+        claude.pid_provenance = Some("session-prover".into());
+        claude.harness = Some("claude".into());
+        assert_eq!(classify(&claude, Some(now)), ClaimState::Live);
+    }
+
+    #[test]
     fn make_claim_stamps_pid_provenance_by_pid_origin() {
         let td = TempDir::new().unwrap();
-        // A defaulted pid is the claimant itself: the strongest provenance.
+        // A defaulted pid is the claimant itself: the strongest provenance -
+        // but only under a harness that forks per session. The suite's own
+        // ambient harness decides which, so the expectation is derived rather
+        // than hardcoded; hardcoding it makes this test pass under claude and
+        // fail under codex, which is a flake keyed to who ran it.
         let own = match acquire("session:prov", "pty:me", opts_in(&td)) {
             AcquireOutcome::Acquired(r) => r,
             other => panic!("{other:?}"),
         };
-        assert_eq!(own.pid_provenance.as_deref(), Some("session-prover"));
+        let expected = if pid_dies_with_session(own.harness.as_deref()) {
+            "session-prover"
+        } else {
+            "ambient"
+        };
+        assert_eq!(own.pid_provenance.as_deref(), Some(expected));
         // An explicitly passed pid is caller-supplied and unverifiable here:
         // ambient, so the hybrid arm will not extend an expired lease for it.
         let mut o = opts_in(&td);

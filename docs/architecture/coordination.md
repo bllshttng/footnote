@@ -234,6 +234,8 @@ differ from the per-walker `walker:` claim:
   if the durable pid is uncapturable, no `--pid` is recorded and the claim is
   TTL-only exactly as before. A crashed session's lock self-heals when its pid
   dies and the TTL expires.
+- **A harness whose sessions share one host process never earns the prover
+  stamp.** The hybrid arm above rests on a pid that dies when the session dies. That is true only when the harness forks one binary per session. codex does not: its nearest harness ancestor is a shared `codex app-server` that hosts every session on the machine and outlives all of them, so a live reading there proves the multiplexer is up and says nothing about the session. Measured 2026-09-03: a codex claim read LIVE 3h45m past its TTL while its session had been dead five hours, and `fno agents claim reap` could not touch it. Such a claim now stamps `ambient` at write time, and `classify` refuses to extend an expired lease for a record whose own `harness` names a shared host, which is what reaches records already on disk. The list is a deny-list in `pid_dies_with_session` (`crates/fno-agents/src/claims.rs`, mirrored in `cli/src/fno/claims/session_pid.py`), and adding a name to it costs a measurement: run one session, walk to its harness ancestor, end the session, and check whether that pid is still alive. An unknown or unmeasured harness keeps the extension, because most records carry no harness at all and denying them would let a peer reclaim a suspended session's claim.
 
 Two enforcement points:
 
