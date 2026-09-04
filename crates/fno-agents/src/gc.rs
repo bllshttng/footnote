@@ -490,6 +490,32 @@ pub(crate) fn row_transcript(
     })
 }
 
+/// WHY the sweep never asked a kept row's transcript tail, for the `not
+/// probed:` verdict. Its predecessor string read as "tried and failed" and
+/// produced a wrong root cause; the attempted-and-failed verdict is `tail:
+/// unknown`, and this answers the different question, naming the gate that
+/// actually held the row.
+pub(crate) fn not_probed_reason(
+    e: &crate::state::RegistryEntry,
+    is_live: bool,
+    idle: Option<i64>,
+    grace_secs: i64,
+) -> &'static str {
+    if is_live {
+        "live and advancing"
+    } else if idle.is_none() {
+        "no idle signal"
+    } else if idle.is_some_and(|secs| secs <= grace_secs) {
+        "within grace"
+    } else if e.pid.is_some() {
+        "has pid"
+    } else {
+        // Unreachable through the sweep: a pid-less row past grace is
+        // escalated and its arm is `tail: ...`, never this one.
+        "past grace"
+    }
+}
+
 /// Decide the GC action for one row. Pure: no clock, no I/O.
 ///
 /// The reap condition is all three of: (1) terminal status OR pid confirmed dead

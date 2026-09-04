@@ -2573,6 +2573,9 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         row: crate::gc::GcRow,
         id: String,
         grace_secs: i64,
+        /// The idle reading that fed the dormant gate, kept so a row the gate
+        /// did not open for can be told WHY it was never probed.
+        idle: Option<i64>,
         /// The handle this row escalated to the probe, when the stat gate could
         /// not answer its liveness question from disk alone.
         dormant_handle: Option<String>,
@@ -2686,6 +2689,7 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
         // shortfall. Removing it means every escalated row is judged this
         // sweep, and the count spent is reported.
         let mut dormant_handle = None;
+        let mut idle = None;
         // Every pid-less row gets its tail read. The two identity clauses this
         // gate used to demand (a short_id the harness issued, not-a-one-shot)
         // said nothing about whether the tail is worth reading, and they held
@@ -2711,10 +2715,9 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
             // is not here: growth since the last sweep leaves an mtime seconds
             // old, and such a row never reaches this branch at all. See
             // `a_live_row_with_a_growing_transcript_is_never_probed_by_the_dormant_gate`.
-            if let Some(idle) = row_idle_secs(e, now, transcript.as_deref()) {
-                if idle > grace_secs {
-                    dormant_handle = Some(crate::gc::row_handle(e));
-                }
+            idle = row_idle_secs(e, now, transcript.as_deref());
+            if idle.map_or(false, |secs| secs > grace_secs) {
+                dormant_handle = Some(crate::gc::row_handle(e));
             }
         }
         // Filled in by pass two from the batched probe. A row the stat gate
@@ -2775,6 +2778,7 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
             row,
             id,
             grace_secs,
+            idle,
             dormant_handle,
         });
     }
@@ -2802,6 +2806,7 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
             mut row,
             id,
             grace_secs,
+            idle,
             dormant_handle,
         } = p;
         // Only a POSITIVE `done` reading evicts. A handle the batch could not
@@ -2901,7 +2906,23 @@ pub(crate) fn gc_sweep_impl_with_node_cascade(
                                 id,
                                 match tail_state {
                                     Some(state) => format!("tail: {state}"),
-                                    None => "no tail read".to_string(),
+                                    // The probe RAN for this handle and answered
+                                    // nothing: the attempted-and-failed verdict,
+                                    // and still a keep - only `done` evicts.
+                                    None if dormant_handle.is_some() => "tail: unknown".to_string(),
+                                    // The probe was NEVER ASKED. Name the gate
+                                    // that held it: the verdict this arm used
+                                    // to print was heard as read-and-failed and
+                                    // produced a wrong root cause.
+                                    None => format!(
+                                        "not probed: {}",
+                                        crate::gc::not_probed_reason(
+                                            e,
+                                            row.is_live,
+                                            idle,
+                                            grace_secs
+                                        )
+                                    ),
                                 },
                             ));
                         }
