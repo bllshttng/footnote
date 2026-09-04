@@ -80,7 +80,7 @@ def _collect_event_types() -> list[str]:
     # Rust fno-agents supervisor. Event types whose ALL sources are within this
     # set were added to events-schema.yaml as documentation for Rust-emitted
     # events and are never emitted by the Python fno pipeline.
-    rust_infra_sources = frozenset(["daemon", "subagent", "loop"])
+    rust_infra_sources = frozenset(["daemon", "subagent", "loop", "pr-heal"])
 
     result = []
     for entry in SCHEMA.get("event_types", []):

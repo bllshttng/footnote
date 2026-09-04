@@ -37,7 +37,7 @@ envelope:
       # daemon.rs). Per-agent worker sources (worker:<id>, stream-worker:<id>) are
       # pattern sources, validated by both the Python and bash validators via the
       # `patterns` list below (previously only the parity-script layer checked them).
-      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config]
+      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config, pr-heal]
       patterns:
         - '^(worker|stream-worker):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
@@ -4187,7 +4187,7 @@ event_types:
 
   - name: pr_heal_tick
     description: "CI heal drive loop (x-974c): one row per pr-heal --all --apply invocation carrying the per-cycle counts. Emitted even when every PR is skipped, so a quiet cycle cannot read as a loop that never ran. Rust-emitted into the global journal; the tick's own phase only gates the invocation."
-    sources: [pr-heal]
+    sources: [pr-heal, daemon]
     data:
       required: [seen, unknown, dry_run]
       properties:
