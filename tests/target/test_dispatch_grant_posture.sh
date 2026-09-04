@@ -110,6 +110,8 @@ dispatch_out="$(bash "$DISPATCH" --here --dry-run --allow-merge "$NODE_ID" 2>&1)
 [[ ! -s "$CALL_LOG" ]]
 
 normalize_out="$(cd "$PROJECT" && env PATH="/usr/bin:/bin" bash "$NORMALIZE" --input "$NODE_ID")" || true
-[[ "$(field "$normalize_out" allow_merge)" == 0 ]]
+# AC8 fail-closed: with fno absent the family ask refuses the whole normalize
+# loud (no allow_merge field at all); the one thing it must never do is grant.
+[[ "$(field "$normalize_out" allow_merge)" != 1 ]]
 
 echo "PASS: dispatch and normalize resolve grant posture from config and fail closed"
