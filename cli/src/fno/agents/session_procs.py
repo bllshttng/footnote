@@ -84,10 +84,10 @@ def bg_socket_pid_map(
 def roster_pid_map() -> Optional[dict[str, Optional[int]]]:
     """The claude daemon roster as ``{8-hex jobId: host pid}``, or None when unreadable.
 
-    The SECOND daemon-side oracle for a bg row the rv farm missed: a short_id
-    in neither map is a dead session (x-a457); a roster pid is the PTY HOST
-    hosting it. Missing file: {}; other failure: None. A held worker with no
-    usable pid maps to None - the session exists, its key is not absence.
+    The SECOND daemon-side oracle for a bg row the rv farm missed: a short_id in
+    neither map is a dead session (x-a457); a roster pid is the PTY HOST hosting
+    it. Missing file: {}; other failure: None. A held worker with no usable pid
+    maps to None - the session exists, its key is not absence.
     """
     from fno.agents.spawn_gate import _roster_path
 
