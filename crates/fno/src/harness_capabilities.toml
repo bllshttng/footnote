@@ -563,6 +563,14 @@ status_pattern = ""
 [harness.opencode.features.spawn]
 state = "native"
 
+# MEASURED 2026-09-03 on a live daemon-owned session: the row ships no
+# native attach verb (interactive_attach above reads unsupported) and a real
+# `fno agents attach` still landed in the session's own pane - "thread pane
+# -> <name>", exit 0 - through the daemon-kept lane. Reachability yes, verb
+# inventory no: the exact split this key exists to record.
+[harness.opencode.features.attach]
+state = "native"
+
 # pi (@earendil-works/pi-coding-agent 0.84.2), a DUAL-LANE harness. Which lane
 # a session gets is a choice fno makes at exec, never a property of pi:
 #
