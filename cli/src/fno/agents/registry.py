@@ -2273,6 +2273,7 @@ def heal_mux_ref(
     harness: str,
     mux_session: str,
     pane_id: int,
+    session_id: Optional[str] = None,
     registry_path: Optional[Path] = None,
 ) -> Optional[tuple[Optional[dict], dict]]:
     """Re-point a spawned worker's row at the pane it actually runs in.
@@ -2285,8 +2286,14 @@ def heal_mux_ref(
     environment - ``FNO_SESSION`` and ``FNO_PANE`` are in every pane child's
     env (pty.rs) - so the session-start restamp path, which already re-points
     ``harness_session_id`` keyed on the row NAME, also heals the mux ref.
-    Keyed on the name for the same reason the restamp is: the one identity a
-    harness cannot re-mint.
+
+    The target row prefers ``session_id``: the row whose
+    ``harness_session_id`` names THIS session is the row this worker moved,
+    which matters when the id restamp BRANCHED (a reachable predecessor kept
+    its row and this session minted its own) - keying on the name alone
+    would heal the predecessor and strand the successor paneless. With no id
+    (or no row carrying it yet) the name is the key, for the same reason the
+    restamp keys on it: the one identity a harness cannot re-mint.
 
     ``mux`` is written and ``short_id`` cleared in ONE ``update_registry``
     transaction: ``_validate_single_live_ref`` enforces mux XOR worker XOR bg
@@ -2311,44 +2318,46 @@ def heal_mux_ref(
         return None
 
     new_mux = {"session": mux_session, "pane_id": pane_id}
+
+    def _find(entries: list[AgentEntry]) -> Optional[AgentEntry]:
+        if session_id:
+            by_id = next(
+                (
+                    e
+                    for e in entries
+                    if e.harness == harness and e.harness_session_id == session_id
+                ),
+                None,
+            )
+            if by_id is not None:
+                return by_id
+        return next(
+            (
+                e
+                for e in entries
+                if e.harness == harness and (e.name == name or name in e.aliases)
+            ),
+            None,
+        )
+
     # Decide from a pre-read so the idempotent no-op never rewrites the file
     # byte-for-byte (the same rule record_session_observation holds). The
     # updater below re-decides under the lock, so a concurrent writer landing
     # between the two reads cannot double-write.
-    current = load_registry(path=registry_path)
-    row = next(
-        (
-            e
-            for e in current
-            if (e.name == name or name in e.aliases) and e.harness == harness
-        ),
-        None,
-    )
+    row = _find(load_registry(path=registry_path))
     if row is None or row.mux == new_mux:
         return None  # no such row, or already on the pair: no write, no event
     before = dict(row.mux) if row.mux else None
 
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
-        for entry in entries:
-            if (
-                entry.name != name and name not in entry.aliases
-            ) or entry.harness != harness:
-                continue
-            if entry.mux != new_mux:
-                entry.mux = dict(new_mux)
-                entry.short_id = ""
-            return entries
+        target = _find(entries)
+        if target is not None and target.mux != new_mux:
+            target.mux = dict(new_mux)
+            target.short_id = ""
         return entries
 
     persisted = update_registry(_updater, path=registry_path)
-    healed = next(
-        (
-            e
-            for e in persisted
-            if (e.name == name or name in e.aliases) and e.harness == harness
-        ),
-        None,
-    )
+    healed = _find(persisted)
     if healed is None or healed.mux != new_mux:
         # The write did not land (or a concurrent writer replaced the row
         # inside the lock cycle): report nothing rather than a false success.

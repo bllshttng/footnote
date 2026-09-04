@@ -10868,28 +10868,34 @@ impl Core {
                     // (observed live 2026-08-12 - an exited codex row at a
                     // lower index won the bind, and the live claude worker
                     // rendered in the watch-only appendix marked exited). The
-                    // bind prefers a non-exited row; the appendix below still
-                    // renders the loser. Two rows both live (or both exited)
-                    // on one id stay first-match: settling those needs a
+                    // bind is a total order - live mux, live attach, any mux,
+                    // any attach - so a live row of EITHER kind outranks an
+                    // exited one, and the appendix below still renders the
+                    // loser. Two rows both live (or both exited) within one
+                    // kind stay first-match: settling those needs a
                     // generation token on the mux ref, a schema bump.
                     let mux_match = |a: &RegistryAgent| matches!(&a.mux, Some((sess, pane)) if sess == &self.session_name && *pane == pid);
+                    let attach_match = |a: &RegistryAgent| {
+                        a.mux.is_none()
+                            && (a
+                                .attach_id
+                                .as_deref()
+                                .and_then(|id| self.attached.get(id))
+                                .copied()
+                                == Some(pid)
+                                || self.worker_pane_for_agent(a) == Some(pid))
+                    };
                     let matched = self
                         .agents
                         .iter()
                         .position(|a| mux_match(a) && !a.exited)
-                        .or_else(|| self.agents.iter().position(mux_match))
                         .or_else(|| {
-                            self.agents.iter().position(|a| {
-                                a.mux.is_none()
-                                    && (a
-                                        .attach_id
-                                        .as_deref()
-                                        .and_then(|id| self.attached.get(id))
-                                        .copied()
-                                        == Some(pid)
-                                        || self.worker_pane_for_agent(a) == Some(pid))
-                            })
-                        });
+                            self.agents
+                                .iter()
+                                .position(|a| attach_match(a) && !a.exited)
+                        })
+                        .or_else(|| self.agents.iter().position(mux_match))
+                        .or_else(|| self.agents.iter().position(attach_match));
                     // One lookup: liveness AND the bare-pane label read the same
                     // entry (a tree leaf reaped from `panes` is dying, so it
                     // forces `exited` - the fact-beats-report rule the old join
@@ -24740,10 +24746,14 @@ mod tests {
     fn agent_rows_attach_rows_still_bind_when_no_mux_row_matches() {
         // x-0090's attach-map reconciliation must survive the live-preference
         // reordering: a paneless bg row whose attach map names this pane
-        // binds it when no mux row claims the id.
+        // binds it when no mux row claims the id - AND a LIVE attach row
+        // outranks an EXITED mux row on the same recycled id (the total
+        // order: live mux, live attach, any mux, any attach).
         let (mut core, _c, p1, _p2, _rx) = seen_test_core();
         core.attached.insert("attach-1".into(), p1);
-        core.agents = vec![bg_row("bg-mapped", "/tmp/seen", Some("attach-1"))];
+        let mut stale = agent_in("test", p1, None, true);
+        stale.name = "exited-older".into();
+        core.agents = vec![stale, bg_row("bg-mapped", "/tmp/seen", Some("attach-1"))];
         let rows = core.agent_rows();
         let mapped = rows
             .iter()
@@ -24752,7 +24762,7 @@ mod tests {
         assert_eq!(
             mapped.pane_id,
             Some(p1),
-            "the attach-map row still binds the pane"
+            "the live attach row binds the pane over the exited mux row"
         );
     }
 

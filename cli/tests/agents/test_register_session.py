@@ -1327,6 +1327,26 @@ def test_register_verb_refuses_when_fno_agent_self_row_exists(tmp_path: Path, mo
     assert names == ["x-f75e-mux-chrome"], names
 
 
+def test_register_verb_refuses_in_the_row_pending_window(tmp_path: Path, monkeypatch) -> None:
+    """x-0345 review: the row-pending marker names the row the spawner is
+    about to write, so /fno-me in that window refuses too - not just when
+    the row already exists."""
+    use_tmpdir(monkeypatch, tmp_path)
+    for m in _MARKERS:
+        monkeypatch.delenv(m, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "beef1111-2222-3333-4444-555566667777")
+    monkeypatch.setenv("FNO_AGENT_SELF", "t-pending-worker")
+    monkeypatch.setenv("FNO_AGENT_ROW_PENDING", "t-pending-worker")
+    from typer.testing import CliRunner
+
+    from fno.agents.cli import agents_app
+    from fno.agents.registry import load_registry
+
+    result = CliRunner().invoke(agents_app, ["register"])
+    assert result.exit_code == 2, result.output
+    assert load_registry() == [], "a refused pending-window register wrote a row"
+
+
 def test_register_verb_allows_fno_agent_self_without_a_row(tmp_path: Path, monkeypatch) -> None:
     """The guard keys on an EXISTING row: a spawned worker whose row was never
     written (the FNO_AGENT_ROW_PENDING race) can still self-register."""

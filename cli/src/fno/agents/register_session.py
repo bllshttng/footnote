@@ -160,25 +160,32 @@ def _mux_pair_from_env(env: "Optional[dict[str, str]]" = None) -> Optional[tuple
     return session, pane
 
 
-def _heal_own_mux_ref(agent_self: str, harness: str) -> None:
+def _heal_own_mux_ref(agent_self: str, harness: str, session_id: str) -> None:
     """x-0345 W2 (identity OUT): heal this worker's row to the pane it runs in.
 
-    Runs inside the fail-open restamp path, before the per-harness arms (the
-    claude arm returns early) and independent of the id restamp: a resumed
-    pane keeps its uuid but gets a NEW pane, so "id already current" must
-    not skip the pane heal. Every door that can put a spawned worker on a
-    pane routes through here - resume, a pasted `--print-command` line, a
-    hand-written `mux pane run` - because the hook runs INSIDE the pane
-    rather than beside it. The success event is emitted only on a verified
-    write (heal_mux_ref confirms the persisted row); a swallowed failure
-    leaves `session_pane_rebound_failed` on the event log.
+    Runs inside the fail-open restamp path, AFTER the id observation so the
+    heal targets the row that names THIS session - the classification can
+    branch (a reachable predecessor keeps its row, this session mints its
+    own), and keying on the name alone would heal the predecessor while the
+    successor stays paneless. `heal_mux_ref` prefers the row whose
+    harness_session_id is `session_id` and falls back to the name. Every
+    door that can put a spawned worker on a pane routes through here -
+    resume, a pasted `--print-command` line, a hand-written `mux pane run` -
+    because the hook runs INSIDE the pane rather than beside it. The success
+    event is emitted only on a verified write (heal_mux_ref confirms the
+    persisted row); a swallowed failure leaves
+    `session_pane_rebound_failed` on the event log.
     """
     pair = _mux_pair_from_env()
     if pair is None:
         return
     try:
         moved = heal_mux_ref(
-            name=agent_self, harness=harness, mux_session=pair[0], pane_id=pair[1]
+            name=agent_self,
+            harness=harness,
+            mux_session=pair[0],
+            pane_id=pair[1],
+            session_id=session_id,
         )
     except Exception as exc:  # fail-open: never block session start (AC7-ERR)
         events.emit(
@@ -230,12 +237,6 @@ def _restamp(agent_self: str, harness: str, session_id: str, source: str = "") -
     perfectly healthy. The wait is bounded and still fail-soft: exhausting it
     returns 0 exactly as a genuine no-row miss always did.
     """
-    # x-0345 W2 (identity OUT): heal the row's pane ref from the hosting pair
-    # this session reads from its own env, before the per-harness arms (the
-    # claude arm returns early) and independent of the id restamp - a resumed
-    # pane keeps its uuid but gets a NEW pane, so an id that is already
-    # current must not skip the pane heal.
-    _heal_own_mux_ref(agent_self, harness)
     # Only the pane substrate writes its row after the child starts, and it says
     # so by name. Every other spawn either has its row already or never gets one -
     # a headless one-shot sets FNO_AGENT_SELF and deliberately has no row, so
@@ -289,6 +290,11 @@ def _restamp(agent_self: str, harness: str, session_id: str, source: str = "") -
                         outcome,
                         reading,
                     )
+                    # x-0345 W2 (identity OUT): heal the row's pane ref from
+                    # the hosting pair this session reads from its own env -
+                    # AFTER the id observation, so a branched session heals
+                    # its OWN row, not the predecessor's.
+                    _heal_own_mux_ref(agent_self, harness, session_id)
                     return 0
             else:
                 expected_predecessor_session_id, predecessor_reachable = (
@@ -341,6 +347,10 @@ def _restamp(agent_self: str, harness: str, session_id: str, source: str = "") -
             f"register_session: restamped {entry.name} -> {session_id}",
             file=sys.stderr,
         )
+    # x-0345 W2: the non-claude lineage path heals its pane ref here, after
+    # its restamp, for the same branched-row reason the claude arm heals
+    # inside its own arm.
+    _heal_own_mux_ref(agent_self, harness, session_id)
     return 0
 
 

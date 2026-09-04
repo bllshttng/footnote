@@ -3930,7 +3930,11 @@ def cmd_register(
     if self_name:
         from fno.agents.registry import load_registry
 
-        if any(row.name == self_name for row in load_registry()):
+        # The row-pending marker names the row being written just after the
+        # pane starts; refusing on it too closes the seconds-wide window
+        # where /fno-me would still mint the duplicate ahead of the spawner.
+        pending = os.environ.get("FNO_AGENT_ROW_PENDING") == self_name
+        if pending or any(row.name == self_name for row in load_registry()):
             sys.stderr.write(
                 f"cannot register: this session already IS mesh worker {self_name!r} "
                 "(FNO_AGENT_SELF). Its row exists and the session-start restamp "

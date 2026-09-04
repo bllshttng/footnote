@@ -2364,8 +2364,14 @@ fn mesh_identity_assignments(
     harness: &str,
     fno_id: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    let mut pairs: Vec<(&str, &str)> =
-        vec![("FNO_AGENT_SELF", name), ("FNO_AGENT_HARNESS", harness)];
+    // An empty harness or fno_id is OPTIONAL provenance (a degenerate row
+    // can carry neither field) and is omitted, not written as an empty
+    // assignment; an empty NAME is the one hard error - the wrapper exists
+    // to carry it.
+    let mut pairs: Vec<(&str, &str)> = vec![("FNO_AGENT_SELF", name)];
+    if !harness.is_empty() {
+        pairs.push(("FNO_AGENT_HARNESS", harness));
+    }
     if let Some(id) = fno_id.filter(|id| !id.is_empty()) {
         pairs.push(("FNO_NODE", id));
     }
@@ -6332,11 +6338,14 @@ mod tests {
         assert!(mesh_identity_assignments("bad=name", "claude", None).is_err());
         assert!(mesh_identity_assignments("bad\nname", "claude", None).is_err());
         assert!(mesh_identity_assignments("", "claude", None).is_err());
-        assert!(mesh_identity_assignments("ok", "", None).is_err());
         assert!(mesh_identity_assignments("ok", "c=l", None).is_err());
-        // An empty fno_id is optional provenance, not an error: it is dropped.
+        // An empty harness or fno_id is optional provenance, not an error:
+        // it is omitted (a degenerate row must still print/launch carrying
+        // its name), never written as an empty assignment.
         let a = mesh_identity_assignments("ok", "claude", Some("")).unwrap();
         assert_eq!(a, vec!["FNO_AGENT_SELF=ok", "FNO_AGENT_HARNESS=claude"]);
+        let b = mesh_identity_assignments("ok", "", None).unwrap();
+        assert_eq!(b, vec!["FNO_AGENT_SELF=ok"]);
     }
 
     #[test]
