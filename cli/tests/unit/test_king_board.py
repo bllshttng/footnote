@@ -86,6 +86,7 @@ def test_scope_ids_filter_every_node_bearing_queue_and_report_rejections():
             ]
         ),
         claimed_nodes=_ok([_node("in-held"), _node("out-held")]),
+        pr_nodes=_ok([_pr_node("in-pr"), _pr_node("out-pr")]),
         needs=_ok(
             [
                 {"kind": "unreachable", "name": "inside", "node": "in-ready"},
@@ -97,12 +98,13 @@ def test_scope_ids_filter_every_node_bearing_queue_and_report_rejections():
     board = build_board(
         inputs,
         crown_scope="x-root",
-        scope_ids={"in-ready", "in-held", "in-stale"},
+        scope_ids={"in-ready", "in-held", "in-stale", "in-pr"},
     )
 
     assert [r["id"] for r in _queue(board, "undispatched")["rows"]] == ["in-ready"]
     assert _queue(board, "unplanned")["rows"] == []
     assert [r["id"] for r in _queue(board, "stalled_holder")["rows"]] == ["in-held"]
+    assert [r["id"] for r in _queue(board, "undriven_pr")["rows"]] == ["in-pr"]
     assert [r["key"] for r in _queue(board, "stale_claim")["rows"]] == [
         "node:in-stale"
     ]
@@ -116,8 +118,9 @@ def test_scope_ids_filter_every_node_bearing_queue_and_report_rejections():
         "out-unplanned",
         "out-held",
         "out-stale",
+        "out-pr",
     }
-    assert board["actionable"] == 3
+    assert board["actionable"] == 4
 
 
 def test_a_scoped_board_demotes_the_operator_lane_to_report_only():
@@ -196,7 +199,7 @@ def test_undispatched_row_names_the_node_and_carries_a_rerunnable_source():
 
 def test_every_queue_carries_a_source_command():
     board = build_board(_empty_inputs())
-    assert len(board["queues"]) == 10
+    assert len(board["queues"]) == 11
     for q in board["queues"]:
         assert q["source"], f"{q['name']} has no source command"
 
@@ -539,6 +542,43 @@ def test_the_active_state_set_is_imported_not_copied():
     assert board_mod.ACTIVE_STATES is _ACTIVE_STATES
 
 
+# --- the driver predicate (one answer, two queues) ---------------------------
+
+
+def test_node_driver_answers_active_for_a_live_claim_with_a_fresh_holder():
+    from fno.king.board import _node_driver
+
+    claim = _claim("x-live", holder="target-session:busy")
+    state, found = _node_driver(
+        "x-live",
+        {"x-live": claim},
+        {"target-session:busy": {"state": "working", "age_s": 12}},
+    )
+    assert state == "active"
+    assert found is claim
+
+
+def test_node_driver_answers_stalled_for_a_live_claim_with_no_active_holder():
+    from fno.king.board import _node_driver
+
+    claim = _claim("x-quiet", holder="target-session:ghost")
+    state, found = _node_driver("x-quiet", {"x-quiet": claim}, {})
+    assert state == "stalled"
+    assert found is claim
+
+
+def test_node_driver_answers_none_for_an_absent_or_dead_claim():
+    """``none`` covers both an absent claim (the worker exited cleanly and
+    released) and a dead one (the lock outlived its holder). The dead half
+    belongs to `stale_claim` too; the caller filters further."""
+    from fno.king.board import _DEAD_CLAIM_STATES, _node_driver
+
+    assert _node_driver("x-gone", {}, {}) == ("none", None)
+    for state in sorted(_DEAD_CLAIM_STATES):
+        claim = _claim("x-dead", state=state)
+        assert _node_driver("x-dead", {"x-dead": claim}, {}) == ("none", claim)
+
+
 # --- AC1-ERR ----------------------------------------------------------------
 
 
@@ -676,7 +716,7 @@ def test_only_a_finished_green_pr_counts_as_mergeable(check, expected, monkeypat
         }
     ]
     monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
-    read, _ = board_mod._read_prs(timeout=1, max_pr_reads=10)
+    read, _, _ = board_mod._read_prs(timeout=1, max_pr_reads=10)
     assert len(read.rows()) == expected
 
 
@@ -687,27 +727,24 @@ def test_an_unmergeable_pr_is_not_the_kings_work(monkeypatch):
         {"number": 1, "title": "t", "mergeable": "CONFLICTING", "statusCheckRollup": []}
     ]
     monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
-    read, _ = board_mod._read_prs(timeout=1, max_pr_reads=10)
+    read, _, _ = board_mod._read_prs(timeout=1, max_pr_reads=10)
     assert read.rows() == []
 
 
-def test_missing_bindings_warn_for_pending_red_and_green_prs(monkeypatch, tmp_path):
-    from fno import paths
+def test_missing_bindings_warn_for_pending_red_and_green_prs(monkeypatch):
+    """Hermetic: the graph read is patched at the store seam. The real
+    `read_graph_strict` rides the Rust store keeper, which a CI runner
+    without the built worker cannot spawn (measured on PR 1437's
+    changed-smoke), and these tests subject the BINDING logic, not the
+    store."""
     from fno.king import board as board_mod
 
-    graph_path = tmp_path / "graph.json"
-    graph_path.write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {"id": "x-1111", "status": "ready"},
-                    {"id": "x-2222", "status": "ready"},
-                    {"id": "x-3333", "status": "ready"},
-                ]
-            }
-        )
-    )
-    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
+    entries = [
+        {"id": "x-1111", "status": "ready"},
+        {"id": "x-2222", "status": "ready"},
+        {"id": "x-3333", "status": "ready"},
+    ]
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda _path: entries)
     listing = [
         {
             "number": 1,
@@ -736,7 +773,7 @@ def test_missing_bindings_warn_for_pending_red_and_green_prs(monkeypatch, tmp_pa
     ]
     monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
 
-    read, warnings = board_mod._read_prs(timeout=1, max_pr_reads=10)
+    read, _, warnings = board_mod._read_prs(timeout=1, max_pr_reads=10)
 
     assert read.rows() == [{"number": 3, "title": "green"}]
     assert {"#1", "#2", "#3"} <= {
@@ -777,7 +814,7 @@ def test_a_superseded_red_beside_a_fresh_green_reads_mergeable(monkeypatch):
         }
     ]
     monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
-    read, _ = board_mod._read_prs(timeout=1, max_pr_reads=10)
+    read, _, _ = board_mod._read_prs(timeout=1, max_pr_reads=10)
     assert [r["number"] for r in read.rows()] == [917]
 
 
@@ -816,7 +853,7 @@ def test_a_listing_that_hits_its_bound_is_reported(monkeypatch):
         for n in range(5)
     ]
     monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
-    _, warnings = board_mod._read_prs(timeout=1, max_pr_reads=5)
+    _, _, warnings = board_mod._read_prs(timeout=1, max_pr_reads=5)
     assert any("5" in w and "mergeable_pr" in w for w in warnings), warnings
 
 
@@ -833,8 +870,232 @@ def test_every_fetched_pr_is_judged(monkeypatch):
         for n in range(8)
     ]
     monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
-    read, _ = board_mod._read_prs(timeout=1, max_pr_reads=5)
+    read, _, _ = board_mod._read_prs(timeout=1, max_pr_reads=5)
     assert len(read.rows()) == 8
+
+
+# --- the open-PR node rows (undriven_pr's source) -----------------------------
+
+
+def test_read_prs_carries_the_bound_node_rows_as_their_own_source(monkeypatch):
+    """`fno backlog ready` removes live-claimed rows AND never returns
+    in_review, so an undriven-PR queue's candidates can only come from here:
+    the open-PR listing intersected with the graph. Hermetic at the store
+    seam (see the missing-bindings test for why)."""
+    from fno.king import board as board_mod
+
+    entries = [{"id": "x-a0a3", "status": "in_review", "pr_number": 1394}]
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda _path: entries)
+    listing = [
+        {
+            "number": 1394,
+            "title": "t",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+            "headRefName": "feature/x-a0a3",
+            "url": "https://github.com/o/r/pull/1394",
+        }
+    ]
+    monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
+
+    prs, pr_nodes, _warnings = board_mod._read_prs(timeout=1, max_pr_reads=10)
+
+    rows = pr_nodes.rows()
+    assert [r["id"] for r in rows] == ["x-a0a3"]
+    assert rows[0]["pr_number"] == 1394
+    assert rows[0]["pr_url"] == "https://github.com/o/r/pull/1394"
+    assert prs.ok
+
+
+def test_an_unreadable_graph_leaves_prs_readable_and_pr_nodes_unreadable(monkeypatch):
+    """`mergeable_pr` survives a broken graph read because it needs no node;
+    a node queue degrades to UNREADABLE, never to empty - an empty read is
+    the clean-board lie this module exists against."""
+    import fno.graph.store as store_mod
+    from fno.king import board as board_mod
+
+    def _boom(_path):
+        raise RuntimeError("graph unreadable")
+
+    monkeypatch.setattr(store_mod, "read_graph_strict", _boom)
+    listing = [
+        {
+            "number": 1,
+            "title": "t",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{"conclusion": "SUCCESS", "status": "COMPLETED"}],
+            "headRefName": "feature/x-1111",
+            "url": "u1",
+        }
+    ]
+    monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
+
+    prs, pr_nodes, warnings = board_mod._read_prs(timeout=1, max_pr_reads=10)
+
+    assert prs.ok and prs.rows()
+    assert not pr_nodes.ok
+    assert any(w.startswith("pr_node_binding_unreadable") for w in warnings)
+
+
+# --- the undriven_pr queue (a PR nobody is driving) ---------------------------
+
+
+def _pr_node(node_id, *, status="in_review", pr_number=1394, priority="p1", **extra):
+    row = {
+        "id": node_id,
+        "priority": priority,
+        "status": status,
+        "pr_number": pr_number,
+        "pr_url": f"https://github.com/o/r/pull/{pr_number}",
+        "title": f"t-{node_id}",
+        "plan_path": "/plans/p.md",
+    }
+    row.update(extra)
+    return row
+
+
+def test_undriven_pr_names_the_id_and_disappears_under_a_live_claim():
+    """The positive marker, by node id, in both directions. A board run that
+    merely returns rows proves nothing: the board already returned 123 rows
+    while missing all seven orphans."""
+    node = _pr_node("x-a0a3")
+    board = build_board(_empty_inputs(pr_nodes=_ok([node])))
+    assert [r["id"] for r in _queue(board, "undriven_pr")["rows"]] == ["x-a0a3"]
+
+    holder = "target-session:live"
+    board = build_board(
+        _empty_inputs(
+            pr_nodes=_ok([node]),
+            claims=_ok([_claim("x-a0a3", holder=holder)]),
+            holder_activity={holder: {"state": "working", "age_s": 12}},
+        )
+    )
+    assert _queue(board, "undriven_pr")["rows"] == []
+
+
+def test_an_undriven_pr_is_partitioned_against_stalled_holder():
+    """Two queues, one predicate: ``none`` goes to undriven_pr, ``stalled`` to
+    stalled_holder. The same node can never be dispatched twice."""
+    node = _pr_node("x-part")
+    holder = "target-session:dead"
+    board = build_board(
+        _empty_inputs(
+            pr_nodes=_ok([node]),
+            claims=_ok([_claim("x-part", holder=holder)]),
+            holder_activity={holder: {"state": "stalled", "age_s": 9000}},
+            claimed_nodes=_ok([node]),
+        )
+    )
+    assert [r["id"] for r in _queue(board, "stalled_holder")["rows"]] == ["x-part"]
+    assert _queue(board, "undriven_pr")["rows"] == []
+
+
+def test_a_deferred_node_with_an_open_pr_is_not_undriven_work():
+    """Report only: a node the operator already deferred is skipped rather
+    than nagged back up."""
+    board = build_board(
+        _empty_inputs(pr_nodes=_ok([_pr_node("x-def", status="deferred")]))
+    )
+    assert _queue(board, "undriven_pr")["rows"] == []
+
+
+def test_a_terminal_node_is_excluded_through_the_closure_helper():
+    """A legacy row can carry a stale open `status` beside a real
+    `completed_at`; closure is asked of is_terminal_entry, not of status."""
+    node = _pr_node("x-done", completed_at="2026-09-01T00:00:00Z")
+    board = build_board(_empty_inputs(pr_nodes=_ok([node])))
+    assert _queue(board, "undriven_pr")["rows"] == []
+
+
+def test_a_suspect_claim_is_a_driver_and_never_reaches_undriven_pr():
+    """claims.rs treats Suspect like Live for dispatch: TTL-unexpired, holder
+    pid unproven, never stolen. Measured 2026-09-03: under load 5 of 15 node
+    claims read suspect while their holders' transcripts were seconds old. A
+    later widening of _DEAD_CLAIM_STATES must break loudly here."""
+    from fno.king.board import _DEAD_CLAIM_STATES
+
+    node = _pr_node("x-susp", pr_number=1400)
+    board = build_board(
+        _empty_inputs(
+            pr_nodes=_ok([node]),
+            claims=_ok([_claim("x-susp", state="suspect", holder="target-session:s")]),
+        )
+    )
+    assert _queue(board, "undriven_pr")["rows"] == []
+    assert "suspect" not in _DEAD_CLAIM_STATES
+
+
+def test_an_unreadable_claim_list_builds_no_undriven_rows():
+    """A timed-out probe must not read as an absent driver: every node would
+    resolve to `none` and the king would dispatch over every live worker at
+    once. The loop refuses before a row exists; the render refuses again."""
+    node = _pr_node("x-blind")
+    board = build_board(
+        _empty_inputs(
+            pr_nodes=_ok([node]), claims=SourceRead(error="timed out after 5s")
+        )
+    )
+    queue = _queue(board, "undriven_pr")
+    assert queue["status"] == "unreadable"
+    assert queue["rows"] == []
+    assert board["exit_code"] == 1
+
+
+def test_a_mergeable_green_pr_belongs_to_exactly_one_queue_per_merge_posture():
+    """When the king can merge, a green mergeable PR's remedy is the merge
+    `mergeable_pr` already names. When it cannot, nobody acts on that queue,
+    so the PR still needs a driver and belongs here."""
+    node = _pr_node("x-mrg", pr_number=900)
+    inputs = _empty_inputs(
+        pr_nodes=_ok([node]), prs=_ok([{"number": 900, "title": "t"}])
+    )
+
+    mergeable = build_board(inputs, autonomous_merge=True)
+    assert _queue(mergeable, "undriven_pr")["rows"] == []
+
+    report_only = build_board(inputs, autonomous_merge=False)
+    assert [r["id"] for r in _queue(report_only, "undriven_pr")["rows"]] == ["x-mrg"]
+
+
+def test_a_p2_node_with_an_open_pr_is_not_undriven_work():
+    board = build_board(
+        _empty_inputs(pr_nodes=_ok([_pr_node("x-p2", priority="p2")]))
+    )
+    assert _queue(board, "undriven_pr")["count"] == 0
+
+
+def test_an_unreadable_pr_nodes_source_makes_the_queue_unreadable_and_actionable():
+    """A blind ACTIONABLE queue is work: the king may not exit NoWork while it
+    cannot see a queue it could have shrunk."""
+    board = build_board(_empty_inputs(pr_nodes=SourceRead(error="graph unreadable")))
+    q = _queue(board, "undriven_pr")
+    assert q["status"] == "unreadable"
+    assert q["actionable"] is True
+    assert board["actionable"] >= 1
+    assert board["exit_code"] == 1
+
+
+def test_the_undriven_pr_queue_names_its_verb_and_its_report_only_bound():
+    board = build_board(_empty_inputs(pr_nodes=_ok([_pr_node("x-verb")])))
+    q = _queue(board, "undriven_pr")
+    assert q["verb"] == "/fno:target"
+    assert q["actionable"] is True
+    assert "never close" in q["note"]
+    assert "defer" in q["note"]
+
+
+def test_a_failing_pr_listing_blinds_both_pr_sources_with_the_same_cause(monkeypatch):
+    from fno.king import board as board_mod
+
+    dead = SourceRead(error="exit 1: gh auth expired")
+    monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: dead)
+
+    prs, pr_nodes, warnings = board_mod._read_prs(timeout=1, max_pr_reads=10)
+
+    assert not prs.ok
+    assert not pr_nodes.ok
+    assert prs.error == pr_nodes.error
+    assert warnings == []
 
 
 # --- truncation -------------------------------------------------------------

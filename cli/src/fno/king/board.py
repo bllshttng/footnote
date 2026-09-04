@@ -1,4 +1,4 @@
-"""Read the ten queues that decide whether a king still has work.
+"""Read the eleven queues that decide whether a king still has work.
 
 Three properties are load-bearing and each has a test that fails loudly when it
 breaks.
@@ -68,6 +68,7 @@ SRC_CLAIMS = "fno agents claim list -J --include-stale --prefix node:"
 SRC_PRS = (
     "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url"
 )
+SRC_PR_NODES = f"{SRC_PRS} + fno backlog get <id>"
 SRC_QUESTIONS = "fno inbox outstanding --json"
 SRC_NEEDS = "fno agents needs --json"
 
@@ -124,6 +125,9 @@ class BoardInputs:
     #: Independent planned-unclaimed inventory. Production collection always
     #: supplies it; None keeps pure test fixtures source-compatible.
     undispatched: SourceRead | None = None
+    #: Graph rows for nodes bound to an OPEN PR, annotated with the
+    #: `pr_number` actually open; never from a selector (see `undriven_pr`).
+    pr_nodes: SourceRead | None = None
 
 
 def _as_dict(value: Any) -> dict:
@@ -133,7 +137,7 @@ def _as_dict(value: Any) -> dict:
     through a PATH-resolved ``fno``, so a stale deployed CLI can answer with an
     older stream shape (a list where a dict belongs, string counts). A
     structural surprise in ONE stream must degrade that stream, never raise
-    out of ``build_board`` - an exception here kills all ten queues instead
+    out of ``build_board`` - an exception here kills all eleven queues instead
     of the designed one-unreadable-queue exit.
     """
     return value if isinstance(value, dict) else {}
@@ -162,6 +166,26 @@ def _holder_is_active(activity: Optional[dict]) -> bool:
     if age is None:
         return False
     return age <= STALLED_AFTER_S
+
+
+def _node_driver(
+    node_id: object, claim_by_node: dict[str, dict], holder_activity: dict[str, dict]
+) -> tuple[str, Optional[dict]]:
+    """Who is driving this node: ``active``, ``stalled``, or ``none``.
+
+    One answer, two queues: ``stalled_holder`` selects ``stalled`` and
+    ``undriven_pr`` selects ``none``, so they partition by construction. A
+    suspect claim must NEVER read ``none`` - claims.rs treats Suspect like
+    Live for dispatch, never stolen. The dead half of ``none`` is also
+    `stale_claim`'s; its remedy is a reap, so callers filter further.
+    """
+    claim = claim_by_node.get(str(node_id))
+    if claim is None or claim.get("state") in _DEAD_CLAIM_STATES:
+        return "none", claim
+    holder = str(claim.get("holder") or "")
+    if _holder_is_active(holder_activity.get(holder)):
+        return "active", claim
+    return "stalled", claim
 
 
 def compile_scope_ids(scope: str, entries: list[dict], *, resolve=None) -> set[str]:
@@ -340,12 +364,12 @@ def build_board(
         # the king at done work (x-94f8's stalled_holder queue).
         if node.get("status") in TERMINAL_RUNGS:
             continue
-        claim = claim_by_node.get(str(node.get("id")))
-        if claim is None or claim.get("state") in _DEAD_CLAIM_STATES:
+        state, claim = _node_driver(
+            node.get("id"), claim_by_node, inputs.holder_activity
+        )
+        if state != "stalled" or claim is None:
             continue
         holder = str(claim.get("holder") or "")
-        if _holder_is_active(inputs.holder_activity.get(holder)):
-            continue
         if not in_scope("stalled_holder", node.get("id"), node):
             continue
         stalled.append(
@@ -387,6 +411,47 @@ def build_board(
     pr_rows = [
         {"number": r.get("number"), "title": r.get("title")} for r in inputs.prs.rows()
     ]
+
+    # `stalled_holder`'s complement, the second half of ONE predicate. That
+    # queue starts from a CLAIM, so a worker that exited cleanly and released
+    # its claim leaves it no row to see. Measured 2026-09-03: 7 of 12 open PRs
+    # in this state. NOT sourced from `fno backlog ready`; reports only.
+    from fno.graph.statuses import derived_status, is_terminal_entry
+
+    mergeable_numbers = {r.get("number") for r in pr_rows} if autonomous_merge else set()
+    undriven: list[dict] = []
+    # Fail CLOSED on an unreadable claim list, in the LOOP: `claim_by_node`
+    # answers {} for an errored source, so every node would read `none` and
+    # the king would dispatch over every live worker at once. `_queue` too.
+    for node in (inputs.pr_nodes.rows() if (inputs.pr_nodes and inputs.claims.ok) else []):
+        if node.get("priority") not in KING_PRIORITIES:
+            continue
+        # A raw graph entry: closure is asked of the helper, never a bare
+        # status read (see is_terminal_entry).
+        if is_terminal_entry(node):
+            continue
+        if derived_status(node) in {"deferred", "blocked"}:
+            continue
+        state, _claim = _node_driver(node.get("id"), claim_by_node, inputs.holder_activity)
+        if state != "none":
+            continue
+        # When the king can merge, a green mergeable PR's remedy is the merge
+        # mergeable_pr already names. When it cannot, the PR still needs a
+        # driver; the queues stay disjoint on the row the king would act on.
+        if node.get("pr_number") in mergeable_numbers:
+            continue
+        if not in_scope("undriven_pr", node.get("id"), node):
+            continue
+        undriven.append(
+            {
+                "id": node.get("id"),
+                "priority": node.get("priority"),
+                "title": node.get("title"),
+                "status": derived_status(node),
+                "pr_number": node.get("pr_number"),
+                "pr_url": node.get("pr_url"),
+            }
+        )
 
     # One outstanding read, three streams. A non-dict payload (a verb that
     # changed shape) degrades to empty streams rather than a crash, mirroring
@@ -480,6 +545,18 @@ def build_board(
             SourceRead(error=inputs.claims.error or inputs.claimed_nodes.error),
             stalled,
             actionable=True,
+        ),
+        _queue(
+            "undriven_pr",
+            SRC_PR_NODES,
+            SourceRead(
+                error=(inputs.pr_nodes.error if inputs.pr_nodes else "") or inputs.claims.error
+            ),
+            undriven,
+            actionable=True,
+            note="an open PR with nobody driving it; report only, never close "
+            "or defer one - that judgment is the operator's",
+            verb="/fno:target",
         ),
         _queue(
             "mergeable_pr",
@@ -611,8 +688,13 @@ def _run_json(cmd: list[str], *, timeout: int = 60) -> SourceRead:
         return SourceRead(error=f"unparseable output: {exc}")
 
 
-def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
-    """Open PRs that are green, mergeable and unmerged.
+def _read_prs(
+    timeout: int, max_pr_reads: int
+) -> tuple[SourceRead, SourceRead, list[str]]:
+    """Open PRs that are green, mergeable and unmerged, plus their nodes.
+
+    The second source is every bound node's graph row, annotated with the
+    ``pr_number`` actually open; both reads are already paid for here.
 
     Costs exactly ONE call: the rollup arrives inside the listing, so there is
     no per-PR status read to cap. The bound therefore sits on the CALL, via
@@ -640,7 +722,7 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
         timeout=timeout,
     )
     if not listing.ok:
-        return listing, []
+        return listing, listing, []
     rows = listing.rows()
     warnings: list[str] = []
     # A listing that comes back exactly AT its limit is indistinguishable from
@@ -655,16 +737,33 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
         from fno.graph._reconcile import classify_open_pr_bindings
         from fno.graph.store import read_graph_strict
 
-        bindings = classify_open_pr_bindings(rows, read_graph_strict(paths.graph_json()))
+        entries = read_graph_strict(paths.graph_json())
+        bindings = classify_open_pr_bindings(rows, entries)
     except Exception as exc:  # noqa: BLE001 - mergeability remains readable
         warnings.append(f"pr_node_binding_unreadable: {exc}")
+        # An unreadable binding is an unreadable QUEUE, never an empty one:
+        # mergeable_pr needs no node, undriven_pr is nothing but nodes. That
+        # asymmetry is why this degrades one source rather than both.
+        pr_nodes: SourceRead = SourceRead(error=f"pr node binding unreadable: {exc}")
     else:
+        by_id = {e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e["id"], str)}
+        bound: list[dict] = []
         for binding in bindings:
             if binding.verdict == "missing":
                 warnings.append(
                     f"pr_node_binding_missing: #{binding.pr_number} "
                     f"{binding.head_ref} -> {binding.node_id}"
                 )
+            # `bound` is the only verdict whose node points BACK at this PR.
+            # `missing` is already warned above; `untracked`/`ambiguous` carry
+            # no single candidate, and a list-order guess is the wrong-node bind.
+            if binding.verdict != "bound" or not binding.node_id:
+                continue
+            entry = by_id.get(binding.node_id)
+            if entry is None:
+                continue
+            bound.append({**entry, "pr_number": binding.pr_number, "pr_url": binding.pr_url})
+        pr_nodes = SourceRead(payload=bound)
     # Every fetched row is judged. They cost the same one call whether read or
     # discarded, so dropping any of them buys nothing and loses real work.
     ready: list[dict] = []
@@ -699,7 +798,7 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
         if "pending" in classes:
             continue
         ready.append({"number": pr.get("number"), "title": pr.get("title")})
-    return SourceRead(payload=ready), warnings
+    return SourceRead(payload=ready), pr_nodes, warnings
 
 
 #: Per-project rows rendered for the capture stream. The count stays whole;
@@ -824,7 +923,7 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
     claims = _run_json([*_fno(), "agents", "claim", "list", "-J", "--include-stale", "--prefix", "node:"],
         timeout=timeout,
     )
-    prs, warnings = _read_prs(timeout, max_pr_reads)
+    prs, pr_nodes, warnings = _read_prs(timeout, max_pr_reads)
     claimed_nodes, holders, claimed_warnings = _read_claimed_nodes(claims, timeout)
     warnings.extend(claimed_warnings)
 
@@ -834,6 +933,7 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
         claimed_nodes=claimed_nodes,
         holder_activity=_resolve_holder_activity(holders),
         prs=prs,
+        pr_nodes=pr_nodes,
         outstanding=_read_outstanding(timeout),
         needs=_run_json([*_fno(), "agents", "needs", "--json"], timeout=timeout),
         lane=_read_lane(),

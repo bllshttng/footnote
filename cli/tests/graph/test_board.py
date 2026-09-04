@@ -117,15 +117,15 @@ def test_zero_subprocess_calls_over_a_full_fixture(raising_subprocess, cache_dir
     assert board["on_deck"]["rows"][0]["id"] == "x-deck1"
 
 
-def test_zero_subprocess_calls_through_the_cli(raising_subprocess, cache_dir, tmp_path, monkeypatch):
+def test_zero_subprocess_calls_through_the_cli(raising_subprocess, cache_dir, monkeypatch):
     """Same proof, but through the actual CLI command (parsing + compute +
     print), with an explicit --project so detect_project's local-git call
-    (a different, non-network subprocess use) never enters the picture."""
-    graph_path = tmp_path / "graph.json"
-    graph_path.write_text(
-        json.dumps({"entries": [_node("x-deck2", title="on deck via cli")]}), encoding="utf-8"
-    )
-    monkeypatch.setattr("fno.graph.cli._graph_path", lambda: graph_path)
+    (a different, non-network subprocess use) never enters the picture. The
+    graph read is patched at the store seam: the real `read_graph_strict`
+    spawns the Rust store keeper, which exists on a developer machine but
+    not on every CI runner, and the store read is not this test's subject."""
+    entries = [_node("x-deck2", title="on deck via cli")]
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", lambda _path: entries)
 
     result = runner.invoke(cli, ["board", "--project", "fno", "--json"])
 
