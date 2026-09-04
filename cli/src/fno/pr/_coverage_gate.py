@@ -1165,18 +1165,14 @@ def attestation_chain(
                             continue
                     # Dedup on the producer's invocation_id PLUS the head it
                     # attested, falling back to the whole payload only when
-                    # the row predates the field. The payload key is wrong
-                    # across stores: the global mirror stamps `repo` onto its
-                    # copy and the project row carries none, so one
-                    # attestation produced two payload keys and the chain
-                    # counted every mirrored round twice - which the no-refund
-                    # budget turns into "one review reads 2/2". The
-                    # invocation_id is minted once by the producer and lands
-                    # identically on both rows. The head must ride the key
-                    # because one invocation legitimately attests again at a
-                    # NEW head (the emit-attestation recovery path after a
-                    # fix): keyed on the invocation alone, the chain kept the
-                    # FIRST row and swallowed every later pass and its
+                    # the row predates the field. The mirror stamped `repo`
+                    # onto its copy alone, so a payload key counted every
+                    # mirrored round twice ("one review reads 2/2"); the
+                    # invocation_id lands identically on both rows. The head
+                    # must ride the key because the recovery path re-attests
+                    # under one invocation at each fixed head: keyed on the
+                    # invocation alone, the chain kept the first row (the
+                    # fail) and swallowed every later pass and its
                     # dispositions, so a fixed finding read as never resolved.
                     invocation_id = data.get("invocation_id")
                     if isinstance(invocation_id, str) and invocation_id:
