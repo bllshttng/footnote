@@ -211,7 +211,9 @@ def _validate_inputs(
         )
 
 
-def _resolve_pid_provenance(pid: Optional[int], ttl_ms: Optional[int]) -> str:
+def _resolve_pid_provenance(
+    pid: Optional[int], ttl_ms: Optional[int], harness: Optional[str]
+) -> str:
     """Classify how a claim's pid was resolved: "session-prover" or "ambient".
 
     The corroborated hybrid arm in ``staleness.classify`` reads this field to
@@ -227,8 +229,16 @@ def _resolve_pid_provenance(pid: Optional[int], ttl_ms: Optional[int]) -> str:
     dies when the session does, and under a harness whose sessions share one
     host process it does not: the walk lands on a multiplexer that outlives
     every session it hosts, both sides of the equality below hold, and the
-    stamp is earned by a walk that proved the wrong thing. So the harness the
-    same walk reports gates the stamp - see ``pid_dies_with_session``.
+    stamp is earned by a walk that proved the wrong thing. So ``harness``
+    gates the stamp - see ``pid_dies_with_session``.
+
+    ``harness`` is REQUIRED and is the harness the caller is about to WRITE on
+    the record, never one resolved here. Resolving it here would let the stamp
+    be earned against the walking process's own harness while the record stores
+    a different one, so a record could contradict itself about which harness
+    wrote it - the state the Rust ``make_claim`` hoists a single
+    ``resolve_harness()`` call to make impossible. It also spares a second full
+    ancestor walk: every caller has already resolved this value.
 
     ``ttl_ms`` gates the walk: provenance is only ever consulted on a TTL
     claim (PID-liveness claims never expire into the hybrid arm), so a
@@ -239,15 +249,11 @@ def _resolve_pid_provenance(pid: Optional[int], ttl_ms: Optional[int]) -> str:
     if pid is None or ttl_ms is None:
         return "ambient"
     try:
-        from .session_pid import (
-            pid_dies_with_session,
-            resolve_session_harness,
-            resolve_session_pid,
-        )
+        from .session_pid import pid_dies_with_session, resolve_session_pid
 
-        if resolve_session_pid(from_pid=os.getpid()) != pid:
+        if not pid_dies_with_session(harness):
             return "ambient"
-        if not pid_dies_with_session(resolve_session_harness(from_pid=os.getpid())):
+        if resolve_session_pid(from_pid=os.getpid()) != pid:
             return "ambient"
         return "session-prover"
     except Exception:  # noqa: BLE001 - an unprovable pid is ambient, never an error
@@ -404,7 +410,7 @@ def acquire_claim(
     # the prover or stays ambient - a writer that cannot reach the prover
     # records the pid it has with "ambient" rather than lying.
     if pid_provenance is None:
-        pid_provenance = _resolve_pid_provenance(pid, ttl_ms)
+        pid_provenance = _resolve_pid_provenance(pid, ttl_ms, harness)
 
     new_claim = _make_claim(
         key, holder, ttl_ms, reason, metadata, pid, host, harness,
@@ -725,7 +731,7 @@ def compare_and_rebind(
     )
     # Same placement, same reason: the rebind rewrites the pid, so its
     # provenance is earned here against the prover or it resets to ambient.
-    resolved_provenance = _resolve_pid_provenance(new_pid, ttl_ms)
+    resolved_provenance = _resolve_pid_provenance(new_pid, ttl_ms, resolved_harness)
     recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
     acquired_lock = False
     recovery_token = ""
@@ -1234,9 +1240,12 @@ def refresh_claim(
                 # (see _reanchor_pid_for), so the equality half of the stamp
                 # holds by construction. The harness half does not: under a
                 # shared-host harness that same answer is a multiplexer, so
-                # hardcoding the stamp here would re-poison on every refresh
-                # what acquire had just stopped writing. Re-derive it.
-                new_pid_provenance=_resolve_pid_provenance(anchor_pid, window),
+                # hardcoding the stamp here re-poisons on every refresh what
+                # acquire had just stopped writing. Re-derive it against the
+                # record's OWN harness, which a rebind-less refresh keeps.
+                new_pid_provenance=_resolve_pid_provenance(
+                    anchor_pid, window, existing.harness
+                ),
                 keep_acquired_at=True,
             )
         else:

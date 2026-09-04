@@ -336,16 +336,12 @@ class TestPidProvenanceStamping:
         monkeypatch.setattr(
             "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
         )
-        # Pin the harness too. The provenance stamp now gates on it, and the
-        # real walk answers whatever harness happens to be running this
-        # suite - so an unpinned test asserts session-prover under claude and
-        # ambient under codex, which is a flake keyed to who ran it.
-        monkeypatch.setattr(
-            "fno.claims.session_pid.resolve_session_harness",
-            lambda from_pid=None: "claude",
-        )
+        # The harness is passed, not walked: the stamp now gates on the value
+        # the writer stores, so an unpinned test would assert session-prover
+        # under claude and ambient under codex - a flake keyed to who ran it.
         claim = acquire_claim(
-            "node:x-1", HOLDER_A, ttl_ms=60_000, pid=os.getpid(), root=tmp_path
+            "node:x-1", HOLDER_A, ttl_ms=60_000, pid=os.getpid(),
+            harness="claude", root=tmp_path
         )
         assert claim.pid_provenance == "session-prover"
 
@@ -427,14 +423,6 @@ class TestPidProvenanceStamping:
         monkeypatch.setattr(
             "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
         )
-        # Pin the harness too. The provenance stamp now gates on it, and the
-        # real walk answers whatever harness happens to be running this
-        # suite - so an unpinned test asserts session-prover under claude and
-        # ambient under codex, which is a flake keyed to who ran it.
-        monkeypatch.setattr(
-            "fno.claims.session_pid.resolve_session_harness",
-            lambda from_pid=None: "claude",
-        )
         # A dead-prior handover claim the worker's init takes over.
         handover = Claim(
             key="node:x-5", holder="spawn-handover:bp-x5",
@@ -445,14 +433,46 @@ class TestPidProvenanceStamping:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(serialize_claim(handover))
 
+        # The harness is named, not walked: the rebind gates the stamp on the
+        # harness it STORES, so leaving it ambient makes this assert
+        # session-prover under claude and ambient under codex.
         claim, mode = compare_and_rebind(
             "node:x-5", "spawn-handover:bp-x5",
             new_holder=HOLDER_A, new_pid=os.getpid(), ttl_ms=3_600_000,
-            root=tmp_path,
+            new_harness="claude", root=tmp_path,
         )
         assert mode == "handover"
         assert claim.pid == os.getpid()
         assert claim.pid_provenance == "session-prover"
+        assert claim.harness == "claude"
+
+    def test_rebind_stamp_and_stored_harness_never_disagree(self, tmp_path, monkeypatch):
+        """A rebind that hands a claim to a SHARED-HOST harness must not stamp
+        session-prover, even when the rebinding process's own harness forks per
+        session. The stamp is earned against the harness the record will carry,
+        never against the walker's - otherwise a record contradicts itself
+        about which harness wrote it, which is the state the Rust make_claim
+        hoists one resolve_harness() call to make impossible."""
+        monkeypatch.setattr(
+            "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
+        )
+        handover = Claim(
+            key="node:x-7", holder="spawn-handover:bp-x7",
+            acquired_at=now_ms(), expires_at=now_ms() + 900_000,
+            pid=999_999_999, host=socket.gethostname(), pid_provenance="ambient",
+        )
+        path = claim_path("node:x-7", root=tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(serialize_claim(handover))
+
+        claim, mode = compare_and_rebind(
+            "node:x-7", "spawn-handover:bp-x7",
+            new_holder=HOLDER_A, new_pid=os.getpid(), ttl_ms=3_600_000,
+            new_harness="codex", root=tmp_path,
+        )
+        assert mode == "handover"
+        assert claim.harness == "codex"
+        assert claim.pid_provenance == "ambient"
 
     def test_shared_host_harness_never_earns_the_prover_stamp(self, tmp_path, monkeypatch):
         """AC1 - the writer side of the specimen. The prover walk succeeds:
@@ -465,14 +485,14 @@ class TestPidProvenanceStamping:
         monkeypatch.setattr(
             "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
         )
-        monkeypatch.setattr(
-            "fno.claims.session_pid.resolve_session_harness",
-            lambda from_pid=None: "codex",
-        )
         claim = acquire_claim(
-            "node:x-shared", HOLDER_A, ttl_ms=60_000, pid=os.getpid(), root=tmp_path
+            "node:x-shared", HOLDER_A, ttl_ms=60_000, pid=os.getpid(),
+            harness="codex", root=tmp_path
         )
         assert claim.pid_provenance == "ambient"
+        # The stamp is gated on the harness the record STORES, so the two can
+        # never disagree about which harness wrote it.
+        assert claim.harness == "codex"
 
     def test_per_session_harness_still_earns_the_prover_stamp(self, tmp_path, monkeypatch):
         """AC1's twin: the identical acquire under a harness that forks per
@@ -481,12 +501,9 @@ class TestPidProvenanceStamping:
         monkeypatch.setattr(
             "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
         )
-        monkeypatch.setattr(
-            "fno.claims.session_pid.resolve_session_harness",
-            lambda from_pid=None: "claude",
-        )
         claim = acquire_claim(
-            "node:x-forked", HOLDER_A, ttl_ms=60_000, pid=os.getpid(), root=tmp_path
+            "node:x-forked", HOLDER_A, ttl_ms=60_000, pid=os.getpid(),
+            harness="claude", root=tmp_path
         )
         assert claim.pid_provenance == "session-prover"
 
@@ -500,12 +517,9 @@ class TestPidProvenanceStamping:
         monkeypatch.setattr(
             "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
         )
-        monkeypatch.setattr(
-            "fno.claims.session_pid.resolve_session_harness",
-            lambda from_pid=None: "codex",
-        )
         first = acquire_claim(
-            "node:x-refresh-shared", HOLDER_A, ttl_ms=60_000, pid=os.getpid(), root=tmp_path
+            "node:x-refresh-shared", HOLDER_A, ttl_ms=60_000, pid=os.getpid(),
+            harness="codex", root=tmp_path
         )
         assert first.pid_provenance == "ambient"
         refreshed = refresh_claim(
@@ -521,16 +535,9 @@ class TestPidProvenanceStamping:
         monkeypatch.setattr(
             "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: os.getpid()
         )
-        # Pin the harness too. The provenance stamp now gates on it, and the
-        # real walk answers whatever harness happens to be running this
-        # suite - so an unpinned test asserts session-prover under claude and
-        # ambient under codex, which is a flake keyed to who ran it.
-        monkeypatch.setattr(
-            "fno.claims.session_pid.resolve_session_harness",
-            lambda from_pid=None: "claude",
-        )
         first = acquire_claim(
-            "node:x-6", HOLDER_A, ttl_ms=60_000, pid=os.getpid(), root=tmp_path
+            "node:x-6", HOLDER_A, ttl_ms=60_000, pid=os.getpid(),
+            harness="claude", root=tmp_path
         )
         assert first.pid_provenance == "session-prover"
         refreshed = refresh_claim("node:x-6", HOLDER_A, ttl_ms=60_000, root=tmp_path)
