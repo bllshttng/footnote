@@ -267,20 +267,6 @@ _REMOVE_STRATEGIES = {"claude-short-id", "codex-session-index", "registry-only"}
 # validator's LOOP_PARTICIPATION so the two runtimes cannot disagree about which
 # contracts are legal. The table's comment carries the per-harness measurement.
 _LOOP_PARTICIPATION = {"native", "extension", "none"}
-# The closed feature key set (x-a3e8). A feature is what a harness can DO - a
-# review command, an RPC surface, a plugin system - as opposed to the keystroke
-# mechanics, which model how fno PUPPETS a pane. Closed so a typo is a parse
-# error rather than a silent new dimension.
-_FEATURE_KEYS = frozenset({
-    "review", "spawn", "attach", "rpc", "server", "hooks",
-    "skills_dir", "subagent_dispatch", "mcp", "acp", "plugins",
-})
-# The four states a feature claim may declare, kept identical to the Rust
-# validator's FEATURE_STATES so the two runtimes cannot disagree. `capable`
-# is the load-bearing third state: the harness exposes the feature and fno
-# has NO wired arm for it. `thread = false` could not say that, and
-# SPAWN_HARNESSES could only encode it as a tuple plus prose.
-_FEATURE_STATES = frozenset({"native", "capable", "absent", "unmeasured"})
 
 
 def _contract_error(harness: str, field: str, detail: str) -> "DispatchResolveError":
@@ -504,20 +490,6 @@ def _validate_row(harness: str, caps: dict) -> None:
         raise _contract_error(harness, "session_binding", "bad required/timeout values")
     if binding["timeout_ms"] < 0 or (binding["required"] and binding["timeout_ms"] == 0):
         raise _contract_error(harness, "session_binding", "required binding needs a timeout")
-    features = caps.get("features")
-    if features is None:
-        return
-    if not isinstance(features, dict):
-        raise _contract_error(harness, "features", "must be a table of feature claims")
-    for key, claim in features.items():
-        if key not in _FEATURE_KEYS:
-            raise _contract_error(harness, "features", f"unknown feature key {key!r}")
-        if not isinstance(claim, dict) or set(claim) != {"state"}:
-            raise _contract_error(harness, f"features.{key}", "a feature claim carries only state")
-        if claim["state"] not in _FEATURE_STATES:
-            raise _contract_error(
-                harness, f"features.{key}", f"unknown state {claim['state']!r}"
-            )
 
 
 def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
@@ -547,25 +519,6 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
     for harness, caps in harnesses.items():
         _validate_row(harness, caps)
     _validate_probe_decls(root.get("probe"))
-    probe = root.get("probe") or {}
-    # A feature declaration may only name a key in the closed set, and a
-    # feature USED on any row may only exist beside a declaration: the
-    # declaration is what makes the claim checkable, so a claim without one
-    # is a guess the table refuses to carry (x-a3e8).
-    for field in probe:
-        key = field[len("features."):] if field.startswith("features.") else None
-        if key is not None and key not in _FEATURE_KEYS:
-            raise _contract_error(
-                field, "probe.key", f"{key!r} is not one of the feature keys"
-            )
-    for harness, caps in harnesses.items():
-        for key in (caps.get("features") or {}):
-            if f"features.{key}" not in probe:
-                raise _contract_error(
-                    harness,
-                    f"features.{key}",
-                    f"used with no [probe.features.{key}] declaration",
-                )
     return version, harnesses
 
 
@@ -922,71 +875,6 @@ def known_harnesses() -> list[str]:
     supported-harness roster is ``fno.harness_names.KNOWN_HARNESSES``, which
     is wider - hermes and openclaw sit on it with no row here."""
     return sorted(_HARNESS_CAPS)
-
-
-def feature_claim(harness: str, key: str) -> str:
-    """The declared state of ``key`` on ``harness``: one of ``native``,
-    ``capable``, ``absent``, ``unmeasured`` (x-a3e8). A key ABSENT from the
-    row reads ``unmeasured`` - a feature nobody measured is a visible gap,
-    never a refusal; the refusal lives in the lane that consumes the
-    feature. Unknown harness raises like :func:`capabilities`; an unknown
-    KEY raises too, because a caller asking for a key outside the closed
-    set is a typo, not a measurement."""
-    caps = capabilities(harness)
-    if key not in _FEATURE_KEYS:
-        raise DispatchResolveError(
-            f"unknown feature key {key!r}; the feature vocabulary knows: "
-            f"{', '.join(sorted(_FEATURE_KEYS))}"
-        )
-    claim = caps.get("features") or {}
-    return claim.get(key, {}).get("state", "unmeasured") if isinstance(claim, dict) else "unmeasured"
-
-
-_FEATURE_CAPABILITY = {
-    "absent": "ships no such command this lane could fire",
-    "capable": "has such a surface, but fno has wired no arm for it",
-    "unmeasured": "has not had this surface measured",
-}
-
-# The review SUBJECT, not a verb inventory: any namespace-qualified or
-# code-qualified spelling of /review gates a keystroke lane against the
-# recipient row's features.review. The codex-daemon lane keeps its exact
-# review_verbs membership test in the mail lane.
-_REVIEW_SUBJECT_RE = re.compile(r"^/(?:[a-z][a-z0-9-]*:)?(?:code-)?review$", re.IGNORECASE)
-
-
-def feature_refusal_reason(harness: str, key: str) -> Optional[str]:
-    """Why a consuming lane must refuse ``key`` on ``harness``, or ``None``
-    when the row reads native and the lane proceeds (x-a3e8). An undeclared
-    harness reads unmeasured, never an exception: the honest answer to a
-    row that does not exist is that nobody has measured it. The reason
-    names the key, the state, and the probe that settles it, so every
-    consuming lane refuses in the same words."""
-    try:
-        state = feature_claim(harness, key)
-    except DispatchResolveError:
-        state = "unmeasured"
-        harness_label = f"{harness or 'an undeclared harness'}"
-    else:
-        harness_label = harness
-    if state == "native":
-        return None
-    return (
-        f"capability row records features.{key} = {state!r}: it "
-        f"{_FEATURE_CAPABILITY[state]}. Settle the row with "
-        f"'fno agents harness probe {harness_label}'."
-    )
-
-
-def review_lane_block(harness: str, first_token: str) -> Optional[str]:
-    """The full refusal reason when a raw ``first_token`` names the review
-    subject and the harness's row does not read ``features.review = native``
-    (x-a3e8); ``None`` when the payload is not a review verb or the row is
-    native. The keystroke lane asks this before it types, so a review can
-    never again deliver a receipt over a verb the harness cannot fire."""
-    if not _REVIEW_SUBJECT_RE.match(first_token):
-        return None
-    return feature_refusal_reason(harness or "", "review")
 
 
 def capabilities(harness: str) -> dict:

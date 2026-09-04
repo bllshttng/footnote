@@ -5558,13 +5558,16 @@ def cmd_dispatch_lanes(
             harness = harness.strip()
             if not harness:
                 raise DispatchFlagError("--harness must not be empty")
-            from fno.harness_names import SPAWN_HARNESSES, thread_spawn_refusal
+            from fno.harness_names import SPAWN_HARNESSES
 
             if harness not in SPAWN_HARNESSES:
-                # The refusal's two shapes (a declared pane-only harness is
-                # not an unknown name) are built beside the roster they
-                # derive from, so every surface renders the same words.
-                raise DispatchFlagError(thread_spawn_refusal(harness))
+                accepted = ", ".join(SPAWN_HARNESSES)
+                raise DispatchFlagError(
+                    f"unknown harness {harness!r} on the thread substrate "
+                    f"(--harness names the CLI BINARY); accepted here: {accepted}.\n"
+                    "agy and gemini launch on --substrate pane only.\n"
+                    "If you meant a model VENDOR, that is -P/--provider."
+                )
         if provider is not None:
             provider = provider.strip()
             if not provider:

@@ -143,6 +143,11 @@ state = "native"
 [harness.claude.features.attach]
 state = "native"
 
+# Subagent dispatch rides the Task/Agent tool; the review lane's registry
+# reviewers resolve their `requires: subagent-dispatch` from this row.
+[harness.claude.features.subagent_dispatch]
+state = "native"
+
 [harness.codex]
 permission_bypass = ["--dangerously-bypass-approvals-and-sandbox"]
 resume = "native-thread"
@@ -282,6 +287,10 @@ state = "native"
 [harness.codex.features.attach]
 state = "native"
 
+# Codex reaches subagent dispatch through project custom agents / spawn_agent.
+[harness.codex.features.subagent_dispatch]
+state = "native"
+
 [harness.gemini]
 permission_bypass = ["--yolo"]
 resume = "native-continue"
@@ -371,6 +380,13 @@ status_pattern = ""
 # thread arm exists to wire and none will be.
 [harness.gemini.features.spawn]
 state = "absent"
+
+# The experimental project-agent mode exists on the binary and fno drives no
+# lane into it, so this is the textbook `capable`: exposed, unwired. A
+# registry reviewer demanding subagent-dispatch resolves unavailable here,
+# not assumed-yes.
+[harness.gemini.features.subagent_dispatch]
+state = "capable"
 
 [harness.agy]
 permission_bypass = ["--dangerously-skip-permissions"]

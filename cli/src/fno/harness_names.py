@@ -18,9 +18,6 @@ name set is the source of truth; the capability table validates against it.
 """
 from __future__ import annotations
 
-import tomllib
-from pathlib import Path
-
 # Every harness supported by shipped evidence, not every harness with a
 # capability row. hermes and openclaw host real sessions per docs/SETUP-*.md
 # but have no native fno dispatch, so they carry no row in
@@ -41,66 +38,38 @@ KNOWN_HARNESSES: tuple[str, ...] = (
     "grok",
 )
 
-# The spawn roster reads from the capability table, not from a literal here
-# (x-a3e8). One answer used to live in two places - a Python tuple plus a
-# comment saying which rows it meant - and the two could not be checked
-# against each other. Now the row IS the answer: a harness belongs exactly
-# when its [harness.<name>.features.spawn] stanza reads native, with the
-# journey evidence cited on the row itself. Still pure stdlib file reading -
-# the module's no-fno-imports contract above is what keeps this layer L0.
-_PACKAGED_CONTRACT = Path(__file__).parent / "agents" / "harness_capabilities.toml"
-
-
-def _capability_table() -> dict:
-    """The packaged capability table as plain dicts. Loud on a broken
-    install: a missing or unparseable table is an import-time failure, the
-    same posture harness_map takes when it loads the same file."""
-    with _PACKAGED_CONTRACT.open("rb") as handle:
-        return tomllib.load(handle)
-
-
-def _spawn_state(name: str, table: dict | None = None) -> str:
-    """``features.spawn.state`` for one capability row, ``unmeasured`` when
-    the row carries no features stanza for it. The absent-row default is
-    the honest one: a feature nobody measured is a gap, never a seat."""
-    row = (table or _capability_table()["harness"]).get(name) or {}
-    claim = row.get("features") or {}
-    return claim.get("spawn", {}).get("state", "unmeasured")
-
-
-SPAWN_HARNESSES: tuple[str, ...] = tuple(
-    sorted(
-        name
-        for name, row in _capability_table()["harness"].items()
-        if (row.get("features") or {}).get("spawn", {}).get("state") == "native"
-    )
+# Thread/headless accepts opencode through its launch seam, and the
+# keeper-hosted lanes: cursor-agent through `create-chat`'s callee-minted
+# chat id, pi through the caller-assigned id the restart journey proved.
+# agy and gemini are pane-only and stay out of this tuple.
+#
+# pi joins on journey evidence, not roster growth: its keeper-hosted thread
+# lane survived a double SIGKILL (journey wk-x61bc,
+# cli/tests/agents/test_thread_keeper_journey.py, first green 2026-09-01 on pi
+# 0.84.2), and the spawn arm shipped behind that evidence
+# (`dispatch_spawn`'s pi branch drives `_lane_b_thread_spawn`). pi's HEADLESS
+# lane is a different story: nothing has run it, its state_root_grant row
+# reads `unmeasured`, and `_check_spawn_harness` refuses that lane by stance
+# rather than by absence from this tuple. The membership answers "is there a
+# seam arm"; the row answers "is the lane measured".
+#
+# cursor-agent joins the same way (x-61bc's generic thread lane): the
+# dispatch_spawn arm mints the chat id through `create-chat`, hosts the TUI
+# under `fno-agents-worker --keeper`, and the journey backs it. Its `thread`
+# row reads true behind that same journey.
+#
+# grok joins the same keeper lane (x-fd31): the dispatch_spawn arm mints the
+# caller-assigned `--session-id` uuid, hosts the TUI under
+# `fno-agents-worker --keeper`, and the live measurement (create, SIGKILL,
+# `--resume` recall) backs the row. kimi is deliberately ABSENT: its ACP
+# mint lane is built and unit-tested, but the binary refuses every turn
+# until its provider is configured (the operator's who-pays axis), so no
+# row and no SPAWN_HARNESSES seat can stand behind an unmeasured lane.
+SPAWN_HARNESSES: tuple[str, ...] = (
+    "claude",
+    "codex",
+    "opencode",
+    "cursor-agent",
+    "pi",
+    "grok",
 )
-
-
-def pane_only_harnesses() -> tuple[str, ...]:
-    """Declared harnesses with NO wired spawn arm - the derived form of the
-    sentence the two spawn refusals used to hardcode by hand and had to
-    keep in agreement. Sorted, so a refusal's accepted text is stable."""
-    table = _capability_table()["harness"]
-    return tuple(
-        sorted(name for name in table if _spawn_state(name, table) != "native")
-    )
-
-
-def thread_spawn_refusal(harness: str) -> str:
-    """The thread-substrate refusal for a harness outside the derived
-    roster, built HERE so every refusal surface renders the same words from
-    the same table and can never disagree again. A declared pane-only
-    harness is not an unknown name; its answer says what the row says."""
-    if harness in pane_only_harnesses():
-        return (
-            f"harness {harness!r} is refused on the thread substrate: "
-            "features.spawn is not native in harness_capabilities.toml; "
-            "it launches on --substrate pane only."
-        )
-    return (
-        f"unknown harness {harness!r} on the thread substrate (--harness "
-        f"names the CLI BINARY); accepted here: {', '.join(SPAWN_HARNESSES)}.\n"
-        "If you meant a model VENDOR, that is -P/--provider."
-    )
-

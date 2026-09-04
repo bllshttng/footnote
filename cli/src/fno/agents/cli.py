@@ -5241,7 +5241,8 @@ def cmd_attach(
     own TUI on the thread the shared app-server daemon owns. fno draws
     nothing either way; each harness renders its own interface.
 
-    Every other harness: asked of the table (x-a3e8). features.attach answers reachability; native rides the daemon-kept lane above, any other state refuses by name with the probe.
+    Every other harness: refused with exit 13, because it has no
+    persistent session to attach to.
     """
     from fno.agents.dispatch import DispatchAskError, attach_agent
 

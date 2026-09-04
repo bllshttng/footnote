@@ -55,7 +55,7 @@ from fno.agents import rm_notice
 from fno.agents.context import EventContext, build_context
 from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
-from fno.agents.harnesses import KNOWN_PROVIDERS
+from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.reachability import mux_ref_names_a_pane
 from fno.agents.registry import (
@@ -439,16 +439,62 @@ class DispatchAskError(RuntimeError):
 
 
 def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
-    """Validate a harness at the thread/headless spawn seam (x-a3e8).
+    """Validate a harness at the thread/headless spawn seam.
 
-    The question and its four state answers live in
-    :mod:`fno.agents.spawn_seam`, a module named by the question it
-    answers; this wrapper keeps the seam's address stable for callers
-    and tests.
+    Substrate-aware (x-43bd): membership in ``SPAWN_HARNESSES`` says a seam
+    arm exists, and the capability row says which of the two lanes it opens.
+    A harness whose ``state_root_grant`` stance for the requested substrate
+    reads ``"unmeasured"`` is refused here rather than silently inheriting a
+    stance from the lanes that have run - the state-root gate downstream only
+    refuses an ABSENT key, so an ``"unmeasured"`` value would pass it.
     """
-    from fno.agents.spawn_seam import check_spawn_harness
+    if name in SPAWN_HARNESSES:
+        substrate = "headless" if headless else "thread"
+        from fno.agents.harness_map import capabilities_or_undeclared
 
-    check_spawn_harness(name, headless=headless)
+        stance = capabilities_or_undeclared(name).get("state_root_grant", {}).get(
+            substrate
+        )
+        # Absent refuses beside "unmeasured": a row that does not record a
+        # stance for the lane has not measured it, and silence would let a
+        # new member inherit a pass from the lanes that did run.
+        if stance is None or stance == "unmeasured":
+            raise DispatchAskError(
+                f"{name!r} has a spawn arm, but its {substrate} lane is not "
+                "measured: the capability row records state_root_grant."
+                f"{substrate} = {stance!r} (absent or unmeasured), and nothing "
+                "has run that lane unattended. An unattended journey for the "
+                f"lane is what clears it (pi's thread journey is the shape: "
+                "cli/tests/agents/test_pi_spawn_journey.py). "
+                f"Use --substrate pane, which every harness hosts.",
+                exit_code=2,
+            )
+        return
+    from fno.agents.harness_map import is_declared
+
+    if not is_declared(name):
+        # x-f579: an undeclared harness HAS a lane - the pane - so this refusal
+        # must name that lane rather than the accept set. It must not fall into
+        # the deprecated-harness text below either: that one names agy as a
+        # successor, a harness the operator never mentioned (the same trap the
+        # SPAWN_HARNESSES comment records for pi).
+        raise DispatchAskError(
+            f"harness {name!r} declares no capability row (no entry in "
+            "harness_capabilities.toml); --substrate pane is the only substrate "
+            f"available to it ('fno agents spawn -H {name} --substrate pane' "
+            "hosts the binary with fno as the viewport). A thread or headless "
+            "lane needs the vendor's own protocol and must be measured first.\n"
+            "If you meant a model VENDOR, that is -P/--provider.",
+            exit_code=2,
+        )
+    accepted = ", ".join(SPAWN_HARNESSES)
+    raise DispatchAskError(
+        f"unknown harness {name!r} on the thread substrate (--harness names "
+        f"the CLI BINARY); accepted here: {accepted}.\n"
+        "agy and gemini launch on --substrate pane only.\n"
+        "If you meant a model VENDOR, that is -P/--provider.",
+        exit_code=2,
+    )
 
 
 # Exit-code taxonomy (documented here for cross-language parity with Rust Task 1.3):
@@ -6088,70 +6134,33 @@ def attach_agent(name: str) -> AttachResult:
             exit_code=landed.returncode,
         )
 
-    if existing.harness != "claude":
-        # (x-a3e8) Reachability is the table's answer, never the verb
-        # inventory and never the gap in this file: features.attach says
-        # whether fno can attach to a live session on this harness. The old
-        # branches read a missing Python implementation as the harness's
-        # inability, which is how a daemon-held codex thread and a
-        # keeper-held agy session both read as unattachable.
-        from fno.agents.harness_map import DispatchResolveError, feature_claim
+    if existing.harness in ("codex", "gemini"):
+        # (x-6678) A codex THREAD is attachable now: it lives on the shared
+        # app-server daemon and `codex resume --remote` opens the real TUI on
+        # it. That path is the Rust verb's (client_verbs.rs), which is what
+        # `fno agents attach` routes to. This fallback runs only when the Rust
+        # binary is unavailable, and in that world no codex thread exists to
+        # attach to, because the Rust daemon is what spawns one.
+        sys.stderr.write(
+            f"{existing.harness} agents are one-shot; no persistent "
+            "session to attach to. Use 'fno agents logs "
+            f"{name} --follow' for live output.\n"
+        )
+        # Forensic event so an `events.jsonl` audit can correlate
+        # "why did this attach attempt fail" against operator activity.
+        # (Sigma-review C4 finding: silent on the refused path before.)
+        events.emit(
+            "agent_attach_refused",
+            name=name,
+            provider=existing.harness,
+            reason="one-shot-provider-no-persistent-session",
+        )
+        return AttachResult(name=name, provider=existing.harness, exit_code=13)
 
-        try:
-            attach_state = feature_claim(existing.harness, "attach")
-        except DispatchResolveError:
-            attach_state = "unmeasured"
-        if attach_state != "native":
-            capability = {
-                "absent": "has no attachable session",
-                "capable": "can hold a live session, but fno has wired no attach arm for it",
-                "unmeasured": "has not had attach reachability measured",
-            }[attach_state]
-            sys.stderr.write(
-                f"attach to {name!r} ({existing.harness}) is refused: its "
-                f"capability row records features.attach = {attach_state!r} - "
-                f"it {capability}. Settle the row with 'fno agents harness "
-                f"probe {existing.harness}'. 'fno agents logs {name} --follow' "
-                "still shows live output.\n"
-            )
-            # Forensic event so an `events.jsonl` audit can correlate
-            # "why did this attach attempt fail" against operator activity.
-            events.emit(
-                "agent_attach_refused",
-                name=name,
-                provider=existing.harness,
-                reason=f"features-attach-{attach_state}",
-            )
-            return AttachResult(name=name, provider=existing.harness, exit_code=13)
-        if existing.harness == "codex":
-            # Native, but the wired arm is the fno-agents binary
-            # (client_verbs.rs), which `fno agents attach` routes to before
-            # this Python fallback ever runs. This fallback executes only
-            # when that binary is unavailable, and in that world no codex
-            # thread exists to attach to, because the Rust daemon is what
-            # spawns one. The lane is down; the harness is not unable.
-            sys.stderr.write(
-                "codex attach is wired through the fno-agents binary, which "
-                "is unavailable in this runtime, and a codex thread exists "
-                f"only under that daemon. Run 'fno doctor --fix'. 'fno agents "
-                f"logs {name} --follow' still shows live output.\n"
-            )
-            events.emit(
-                "agent_attach_refused",
-                name=name,
-                provider="codex",
-                reason="attach-lane-binary-unavailable",
-            )
-            return AttachResult(name=name, provider="codex", exit_code=13)
-        # Native on a keeper-held harness: the wired arm is the daemon-kept
-        # lane (the mux-thread portal) already tried above. Reaching this
-        # point means no live mux server answered, so the lane is down.
+    if existing.harness != "claude":
         raise DispatchAskError(
-            f"{existing.harness} attach rides the daemon-kept lane (the "
-            "mux-thread portal), and no live mux server answered. Start one "
-            "with 'fno mux serve' and retry; 'fno agents logs "
-            f"{name} --follow' shows live output meanwhile.",
-            exit_code=24,
+            f"attach for harness {existing.harness!r} is not implemented",
+            exit_code=2,
         )
 
     short_id = existing.short_id

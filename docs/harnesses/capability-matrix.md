@@ -17,9 +17,9 @@ Every non-native cell settles the same way: `fno agents harness probe <harness>`
 
 | harness | acp | attach | hooks | mcp | plugins | review | rpc | server | skills_dir | spawn | subagent_dispatch |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| claude | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
-| codex | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
-| gemini | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `absent` | `unmeasured` |
+| claude | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `native` |
+| codex | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `native` |
+| gemini | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `absent` | `capable` |
 | agy | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `absent` | `unmeasured` |
 | opencode | `unmeasured` | `native` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |
 | pi | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `native` | `unmeasured` |

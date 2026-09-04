@@ -425,11 +425,8 @@ def test_dispatch_lanes_refuses_pane_only_harness_before_selection(monkeypatch):
     )
 
     assert result.exit_code == 2
-    # gemini carries a row, so it is not an unknown name: the refusal reads
-    # its features.spawn state and names the pane lane (derived from the
-    # same table as the roster, never a hardcoded sentence).
-    assert "features.spawn is not native" in result.output
-    assert "--substrate pane" in result.output
+    assert "accepted here: claude, codex, opencode" in result.output
+    assert "agy and gemini launch on --substrate pane only" in result.output
     assert called is False
 
 
