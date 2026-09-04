@@ -17,6 +17,7 @@ use crate::events::EventEmitter;
 // point (`state::update_registry`) can stage the same recovery record for a
 // row removed through ANY door; re-exported so the reap path's references
 // are unchanged.
+pub use crate::gc::{gc_sweep, gc_sweep_dry_run};
 use crate::identity::canonical_handle;
 use crate::paths::{self, AgentsHome};
 use crate::protocol::{
@@ -1327,7 +1328,7 @@ fn transcript_fresh_probe(log_path: Option<&str>, now: i64, window_secs: i64) ->
 /// codex row has no claude transcript by construction, so a claude-keyed probe
 /// would reap every codex worker on the machine.
 #[derive(Default)]
-struct HarnessStoreIndex {
+pub(crate) struct HarnessStoreIndex {
     /// Resolved store roots; `None` until the first lookup resolves them from
     /// `$HOME` (or forever, for an index built `with_roots` in tests).
     claude_root: Option<std::path::PathBuf>,
@@ -1377,7 +1378,7 @@ impl HarnessStoreIndex {
 
     /// Every transcript candidate this row's harness store holds for its
     /// session id. Empty vector = the session is GONE from its own store.
-    fn matches(&mut self, e: &state::RegistryEntry) -> Option<Vec<std::path::PathBuf>> {
+    pub(crate) fn matches(&mut self, e: &state::RegistryEntry) -> Option<Vec<std::path::PathBuf>> {
         let sid = e.harness_session_id.as_deref().filter(|s| !s.is_empty())?;
         let harness = e.harness_name();
         let root = match harness {
@@ -1663,7 +1664,7 @@ fn cascade_harness_session_result_with(
     }
 }
 
-fn cascade_harness_session_with(
+pub(crate) fn cascade_harness_session_with(
     index: &mut HarnessStoreIndex,
     e: &state::RegistryEntry,
 ) -> Option<(String, String)> {
@@ -2257,14 +2258,14 @@ fn restore_unaccounted_row(home: &AgentsHome, entry: &RegistryEntry) -> Result<(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct NodeSessionCascadeReceipt {
+pub(crate) struct NodeSessionCascadeReceipt {
     row_removed: bool,
     status_before: Option<String>,
     status_after: Option<String>,
     remaining_open_do: usize,
 }
 
-fn reap_node_session(
+pub(crate) fn reap_node_session(
     entry: &state::RegistryEntry,
     node_id: &str,
     harness: &str,
@@ -2354,93 +2355,14 @@ fn reap_node_session(
     })
 }
 
-/// Dead-row garbage collection sweep (x-b1aa). Removes terminal, past-grace,
-/// clean agent-view rows from the registry so finished rows stop accumulating
-/// "like browser tabs." Shared by the daemon idle tick (the automatic path) and
-/// `fno agents reap` (the manual escape hatch) -- ONE decision (`gc::gc_action`),
-/// two triggers (Locked Decision #2). Idempotent and safe against a concurrent
-/// sweep via the atomic reap-write: a row already gone is a no-op.
-///
-/// Liveness is RE-CHECKED here (AC1-FR): a row that re-registered live during the
-/// grace window is never swept on a stale `exited`, and its stale `exited_at` is
-/// cleared. A registry-write failure is surfaced as `daemon_recovery_error` and
-/// reported as zero reaps, so the event log never claims a removal the disk did
-/// not get (AC1-ERR).
-/// `grace_for_harness` resolves `agents.dead_row_grace` PER ROW, keyed on
-/// `e.harness_name()` (x-9de7 task 6) -- defence in depth, not the fix: it
-/// only sets the blast radius of a false `exited` write, since a live row is
-/// re-checked and never touched regardless of grace. Injected so this stays
-/// testable without shelling config reads; production passes
-/// `agents_config::dead_row_grace_secs`.
-pub fn gc_sweep(
-    home: &AgentsHome,
-    emitter: &EventEmitter,
-    grace_for_harness: &dyn Fn(&str) -> Duration,
-    // Retention window for reap receipts, in days (x-6db9). Resolved by the
-    // caller from `agents.reap_receipts.retain_days` the same way the grace
-    // window is resolved from `agents.dead_row_grace`.
-    retain_days: u64,
-) -> GcSummary {
-    let store = std::cell::RefCell::new(HarnessStoreIndex::default());
-    let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
-    let truth = registry_entries(home).map_or_else(std::collections::HashMap::new, |entries| {
-        batched_row_truths(&entries, &live_truth_tail_states)
-    });
-    let prober = live_liveness_prober(truth);
-    gc_sweep_impl_with_node_cascade(
-        home,
-        emitter,
-        grace_for_harness,
-        false,
-        retain_days,
-        &live_truth_tail_states,
-        &|e| store.borrow_mut().matches(e),
-        &prober,
-        Some(&|e, node_id, harness, session_id| reap_node_session(e, node_id, harness, session_id)),
-        &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
-    )
-}
-
-/// `fno agents reap --dry-run` (x-9de7 task 5): classify the registry exactly
-/// as [`gc_sweep`] does, including every `kept_dirty` / `kept_uncorroborated`
-/// diagnostic, but never write the registry, never emit a `daemon_recovery_error`
-/// or `agent_row_reaped` event, and never touch dispatch termination. "Would
-/// reap" and "would keep, and why" are read straight off the same
-/// classification the real sweep uses - a reaper an operator cannot rehearse
-/// is one they will not run.
-pub fn gc_sweep_dry_run(
-    home: &AgentsHome,
-    grace_for_harness: &dyn Fn(&str) -> Duration,
-) -> GcSummary {
-    // Never emitted to in dry-run mode (the whole write+emit tail is skipped
-    // below), so an unused placeholder path satisfies the shared signature.
-    let emitter = EventEmitter::new(std::path::PathBuf::new(), "daemon");
-    let store = std::cell::RefCell::new(HarnessStoreIndex::default());
-    let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
-    let truth = registry_entries(home).map_or_else(std::collections::HashMap::new, |entries| {
-        batched_row_truths(&entries, &live_truth_tail_states)
-    });
-    let prober = live_liveness_prober(truth);
-    gc_sweep_impl_with_node_cascade(
-        home,
-        &emitter,
-        grace_for_harness,
-        true,
-        0, // dry-run never expires: a rehearsal that pruned would not be one
-        &live_truth_tail_states,
-        &|e| store.borrow_mut().matches(e),
-        &prober,
-        None,
-        &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
-    )
-}
-
 /// The dormant gate's transcript-tail read, as production runs it: the shared
 /// truth probe (`fno agents truth --handles ... --json`, bounded at 5s),
 /// lowered to the state string alone, for EVERY escalated handle in one
 /// subprocess. Injected into [`gc_sweep_impl`] so the decision path is
 /// unit-testable without shelling out to a real `fno`.
-fn live_truth_tail_states(handles: &[String]) -> std::collections::HashMap<String, String> {
+pub(crate) fn live_truth_tail_states(
+    handles: &[String],
+) -> std::collections::HashMap<String, String> {
     crate::claude_ask::family1_truth_probe_many(handles)
         .into_iter()
         .map(|(handle, probe)| (handle, probe.state))
@@ -2451,7 +2373,9 @@ fn live_truth_tail_states(handles: &[String]) -> std::collections::HashMap<Strin
 /// start time no longer matches provably ended. Folded into the answer type
 /// so the reapers read one vocabulary; the ladder never answers `Dead` from
 /// absence.
-fn fold_positive_death(e: &state::RegistryEntry) -> Option<crate::client_verbs::RowLiveness> {
+pub(crate) fn fold_positive_death(
+    e: &state::RegistryEntry,
+) -> Option<crate::client_verbs::RowLiveness> {
     e.pid
         .map(|p| !pid_is_ours(p, e.pid_start_time))
         .unwrap_or(false)
@@ -2460,7 +2384,7 @@ fn fold_positive_death(e: &state::RegistryEntry) -> Option<crate::client_verbs::
 
 /// One registry read for the pre-sweep truth batch. An unreadable registry
 /// yields no candidates; the sweep body re-reads and reports for itself.
-fn registry_entries(home: &AgentsHome) -> Option<Vec<state::RegistryEntry>> {
+pub(crate) fn registry_entries(home: &AgentsHome) -> Option<Vec<state::RegistryEntry>> {
     state::load_registry(&home.registry_json())
         .ok()
         .map(|r| r.entries)
@@ -2476,7 +2400,7 @@ fn registry_entries(home: &AgentsHome) -> Option<Vec<state::RegistryEntry>> {
 /// stamped-only batch leaves the transcript - the one marker a pid-less,
 /// unstamped claude row can carry - permanently silent for that vote. An
 /// empty candidate set spends nothing.
-fn batched_row_truths(
+pub(crate) fn batched_row_truths(
     entries: &[state::RegistryEntry],
     truth_tail_states: &dyn Fn(&[String]) -> std::collections::HashMap<String, String>,
 ) -> std::collections::HashMap<String, String> {
@@ -2503,7 +2427,7 @@ fn batched_row_truths(
 /// probe - the truth rung reads the batched map, never a per-row subprocess.
 /// Injected like `store_matches` so a sweep-level test never depends on what
 /// lives in the developer's real `~/.claude`.
-fn live_liveness_prober(
+pub(crate) fn live_liveness_prober(
     truth: std::collections::HashMap<String, String>,
 ) -> impl Fn(&state::RegistryEntry) -> crate::client_verbs::RowLiveness {
     let home = crate::claude_ask::ClaudeHome::from_env();
@@ -2567,7 +2491,7 @@ fn gc_sweep_impl(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn gc_sweep_impl_with_node_cascade(
+pub(crate) fn gc_sweep_impl_with_node_cascade(
     home: &AgentsHome,
     emitter: &EventEmitter,
     grace_for_harness: &dyn Fn(&str) -> Duration,
@@ -2600,6 +2524,11 @@ fn gc_sweep_impl_with_node_cascade(
     // test must be able to stage a refusal without mutating PATH/HOME.
     cascade: &dyn Fn(&state::RegistryEntry) -> Option<(String, String)>,
 ) -> GcSummary {
+    // (x-f191) Per-row stderr progress, opt-in via FNO_REAP_PROGRESS=1: only
+    // a caller that reads partial output on a timeout (the mux server's
+    // bounded reap) sets it on the child. The daemon's idle tick runs this
+    // sweep every few seconds and must not log a line per row per tick.
+    let progress = std::env::var_os("FNO_REAP_PROGRESS").is_some_and(|v| v == "1");
     let mut summary = GcSummary::default();
     // The retention pass runs on EVERY sweep, before the empty-registry
     // early return below: receipts age out on their own clock, and a quiet
@@ -2665,6 +2594,15 @@ fn gc_sweep_impl_with_node_cascade(
     let mut pending: Vec<PendingRow> = Vec::with_capacity(registry.entries.len());
 
     for e in &registry.entries {
+        // (x-f191) Progress on stderr, one line per row: a sweep that outlives
+        // its 20s caller bound can still say how far it got. stdout stays the
+        // --json contract; stderr lines are free-form and every consumer of
+        // this sweep already treats stderr as log. Gated: the daemon's idle
+        // tick runs this sweep every few seconds and must not log a line per
+        // row per tick.
+        if progress {
+            eprintln!("reap: scan {}", e.name);
+        }
         let grace_secs = grace_for_harness(e.harness_name()).as_secs() as i64;
         // x-91f3: the ladder answers for EVERY row, not only the stamped
         // live-ish rows the consult below used to gate it to. `short_id` is
@@ -3071,11 +3009,22 @@ fn gc_sweep_impl_with_node_cascade(
     });
     match write {
         Ok(()) => {
+            // (x-f191) The write is one atomic pass, so the removed count is
+            // known here - before the per-row cascade work below, which is
+            // where a sweep under load spends its time.
+            if progress {
+                eprintln!("reap: removed {}", reaped_names.len());
+            }
             // Emit only AFTER a successful write so the event log never diverges
             // from disk (AC1-ERR), and only for rows actually removed under the
             // lock (a stale candidate whose identity changed is not a reap).
             for e in &registry.entries {
                 if reaped_names.contains(&e.name) {
+                    // (x-f191) The row whose accounting + cascade is now in
+                    // flight; the next scan/cascade line supersedes it.
+                    if progress {
+                        eprintln!("reap: cascade {}", e.name);
+                    }
                     let node_id = dispatch_node_id(&e.name);
                     let mut target_session_id = None;
                     let mut termination_event = false;

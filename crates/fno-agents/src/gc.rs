@@ -12,6 +12,22 @@
 
 use crate::client_verbs::RowLiveness;
 use crate::AgentStatus;
+// --- the sweep shells (x-f191: rehomed from daemon.rs under the file budget) --
+// The two triggers behind the pure decision above: the daemon's idle tick and
+// the manual `fno agents reap` verb both shell these. The sweep body itself
+// (`gc_sweep_impl_with_node_cascade` and the probe ladder it injects) stays in
+// daemon.rs beside the registry writes it owns; the verbs live here beside the
+// decision they wrap.
+
+use std::time::Duration;
+
+use crate::daemon::{
+    batched_row_truths, cascade_harness_session_with, gc_sweep_impl_with_node_cascade,
+    live_liveness_prober, live_truth_tail_states, reap_node_session, registry_entries, GcSummary,
+    HarnessStoreIndex,
+};
+use crate::events::EventEmitter;
+use crate::paths::AgentsHome;
 
 /// How many grace windows a row with nothing to corroborate is kept before the
 /// absolute-age backstop removes it. Large on purpose: the backstop is the
@@ -407,6 +423,87 @@ pub fn gc_action(row: &GcRow, now: i64, grace_secs: i64) -> GcAction {
 /// as a silent, unexplained keep.
 pub fn keep_reason(row: &GcRow, now: i64, grace_secs: i64) -> Option<KeepReason> {
     gc_decide(row, now, grace_secs).1
+}
+
+/// Dead-row garbage collection sweep (x-b1aa). Removes terminal, past-grace,
+/// clean agent-view rows from the registry so finished rows stop accumulating
+/// "like browser tabs." Shared by the daemon idle tick (the automatic path) and
+/// `fno agents reap` (the manual escape hatch) -- ONE decision (`gc::gc_action`),
+/// two triggers (Locked Decision #2). Idempotent and safe against a concurrent
+/// sweep via the atomic reap-write: a row already gone is a no-op.
+///
+/// Liveness is RE-CHECKED here (AC1-FR): a row that re-registered live during the
+/// grace window is never swept on a stale `exited`, and its stale `exited_at` is
+/// cleared. A registry-write failure is surfaced as `daemon_recovery_error` and
+/// reported as zero reaps, so the event log never claims a removal the disk did
+/// not get (AC1-ERR).
+/// `grace_for_harness` resolves `agents.dead_row_grace` PER ROW, keyed on
+/// `e.harness_name()` (x-9de7 task 6) -- defence in depth, not the fix: it
+/// only sets the blast radius of a false `exited` write, since a live row is
+/// re-checked and never touched regardless of grace. Injected so this stays
+/// testable without shelling config reads; production passes
+/// `agents_config::dead_row_grace_secs`.
+pub fn gc_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    grace_for_harness: &dyn Fn(&str) -> Duration,
+    // Retention window for reap receipts, in days (x-6db9). Resolved by the
+    // caller from `agents.reap_receipts.retain_days` the same way the grace
+    // window is resolved from `agents.dead_row_grace`.
+    retain_days: u64,
+) -> GcSummary {
+    let store = std::cell::RefCell::new(HarnessStoreIndex::default());
+    let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
+    let truth = registry_entries(home).map_or_else(std::collections::HashMap::new, |entries| {
+        batched_row_truths(&entries, &live_truth_tail_states)
+    });
+    let prober = live_liveness_prober(truth);
+    gc_sweep_impl_with_node_cascade(
+        home,
+        emitter,
+        grace_for_harness,
+        false,
+        retain_days,
+        &live_truth_tail_states,
+        &|e| store.borrow_mut().matches(e),
+        &prober,
+        Some(&|e, node_id, harness, session_id| reap_node_session(e, node_id, harness, session_id)),
+        &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
+    )
+}
+
+/// `fno agents reap --dry-run` (x-9de7 task 5): classify the registry exactly
+/// as [`gc_sweep`] does, including every `kept_dirty` / `kept_uncorroborated`
+/// diagnostic, but never write the registry, never emit a `daemon_recovery_error`
+/// or `agent_row_reaped` event, and never touch dispatch termination. "Would
+/// reap" and "would keep, and why" are read straight off the same
+/// classification the real sweep uses - a reaper an operator cannot rehearse
+/// is one they will not run.
+pub fn gc_sweep_dry_run(
+    home: &AgentsHome,
+    grace_for_harness: &dyn Fn(&str) -> Duration,
+) -> GcSummary {
+    // Never emitted to in dry-run mode (the whole write+emit tail is skipped
+    // below), so an unused placeholder path satisfies the shared signature.
+    let emitter = EventEmitter::new(std::path::PathBuf::new(), "daemon");
+    let store = std::cell::RefCell::new(HarnessStoreIndex::default());
+    let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
+    let truth = registry_entries(home).map_or_else(std::collections::HashMap::new, |entries| {
+        batched_row_truths(&entries, &live_truth_tail_states)
+    });
+    let prober = live_liveness_prober(truth);
+    gc_sweep_impl_with_node_cascade(
+        home,
+        &emitter,
+        grace_for_harness,
+        true,
+        0, // dry-run never expires: a rehearsal that pruned would not be one
+        &live_truth_tail_states,
+        &|e| store.borrow_mut().matches(e),
+        &prober,
+        None,
+        &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
+    )
 }
 
 #[cfg(test)]

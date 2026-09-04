@@ -862,7 +862,7 @@ fn text_frame(rows: u16, cols: u16, ch: char) -> Frame {
     }
 }
 
-fn two_pane_view() -> View {
+pub(super) fn two_pane_view() -> View {
     // 30x100 terminal, panel visible (100 >= 28+40). Content = 28x72
     // (tab bar + status row). Two panes split H: 35 + divider + 36 cols.
     let mut view = View::new(
@@ -1197,7 +1197,7 @@ fn focus_outline_wraps_both_seams_of_a_2x2_pane() {
 }
 
 // An agent row hosting a given pane, under squad 1.
-fn focus_agent(pane: u64) -> AgentRow {
+pub(super) fn focus_agent(pane: u64) -> AgentRow {
     AgentRow {
         portal: None,
         harness: None,
@@ -11456,7 +11456,7 @@ fn blank_spacers_separate_groups_only_when_multi_squad() {
     );
 }
 
-fn agent_row_at(v: &View, pred: impl Fn(&AgentRow) -> bool) -> usize {
+pub(super) fn agent_row_at(v: &View, pred: impl Fn(&AgentRow) -> bool) -> usize {
     v.display_rows()
         .iter()
         .position(|r| matches!(r, DisplayRow::Agent(a) if pred(a)))
@@ -12102,7 +12102,7 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
 // -- x-76ea agent-row lifecycle -------------------------------------
 
 /// A plain (non-tombstone) registry agent row under squad 1, varied by state.
-fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRow {
+pub(super) fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRow {
     AgentRow {
         portal: None,
         harness: None,
@@ -12142,10 +12142,9 @@ fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRow {
 }
 
 #[tokio::test]
-async fn selector_x_on_live_agent_arms_stop_confirm() {
-    // US1 / AC1-HP (client half): x on a live (non-tombstone) agent row arms
-    // a StopAgent confirm carrying the row's name; nothing is sent until the
-    // confirm commits, and the selector closes (open_confirm).
+async fn selector_x_on_live_agent_arms_remove_confirm() {
+    // x-f191 scope b: x on a live row arms ONE remove confirm (the server
+    // composes stop-then-rm); nothing sends until the confirm commits.
     let mut v = view_with_agents(vec![lifecycle_row("worker-a", false, false)]);
     v.set_squad_view(1, SectionView::Expanded);
     v.selector = Some(agent_row_at(&v, |a| a.name == "worker-a"));
@@ -12154,11 +12153,11 @@ async fn selector_x_on_live_agent_arms_stop_confirm() {
     assert!(buf.is_empty(), "arming a confirm sends nothing");
     assert_eq!(v.selector, None, "the confirm closes the selector");
     match v.confirm.as_ref().map(|c| (&c.action, c.label.as_str())) {
-        Some((ConfirmKind::StopAgent { name }, label)) => {
+        Some((ConfirmKind::RemoveAgent { name }, label)) => {
             assert_eq!(name, "worker-a");
             assert_eq!(label, "worker-a");
         }
-        _ => panic!("expected a StopAgent confirm"),
+        _ => panic!("expected a RemoveAgent confirm"),
     }
 }
 
@@ -15134,7 +15133,7 @@ fn density_button_glyph_sits_one_column_off_the_divider() {
     );
 }
 
-fn view_with_agents(agents: Vec<AgentRow>) -> View {
+pub(super) fn view_with_agents(agents: Vec<AgentRow>) -> View {
     let mut v = two_pane_view();
     v.layout.agents = agents;
     v

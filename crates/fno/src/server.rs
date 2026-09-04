@@ -53,7 +53,10 @@ use crate::vt::{self, frame_text, Modes};
 
 mod agent_actions;
 
-use self::agent_actions::{run_agent_action, run_agent_rename, run_mail_send, run_reentry_plan};
+use self::agent_actions::{
+    run_agent_action, run_agent_rename, run_mail_send, run_reap, run_reentry_plan,
+    run_stop_or_remove,
+};
 
 /// A control connection's reply channel: exactly one [`ServerMsg`], then close.
 type ControlReply = oneshot::Sender<ServerMsg>;
@@ -3486,6 +3489,7 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
         }
     }
 }
+
 /// (x-9c5f) Sanitize peek-overlay free-text mail: strip control chars, trim,
 /// refuse blank-after-sanitize and over-`MAX_MAIL_TEXT` (never truncate - a
 /// silently cut instruction to a worker is worse than a visible refusal, Locked
@@ -3681,28 +3685,6 @@ async fn run_agent_peek(name: &str) -> Vec<String> {
     body.lines().map(str::to_string).collect()
 }
 
-/// Shell `fno-agents reap --json` once for the bulk-reap gesture (x-7561),
-/// bounded + fail-open like `run_agent_action`: on success parse the `reaped`
-/// array length into a visible `reaped N` count (zero is a successful `reaped
-/// 0`), else a bounded failure notice. The argv is a fixed literal.
-async fn run_reap() -> String {
-    const REAP_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut command =
-        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
-    command
-        .args(["reap", "--json"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let fut = crate::process_admission::tokio_output(&mut command);
-    match tokio::time::timeout(REAP_TIMEOUT, fut).await {
-        Err(_) => "reap: timed out".to_string(),
-        Ok(Err(_)) => "reap: unavailable".to_string(),
-        Ok(Ok(out)) if out.status.success() => reap_notice(&String::from_utf8_lossy(&out.stdout)),
-        Ok(Ok(_)) => "reap: failed".to_string(),
-    }
-}
-
 /// Shell `claude <verb> <attach_id>` for an external lifecycle action (x-7561):
 /// `stop` preserves the conversation, `rm` deletes the session + worktree
 /// (Domain Pitfall 2 - they are not interchangeable). Bounded + argv-safe (the
@@ -3755,20 +3737,6 @@ async fn run_claude_agents_all(
         return None;
     }
     crate::agents_view::parse_claude_agents(&String::from_utf8_lossy(&output.stdout), tracked)
-}
-
-/// Map `fno-agents reap --json` stdout to the `reaped N` notice. The verb
-/// exited zero, so the reap ran; unparseable output still reports a success
-/// with an unknown count rather than a false failure (the row-vanish is the
-/// authoritative truth, this notice is advisory).
-fn reap_notice(stdout: &str) -> String {
-    match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
-        Ok(v) => match v.get("reaped").and_then(|r| r.as_array()) {
-            Some(arr) => format!("reaped {}", arr.len()),
-            None => "reaped 0".to_string(),
-        },
-        Err(_) => "reap: done".to_string(),
-    }
 }
 
 /// x-0296 CI diagnostics: timestamped breadcrumbs for the e2e server log
@@ -9671,6 +9639,18 @@ impl Core {
         });
     }
 
+    /// (x-f191) The one-gesture remove: off-loop like
+    /// [`Self::agent_action`], but the verb pair (stop, then rm) so the
+    /// operator states removal intent once. A live row stops first; a corpse
+    /// whose stop no-ops still clears through rm's already-absent gate.
+    fn stop_agent_action(&self, id: u64, name: String) {
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let notice = run_stop_or_remove(&name).await;
+            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
+        });
+    }
+
     /// (x-d285) Resolve a gesture's re-entry plan OFF the core loop and
     /// re-dispatch the gesture when the verdict lands. `request` names the
     /// gesture to re-enter (the attach id + its placement, or the resume
@@ -14327,10 +14307,11 @@ impl Core {
                 Flow::Continue
             }
             Command::StopAgent { name } => {
-                // Stop a live sideline row (x-76ea). `resolve_lifecycle_target`
-                // validates the name against THIS server's catalog fail-closed;
-                // the shell is idempotent (already-exited is a clean no-op), so
-                // the exited flag is unused here.
+                // Stop a live sideline row (x-76ea). Stop ONLY: this is the
+                // menu's stop-only path; the one-gesture stop-and-remove
+                // composition lives on RemoveAgent (x-f191 scope b).
+                // `resolve_lifecycle_target` validates the name against THIS
+                // server's catalog fail-closed.
                 match self.resolve_lifecycle_target(&name) {
                     Err(msg) => self.notice(client_id, msg),
                     Ok(_row) => self.agent_action(client_id, "stop", name),
@@ -14338,19 +14319,15 @@ impl Core {
                 Flow::Continue
             }
             Command::RemoveAgent { name } => {
-                // Remove an exited sideline row (x-76ea). Same resolution as
-                // StopAgent, plus the stop-then-rm ordering: a still-live row is
-                // refused with the stop-first reason (the CLI enforces this too,
-                // but refusing here keeps the notice specific and skips a doomed
-                // subprocess).
-                // `.map(|a| a.exited)` drops the row borrow before the arm bodies
-                // call `&mut self` methods (the resolver now returns a reference).
-                match self.resolve_lifecycle_target(&name).map(|a| a.exited) {
+                // (x-f191 scope b) The operator states the intent ONCE: remove.
+                // The server orchestrates stop-then-rm off-loop - a live row is
+                // stopped as part of its removal (the stop's registry flip is
+                // what the rm leg reads), and a stored-live corpse whose stop
+                // no-ops reaches the CLI's already-absent branch through rm's
+                // daemon-side live gate. Same resolution as StopAgent.
+                match self.resolve_lifecycle_target(&name) {
                     Err(msg) => self.notice(client_id, msg),
-                    Ok(false) => {
-                        self.notice(client_id, format!("{name} is still live - stop it first"))
-                    }
-                    Ok(true) => self.agent_action(client_id, "rm", name),
+                    Ok(_row) => self.stop_agent_action(client_id, name),
                 }
                 Flow::Continue
             }
@@ -21303,23 +21280,6 @@ mod tests {
         );
         assert!(matches!(flow, Flow::Continue));
         assert!(drain_notice(&mut rx).unwrap().contains("no such agent"));
-    }
-
-    #[test]
-    fn remove_agent_live_row_refused_stop_first() {
-        // US2 (stop-then-rm ordering): RemoveAgent on a still-live registry row
-        // is refused with the stop-first reason (mirrors the CLI's own refusal).
-        let mut core = empty_core();
-        core.agents = vec![bg_row("live-worker", "/tmp", None)]; // exited: false
-        let (c, mut rx) = client_with_rx(1);
-        core.clients.push(c);
-        core.command(
-            1,
-            Command::RemoveAgent {
-                name: "live-worker".into(),
-            },
-        );
-        assert!(drain_notice(&mut rx).unwrap().contains("still live"));
     }
 
     /// A helper for the respawn refusal tests: an EXITED registry row with an
@@ -29970,23 +29930,6 @@ mod tests {
             .max()
             .unwrap() as u64;
         assert!(dispatch_timeout() >= Duration::from_millis(max_binding_ms + 15_000));
-    }
-
-    #[test]
-    fn reap_notice_maps_reaped_count() {
-        // AC1-HP: the reaped array length is the visible count.
-        assert_eq!(
-            reap_notice(r#"{"reaped":["a","b","c"],"kept_dirty":[]}"#),
-            "reaped 3"
-        );
-        // AC1-EDGE: zero candidates is a successful visible `reaped 0`, not an
-        // error and not silence.
-        assert_eq!(reap_notice(r#"{"reaped":[],"kept_dirty":[]}"#), "reaped 0");
-        // A missing `reaped` key (schema drift) reads as zero reaped.
-        assert_eq!(reap_notice(r#"{"kept_dirty":[]}"#), "reaped 0");
-        // The verb exited zero, so unparseable stdout still reports success (the
-        // row-vanish is authoritative), never a false failure.
-        assert_eq!(reap_notice("not json"), "reap: done");
     }
 
     fn block(complete: bool, truncated: bool, implicit: bool, text: &str) -> vt::BlockRead {
