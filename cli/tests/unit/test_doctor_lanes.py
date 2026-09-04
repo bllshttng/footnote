@@ -20,6 +20,10 @@ from fno.cli import app
 
 runner = CliRunner()
 
+#: Captured before any test patches it, so a test that wants the REAL cost
+#: function back cannot accidentally re-pin the fake over itself.
+_REAL_FLEET_COST = dl._fleet_cost
+
 
 def _macmon_sample(**overrides):
     sample = {
@@ -35,6 +39,20 @@ def _macmon_sample(**overrides):
     }
     sample.update(overrides)
     return sample
+
+
+def _footprint(*, tests: int = 3, gap: str | None = None):
+    """A footprint reading stand-in: only the fields the census reads."""
+    return SimpleNamespace(
+        fleet_cpu_cores=0.5,
+        rss_gb=1.9,
+        test_process_count=tests,
+        attribution_gap=gap,
+    )
+
+
+def _rows(count: int):
+    return [SimpleNamespace(status="live") for _ in range(count)]
 
 
 def _pin_load(monkeypatch, *, status: str = "within", load: float = 6.3):
@@ -62,8 +80,26 @@ def _healthy_reading(monkeypatch, sample=None):
     monkeypatch.setattr(dl, "read_memory_pressure", lambda **k: (0.84, None))
     monkeypatch.setattr(
         dl,
+        "_fleet_snapshot",
+        lambda: (_footprint(), _rows(6), None, 421),
+    )
+    monkeypatch.setattr(
+        dl,
         "_fleet_cost",
-        lambda: (0.08, 0.31, 6, "measured from the live roster's attributed footprint"),
+        lambda *_a: (
+            0.08,
+            0.31,
+            6,
+            "measured from the live roster's attributed footprint",
+        ),
+    )
+    monkeypatch.setattr(
+        "fno.agents.court.gather_court",
+        lambda rows=None: {
+            "crowns": [],
+            "conflicts": [],
+            "summary": {"total": 2, "disagreements": 0, "unknowns": 0},
+        },
     )
 
 
@@ -246,3 +282,126 @@ def test_live_macmon_smoke_answers_on_a_healthy_machine(monkeypatch) -> None:
     states = {a["name"]: a["state"] for a in payload["arms"]}
     assert states["whole-machine cpu"] == dl.MEASURED
     assert states["memory"] == dl.MEASURED
+
+
+def test_ac2_hp_census_counts_add_up_and_the_cost_is_measured(monkeypatch) -> None:
+    """AC2-HP: kings plus workers equals the roster rows, because both come
+    from ONE rows list. The per-lane cost reads measured, never seed."""
+    _healthy_reading(monkeypatch)
+
+    reading = dl.read_lanes()
+
+    census = reading.census
+    assert census["roster_rows"] == 6
+    assert census["kings"] == 2
+    assert census["workers"] == 4
+    assert census["kings"] + census["workers"] == census["roster_rows"]
+    assert census["tests"] == 3
+    assert census["read_ms"] == 421
+    assert "measured" in reading.cost_source
+    assert "seed" not in reading.cost_source
+
+
+def test_ac2_edge_unreadable_registry_nulls_the_counts_and_keeps_the_seed(
+    monkeypatch,
+) -> None:
+    """AC2-EDGE: an unreadable registry must never render as an empty fleet.
+    The counts are null and the cost falls back to the documented seed with
+    its reason named."""
+    _healthy_reading(monkeypatch)
+    monkeypatch.setattr(dl, "_fleet_snapshot", lambda: (_footprint(), None, "registry unreadable", 12))
+    monkeypatch.setattr(dl, "_fleet_cost", _REAL_FLEET_COST)
+
+    reading = dl.read_lanes()
+
+    census = reading.census
+    assert census["roster_rows"] is None
+    assert census["kings"] is None
+    assert census["workers"] is None
+    assert reading.cost_source == "seed (no live roster rows to measure)"
+    text = dl.render(reading)
+    assert "unknown" in text
+    assert "roster: registry unreadable - the counts above are unread" in text
+
+
+def test_the_census_renders_on_a_refusal_too(monkeypatch) -> None:
+    """A refused lane number is exactly when a person most wants the census."""
+    _pin_load(monkeypatch)
+    monkeypatch.setattr(dl, "read_macmon", lambda **k: (None, "macmon not on PATH"))
+    monkeypatch.setattr(dl, "read_memory_pressure", lambda **k: (None, "unreadable"))
+    monkeypatch.setattr(dl, "_fleet_snapshot", lambda: (_footprint(), _rows(4), None, 30))
+    monkeypatch.setattr(
+        "fno.agents.court.gather_court",
+        lambda rows=None: {"conflicts": [], "summary": {"total": 1}},
+    )
+
+    reading = dl.read_lanes()
+
+    assert reading.refused
+    assert reading.census["roster_rows"] == 4
+    assert "court: 1 king(s), 3 worker(s)" in dl.render(reading)
+
+
+def test_the_attribution_gap_rides_its_own_line_never_the_counts(
+    monkeypatch,
+) -> None:
+    """x-e040: the gap is a process-to-row failure, so it cannot corrupt a row
+    count. It qualifies the CPU reading and is never folded into the census."""
+    _healthy_reading(monkeypatch)
+    gap = "11 pidless row(s) with no identity route (codex)"
+    monkeypatch.setattr(
+        dl, "_fleet_snapshot", lambda: (_footprint(gap=gap), _rows(6), None, 40)
+    )
+
+    text = dl.render(dl.read_lanes())
+
+    assert gap in text
+    assert "undercount, not headroom" in text
+    assert "court: 2 king(s), 4 worker(s)" in text
+
+
+def test_a_king_conflict_is_rendered_because_a_bare_count_hides_it(
+    monkeypatch,
+) -> None:
+    _healthy_reading(monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.court.gather_court",
+        lambda rows=None: {
+            "conflicts": [{"scope": "node:x-1", "holders": ["a", "b"]}],
+            "summary": {"total": 2},
+        },
+    )
+
+    reading = dl.read_lanes()
+
+    assert reading.census["king_conflicts"] == 1
+    assert "court conflicts: 1 scope(s)" in dl.render(reading)
+
+
+def test_an_unreadable_court_nulls_the_crowns_rather_than_reporting_none(
+    monkeypatch,
+) -> None:
+    """gather_court nulls its summary on an unreadable registry. Reading that
+    null as zero kings would report a kingless fleet from a read that saw
+    nothing."""
+    _healthy_reading(monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.court.gather_court",
+        lambda rows=None: {"conflicts": None, "summary": {"total": None}},
+    )
+
+    census = dl.read_lanes().census
+
+    assert census["roster_rows"] == 6
+    assert census["kings"] is None
+    assert census["workers"] is None
+
+
+def test_json_payload_carries_the_census(monkeypatch) -> None:
+    _healthy_reading(monkeypatch)
+    result = runner.invoke(app, ["doctor", "lanes", "--json"])
+    assert result.exit_code == 0, result.output
+    census = json.loads(result.stdout)["census"]
+    assert census["kings"] == 2
+    assert census["workers"] == 4
+    assert census["tests"] == 3

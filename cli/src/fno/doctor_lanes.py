@@ -34,6 +34,7 @@ import json
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -89,6 +90,7 @@ class LaneReading:
     per_lane_mem_gb: Optional[float] = None
     cost_source: str = ""
     refusal_reason: str = ""
+    census: dict = field(default_factory=dict)
 
     @property
     def refused(self) -> bool:
@@ -104,6 +106,7 @@ class LaneReading:
             "per_lane_mem_gb": self.per_lane_mem_gb,
             "cost_source": self.cost_source,
             "refused_reason": self.refusal_reason,
+            "census": self.census,
             "arms": [a.to_json() for a in self.arms],
         }
 
@@ -286,25 +289,66 @@ def _power_arm(sample: Optional[dict], reason: Optional[str]) -> ArmReading:
     )
 
 
-def _fleet_cost() -> tuple[float, float, int, str]:
+def _fleet_snapshot() -> tuple[Any, Optional[list], Optional[str], int]:
+    """One footprint reading, the live rows, why they are missing, and how long
+    both took. The rows come from the reader the leak threshold uses, so the
+    two can never describe different fleets."""
+    from fno.doctor_footprint import cause_reading, live_registry_rows
+
+    started = time.monotonic()
+    reading, error = cause_reading()
+    rows, rows_error = live_registry_rows()
+    read_ms = int((time.monotonic() - started) * 1000)
+    return (None if error is not None else reading), rows, rows_error, read_ms
+
+
+def _fleet_cost(reading: Any, rows: Optional[list]) -> tuple[float, float, int, str]:
     """Per-lane CPU cores and GB, measured from the fleet's own attributed
     footprint over the live roster; the documented seed when no row is live."""
-    from fno.doctor_footprint import _roster_count, cause_reading
+    count = 0 if reading is None else len(rows or ())
+    if not count:
+        why = "footprint unavailable" if reading is None else "no live roster rows to measure"
+        return SEED_PER_LANE_CORES, SEED_PER_LANE_GB, 0, f"seed ({why})"
+    per_cpu = max(0.01, reading.fleet_cpu_cores / count)
+    per_gb = max(0.01, reading.rss_gb / count)
+    return per_cpu, per_gb, count, "measured from the live roster's attributed footprint"
 
-    reading, error = cause_reading()
-    rows, _roster_error = _roster_count()
-    if error is not None or reading is None:
-        return SEED_PER_LANE_CORES, SEED_PER_LANE_GB, 0, "seed (footprint unavailable)"
-    if not rows:
-        return (
-            SEED_PER_LANE_CORES,
-            SEED_PER_LANE_GB,
-            0,
-            "seed (no live roster rows to measure)",
-        )
-    per_cpu = max(0.01, reading.fleet_cpu_cores / rows)
-    per_gb = max(0.01, reading.rss_gb / rows)
-    return per_cpu, per_gb, rows, "measured from the live roster's attributed footprint"
+
+def _census(
+    reading: Any, rows: Optional[list], rows_error: Optional[str], read_ms: int
+) -> dict:
+    """The court census: kings, workers, tests.
+
+    Kings and workers are ROW counts, tests is a PROCESS count, never folded
+    together. The gap rides as its own field for the same reason (x-e040).
+    Full rule: docs/architecture/resource-meter.md.
+    """
+    census: dict[str, Any] = {
+        "kings": None, "king_conflicts": None, "workers": None,
+        "tests": None if reading is None else reading.test_process_count,
+        "roster_rows": None if rows is None else len(rows),
+        "attribution_gap": None if reading is None else reading.attribution_gap,
+        # An unread count NAMES why, the rule every arm follows: without it
+        # "unknown rows" cannot be told from an incomplete registry.
+        "roster_error": rows_error,
+        "read_ms": read_ms,
+    }
+    try:
+        from fno.agents.court import gather_court
+
+        court = gather_court(rows) if rows is not None else {}
+    except Exception:
+        return census
+    kings = (court.get("summary") or {}).get("total")
+    if not isinstance(kings, int):
+        # An unreadable court nulls the crown counts rather than reporting a
+        # kingless fleet from a read that saw nothing.
+        return census
+    conflicts = court.get("conflicts")
+    census["kings"] = kings
+    census["king_conflicts"] = len(conflicts) if isinstance(conflicts, list) else None
+    census["workers"] = len(rows or ()) - kings
+    return census
 
 
 def read_lanes(
@@ -327,6 +371,12 @@ def read_lanes(
     power_arm = _power_arm(sample, macmon_reason)
     reading.arms.extend([load_arm, cpu_arm, mem_arm, power_arm])
 
+    # One fleet read serves both the census and the per-lane divisor, taken
+    # BEFORE the refusal branch: a refused lane number is exactly when a
+    # person most wants to see what the machine is holding.
+    footprint, rows, rows_error, read_ms = _fleet_snapshot()
+    reading.census = _census(footprint, rows, rows_error, read_ms)
+
     dark = [a for a in reading.arms if a.state == DARK]
     if cpu_arm.state == DARK or mem_arm.state == DARK:
         working = [a.name for a in reading.arms if a.state == MEASURED]
@@ -338,7 +388,7 @@ def read_lanes(
         return reading
 
     assert cpu_arm.value is not None and mem_arm.value is not None  # measured arms
-    per_cpu, per_gb, rows, cost_source = _fleet_cost()
+    per_cpu, per_gb, row_count, cost_source = _fleet_cost(footprint, rows)
     busy = cpu_arm.value["busy_fraction"]
     capacity = cpu_arm.value["capacity_cores"]
     free_cores = capacity * (1.0 - busy)
@@ -368,9 +418,35 @@ def read_lanes(
     reading.per_lane_cpu_cores = round(per_cpu, 3)
     reading.per_lane_mem_gb = round(per_gb, 3)
     reading.cost_source = (
-        f"{cost_source} ({rows} live row(s))" if rows else cost_source
+        f"{cost_source} ({row_count} live row(s))" if row_count else cost_source
     )
     return reading
+
+
+def _census_lines(census: dict) -> list[str]:
+    """Rendered so an unread count says so: a count the reader can act on and
+    a count nobody took must never look the same."""
+    if not census:
+        return []
+    n = {k: ("unknown" if v is None else v) for k, v in census.items()}
+    lines = [
+        f"  court: {n['kings']} king(s), {n['workers']} worker(s), "
+        f"{n['tests']} running test(s) "
+        f"({n['roster_rows']} live roster row(s), {n['read_ms']} ms)"
+    ]
+    if census.get("king_conflicts"):
+        lines.append(
+            f"  court conflicts: {n['king_conflicts']} scope(s) held by more than "
+            "one live crown - a bare king count hides this"
+        )
+    if census.get("roster_error"):
+        lines.append(f"  roster: {n['roster_error']} - the counts above are unread")
+    if census.get("attribution_gap"):
+        lines.append(
+            f"  attribution gap: {n['attribution_gap']} - the fleet CPU share is "
+            "an undercount, not headroom"
+        )
+    return lines
 
 
 def render(reading: LaneReading) -> str:
@@ -384,6 +460,7 @@ def render(reading: LaneReading) -> str:
                 lines.append(f"  {arm.name}: dark - {arm.reason}")
             else:
                 lines.append(f"  {arm.name}: measured ({arm.source})")
+        lines.extend(_census_lines(reading.census))
         return "\n".join(lines)
     lines.append(f"lanes: {reading.lane_count} more fit")
     for arm in reading.arms:
@@ -392,6 +469,7 @@ def render(reading: LaneReading) -> str:
         f"  per-lane cost: {reading.per_lane_cpu_cores} cores, "
         f"{reading.per_lane_mem_gb} GB - {reading.cost_source}"
     )
+    lines.extend(_census_lines(reading.census))
     return "\n".join(lines)
 
 

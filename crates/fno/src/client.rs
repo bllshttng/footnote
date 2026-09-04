@@ -1134,6 +1134,9 @@ struct View {
     yard_want: bool,
     yard_inflight: bool,
     yard_gen: u64,
+    /// (x-3cb3) The court panel. The whole thing - open flag, cached fold,
+    /// generation - lives in its own module, so this is one field.
+    court: crate::court_overlay::Panel,
     /// Catch-up "while you were gone" digest lines (x-4e2d), set on attach after
     /// an absence; the next keypress dismisses it (like [`View::overlay`]).
     digest: Option<Vec<String>>,
@@ -2919,6 +2922,7 @@ impl View {
             yard_want: false,
             yard_inflight: false,
             yard_gen: 0,
+            court: crate::court_overlay::Panel::default(),
             digest: None,
             notice: None,
             row_stamp: None,
@@ -3376,6 +3380,7 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.yard = None;
+        self.court.close();
         self.search = None;
         self.rename = None;
         self.move_pick = None;
@@ -3396,6 +3401,7 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.yard = None;
+        self.court.close();
         self.search = None;
         self.rename = None;
         self.create = None;
@@ -3419,6 +3425,7 @@ impl View {
         self.sel_hover_armed = false;
         self.answers = None;
         self.yard = None;
+        self.court.close();
         self.search = None;
         // A half-typed workspace name is dropped too (gemini review): the
         // confirm owns the bottom row, and resuming a hidden create overlay
@@ -3450,6 +3457,7 @@ impl View {
         self.selector = None;
         self.answers = None;
         self.yard = None;
+        self.court.close();
         self.search = None;
         self.move_pick = None;
         self.attach_place = None;
@@ -3889,6 +3897,7 @@ impl View {
         self.menu_usurping_open()
             || self.answers.is_some()
             || self.yard.is_some()
+            || self.court.is_open()
             || self.peek.is_some()
             || self.digest.is_some()
     }
@@ -3922,6 +3931,7 @@ impl View {
             || self.nav.is_some()
             || self.answers.is_some()
             || self.yard.is_some()
+            || self.court.is_open()
             || self.digest.is_some()
     }
 
@@ -6842,6 +6852,24 @@ impl View {
                 &self.theme,
                 None,
             );
+        } else if self.court.is_open() {
+            // (x-3cb3) The court: what the machine is holding, and the cap
+            // that decides whether another lane fits. Read-only - every key
+            // closes it.
+            let lines = self.court.lines();
+            let chrome = chrome::Chrome::new("the court", Anchor::Center)
+                .footer("any key closes · prefix+C reopens");
+            draw_lines_overlay(
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                &lines,
+                &self.theme,
+                None,
+            );
         } else if let Some(picker) = &self.move_pick {
             // x-96e8 move picker: `move tab to:` / `move pane to:` + one
             // numbered line per candidate squad.
@@ -9541,6 +9569,7 @@ const NEEDS_CACHE_TTL: Duration = Duration::from_secs(5);
 /// parse for data that is nearly static (species and album history change
 /// on merge cadence, not keystroke cadence).
 const YARD_CACHE_TTL: Duration = Duration::from_secs(60);
+
 /// Default fold window: the last 24h (the fold also windows server-side).
 const NEEDS_WINDOW_SECS: u64 = 24 * 60 * 60;
 
@@ -9989,7 +10018,7 @@ const ANSWER_OVERLAY_W: usize = 54;
 /// The footer state of the needs-me overlay: whether the event-fold leg is
 /// still in flight, failed (loud degrade, AC2-ERR), or landed.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum NeedsFooter {
+pub(crate) enum NeedsFooter {
     Folding,
     Degraded,
     AsOf,
@@ -10147,9 +10176,13 @@ struct YardSel {
     opened_at: Instant,
 }
 
+/// The yard's line builder moved into the module named for it; the alias
+/// keeps the one call site and its tests reading the same as before.
+use crate::yard_overlay::overlay_lines as yard_overlay_lines;
+
 /// The yard overlay body width: the 12-column sprite plus a label margin,
 /// padded to a block rectangle like the needs overlay.
-const YARD_OVERLAY_W: usize = 48;
+pub(crate) const YARD_OVERLAY_W: usize = 48;
 /// Frame period for the flavour leg: frames advance on a timer, never on a
 /// state change (a pose carries no reading, which is exactly why cycling it
 /// is legal where cycling the eye would not be).
@@ -10181,94 +10214,6 @@ fn yard_eye(a: &AgentRow, need: Option<NeedKind>) -> crate::sprites::Eye {
         None if !a.exited && a.badge == Some(AgentBadge::Working) => Eye::Working,
         None => Eye::Reserved,
     }
-}
-
-/// Build the yard overlay lines (x-b2bf): the CROWD as one glyph per citizen
-/// (the cheap layer - many cats, one cell each, the only multi-citizen
-/// render) and the SPOTLIGHT as exactly one 12-column sprite for the
-/// selected citizen. One sprite at a time is the capacity ruling: a
-/// simultaneous field of full sprites fits no panel width the sideline
-/// publishes (`PANEL_W` 28 fits one sprite plus a label, two plus nothing).
-/// Without an identity payload the spotlight shows its pending notice and
-/// NO sprite - a species with no reading is a guessed cat, and the yard does
-/// not guess. The hat reads the ROW's `crown_level` (the same wire value the
-/// sideline orders by), never a payload copy.
-fn yard_overlay_lines(
-    crowd: &[(&str, crate::sprites::Eye, u32)],
-    sel: usize,
-    identity: Option<&crate::yard_overlay::YardItem>,
-    frame: usize,
-    footer: NeedsFooter,
-) -> Vec<String> {
-    let mut lines = vec![pad_to(" the yard · n/N pick · q close", YARD_OVERLAY_W)];
-    if crowd.is_empty() {
-        // The true failure state of a dispatch system: nothing was sent out.
-        lines.push(pad_to(
-            "   the yard is empty - nothing was dispatched",
-            YARD_OVERLAY_W,
-        ));
-    } else {
-        // Crowd row: one eye glyph per citizen, wrapped to the body width.
-        let glyphs: String = crowd.iter().map(|(_, e, _)| e.glyph()).collect();
-        for chunk in glyphs
-            .chars()
-            .collect::<Vec<_>>()
-            .chunks(YARD_OVERLAY_W - 3)
-        {
-            lines.push(pad_to(
-                &format!("   {}", chunk.iter().collect::<String>()),
-                YARD_OVERLAY_W,
-            ));
-        }
-        lines.push(pad_to("", YARD_OVERLAY_W));
-        let sel = sel.min(crowd.len() - 1);
-        let (name, eye, crown) = crowd[sel];
-        match identity {
-            Some(id) => {
-                let mut caption =
-                    format!(" ▸ {name} · {}", crate::sprites::species_name(id.species));
-                if !id.rarity.is_empty() {
-                    caption.push_str(&format!(" · {}", id.rarity));
-                }
-                if crown >= 1 {
-                    caption.push_str(&format!(" · crown {crown}"));
-                }
-                if id.first_sighting {
-                    caption.push_str(" · NEW");
-                }
-                lines.push(pad_to(&caption, YARD_OVERLAY_W));
-                if crown >= 1 {
-                    lines.push(pad_to(
-                        &format!("  {}", crate::sprites::HAT_CROWN),
-                        YARD_OVERLAY_W,
-                    ));
-                }
-                for row in crate::sprites::render_frame(id.species, frame, eye) {
-                    lines.push(pad_to(&format!("  {row}"), YARD_OVERLAY_W));
-                }
-            }
-            None => {
-                // No identity for this row. What that MEANS depends on the
-                // fold: still folding says pending; landed says the row has
-                // no registry citizen behind it (a bare shell, a tombstone,
-                // an external roster row) - never "pending" forever, and
-                // never a guessed species either way.
-                let why = match footer {
-                    NeedsFooter::Folding => "identity fold pending".to_string(),
-                    NeedsFooter::Degraded => "identity fold unavailable".to_string(),
-                    NeedsFooter::AsOf => "no yard identity (not a registry citizen)".to_string(),
-                };
-                lines.push(pad_to(&format!(" ▸ {name} · {why}"), YARD_OVERLAY_W));
-            }
-        }
-    }
-    let footer_line = match footer {
-        NeedsFooter::Folding => "   folding identities...".to_string(),
-        NeedsFooter::Degraded => "   identity fold unavailable - readings only".to_string(),
-        NeedsFooter::AsOf => format!("   {} citizens", crowd.len()),
-    };
-    lines.push(pad_to(&footer_line, YARD_OVERLAY_W));
-    lines
 }
 
 /// The navigator overlay content width (x-653d): labels truncate to it and pad
@@ -10884,7 +10829,7 @@ fn pad_cols(s: &str, w: usize) -> String {
     out
 }
 
-fn pad_to(s: &str, w: usize) -> String {
+pub(crate) fn pad_to(s: &str, w: usize) -> String {
     let count = s.chars().count();
     if count > w {
         let mut t: String = s.chars().take(w.saturating_sub(1)).collect();
@@ -11207,6 +11152,10 @@ async fn attach_and_run(
     let (yard_tx, mut yard_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<crate::yard_overlay::YardItem>>)>();
 
+    // (x-3cb3) The court fold leg, same shape as the yard's.
+    let (court_tx, mut court_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, Option<crate::court_overlay::Court>)>();
+
     // x-84d7: the Connections modal's read fold runs off the UI loop and reports
     // back here, tagged with the generation it was kicked under, so a slow `fno`
     // never blocks the modal and a result landing after a close/refresh is
@@ -11321,6 +11270,12 @@ async fn attach_and_run(
             tokio::spawn(async move {
                 let result = crate::yard_overlay::fold_now().await;
                 let _ = tx.send((gen, result));
+            });
+        }
+        if let Some(gen) = view.court.take_want() {
+            let tx = court_tx.clone();
+            tokio::spawn(async move {
+                let _ = tx.send((gen, crate::court_overlay::fold_now().await));
             });
         }
         // x-84d7: kick a wanted Connections read off the UI loop, at most one in
@@ -11759,6 +11714,16 @@ async fn attach_and_run(
                             view.yard_degraded = true;
                         }
                     }
+                    if let Err(e) = compositor.draw(&view.compose()) {
+                        break Err(format!("draw: {e}"));
+                    }
+                }
+            }
+            Some((gen, result)) = court_rx.recv() => {
+                // (x-3cb3) The court fold landed. `apply` owns the merge
+                // discipline (gen guard, degrade-loud, no age restamp on a
+                // failure) and answers whether anything changed on screen.
+                if view.court.apply(gen, result) {
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }
@@ -12928,6 +12893,14 @@ async fn handle_stdin(
     if view.yard.is_some() {
         return yard_keys(view, &passthrough, sock_w).await;
     }
+    if view.court.is_open() {
+        // Read-only overlay: ANY key closes it, and no byte leaks into a
+        // pane (the answer-overlay invariant).
+        if !passthrough.is_empty() {
+            view.court.close();
+        }
+        return Ok(StdinFlow::Continue);
+    }
     if view.create.is_some() {
         return create_keys(view, &passthrough, sock_w).await;
     }
@@ -13115,6 +13088,7 @@ async fn dispatch_event(
                 view.yard_want = true;
             }
         }
+        Event::OpenCourt => view.court.open(),
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;
             // Chrome changed size: report the new content area so rects

@@ -45,6 +45,9 @@ crossing	crates/fno/src/client.rs	2745	let mut command = crate::process_admissio
 crossing	crates/fno/src/client.rs	14754	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/connections_view.rs	1240	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/connections_view.rs	1278	let mut cmd = crate::process_admission::tokio_command(fno_bin());
+crossing	crates/fno/src/court_overlay.rs	334	fn fno_bin() -> PathBuf {
+crossing	crates/fno/src/court_overlay.rs	335	crate::server::fno_bin()
+crossing	crates/fno/src/court_overlay.rs	346	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/needs_overlay.rs	122	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/needs_overlay.rs	144	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/needs_overlay.rs	209	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());

@@ -100,6 +100,96 @@ struct Payload {
     citizens: Vec<YardItem>,
 }
 
+use crate::client::{pad_to, NeedsFooter, YARD_OVERLAY_W};
+
+/// Build the yard overlay lines (x-b2bf): the CROWD as one glyph per citizen
+/// (the cheap layer - many cats, one cell each, the only multi-citizen
+/// render) and the SPOTLIGHT as exactly one 12-column sprite for the
+/// selected citizen. One sprite at a time is the capacity ruling: a
+/// simultaneous field of full sprites fits no panel width the sideline
+/// publishes (`PANEL_W` 28 fits one sprite plus a label, two plus nothing).
+/// Without an identity payload the spotlight shows its pending notice and
+/// NO sprite - a species with no reading is a guessed cat, and the yard does
+/// not guess. The hat reads the ROW's `crown_level` (the same wire value the
+/// sideline orders by), never a payload copy.
+pub(crate) fn overlay_lines(
+    crowd: &[(&str, crate::sprites::Eye, u32)],
+    sel: usize,
+    identity: Option<&crate::yard_overlay::YardItem>,
+    frame: usize,
+    footer: NeedsFooter,
+) -> Vec<String> {
+    let mut lines = vec![pad_to(" the yard · n/N pick · q close", YARD_OVERLAY_W)];
+    if crowd.is_empty() {
+        // The true failure state of a dispatch system: nothing was sent out.
+        lines.push(pad_to(
+            "   the yard is empty - nothing was dispatched",
+            YARD_OVERLAY_W,
+        ));
+    } else {
+        // Crowd row: one eye glyph per citizen, wrapped to the body width.
+        let glyphs: String = crowd.iter().map(|(_, e, _)| e.glyph()).collect();
+        for chunk in glyphs
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(YARD_OVERLAY_W - 3)
+        {
+            lines.push(pad_to(
+                &format!("   {}", chunk.iter().collect::<String>()),
+                YARD_OVERLAY_W,
+            ));
+        }
+        lines.push(pad_to("", YARD_OVERLAY_W));
+        let sel = sel.min(crowd.len() - 1);
+        let (name, eye, crown) = crowd[sel];
+        match identity {
+            Some(id) => {
+                let mut caption =
+                    format!(" ▸ {name} · {}", crate::sprites::species_name(id.species));
+                if !id.rarity.is_empty() {
+                    caption.push_str(&format!(" · {}", id.rarity));
+                }
+                if crown >= 1 {
+                    caption.push_str(&format!(" · crown {crown}"));
+                }
+                if id.first_sighting {
+                    caption.push_str(" · NEW");
+                }
+                lines.push(pad_to(&caption, YARD_OVERLAY_W));
+                if crown >= 1 {
+                    lines.push(pad_to(
+                        &format!("  {}", crate::sprites::HAT_CROWN),
+                        YARD_OVERLAY_W,
+                    ));
+                }
+                for row in crate::sprites::render_frame(id.species, frame, eye) {
+                    lines.push(pad_to(&format!("  {row}"), YARD_OVERLAY_W));
+                }
+            }
+            None => {
+                // No identity for this row. What that MEANS depends on the
+                // fold: still folding says pending; landed says the row has
+                // no registry citizen behind it (a bare shell, a tombstone,
+                // an external roster row) - never "pending" forever, and
+                // never a guessed species either way.
+                let why = match footer {
+                    NeedsFooter::Folding => "identity fold pending".to_string(),
+                    NeedsFooter::Degraded => "identity fold unavailable".to_string(),
+                    NeedsFooter::AsOf => "no yard identity (not a registry citizen)".to_string(),
+                };
+                lines.push(pad_to(&format!(" ▸ {name} · {why}"), YARD_OVERLAY_W));
+            }
+        }
+    }
+    let footer_line = match footer {
+        NeedsFooter::Folding => "   folding identities...".to_string(),
+        NeedsFooter::Degraded => "   identity fold unavailable - readings only".to_string(),
+        NeedsFooter::AsOf => format!("   {} citizens", crowd.len()),
+    };
+    lines.push(pad_to(&footer_line, YARD_OVERLAY_W));
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
