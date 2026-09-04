@@ -81,7 +81,12 @@ if [[ -f "$WORK/.fno/convo-signals.jsonl" ]]; then
   echo "FAIL: fyi wrote convo-signals.jsonl (capture was removed)" >&2
   exit 1
 fi
-WAKE_FILES=$(find "$WORK/.fno/wake-signals" -name 'wake-*.json' 2>/dev/null | wc -l | tr -d ' ')
+WAKE_DIR=$(FNO_INBOX_ROOT="$INBOX_ROOT" uv run --project "$CLI_DIR" python3 -c "
+from pathlib import Path
+from fno.wake.signal import signals_dir
+print(signals_dir(Path('$WORK')))
+")
+WAKE_FILES=$(find "$WAKE_DIR" -name 'wake-*.json' 2>/dev/null | wc -l | tr -d ' ')
 if [[ "$WAKE_FILES" -lt 1 ]]; then
   echo "FAIL: question did not drop a wake-signal" >&2
   exit 1

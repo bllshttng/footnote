@@ -7,6 +7,8 @@ external sinks. This file covers all ACs across the six user stories; the
 """
 from __future__ import annotations
 
+import os
+import subprocess
 import threading
 
 import pytest
@@ -17,12 +19,21 @@ from fno.config import ConfigBlock, StatusFanoutConfig, StatusSinkConfig
 # ── shared fixtures/helpers for tick tests ──────────────────────────────────
 
 
+def _sinks_dir(root):
+    """The status-sinks dir exactly as production resolves it (x-spaces)."""
+    from fno.paths import project_log
+
+    return project_log("events.jsonl", project_root=root).parent / "status-sinks"
+
+
 def _write_events(root, lines: list[dict]) -> None:
-    fno_dir = root / ".fno"
-    fno_dir.mkdir(parents=True, exist_ok=True)
     import json as _json
 
-    with (fno_dir / "events.jsonl").open("w", encoding="utf-8") as fh:
+    from fno.paths import project_log
+
+    journal = project_log("events.jsonl", project_root=root)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    with journal.open("w", encoding="utf-8") as fh:
         for obj in lines:
             fh.write(_json.dumps(obj) + "\n")
 
@@ -178,7 +189,7 @@ def test_tick_empty_sinks_is_clean_noop(tmp_path):
     res = sf.run_tick(tmp_path, [])
     assert res.sinks == []
     # No cursor dir created for a no-op.
-    assert not (tmp_path / ".fno" / "status-sinks").exists()
+    assert not _sinks_dir(tmp_path).exists()
 
 
 def test_tick_fresh_cursor_starts_at_eof_no_backfill(tmp_path):
@@ -197,7 +208,7 @@ def test_tick_fresh_cursor_starts_at_eof_no_backfill(tmp_path):
     # a later same-second event is still delivered (idx >= n).
     import json as _json
     cur = _json.loads(
-        (tmp_path / ".fno" / "status-sinks" / "s.cursor").read_text())
+        (_sinks_dir(tmp_path) / "s.cursor").read_text())
     assert cur == {"ts": "2026-07-12T00:00:02Z", "n": 1}
 
 
@@ -205,7 +216,7 @@ def test_tick_matched_event_delivers_once_and_advances(tmp_path):
     from fno import status_fanout as sf
 
     # Pre-seed a cursor so the blocked event is "new".
-    ss = tmp_path / ".fno" / "status-sinks"
+    ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
     _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked", **{"node": "x-9"})])
@@ -220,7 +231,7 @@ def test_tick_matched_event_delivers_once_and_advances(tmp_path):
 def test_tick_match_filter_and_events_filter(tmp_path):
     from fno import status_fanout as sf
 
-    ss = tmp_path / ".fno" / "status-sinks"
+    ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
     _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [
@@ -238,7 +249,7 @@ def test_tick_match_filter_and_events_filter(tmp_path):
 def test_tick_dry_run_matches_but_sends_nothing(tmp_path):
     from fno import status_fanout as sf
 
-    ss = tmp_path / ".fno" / "status-sinks"
+    ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
     _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
@@ -251,13 +262,14 @@ def test_tick_dry_run_matches_but_sends_nothing(tmp_path):
 
 def test_tick_malformed_line_skipped_and_counted(tmp_path):
     from fno import status_fanout as sf
+    from fno.paths import project_log
 
-    fno_dir = tmp_path / ".fno"
-    fno_dir.mkdir(parents=True)
-    ss = fno_dir / "status-sinks"
-    ss.mkdir()
+    ss = _sinks_dir(tmp_path)
+    ss.mkdir(parents=True, exist_ok=True)
     _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
-    with (fno_dir / "events.jsonl").open("w") as fh:
+    journal = project_log("events.jsonl", project_root=tmp_path)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    with journal.open("w") as fh:
         fh.write("not json at all\n")
         import json as _json
         fh.write(_json.dumps(_ev("2026-07-12T00:00:05Z", "blocked")) + "\n")
@@ -269,17 +281,18 @@ def test_tick_malformed_line_skipped_and_counted(tmp_path):
 
 def test_tick_rotation_drains_dot1_before_active(tmp_path):
     from fno import status_fanout as sf
+    from fno.paths import project_log
 
-    fno_dir = tmp_path / ".fno"
-    fno_dir.mkdir(parents=True)
-    ss = fno_dir / "status-sinks"
-    ss.mkdir()
+    ss = _sinks_dir(tmp_path)
+    ss.mkdir(parents=True, exist_ok=True)
     _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
     import json as _json
     # Rotated history holds an older blocked event; active holds a newer one.
-    with (fno_dir / "events.jsonl.1").open("w") as fh:
+    rotated = project_log("events.jsonl.1", project_root=tmp_path)
+    rotated.parent.mkdir(parents=True, exist_ok=True)
+    with rotated.open("w") as fh:
         fh.write(_json.dumps(_ev("2026-07-12T00:00:01Z", "blocked", **{"node": "old"})) + "\n")
-    with (fno_dir / "events.jsonl").open("w") as fh:
+    with project_log("events.jsonl", project_root=tmp_path).open("w") as fh:
         fh.write(_json.dumps(_ev("2026-07-12T00:00:09Z", "blocked", **{"node": "new"})) + "\n")
     rec = _Recorder()
     res = sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=rec)
@@ -292,7 +305,7 @@ def test_tick_rotation_drains_dot1_before_active(tmp_path):
 def test_tick_short_circuit_holds_cursor_for_retry(tmp_path):
     from fno import status_fanout as sf
 
-    ss = tmp_path / ".fno" / "status-sinks"
+    ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
     _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [
@@ -312,7 +325,7 @@ def test_tick_short_circuit_holds_cursor_for_retry(tmp_path):
 def test_tick_per_sink_isolation_one_raises(tmp_path):
     from fno import status_fanout as sf
 
-    ss = tmp_path / ".fno" / "status-sinks"
+    ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
     _seed_cursor(ss, "bad", "2026-07-12T00:00:00Z")
     _seed_cursor(ss, "good", "2026-07-12T00:00:00Z")
@@ -357,7 +370,7 @@ def test_tick_lock_uses_cross_language_directory_mutex(tmp_path):
     lock = sf._TickLock(tmp_path)
 
     assert lock.acquire()
-    lock_dir = tmp_path / ".fno" / "status-sinks" / ".tick.lock.d"
+    lock_dir = _sinks_dir(tmp_path) / ".tick.lock.d"
     assert lock_dir.is_dir()
     assert (lock_dir / "owner").is_file()
     lock.release()
@@ -372,9 +385,17 @@ def test_shared_journal_uses_one_fanout_lock_and_cursor(tmp_path):
     canonical = tmp_path / "canonical"
     worktree = tmp_path / "worktree"
     _write_events(canonical, [])
-    (worktree / ".fno").mkdir(parents=True)
-    (worktree / ".fno" / "events.jsonl").symlink_to(
-        canonical / ".fno" / "events.jsonl"
+    # One repo, one journal: link the worktree through git so both roots
+    # resolve the same space (the old symlink trick retired with .fno state).
+    subprocess.run(
+        ["git", "init", "-q", str(canonical)],
+        check=True, capture_output=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
+    )
+    subprocess.run(
+        ["git", "-C", str(canonical), "worktree", "add", "-q", str(worktree)],
+        check=True, capture_output=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
     )
     sink = _text_sink()
 
@@ -386,7 +407,11 @@ def test_shared_journal_uses_one_fanout_lock_and_cursor(tmp_path):
         lock.release()
 
     sf.run_tick(canonical, [sink], dispatch_fn=_Recorder())
-    with (canonical / ".fno" / "events.jsonl").open("a", encoding="utf-8") as handle:
+    from fno.paths import project_log
+
+    journal = project_log("events.jsonl", project_root=canonical)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    with journal.open("a", encoding="utf-8") as handle:
         handle.write(_json.dumps(_ev("2026-07-12T00:00:05Z", "blocked")) + "\n")
 
     first = _Recorder()
@@ -402,7 +427,7 @@ def test_shared_journal_uses_one_fanout_lock_and_cursor(tmp_path):
 def test_tick_renews_its_lock_during_a_long_dispatch(tmp_path, monkeypatch):
     from fno import status_fanout as sf
 
-    state_dir = tmp_path / ".fno" / "status-sinks"
+    state_dir = _sinks_dir(tmp_path)
     state_dir.mkdir(parents=True)
     _seed_cursor(state_dir, "s", "2026-08-11T08:00:00Z")
     _write_events(tmp_path, [_ev("2026-08-11T09:00:00Z", "blocked")])
@@ -429,7 +454,7 @@ def test_tick_renews_its_lock_during_a_long_dispatch(tmp_path, monkeypatch):
 def test_tick_does_not_publish_cursor_after_lease_loss(tmp_path, monkeypatch):
     from fno import status_fanout as sf
 
-    state_dir = tmp_path / ".fno" / "status-sinks"
+    state_dir = _sinks_dir(tmp_path)
     state_dir.mkdir(parents=True)
     original_cursor = {"ts": "2026-08-11T08:00:00Z", "n": 0}
     _seed_cursor(state_dir, "s", original_cursor["ts"])
@@ -464,7 +489,7 @@ def test_tick_orders_migrated_older_rows_before_the_canonical_tail(tmp_path):
             _ev("2026-08-11T09:00:00Z", "blocked"),
         ],
     )
-    state_dir = tmp_path / ".fno" / "status-sinks"
+    state_dir = _sinks_dir(tmp_path)
     state_dir.mkdir()
     _seed_cursor(state_dir, "s", "2026-08-11T08:00:00Z")
     recorder = _Recorder()
@@ -683,7 +708,7 @@ def test_integration_tick_text_webhook_delivers_and_advances(tmp_path, monkeypat
     posts = []
     monkeypatch.setattr(sf, "_post_json",
                         lambda u, b, t: (posts.append(b) or sf._HttpResult(ok=True, status=200)))
-    ss = tmp_path / ".fno" / "status-sinks"
+    ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
     _seed_cursor(ss, "d", "2026-07-12T00:00:00Z")
     ev = _ev("2026-07-12T00:00:05Z", "blocked", **{"node": "x-9"})
@@ -704,7 +729,7 @@ def test_integration_tick_connect_class_short_circuit_holds_batch(tmp_path, monk
 
     monkeypatch.setattr(sf, "_post_json", lambda u, b, t: sf._HttpResult(ok=False, status=None))
     monkeypatch.setattr(sf, "_sleep", lambda s: None)
-    ss = tmp_path / ".fno" / "status-sinks"
+    ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
     _seed_cursor(ss, "d", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [
@@ -726,7 +751,7 @@ def test_integration_tick_permanent_4xx_drops_and_advances(tmp_path, monkeypatch
 
     monkeypatch.setattr(sf, "_post_json", lambda u, b, t: sf._HttpResult(ok=False, status=404))
     monkeypatch.setattr(sf, "_sleep", lambda s: None)
-    ss = tmp_path / ".fno" / "status-sinks"
+    ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
     _seed_cursor(ss, "d", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
@@ -974,7 +999,7 @@ def test_tick_same_second_events_both_delivered(tmp_path):
     # BOTH deliver. A bare-ts cursor dropped the second forever.
     from fno import status_fanout as sf
 
-    ss = tmp_path / ".fno" / "status-sinks"
+    ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
     _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [
@@ -994,7 +1019,7 @@ def test_tick_same_second_across_ticks_not_dropped(tmp_path):
     # same-second event) is still NEW next tick.
     from fno import status_fanout as sf
 
-    ss = tmp_path / ".fno" / "status-sinks"
+    ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
     _seed_cursor(ss, "s", "2026-07-12T00:00:05Z", n=1)
     _write_events(tmp_path, [
@@ -1010,7 +1035,7 @@ def test_tick_same_second_across_ticks_not_dropped(tmp_path):
 def test_tick_orders_mixed_precision_timestamps_by_instant(tmp_path):
     from fno import status_fanout as sf
 
-    ss = tmp_path / ".fno" / "status-sinks"
+    ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
     _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [
@@ -1042,7 +1067,7 @@ def test_tick_cmd_exits_0_and_logs_counts_on_drop(tmp_path, monkeypatch):
     from fno import paths as _paths
     from fno import status_fanout as sf
 
-    ss = tmp_path / ".fno" / "status-sinks"
+    ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
     _seed_cursor(ss, "d", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
@@ -1061,7 +1086,7 @@ def test_tick_cursor_write_failure_isolated_per_sink(tmp_path, monkeypatch):
     # Finding #2: one sink's cursor-write failure must not abort the others'.
     from fno import status_fanout as sf
 
-    ss = tmp_path / ".fno" / "status-sinks"
+    ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
     _seed_cursor(ss, "a", "2026-07-12T00:00:00Z")
     _seed_cursor(ss, "b", "2026-07-12T00:00:00Z")
@@ -1083,7 +1108,7 @@ def test_tick_unknown_dispatch_status_drops_not_shortcircuits(tmp_path):
     # Finding #5: a typo'd dispatcher return must not silently retry forever.
     from fno import status_fanout as sf
 
-    ss = tmp_path / ".fno" / "status-sinks"
+    ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
     _seed_cursor(ss, "s", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [
@@ -1137,17 +1162,16 @@ def test_tick_same_second_split_across_rotation_boundary(tmp_path):
     # .1 was skipped, the occurrence index reset to 0, and both were dropped forever.
     from fno import status_fanout as sf
     import json as _json
+    from fno.paths import project_log
 
-    fno_dir = tmp_path / ".fno"
-    fno_dir.mkdir(parents=True)
-    ss = fno_dir / "status-sinks"
-    ss.mkdir()
+    ss = _sinks_dir(tmp_path)
+    ss.mkdir(parents=True, exist_ok=True)
     T = "2026-07-12T00:00:05Z"
     _seed_cursor(ss, "s", T, n=2)
-    with (fno_dir / "events.jsonl.1").open("w") as fh:
+    with project_log("events.jsonl.1", project_root=tmp_path).open("w") as fh:
         fh.write(_json.dumps(_ev(T, "blocked", **{"node": "t1"})) + "\n")
         fh.write(_json.dumps(_ev(T, "blocked", **{"node": "t2"})) + "\n")
-    with (fno_dir / "events.jsonl").open("w") as fh:
+    with project_log("events.jsonl", project_root=tmp_path).open("w") as fh:
         fh.write(_json.dumps(_ev(T, "blocked", **{"node": "t3"})) + "\n")
         fh.write(_json.dumps(_ev(T, "blocked", **{"node": "t4"})) + "\n")
     rec = _Recorder()
@@ -1188,9 +1212,10 @@ def test_cloudevents_id_distinct_for_distinct_same_second_events():
 
 def _one_event_file(tmp_path):
     import json as _json
-    fno_dir = tmp_path / ".fno"
-    fno_dir.mkdir(parents=True)
-    active = fno_dir / "events.jsonl"
+    from fno.paths import project_log
+
+    active = project_log("events.jsonl", project_root=tmp_path)
+    active.parent.mkdir(parents=True, exist_ok=True)
     with active.open("w") as fh:
         fh.write(_json.dumps(_ev("2026-07-12T00:00:05Z", "blocked")) + "\n")
     return active
@@ -1270,7 +1295,7 @@ def test_integration_tick_401_holds_cursor_and_logs(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sf, "_post_json", lambda u, b, t: sf._HttpResult(ok=False, status=401))
     monkeypatch.setattr(sf, "_sleep", lambda s: None)
-    ss = tmp_path / ".fno" / "status-sinks"
+    ss = _sinks_dir(tmp_path)
     ss.mkdir(parents=True)
     _seed_cursor(ss, "d", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])

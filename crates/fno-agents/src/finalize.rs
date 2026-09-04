@@ -2155,7 +2155,7 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
 /// withhold to the coverage authority (x-0eaf). Missing/unreadable -> false
 /// (fall back to the per-app check).
 fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
-    let path = crate::paths::space_dir(cwd).join("events.jsonl");
+    let path = crate::paths::events_path(cwd);
     let Ok(content) = fs::read_to_string(&path) else {
         return false;
     };
@@ -2226,7 +2226,7 @@ fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
 /// The head_sha from the latest covered review_coverage event (matching the
 /// current HEAD), or None. Used to pin the auto-merge arm. (x-0eaf)
 fn covered_head_from_event(cwd: &Path) -> Option<String> {
-    let path = crate::paths::space_dir(cwd).join("events.jsonl");
+    let path = crate::paths::events_path(cwd);
     let content = fs::read_to_string(&path).ok()?;
     let head = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])

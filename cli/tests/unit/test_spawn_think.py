@@ -901,7 +901,8 @@ def test_think_output_path_reuses_existing_node_doc_on_redispatch(monkeypatch, t
     """AC-EDGE: a re-dispatch reuses this node's existing doc keyed on the node id,
     not a fresh date file - and is stable across a slug edit between dispatches."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    plans = tmp_path / ".fno" / "plans"
+    from fno.paths import plans_dir
+    plans = plans_dir(tmp_path)  # the resolver, where the product reads
     plans.mkdir(parents=True)
     prior = plans / "2020-01-01-old-slug-x-2222aaaa.md"
     prior.write_text("# earlier dispatch\n")
@@ -915,7 +916,8 @@ def test_think_output_path_reuses_frontmatter_claiming_stub(monkeypatch, tmp_pat
     """AC-FR: a pre-created stub whose frontmatter claims the node is the doc's
     home even though its name carries no node-id suffix (reuse-if-claimed)."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    plans = tmp_path / ".fno" / "plans"
+    from fno.paths import plans_dir
+    plans = plans_dir(tmp_path)  # the resolver, where the product reads
     plans.mkdir(parents=True)
     stub = plans / "2020-01-01-hand-created-stub.md"
     stub.write_text("---\nclaims: x-2222aaaa\nstatus: design\n---\n# stub\n")
@@ -928,7 +930,8 @@ def test_think_output_path_reuses_legacy_slug_only_doc(monkeypatch, tmp_path):
     frontmatter claim) is reused on re-dispatch under the same slug, not
     duplicated by a fresh …-<slug>-<node_id>.md mint."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    plans = tmp_path / ".fno" / "plans"
+    from fno.paths import plans_dir
+    plans = plans_dir(tmp_path)  # the resolver, where the product reads
     plans.mkdir(parents=True)
     legacy = plans / "2020-01-01-my-slug.md"
     legacy.write_text("# legacy dispatch, no frontmatter link\n")
@@ -942,7 +945,8 @@ def test_think_output_path_node_id_doc_beats_legacy_slug(monkeypatch, tmp_path):
     """A node-id-suffixed doc wins over a legacy slug-only doc for the same node
     (node-id resolution stays primary; the legacy glob is only a last resort)."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    plans = tmp_path / ".fno" / "plans"
+    from fno.paths import plans_dir
+    plans = plans_dir(tmp_path)  # the resolver, where the product reads
     plans.mkdir(parents=True)
     (plans / "2020-01-01-my-slug.md").write_text("# legacy\n")
     suffixed = plans / "2020-02-02-my-slug-x-2222aaaa.md"
@@ -954,7 +958,8 @@ def test_think_output_path_node_id_doc_beats_legacy_slug(monkeypatch, tmp_path):
 def test_think_output_path_claim_beats_name_suffix(monkeypatch, tmp_path):
     """A frontmatter claim outranks a mere name-suffix match for the same node."""
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
-    plans = tmp_path / ".fno" / "plans"
+    from fno.paths import plans_dir
+    plans = plans_dir(tmp_path)  # the resolver, where the product reads
     plans.mkdir(parents=True)
     (plans / "2020-01-01-suffix-x-2222aaaa.md").write_text("# name match only\n")
     claimed = plans / "2020-02-02-the-real-home.md"
