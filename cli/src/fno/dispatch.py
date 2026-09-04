@@ -314,9 +314,10 @@ def _autonomous_route_for(
         # gets probed: skipping quota policy on a read failure is the change
         # that could dispatch onto a walled account.
         pinned_harness = (harness or "").strip()
-        rec_harness = record_harness(provider_id, Path(cwd) if cwd else None)
-        if pinned_harness and rec_harness and rec_harness != pinned_harness:
-            return None
+        if pinned_harness:
+            rec_harness = record_harness(provider_id, Path(cwd) if cwd else None)
+            if rec_harness and rec_harness != pinned_harness:
+                return None
         return select_autonomous_route(
             provider_id=provider_id,
             priority=(rec or {}).get("priority"),
