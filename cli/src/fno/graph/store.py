@@ -740,10 +740,8 @@ def resolve_node_with_archive(node_id: str, archived: list[dict]) -> Optional[di
     match = resolve_node(node_id, archived)
     if match.kind == "exact":
         return dict(match.candidates[0]) | {"_archived": True}
-    # An archive-side id collision with the working graph gets reminted, and
-    # the old id is kept as `previous_id` so a reference made before the remint
-    # (a doc, a mail thread, a stale branch name) still resolves instead of
-    # reading as a plain miss.
+    # A reminted id keeps the old one as `previous_id`, so a reference made
+    # before the remint still resolves instead of reading as a plain miss.
     return next(
         (
             dict(e) | {"_archived": True}

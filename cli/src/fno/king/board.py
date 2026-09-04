@@ -864,8 +864,8 @@ def _read_claimed_nodes(claims: SourceRead) -> tuple[SourceRead, set[str], list[
 
     Measured 2026-09-03: 13 per-claim `fno backlog get` subprocesses cost
     30.8s against this read's 30s stop-gate ceiling, so the lookup reads the
-    graph in process through the same tiers `cmd_get` applies; `fno backlog
-    get <id>` stays the hand repro for any row here.
+    graph in process through the same tiers `cmd_get` applies; the verb
+    stays the hand repro for any row here.
     """
     if not claims.ok:
         return SourceRead(error=claims.error), set(), []
@@ -918,8 +918,8 @@ def _read_claimed_nodes(claims: SourceRead) -> tuple[SourceRead, set[str], list[
         if node is None:
             warnings.append(f"stalled_holder: {node_id} unreadable: no node matching in graph")
             continue
-        # A terminal node's claim is a leak for the reaper; dropping it at the
-        # source also keeps its holder out of the transcript reads.
+        # A terminal claim is a reaper leak; dropping it here also keeps its
+        # holder out of the transcript reads.
         if node.get("status") in TERMINAL_RUNGS:
             continue
         nodes.append(node)
@@ -983,10 +983,8 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
 
         # The claims chain runs HERE, inside the with-block: the executor's
         # exit joins every worker, so a chain placed after it ran strictly
-        # after all six sources (the reviewer's catch - wall clock was
-        # max(sources) + chain, not max(sources)). Waiting on a pool future
-        # from the calling thread is safe: no pool worker waits on this
-        # thread, so the wait cannot cycle.
+        # after all six sources. Waiting on a pool future from the calling
+        # thread is safe: no worker waits back, so the wait cannot cycle.
         claims = _run(lambda: claims_f.result())
         try:
             claimed_nodes, holders, claimed_warnings = _read_claimed_nodes(claims)
