@@ -188,9 +188,8 @@ def resolve_thread_viewport(
 
     if invoke(["mux", "thread", "--session", session, thread_id], 30).returncode:
         raise RetaskTransportError("thread_view_unavailable")
-    # The pane opened above stays open on a join miss, and its name stamping
-    # can lag the open, so the join retries before giving up; the miss names
-    # the opened pane rather than the row's ref.
+    # The pane opened above stays open on a join miss and its name stamping
+    # can lag the open, so the join retries; the miss names the opened pane.
     for _ in range(3):
         try:
             panes = invoke(["mux", "pane", "ls", "--session", session, "--json"], 10)

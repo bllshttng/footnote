@@ -4538,12 +4538,8 @@ def cmd_send(
         from fno.mail.thread_force import send_by_thread_identity
 
         if send_by_thread_identity(
-            name,
-            message=message,
-            from_name=from_name,
-            harness=harness,
-            style_exception=style_exception,
-            origin=mail_origin,
+            name, message=message, from_name=from_name, harness=harness,
+            style_exception=style_exception, origin=mail_origin,
         ):
             return
         forced_resolved, forced_suggestions = discover_mod.resolve_or_suggest(name)
