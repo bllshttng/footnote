@@ -151,3 +151,183 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    //! `reap` outcome rendering: both counts, at every pass, including zero.
+    //!
+    //! These live here rather than in the `fno-agents` binary that calls
+    //! `render_reap`: the binary is over the file budget, and a renderer's
+    //! tests belong beside the renderer.
+    use super::*;
+    use crate::daemon::GcSummary;
+    use serde_json::{json, Value};
+
+    fn summary(reaped: &[&str], backstop: &[&str]) -> crate::daemon::GcSummary {
+        crate::daemon::GcSummary {
+            reaped: reaped.iter().map(|s| (*s).to_string()).collect(),
+            reaped_backstop: backstop.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reap_reports_the_backstop_count_even_when_it_is_zero() {
+        // The always-on half of the criterion. An operator reading a quiet pass
+        // must still see that the second count exists and is zero, or a later
+        // nonzero one has nothing to be read against.
+        let out = render_reap(&summary(&["a1"], &[]), false, false);
+        assert!(
+            out.starts_with("reaped 1 row(s) (0 by the age backstop, 0 dormant done)"),
+            "missing the zero backstop count: {out}"
+        );
+    }
+
+    #[test]
+    fn reap_names_every_backstop_row_it_removed() {
+        // The regression: the field existed and nothing printed it, so the verb
+        // said "reaped 0 row(s)" while the backstop deleted two rows.
+        let out = render_reap(&summary(&[], &["b1", "b2"]), false, false);
+        assert!(
+            out.starts_with("reaped 0 row(s) (2 by the age backstop, 0 dormant done)"),
+            "backstop removals missing from the totals: {out}"
+        );
+        assert!(out.contains("  reaped b1 (age backstop"), "{out}");
+        assert!(out.contains("  reaped b2 (age backstop"), "{out}");
+    }
+
+    #[test]
+    fn reap_json_carries_both_lists() {
+        let out = render_reap(&summary(&["a1"], &["b1"]), true, false);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(v["reaped"], json!(["a1"]));
+        assert_eq!(v["reaped_backstop"], json!(["b1"]));
+    }
+
+    #[test]
+    fn reap_json_carries_node_session_refusals() {
+        let s = crate::daemon::GcSummary {
+            node_session_refused: vec![("node-1".into(), "read-back failed".into())],
+            ..Default::default()
+        };
+        let out = render_reap(&s, true, false);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(
+            v["node_session_refused"],
+            json!([{"id": "node-1", "reason": "read-back failed"}])
+        );
+        assert!(render_reap(&s, false, false).contains("node session refused"));
+    }
+
+    #[test]
+    fn reap_json_keeps_the_backstop_key_when_empty() {
+        // A key that vanishes at zero makes every consumer write a default, and
+        // one of them will default to "no backstop removals ever happened".
+        let out = render_reap(&summary(&[], &[]), true, false);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(v["reaped_backstop"], json!([]));
+    }
+
+    // -- x-9de7 task 5: kept_uncorroborated + --dry-run ----------------------
+
+    #[test]
+    fn reap_names_the_uncorroborated_gate_in_text_and_json() {
+        let s = crate::daemon::GcSummary {
+            kept_uncorroborated: vec!["stuck1".to_string()],
+            ..Default::default()
+        };
+        let text = render_reap(&s, false, false);
+        assert!(
+            text.contains("  kept stuck1 (uncorroborated"),
+            "no named gate for the stuck row: {text}"
+        );
+        let out = render_reap(&s, true, false);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(v["kept_uncorroborated"], json!(["stuck1"]));
+    }
+
+    // -- x-98ab: the Live keep is reported like any other --------------------
+
+    #[test]
+    fn reap_names_the_live_gate_in_text_and_json() {
+        // A zero-reap pass over a fully-live fleet must never read as silence:
+        // all 26 rows kept, every one named with the gate that kept it.
+        let s = crate::daemon::GcSummary {
+            kept_live: vec!["live1".to_string(), "live2".to_string()],
+            ..Default::default()
+        };
+        let text = render_reap(&s, false, false);
+        assert!(
+            text.contains("  kept live1 (live: liveness re-check reports it alive)"),
+            "no named gate for the live row: {text}"
+        );
+        assert!(text.contains("  kept live2 (live:"));
+        let out = render_reap(&s, true, false);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(v["kept_live"], json!(["live1", "live2"]));
+    }
+
+    #[test]
+    fn reap_names_the_not_terminal_gate_in_text_and_json() {
+        // x-91f3: the NotTerminal keep is the blanket that held the measured
+        // registry - the majority verdict on a fleet of pid-less rows - and
+        // it went unnamed, so the verb said "would reap 0" while keeping 26.
+        let s = crate::daemon::GcSummary {
+            kept_not_terminal: vec![
+                ("nt1".to_string(), "tail: stalled".to_string()),
+                ("nt2".to_string(), "no tail read".to_string()),
+            ],
+            ..Default::default()
+        };
+        let text = render_reap(&s, false, false);
+        assert!(
+            text.contains("  kept nt1 (not terminal:"),
+            "no named gate for the not-terminal row: {text}"
+        );
+        assert!(text.contains("  kept nt2 (not terminal:"));
+        // A row held because it died mid-turn and one held because nothing
+        // could read its transcript are different problems with different
+        // fixes, and the gate name alone spells them the same.
+        assert!(text.contains("tail: stalled"), "{text}");
+        assert!(text.contains("no tail read"), "{text}");
+        let out = render_reap(&s, true, false);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(
+            v["kept_not_terminal"],
+            json!([
+                {"id": "nt1", "reason": "tail: stalled"},
+                {"id": "nt2", "reason": "no tail read"},
+            ])
+        );
+    }
+
+    #[test]
+    fn reap_dry_run_says_would_reap_not_reaped() {
+        // `--dry-run` must never claim past tense on a row nothing removed.
+        let out = render_reap(&summary(&["a1"], &["b1"]), false, true);
+        assert!(out.starts_with("would reap 1 row(s) (1 by the age backstop, 0 dormant done)"));
+        assert!(out.contains("  would reap a1"));
+        assert!(out.contains("  would reap b1 (age backstop"));
+        assert!(
+            !out.contains("reaped a1"),
+            "must not also say reaped: {out}"
+        );
+        assert!(out.contains("(dry-run: no changes made)"));
+    }
+
+    #[test]
+    fn reap_dry_run_json_names_the_mode() {
+        let out = render_reap(&summary(&["a1"], &[]), true, true);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(v["dry_run"], json!(true));
+        assert_eq!(v["reaped"], json!(["a1"]));
+    }
+
+    #[test]
+    fn reap_live_run_json_names_the_mode_false() {
+        let out = render_reap(&summary(&["a1"], &[]), true, false);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(v["dry_run"], json!(false));
+    }
+
+}
