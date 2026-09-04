@@ -81,6 +81,8 @@ attached="$SCRATCH/attached-wt"
 git -C "$canonical" worktree add -q -b attached-branch "$attached" >/dev/null
 link_real_hook "$attached"
 run_setup_worktree_install "$attached"
+mirror_key="$(git -C "$attached" config --local --bool fno.salvageRemoteMirror)"
+[[ "$mirror_key" == "true" ]] || fail "setup-worktree did not turn the salvage mirror on"
 git -C "$attached" config user.email t@t.co
 git -C "$attached" config user.name t
 echo y > "$attached/g.txt"
@@ -94,10 +96,18 @@ ref_out="$(git -C "$canonical" for-each-ref "refs/fno/salvage/$wt_name")"
 [[ -n "$ref_out" ]] || fail "no local salvage ref written for $wt_name"
 echo "$ref_out" | grep -q "$sha_attached" || fail "salvage ref does not point at the commit"
 
-remote_ref_out="$(git --git-dir="$remote" for-each-ref "refs/fno/salvage/$wt_name")"
-[[ -z "$remote_ref_out" ]] || fail "default commit uploaded a salvage ref without opt-in"
+# The mirror is default-on (x-28ff): the push is backgrounded, so poll for a
+# bounded window instead of racing it.
+mirrored=""
+for _ in 1 2 3 4 5; do
+  mirrored="$(git ls-remote "$remote" "refs/fno/salvage/$wt_name")"
+  [[ -n "$mirrored" ]] && break
+  sleep 1
+done
+[[ -n "$mirrored" ]] || fail "default-on mirror did not push the salvage ref to origin"
+echo "$mirrored" | grep -q "$sha_attached" || fail "mirrored salvage ref does not point at the commit"
 
-echo "PASS: commit lands a local salvage ref without uploading WIP by default"
+echo "PASS: commit lands a local salvage ref and the default-on mirror reaches origin"
 
 # --- AC1b: repository opt-in enables the best-effort remote mirror --------
 
@@ -120,6 +130,23 @@ echo "$opted_in_remote_ref" | grep -q "$sha_opted_in" \
   || fail "opted-in remote salvage ref does not point at the commit"
 
 echo "PASS: repository opt-in mirrors the salvage ref to origin"
+
+# --- AC1c: unsetting the mirror key keeps commits local-only --------------
+
+opted_out="$SCRATCH/opted-out-wt"
+git -C "$canonical" worktree add -q -b opted-out-branch "$opted_out" >/dev/null
+link_real_hook "$opted_out"
+git -C "$opted_out" config --local --unset fno.salvageRemoteMirror || true
+git -C "$opted_out" config user.email t@t.co
+git -C "$opted_out" config user.name t
+echo local > "$opted_out/local.txt"
+git -C "$opted_out" add local.txt
+git -C "$opted_out" commit -q -m "opted-out commit"
+sleep 1
+opted_out_ref="$(git ls-remote "$remote" "refs/fno/salvage/$(basename "$opted_out")")"
+[[ -z "$opted_out_ref" ]] || fail "unset mirror key still uploaded a salvage ref"
+
+echo "PASS: unsetting the mirror key keeps commits local-only"
 
 # --- AC2: a DETACHED worktree's commit survives its own removal ---------
 

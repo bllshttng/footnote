@@ -3458,6 +3458,10 @@ def start(
         )
         raise typer.Exit(code=1)
     wt_path = Path(wt)
+    # ensure names the branch's provenance (continued/salvaged/fresh) on its
+    # stderr receipt; a re-dispatched worker must see it is continuing.
+    _from = re.search(r" base=(\S+)", ens.stderr or "")
+    from_note = f"  from={_from.group(1)}" if _from else ""
 
     # policy=never: ensure returned the repo main checkout itself (launch in place,
     # no worktree). Skip the worktree-only heal + setup-worktree.sh - both mutate
@@ -3628,6 +3632,6 @@ def start(
     model_note = f"  model={model} ({decision_source})" if model else ""
     typer.echo(
         f"worktree={wt_path}  .fno={fno_state}  "
-        f"base={_truthful_base(wt_path, base_label)}  node=claimed{model_note}"
+        f"base={_truthful_base(wt_path, base_label)}  node=claimed{from_note}{model_note}"
     )
     typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)

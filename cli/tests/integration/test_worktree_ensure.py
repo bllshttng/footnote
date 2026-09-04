@@ -88,6 +88,111 @@ def test_ensure_branches_from_origin_main_not_local_head(
     assert wt_head == origin_main_sha  # based on origin/main, not local HEAD
 
 
+def _bare_origin(main_repo: Path, tmp_path: Path) -> Path:
+    """Bare origin with `main` pushed from main_repo; returns the origin path."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    _git("remote", "add", "origin", str(origin), cwd=main_repo)
+    _git("push", "-q", "origin", "main", cwd=main_repo)
+    return origin
+
+
+def test_ensure_continues_origin_feature_branch_ahead_of_main(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """AC2-HP (x-28ff): origin/feature/<name> ahead of main -> the new worktree
+    tracks that branch at its tip, and the receipt names it as continued."""
+    origin = _bare_origin(main_repo, tmp_path)
+    _git("checkout", "-qb", "feature/x-1234", cwd=main_repo)
+    (main_repo / "a.txt").write_text("one\n")
+    _git("add", "a.txt", cwd=main_repo)
+    _git("commit", "-qm", "one", cwd=main_repo)
+    (main_repo / "b.txt").write_text("two\n")
+    _git("add", "b.txt", cwd=main_repo)
+    _git("commit", "-qm", "two", cwd=main_repo)
+    _git("push", "-q", "origin", "feature/x-1234", cwd=main_repo)
+    tip = _git("rev-parse", "feature/x-1234", cwd=main_repo).stdout.strip()
+    # Delete the LOCAL branch: the continued path fires when only origin has
+    # the work (a fresh checkout, or a branch that never came back). A local
+    # branch present in the canonical repo takes today's checkout path.
+    _git("checkout", "-q", "main", cwd=main_repo)
+    _git("branch", "-qD", "feature/x-1234", cwd=main_repo)
+
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "x-1234"])
+    assert res.exit_code == 0, res.stderr
+    wt = Path(res.stdout.strip())
+    assert _git("rev-parse", "HEAD", cwd=wt).stdout.strip() == tip
+    upstream = _git("rev-parse", "--abbrev-ref", "feature/x-1234@{upstream}", cwd=wt).stdout.strip()
+    assert upstream == "origin/feature/x-1234"
+    assert "base=continued:origin/feature/x-1234:+2" in res.stderr
+
+
+def test_ensure_salvages_remote_salvage_ref_when_no_branch(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """AC3-HP (x-28ff): only refs/fno/salvage/<name> on origin ahead of main ->
+    the new branch starts at that commit and the receipt names it as salvaged."""
+    _bare_origin(main_repo, tmp_path)
+    _git("checkout", "-qb", "spill", cwd=main_repo)
+    (main_repo / "c.txt").write_text("salvage me\n")
+    _git("add", "c.txt", cwd=main_repo)
+    _git("commit", "-qm", "unpushed work", cwd=main_repo)
+    spill_tip = _git("rev-parse", "HEAD", cwd=main_repo).stdout.strip()
+    _git("push", "-q", "origin", f"{spill_tip}:refs/fno/salvage/x-5555", cwd=main_repo)
+    _git("checkout", "-q", "main", cwd=main_repo)
+
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "x-5555"])
+    assert res.exit_code == 0, res.stderr
+    wt = Path(res.stdout.strip())
+    assert _git("rev-parse", "HEAD", cwd=wt).stdout.strip() == spill_tip
+    assert "base=salvaged:refs/fno/salvage/x-5555:+1" in res.stderr
+
+
+def test_ensure_merged_branch_cuts_fresh(main_repo: Path, tmp_path: Path) -> None:
+    """AC4-EDGE (x-28ff): the branch exists on origin but carries zero commits
+    ahead of main (it merged) -> fresh cut from origin/main, and the receipt
+    says so. Name existence never reads as ahead."""
+    origin = _bare_origin(main_repo, tmp_path)
+    _git("checkout", "-qb", "feature/x-7777", cwd=main_repo)
+    (main_repo / "d.txt").write_text("merged later\n")
+    _git("add", "d.txt", cwd=main_repo)
+    _git("commit", "-qm", "merged later", cwd=main_repo)
+    _git("push", "-q", "origin", "feature/x-7777", cwd=main_repo)
+    _git("checkout", "-q", "main", cwd=main_repo)
+    _git("merge", "-q", "--ff-only", "feature/x-7777", cwd=main_repo)
+    _git("push", "-q", "origin", "main", cwd=main_repo)
+    # Only origin keeps the (now merged) branch, so ensure resolves the
+    # remote refs instead of today's local-branch checkout path.
+    _git("branch", "-qD", "feature/x-7777", cwd=main_repo)
+    main_tip = _git("rev-parse", "origin/main", cwd=main_repo).stdout.strip()
+    del origin
+
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "x-7777"])
+    assert res.exit_code == 0, res.stderr
+    wt = Path(res.stdout.strip())
+    assert _git("rev-parse", "HEAD", cwd=wt).stdout.strip() == main_tip
+    assert "base=fresh:origin/main" in res.stderr
+    assert "continued" not in res.stderr
+
+
+def test_ensure_unreachable_origin_cuts_fresh_and_names_failure(
+    main_repo: Path, tmp_path: Path
+) -> None:
+    """AC4-EDGE (x-28ff): the fetch cannot reach origin at all -> fresh cut,
+    and the receipt's stderr names the fetch failure instead of silently
+    blessing a possibly stale main."""
+    origin = _bare_origin(main_repo, tmp_path)
+    origin.rename(tmp_path / "origin-gone")  # unreachable: fetch must fail
+
+    res = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "x-9999"])
+    assert res.exit_code == 0, res.stderr
+    wt = Path(res.stdout.strip())
+    main_tip = _git("rev-parse", "origin/main", cwd=main_repo).stdout.strip()
+    assert _git("rev-parse", "HEAD", cwd=wt).stdout.strip() == main_tip
+    assert "base=fresh:origin/main" in res.stderr
+    assert "base fetch failed" in res.stderr
+
+
 def test_ensure_idempotent_reuse(main_repo: Path, tmp_path: Path) -> None:
     """AC1-EDGE: a second ensure for the same name reuses the worktree."""
     first = runner.invoke(app, ["worktree", "ensure", "--repo", str(main_repo), "--name", "dup"])
