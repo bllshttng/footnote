@@ -228,6 +228,15 @@ RUST_CLIENT_VERBS = frozenset(
         # (no daemon RPC, no Python impl); this entry keeps the
         # client.rs<->router parity test in sync and provides the help line.
         "recover",
+        # Batch graph read, Bash-call census, and the session-start byte total
+        # (x-997a): all three dispatch directly in client.rs before
+        # build_request (no daemon RPC, no Python impl). `fno backlog get`'s
+        # forwarder and `fno doctor bash-census` invoke the binary directly
+        # (not via `fno agents` routing); these entries keep the
+        # client.rs<->router parity test in sync.
+        "graph-get",
+        "bash-census",
+        "session-start-bytes",
     }
 )
 
