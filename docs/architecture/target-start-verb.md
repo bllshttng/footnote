@@ -4,7 +4,7 @@
 
 A background `/target` cold-start has to isolate itself before building. Done by hand that is five non-obvious moves across three competing mechanisms (harness `EnterWorktree`, raw `git worktree add`, the skill's attended worktree offer), and two of the moves are silent killers whose fix used to live only in agent memory:
 
-- `.fno` arrives as a **whole-dir symlink** to canonical, so `fno do target init` refuses on what looks like a stale manifest. The fix is `rm .fno && mkdir .fno && bash scripts/setup/setup-worktree.sh`.
+- Project state used to live inside the tree, so a worktree's `.fno` arrived as a whole-dir symlink to canonical and `fno do target init` refused on what looked like a stale manifest. State moved into the repo's space under `~/.fno/spaces/` (x-b1ee), there is nothing to symlink, and the heal step is gone.
 - The worktree base is **behind `origin/main`** (branched off local HEAD), so the eventual PR shows phantom deletions of unrelated work, caught only at PR time. The fix is to branch off `origin/main`, never local HEAD.
 
 `fno do target start <node>` collapses all of it into one idempotent verb with a printed receipt, so a memory-less agent (OSS, or a weaker model) succeeds without knowing the folklore.
@@ -14,9 +14,9 @@ A background `/target` cold-start has to isolate itself before building. Done by
 It does not reimplement worktree mechanics; it sequences pieces that already exist:
 
 1. **Create / reuse the worktree off `origin/main`** via `fno agents workspace worktree ensure`. That verb branches off `origin/main` (never local HEAD) and reuses an existing worktree idempotently. It refuses to nest inside a linked worktree, and prints the worktree path on stdout.
-2. **Heal `.fno`** — if it arrived as a whole-dir symlink, `rm` + `mkdir` it — then link shared state via `worktree.py`'s `_run_setup_worktree_hook` (the setup-worktree.sh runner that the `shellout-drift` gate explicitly exempts).
-3. **Init the session from the worktree** via `fno do target init`, which writes the immutable manifest and claims the node exactly once. `start` re-uses that one-call claim rather than claiming separately.
-4. **Print a receipt:** `worktree=<path>  .fno=healed|ok  base=origin/main behind=<n>  node=claimed`. The base field carries a MEASURED distance. `start` fetches the remote branch first. `rev-list --count HEAD..origin/main` reads the LOCAL ref, and a stale ref answers 0 for a branch dozens of commits behind. When the fetch or the count fails, the field says `behind=unmeasured:<why>`. Never a silent zero. The whole receipt is whitespace-separated `key=value` tokens. So `<why>` is one hyphenated slug, never a parenthetical. `behind=unmeasured (fetch timed out)` splits into three tokens carrying no key.
+2. **Link shared non-fno state** via `worktree.py`'s `_run_setup_worktree_hook` (the setup-worktree.sh runner that the `shellout-drift` gate explicitly exempts). Project state needs no link: the space resolves identically from every worktree.
+3. **Init the session from the worktree** via `fno do target init`, which writes the immutable manifest into the worktree's space slice and claims the node exactly once. `start` re-uses that one-call claim rather than claiming separately.
+4. **Print a receipt:** `worktree=<path>  base=origin/main behind=<n>  node=claimed`. The base field carries a MEASURED distance. `start` fetches the remote branch first. `rev-list --count HEAD..origin/main` reads the LOCAL ref, and a stale ref answers 0 for a branch dozens of commits behind. When the fetch or the count fails, the field says `behind=unmeasured:<why>`. Never a silent zero. The whole receipt is whitespace-separated `key=value` tokens. So `<why>` is one hyphenated slug, never a parenthetical. `behind=unmeasured (fetch timed out)` splits into three tokens carrying no key.
 
 ## Idempotency
 

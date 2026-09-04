@@ -175,14 +175,9 @@ def codemap(
             err=True,
         )
         raise typer.Exit(code=EXIT_USAGE)
-    # Default output path discrimination:
-    #   * --json without --output -> codemap.json in the analyzed repo's
-    #     worktree space slice, so a JSON run never overwrites the canonical
-    #     markdown artifact (Codex P2).
-    #   * --repo without --output -> write to the ANALYZED repo's space so
-    #     downstream skills in that repo find the artifact they expect
-    #     (Codex P2). The codemap is per-checkout, so the worktree slice of
-    #     the space answers.
+    # Default output path: the analyzed repo's worktree space slice, so a JSON
+    # run never overwrites the canonical markdown artifact (Codex P2) and
+    # downstream skills in that repo find the artifact they expect.
     if output is None:
         from fno.paths import worktree_space_dir
 

@@ -12,16 +12,13 @@ priority, highest first:
      deduped when 2 == 3)
   4. ~/.fno/settings.yaml  (per-user global; shared defaults)
 
-A key absent from a higher-priority file falls through to the next file
-down, so the per-user global can hold shared defaults (e.g.
-config.obsidian.vault) while each project sets only its deltas (e.g.
-config.post_merge.parking_lot_path). When no file exists, built-in defaults apply.
-This mirrors the shell reader (scripts/lib/config.sh, per-key local->global
-fallback) and the provider loader, both of which already merge project-local
-over global.
+A key absent from a higher-priority file falls through to the next file down,
+so the per-user global holds shared defaults while each project sets only its
+deltas. With no file, built-in defaults apply. This mirrors the shell reader
+(scripts/lib/config.sh, per-key local->global fallback) and the provider loader.
 
-Cache: load_settings() is cached per-process via functools.lru_cache.
-Mid-process edits to settings.yaml do not take effect; the next
+Cache: load_settings() is cached per-process via functools.lru_cache;
+mid-process edits to settings.yaml do not take effect; the next
 subprocess sees the new value.
 
 Design decisions (locked in 2026-05-14-path-config.md):

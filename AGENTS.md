@@ -133,15 +133,15 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 
 NEVER edit these directly (a `PreToolUse` hook detects it). Use `fno backlog` / `fno do state`:
 - `~/.fno/graph.json` - the backlog graph; mutate via `fno backlog` only.
-- `.fno/target-state.md` - immutable session manifest after init; only legal post-init write is first-fill of empty `plan_path` via `fno do state set`.
+- `<space>/worktrees/<name>/target-state.md` (the session manifest, resolved via `fno-agents state path target-state`) - immutable after init; only legal post-init write is first-fill of empty `plan_path` via `fno do state set`.
 
 | File | Default | Purpose | Owner |
 |------|---------|---------|-------|
 | `paths.graph_json()` | `~/.fno/graph.json` (+ `.md` Kanban) | Feature dependency graph | backlog |
 | `paths.ledger_json()` | `~/.fno/ledger.json` | Execution history + cost | target |
 | `paths.briefs_dir()` | `~/.fno/briefs/{id}.md` | Sidecar discovery briefs | backlog |
-| `.fno/target-state.md` | project-relative | Immutable session manifest | target |
-| `.fno/STATE.md` / `SUMMARY.md` / `00-INDEX.md` | project-relative | Wave progress / completion / strategy | /execute, operator, /blueprint |
+| `<space>/worktrees/<name>/target-state.md` | repo space | Immutable session manifest | target |
+| `<space>/worktrees/<name>/STATE.md` / `SUMMARY.md` / `00-INDEX.md` | repo space | Wave progress / completion / strategy | /execute, operator, /blueprint |
 | `{plan_path}.artifacts/` | plan-relative | Quick-plan sidecar | target stop hook |
 
 Paths resolve via `fno.paths`; override under `config.paths.*`; check with `fno config doctor`. [path-config](docs/path-config.md). A state-root TOP-LEVEL write needs an owner + lifetime in [state-root-inventory](docs/state-root-inventory.md); session-keyed files go in a subfolder.
@@ -174,11 +174,11 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 
 ## CLI subsystems (summary + doc)
 
-- **`fno agents claim`** - the one work-claim primitive; atomic lockfiles under `.fno/claims/`. `target init` already claims the node - never `claim acquire` manually. [coordination](docs/architecture/coordination.md).
+- **`fno agents claim`** - the one work-claim primitive; atomic lockfiles (global-id keys under `~/.fno/claims/`, repo-local keys under the repo's space). `target init` already claims the node - never `claim acquire` manually. [coordination](docs/architecture/coordination.md).
 - **`fno agents mail` - native review.** A worker runs the native review via Skill; raw mail is the fallback. The stop gate and `fno do pr merge` enforce code review; `review.self_review_required = false` needs a live claim, expires after `review.optout_ttl_minutes`, and disarms unattended auto-merge. [review lanes](docs/architecture/review-lanes.md).
 - **`fno inbox decide`** - records a ruling per subject. `fno inbox decisions X` recovers it, newest first. [decision-record](docs/architecture/decision-record.md).
 - **`fno whoami` / `fno whoami status`** - read-only self-introspection; run when confused after compaction.
-- **`fno do target start <node>`** - one-verb worktree cold-start (ensure off `origin/main` -> heal `.fno` symlink -> `target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
+- **`fno do target start <node>`** - one-verb worktree cold-start (ensure off `origin/main` -> `target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
 - **Spawn substrate** - `fno agents spawn --substrate <pane|thread|headless>`. `pane` and `thread` are both interactive and attachable. `pane` is default and mux-hosted. `thread` is persistent and hosts no pane until one is created; view: a **portal**, 0-indexed, several at once ([portals](docs/architecture/portals.md)). `headless` is the only non-interactive substrate, one-shot. `bg` is a one-release alias naming that same interactive `thread`.
 - **`fno mux workspace restore`** - one verb resumes every worker member of a mux session through its own harness's declared resume form after a reboot or server kill; every member it cannot bring back is named with the reason. [workspace-restore](docs/architecture/workspace-restore.md).
 - **Pane keeper** - a worker pane's pty master lives in a keeper, not the server. A fresh server re-adopts the SAME pid. Plain panes still die with the server. `fno mux pane keeper list` reads survivors, and the page answers why not the daemon. [pane-keeper](docs/architecture/pane-keeper.md).

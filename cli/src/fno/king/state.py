@@ -76,8 +76,7 @@ def king_manifest_path(scope: str, *, state_root: Optional[Path] = None) -> Path
     Scope is registry data, but it becomes a filename here. Refuse path syntax
     instead of normalizing it: two spellings of one scope must never select two
     files, and no scope may escape the state root. The default root is the
-    repo's space (cross-worktree, keyed on the canonical checkout); a caller
-    may pin one explicitly.
+    repo's space; a caller may pin one explicitly.
     """
     scope = scope.strip()
     if not scope or ".." in scope or "/" in scope or "\\" in scope or "\0" in scope:

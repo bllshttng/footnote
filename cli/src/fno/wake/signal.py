@@ -40,7 +40,6 @@ class WakeSignal:
 
 
 def signals_dir(repo_root: Path) -> Path:
-    """Wake signals live in the repo's space, shared by every worktree."""
     from fno.paths import space_dir
 
     return space_dir(repo_root) / "wake-signals"

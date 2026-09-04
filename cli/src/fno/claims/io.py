@@ -154,11 +154,9 @@ def claims_dir(root: Path | None = None) -> Path:
     base dir:
 
       1. explicit ``root`` argument (per-root claims, e.g. walker singleton),
-      2. ``$FNO_CLAIMS_ROOT`` env var (global node claims; see
-         ``CLAIMS_ROOT_ENV``),
-      3. the repo's space (one per repository, keyed on the canonical root),
-         so claims from linked worktrees and the canonical checkout land in
-         the same directory and no claims dir lives inside a checkout.
+      2. ``$FNO_CLAIMS_ROOT`` env var (global node claims),
+      3. the repo's space (keyed on the canonical root), so claims from every
+         worktree land in one directory and no claims dir lives in a checkout.
     """
     if root is not None:
         base: Path = root
@@ -168,8 +166,7 @@ def claims_dir(root: Path | None = None) -> Path:
             return Path(override) / CLAIMS_DIRNAME
         from fno.paths import space_dir
 
-        # The space is already fno-owned state, so the claims dir sits at
-        # <space>/claims directly - no nested .fno segment inside the space.
+        # fno-owned state: <space>/claims directly, no nested .fno segment.
         return space_dir() / "claims"
     return base / CLAIMS_DIRNAME
 
@@ -302,11 +299,9 @@ def _breadcrumb_path() -> Path:
     outside its sandbox, so a breadcrumb aimed there is silently dropped by the
     very failure it is reporting.
 
-    Deliberately NOT moved into the repo's space with the other project
-    state: this file exists precisely for the worker whose access to the fno
-    state root was just DENIED, so it must live in the one root that worker
-    demonstrably still has. Alongside ``.fno/config.toml`` it is the one
-    intentional checkout-local file.
+    Deliberately NOT moved into the repo's space: it exists for the worker
+    whose access to the fno state root was just DENIED, so it stays in the
+    one root that worker demonstrably still has.
     """
     from fno.paths import resolve_repo_root
 

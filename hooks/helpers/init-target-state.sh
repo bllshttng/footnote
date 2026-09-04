@@ -26,12 +26,17 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
 # Project state files resolve through the owning verb (the repo's space under
 # ~/.fno/spaces/, keyed on the canonical root). Degraded fallback for an fno
-# predating the verb: the legacy checkout path.
+# predating the verb: the legacy checkout path, spelled with its real filename.
 _space_state_path() {
   local p
-  p=$(fno do state path "$1" 2>/dev/null || true)
+  p=$(fno-agents state path "$1" 2>/dev/null || true)
   if [[ -z "$p" ]]; then
-    p="$REPO_ROOT/.fno/$1"
+    case "$1" in
+      target-state) p="$REPO_ROOT/.fno/target-state.md" ;;
+      events)       p="$REPO_ROOT/.fno/events.jsonl" ;;
+      scratchpad)   p="$REPO_ROOT/.fno/scratchpad" ;;
+      *)            p="$REPO_ROOT/.fno/$1" ;;
+    esac
   fi
   printf '%s\n' "$p"
 }
@@ -586,7 +591,7 @@ _worktree_has_fresh_activity() {
   # lives in the worktree slice of the repo's space; fall back to the legacy
   # checkout path for an fno predating the verb.
   local spad
-  spad="$(cd "$root" 2>/dev/null && fno do state path scratchpad 2>/dev/null || true)"
+  spad="$(cd "$root" 2>/dev/null && fno-agents state path scratchpad 2>/dev/null || true)"
   [[ -z "$spad" ]] && spad="$root/.fno/scratchpad"
   if [[ -d "$spad" ]]; then
     while IFS= read -r f; do

@@ -143,7 +143,7 @@ resolve_manifest_state() {
 # The manifest lives in the worktree slice of the repo's space; resolve it
 # through the owning verb so this hook never spells the path. Degraded
 # fallback for an fno predating the verb: the legacy checkout-relative path.
-LIVE_STATE_FILE=$(fno do state path target-state 2>/dev/null || true)
+LIVE_STATE_FILE=$(fno-agents state path target-state 2>/dev/null || true)
 [[ -z "$LIVE_STATE_FILE" ]] && LIVE_STATE_FILE=".fno/target-state.md"
 STATE_FILE="$LIVE_STATE_FILE"
 TARGET_CWD="$PWD"
@@ -155,7 +155,7 @@ OTHER_WORKTREE_PRESENT=0
 (( WORKTREE_COUNT > 1 )) && OTHER_WORKTREE_PRESENT=1
 # The project space root: cross-worktree journals, kings and stop-hook
 # diagnostics live here, never in the checkout.
-SPACE_DIR=$(dirname "$(fno do state path events 2>/dev/null || true)")
+SPACE_DIR=$(dirname "$(fno-agents state path events 2>/dev/null || true)")
 [[ -z "$SPACE_DIR" || "$SPACE_DIR" == "." ]] && SPACE_DIR="${REPO_ROOT}/.fno"
 
 resolve_agents_bin() {

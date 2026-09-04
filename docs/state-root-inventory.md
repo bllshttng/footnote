@@ -135,7 +135,7 @@ Leave them. The finding is the cwd fallback, not the directories it produced. `.
 
 ## The project journal and `FNO_EVENTS_PATH`
 
-The per-checkout journal `<repo>/.fno/events.jsonl` resolves through `paths.project_events_json()`. `FNO_EVENTS_PATH` overrides it. The override exists because repo-root resolution cannot be sandboxed. `fno.hermetic.neutralise` deliberately leaves `FNO_REPO_ROOT` unset. So an unpathed `append_event` under test writes a real row into the developer's checkout, and both operator readers fold that file. On 2026-08-17 six test fixtures sat in the needs panel beside two genuine operator questions.
+The per-repository journal `<space>/events.jsonl` resolves through `paths.project_events_json()`. `FNO_EVENTS_PATH` overrides it. The override exists because repo-root resolution cannot be sandboxed. `fno.hermetic.neutralise` deliberately leaves `FNO_REPO_ROOT` unset. So an unpathed `append_event` under test writes a real row into the developer's space, and both operator readers fold that file. On 2026-08-17 six test fixtures sat in the needs panel beside two genuine operator questions.
 
 `neutralise` pins the override at one line, and that env reaches the pytest, shell, and cargo trees. All three writers read it: the Python resolver, `scripts/lib/events.sh`, and `claim_events_path` in the Rust claims module. Rust has to read it because the two implementations share that journal and its `.lock.d` mutex as a wire contract. A pin one side ignores splits the writers apart. The loop-journal writers in `fno-agents` still build their path by hand and remain outside the pin. Reach for the pin, not for a marker the fold recognises. A fold that must know about test data carries an exception list, and the next fixture that misses the list refills the queue in silence. A test that sets `FNO_REPO_ROOT` itself and reads the journal back must name the same file in `FNO_EVENTS_PATH`. The pin outranks the root.
 
@@ -146,39 +146,48 @@ The per-checkout journal `<repo>/.fno/events.jsonl` resolves through `paths.proj
 3. Name the deleter. Ephemeral state gets its lifetime in the code that writes it, not in a separate janitor. A janitor drifts from the writer and goes unrun. `scripts/prune-fno-dir.sh` was deleted for exactly that: never once invoked, while every file on its delete list sat in the root.
 4. Add a row above.
 
-## Project-relative session manifests
+## The project space (`~/.fno/spaces/<slug>/`)
 
-Not state-root writers, listed here because they are the other family of session-keyed files an operator finds and cannot attribute.
+Project state left the checkout (2026-09-03, x-b1ee). One space per repository, keyed on the CANONICAL repo root (the git common dir's checkout), slug = `<basename>-<first 8 hex of sha256(canonical root path)>`. Every worktree of a repo resolves to ONE space, so cross-worktree state needs no symlink. Per-worktree state sits at `<space>/worktrees/<worktree basename>/`. A checkout keeps only `.fno/config.toml` (committed project config) and the sandbox breadcrumb below. The first resolve of a moved file renames the legacy `<repo>/.fno/<file>` into the space and leaves a `<repo>/.fno/MOVED-TO` pointer naming it.
 
 | Entry | Writer | Lifetime |
 |---|---|---|
-| `.fno/target-state.md` | `hooks/helpers/init-target-state.sh` via `fno do target init` | write-once per target session; archived on a terminal |
-| `.fno/kings/<scope>.md` | `cli/src/fno/king/state.py` via coronation or `fno agents king init` | one loop-state file per live crown scope; stale files are inert without a live registry crown and cleanup is best-effort (`fno agents king done` on abdication) |
-| `.fno/kings/<scope>.md.lock`, `.md.tmp` | `state.py` / `loop_king.rs` / `king/wake.py` over the manifest lock | lock lives only for the critical section; tmp is replaced on every locked write |
-| `.fno/kings/<scope>.wake.json` | `pr_watch/_king_wake.py` (the tick's wake phase) | tick-local board-hash cache with no reign meaning; refreshed only when a wake fires, so it never outlives the manifest beside it |
-| `.fno/kings/<scope>.md.wake.log` | `pr_watch/_king_wake.py` (detached wake-mode walk) | append-only stdout of the walks this phase spawned; the events journal is the receipt, this log is diagnosis |
-| `.fno/kings/<scope>.cancelled` | `king/cli.py` via `fno agents king cancel` | removed by `--clear` or by the next `king init`; the per-scope walk sentinel is beside its canonical crown manifest |
+| `<space>/events.jsonl` | `paths.project_events_json()` and `fno-agents` journal writers | append-only per repository; rotated at 8 MB |
+| `<space>/claims/` | `fno.claims` for repo-local keys (`walker:`, `review:`, `reap:`); global-id keys (`node:`, `dispatch:`, ...) stay at the global root | re-acquirable leases |
+| `<space>/kings/<scope>.md` | `cli/src/fno/king/state.py` via coronation or `fno agents king init` | one loop-state file per live crown scope; stale files are inert without a live registry crown and cleanup is best-effort (`fno agents king done` on abdication) |
+| `<space>/kings/<scope>.md.lock`, `.md.tmp` | `state.py` / `loop_king.rs` / `king/wake.py` over the manifest lock | lock lives only for the critical section; tmp is replaced on every locked write |
+| `<space>/kings/<scope>.wake.json` | `pr_watch/_king_wake.py` (the tick's wake phase) | tick-local board-hash cache with no reign meaning; refreshed only when a wake fires, so it never outlives the manifest beside it |
+| `<space>/kings/<scope>.md.wake.log` | `pr_watch/_king_wake.py` (detached wake-mode walk) | append-only stdout of the walks this phase spawned; the events journal is the receipt, this log is diagnosis |
+| `<space>/plans/` | `paths.plans_dir()` default (a configured vault template still wins) | permanent plan docs |
+| `<space>/inbox/` | `paths.inbox_dir()` default | per-project inbox |
+| `<space>/status-sinks/` | `paths.status_sinks_dir()` (x-2057) | per-sink cursors + error logs |
+| `<space>/carveouts.jsonl`, `.lock.d/` | `cli/src/fno/carveout/core.py` via `paths.project_log` | append-only ledger; consumed by the retro-triage harvest |
+| `<space>/worktree-log.jsonl` | `hooks/worktree-setup.sh` | append-only worktree lifecycle log |
+| `<space>/wake-signals/` | `cli/src/fno/wake/signal.py` | one-shot records; drained by the wake readers |
+| `<space>/artifacts/consolidated/` | `scripts/lib/consolidate-artifacts.sh` | per-PR consolidated gate artifacts, shared across worktrees |
+| `<space>/scratchpad-adjacent diagnostics`: `loop-check.stderr.log`, `finalize.stderr.log`, `.loop-check-unavail-*`, `.king-resolve-unavail-*`, `.think-offer-cursor` | `hooks/target-stop-hook.sh`, `hooks/agy-target-stop-hook.sh`, `hooks/born-with-why-offer-inject.sh` | bounded retries/diagnostics; counters self-heal on the first clean decision |
+| `<space>/worktrees/<name>/target-state.md` | `hooks/helpers/init-target-state.sh` via `fno do target init` | write-once per target session; archived on a terminal |
+| `<space>/worktrees/<name>/run-log.jsonl` | `crates/fno-agents/src/loopcheck.rs` through `run_state::append_transition` | append-only per worktree; retained as the lifecycle fold and deleted with a disposable worktree |
+| `<space>/worktrees/<name>/codemap.md` | `fno doctor codemap` | regenerated |
+| `<space>/worktrees/<name>/scratchpad/` | `/target` sessions, per the manifest's `scratchpad_path` | live session scratch; archived at session end |
 
 Target state is write-once after init. King state is atomically refreshed at coronation and both gate a stop hook.
 
 A king runs in the canonical checkout. A target manifest can sit there too. So the king gets its own file rather than a `driver:` field on the target one. A manifest whose name says target and whose contents say king is how two sessions come to share one discriminator.
 
-## Project-relative run journal
+## The checkout-local exceptions
+
+Two files stay inside a checkout, each because moving it breaks the thing that writes it:
 
 | Entry | Writer | Lifetime |
 |---|---|---|
-| `.fno/run-log.jsonl` | `crates/fno-agents/src/loopcheck.rs` through `run_state::append_transition` | append-only per checkout; retained as the lifecycle fold and deleted with a disposable worktree |
+| `.fno/config.toml` | `fno config project init` / the operator | committed project config, the same class as `.claude/settings.json` |
+| `.fno/state-root-denied.json` | the DENIED worker, through `crates/fno-agents/src/claims.rs::write_state_root_breadcrumb` and its Python twin `cli/src/fno/claims/io.py::_breadcrumb_path` | until the next successful claim on this repo, which deletes it |
 
-## Project-relative sandbox breadcrumb
-
-| Entry | Writer | Lifetime |
-|---|---|---|
-| `.fno/state-root-denied.json` | the DENIED worker, through `crates/fno-agents/src/claims.rs::write_state_root_breadcrumb` and its Python twin `cli/src/fno/claims/io.py::_write_denial_breadcrumb` | until the next successful claim on this repo, which deletes it |
-
-This file is here because it is the only thing a mute worker can still say.
+The breadcrumb is here because it is the only thing a mute worker can still say.
 
 A worker whose sandbox denies the fno state root has lost the claim store, the mail bus and the spawn mutex in one move. It cannot report that, because reporting is the capability it lost. It reports into its own transcript, which nothing reads, and the fleet meanwhile sees a live row with progress advancing. Five workers died that way in one night. Two of them finished real work nobody heard about.
 
-The same sandbox that took the state root left the repo writable. So the refusal is written here, inside the one root the worker demonstrably has, and the operator reads it from outside the sandbox. The write is best effort and never raises: a breadcrumb that cannot be written must not become a second failure stacked on the first.
+The same sandbox that took the state root left the repo writable. So the refusal is written here, inside the one root the worker demonstrably has, and the operator reads it from outside the sandbox. Moving it into the space would move it behind the very grant that was denied. The write is best effort and never raises: a breadcrumb that cannot be written must not become a second failure stacked on the first.
 
 It carries the denied absolute root, the harness session id, and a UTC timestamp. A successful claim write clears it, because a stale breadcrumb reads as a live problem forever.

@@ -89,7 +89,7 @@ Resolve the save path with `fno do plan path --slug "<slug>" [--node "<node-id>"
 
 Initialize session state for cost tracking (replaces the PreToolUse hook for portability). State lives in the repo's space, not the checkout; resolve the dir through the verb:
 ```bash
-STATE_DIR=$(dirname "$(fno do state path target-state 2>/dev/null)" 2>/dev/null)
+STATE_DIR=$(dirname "$(fno-agents state path target-state 2>/dev/null)" 2>/dev/null)
 [[ -z "$STATE_DIR" || "$STATE_DIR" == "." ]] && STATE_DIR=".fno"
 mkdir -p "$STATE_DIR"
 # Don't overwrite if target is running (it has its own state)
@@ -129,7 +129,7 @@ fi
    # section AND the codemap is fresh (<24h), schema was grounded at design
    # time - skip the --db-schema regeneration (mirrors the `## Discovery` skip
    # below). $DESIGN_DOC_PATH is the resolved design-doc argument, if any.
-   CODEMAP_PATH=$(fno do state path codemap 2>/dev/null || true)
+   CODEMAP_PATH=$(fno-agents state path codemap 2>/dev/null || true)
    [ -z "$CODEMAP_PATH" ] && CODEMAP_PATH="$REPO_ROOT/.fno/codemap.md"
    schema_reused=""
    if [ -n "${DESIGN_DOC_PATH:-}" ] && grep -q '^## Schema Reconciliation$' "$DESIGN_DOC_PATH" 2>/dev/null \

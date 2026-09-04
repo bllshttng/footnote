@@ -223,27 +223,28 @@ def resolve_canonical_repo_root() -> Path:
     return resolve_repo_root()
 
 
-# Project spaces: the per-repository state root OUTSIDE any checkout.
-# Cross-worktree state sits at the space root, session-keyed state under
-# ``worktrees/<name>/``; a checkout keeps only ``.fno/config.toml``. Keying
-# on the CANONICAL root gives every worktree of one repo ONE space.
+# Project spaces: state OUTSIDE any checkout. Cross-worktree state at the
+# space root, session-keyed state under ``worktrees/<name>/``.
 
 
 def space_slug(canonical_root: Path) -> str:
-    """The per-repo space key: ``<basename>-<first 8 hex of sha256(path)>``.
-
-    Mirrored byte for byte in ``fno-agents::paths`` (a golden-value test on
-    each side pins the format).
-    """
+    """``<basename>-<first 8 hex of sha256(path)>``; mirrored byte for byte
+    in ``fno-agents::paths`` (golden-value tests pin the format)."""
     digest = hashlib.sha256(str(canonical_root).encode("utf-8")).hexdigest()[:8]
     return f"{canonical_root.name}-{digest}"
 
 
 def _canonical_for(root: Path) -> Path:
+    root = root.resolve()
+    gitdir = root / ".git"
+    # A `.git` dir is a main checkout; an absent one is no repo. Only the
+    # linked-worktree gitfile needs the probe.
+    if not gitdir.exists() or gitdir.is_dir():
+        return root
     canonical = resolve_canonical_worktree(root)
     if canonical is not None:
         return canonical.resolve()
-    return root.resolve()
+    return root
 
 
 def spaces_root() -> Path:
@@ -259,8 +260,8 @@ def spaces_root() -> Path:
 
 
 def space_dir(project_root: Optional[Path] = None) -> Path:
-    """The space for the repo behind ``project_root`` (default: cwd's),
-    keyed on its CANONICAL root so every worktree answers the same path."""
+    """The space for ``project_root``'s repo (default: cwd's), keyed on its
+    CANONICAL root so every worktree answers the same path."""
     root = resolve_canonical_repo_root() if project_root is None else _canonical_for(project_root)
     return _guard_state_path(spaces_root() / space_slug(root))
 
@@ -274,31 +275,29 @@ def worktree_space_dir(project_root: Optional[Path] = None) -> Path:
     return space_dir(root)
 
 
-def target_state_path() -> Path:
+def target_state_path(project_root: Optional[Path] = None) -> Path:
     """The write-once session manifest, per worktree slice of the space."""
-    return _guard_state_path(worktree_space_dir() / "target-state.md")
+    return _guard_state_path(worktree_space_dir(project_root) / "target-state.md")
 
 
-def kings_dir(project_root: Optional[Path] = None) -> Path:
-    """Crown manifests: cross-worktree, so at the space root."""
-    return _guard_state_path(space_dir(project_root) / "kings")
-
-
-def run_log_path() -> Path:
-    """The lifecycle run journal, per worktree slice of the space."""
-    return _guard_state_path(worktree_space_dir() / "run-log.jsonl")
+def target_state_path_or_legacy(project_root: Optional[Path] = None) -> Path:
+    """``target_state_path``, falling back to the pre-space checkout manifest
+    when the session predates the move or the space root cannot resolve."""
+    try:
+        space = target_state_path(project_root)
+        if space.exists():
+            return space
+    except Exception:  # noqa: BLE001 - a read degrades, never refuses
+        pass
+    root = project_root or resolve_repo_root()
+    return root / ".fno" / "target-state.md"
 
 
 def migrate_from_checkout(old: Path, new: Path) -> bool:
-    """One-shot lazy migration of a legacy ``<repo>/.fno/<file>`` onto the space.
-
-    Called by each accessor on first resolve: when ``old`` exists, is not a
-    symlink (a worktree link dies with the canonical move instead), and
-    ``new`` does not, rename within a filesystem or ``shutil.move`` across
-    ones, then leave ``<repo>/.fno/MOVED-TO`` naming the space so a stale
-    reader fails loud. Best effort: any failure leaves the old file in place
-    and returns False, so a read-only checkout degrades to today's behavior
-    rather than refusing.
+    """One-shot lazy migration onto the space: move a legacy checkout file to
+    ``new`` unless either exists or old is a symlink, then leave a MOVED-TO
+    pointer. Best effort: any failure leaves ``old`` in place and returns
+    False, degrading to the legacy path.
     """
     if old == new or new.exists() or not old.exists() or old.is_symlink():
         return False
@@ -633,25 +632,11 @@ STATE_FILES: tuple[StateFile, ...] = (
         owning_modules=("cli/src/fno/paths.py", "crates/fno-agents/src/paths.rs"),
     ),
     StateFile(
-        filename="kings",
-        resolver="fno.paths.kings_dir",
-        root_class="PROJECT",
-        selector="config.paths.spaces_dir, else state_dir",
-        owning_modules=("cli/src/fno/paths.py", "cli/src/fno/king/state.py"),
-    ),
-    StateFile(
-        filename="run-log.jsonl",
-        resolver="fno.paths.run_log_path",
-        root_class="PROJECT",
-        selector="worktree slice of the space",
-        owning_modules=("cli/src/fno/paths.py", "crates/fno-agents/src/run_state.rs"),
-    ),
-    StateFile(
         filename="target-state.md",
         resolver="fno.paths.target_state_path",
         root_class="PROJECT",
         selector="worktree slice of the space",
-        owning_modules=("cli/src/fno/paths.py", "cli/src/fno/state/cli.py"),
+        owning_modules=("cli/src/fno/paths.py", "cli/src/fno/agent/state.py"),
     ),
 )
 
@@ -1092,19 +1077,13 @@ def bus_dir() -> Path:
 
 
 def plans_dir(project_root: Optional[Path] = None) -> Path:
-    """Return the plans directory.
-
-    Default is the space: <space>/plans/. An explicit config value (usually a
-    vault template) resolves as before; the legacy project-relative default
-    ``.fno/plans/`` moved into the space with the rest of the project state.
-    """
+    """Return the plans directory: ``<space>/plans/`` by default. An explicit
+    config value (usually a vault template) resolves as before."""
     settings = _settings()
     raw = settings.plans_dir
     if raw == ".fno/plans/":
         space = space_dir(project_root) / "plans"
-        migrate_from_checkout(
-            (project_root or resolve_repo_root()) / ".fno" / "plans", space
-        )
+        migrate_from_checkout((project_root or resolve_repo_root()) / ".fno" / "plans", space)
         return space
     root = project_root or resolve_repo_root()
 
@@ -1366,14 +1345,11 @@ def project_log(name: str, project_root: Optional[Path] = None) -> Path:
     """Return ``<space>/<name>`` for a project log/state file.
 
     Anchored to the space (one per repository, keyed on the canonical root)
-    so a hook or CLI subcommand invoked from any subdirectory or worktree of
-    the repo lands on the same file. This is the single accessor ad-hoc
-    writers (events.jsonl, finalize.stderr.log, worktree-log.jsonl,
-    inbox-errors.jsonl, ...) route through instead of hand-building
-    ``".fno/" + name`` strings, per the placement rule (state lives only
-    under ``~/.fno/``, the repo's space, or ``internal/<project>/``).
-    Callers needing a nested path (e.g. ``"claims/foo.lock"``) pass the
-    sub-path as part of ``name``.
+    so any subdirectory or worktree lands on the same file. The single
+    accessor ad-hoc writers (events.jsonl, finalize.stderr.log,
+    worktree-log.jsonl, inbox-errors.jsonl, ...) route through instead of
+    hand-building ``".fno/" + name`` strings, per the placement rule.
+    Nested paths pass the sub-path as part of ``name``.
     """
     root = project_root or resolve_repo_root()
     space = space_dir(root) / name
@@ -1382,9 +1358,7 @@ def project_log(name: str, project_root: Optional[Path] = None) -> Path:
 
 
 def status_sinks_dir(project_root: Optional[Path] = None) -> Path:
-    """Directory holding per-sink cursor + error-log files for the status
-    fanout (``<space>/status-sinks/``, x-2057). Routes through
-    :func:`project_log` so callers never hand-assemble the path."""
+    """Per-sink cursors + error logs for the status fanout (x-2057)."""
     return project_log("status-sinks", project_root=project_root)
 
 

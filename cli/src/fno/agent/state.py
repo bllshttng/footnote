@@ -271,7 +271,9 @@ def _load_session_state(
         path = state_file_override
         kind = "override"
     else:
-        target = project_root / ".fno" / "target-state.md"
+        from fno import paths as _paths
+
+        target = _paths.target_state_path_or_legacy(project_root)
         session = project_root / ".fno" / "session-state.md"
         target_present = target.exists() and target.stat().st_size > 0
         session_present = session.exists() and session.stat().st_size > 0

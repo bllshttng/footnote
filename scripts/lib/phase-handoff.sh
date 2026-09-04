@@ -17,7 +17,7 @@ PH_MAX_CHARS=2000
 # to the legacy checkout path when fno predates the verb.
 _ph_dir() {
   local d
-  d=$(fno do state path target-state 2>/dev/null | xargs dirname 2>/dev/null || true)
+  d=$(fno-agents state path target-state 2>/dev/null | xargs dirname 2>/dev/null || true)
   if [[ -n "$d" ]]; then
     echo "$d/artifacts/handoff"
   else

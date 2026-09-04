@@ -1942,7 +1942,7 @@ def _warn_no_merge_dropped() -> None:
         "WARNING: --no-merge did NOT take - this session wrote no manifest, and "
         "the manifest is write-once. Merge posture is whatever the existing "
         "manifest says. Verify with:\n"
-        "  sed -n 's/^auto_merge_approved:[[:space:]]*//p' .fno/target-state.md\n"
+        "  sed -n 's/^auto_merge_approved:[[:space:]]*//p' \"$(fno-agents state path target-state)\"\n"
         "and if it is not `false`, do not rely on this flag.",
         err=True,
     )
@@ -3491,16 +3491,12 @@ def start(
         # codex-native branch above); resolve the same verified ref locally.
         base_label = _remote_base_ref(repo_root)
 
-    # Idempotent re-run from canonical: a manifest already in this worktree's
-    # space slice means init has run (write-once) - skip it, never double-claim
-    # or error. A manifest still at the legacy checkout path counts too: that
-    # session initialized before the space move.
-    from fno.paths import worktree_space_dir
+    # Idempotent re-run from canonical: a manifest in this worktree's space
+    # slice (or still at the legacy checkout path) means init has run - skip
+    # it, never double-claim or error.
+    from fno.paths import target_state_path_or_legacy
 
-    manifest = worktree_space_dir(wt_path) / "target-state.md"
-    legacy_manifest = wt_path / ".fno" / "target-state.md"
-    if not manifest.exists() and legacy_manifest.exists() and not legacy_manifest.is_symlink():
-        manifest = legacy_manifest
+    manifest = target_state_path_or_legacy(wt_path)
     if manifest.exists() and not manifest.is_symlink():
         # A manifest means init ran. Classify the live node claim from this
         # session's view: foreign-live -> park; ours -> idempotent already-claimed;

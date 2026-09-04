@@ -442,6 +442,7 @@ def neutralise(
     # FNO_TEST_HERMETIC is set, so a hand-built path is stopped rather than
     # landing in a live journal. See docs/architecture/test-hermeticity.md.
     out["FNO_EVENTS_PATH"] = str(sandbox / "events.jsonl")
+    out["FNO_SPACES_DIR"] = str(sandbox / "spaces")  # spaces root, like events
 
     out.update(caches)
     out.update(_git_pins(sandbox))

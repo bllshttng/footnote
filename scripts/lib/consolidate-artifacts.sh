@@ -36,7 +36,7 @@ set -uo pipefail
 # path as the fallback for an fno predating it.
 _state_dir_default() {
     local p
-    p=$(fno do state path target-state 2>/dev/null || true)
+    p=$(fno-agents state path target-state 2>/dev/null || true)
     if [[ -n "$p" ]]; then
         dirname "$p"
     else
@@ -46,7 +46,7 @@ _state_dir_default() {
 STATE_DIR="${STATE_DIR:-$(_state_dir_default)}"
 
 REPO_TL=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-SPACE_DIR=$(dirname "$(fno do state path events 2>/dev/null || true)")
+SPACE_DIR=$(dirname "$(fno-agents state path events 2>/dev/null || true)")
 [[ -z "$SPACE_DIR" || "$SPACE_DIR" == "." ]] && SPACE_DIR="$REPO_TL/.fno"
 
 read_state_field() {

@@ -83,7 +83,7 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${GEMINI_PLUGIN_ROOT:-$(
 EVENTS_LIB="${PLUGIN_ROOT}/scripts/lib/events.sh"
 # shellcheck source=../scripts/lib/events.sh
 [[ -r "$EVENTS_LIB" ]] && source "$EVENTS_LIB" 2>/dev/null || true
-LIVE_STATE_FILE=$(fno do state path target-state 2>/dev/null || true)
+LIVE_STATE_FILE=$(fno-agents state path target-state 2>/dev/null || true)
 [[ -z "$LIVE_STATE_FILE" ]] && LIVE_STATE_FILE="$ROOT/.fno/target-state.md"
 STATE_FILE="$LIVE_STATE_FILE"
 TARGET_CWD="$ROOT"
@@ -93,7 +93,7 @@ WORKTREE_COUNT=$(git -C "$ROOT" worktree list --porcelain 2>/dev/null \
 [[ "$WORKTREE_COUNT" =~ ^[0-9]+$ ]] || WORKTREE_COUNT=0
 OTHER_WORKTREE_PRESENT=0
 (( WORKTREE_COUNT > 1 )) && OTHER_WORKTREE_PRESENT=1
-SPACE_DIR=$(dirname "$(fno do state path events 2>/dev/null || true)")
+SPACE_DIR=$(dirname "$(fno-agents state path events 2>/dev/null || true)")
 [[ -z "$SPACE_DIR" || "$SPACE_DIR" == "." ]] && SPACE_DIR="${REPO_ROOT}/.fno"
 
 resolve_agents_bin() {
