@@ -401,7 +401,7 @@ def test_live_root_pids_refuses_unavailable_pidless_worker_discovery(monkeypatch
     )
     # x-a457: the map missing the row is no longer proof of death on its own;
     # an UNREADABLE roster oracle is what keeps this row in the gap.
-    monkeypatch.setattr(doctor_footprint, "_claude_roster_pids", lambda: None)
+    monkeypatch.setattr("fno.agents.session_procs.roster_pid_map", lambda: None)
 
     roots, error = doctor_footprint._live_root_pids()
     assert roots == set()
@@ -432,7 +432,7 @@ def test_live_root_pids_drops_routed_corpse_row_dead_in_both_daemon_oracles(
         "fno.agents.session_procs.bg_socket_pid_map",
         lambda **_kwargs: {},
     )
-    monkeypatch.setattr(doctor_footprint, "_claude_roster_pids", lambda: {})
+    monkeypatch.setattr("fno.agents.session_procs.roster_pid_map", lambda: {})
 
     assert doctor_footprint._live_root_pids() == (set(), None)
 
@@ -457,7 +457,9 @@ def test_live_root_pids_attributes_routed_row_through_roster_pid(monkeypatch) ->
         "fno.agents.session_procs.bg_socket_pid_map",
         lambda **_kwargs: {},
     )
-    monkeypatch.setattr(doctor_footprint, "_claude_roster_pids", lambda: {"alive123": 903})
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {"alive123": 903}
+    )
     monkeypatch.setattr(
         "fno.agents.spawn_gate._pid_alive",
         lambda pid, _start: pid == 903,

@@ -2119,8 +2119,7 @@ def _mint_branch_row(
         related_session_id=None,
         # A claude branch is born bg-routable: short_id is the 8-hex jobId the
         # rv socket farm keys on; left "", footprint read the branch as
-        # unattributed cost (x-a457). Others keep "": first-8 is not a
-        # transport key there.
+        # unattributed cost (x-a457). Others keep "": no transport key there.
         short_id=(
             claude_transport_short_id(session_id) if entry.harness == "claude" else ""
         ),

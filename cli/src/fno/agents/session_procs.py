@@ -16,10 +16,13 @@ disagree about which process a row owns.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
 from typing import Optional
+
+from fno.harness_identity import claude_transport_short_id
 
 _MIB = 1024 * 1024
 
@@ -79,6 +82,34 @@ def bg_socket_pid_map(
     # lsof exits 1 when no listed file has a holder; its stdout is then empty
     # and parses to {}, which is the correct answer for "no live bg sessions".
     return _pid_map_from_lsof(proc.stdout)
+
+
+def roster_pid_map() -> Optional[dict[str, int]]:
+    """The claude daemon roster as ``{8-hex jobId: host pid}``, or None when unreadable.
+
+    The SECOND daemon-side oracle for a bg row the rv farm missed: a short_id
+    in neither map is a dead session (x-a457). A roster pid is the PTY HOST
+    hosting it. Missing file: definitive {}; other read failure: None.
+    """
+    from fno.agents.spawn_gate import _roster_path
+
+    try:
+        raw = json.loads(_roster_path().read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception:  # noqa: BLE001 - an unreadable roster proves nothing
+        return None
+    workers = raw.get("workers") if isinstance(raw, dict) else None
+    if not isinstance(workers, dict):
+        return None
+    return {
+        claude_transport_short_id(w["sessionId"]): w["pid"]
+        for w in workers.values()
+        if isinstance(w, dict)
+        and isinstance(w.get("sessionId"), str)
+        and isinstance(w.get("pid"), int)
+        and not isinstance(w.get("pid"), bool)
+    }
 
 
 def resolve_session_pid(

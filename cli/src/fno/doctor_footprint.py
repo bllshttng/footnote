@@ -236,10 +236,6 @@ def _pidless_route(row: Any) -> str | None:
     return None
 
 
-#: Claim states that positively report NO live holder; an absence never does.
-_CLAIM_DEAD_STATES = frozenset({"free", "stale"})
-
-
 def _claim_witness(name: str) -> str | None:
     """The ``worker:<name>`` claim state, or None when the store cannot answer.
 
@@ -256,37 +252,6 @@ def _claim_witness(name: str) -> str | None:
     except Exception:  # noqa: BLE001 - an unreadable store proves nothing
         return None
     return str(state) if state else None
-
-
-def _claude_roster_pids() -> dict[str, int] | None:
-    """The claude daemon roster as ``{8-hex jobId: host pid}``, or None when unreadable.
-
-    The second daemon-side oracle for a routed row the socket map missed: a
-    short_id in NEITHER the rv farm NOR the daemon's worker list is a corpse
-    row (x-a457, measured: all 21 map-missed rows were roster-absent too). A
-    roster pid is the PTY HOST hosting that session. Missing file: definitive
-    {}; other read failure: None (fail closed).
-    """
-    try:
-        from fno.agents.spawn_gate import _roster_path
-        from fno.harness_identity import claude_transport_short_id
-
-        raw = json.loads(_roster_path().read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except Exception:  # noqa: BLE001 - an unreadable roster proves nothing
-        return None
-    workers = raw.get("workers") if isinstance(raw, dict) else None
-    if not isinstance(workers, dict):
-        return None
-    return {
-        claude_transport_short_id(w["sessionId"]): w["pid"]
-        for w in workers.values()
-        if isinstance(w, dict)
-        and isinstance(w.get("sessionId"), str)
-        and isinstance(w.get("pid"), int)
-        and not isinstance(w.get("pid"), bool)
-    }
 
 
 def _unrouted_row_costs_fleet(row: Any) -> bool:
@@ -306,7 +271,9 @@ def _unrouted_row_costs_fleet(row: Any) -> bool:
             pane = None
         return pane is None
     state = _claim_witness(str(getattr(row, "name", "")))
-    return state not in _CLAIM_DEAD_STATES
+    # free/stale are the claim states that POSITIVELY report no live holder;
+    # live/suspect say alive, an unreadable store says nothing.
+    return state not in ("free", "stale")
 
 
 def _terminal_row_changed_after_snapshot(row: Any, snapshot_at: float) -> bool:
@@ -338,7 +305,7 @@ def _live_root_pids(
     roots: set[int] = set()
     try:
         from fno.agents.registry import load_registry
-        from fno.agents.session_procs import bg_socket_pid_map
+        from fno.agents.session_procs import bg_socket_pid_map, roster_pid_map
         from fno.agents.spawn_gate import LIVE_STATUSES
 
         rows = load_registry()
@@ -386,10 +353,14 @@ def _live_root_pids(
         routed_rows = [row for row in pidless_rows if _pidless_route(row) is not None]
         # x-e040: a routless row is a NAMED gap, not a dead reading - x-a457:
         # but only while a witness says the cost is real; a corpse row's
-        # expired claim kept the gate refusing for hours.
-        fleet_unrouted = [
-            row for row in unrouted_rows if _unrouted_row_costs_fleet(row)
-        ]
+        # expired claim kept the gate refusing for hours. Past the deadline:
+        # no witness reads, fail closed to all-gap.
+        budget_blown = deadline is not None and time.monotonic() >= deadline
+        fleet_unrouted = (
+            unrouted_rows
+            if budget_blown
+            else [row for row in unrouted_rows if _unrouted_row_costs_fleet(row)]
+        )
         gap_rows: list[str] = [
             f"{len(fleet_unrouted)} pidless row(s) with no identity route "
             f"({', '.join(sorted({str(row.harness) for row in fleet_unrouted}))})"
@@ -411,7 +382,7 @@ def _live_root_pids(
             # last word. Roster-held rows attribute through their roster pid;
             # a short_id in neither is a corpse row; an unreadable roster
             # stays a gap row (fail closed).
-            roster_pids = _claude_roster_pids()
+            roster_pids = None if budget_blown else roster_pid_map()
             still_missing: list[Any] = []
             for row in missing:
                 pid = roster_pids.get(row.short_id) if roster_pids else None
