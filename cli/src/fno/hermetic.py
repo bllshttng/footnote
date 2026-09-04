@@ -202,6 +202,10 @@ _RUNNER_PASSTHROUGH = (
     # opt-in live grok journey. The live test restores real HOME because Grok's
     # credential lives under ~/.grok, while its cwd remains an isolated fixture.
     "FNO_GROK_LIVE",
+    # opt-in live king-board duration gate (test_king_board.py). The live test
+    # restores real HOME because the duration claim needs the operator's real
+    # graph, claims and open PRs; the hermetic sandbox has no world to time.
+    "FNO_KING_BOARD_LIVE",
     # opt-in live kimi journey (the credential-gated onboarding waves). The
     # live test restores real HOME because kimi's credential lives under
     # ~/.kimi-code, while its cwd remains an isolated fixture.

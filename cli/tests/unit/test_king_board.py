@@ -1240,3 +1240,181 @@ def test_a_nested_shape_change_degrades_that_stream_not_the_whole_board():
     assert cap["count"] == 0, '"many" is not a count; zero, not a crash'
     assert {"project": "b", "n": 2} in cap["rows"]
     assert {"project": "a", "n": 0} in cap["rows"], "junk counts render as 0"
+
+
+# --- the claimed-nodes read: one graph read, zero per-claim subprocesses ----
+# x-3761: the per-claim `fno backlog get` loop cost 30.8s for 13 claims on an
+# idle machine against this board's own 30s stop-gate ceiling, so every king
+# fire died on `king board unreadable` before reaching a decision. The lookup
+# reads the graph in process now; these tests pin that shape.
+
+
+def _graph_file(tmp_path, entries):
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps({"entries": entries}))
+    return graph_path
+
+
+def _isolate_graph(monkeypatch, tmp_path, entries):
+    from fno import paths
+
+    monkeypatch.setattr(paths, "graph_json", lambda: _graph_file(tmp_path, entries))
+    monkeypatch.setattr(paths, "graph_archive_json", lambda: tmp_path / "no-archive.json")
+
+
+def test_a_live_claim_resolves_without_a_single_subprocess(monkeypatch, tmp_path):
+    """Zero spawns is the regression guard; the resolved row is the positive
+    control. Zero spawns with zero rows would prove the fixture never got
+    read, not that the read got cheap."""
+    from fno.king import board as board_mod
+
+    _isolate_graph(
+        monkeypatch,
+        tmp_path,
+        [{"id": "x-1111", "status": "in_progress", "priority": "p0", "title": "held work"}],
+    )
+    spawns = []
+    real_run = board_mod.subprocess.run
+
+    def counting_run(cmd, *args, **kwargs):
+        spawns.append(cmd)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(board_mod.subprocess, "run", counting_run)
+
+    nodes, holders, warnings = board_mod._read_claimed_nodes(_ok([_claim("x-1111")]))
+
+    assert [n["id"] for n in nodes.rows()] == ["x-1111"], "the claim must resolve to its node row"
+    assert holders == {"target-session:abc"}, "a p0 holder feeds the activity read"
+    assert spawns == [], "a claimed-node lookup must never spawn a subprocess"
+    assert warnings == []
+
+
+def test_a_claim_on_an_absent_node_warns_and_the_queue_stays_readable(monkeypatch, tmp_path):
+    """One missing node degrades to a warning exactly as a failed per-claim
+    read did; it must never turn the stalled_holder source unreadable."""
+    from fno.king import board as board_mod
+
+    _isolate_graph(
+        monkeypatch, tmp_path, [{"id": "x-1111", "status": "ready", "priority": "p1"}]
+    )
+
+    nodes, holders, warnings = board_mod._read_claimed_nodes(
+        _ok([_claim("x-9999"), _claim("x-1111", holder="target-session:def")])
+    )
+
+    assert nodes.ok, "a missing node is not an unreadable queue"
+    assert [n["id"] for n in nodes.rows()] == ["x-1111"]
+    assert holders == {"target-session:def"}
+    assert len(warnings) == 1 and "x-9999" in warnings[0]
+
+
+def test_claims_beyond_the_old_20_read_cap_all_resolve(monkeypatch, tmp_path):
+    """The 20-claim cap existed because each lookup was a subprocess. Reads
+    are one file read now, so a cap would only destroy coverage."""
+    from fno.king import board as board_mod
+
+    ids = [f"cap-{i:04d}" for i in range(25)]
+    _isolate_graph(
+        monkeypatch, tmp_path, [{"id": i, "status": "in_progress", "priority": "p1"} for i in ids]
+    )
+
+    nodes, holders, warnings = board_mod._read_claimed_nodes(
+        _ok([_claim(i, holder=f"target-session:{i}") for i in ids])
+    )
+
+    assert len(nodes.rows()) == 25
+    assert len(holders) == 25
+    assert not any("capped" in w for w in warnings)
+
+
+def test_a_terminal_nodes_claim_drops_at_source(monkeypatch, tmp_path):
+    """A done node's leftover claim is a leak for the reaper, never king work;
+    dropping it at the source also keeps its holder out of the transcript
+    reads."""
+    from fno.king import board as board_mod
+
+    _isolate_graph(
+        monkeypatch,
+        tmp_path,
+        [
+            {"id": "x-done", "status": "done", "priority": "p0"},
+            {"id": "x-live", "status": "in_progress", "priority": "p0"},
+        ],
+    )
+
+    nodes, holders, warnings = board_mod._read_claimed_nodes(
+        _ok([_claim("x-done"), _claim("x-live", holder="target-session:def")])
+    )
+
+    assert [n["id"] for n in nodes.rows()] == ["x-live"]
+    assert holders == {"target-session:def"}
+    assert warnings == []
+
+
+@pytest.mark.e2e
+def test_the_live_board_read_fits_the_stop_gate_ceiling_by_duration():
+    """x-3761's acceptance is SECONDS, not rows: the read returned 123 rows
+    and still died at the 30s stop-gate ceiling. Opt-in (`FNO_KING_BOARD_LIVE=1`)
+    because the claim needs the operator's real graph, claims and open PRs -
+    the hermetic suite sandboxes HOME, so a default run has no world to time.
+    This runs the gate's own command (`inbox board --json`, the read
+    `bounded_read` kills at STOPGATE_READ_TIMEOUT) as a subprocess against the
+    real HOME so it pays the same interpreter and import cost a stop fire pays,
+    times it, and asserts the number. The parse-shape assertions are the "stop
+    hook reaches its decision" check: `parse_king_board` needs an integer
+    `actionable` and a `queues` array, or the fire renders `king board
+    unreadable` no matter how fast the read was.
+    """
+    import os
+    import subprocess
+    import sys
+    import time
+
+    if not os.environ.get("FNO_KING_BOARD_LIVE"):
+        pytest.skip(
+            "the duration claim needs the real board; set FNO_KING_BOARD_LIVE=1 to run it"
+        )
+    real_home = next(
+        (
+            candidate
+            for candidate in (
+                os.path.join("/Users", os.environ.get("USER", "")),
+                os.path.join("/home", os.environ.get("USER", "")),
+                "/root",
+            )
+            if os.path.isdir(candidate)
+        ),
+        None,
+    )
+    assert real_home is not None, "the live board read could not locate the real HOME"
+
+    env = {**os.environ, "HOME": real_home, "USERPROFILE": real_home, "NO_COLOR": "1"}
+    # The hermetic suite flags its children FNO_TEST_HERMETIC=1 so a journal
+    # write cannot reach the live events.jsonl. This child IS the deliberate
+    # real-world read, so the flag must not travel with it.
+    env.pop("FNO_TEST_HERMETIC", None)
+    start = time.monotonic()
+    proc = subprocess.run(
+        [sys.executable, "-m", "fno.cli", "inbox", "board", "--json"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=300,
+    )
+    elapsed = time.monotonic() - start
+    assert elapsed < 30.0, f"board read took {elapsed:.1f}s against the 30.0s stop-gate ceiling"
+    # The board exits 1 when a queue is unreadable and STILL prints the full
+    # payload; the gate parses that payload regardless of the exit code, so
+    # only an absent one is a decision-blocking failure.
+    assert proc.stdout.strip(), (
+        f"board printed no payload (rc={proc.returncode}); stderr: {proc.stderr.strip()[-400:]}"
+    )
+
+    board = json.loads(proc.stdout)
+    assert isinstance(board.get("actionable"), int), "parse_king_board cannot decide without it"
+    queues = board.get("queues")
+    assert isinstance(queues, list) and queues, "parse_king_board needs a queues array"
+    for q in queues:
+        assert isinstance(q.get("name"), str), f"queue missing a name: {q}"
+        assert q.get("status") in {"ok", "unreadable"}, f"queue status undecidable: {q}"
