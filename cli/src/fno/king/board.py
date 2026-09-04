@@ -888,7 +888,12 @@ def _read_claimed_nodes(claims: SourceRead) -> tuple[SourceRead, set[str], list[
     warnings: list[str] = []
     from fno.graph.fuzzy import resolve_node
     from fno.graph.statuses import TERMINAL_RUNGS
-    from fno.graph.store import GraphUnreadableError, read_graph, read_graph_strict
+    from fno.graph.store import (
+        GraphUnreadableError,
+        read_archive_entries,
+        read_graph_strict,
+        resolve_node_with_archive,
+    )
 
     try:
         entries = read_graph_strict(paths.graph_json())
@@ -902,25 +907,19 @@ def _read_claimed_nodes(claims: SourceRead) -> tuple[SourceRead, set[str], list[
             [f"stalled_holder: nodes unreadable, graph unreadable: {exc}"],
         )
 
+    archived: Optional[list[dict]] = None
+
     def _resolve(node_id: str) -> Optional[dict]:
+        nonlocal archived
         match = resolve_node(node_id, entries)
         if match.kind == "exact":
             return dict(match.candidates[0])
-        archive_path = paths.graph_archive_json()
-        if not archive_path.exists():
-            return None
-        archived = read_graph(archive_path)
-        amatch = resolve_node(node_id, archived)
-        if amatch.kind == "exact":
-            return dict(amatch.candidates[0]) | {"_archived": True}
-        return next(
-            (
-                dict(e) | {"_archived": True}
-                for e in archived
-                if isinstance(e, dict) and e.get("previous_id") == node_id
-            ),
-            None,
-        )
+        # The archive read is paid once per board read, not once per miss: a
+        # burst of absent-from-graph claims (a leak, exactly when the board is
+        # most needed) must not turn into one file read per claim.
+        if archived is None:
+            archived = read_archive_entries()
+        return resolve_node_with_archive(node_id, archived)
 
     nodes: list[dict] = []
     holders: set[str] = set()
@@ -1076,7 +1075,14 @@ def autonomous_merge_enabled() -> bool:
         return False
 
 
-DEFAULT_BOARD_TIMEOUT = 60
+#: Per-source timeout. Must sit UNDER the 30s stop-gate ceiling
+#: (loopcheck.rs STOPGATE_READ_TIMEOUT): the ceiling exists so a hung source
+#: can never outlive a stop fire, and a 60s inner cap admitted exactly that -
+#: one hung source reproduced the whole "king board unreadable" symptom the
+#: fast collect exists to prevent, where a 25s cap degrades it to an
+#: unreadable-queue warning with the payload intact. Raise the outer ceiling
+#: first if this ever needs to grow.
+DEFAULT_BOARD_TIMEOUT = 25
 
 
 def _board_timeout() -> int:

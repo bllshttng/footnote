@@ -45,7 +45,7 @@ import tempfile
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
 from pathlib import Path
 
 from fno.graph._constants import (  # noqa: F401  GRAPH_MD re-exported: patched via store.GRAPH_MD
@@ -714,6 +714,48 @@ def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
     is written on this path.
     """
     return _client_for(path).read(path, strict=True)["entries"]
+
+
+def read_archive_entries() -> list[dict]:
+    """The archived nodes, best-effort: an absent or unreadable archive is [].
+
+    One read of the terminal-node archive that lives beside the working graph.
+    Callers that may test many ids against it should read once and pass the
+    list to :func:`resolve_node_with_archive`.
+    """
+    from fno.paths import graph_archive_json
+
+    archive_path = graph_archive_json()
+    if not archive_path.exists():
+        return []
+    return read_graph(archive_path)
+
+
+def resolve_node_with_archive(node_id: str, archived: list[dict]) -> Optional[dict]:
+    """Read-through resolve against the archive: exact id, else a previous_id hit.
+
+    The read-only half of `backlog get`'s miss path: a node the sweep archived
+    still resolves, stamped ``_archived`` so a consumer can tell. Soft by
+    contract - the caller read ``archived`` through :func:`read_archive_entries`,
+    which degrades to [] rather than raising.
+    """
+    from fno.graph.fuzzy import resolve_node
+
+    match = resolve_node(node_id, archived)
+    if match.kind == "exact":
+        return dict(match.candidates[0]) | {"_archived": True}
+    # An archive-side id collision with the working graph gets reminted, and
+    # the old id is kept as `previous_id` so a reference made before the remint
+    # (a doc, a mail thread, a stale branch name) still resolves instead of
+    # reading as a plain miss.
+    return next(
+        (
+            dict(e) | {"_archived": True}
+            for e in archived
+            if isinstance(e, dict) and e.get("previous_id") == node_id
+        ),
+        None,
+    )
 
 
 def entries_with_archive(entries: list) -> list:
