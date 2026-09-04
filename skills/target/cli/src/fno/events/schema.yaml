@@ -3496,7 +3496,7 @@ event_types:
 
   - name: dispatch_spawned
     retention: durable
-    description: "Emitted inside `_spawn_worker` once per successful autonomous launch, naming the argv it actually sent. The spawner is the only place that knows the resolved pair, so this is where the receipt lives: the sibling advance_dispatched rows name a node and an agent, which left the three dispatch doors (lane fill, merge-triggered auto-continue, active-backlog drain) indistinguishable in the file. `caller` is what tells them apart. `harness` is the --harness argv and `command` is the message as sent, so a row where they disagree is the x-374b split reopening. Best-effort: a journal failure never wedges a launch that already happened, so an absent row is not proof no spawn occurred."
+    description: "Emitted inside `_spawn_worker` once per successful autonomous launch, naming the argv it actually sent. The spawner is the only place that knows the resolved pair, so this is where the receipt lives: the sibling advance_dispatched rows name a node and an agent, which left the four dispatch doors (lane fill, merge-triggered auto-continue, mission converge, reconcile de-stub) indistinguishable in the file. `caller` is what tells them apart. `harness` is the --harness argv and `command` is the message as sent, so a row where they disagree is the x-374b split reopening. Best-effort: a journal failure never wedges a launch that already happened, so an absent row is not proof no spawn occurred."
     sources: [backlog]
     data:
       required: [node_id, harness, substrate, command, caller]
@@ -3533,7 +3533,7 @@ event_types:
           description: "The --cwd the worker was launched into; empty means --fresh."
         caller:
           type: string
-          description: "Which dispatch door fired: dispatch_lanes, advance, _converge_one, or unknown for a caller that has not been threaded yet. The field this row exists for."
+          description: "Which dispatch door fired: dispatch_lanes, advance, _converge_one, reconcile_dispatch, or unknown for a caller that has not been threaded yet. The field this row exists for."
         grid:
           type: string
           description: "The capacity grid's terminal reason for this spawn, e.g. grid=no-inventory-declared when config.routing.models is undeclared so difficulty bands route nothing. Empty when an explicit pin skipped the grid."
