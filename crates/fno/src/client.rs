@@ -6378,34 +6378,6 @@ impl View {
             .saturating_sub(self.court_block_rows())
     }
 
-    /// Rows the court block owns at the bottom of the sideline: three when
-    /// minimized, the expanded reading's height when expanded, and ZERO when
-    /// the terminal cannot hold it beside at least one sideline row - the
-    /// block yields, the rows never do.
-    fn court_block_rows(&self) -> usize {
-        let block = if self.court.is_expanded() {
-            self.court.expanded_lines(&self.agent_ages()).len()
-        } else {
-            crate::court_overlay::MINIMIZED_ROWS
-        };
-        let available = (self.term.0 as usize).saturating_sub(self.bottom_row_is_chrome() as usize);
-        if available > block {
-            block
-        } else {
-            0
-        }
-    }
-
-    /// The transcript-derived age the daemon stamped on every row it handed
-    /// us, in row order - the one source the census split reads.
-    fn agent_ages(&self) -> Vec<Option<u64>> {
-        self.layout
-            .agents
-            .iter()
-            .map(|a| a.last_activity_age_s)
-            .collect()
-    }
-
     /// Follow-the-cursor sideline scroll (x-a621): move [`View::sideline_offset`]
     /// the least it takes to keep the selector (or hover) row on screen, then
     /// clamp into `[0, rows - visible]` so a shrunk catalog never scrolls past the
@@ -8662,34 +8634,7 @@ impl View {
         // chrome beside the live rows, and the painter truncates to the panel
         // width - the same rule every sideline row follows.
         if block_rows > 0 {
-            for (k, text) in block_lines.into_iter().enumerate() {
-                let r = list_rows + k;
-                if r >= rows {
-                    break;
-                }
-                let mut col = 0usize;
-                for ch in text.chars() {
-                    let w = glyph_cols(ch);
-                    if col + w > text_w {
-                        break;
-                    }
-                    cells[r * cols + col] = Cell {
-                        c: ch,
-                        fg: Color::Default,
-                        bg: Color::Default,
-                        flags: cell_flags::DIM,
-                    };
-                    if w == 2 {
-                        cells[r * cols + col + 1] = Cell {
-                            c: ' ',
-                            fg: Color::Default,
-                            bg: Color::Default,
-                            flags: cell_flags::DIM | cell_flags::WIDE_SPACER,
-                        };
-                    }
-                    col += w;
-                }
-            }
+            court_block::paint_court_block(cells, block_lines, list_rows, rows, cols, text_w);
         }
         // The divider column, now full terminal height (the sideline owns row
         // 0 too; the strip sits right of the divider) - x-cd67 US1.
@@ -17200,3 +17145,6 @@ fn map_color(c: Color) -> CtColor {
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+#[path = "client/court_block.rs"]
+mod court_block;

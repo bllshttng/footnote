@@ -609,9 +609,9 @@ mod tests {
                  "roster_rows": 50, "read_ms": 597, "attribution_gap": null,
                  "top_consumers": [
                    {"name": "fno-py", "procs": 23, "cpu_pct": 41.2,
-                    "worktree": ".claude/worktrees/x-b1ee", "worktree_procs": 22},
+                    "worktree": ".fno/worktrees/x-b1ee", "worktree_procs": 22},
                    {"name": "fno-agents-worker", "procs": 18, "cpu_pct": 27.9,
-                    "worktree": ".claude/worktrees/x-b1ee", "worktree_procs": 18}
+                    "worktree": ".fno/worktrees/x-b1ee", "worktree_procs": 18}
                  ]},
       "arms": [
         {"name": "spawn load", "state": "measured",
@@ -673,7 +673,7 @@ mod tests {
             .expect("top consumers parse");
         assert_eq!(top.len(), 2);
         assert_eq!(top[0].name, "fno-py");
-        assert_eq!(top[0].worktree.as_deref(), Some(".claude/worktrees/x-b1ee"));
+        assert_eq!(top[0].worktree.as_deref(), Some(".fno/worktrees/x-b1ee"));
     }
 
     #[test]
@@ -830,11 +830,11 @@ mod tests {
 
         assert!(text.contains("fno-py 23 procs 41%"), "{text}");
         assert!(
-            text.contains("22 of fno-py in .claude/worktrees/x-b1ee"),
+            text.contains("22 of fno-py in .fno/worktrees/x-b1ee"),
             "{text}"
         );
         assert!(
-            text.contains("18 of fno-agents-worker in .claude/worktrees/x-b1ee"),
+            text.contains("18 of fno-agents-worker in .fno/worktrees/x-b1ee"),
             "{text}"
         );
     }

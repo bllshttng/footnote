@@ -269,7 +269,7 @@ def test_ac8_hp_top_consumers_name_the_process_and_the_worktree() -> None:
         for i in range(23)
     ]
     workers = [
-        (90.0 - i, f"fno-agents-worker debug .claude/worktrees/x-b1ee/target/{i}")
+        (90.0 - i, f"fno-agents-worker debug .fno/worktrees/x-b1ee/target/{i}")
         for i in range(18)
     ]
     sustained = fno_py + workers
@@ -280,7 +280,7 @@ def test_ac8_hp_top_consumers_name_the_process_and_the_worktree() -> None:
     assert top[0]["procs"] == 23
     assert top[1]["name"] == "fno-agents-worker"
     assert top[1]["procs"] == 18
-    assert top[1]["worktree"] == ".claude/worktrees/x-b1ee"
+    assert top[1]["worktree"] == ".fno/worktrees/x-b1ee"
     assert top[1]["worktree_procs"] == 18
     # Bounded to five consumers.
     assert len(top) <= 5

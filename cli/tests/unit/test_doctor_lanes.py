@@ -447,7 +447,7 @@ def test_the_census_carries_top_consumers_from_the_ps_read(monkeypatch) -> None:
             _footprint(
                 top=[
                     (210.0, "/usr/local/bin/python3 fno-py doctor test"),
-                    (45.0, "fno-agents-worker --worktree .claude/worktrees/x-b1ee"),
+                    (45.0, "fno-agents-worker --worktree .fno/worktrees/x-b1ee"),
                 ]
             ),
             _rows(6),
@@ -462,7 +462,7 @@ def test_the_census_carries_top_consumers_from_the_ps_read(monkeypatch) -> None:
     assert top[0]["name"] == "python3"
     assert top[0]["procs"] == 1
     assert top[0]["cpu_pct"] == 210.0
-    assert census["top_consumers"][1]["worktree"] == ".claude/worktrees/x-b1ee"
+    assert census["top_consumers"][1]["worktree"] == ".fno/worktrees/x-b1ee"
     assert census["top_consumers"][1]["worktree_procs"] == 1
 
 
