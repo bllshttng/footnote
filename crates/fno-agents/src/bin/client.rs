@@ -55,6 +55,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "rename",
     "report",
     "review-coverage",
+    "review-summary",
     "restart",
     "resume",
     "review-start",
