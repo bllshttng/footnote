@@ -438,6 +438,27 @@ effort_labels = {}
 status_command = ""
 status_pattern = ""
 
+
+# The keeper-lane spawn arm (docs/architecture/thread-lanes.md). state_root_grant
+# above records a write-access MECHANISM per lane, never whether a lane was
+# run, so agy passes the seam's unmeasured-stance check for headless too and
+# that refusal has to be stated here. `ready_marker` measured 2026-09-03 on
+# 1.1.24, after the restored transcript finishes painting.
+[harness.agy.keeper]
+once_refusal = "--once is not supported on the agy thread lane (it is persistent); agy's one-shot form is `agy -p`, whose lane is unmeasured"
+carries = ["model", "yolo", "permission_mode", "add_dir", "effort", "resume_session_id"]
+ready_marker = "? for shortcuts"
+headless_refusal = "agy's headless lane is unmeasured: `agy -p` prints and exits, and nothing has run it as an fno worker. Use --substrate thread for a persistent worker or --substrate pane for an attended one."
+bypass_flag = "--dangerously-skip-permissions"
+bypass_always = true
+takes_model = true
+takes_effort = true
+takes_add_dir = true
+# Enter accepts the highlighted default, "Yes, I trust this folder", the same
+# answer the pane lane submits. A keeper has nobody to answer a modal, and a
+# TUI behind an unanswered one runs NOTHING while holding a live registry row.
+clear_modal = ["trust (?:this )?folder|do you trust", "\r"]
+
 [harness.opencode]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-session"
@@ -725,6 +746,16 @@ status_pattern = ""
 
 # cursor-agent is a pane-only fno harness. Its --print stream-json mode is
 # output-only: it has no input-format, rpc, acp, serve, or stdio drive lane.
+
+# The keeper-lane spawn arm (docs/architecture/thread-lanes.md). The lane
+# driver appends pi's own provider/model pair, so every option that would ride
+# another lane's argv is refused by name and `carries` is empty.
+[harness.pi.keeper]
+once_refusal = "--once is not supported on the pi thread lane (it is persistent); pi has no one-shot lane - its headless stance is unmeasured"
+carries = []
+ready_marker = "(sub)"
+resume_refusal = "is not supported on the pi thread lane yet; the keeper row resumes by name (fno agents ask/resume <name>). Refusing rather than silently spawning a fresh session."
+
 [harness.cursor-agent]
 permission_bypass = ["--force"]
 resume = "native-session"
@@ -871,6 +902,20 @@ reason = "measured over 5 delays x 3 trials on a live pane; no one-shot probe re
 # stdio) are built and unit-tested in the Python driver
 # (fno.agents.harnesses.grok), but the lane dispatch resolves onto is the
 # keeper-hosted TUI, and the row is a statement about THAT lane.
+
+# The keeper-lane spawn arm (docs/architecture/thread-lanes.md). `carries`
+# names the launch axes this lane has a measured spelling for; every other
+# axis is refused BY NAME, so one list answers both questions.
+[harness.cursor-agent.keeper]
+once_refusal = "cursor-agent has no headless lane: --print is output-only (no --input-format, no rpc), so there is no one-shot form. Use the thread substrate for a persistent worker or --substrate pane for an attended one."
+once_and_headless_together = true
+carries = ["model", "yolo", "permission_mode", "add_dir", "resume_session_id"]
+# The declared create form already carries --trust. --trust is NOT the bypass
+# axis; --force is.
+bypass_flag = "--force"
+takes_model = true
+takes_add_dir = true
+
 [harness.grok]
 permission_bypass = ["--always-approve"]
 resume = "native-session"
@@ -993,3 +1038,16 @@ tokens = []
 effort_labels = {}
 status_command = ""
 status_pattern = ""
+
+
+# The keeper-lane spawn arm (docs/architecture/thread-lanes.md). Re-using a
+# spent `--session-id` is a grok refusal, never a resume, so the arm refuses
+# `spawn --resume` rather than render a create form with a used id.
+[harness.grok.keeper]
+once_refusal = "--once is not supported on the grok thread lane (it is persistent); grok has no one-shot lane - its headless stance is unmeasured"
+carries = ["model", "yolo", "permission_mode", "effort"]
+ready_marker = "Shift+Tab:mode"
+resume_refusal = "is not supported on the grok thread lane yet; the keeper row resumes by name (fno agents ask/resume <name>). Refusing rather than spawning a fresh session."
+bypass_flag = "--always-approve"
+takes_model = true
+takes_effort = true

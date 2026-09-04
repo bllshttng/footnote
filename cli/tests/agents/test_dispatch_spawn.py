@@ -535,7 +535,7 @@ def test_spawn_thread_refusal_names_axis_and_actual_accept_set(workdir) -> None:
     ) in declared.output
     # The pane sentence derives from the tuple now, so it names the refused
     # harness and can never contradict the accept list beside it.
-    assert "gemini launches on --substrate pane only." in declared.output
+    assert "gemini has no measured thread lane yet; use --substrate pane." in declared.output
 
 
 def test_spawn_thread_refusal_renders_from_accept_set(monkeypatch) -> None:
@@ -563,7 +563,7 @@ def test_spawn_thread_refusal_renders_from_accept_set(monkeypatch) -> None:
     assert expected.endswith("future"), "the monkeypatched name must be rendered"
     # The pane sentence derives too: it names the refused harness, never a
     # hardcoded roster that the tuple can outgrow.
-    assert "gemini launches on --substrate pane only." in str(caught.value)
+    assert "gemini has no measured thread lane yet; use --substrate pane." in str(caught.value)
 
 
 def test_thread_refusal_is_one_message_across_both_seams(monkeypatch) -> None:
@@ -702,7 +702,7 @@ def test_spawn_agy_headless_refuses_by_name(workdir, monkeypatch) -> None:
     message = str(caught.value)
     assert "unmeasured" in message
     assert "--substrate thread" in message
-    assert "pane only" not in message, (
+    assert "no measured thread lane" not in message, (
         "the merged measurement disproved that sentence for agy"
     )
 
@@ -713,12 +713,12 @@ def test_a_keeper_lane_refuses_the_permission_axis_it_does_not_carry() -> None:
     adjacent surprise, and a flat contradiction of the row's own claim that
     every axis it does not carry is refused BY NAME."""
     from fno.agents import dispatch
-    from fno.agents.keeper_thread import KEEPER_ARMS, LAUNCH_AXES
+    from fno.agents.keeper_thread import LAUNCH_AXES, keeper_arm
 
     assert ("--permission-mode", "permission_mode") in LAUNCH_AXES
-    assert "permission_mode" not in KEEPER_ARMS["pi"].carries
+    assert "permission_mode" not in keeper_arm("pi")["carries"]
     for harness in ("cursor-agent", "grok", "agy"):
-        assert "permission_mode" in KEEPER_ARMS[harness].carries, harness
+        assert "permission_mode" in keeper_arm(harness)["carries"], harness
 
     with pytest.raises(dispatch.DispatchAskError) as caught:
         dispatch.dispatch_spawn(

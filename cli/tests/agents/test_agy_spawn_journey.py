@@ -337,7 +337,7 @@ def test_AC1_HP_the_spawn_seam_journey_on_a_real_agy_thread(
             f"the public spawn surface refused: {result.output}"
         )
         assert "unknown harness" not in result.output
-        assert "pane only" not in result.output
+        assert "no measured thread lane" not in result.output
         receipt = json.loads(result.output.strip().splitlines()[-1])
         assert receipt["harness"] == "agy"
         session_id = receipt["short_id"]

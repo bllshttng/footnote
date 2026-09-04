@@ -38,41 +38,17 @@ KNOWN_HARNESSES: tuple[str, ...] = (
     "grok",
 )
 
-# Thread/headless accepts opencode through its launch seam, and the
-# keeper-hosted lanes: cursor-agent through `create-chat`'s callee-minted
-# chat id, pi through the caller-assigned id the restart journey proved.
-# gemini is pane-only and stays out of this tuple: it is deprecated and has no
-# maintained dispatch lane at all.
+# Every harness with a BUILT thread-spawn arm: opencode through its launch
+# seam, and cursor-agent, pi, grok and agy through the keeper lane. A name
+# joins on journey evidence, never on roster growth, and the lane table in
+# docs/architecture/thread-lanes.md carries the measurement behind each row.
 #
-# pi joins on journey evidence, not roster growth: its keeper-hosted thread
-# lane survived a double SIGKILL (journey wk-x61bc,
-# cli/tests/agents/test_thread_keeper_journey.py, first green 2026-09-01 on pi
-# 0.84.2), and the spawn arm shipped behind that evidence
-# (`dispatch_spawn`'s pi branch drives `_lane_b_thread_spawn`). pi's HEADLESS
-# lane is a different story: nothing has run it, its state_root_grant row
-# reads `unmeasured`, and `_check_spawn_harness` refuses that lane by stance
-# rather than by absence from this tuple. The membership answers "is there a
-# seam arm"; the row answers "is the lane measured".
-#
-# cursor-agent joins the same way (x-61bc's generic thread lane): the
-# dispatch_spawn arm mints the chat id through `create-chat`, hosts the TUI
-# under `fno-agents-worker --keeper`, and the journey backs it. Its `thread`
-# row reads true behind that same journey.
-#
-# grok joins the same keeper lane (x-fd31): the dispatch_spawn arm mints the
-# caller-assigned `--session-id` uuid, hosts the TUI under
-# `fno-agents-worker --keeper`, and the live measurement (create, SIGKILL,
-# `--resume` recall) backs the row. kimi is deliberately ABSENT: its ACP
-# mint lane is built and unit-tested, but the binary refuses every turn
-# until its provider is configured (the operator's who-pays axis), so no
-# row and no SPAWN_HARNESSES seat can stand behind an unmeasured lane.
-#
-# agy joins the same keeper lane, callee-minted like cursor-agent: it takes no
-# id on the command line, so the arm mints one from a print-mode turn's JSON
-# envelope and every later process rejoins with `--conversation <id>`.
-# Measured 2026-09-03 on agy 1.1.24 - the id named a real db under
-# ~/.gemini/antigravity-cli/conversations and a fresh process resumed it
-# INTERACTIVELY. agy's HEADLESS lane stays unmeasured.
+# Membership answers "is there a seam arm". The capability row answers "is the
+# lane measured". They are different questions, which is why pi and agy sit
+# here while their HEADLESS lanes stay unmeasured and `_check_spawn_harness`
+# refuses those by stance. kimi is absent for the same reason: its ACP mint
+# lane is built and unit-tested, but the binary refuses every turn until its
+# provider is configured, so nothing measured stands behind a seat.
 SPAWN_HARNESSES: tuple[str, ...] = (
     "claude",
     "codex",
@@ -87,17 +63,15 @@ SPAWN_HARNESSES: tuple[str, ...] = (
 def unknown_thread_harness_message(name: str) -> str:
     """The one refusal every thread-substrate seam raises.
 
-    Both halves derive from the tuples in this module: the accept list from
-    ``SPAWN_HARNESSES``, the pane-only sentence from the roster beside it. Two
-    seams used to render the list from the tuple and hardcode that sentence,
-    so the prose could name a harness the tuple had since admitted - and did.
+    Both halves derive from the tuples in this module, so no seam can name a
+    harness the accept list has since admitted. The ROSTER, not the capability
+    table, decides the second sentence: the pane lane execs whatever is on
+    PATH, so a capability row is not what earns one. An unrecognized name gets
+    no such pointer, because nothing here knows the binary exists.
 
-    The roster, not the capability table, decides the pane line. The pane lane
-    hosts an UNDECLARED binary too (it execs whatever is on PATH), so a rowed
-    harness is not the set that has one; a rostered name is a harness fno
-    recognizes, and pane is the lane left once the accept list refuses it. An
-    unrecognized name gets no such promise, because nothing here knows whether
-    a binary by that name exists at all.
+    A missing thread lane is a statement about what fno has BUILT, never about
+    the harness: any harness can host a thread once its lane is measured
+    (docs/architecture/thread-lanes.md).
     """
     accepted = ", ".join(SPAWN_HARNESSES)
     lines = [
@@ -105,6 +79,6 @@ def unknown_thread_harness_message(name: str) -> str:
         f"the CLI BINARY); accepted here: {accepted}.",
     ]
     if name in KNOWN_HARNESSES:
-        lines.append(f"{name} launches on --substrate pane only.")
+        lines.append(f"{name} has no measured thread lane yet; use --substrate pane.")
     lines.append("If you meant a model VENDOR, that is -P/--provider.")
     return "\n".join(lines)

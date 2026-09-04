@@ -2,12 +2,7 @@
 
 ``--conversation`` resumes and nothing creates, so the id comes from the only
 surface that returns one: a print-mode turn whose JSON envelope carries
-``conversation_id``. Callee-minted-read-back like cursor-agent, minus the fd
-dance, because ``agy -p`` prints and exits where ``create-chat`` stays alive.
-
-Measured 2026-09-03 on agy 1.1.24: the mint returned in 1.5s, the id equalled
-the db filename under ``~/.gemini/antigravity-cli/conversations``, and a fresh
-process given ``agy --conversation <id>`` restored that transcript.
+``conversation_id``. Measurement and lane notes: docs/architecture/thread-lanes.md.
 """
 from __future__ import annotations
 
@@ -20,13 +15,11 @@ from fno.agents.dispatch import DispatchAskError
 
 AGY_BINARY = "agy"
 # The mint is a real turn, so it needs a real prompt. A no-op one keeps the
-# conversation's first message harmless; the seed arrives at the composer once
-# the keeper has the TUI up.
+# conversation's first message harmless.
 MINT_PROMPT = "Reply with exactly: OK"
-# Inside the row's declared binding window (timeout_ms = 60000) and inside the
-# daemon's own dispatch timeout, so a wedged `agy` raises the refusal below
-# rather than being killed mid-mint by a caller with a shorter fuse. The
-# measured mint is 1.5s, so this is a ceiling, not a budget.
+# A ceiling, not a budget: the measured mint is 1.5s. It sits inside the row's
+# declared binding window (timeout_ms = 60000), so a wedged `agy` raises the
+# refusal below instead of being killed by a caller with a shorter fuse.
 MINT_TIMEOUT_S = 45.0
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -43,8 +36,7 @@ class AgySessionError(DispatchAskError):
 
 def require_conversation_id(conversation_id: str) -> str:
     """Validate an id before any process launches on it: a truncated one is a
-    DIFFERENT conversation to agy, never a resume, so it would open an empty
-    one under a name fno believes is occupied."""
+    DIFFERENT conversation to agy, never a resume."""
     text = (conversation_id or "").strip()
     if not _UUID_RE.match(text):
         raise AgySessionError(
@@ -57,20 +49,14 @@ def require_conversation_id(conversation_id: str) -> str:
 
 def create_conversation(cwd: Path | str, *, timeout_s: float = MINT_TIMEOUT_S) -> str:
     """Mint an agy conversation id by running one print-mode turn."""
+    argv = [
+        AGY_BINARY, "-p", MINT_PROMPT,
+        "--output-format", "json",
+        "--dangerously-skip-permissions",
+    ]
     try:
         completed = subprocess.run(  # noqa: S603
-            [
-                AGY_BINARY,
-                "-p",
-                MINT_PROMPT,
-                "--output-format",
-                "json",
-                "--dangerously-skip-permissions",
-            ],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
+            argv, cwd=str(cwd), capture_output=True, text=True, timeout=timeout_s
         )
     except OSError as exc:
         raise AgySessionError(f"agy could not start: {exc}") from exc
@@ -103,12 +89,6 @@ def create_conversation(cwd: Path | str, *, timeout_s: float = MINT_TIMEOUT_S) -
 
 def conversation_store_path(conversation_id: str) -> Path:
     """Where agy keeps this conversation - its OWN store, so a journey can
-    assert the spawn's id against the harness rather than against fno's
-    registry row echoing itself back."""
-    return (
-        Path.home()
-        / ".gemini"
-        / "antigravity-cli"
-        / "conversations"
-        / f"{require_conversation_id(conversation_id)}.db"
-    )
+    assert the spawn's id against the harness, not against fno echoing itself."""
+    store = Path.home() / ".gemini" / "antigravity-cli" / "conversations"
+    return store / f"{require_conversation_id(conversation_id)}.db"

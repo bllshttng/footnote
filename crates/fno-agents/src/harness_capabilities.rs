@@ -124,6 +124,49 @@ pub struct HarnessCapabilities {
     pub permission_response: BTreeMap<String, PermissionResponse>,
     pub resume_strategy: ResumeStrategy,
     pub model_switch_strategy: ModelSwitchStrategy,
+    /// The keeper-lane spawn arm, absent on a harness with no keeper lane.
+    /// One row replaces four hand-written copies of the same spawn block; the
+    /// fields are documented in docs/architecture/thread-lanes.md.
+    #[serde(default)]
+    pub keeper: Option<KeeperArm>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeeperArm {
+    /// Why this lane has no one-shot form, in the sentence the operator sees.
+    pub once_refusal: String,
+    /// The launch axes this lane has a measured spelling for. Every other
+    /// axis is refused BY NAME, so one list answers both questions.
+    pub carries: Vec<String>,
+    /// This TUI's own composer-idle paint; empty keeps the seed default.
+    #[serde(default)]
+    pub ready_marker: String,
+    #[serde(default)]
+    pub resume_refusal: String,
+    #[serde(default)]
+    pub headless_refusal: String,
+    /// Refuse `--once` and headless with ONE message, where they name the
+    /// same absent lane.
+    #[serde(default)]
+    pub once_and_headless_together: bool,
+    /// The never-prompt flag, appended under `--yolo` - or always, where an
+    /// unattended keeper has nobody to answer a first approval.
+    #[serde(default)]
+    pub bypass_flag: String,
+    #[serde(default)]
+    pub bypass_always: bool,
+    #[serde(default)]
+    pub takes_model: bool,
+    #[serde(default)]
+    pub takes_effort: bool,
+    #[serde(default)]
+    pub takes_add_dir: bool,
+    /// `[regex, keys]` for a TUI that paints a blocking modal before its
+    /// composer. A TUI behind an unanswered modal runs nothing while holding
+    /// a live registry row.
+    #[serde(default)]
+    pub clear_modal: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -39,10 +39,30 @@ A `keeper` harness with no built lane still gets an honest refusal naming what i
 |---|---|---|---|
 | claude | `attach` | true | Attach form is a subcommand; the session store is the harness's own, and the unattended restart journey passed. |
 | codex | `attach` | true | Attach goes through the app-server daemon, which keeps the session alive out of process; the journey passed. |
-| agy | `keeper` | false | Resume is a session flag whose session binding strategy is `unsupported`, so identity cannot be preserved across a restart; the keeper lane needs fno to hold the PTY, which is built, but the pi-grade journey cannot pass on agy until binding works. |
+| agy | `keeper` | true | Resume is a session flag, `agy --conversation {id}`, and the id is callee-minted: `agy -p` prints a JSON envelope carrying `conversation_id`. Measured 2026-09-03 on agy 1.1.24. The minted id named a real db under `~/.gemini/antigravity-cli/conversations` and a fresh process restored that transcript. Journey: `cli/tests/agents/test_agy_spawn_journey.py`, opt-in `FNO_AGY_LIVE=1`. The HEADLESS lane stays unmeasured and the arm refuses it by name. |
+| cursor-agent | `keeper` | true | `create-chat` mints the chat id before the child launches, so the id exists before any worker starts. `--print` is output-only, so there is no one-shot form to offer instead. |
+| grok | `keeper` | true | `--session-id` adopts a caller-assigned uuid and `--resume` on a fresh process recalls a prior turn across a SIGKILL. Re-using a spent id is a grok refusal, never a resume, so the arm refuses `spawn --resume` rather than rendering a create form with a used id. |
 | opencode | `keeper` | false | The serve lane is launch-only, and its session binding is `store-lookup` with `required = false`, which races the store write; the keeper PTY itself is built and reusable. |
 | pi | `keeper` | true | The keeper PTY is built and the seven-step restart journey passed: both supervisors SIGKILLed, the recorded child pid surviving under the same keeper, cwd/session id/session store unchanged, the second mail prompt answered (`cli/tests/agents/test_thread_keeper_journey.py`, opt-in `FNO_PI_LIVE=1`). The bit backs the thread lane a one-shot dispatch resolves onto; the autonomous `/target` template still refuses at the loop gate until pi's loop extension ships, and the spawn arm is still unbuilt, so `fno agents spawn --substrate thread` refuses pi until that arm ships with its own journey. |
 | gemini | n/a | false | Refused earlier, at `command_surface`: the harness is deprecated in favor of agy and never reaches the thread gate. Its resume form would otherwise read `keeper`. |
+
+## The keeper arm table
+
+Four harnesses reach the keeper lane. Each wanted the same forty lines of spawn code. Refuse the launch options this lane has no measured spelling for. Refuse `--once`, and sometimes `--resume`. Call the lane driver, paste the seed against this TUI's own idle paint, emit the event, return the receipt. Only the data differed. So `cli/src/fno/agents/keeper_thread.py` holds one loop, and the capability contract holds one `[harness.<name>.keeper]` row per harness.
+
+A row names the axes it CARRIES. Every other axis is refused by name rather than dropped in silence, so one tuple answers both questions and the two answers cannot disagree. Refusal sentences stay per-harness and verbatim, because a refusal is runtime text a person reads.
+
+| Field | What it records |
+|---|---|
+| `carries` | The launch axes this lane has a measured spelling for. The complement is the refusal set. |
+| `ready_marker` | This TUI's own composer-idle paint, the positive marker the seed waits for. |
+| `once_refusal` / `resume_refusal` / `headless_refusal` | Why the lane is absent, in the sentence the operator sees. |
+| `bypass_flag`, `bypass_always` | The never-prompt flag. `bypass_always` is for a TUI whose first approval has nobody to answer it. |
+| `clear_modal` | `(regex, keys)` for a TUI that paints a blocking modal before its composer. A TUI behind an unanswered modal runs nothing while holding a live registry row. |
+
+Two rows carry a `finish_argv` completion the fields cannot express. pi appends its provider/model pair, because bare `pi` defaults to provider google. agy upserts folder trust, because a folder agy does not trust puts a modal in front of the composer and in front of the mint.
+
+The mint is per row too. `cursor-agent` and `agy` are callee-minted-read-back: the harness makes the id and fno reads it back before the TUI launches. `pi` and `grok` take fno's own UUIDv4. Either way the id exists before any worker starts. A caller-supplied id is validated, never minted: a truncated id is a different conversation to the harness, not a resume.
 
 ## The gate rule
 

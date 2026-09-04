@@ -143,13 +143,16 @@ def test_lane_b_spawn_wiring_names_every_wired_keeper_harness() -> None:
     field that makes it a real arm rather than a stub: the refusal an
     operator reads when the lane has no one-shot form.
     """
-    from fno.agents.keeper_thread import KEEPER_ARMS
+    from fno.agents.harness_map import known_harnesses
+    from fno.agents.keeper_thread import keeper_arm
 
     source = inspect.getsource(dispatch_mod.dispatch_spawn)
     assert "keeper_thread_spawn" in source
-    assert set(KEEPER_ARMS) == {"cursor-agent", "pi", "grok", "agy"}
-    for harness, arm in KEEPER_ARMS.items():
-        assert arm.once_refusal, f"{harness} declares no one-shot refusal"
+    rowed = {h for h in known_harnesses() if keeper_arm(h) is not None}
+    assert rowed == {"cursor-agent", "pi", "grok", "agy"}
+    for harness in sorted(rowed):
+        arm = keeper_arm(harness)
+        assert arm and arm.get("once_refusal"), f"{harness} declares no one-shot refusal"
 
 
 # ---------------------------------------------------------------------------

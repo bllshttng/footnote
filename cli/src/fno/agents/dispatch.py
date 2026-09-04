@@ -1479,12 +1479,8 @@ def _keeper_seed_submit(
     wired (the same marker the journeys wait on).
 
     ``clear_modal`` is ``(regex, keys)`` for a TUI that can paint a blocking
-    modal BEFORE its composer. agy's folder-trust gate is the case: a keeper
-    has nobody to answer it, and a TUI behind an unanswered modal runs NOTHING
-    while holding a live registry row. The pane lane answers the same modal the
-    same way. Both keep the trust-file upsert beside it - a granted folder
-    never paints the modal, and the answer covers the times the grant does not
-    take.
+    modal BEFORE its composer, which a keeper has nobody to answer
+    (docs/architecture/thread-lanes.md).
     """
     import socket as _socket
     import time as _time
@@ -1532,15 +1528,11 @@ def _keeper_seed_submit(
             if clear_modal is not None and not modal_answered:
                 pattern, keys = clear_modal
                 if re.search(pattern, bytes(text).decode("utf-8", "replace"), re.I):
-                    # Answer ONCE and keep both buffers. `raw_pending` can hold
-                    # the head of a partial frame, so clearing it would make the
-                    # next recv parse a tag/length out of mid-payload and the
-                    # decoder break on a garbage length forever - a wedge that
-                    # reads exactly like a TUI that never painted. `text` keeps
-                    # its bytes because the composer marker can arrive in the
-                    # SAME recv as the modal; `modal_answered` is what stops a
-                    # second answer, so the clear bought nothing and cost the
-                    # marker.
+                    # Answer ONCE and clear NEITHER buffer. `raw_pending` can
+                    # hold the head of a partial frame and `text` can hold the
+                    # composer marker from this same recv; `modal_answered` is
+                    # what stops a second answer. The regression test is
+                    # test_lane_b_thread_spawn.py's frame-desync case.
                     conn.sendall(frame(tag_input, keys))
                     modal_answered = True
                     _time.sleep(0.5)
@@ -2906,11 +2898,8 @@ def dispatch_spawn(
             effective_message=effective_message,
         )
 
-    # 3b-2. The keeper-lane thread spawns (cursor-agent, pi, grok, agy). Each
-    # is a row in `fno.agents.keeper_thread.KEEPER_ARMS`: what it refuses by
-    # name, whether it has a one-shot or a resume form, which axes ride the
-    # lane driver, and its own composer-idle paint. Four hand-written copies of
-    # one forty-line block is what that table replaced.
+    # 3b-2. The keeper-lane thread spawns (cursor-agent, pi, grok, agy), one
+    # row each in the capability contract's `[harness.<name>.keeper]`.
     from fno.agents.keeper_thread import keeper_thread_spawn
 
     keeper_result = keeper_thread_spawn(
