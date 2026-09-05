@@ -488,8 +488,14 @@ fn specimen_events() -> String {
 
 #[test]
 fn ac5_marker_specimen_blocks_nothing() {
-    let blockers = disposition_blockers(&specimen_events(), BRANCH, SPECIMEN_HEAD, true);
-    assert_eq!(blockers, Vec::new());
+    // The specimen's fixed findings are terminal once the chain carries
+    // corroboration; on the author's own signature alone a fixed finding
+    // stays non-terminal (the fixed-uncorroborated axis), the same
+    // signature test a decline answers to.
+    let corroborated = disposition_blockers(&specimen_events(), BRANCH, SPECIMEN_HEAD, false);
+    assert_eq!(corroborated, Vec::new());
+    let alone = disposition_blockers(&specimen_events(), BRANCH, SPECIMEN_HEAD, true);
+    assert_eq!(alone[0].axis, "fixed-uncorroborated");
 }
 
 #[test]
@@ -508,12 +514,19 @@ fn ac5b_marker_one_open_finding_blocks_by_key() {
         false,
     ));
     let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, true);
-    assert_eq!(blockers.len(), 1);
-    assert_eq!(
-        blockers[0].finding_key,
-        "cli/src/fno/pr/_coverage_gate.py:999:correctness"
-    );
-    assert_eq!(blockers[0].axis, "open");
+    // On the author's own signature alone the specimen's five fixed
+    // findings are non-terminal too (fixed-uncorroborated); the open one
+    // still blocks by key among them.
+    assert_eq!(blockers.len(), 6);
+    let open = blockers
+        .iter()
+        .find(|b| b.finding_key == "cli/src/fno/pr/_coverage_gate.py:999:correctness")
+        .expect("the open finding blocks by key");
+    assert_eq!(open.axis, "open");
+    assert!(blockers
+        .iter()
+        .filter(|b| b.finding_key != open.finding_key)
+        .all(|b| b.axis == "fixed-uncorroborated"));
 }
 
 #[test]

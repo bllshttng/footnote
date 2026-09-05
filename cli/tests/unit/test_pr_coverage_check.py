@@ -758,7 +758,10 @@ def _ac5b_finding():
 
 
 def test_ac5_marker_specimen_is_covered(monkeypatch, tmp_path):
-    """AC5-MARKER: the disposition-complete specimen returns literal COVERED."""
+    """AC5-MARKER: the disposition-complete specimen returns literal COVERED.
+    The specimen's fixing round attests from a second session: a fixed
+    disposition is terminal only with corroboration, so the author's own
+    signature alone no longer covers this chain."""
     _specimen_gates(monkeypatch)
     _seed_specimen(tmp_path)
     state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
@@ -863,6 +866,178 @@ def test_ac5_hp_fixed_confirmed_plus_untouched_nits_covered(monkeypatch, tmp_pat
     )
     assert state == _coverage_gate.COVERED
     assert note == "2 non-blocking finding(s) treated by class"
+
+
+def test_attest_empty_commit_dispose_is_refused_by_name(monkeypatch, tmp_path):
+    """AC5-EMPTY, the positive marker: attest, empty-commit, dispose. The
+    empty commit satisfies head inequality at zero cost, so the corroboration
+    term is what refuses: a CONFIRMED finding disposed `fixed` on the
+    author's own signature alone stays non-terminal, and the refusal names
+    the finding and both remedies."""
+    _specimen_gates(monkeypatch)
+    # Two rounds in the chain: hold the cap above them so the refusal is
+    # the plain not-terminal sentence, not the exhausted-round verdict.
+    monkeypatch.setattr(_coverage_gate, "resolved_max_rounds", lambda repo: 3)
+    round1_head = "a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3"
+    r1 = {
+        "ts": "2026-08-25T21:00:00Z",
+        "type": "review_attestation",
+        "source": "hook",
+        "data": {
+            "reviewer": "code-review",
+            "head_sha": round1_head,
+            "verdict": "fail",
+            "session_id": "s-empty",
+            "branch": "feature/x-8439",
+            "reviewed_base_sha": "17a3b85b1a70a22014f1fc4e04b7aa35a632757f",
+            "reviewed_head_sha": round1_head,
+            "reviewed_file_count": 2,
+            "reviewed_line_count": 30,
+            "findings_blocking": 1,
+            "findings_nonblocking": 0,
+            "findings": [
+                {"category": "correctness", "verdict": "CONFIRMED", "blocking": True,
+                 "has_required_fields": True, "finding_key": "a.py:1:correctness"},
+            ],
+        },
+    }
+    # The empty commit: HEAD moves, the tree does not.
+    r2 = {
+        "ts": "2026-08-25T21:30:00Z",
+        "type": "review_attestation",
+        "source": "hook",
+        "data": {
+            "reviewer": "code-review",
+            "head_sha": FIXTURE_HEAD,
+            "verdict": "pass",
+            "session_id": "s-empty",
+            "branch": "feature/x-8439",
+            "reviewed_base_sha": round1_head,
+            "reviewed_head_sha": FIXTURE_HEAD,
+            "reviewed_file_count": 0,
+            "reviewed_line_count": 0,
+            "findings_blocking": 0,
+            "findings_nonblocking": 0,
+            "findings": [],
+            "dispositions": [
+                {"finding_key": "a.py:1:correctness", "disposition": "fixed",
+                 "reason": "attested by the author"},
+            ],
+        },
+    }
+    row = {
+        "ts": "2026-08-25T21:31:00Z",
+        "type": "review_coverage",
+        "source": "hook",
+        "data": {
+            "pr": 1179, "coverage": "covered", "review_state": "reviewed",
+            "reviewed_count": 1, "self_attested_count": 1,
+            "head_sha": FIXTURE_HEAD,
+            "verdicts": [{
+                "producer": "local_attestation", "name": "code-review",
+                "verdict": "reviewed", "reviewed_sha": FIXTURE_HEAD,
+                "freshness": "fresh", "attestation_origin": "self_attested",
+            }],
+        },
+    }
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    (tmp_path / ".fno" / "events.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in (r1, r2, row)) + "\n", encoding="utf-8"
+    )
+    state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
+        1179, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert "a.py:1:correctness" in refusal
+    assert "own signature alone" in refusal
+    assert "second session's head-pinned attestation" in refusal
+    assert "non-author GitHub approval" in refusal
+
+
+def test_real_fix_after_a_stale_same_head_dispose_covers(monkeypatch, tmp_path):
+    """A same-head `fixed`, then a real fix whose round re-emits no
+    disposition: the delta witness reads the rows after the last raise, so
+    the corroborated chain is terminal instead of pinned to the stale
+    same-head dispose forever."""
+    _specimen_gates(monkeypatch)
+    round1_head = "a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3"
+    finding = {
+        "category": "correctness", "verdict": "CONFIRMED", "blocking": True,
+        "has_required_fields": True, "finding_key": "a.py:1:correctness",
+    }
+    r1 = {
+        "ts": "2026-08-25T21:00:00Z",
+        "type": "review_attestation",
+        "source": "hook",
+        "data": {
+            "reviewer": "code-review", "head_sha": round1_head,
+            "verdict": "fail", "session_id": "s-stale",
+            "branch": "feature/x-8439",
+            "reviewed_base_sha": "17a3b85b1a70a22014f1fc4e04b7aa35a632757f",
+            "reviewed_head_sha": round1_head,
+            "reviewed_file_count": 2, "reviewed_line_count": 30,
+            "findings_blocking": 1, "findings_nonblocking": 0,
+            "findings": [finding],
+        },
+    }
+    # The same-head re-run that disposes: terminal for nothing on its own.
+    r2 = {
+        "ts": "2026-08-25T21:10:00Z",
+        "type": "review_attestation",
+        "source": "hook",
+        "data": {
+            "reviewer": "code-review", "head_sha": round1_head,
+            "verdict": "pass", "session_id": "s-stale",
+            "branch": "feature/x-8439",
+            "reviewed_base_sha": "17a3b85b1a70a22014f1fc4e04b7aa35a632757f",
+            "reviewed_head_sha": round1_head,
+            "reviewed_file_count": 2, "reviewed_line_count": 30,
+            "findings_blocking": 0, "findings_nonblocking": 0,
+            "findings": [],
+            "dispositions": [
+                {"finding_key": "a.py:1:correctness", "disposition": "fixed",
+                 "reason": "same-head dispose"},
+            ],
+        },
+    }
+    # The real fix's round: a new head, no disposition re-emitted.
+    r3 = {
+        "ts": "2026-08-25T21:30:00Z",
+        "type": "review_attestation",
+        "source": "hook",
+        "data": {
+            "reviewer": "code-review", "head_sha": FIXTURE_HEAD,
+            "verdict": "pass", "session_id": "s-stale",
+            "branch": "feature/x-8439",
+            "reviewed_base_sha": round1_head,
+            "reviewed_head_sha": FIXTURE_HEAD,
+            "reviewed_file_count": 4, "reviewed_line_count": 95,
+            "findings_blocking": 0, "findings_nonblocking": 0,
+            "findings": [],
+        },
+    }
+    row = {
+        "ts": "2026-08-25T21:31:00Z",
+        "type": "review_coverage",
+        "source": "hook",
+        "data": {
+            "pr": 1179, "coverage": "covered", "review_state": "reviewed",
+            "reviewed_count": 1, "head_sha": FIXTURE_HEAD,
+            "verdicts": [{
+                "producer": "local_attestation", "name": "code-review",
+                "verdict": "reviewed", "reviewed_sha": FIXTURE_HEAD,
+                "freshness": "fresh", "attestation_origin": "other_session",
+            }],
+        },
+    }
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    (tmp_path / ".fno" / "events.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in (r1, r2, r3, row)) + "\n", encoding="utf-8"
+    )
+    state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
+        1179, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.COVERED, refusal
 
 
 def test_ac5_err_self_attested_decline_refuses_with_both_remedies(monkeypatch, tmp_path):
@@ -2239,6 +2414,89 @@ def test_attestation_chain_keeps_same_invocation_reattests_at_new_heads(
         chain, cov=None, cwd=str(tmp_path)
     )
     assert refusal == "", nonterminal
+
+
+def test_attestation_chain_keeps_same_invocation_same_head_reruns(
+    monkeypatch, tmp_path
+):
+    """One invocation, one head, ONE second, TWO rounds: kept, and terminal
+    for nothing.
+
+    Measured live on feature/x-a3e8: a pass and the later fail that
+    superseded it shared invocation_id AND head_sha (the hold mints one id
+    per branch, and both rows attested the same commit), so an
+    invocation-based key deleted the second row. The ts cannot separate
+    them either - most producers stamp second precision, so both rows here
+    share one second on purpose. The payload separates them (verdict and
+    findings differ). And the same-head re-run must not clear: a fixed
+    disposition is terminal only when the disposing round attested a
+    DIFFERENT head, else an author clears a CONFIRMED finding by
+    re-attesting the head that raised it."""
+    from fno.pr import _reviews
+
+    head = "46695fffc00000000000000000000000000000000"
+    finding = {
+        "finding_key": "f.py:1:correctness",
+        "category": "correctness",
+        "verdict": "CONFIRMED",
+    }
+    fail_row = {
+        "reviewer": "code-review",
+        "head_sha": head,
+        "verdict": "fail",
+        "session_id": "s-1",
+        "attester_session_id": "s-1",
+        "branch": "feature/x-77be",
+        "invocation_id": "ri-1",
+        "findings": [finding],
+    }
+    pass_row = {
+        **fail_row,
+        "verdict": "pass",
+        "findings": [],
+        "dispositions": [
+            {
+                "finding_key": finding["finding_key"],
+                "disposition": "fixed",
+                "reason": "re-attested at the same head, which clears nothing",
+            }
+        ],
+    }
+
+    def _row(ts, data):
+        return json.dumps(
+            {"ts": ts, "type": "review_attestation", "data": data}
+        ) + "\n"
+
+    same_second = "2026-09-04T15:53:10Z"
+    project = tmp_path / "project-events.jsonl"
+    project.write_text(
+        _row(same_second, fail_row) + _row(same_second, pass_row),
+        encoding="utf-8",
+    )
+    global_log = tmp_path / "global-events.jsonl"
+    global_log.write_text(
+        _row(same_second, {**fail_row, "repo": "bllshttng/footnote"})
+        + _row(same_second, {**pass_row, "repo": "bllshttng/footnote"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        _reviews,
+        "_coverage_logs",
+        lambda cwd, project_events: (project, global_log, "bllshttng/footnote"),
+    )
+    chain = _coverage_gate.attestation_chain(
+        str(tmp_path), head_branch="feature/x-77be", head=head
+    )
+    assert [(row["verdict"], row["dispositions"]) for row in chain] == [
+        ("fail", None),
+        ("pass", pass_row["dispositions"]),
+    ], "two distinct rounds in one second under one invocation are two entries"
+    refusal, _note, nonterminal, _hard = _coverage_gate.disposition_refusal(
+        chain, cov=None, cwd=str(tmp_path)
+    )
+    assert nonterminal == ["f.py:1:correctness"], refusal
+    assert refusal != "", "a same-head fixed disposition must never read terminal"
 
 
 def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):

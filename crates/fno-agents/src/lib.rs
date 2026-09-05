@@ -74,6 +74,7 @@ pub mod cursor_agent;
 pub mod daemon;
 pub mod delivery_completion;
 pub mod digest;
+pub mod disposition_gate;
 pub mod drift;
 pub mod envelope;
 pub mod events;
