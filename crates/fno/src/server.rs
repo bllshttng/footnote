@@ -7582,22 +7582,13 @@ impl Core {
         // (x-8f9d) Every portal seat, collected once: the per-tab prune below
         // folds over all of them.
         let seats: Vec<u64> = self.portals.values().map(|p| p.seat).collect();
-        // (x-5baf) Each of this squad's panes' live cwd, read once up front
-        // (one syscall per leaf per flush) rather than per-slot: a pane can
-        // appear as a leaf in only one tab, so there is no repeat work to
-        // dedupe. A dead child pid degrades to the pane's own spawn cwd,
-        // recorded at spawn (`PaneEntry::cwd`), never a capture failure.
+        // (x-5baf) Each surviving pane's live cwd, filled in per tab below
+        // (below the portal-seat prune, never before it) so a portal pane -
+        // always excluded from `pruned` before a slot is ever captured - never
+        // costs a syscall for a cwd nothing reads. A dead child pid degrades
+        // to the pane's own spawn cwd, recorded at spawn (`PaneEntry::cwd`),
+        // never a capture failure.
         let mut pane_cwd: HashMap<u64, String> = HashMap::new();
-        for pane in sq.tabs.iter().flat_map(|t| tree::leaves(&t.root)) {
-            if let Some(entry) = self.panes.get(&pane) {
-                let cwd = entry
-                    .pty
-                    .child_pid()
-                    .and_then(process_cwd)
-                    .unwrap_or_else(|| entry.cwd.clone());
-                pane_cwd.insert(pane, cwd);
-            }
-        }
         let mut trees = Vec::with_capacity(sq.tabs.len());
         let mut active_tab = 0;
         // If pruning hollows out the active tab itself, `active_tab` has no
@@ -7645,6 +7636,19 @@ impl Core {
                 active_tab = trees.len();
             }
             let root = pruned.as_ref().unwrap_or(&t.root);
+            for pane in tree::leaves(root) {
+                if pane_cwd.contains_key(&pane) {
+                    continue;
+                }
+                if let Some(entry) = self.panes.get(&pane) {
+                    let cwd = entry
+                        .pty
+                        .child_pid()
+                        .and_then(process_cwd)
+                        .unwrap_or_else(|| entry.cwd.clone());
+                    pane_cwd.insert(pane, cwd);
+                }
+            }
             let mut capture = SlotCapture::new(&pane_owner, &pane_cwd);
             let tree = capture.node_to_spec(root);
             let focus = capture.slot_of(t.focus);
@@ -9073,14 +9077,23 @@ impl Core {
                                 slot_pane.insert(slot.name.as_str(), p);
                             }
                             None => {
-                                // (x-5baf) A slot's own captured cwd, when it
-                                // still exists, beats the squad root: the
-                                // whole point of remembering it. A vanished
-                                // directory or a pre-v68 slot with none
-                                // recorded falls back to `cwd0`, same shape as
-                                // the worker lane's `restore_member_cwd` above.
+                                // (x-5baf) A genuine Shell slot's own captured
+                                // cwd, when it still exists, beats the squad
+                                // root: the whole point of remembering it. A
+                                // dead worker's substitute shell (the `Fno`
+                                // arm above) keeps spawning at the squad root
+                                // as before - its slot's cwd is the WORKER's
+                                // own directory, not a shell's, and steering
+                                // the substitute there is a different feature
+                                // than this one. A vanished directory or a
+                                // pre-v68 slot with none recorded falls back
+                                // to `cwd0`, same shape as the worker lane's
+                                // `restore_member_cwd` above.
+                                let stored_cwd = matches!(slot.binding, LayoutBinding::Shell)
+                                    .then(|| slot.cwd.as_deref())
+                                    .flatten();
                                 let (spawn_cwd, gone) =
-                                    restore_member_cwd(slot.cwd.as_deref(), &cwd0, |p| {
+                                    restore_member_cwd(stored_cwd, &cwd0, |p| {
                                         std::path::Path::new(p).is_dir()
                                     });
                                 if let Some(gone) = gone {
