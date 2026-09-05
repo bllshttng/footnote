@@ -73,7 +73,7 @@ The table classifies the crossing sites, one line of reason each. The pass that 
 | `spawn_gate.rs:378` | conforming | gate-escape telemetry through the event emit path |
 | `backlog_view.rs:69` | conforming | snapshot read through the only writer, schema owned by the source |
 | `client.rs:2470` | conforming | update probe through the update policy owner, bounded |
-| `client.rs:2649` | conforming | workspace prune through the front door, counts owned by the verb; an applied run sends `SquadReload` to every live server so the file and memory agree |
+| `client.rs:2649` | conforming | workspace prune through the front door, counts owned by the verb; an applied run sends `SquadReload` to every live server so the file and memory agree; an orphaned worker tab (its stored member judged Dead) closes by default, used shells stay opt-in |
 | `client.rs:14413` | conforming | config write through the CLI, the same monopoly as the graph |
 | `connections_view.rs:1240` | conforming | config and combo reads through the config owner, fail-open |
 | `connections_view.rs:1278` | conforming | user-initiated verbs dispatched through the CLI surface |

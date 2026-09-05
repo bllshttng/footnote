@@ -307,8 +307,9 @@ fn default_true() -> bool {
 /// `placement` (the geometry a FRESH portal open honors; additive, floor
 /// unchanged; a repoint keeps owning its geometry and says so).
 /// v68 (x-5baf): `LayoutSlot.cwd`, `#[serde(default)]`; floor stays 58.
-/// v69 (prune sync): `ControlVerb::SquadReload` + `ServerMsg::SquadReloaded`;
-/// a v68 peer cannot decode them, so the handshake stops the skew.
+/// v69 (prune sync): `ControlVerb::SquadReload` + `ServerMsg::SquadReloaded`
+/// (a v68 peer cannot decode them, so the handshake stops the skew), and the
+/// additive `PaneInfo.orphaned_worker` (a v68 reader ignores it).
 pub const PROTO_VERSION: u32 = 69;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
@@ -2477,11 +2478,10 @@ pub struct PaneInfo {
     #[serde(default)]
     pub pristine_idle_shell: bool,
     /// (v65, x-cf97) The pane ran something and sits at a prompt NOW: shell
-    /// integration measured (`saw_marker`), no command running, at least one
-    /// completed block. Deliberately narrower than `!pristine_idle_shell`,
-    /// which also covers running and unmeasured panes - a cleanup caller may
-    /// close on this reading, never on the bare negation. `#[serde(default)]`
-    /// keeps a pre-v65 reader wire-tolerant.
+    /// integration measured, no command running, a completed block. Narrower
+    /// than `!pristine_idle_shell` (which also covers running and unmeasured
+    /// panes): a cleanup caller may close on this, never the bare negation.
+    /// `#[serde(default)]` keeps a pre-v65 reader wire-tolerant.
     #[serde(default)]
     pub shell_idle: bool,
     /// (v51, x-1499) The pane's tab name and 1-based ordinal, so the human
@@ -2498,6 +2498,11 @@ pub struct PaneInfo {
     /// direction of `where` (Locked Decision 6).
     #[serde(default)]
     pub fno_id: Option<String>,
+    /// (v69) This pane hosts a stored member the server judges Dead; the
+    /// default prune closes its tab. `#[serde(default)]` keeps a v68 reader
+    /// wire-tolerant.
+    #[serde(default)]
+    pub orphaned_worker: bool,
     /// (x-dfe7) The joined row's classified lineage: the CURRENT harness
     /// session the row answers as, the succession chain it retired (oldest
     /// first), and the fork edge of a parallel branch. `fno_id` stays the
@@ -4756,6 +4761,7 @@ mod tests {
                     tab_name: None,
                     tab_ordinal: Some(1),
                     fno_id: None,
+                    orphaned_worker: false,
                     harness_session_id: None,
                     predecessor_session_ids: Vec::new(),
                     forked_from_session_id: None,

@@ -3,6 +3,7 @@
 //! the run. Extracted from mux_cli.rs under the file-budget gate - the code
 //! the change touched moves with it.
 
+use super::tab_prune::TabPruneOutcome;
 use super::*;
 
 /// What the reload wave did: which sessions re-read the store, which refused.
@@ -118,6 +119,17 @@ pub(super) fn print_prune_summary(
             tabs.used_shells
         ));
     }
+    // (v69) The orphan category names itself only when it fired: zero lines
+    // read as "nothing matched", the same rule as every other part.
+    let orphan_total = tabs.closed_orphaned + tabs.would_close_orphaned;
+    if orphan_total > 0 {
+        let overb = if verb == "pruned" {
+            "closed"
+        } else {
+            "would close"
+        };
+        parts.push(format!("orphaned worker tabs {overb} {orphan_total}"));
+    }
     if !unreachable.is_empty() {
         parts.push(format!(
             "skipped unreachable session(s): {}",
@@ -213,6 +225,8 @@ pub(super) fn render_prune_json(
         "tabs_used_shells": tabs.used_shells,
         "tabs_closed_used_shells": tabs.closed_used,
         "tabs_would_close_used_shells": tabs.would_close_used,
+        "tabs_closed_orphaned": tabs.closed_orphaned,
+        "tabs_would_close_orphaned": tabs.would_close_orphaned,
         // (review) One key covers both runs on purpose: on a dry-run these
         // are the candidates, on an apply they are what actually closed.
         "tabs_close_named": tabs.closed_named,

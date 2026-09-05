@@ -60,6 +60,7 @@ use crate::vt::{self, frame_text, Modes};
 
 mod agent_actions;
 mod agent_rows_join;
+mod pane_identity;
 mod portal_reach;
 mod squad_sync;
 
@@ -3855,6 +3856,8 @@ impl Core {
     /// is stable and machine-readable. A pane mid-teardown (not in the tree)
     /// is still listed with what is known rather than dropped silently.
     fn pane_infos_with_agents(&self, agents: &[RegistryAgent]) -> Vec<PaneInfo> {
+        // (v69) One evidence read feeds every pane row's orphan verdict.
+        let evidence = self.member_evidence();
         let mut out: Vec<PaneInfo> = self
             .panes
             .iter()
@@ -3915,6 +3918,7 @@ impl Core {
                     // points at this pane in THIS session carries the durable
                     // identity. Server-owned (self.agents is the cached read).
                     fno_id: self.fno_id_for_pane_with_agents(pid, agents),
+                    orphaned_worker: self.orphaned_worker_for_pane(pid, agents, &evidence),
                     harness_session_id: joined_row.and_then(|a| a.harness_session_id.clone()),
                     predecessor_session_ids: joined_row
                         .map(|a| a.predecessor_session_ids.clone())
@@ -3946,40 +3950,6 @@ impl Core {
     #[cfg(test)]
     fn fno_id_for_pane(&self, pid: u64) -> Option<String> {
         self.fno_id_for_pane_with_agents(pid, &self.agents)
-    }
-
-    fn fno_id_for_pane_with_agents(&self, pid: u64, agents: &[RegistryAgent]) -> Option<String> {
-        let mut ids = std::collections::BTreeSet::new();
-        for a in agents {
-            if let Some((sess, pane)) = &a.mux {
-                if sess == &self.session_name && *pane == pid {
-                    if let Some(identity) = a.effective_identity() {
-                        ids.insert(identity.to_string());
-                    }
-                }
-            }
-        }
-        // (x-b029) The resume birthright. A pane the daemon itself re-homed
-        // (workspace restore, `pane run --worker`) is recorded in
-        // `worker_session_pane` with its (harness, session id) at spawn - the
-        // same id the resume argv carries. The registry FILE's row can still
-        // point at the pre-restart pane, so the join above misses and the
-        // pane read `-` while doing real work. This map is fno's own record,
-        // not an argv heuristic: the id was stamped at birth by the code that
-        // built the resume command.
-        for ((_, session_id), pane) in &self.worker_session_pane {
-            if *pane == pid {
-                ids.insert(session_id.clone());
-            }
-        }
-        if ids.is_empty() {
-            ids.extend(crate::thread_viewer::identity_for_pane(
-                &self.portals,
-                pid,
-                agents,
-            ));
-        }
-        (ids.len() == 1).then(|| ids.into_iter().next()).flatten()
     }
 
     fn resolve_placement_target(
@@ -16743,6 +16713,9 @@ mod tests {
 
     // The squad-store sync family (prune reload marker + negative control).
     mod squad_sync_tests;
+
+    // The per-pane orphan verdict family.
+    mod pane_identity_tests;
 
     #[test]
     fn node_from_argv_reads_the_wrapper_token() {
