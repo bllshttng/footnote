@@ -13,7 +13,7 @@ Covers:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -297,7 +297,7 @@ def test_kanban_column_and_card_for_a_contained_row(tmp_graph):
     assert _invoke("backlog", "adopt", owner, *kids).exit_code == 0
     kid_row = _by_id(tmp_graph)[kids[0]]
     assert _kanban_column(kid_row) is not None
-    card = tmp_path_file = tmp_graph.with_name("card.md")
+    card = tmp_graph.with_name("card.md")
     render_graph_md(_read_entries(tmp_graph), card, obsidian=False)
     assert f"ships inside: {owner}" in card.read_text()
 
