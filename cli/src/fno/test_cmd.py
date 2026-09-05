@@ -1424,6 +1424,17 @@ def _write_changed_receipt(path: str, payload: dict) -> None:
         pass  # a receipt we cannot write is not a reason to fail the packet
 
 
+def _changed_packet_counts(selections: Sequence[dict]) -> tuple[int, int]:
+    """(pytest files, shell harnesses) the packet maps, deduped by target.
+
+    One spelling for both consumers of the counts: the estimate prices them
+    and the receipt line prints them.
+    """
+    pytest_files = len({s["target"] for s in selections if s["kind"] == "pytest"})
+    shell = len({s["target"] for s in selections if s["kind"] == "shell"})
+    return pytest_files, shell
+
+
 def _estimate_changed_minutes(selections: Sequence[dict]) -> int:
     """Minutes the changed packet plausibly needs, from its selection alone.
 
@@ -1438,8 +1449,7 @@ def _estimate_changed_minutes(selections: Sequence[dict]) -> int:
     over-estimating is a wider ceiling on one job, the cost of
     under-estimating is a run killed by its own cap with no receipt.
     """
-    pytest_files = len({s["target"] for s in selections if s["kind"] == "pytest"})
-    shell = len({s["target"] for s in selections if s["kind"] == "shell"})
+    pytest_files, shell = _changed_packet_counts(selections)
     structural = {s["target"] for s in selections if s["kind"] == "step"}
     build = 1 if _RUST_BUILD_STEP in structural else 0
     # Tenths of a minute, so the arithmetic stays in integers. The build is
@@ -1480,9 +1490,10 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
     # ceiling, and the run job refuses the packet when the estimate cannot fit
     # the ceiling it was given. Printed raw (unclamped) so the fit comparison
     # sees the real number.
+    pytest_files, shell = _changed_packet_counts(selections)
     print(f"smoke: changed-estimate minutes={estimate} "
-          f"pytest_files={len({s['target'] for s in selections if s['kind'] == 'pytest'})} "
-          f"shell={len({s['target'] for s in selections if s['kind'] == 'shell'})} "
+          f"pytest_files={pytest_files} "
+          f"shell={shell} "
           f"steps={len(steps)}", flush=True)
     for s in selections:
         print(f"  select  {s['rule']:20} {s['path']} -> {s['target']}", flush=True)
