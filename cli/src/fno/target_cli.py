@@ -3371,6 +3371,13 @@ def start(
         )
         raise typer.Exit(code=1)
     wt_path = Path(wt)
+    # ensure's stderr receipt says "reusing worktree at <path>" when the tree
+    # already existed; anything else means THIS invocation created it. The
+    # distinction belongs to the init-failure receipt below: a tree this run
+    # created and failed to claim is named for reclaim, while a tree that
+    # predates the run is another session's subject and is not characterized
+    # as our creation.
+    created_this_run = "reusing" not in (ens.stderr or "")
     # ensure names the branch's provenance (continued/salvaged/fresh) on its
     # stderr receipt; a re-dispatched worker must see it is continuing.
     _from = re.search(r" base=(\S+)", ens.stderr or "")
@@ -3532,11 +3539,26 @@ def start(
         init_cmd += ["--beastmode"]
     init = subprocess.run(init_cmd, cwd=str(wt_path))
     if init.returncode != 0:
-        typer.echo(
-            f"fno do target start: target init failed (step: init, exit "
-            f"{init.returncode}); worktree at {wt_path} is created but unclaimed.",
-            err=True,
-        )
+        if created_this_run and not in_place:
+            # One receipt line the run currently lacks: the refused init
+            # leaves a fresh tree holding an init-time manifest and no claim,
+            # which a later reader cannot tell from a live session. The tree
+            # is NOT deleted here - it may hold a partial checkout, and
+            # deletion is the more dangerous of the two mistakes.
+            typer.echo(
+                f"fno do target start: target init failed (step: init, exit "
+                f"{init.returncode}); worktree at {wt_path} is created but "
+                f"unclaimed; reclaim with: fno agents workspace worktree "
+                f"archive {wt_path}",
+                err=True,
+            )
+        else:
+            typer.echo(
+                f"fno do target start: target init failed (step: init, exit "
+                f"{init.returncode}); worktree at {wt_path} predates this "
+                f"run and was left untouched.",
+                err=True,
+            )
         raise typer.Exit(code=init.returncode)
 
     # 4. Receipt - one parse-friendly line a memory-less agent acts on. When a
