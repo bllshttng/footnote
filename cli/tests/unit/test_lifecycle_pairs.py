@@ -83,6 +83,9 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
     # -- self-inverse: the same verb reverses itself --
     Pair("backlog", "rank", "rank"),
     Pair("backlog", "update", "update"),
+    # contain stamps contained_in + parent; its correction is update's
+    # --parent null flag, which the contain epilog names verbatim.
+    Pair("backlog", "contain", "update"),
     # -- corrections whose forward transition is not a verb in this app --
     Pair(
         "backlog",
@@ -103,7 +106,7 @@ KNOWN_COMMANDS: dict[str, frozenset[str]] = {
     "backlog": frozenset({
         "add", "advance", "album", "annotate", "archive", "archive-dedupe-ids",
         "bases", "backfill-deferred-kind", "batch", "board", "capture", "carveout",
-        "collisions", "cost",
+        "collisions", "contain", "cost",
         "decide", "decide-reindex", "decide-retract", "decisions", "decompose", "defer",
         "demand", "dispatch-lanes", "done", "encounter", "epic", "find", "get", "groom",
         "idea", "intake", "join", "lane-fill", "lanes", "maintain", "migrate-difficulty",
