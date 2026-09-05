@@ -10135,6 +10135,12 @@ impl Core {
                             eprintln!("fno mux: pty resize failed: {e}");
                         }
                         entry.vt.resize(r.rows, r.cols);
+                        // The resize's own ioctl signalled once; ask again now
+                        // that the grid is settled, so a renderer that coalesces
+                        // or raced its first repaint gets another chance at the
+                        // final geometry (x-a600: a coviewer clamp resize with no
+                        // repaint request garbles an incremental TUI).
+                        entry.pty.nudge_winch(r.rows, r.cols);
                     }
                 }
             }
