@@ -101,7 +101,10 @@ def test_map_covers_current_surface_once():
     # This branch adds `backlog contain`, the plan-less containment fold,
     # as one new row (first allocated under a retired alias, renamed in
     # place before merge): 568 -> 569.
-    assert len(mapped) == 569, (
+    # The reseat branch adds `agents reseat`, the registry half of the v69
+    # pane-into-portal move, on the same base: counted from the merged
+    # file, never either side, 569 -> 570.
+    assert len(mapped) == 570, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
