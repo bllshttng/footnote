@@ -34,6 +34,7 @@ A	/var/lib/dbus/machine-id	py=cli/src/fno/claims/hostid.py;rs=crates/fno-agents/
 A	</fno_relay_compression>	py=cli/src/fno/agents/spawn_payload.py;rs=crates/fno-agents/src/spawn_payload.rs	# protocol: schemas/spawn-brevity.json plus Python and Rust parity tests pin both runtime carriers
 A	[self-cert: asserts no review evidence]	py=cli/src/fno/target/orient.py;rs=crates/fno-agents/src/loopcheck.rs	# msg-twin
 A	^backgrounded · ([0-9a-f]{8}) ·	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# protocol
+A	a crown needs a scope: name an epic or a project	py=cli/src/fno/agents/crown.py;rs=crates/fno-agents/src/king_board/scope.rs	# msg-twin: the Rust scope reader refuses an unnamed crown in the same words the Python verb does
 A	a model vendor is only routable at spawn	py=cli/src/fno/_flag_aliases.py;rs=crates/fno-agents/src/mail_inject.rs	# msg-twin
 A	accepted forms: name, canonical handle, transport short id, or full session id	py=cli/src/fno/agents/registry.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	agent name must not be empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs|crates/fno-agents/src/client_verbs.rs	# msg-twin
@@ -54,7 +55,7 @@ A	failed to read {log_path}: {exc}	py=cli/src/fno/agents/read.py;rs=crates/fno-a
 A	fno agents resume: registry read failed: {exc}	py=cli/src/fno/agents/resume_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	fno agents trace: agent name is required unless --all is set	py=cli/src/fno/agents/trace_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	fno mux ls --json failed	py=cli/src/fno/update.py;rs=crates/fno/src/client_tests.rs	# msg-twin
-A	fno/review-coverage-unavailable	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol: check-coverage-context-parity.sh pins the py consts against every surface, loopcheck.rs included
+A	fno/review-coverage-unavailable	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/king_board/prs.rs|crates/fno-agents/src/loopcheck.rs	# protocol: check-coverage-context-parity.sh pins the py consts against every surface, loopcheck.rs included; the board port's prs source reuses the same coverage tag
 A	fno_global_settings_path	py=cli/src/fno/adapters/providers/loader.py|cli/src/fno/config_io.py|cli/src/fno/conftest.py|cli/src/fno/hermetic.py;rs=crates/fno-agents/src/agents_config.rs|crates/fno/src/agents_view.rs|crates/fno/src/digest_overlay.rs|crates/fno/src/sideline_color.rs	# protocol
 A	fno_mux_shell_integration	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno/src/client.rs|crates/fno/src/pty.rs	# protocol
 A	fno_process_admission_max	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno/src/bootstrap.rs|crates/fno/src/process_admission.rs	# protocol: Python resolves process_admission.max_processes and Rust enforces the same process-unit env wire; bootstrap.rs is the cfg(test) fixture only, production bootstrap deliberately reads neither wire (bypass hardcodes the default)
@@ -63,6 +64,9 @@ A	from-name must not be empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-ag
 A	github_approval_satisfies	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol: both gates re-derive coverage from the same config key
 A	harness_capabilities.toml	py=cli/src/fno/agents/harness_map.py|scripts/diagnostics/render-harness-matrix.py;rs=crates/fno-agents/src/harness_capabilities.rs|crates/fno/src/agents_view.rs	# data: the third copy is the fno crate's include_str! embed, gated by check-harness-capabilities-fresh.sh; the renderer is the matrix leg
 A	holder must be non-empty	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claims.rs	# msg-twin
+A	claims unreadable: claim key is not a string	py=cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/king_board/classify.rs	# msg-twin: the ported undispatched reader rejects a malformed claim row in the same words
+A	graph unreadable: entry id is not a string	py=cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/king_board/classify.rs	# msg-twin: the ported undispatched reader rejects a malformed graph row in the same words
+A	fno backlog undispatched --json	py=cli/src/fno/backlog/advance.py|cli/src/fno/backlog/undispatched.py;rs=crates/fno-agents/src/king_board.rs	# protocol: the argv the Rust board runs must stay the same verb Python composes and parses
 A	claim pid must be positive	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: Python and Rust claim parsers must reject non-positive anchors identically
 A	codex_companion_session_id	py=cli/src/fno/harness_identity.py;rs=crates/fno-agents/src/claims.rs	# protocol: the shared Python/Rust ambient scrub inventory must remove this Codex marker on every spawn path
 A	codex_companion_transcript_path	py=cli/src/fno/harness_identity.py;rs=crates/fno-agents/src/claims.rs	# protocol: the shared Python/Rust ambient scrub inventory must remove this Codex marker on every spawn path
@@ -140,6 +144,6 @@ A	plan_path_owner_conflict	py=cli/src/fno/graph/store.py;rs=crates/fno-agents/sr
 A	stale >30d, drained by maintain	py=cli/src/fno/graph/_constants.py;rs=crates/fno-agents/src/graph_keeper.rs	# protocol: the defer-kind classification vocabulary both runtimes must agree on
 A	stale-quarantine (guard)	py=cli/src/fno/graph/_constants.py|cli/src/fno/graph/maintain.py;rs=crates/fno-agents/src/graph_keeper.rs	# protocol: the defer-kind classification vocabulary both runtimes must agree on
 A	{label} must be a non-empty string	py=cli/src/fno/graph/store.py;rs=crates/fno-agents/src/graph_keeper.rs	# msg-twin: the session-row identity validation contract is maintained identically on both sides of the keeper socket
-A	[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}	py=cli/src/fno/graph/_constants.py|cli/src/fno/graph/render_html.py|hooks/git-protection.py;rs=crates/fno-agents/src/heal.rs	# protocol: NODE_ID_BODY; the Rust drive loop reads branch-named node ids exactly as the closure producer writes them
+A	[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}	py=cli/src/fno/graph/_constants.py|cli/src/fno/graph/render_html.py|hooks/git-protection.py;rs=crates/fno-agents/src/heal.rs|crates/fno-agents/src/king_board/queues.rs	# protocol: NODE_ID_BODY; the Rust drive loop reads branch-named node ids exactly as the closure producer writes them; the board's queue parser reads the same row ids
 A	--at applies only to --substrate pane (a thread has no calling pane)	py=cli/src/fno/agents/spawn_defaults.py;rs=crates/fno-agents/src/bin/client.rs	# msg-twin: one placement contract, both runtimes refuse word-identical (the Rust validator mirrors Python's placement_refusal; edit both or single-source)
 A	--tab needs a nonblank selector or pane-group name	py=cli/src/fno/agents/spawn_defaults.py;rs=crates/fno-agents/src/bin/client.rs	# msg-twin: one placement contract, both runtimes refuse word-identical (the Rust validator mirrors Python's placement_refusal; edit both or single-source)

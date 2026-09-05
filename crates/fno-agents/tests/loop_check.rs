@@ -8762,7 +8762,7 @@ fn king_manifest(dir: &Path, fno_id: &str) -> PathBuf {
     fs::write(
         &path,
         format!(
-            "---\nfno_id: {fno_id}\ncreated_at: 2026-08-18T00:00:00Z\nscope: board drain\n\
+            "---\nfno_id: {fno_id}\ncreated_at: 2026-08-18T00:00:00Z\nscope: drain\n\
              harness: claude\nbudget_max_iterations: 40\n---\n"
         ),
     )
@@ -8770,59 +8770,167 @@ fn king_manifest(dir: &Path, fno_id: &str) -> PathBuf {
     path
 }
 
-/// A mock `fno` whose `inbox board --json` prints `payload`.
-fn king_board_bin(dir: &Path, payload: &str, exit: i32) -> PathBuf {
-    make_script(
-        dir,
-        "fno-king-mock",
-        &format!("cat <<'JSON'\n{payload}\nJSON\nexit {exit}"),
-    )
+/// A board the fixture serves. The canned payloads died with the subprocess
+/// board read (x-25b8: the stop gate reads the collector in process), so a
+/// spec now names the graph the fixture writes: the rows of the spec's
+/// undispatched queue become planned, ready, unclaimed nodes, and the
+/// decision comes out the real pipeline. An unparseable spec is the blind
+/// case: the graph source goes dark.
+fn king_board_bin(dir: &Path, payload: &str, _exit: i32) -> PathBuf {
+    let path = dir.join("board-spec.json");
+    fs::write(&path, payload).unwrap();
+    path
 }
 
-#[test]
-fn king_board_invocation_carries_the_selected_manifest_path() {
-    let tmp = TempDir::new().unwrap();
-    let state = king_manifest(tmp.path(), "king-state-path");
-    let record = tmp.path().join("board-args");
-    let script = make_script(
-        tmp.path(),
-        "fno-board-state-record",
-        &format!(
-            "printf '%s' \"$*\" > '{}'\ncat <<'JSON'\n{}\nJSON\n",
-            record.display(),
-            BOARD_CLEAN
+/// Write the fixture graph for `board_spec` and pin config + lane at `cwd`.
+/// The epic `drain` matches the manifest scope; every spec row becomes one
+/// undispatchable planned node.
+fn king_prepare_fixture(cwd: &Path, home: &Path, board_spec: &Path) {
+    let fno_dir = cwd.join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
+    let graph = cwd.join("graph.json");
+    let spec = fs::read_to_string(board_spec).unwrap_or_default();
+    let parsed: Option<serde_json::Value> = serde_json::from_str(&spec).ok();
+    let ids: Vec<String> = parsed
+        .as_ref()
+        .and_then(|v| {
+            let rows = v["queues"]
+                .as_array()?
+                .iter()
+                .find(|q| q["name"] == "undispatched")?["rows"]
+                .as_array()
+                .cloned()?;
+            Some(
+                rows.iter()
+                    .filter_map(|r| r["id"].as_str().map(str::to_string))
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
+    if parsed.is_none() {
+        // Blind: the spec never parsed, so the graph source goes dark and the
+        // collector answers with unreadable queues instead of a payload that
+        // was never possible to fake here.
+        let _ = fs::remove_file(&graph);
+    } else {
+        let nodes: Vec<serde_json::Value> = std::iter::once(serde_json::json!(
+            {"id": "drain", "type": "epic", "status": "ready", "priority": "p1"}
+        ))
+        .chain(ids.into_iter().map(|id| {
+            // parent: the manifest scope compiles to the epic plus its
+            // descendants, so a workable row is a child of `drain`.
+            serde_json::json!({"id": id, "type": "feature", "status": "ready",
+                               "priority": "p0", "plan_path": "/plans/p.md",
+                               "parent": "drain"})
+        }))
+        .collect();
+        fs::write(
+            &graph,
+            serde_json::to_string(&serde_json::json!({ "entries": nodes })).unwrap(),
+        )
+        .unwrap();
+    }
+    fs::write(
+        fno_dir.join("config.toml"),
+        format!(
+            "[paths]\ngraph_json = \"{}\"\noperator_lane = \"{}\"\n",
+            graph.display(),
+            home.join("lane.md").display()
         ),
-    );
-
-    let events = tmp.path().join("events.jsonl");
-    let (code, decision) = king_fire(&state, tmp.path(), &events, &script);
-
-    assert_eq!(code, 0, "{decision}");
-    assert_eq!(decision["actionable"], 0);
-    let args = fs::read_to_string(record).unwrap();
-    assert!(args.contains("inbox board --json --state"), "{args}");
-    assert!(args.contains(state.to_str().unwrap()), "{args}");
+    )
+    .unwrap();
+    fs::write(home.join("lane.md"), "").unwrap();
+    let stubs = home.join("stubs");
+    fs::create_dir_all(&stubs).unwrap();
+    fs::write(stubs.join("gh"), "#!/bin/sh\necho '[]'\n").unwrap();
+    // The batched truth probe shells bare `fno` (claude_ask.rs), so without
+    // this stub every fire pays a real installed-CLI cold start and probes the
+    // operator's live sessions - slow AND non-hermetic.
+    fs::write(stubs.join("fno"), "#!/bin/sh\necho '{}'\n").unwrap();
+    fs::write(
+        stubs.join("fno-py"),
+        "#!/bin/sh\ncase \"$*\" in\n  *\"backlog ready\"*) echo '[]';;\n  *) echo '{}';;\nesac\n",
+    )
+    .unwrap();
+    // Stage the default mock only when absent: king_escalate_bin stages its
+    // argv-recording version FIRST, and this fixture prep runs after it.
+    let mock = home.join("escalate-mock");
+    if !mock.is_file() {
+        make_script(
+            home,
+            "escalate-mock",
+            "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"escalate\" ]; then\n\
+             \x20 echo q-mock\n\
+             \x20 exit 0\n\
+             fi\n\
+             exit 0",
+        );
+    };
+    #[cfg(unix)]
+    for stub in ["gh", "fno-py", "fno"] {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(stubs.join(stub), fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }
 
-fn king_fire(state: &Path, cwd: &Path, events: &Path, fno_bin: &Path) -> (i32, serde_json::Value) {
-    let (code, json) = fno_agents::loopcheck::run_loop_check_capture(&[
-        "loop-check".to_string(),
-        "--driver".to_string(),
-        "king".to_string(),
-        "--state".to_string(),
-        state.to_str().unwrap().to_string(),
-        "--transcript".to_string(),
-        cwd.join("transcript.jsonl").to_str().unwrap().to_string(),
-        "--cwd".to_string(),
-        cwd.to_str().unwrap().to_string(),
-        "--events".to_string(),
-        events.to_str().unwrap().to_string(),
-        "--global-events".to_string(),
-        events.to_str().unwrap().to_string(),
-        "--fno-bin".to_string(),
-        fno_bin.to_str().unwrap().to_string(),
+fn king_spawn(state: &Path, cwd: &Path, events: &Path, home: &Path) -> (i32, serde_json::Value) {
+    king_spawn_with(state, cwd, events, home, &[])
+}
+
+/// `extra` carries per-fire CLI overrides, e.g. a short `--read-timeout-ms`
+/// for the wedged-source test. The bound is the whole FIRE's ceiling (the
+/// board's budget derives from it minus the serialization reserve), so only
+/// a fire that needs a killed read passes one.
+fn king_spawn_with(
+    state: &Path,
+    cwd: &Path,
+    events: &Path,
+    home: &Path,
+    extra: &[&str],
+) -> (i32, serde_json::Value) {
+    let stubs = home.join("stubs");
+    let real_path = std::env::var("PATH").unwrap_or_default();
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_fno-agents"));
+    cmd.args([
+        "loop-check",
+        "--driver",
+        "king",
+        "--state",
+        state.to_str().unwrap(),
+        "--transcript",
+        cwd.join("transcript.jsonl").to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--events",
+        events.to_str().unwrap(),
+        "--global-events",
+        events.to_str().unwrap(),
     ]);
-    (code, serde_json::from_str(&json).unwrap())
+    // The board is read in process, so the fixture `fno` serves exactly one
+    // live read: the escalation verb. Its mock is staged by the fixture and
+    // overwritten by tests that need the argv recorder.
+    cmd.arg("--fno-bin").arg(home.join("escalate-mock"));
+    cmd.args(extra);
+    let out = cmd
+        .env("FNO_CLAIMS_ROOT", home)
+        .env("FNO_HOME", home)
+        .env("PATH", format!("{}:{}", stubs.display(), real_path))
+        .output()
+        .unwrap();
+    let json = serde_json::from_str(&String::from_utf8_lossy(&out.stdout))
+        .unwrap_or(serde_json::Value::Null);
+    (out.status.code().unwrap_or(-1), json)
+}
+
+fn king_fire(
+    state: &Path,
+    cwd: &Path,
+    events: &Path,
+    board_spec: &Path,
+) -> (i32, serde_json::Value) {
+    let home = board_spec.parent().unwrap();
+    king_prepare_fixture(cwd, home, board_spec);
+    king_spawn(state, cwd, events, home)
 }
 
 const BOARD_TWO_ACTIONABLE: &str = r#"{
@@ -8980,12 +9088,16 @@ fn king_arm_blocks_rather_than_certifying_a_board_it_cannot_read() {
 
     let (code, d) = king_fire(&state, cwd, &events, &fno);
 
-    assert_eq!(code, 2, "blind is not clean: {d}");
-    assert_eq!(
-        d["decision"], "block",
-        "the unavailable path stays exit 2 (fail-closed): {d}"
+    // The transport's exit-2 fail-closed path died with the subprocess read:
+    // the collector always answers, and blindness degrades into unreadable
+    // queues. The contract that survives is the one that matters - a blind
+    // board never certifies the king done.
+    assert_eq!(code, 0, "the fire decides on a blind board: {d}");
+    assert_eq!(d["decision"], "block", "blind is not clean: {d}");
+    assert_ne!(
+        d["termination_reason"], "NoWork",
+        "a blind board is not a clean terminal: {d}"
     );
-    assert!(d["reason"].as_str().unwrap().contains("unreadable"));
 }
 
 /// Append one event row to a king journal.
@@ -9349,19 +9461,25 @@ fn an_unknown_driver_is_refused_rather_than_run_against_the_wrong_gate() {
 /// `agents king escalate`
 /// argv, so a test can read back which paths escalated and over what.
 fn king_escalate_bin(dir: &Path, payload: &str, log: &Path) -> PathBuf {
+    // The board half of this mock is dead (the board is read in process).
+    // What remains: the SPEC the fixture pipeline reads, and the escalate
+    // argv recorder this returns implicitly through king_spawn's fixed-name
+    // --fno-bin wiring. Returns the SPEC path, which is what king_fire takes.
+    fs::write(dir.join("board-spec.json"), payload).unwrap();
     make_script(
         dir,
-        "fno-king-escalate-mock",
+        "escalate-mock",
         &format!(
             "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"escalate\" ]; then\n\
              \x20 echo \"$*\" >> {log}\n\
              \x20 echo q-mock\n\
              \x20 exit 0\n\
              fi\n\
-             cat <<'JSON'\n{payload}\nJSON",
+             exit 0",
             log = log.display()
         ),
-    )
+    );
+    dir.join("board-spec.json")
 }
 
 /// Plan verification 7, first half: EVERY NoProgress terminal escalates.
@@ -9795,60 +9913,77 @@ exit 0"#,
     );
 }
 
-/// The king driver's one external read (the board) is bounded too, and a
-/// wedged board blocks with the killed-timeout wording rather than hanging
-/// the king's fire.
+/// The board's reads are bounded by the collector's own budget now (the
+/// transport timeout died with the subprocess board read): a wedged source
+/// dies at its slice, the fire still decides, and the payload names the
+/// killed read.
 #[test]
 fn external_read_timeout_king_board_blocks_named() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     let state = king_manifest(cwd, "k-wedge");
     let events = cwd.join("events.jsonl");
-    let bins = TempDir::new().unwrap();
-    // The mock must answer the harness's `--version` probe instantly: an
-    // unconditional sleep costs the setup 30s before the fire even starts
-    // (make_script probe-runs every generated script once).
-    let fno = make_script(
-        bins.path(),
-        "fno-king-mock",
-        "[ \"$1\" = \"--version\" ] && exit 0\nsleep 30",
-    );
+    let bin_dir = TempDir::new().unwrap();
+    let spec = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+    king_prepare_fixture(cwd, bin_dir.path(), &spec);
+
+    // Exactly the `backlog ready` read never answers; every other read of the
+    // same binary answers clean, so the timeout is attributable to ONE slice.
+    let stubs = bin_dir.path().join("stubs");
+    fs::write(
+        stubs.join("fno-py"),
+        "#!/bin/sh\ncase \"$*\" in\n  *\"backlog ready\"*) sleep 30;;\n  *) echo '{}';;\nesac\n",
+    )
+    .unwrap();
 
     let started = std::time::Instant::now();
-    let (code, json) = fno_agents::loopcheck::run_loop_check_capture(&[
-        "loop-check".to_string(),
-        "--driver".to_string(),
-        "king".to_string(),
-        "--state".to_string(),
-        state.to_str().unwrap().to_string(),
-        "--transcript".to_string(),
-        cwd.join("transcript.jsonl").to_str().unwrap().to_string(),
-        "--cwd".to_string(),
-        cwd.to_str().unwrap().to_string(),
-        "--events".to_string(),
-        events.to_str().unwrap().to_string(),
-        "--global-events".to_string(),
-        events.to_str().unwrap().to_string(),
-        "--fno-bin".to_string(),
-        fno.to_str().unwrap().to_string(),
-        "--read-timeout-ms".to_string(),
-        "1000".to_string(),
-    ]);
-    let elapsed = started.elapsed();
-    let d: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(d["decision"], "block", "{d}");
-    let reason = d["reason"].as_str().unwrap();
-    assert!(
-        reason.contains("external read 'king_board' timed out after"),
-        "the king block reason must name the wedged board read: {reason}"
+    let (code, json) = king_spawn_with(
+        &state,
+        cwd,
+        &events,
+        bin_dir.path(),
+        &["--read-timeout-ms", "6000"],
     );
+    let elapsed = started.elapsed();
+    let d = json;
+    assert_eq!(d["decision"], "block", "{d}");
     assert!(
         elapsed < std::time::Duration::from_secs(10),
-        "king fire must return within the bound plus slack, took {elapsed:?}"
+        "a wedged source must die at its slice, not hang the fire: {elapsed:?}"
     );
     assert_eq!(
-        code, 2,
-        "a king block exits 2 like the non-empty board: {code}"
+        code, 0,
+        "a block keeps the king running like any non-empty board: {code}"
+    );
+
+    // The killed read is named where the payload carries it.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .args([
+            "board",
+            "--json",
+            "--budget-ms",
+            "5000",
+            "--state",
+            state.to_str().unwrap(),
+        ])
+        .env("FNO_CLAIMS_ROOT", bin_dir.path())
+        .env("FNO_HOME", bin_dir.path())
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                stubs.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .output()
+        .unwrap();
+    let board: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    let ready_err = board["sources"]["ready"]["error"].as_str().unwrap_or("");
+    assert!(
+        ready_err.contains("timed out after"),
+        "the killed source is named in the payload: {ready_err}"
     );
 }
 
