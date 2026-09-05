@@ -1566,112 +1566,12 @@ def force_release_claim(
             release_dir_mutex(recovery_lock, recovery_token)
 
 
-def _pid_holder_map(dirs: list[Path]) -> dict[tuple[str, int], dict[str, Path]]:
-    """Sweep-time PID-exclusivity evidence: which distinct holders each
-    ``(machine, pid)`` pair names across the swept roots, with one claim
-    file per holder so the mutex re-verify can re-read just the siblings
-    (see :func:`_pid_exclusive_rechecked`).
-
-    The property a single claim cannot carry: a pid identifies a session only
-    when it is the ONLY holder it answers for. A daemon-hosted substrate
-    honestly resolves every session it hosts to the daemon's pid, so
-    provenance-true claims from distinct holders can share one live pid
-    (ab-6d5afbde: seven claims on one app-server pid, every one reading LIVE
-    forever, none reapable, all consuming max_live permanently). Counting
-    DISTINCT holders - never claim files, which one session legitimately
-    writes several of - is what keeps the legitimate same-holder shape
-    exclusive.
-
-    Keyed by ``(machine_id or host, pid)`` because a pid is host-local: the
-    same number on two machines names two processes. Claims whose machine
-    identity spelling differs (a legacy no-machine_id row beside a modern
-    one) simply do not group, which reads exclusive - the safe direction.
-
-    A claim that cannot be read contributes no holder; the sweep's own
-    corrupted/vanished bucketing already reports those files.
-    """
-    holders: dict[tuple[str, int], dict[str, Path]] = {}
-    for cdir in dirs:
-        if not cdir.is_dir():
-            continue
-        for entry in sorted(cdir.iterdir()):
-            if entry.is_dir() or not entry.name.endswith(".lock"):
-                continue
-            try:
-                claim = read_claim_file(entry)
-            except Exception:  # noqa: BLE001 - an unreadable claim is no sibling evidence
-                continue
-            if claim.pid is None:
-                continue
-            holders.setdefault((claim.machine_id or claim.host, claim.pid), {})[claim.holder] = (
-                entry
-            )
-    return holders
-
-
-def _pid_exclusive(
-    claim: Claim, holder_map: dict[tuple[str, int], dict[str, Path]]
-) -> Optional[bool]:
-    """Does the claim's pid name exactly one distinct holder?
-
-    ``None`` (unknown) when the claim has no pid or the map predates the
-    claim's write - absent sibling evidence must never read as
-    exclusive-by-absence; ``classify`` keeps the claim's own evidence
-    deciding.
-    """
-    if claim.pid is None:
-        return None
-    named = holder_map.get((claim.machine_id or claim.host, claim.pid))
-    if named is None:
-        return None
-    return len(named) <= 1
-
-
-def _pid_exclusive_rechecked(
-    claim: Claim,
-    holder_map: dict[tuple[str, int], dict[str, Path]],
-    archived_this_run: set[Path],
-) -> Optional[bool]:
-    """Mutex-time exclusivity for one claim: re-read ONLY this pid's sibling
-    files the scan map named, never the whole store.
-
-    The one direction that can flip a verdict under the recovery mutex is a
-    sibling going away (shared -> exclusive -> possibly LIVE, must not
-    archive) or being replaced by a different holder, and both are answered
-    by those few files. A sibling APPEARING cannot matter here: a claim the
-    scan read as exclusive corroborated to LIVE and never became a reap
-    candidate in this sweep.
-
-    Two going-away shapes differ. A sibling ARCHIVED BY THIS SWEEP was
-    sharing evidence when the set was judged non-exclusive, and the survivor
-    must keep reading it that way - otherwise apply drains one member per
-    sweep while the dry run promised N, and each survivor becomes the sole
-    record for the pid and lives forever (ab-6d5afbde). Any OTHER absent
-    sibling (its holder's own release, a concurrent recovery) genuinely
-    stops naming a holder.
-    """
-    if claim.pid is None:
-        return None
-    named = holder_map.get((claim.machine_id or claim.host, claim.pid))
-    if named is None:
-        return None
-    holders: set[str] = set()
-    for holder, path in named.items():
-        if path in archived_this_run:
-            holders.add(holder)
-            continue
-        try:
-            holders.add(read_claim_file(path).holder)
-        except Exception:  # noqa: BLE001 - a vanished/unreadable sibling stops naming a holder
-            continue
-    return len(holders) <= 1
 
 
 def sweep_verdict(
     claim: Claim,
     *,
     now: Optional[int] = None,
-    pid_exclusive: Optional[bool] = None,
     abandonment_probe: Optional[Callable[[Claim], Optional[bool]]] = None,
     node_settlement: Optional[Callable[..., Optional[bool]]] = None,
     native_verdict: Optional[dict[str, Any]] = None,
@@ -1688,10 +1588,6 @@ def sweep_verdict(
     ``True`` settles (reapable); anything else falls through to liveness,
     which stays the authority for every unsettled shape.
 
-    native ``classify_for_sweep`` plus the roster probe on the
-    one case a pid cannot settle: a ``node:`` claim reading SUSPECT, whose
-    holder is a session and so genuinely might come back under a new pid.
-
     THE single reap decision. The sweep's lock-free triage, its under-mutex
     re-verify, and the spawn guard's targeted recovery all call this, so no two
     of them can drift into different answers about the same claim - the shape
@@ -1701,13 +1597,6 @@ def sweep_verdict(
     probe was supplied), ``"suspect_alive"`` (a worker is on the node) and
     ``"suspect_unprobed"`` (the probe could not run). The last two are kept
     apart deliberately: one is a measurement and the other is its absence.
-
-    ``pid_exclusive`` is the sweep's sibling evidence (ab-6d5afbde): a
-    prover-proven pid shared across DISTINCT holders cannot corroborate an
-    expired lease, so the claim reads SUSPECT and the instruments below -
-    not the shared daemon pid - settle it. ``None`` keeps today's behavior
-    for every caller without sibling context (the spawn guard's single-key
-    recovery).
     """
     verdict = native_verdict or _claim_verdict(claim)
     if node_settlement is not None and claim.key.startswith("node:"):

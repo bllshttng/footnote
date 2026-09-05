@@ -152,23 +152,19 @@ def _reclaim_if_provably_dead(
         if key.startswith("dispatch:"):
             # The reservation's own predicate, deliberately NOT in the shared
             # sweep classifier. `spawn-cli:<pid>` launches a worker and exits, so
-            # a dead pid means no launch is in flight from that process. A
-            # background sweep must not act on that (the TTL is the boot window,
-            # see the native classify_for_sweep decision), but THIS caller is the next
-            # dispatcher, standing at the moment of launch, and it takes the node
-            # claim itself, which covers the window the reservation protected.
-            #
-            # ONLY this dispatcher's own holder shape. `fno backlog advance`
-            # reserves the same key as `advance:<pid>` and spawns WITHOUT
-            # --node, so no node claim is taken and that reservation is the only
-            # barrier its booting worker has. Its pid is dead by design too, so
-            # a predicate reading dead-pid-and-same-host alone cleared it and
-            # launched a second worker onto the node advance had just staffed.
-            # LIVENESS FIRST. A live holder is benign dedup whoever wrote it,
-            # and answering `foreign-reservation` there would lose the one
-            # discriminator callers use to tell dedup from a wedge - they would
-            # print force-release advice against a reservation somebody is
-            # actively launching under.
+            # a dead pid means no launch is in flight from that process (the TTL
+            # is the boot window; see the native classify_for_sweep decision),
+            # but THIS caller is the next dispatcher, standing at the moment of
+            # launch: the node claim it takes covers the window the reservation
+            # protected. ONLY this dispatcher's own holder shape. `fno backlog
+            # advance` reserves the same key as `advance:<pid>` and spawns
+            # WITHOUT --node, so that reservation is the only barrier its
+            # booting worker has; its pid is dead by design too, so a predicate
+            # reading dead-pid-and-same-host alone cleared it and launched a
+            # second worker onto the node advance had just staffed. LIVENESS
+            # FIRST. A live holder is benign dedup whoever wrote it: answering
+            # `foreign-reservation` there would print force-release advice
+            # against a reservation somebody is actively launching under.
             if native.get("state") == "live":
                 return None, _HOLDER_ALIVE
             if native.get("bucket") == "offhost":
