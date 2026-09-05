@@ -230,7 +230,19 @@ pub fn encode_key(key: &str) -> String {
 /// Claim prefixes whose identifier is globally unique (mirrors
 /// `io._GLOBAL_ID_PREFIXES`): these coordinate across worktrees/repos via the
 /// global root, never a cwd-local dir.
-const GLOBAL_ID_PREFIXES: &[&str] = &["node", "dispatch", "reconcile", "session", "config-optout"];
+///
+/// `flight:` is here because the fan-out it latches is machine-wide: the seven
+/// concurrent `agents truth` children that motivated it came from five parents
+/// in different worktrees. A cwd-local root would give each of them its own
+/// lock and dedupe nothing.
+const GLOBAL_ID_PREFIXES: &[&str] = &[
+    "node",
+    "dispatch",
+    "reconcile",
+    "session",
+    "config-optout",
+    "flight",
+];
 
 /// Dotted configuration keys whose opt-out values are backed by global claims.
 /// Python owns the value membership and tests the source-level parity; Rust
@@ -1023,7 +1035,14 @@ fn archive_claim(path: &Path, ts_ms: i64) -> std::io::Result<()> {
 /// the atomic append bound. This path uses a short bounded wait because it runs
 /// on daemon hot paths; a wedged lock logs and skips rather than blocking. The
 /// lockfile write is authoritative; this log is observability only.
-fn emit_claim_event(events_dir: Option<&Path>, type_name: &str, data: Map<String, Value>) {
+///
+/// Shared with [`crate::single_flight`], which is built on these claims and
+/// must land its gate event in the same journal.
+pub(crate) fn emit_audit_event(
+    events_dir: Option<&Path>,
+    type_name: &str,
+    data: Map<String, Value>,
+) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let events_path = claim_events_path(events_dir, &cwd);
     let event = json!({
@@ -1825,7 +1844,7 @@ pub fn acquire(key: &str, holder: &str, opts: AcquireOpts) -> AcquireOutcome {
 
         match atomic_create_exclusive(&path, &payload) {
             Ok(()) => {
-                emit_claim_event(
+                emit_audit_event(
                     events_dir.as_deref(),
                     "claim_acquired",
                     acquired_event_data(&new_claim),
@@ -1906,7 +1925,7 @@ fn idempotent_reacquire(
         "previous_acquired_at".into(),
         Value::Number(existing.acquired_at.into()),
     );
-    emit_claim_event(events_dir, "claim_idempotent_reacquired", data);
+    emit_audit_event(events_dir, "claim_idempotent_reacquired", data);
     AcquireOutcome::Acquired(refreshed)
 }
 
@@ -2066,7 +2085,7 @@ fn recover_stale_locked(
             // between the gone-away read and this call sends us back around.
             return match atomic_create_exclusive(path, &payload) {
                 Ok(()) => {
-                    emit_claim_event(
+                    emit_audit_event(
                         events_dir,
                         "claim_acquired",
                         acquired_event_data(&new_claim),
@@ -2119,7 +2138,7 @@ fn recover_stale_locked(
                 "previous_pid".into(),
                 existing.pid.map(Value::from).unwrap_or(Value::Null),
             );
-            emit_claim_event(events_dir, "claim_stale_reclaimed", data);
+            emit_audit_event(events_dir, "claim_stale_reclaimed", data);
             RecoverResult::Done(AcquireOutcome::Acquired(new_claim))
         }
         Err(CreateError::AlreadyHeld) => RecoverResult::Retry,
@@ -2171,7 +2190,7 @@ pub fn release(
     }
     let mut data = common_event_data(&existing);
     data.insert("duration_held_ms".into(), Value::Number(duration_ms.into()));
-    emit_claim_event(events_dir, "claim_released", data);
+    emit_audit_event(events_dir, "claim_released", data);
     Ok(())
 }
 

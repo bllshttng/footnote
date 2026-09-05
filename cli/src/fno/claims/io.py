@@ -117,10 +117,25 @@ def global_claims_dir() -> Path:
 #                  (loopcheck/finalize) resolve this prefix to the global root
 #                  too; a Python write landing anywhere else is a lease the
 #                  merge lane cannot see.
+# - flight:<argv>  the single-flight latch on an identical fno invocation. The
+#                  fan-out it deletes is machine-wide (seven concurrent
+#                  `agents truth` children from five parents in different
+#                  worktrees), so a cwd-local root would dedupe nothing. Rust
+#                  owns the latch; this entry keeps `fno agents claim status`
+#                  reading the same lockfile.
 # Keys whose identifier is a repo-local resource (walker:<repo_root>) embed
 # their own scope and are NOT listed here; they keep the cwd/env default.
 _GLOBAL_ID_PREFIXES = frozenset(
-    {"node", "dispatch", "reconcile", "session", "groom", "update", "config-optout"}
+    {
+        "node",
+        "dispatch",
+        "reconcile",
+        "session",
+        "groom",
+        "update",
+        "config-optout",
+        "flight",
+    }
 )
 
 
