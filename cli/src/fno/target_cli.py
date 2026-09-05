@@ -2963,7 +2963,7 @@ def _read_node_claim(node_id: str) -> Optional[dict]:
         return None
 
 
-def _classify_node_claim(node_id: str) -> tuple[str, Optional[dict]]:
+def _classify_node_claim(node_id: str, *, info: Optional[dict] = None) -> tuple[str, Optional[dict]]:
     """``(verdict, info)`` for ``node:<id>`` from THIS session's view.
 
     verdict in ``{ours, foreign_live, dead_predecessor, free}``. Liveness is
@@ -2971,9 +2971,11 @@ def _classify_node_claim(node_id: str) -> tuple[str, Optional[dict]]:
     the surface that lets a caller park a second session instead of being told
     the owner went idle. Read-only, never raises; a probe failure reads as
     ``free`` (a re-acquire candidate) so an unreadable claims dir never wedges
-    start.
+    start. ``info`` overrides the claim read (a batch verdict row), so every
+    caller maps state through this one function.
     """
-    info = _read_node_claim(node_id)
+    if info is None:
+        info = _read_node_claim(node_id)
     if not info:
         return ("free", None)
     state = info.get("state")
@@ -3063,7 +3065,7 @@ def _classify_worktree_occupancy(wt_path: Path) -> tuple[str, Optional[dict]]:
     if not session_id:
         return "unknown", {"reason": "session-id-unavailable"}
     try:
-        from fno.agents.watchdog import REAP_QUIET_AFTER_S, finished_with_the_tree, tail_facts
+        from fno.agents.watchdog import QUIET_AFTER_S, finished_with_the_tree, tail_facts
 
         facts = tail_facts(
             session_id,
@@ -3084,7 +3086,7 @@ def _classify_worktree_occupancy(wt_path: Path) -> tuple[str, Optional[dict]]:
     # disagree about the same session - a silent-but-ENGAGED tail read
     # available to a successor while reap refused to touch it, and a dead
     # worker occupied its tree an hour past the fleet's quiet window.
-    if not finished_with_the_tree(facts, time.time(), REAP_QUIET_AFTER_S):
+    if not finished_with_the_tree(facts, time.time(), QUIET_AFTER_S):
         return "occupied_worktree", {
             "session_id": session_id,
             "age_s": int(max(0.0, time.time() - last_epoch)),

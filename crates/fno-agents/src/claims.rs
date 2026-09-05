@@ -1,14 +1,14 @@
-//! Native work-claim substrate: a second implementation of the lockfile
-//! protocol owned by `cli/src/fno/claims/` (Python stays the reference
-//! implementation and the only CLI surface).
+//! Native work-claim substrate: Rust owns the lockfile decisions and the
+//! complete liveness fact set; Python remains the CLI surface and calls the
+//! native verdict door for reads.
 //!
-//! Scope is consumer-driven: `acquire` / `release` / `status` plus the
-//! liveness classifier — exactly what the daemon/adopt/drive/stream-worker
-//! call sites need. Everything else (`list`, `refresh`, `force-release`,
-//! lane slots) remains Python-only.
+//! The claim decision is native and batch-shaped: `list`, `sweep`, `status`,
+//! and liveness classification share one fact set so a Python caller does not
+//! shell once per claim. Mutation verbs and lane-specific policy remain on the
+//! Python CLI surface.
 //!
 //! Protocol parity is the contract, not just passing tests. Source of truth:
-//! `cli/src/fno/claims/{types,io,core,staleness}.py` and
+//! `cli/src/fno/claims/{types,io,core,verdict}.py` and
 //! `docs/architecture/coordination.md`. Load-bearing wire details a second
 //! implementation must reproduce exactly:
 //!
@@ -328,6 +328,79 @@ pub(crate) fn flight_dir(root: &Path) -> PathBuf {
     root.join(FLIGHT_DIRNAME)
 }
 
+/// Enumerate readable claims from the global store and an optional repository
+/// store. The caller supplies the repository root; both stores are one logical
+/// view because a global node claim and a worktree-local claim can describe the
+/// same coordination key. A root read failure returns an empty view so callers
+/// fail toward report-only rather than applying on partial facts.
+pub fn list(prefix: Option<&str>, root: Option<&Path>, include_stale: bool) -> Vec<ClaimRecord> {
+    let mut dirs = Vec::new();
+    if let Some(global) = global_claims_root() {
+        dirs.push(global.join(CLAIMS_DIRNAME));
+    }
+    if let Some(local) = root {
+        dirs.push(local.join(CLAIMS_DIRNAME));
+    }
+    list_in(&dirs, prefix, include_stale)
+}
+
+/// Scan VERBATIM directories. Spaces-era claims live directly at
+/// `<space>/claims`, a layout no explicit-root spelling of [`list`] reaches
+/// (`--root` appends `.fno/claims` for repo-checkout roots).
+pub fn list_in(dirs: &[PathBuf], prefix: Option<&str>, include_stale: bool) -> Vec<ClaimRecord> {
+    let mut seen_dirs = std::collections::BTreeSet::new();
+    let mut best: std::collections::BTreeMap<String, (u8, ClaimRecord)> =
+        std::collections::BTreeMap::new();
+    for dir in dirs {
+        let identity = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if !seen_dirs.insert(identity) {
+            continue;
+        }
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Vec::new(),
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return Vec::new();
+            };
+            let Ok(file_type) = entry.file_type() else {
+                return Vec::new();
+            };
+            if !file_type.is_file() || !entry.file_name().to_string_lossy().ends_with(".lock") {
+                continue;
+            }
+            let Ok(rec) = read_claim_file(&entry.path()) else {
+                // The list contract is records, not diagnostics. Corrupted
+                // rows are withheld exactly as an unreadable root is: they
+                // cannot authorize an apply pass.
+                continue;
+            };
+            if prefix.is_some_and(|wanted| !rec.key.starts_with(wanted)) {
+                continue;
+            }
+            let state = classify(&rec, None);
+            let priority = match state {
+                ClaimState::Live => 0,
+                ClaimState::Suspect => 1,
+                ClaimState::Stale => 2,
+                ClaimState::Free | ClaimState::Corrupted => continue,
+            };
+            if !include_stale && priority > 1 {
+                continue;
+            }
+            let replace = best
+                .get(&rec.key)
+                .is_none_or(|(current, _)| priority < *current);
+            if replace {
+                best.insert(rec.key.clone(), (priority, rec));
+            }
+        }
+    }
+    best.into_values().map(|(_, rec)| rec).collect()
+}
+
 // ---------------------------------------------------------------------------
 // Time, host, and process liveness
 // ---------------------------------------------------------------------------
@@ -415,7 +488,7 @@ fn platform_machine_id() -> String {
 ///
 /// Cached: the macOS arm shells out to `ioreg`, and a sweep reads many
 /// lockfiles against one machine identity.
-fn machine_id() -> String {
+pub fn machine_id() -> String {
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CACHE.get_or_init(platform_machine_id).clone()
 }
@@ -471,6 +544,7 @@ pub mod basis {
     pub const ACCESS_DENIED: &str = "access-denied";
     pub const PID_REUSE: &str = "pid-reuse";
     pub const TTL_EXPIRED: &str = "ttl-expired";
+    pub const PID_SHARED: &str = "pid-shared";
 }
 
 /// Ask the OS what the pid's holder create time is, and name the failure.
@@ -658,6 +732,18 @@ pub fn classify_with_basis(
     now: Option<i64>,
     probe: &dyn Fn(i32) -> PidProbe,
 ) -> (ClaimState, &'static str) {
+    classify_with_basis_and_exclusivity(rec, now, probe, None)
+}
+
+/// Classify with optional sweep-time sibling evidence. `None` is the honest
+/// value for single-key reads; a full scan passes the PID exclusivity map's
+/// result for the record being classified.
+pub fn classify_with_basis_and_exclusivity(
+    rec: &ClaimRecord,
+    now: Option<i64>,
+    probe: &dyn Fn(i32) -> PidProbe,
+    pid_exclusive: Option<bool>,
+) -> (ClaimState, &'static str) {
     let now = now.unwrap_or_else(now_ms);
     if is_expired(rec, now) {
         // Corroborated hybrid: the pid keeps the claim Live only when it was
@@ -682,6 +768,9 @@ pub fn classify_with_basis(
         {
             let (live, cause) = liveness_reading(rec, probe);
             if live {
+                if pid_exclusive == Some(false) {
+                    return (ClaimState::Suspect, basis::PID_SHARED);
+                }
                 return (ClaimState::Live, cause);
             }
         }
@@ -706,6 +795,56 @@ pub fn classify_with_basis(
     } else {
         (ClaimState::Suspect, cause)
     }
+}
+
+/// Classify one claim for a garbage-collection sweep. The bool is true only
+/// when the claim is provably dead from this host; otherwise the bucket names
+/// the reason it remains protected or opaque.
+pub fn classify_for_sweep(
+    rec: &ClaimRecord,
+    now: Option<i64>,
+    probe: &dyn Fn(i32) -> PidProbe,
+    pid_exclusive: Option<bool>,
+) -> (bool, &'static str) {
+    let now = now.unwrap_or_else(now_ms);
+    let same_machine = is_same_machine(&rec.host, rec.machine_id.as_deref());
+    let unidentifiable = rec.machine_id.is_none();
+    if !same_machine && !(unidentifiable && is_expired(rec, now)) {
+        return (false, basis::OFFHOST);
+    }
+    let (state, _) = classify_with_basis_and_exclusivity(rec, Some(now), probe, pid_exclusive);
+    if state == ClaimState::Stale {
+        return (true, "");
+    }
+    (
+        false,
+        if state == ClaimState::Suspect {
+            "suspect"
+        } else {
+            "live"
+        },
+    )
+}
+
+/// Return sweep-time PID exclusivity keyed by the machine identity and pid.
+/// A false value means one prover-visible pid names more than one distinct
+/// holder; a single-key caller must pass `None` to classification because it
+/// has no sibling evidence from which to establish this property.
+pub fn pid_exclusivity(records: &[ClaimRecord]) -> std::collections::BTreeMap<(String, i32), bool> {
+    let mut holders: std::collections::BTreeMap<(String, i32), std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for rec in records {
+        let Some(pid) = rec.pid else { continue };
+        let identity = rec.machine_id.clone().unwrap_or_else(|| rec.host.clone());
+        holders
+            .entry((identity, pid))
+            .or_default()
+            .insert(rec.holder.clone());
+    }
+    holders
+        .into_iter()
+        .map(|(key, holders)| (key, holders.len() <= 1))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -3503,6 +3642,60 @@ mod tests {
     }
 
     #[test]
+    fn sweep_classification_preserves_expiry_host_and_shared_pid_rules() {
+        let me = std::process::id() as i32;
+        let host = hostname();
+        let now = now_ms();
+        let mut proven = record(me, now, Some(now - 1), &host);
+        proven.pid_provenance = Some("session-prover".into());
+
+        assert_eq!(
+            classify_for_sweep(&proven, Some(now), &probe_pid, None),
+            (false, "live")
+        );
+        assert_eq!(
+            classify_for_sweep(&proven, Some(now), &probe_pid, Some(false)),
+            (false, "suspect")
+        );
+        assert_eq!(
+            classify_for_sweep(
+                &record(-1, now, Some(now - 1), &host),
+                Some(now),
+                &probe_pid,
+                None
+            ),
+            (true, "")
+        );
+        assert_eq!(
+            classify_for_sweep(
+                &record(me, now, None, "elsewhere.example"),
+                Some(now),
+                &probe_pid,
+                None,
+            ),
+            (false, "offhost")
+        );
+    }
+
+    #[test]
+    fn pid_exclusivity_counts_distinct_holders_not_claim_files() {
+        let me = std::process::id() as i32;
+        let host = hostname();
+        let mut first = record(me, now_ms(), None, &host);
+        first.holder = "holder-a".into();
+        let mut same_holder = first.clone();
+        same_holder.key = "session:y".into();
+        let mut other_holder = first.clone();
+        other_holder.key = "session:z".into();
+        other_holder.holder = "holder-b".into();
+
+        let one_holder = pid_exclusivity(&[first.clone(), same_holder]);
+        assert_eq!(one_holder.get(&(host.clone(), me)), Some(&true));
+        let shared = pid_exclusivity(&[first, other_holder]);
+        assert_eq!(shared.get(&(host, me)), Some(&false));
+    }
+
+    #[test]
     fn probe_pid_reads_absent_for_an_impossible_pid() {
         // The errno consult must not honor a stale EPERM from an unrelated
         // earlier call: a pid no OS can have assigned is ABSENT (provably
@@ -3844,6 +4037,43 @@ mod tests {
         let rec = rec.unwrap();
         assert_eq!(rec.holder, "pty:me");
         assert_eq!(rec.metadata, meta);
+    }
+
+    #[test]
+    fn list_reads_global_and_local_roots_and_filters_by_prefix() {
+        let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let global = TempDir::new().unwrap();
+        let local = TempDir::new().unwrap();
+        let previous = std::env::var_os("FNO_CLAIMS_ROOT");
+        std::env::set_var("FNO_CLAIMS_ROOT", global.path());
+
+        let mut global_opts = opts_in(&global);
+        global_opts.pid = Some(std::process::id());
+        assert!(matches!(
+            acquire("reap:global", "global-holder", global_opts),
+            AcquireOutcome::Acquired(_)
+        ));
+        let mut local_opts = opts_in(&local);
+        local_opts.pid = Some(std::process::id());
+        assert!(matches!(
+            acquire("reap:local", "local-holder", local_opts),
+            AcquireOutcome::Acquired(_)
+        ));
+        let mut filtered_opts = opts_in(&local);
+        filtered_opts.pid = Some(std::process::id());
+        assert!(matches!(
+            acquire("node:not-reap", "node-holder", filtered_opts),
+            AcquireOutcome::Acquired(_)
+        ));
+
+        let rows = list(Some("reap:"), Some(local.path()), false);
+        let keys: Vec<_> = rows.iter().map(|row| row.key.as_str()).collect();
+        assert_eq!(keys, vec!["reap:global", "reap:local"]);
+
+        match previous {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
     }
 
     // ---- recovery mutex (contract item 6) ---------------------------------

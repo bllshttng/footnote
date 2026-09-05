@@ -108,25 +108,46 @@ NO_EVIDENCE = "no-evidence"
 #: Basis when a transcript resolved but has gone quiet. NOT a death sentence.
 SILENT = "silent"
 
-#: The older wire vocabulary `--status` filters on and the Rust table renders.
-#: Kept stable so this derivation stays additive for every existing consumer; the
-#: verdict, its basis, and its age ride alongside in their own fields rather than
-#: by redefining a word other code already parses.
-#:
-#: Note UNKNOWN, not UNREACHABLE, is where a quiet row lands: silence is absence
-#: of evidence, and only an affirmative falsifier condemns a row. The visible
-#: effect is that rows which used to read `orphaned` purely for being quiet now
-#: read `unknown` with their age attached.
-#:
-#: Lives here rather than beside either caller because BOTH lanes of
-#: ``fno agents list`` render into it -- registry rows and the discovered
-#: live-sessions lane -- and a second copy is how the two lanes ended up
-#: disagreeing inside one payload.
+#: The older wire vocabulary `--status` filtered on, before x-c672 replaced
+#: the `live` token with served activity. Kept only as the historical note for
+#: readers chasing an old `--status live` invocation; nothing renders these
+#: words anymore. `rendered_activity` below is the one status word now, and it
+#: answers what the session is DOING, not whether a store claims it live.
 WIRE_STATUS = {
     REACHABLE: "live",
     UNREACHABLE: "orphaned",
     UNKNOWN: "unknown",
 }
+
+#: The attention window the activity word keys on: a transcript that moved
+#: inside it is `writing`. Mirrors the daemon's `STALE_ATTENTION_S` (the
+#: crates do not link, so the shared fixture in schemas/ is what pins them).
+ACTIVITY_ATTENTION_S = 600
+
+
+def rendered_activity(
+    *,
+    truth_state: Optional[str],
+    age_s: Optional[float],
+    reachability: str,
+) -> str:
+    """The STATUS word both ``fno agents list`` lanes render (x-c672, AC7).
+
+    Served activity, never a ``live`` token: ``writing`` (the transcript
+    moved inside :data:`ACTIVITY_ATTENTION_S`), ``quiet`` (older), ``parked``
+    (the tail closed a promise), with the measured age riding the row in its
+    own field. A positively falsified row reads ``orphaned``, and a probe
+    that answered nothing reads ``unknown``. Nothing DECIDES on this word:
+    retirement reads the reverse join and the lanes read their own probes,
+    so the column is free to answer the operator's actual question.
+    """
+    if reachability == UNREACHABLE:
+        return "orphaned"
+    if truth_state == "done":
+        return "parked"
+    if age_s is None:
+        return "unknown"
+    return "writing" if age_s < ACTIVITY_ATTENTION_S else "quiet"
 
 #: Truth states that are positive evidence of activity. ``done`` is deliberately
 #: absent: a worker that emitted <promise> finished its MISSION, which says

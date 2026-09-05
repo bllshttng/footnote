@@ -216,7 +216,13 @@ def test_bg_permission_mode_non_claude_fails_closed(runner, monkeypatch):
     """codex bg/headless via the Python fallback refuses --permission-mode
     (its one-shot lane hardcodes its bypass); mirrors the Rust guard."""
     _stub_pane_path(monkeypatch)
+    from fno import rust_binary
     from fno.agents.cli import agents_app
+
+    # Force the Python fallback: a smoke run may leave a real fno-agents
+    # reachable for the claim door, which would route this to the Rust guard.
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
 
     result = runner.invoke(
         agents_app,
@@ -232,7 +238,13 @@ def test_bg_permission_mode_claude_honored_via_python(runner, monkeypatch):
     """claude bg via the Python fallback HONORS --permission-mode (it threads to
     _claude_create_path -> bg_create), never a hard-fail. Regression guard for
     the availability bug where a config default hard-failed autonomous dispatch."""
+    from fno import rust_binary
     from fno.agents import dispatch, spawn_gate
+
+    # Force the Python fallback: a smoke run may leave a real fno-agents
+    # reachable for the claim door, which would route this to the Rust runtime.
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
 
     captured: dict = {}
 
@@ -267,7 +279,13 @@ def test_bg_permission_mode_claude_honored_via_python(runner, monkeypatch):
 def test_bg_yolo_receipt_names_bypass_via_python(runner, monkeypatch):
     """--yolo on the Python claude bg fallback names bypassPermissions in the
     receipt (audit parity with the Rust bg receipt)."""
+    from fno import rust_binary
     from fno.agents import dispatch, spawn_gate
+
+    # Force the Python fallback: a smoke run may leave a real fno-agents
+    # reachable for the claim door, which would route this to the Rust runtime.
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
 
     class _Gate:
         def release(self) -> None:

@@ -36,8 +36,7 @@ from fno.claims.core import (
     release_claim,
 )
 from fno.claims.io import claim_path, claims_dir, read_claim_file, serialize_claim
-from fno.claims.staleness import now_ms
-from fno.claims.types import Claim, ClaimState
+from fno.claims.types import Claim, ClaimState, now_ms
 
 
 HOLDER_A = "target-session:sid-a"
@@ -213,7 +212,7 @@ class TestAcquire:
         dead_pid = 999_999
         while psutil.pid_exists(dead_pid):
             dead_pid += 1
-        from fno.claims.staleness import now_ms
+        from fno.claims.types import now_ms
         stale = Claim(
             key="k",
             holder=HOLDER_A,
@@ -240,7 +239,7 @@ class TestAcquire:
         The recorded pid must be dead: under the hybrid liveness arm an
         expired TTL claim whose pid is still ALIVE on this host stays LIVE
         and is NOT reclaimable (see test_hybrid_expired_live_pid_not_reclaimable)."""
-        from fno.claims.staleness import now_ms
+        from fno.claims.types import now_ms
         dead_pid = 999_999
         while psutil.pid_exists(dead_pid):
             dead_pid += 1
@@ -793,7 +792,7 @@ class TestList:
         assert [r["key"] for r in results] == ["node:ab-1"]
 
     def test_AC5_FR_list_excludes_stale_by_default(self, tmp_path):
-        from fno.claims.staleness import now_ms
+        from fno.claims.types import now_ms
         # Write an expired TTL claim whose holder is DEAD. Under hybrid liveness
         # (ab-cc5553f2) an expired TTL claim with a still-LIVE on-host pid stays
         # LIVE, so pinning pid=os.getpid() here made the claim flip to LIVE once

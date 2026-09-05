@@ -28,6 +28,7 @@
 //! owns, so both the process-table walk and the socket-dir walk find it.
 
 use crate::graph_store::{self, FieldUpdate, MutateInput, StoreError};
+use crate::identity::{harness_of_session_id, shape_known_harness};
 use serde_json::{json, Map, Value};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -1006,6 +1007,17 @@ fn session_row(
             )));
         }
     }
+    // An id whose shape names one of the shape-known harnesses refuses a
+    // stamp naming another: the wrong-harness stamp is how phantom twin rows
+    // get minted (a codex v7 id under `harness: claude` reads as a second,
+    // distinct session to every keyed resolver).
+    if let Some(shape) = harness_of_session_id(session_id) {
+        if harness != shape && shape_known_harness(harness) {
+            return Err(StoreError::Invalid(format!(
+                "session_id {session_id} is a {shape} id; refusing harness {harness}"
+            )));
+        }
+    }
     let effort = match effort {
         Some(e) => {
             let e = e.trim();
@@ -1117,8 +1129,11 @@ fn session_row(
 }
 
 /// The append half of store.append_session_record: idempotent on
-/// (phase, harness, session_id); a duplicate fills only timestamps it left
-/// open, and observed_model is the one field the LATEST stamp owns.
+/// (session_id, phase); a duplicate fills only timestamps it left open, and
+/// observed_model is the one field the LATEST stamp owns. The harness is not
+/// part of the key: one session on one phase is one row, whatever harness
+/// spelling a writer carried (the shape check above already refuses a
+/// provably wrong one).
 fn session_append(
     entries: &mut Vec<Value>,
     node_id: &str,
@@ -1129,11 +1144,6 @@ fn session_append(
     };
     let phase = row
         .get("phase")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let harness = row
-        .get("harness")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
@@ -1152,7 +1162,6 @@ fn session_append(
     let rows = sessions.as_array_mut().unwrap();
     let prior = rows.iter_mut().find(|r| {
         r.get("phase").and_then(Value::as_str) == Some(phase.as_str())
-            && r.get("harness").and_then(Value::as_str) == Some(harness.as_str())
             && r.get("session_id").and_then(Value::as_str) == Some(session_id.as_str())
     });
     if let Some(prior) = prior {
@@ -1722,5 +1731,85 @@ mod tests {
             }
         });
         assert!(apply_op_for_tests(&mut entries, &req4).is_err());
+    }
+
+    #[test]
+    fn session_append_dedupes_on_session_and_phase_across_harness_spellings() {
+        let mut entries = vec![json!({"id": "x-twin", "title": "t", "status": "in_progress"})];
+        let req = json!({
+            "name": "session_append",
+            "params": {
+                "node_id": "x-twin", "phase": "do", "harness": "claude",
+                "session_id": "legacy-1", "started_at": "2026-09-04T10:00:00Z",
+            }
+        });
+        apply_op_for_tests(&mut entries, &req).unwrap();
+        // A second writer spelling a different harness for the SAME
+        // (session_id, phase) fills the existing row; it never mints a twin.
+        let req2 = json!({
+            "name": "session_append",
+            "params": {
+                "node_id": "x-twin", "phase": "do", "harness": "unknown",
+                "session_id": "legacy-1", "started_at": "2026-09-04T10:00:30Z",
+                "ended_at": "2026-09-04T11:00:00Z",
+            }
+        });
+        let out = apply_op_for_tests(&mut entries, &req2).unwrap();
+        assert_eq!(out["added"], json!(false));
+        let sessions = entries[0]["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["harness"], json!("claude"));
+        assert_eq!(sessions[0]["ended_at"], json!("2026-09-04T11:00:00Z"));
+    }
+
+    #[test]
+    fn session_append_refuses_an_id_stamped_under_the_wrong_shape_harness() {
+        let mut entries = vec![json!({"id": "x-shape", "title": "t", "status": "in_progress"})];
+        // A codex UUIDv7 id under `harness: claude`: the phantom-twin shape.
+        let req = json!({
+            "name": "session_append",
+            "params": {
+                "node_id": "x-shape", "phase": "do", "harness": "claude",
+                "session_id": "01a06886-9405-74a1-8afd-5b67baf89604",
+            }
+        });
+        let err = apply_op_for_tests(&mut entries, &req).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("is a codex id; refusing harness claude"),
+            "unexpected error: {err}"
+        );
+        assert!(entries[0].get("sessions").is_none());
+        // The same id under its own harness stamps fine, and a v4 id is
+        // accepted under claude.
+        let req2 = json!({
+            "name": "session_append",
+            "params": {
+                "node_id": "x-shape", "phase": "do", "harness": "codex",
+                "session_id": "01a06886-9405-74a1-8afd-5b67baf89604",
+            }
+        });
+        let out = apply_op_for_tests(&mut entries, &req2).unwrap();
+        assert_eq!(out["added"], json!(true));
+        let req3 = json!({
+            "name": "session_append",
+            "params": {
+                "node_id": "x-shape", "phase": "do", "harness": "claude",
+                "session_id": "b936b571-e0aa-40ed-a07d-97acb9a87db1",
+            }
+        });
+        let out = apply_op_for_tests(&mut entries, &req3).unwrap();
+        assert_eq!(out["added"], json!(true));
+        // A shape-silent id (fno-minted uuid4 shape under grok) is never
+        // refused: grok threads legally carry caller-minted v4 ids.
+        let req4 = json!({
+            "name": "session_append",
+            "params": {
+                "node_id": "x-shape", "phase": "do", "harness": "grok",
+                "session_id": "8ad8e13c-1111-4222-8333-444455556666",
+            }
+        });
+        let out = apply_op_for_tests(&mut entries, &req4).unwrap();
+        assert_eq!(out["added"], json!(true));
     }
 }

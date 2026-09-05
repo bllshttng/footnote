@@ -503,10 +503,19 @@ def rests_on_self_attestation_alone(
     """Whether a covered coverage row's whole count is the author's own
     (self_attested) local attestation - the same predicate the Rust gate's
     ``CoverageReport::rests_on_self_attestation_alone`` applies, read from the
-    serialized row. Prefers the recorded counts; derives from verdicts on
-    pre-field rows. Unmeasured authorship (no self_attested_count, no origins)
-    is NOT self-attestation alone: it is not proof of corroboration, but it is
-    not proof of its absence either.
+    serialized row. Prefers the recorded counts; derives from verdicts when
+    the count is absent, and also when it is a recorded ZERO: a zero alongside
+    counted local verdicts can be a real other-session measurement, but it can
+    equally be authorship that could not be measured at classify time (a
+    carried read whose process resolved no target manifest), and a recorded
+    zero cannot tell the two apart. The verdicts rule settles it per row.
+
+    That rule fails closed on authorship: a counted local_attestation
+    is treated as the author's own UNLESS its origin is a measured
+    ``other_session``. An absent key, the explicit ``unknown``, or any
+    unrecognized value means the row cannot prove an independent reviewer,
+    and a row that cannot prove one is not evidence of one - the gate refuses
+    rather than clears.
 
     ``github_approval_satisfies`` is the resolved config flag, and it reaches
     the verdicts fallback through ``_reviews._human_approval_counts`` - the
@@ -528,7 +537,7 @@ def rests_on_self_attestation_alone(
         # predicate exists to name. A 0-count row with no self-attestation is
         # merely uncovered, not self-attested-only.
         return isinstance(self_attested, int) and self_attested > 0
-    if isinstance(self_attested, int):
+    if isinstance(self_attested, int) and self_attested > 0:
         return self_attested == reviewed
     from fno.pr._reviews import _human_approval_counts
 
@@ -541,7 +550,7 @@ def rests_on_self_attestation_alone(
     ]
     return bool(counted) and all(
         v.get("producer") == "local_attestation"
-        and v.get("attestation_origin") == "self_attested"
+        and v.get("attestation_origin") != "other_session"
         for v in counted
     )
 

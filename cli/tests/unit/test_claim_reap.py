@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import psutil
@@ -36,8 +37,8 @@ from fno.claims.core import (
     _clear_lock_mirror_for_reaped,
 )
 from fno.claims.io import archive_claim, claim_path, claims_dir, read_claim_file, serialize_claim
-from fno.claims.staleness import classify_for_sweep, is_provably_dead, now_ms
-from fno.claims.types import Claim
+from fno.claims.types import Claim, now_ms
+from fno.claims.verdict import claim_verdicts
 from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
 
@@ -52,8 +53,30 @@ def _dead_pid() -> int:
     return dead
 
 
+def _native_sweep_verdict(claim: Claim) -> tuple[bool, str]:
+    """Exercise the Rust decision door for a synthetic claim fixture."""
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as raw_root:
+        root = Path(raw_root)
+        path = claim_path(claim.key, root=root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(serialize_claim(claim), encoding="utf-8")
+        row = claim_verdicts([claim.key], root=root).get(claim.key)
+        assert row is not None, f"native door omitted {claim.key}"
+        return bool(row["provably_dead"]), str(row["bucket"] or "")
+
+
+def classify_for_sweep(claim: Claim, _now: int | None = None) -> tuple[bool, str]:
+    return _native_sweep_verdict(claim)
+
+
+def is_provably_dead(claim: Claim, now: int | None = None) -> bool:
+    return _native_sweep_verdict(claim)[0]
+
+
 # ---------------------------------------------------------------------------
-# is_provably_dead: the predicate itself (staleness.py)
+# is_provably_dead: the native verdict door
 # ---------------------------------------------------------------------------
 
 
@@ -205,7 +228,7 @@ class TestExpiredTTLIsHostIndependent:
 
 class TestClassifyForSweepMatchesIsProvablyDead:
     """is_provably_dead is a thin bool-only view of classify_for_sweep
-    (staleness.py) - both share one implementation rather than being kept
+    (the native classifier) - both share one implementation rather than being kept
     in sync by convention. This regression test pins the invariant
     directly rather than trusting that never drifts back apart.
     """
@@ -919,7 +942,7 @@ class TestAbandonmentProbe:
     def test_a_proven_abandoned_node_claim_is_reaped(self, tmp_path):
         self._suspect_node(tmp_path)
         summary = reap_dead_claims(
-            roots=[tmp_path], apply=False, abandonment_probe=lambda _c: True
+            roots=[tmp_path], apply=False, abandonment_probe=lambda _c, **_: True
         )
         assert summary["would_reap"] == 1
         assert summary["kept_suspect_alive"] == 0
@@ -929,7 +952,7 @@ class TestAbandonmentProbe:
         sessions in one worktree and a duplicate PR."""
         self._suspect_node(tmp_path)
         summary = reap_dead_claims(
-            roots=[tmp_path], apply=True, abandonment_probe=lambda _c: False
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c, **_: False
         )
         assert summary["reaped"] == 0
         assert summary["kept_suspect_alive"] == 1
@@ -940,7 +963,7 @@ class TestAbandonmentProbe:
         inversion of this fix."""
         self._suspect_node(tmp_path)
         summary = reap_dead_claims(
-            roots=[tmp_path], apply=True, abandonment_probe=lambda _c: None
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c, **_: None
         )
         assert summary["reaped"] == 0
         assert summary["kept_suspect_unprobed"] == 1
@@ -949,7 +972,7 @@ class TestAbandonmentProbe:
     def test_the_probe_is_never_asked_about_a_non_node_key(self, tmp_path):
         """No other key family has a roster to consult. The reservation is kept
         because its TTL is the boot window, not because the probe said so."""
-        def _boom(_claim):
+        def _boom(_claim, **_):
             raise AssertionError("probe asked about a non-node key")
 
         acquire_claim(
@@ -963,7 +986,7 @@ class TestAbandonmentProbe:
         assert summary["kept_suspect"] == 1
 
     def test_the_probe_is_never_asked_about_a_live_claim(self, tmp_path):
-        def _boom(_claim):
+        def _boom(_claim, **_):
             raise AssertionError("probe asked about a live claim")
 
         acquire_claim(
@@ -1015,7 +1038,7 @@ class TestSharedPidExclusivity:
         self._expired_prover_on_disk(tmp_path, "node:x-one", "target-session:s1")
         self._expired_prover_on_disk(tmp_path, "node:x-two", "target-session:s2")
         summary = reap_dead_claims(
-            roots=[tmp_path], apply=False, abandonment_probe=lambda _c: True
+            roots=[tmp_path], apply=False, abandonment_probe=lambda _c, **_: True
         )
         assert summary["would_reap"] == 2
         assert summary["kept_live"] == 0
@@ -1030,7 +1053,7 @@ class TestSharedPidExclusivity:
         self._expired_prover_on_disk(tmp_path, "node:x-one", "target-session:s1")
         self._expired_prover_on_disk(tmp_path, "node:x-two", "target-session:s2")
         summary = reap_dead_claims(
-            roots=[tmp_path], apply=True, abandonment_probe=lambda _c: True
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c, **_: True
         )
         assert summary["reaped"] == 2
         assert summary["kept_live"] == 0
@@ -1041,7 +1064,7 @@ class TestSharedPidExclusivity:
         self._expired_prover_on_disk(tmp_path, "node:x-one", "target-session:s1")
         self._expired_prover_on_disk(tmp_path, "node:x-two", "target-session:s2")
         summary = reap_dead_claims(
-            roots=[tmp_path], apply=True, abandonment_probe=lambda _c: False
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c, **_: False
         )
         assert summary["reaped"] == 0
         assert summary["kept_suspect_alive"] == 2
@@ -1078,19 +1101,19 @@ class TestSharedPidExclusivity:
         sibling = self._expired_prover_on_disk(
             tmp_path, "node:x-two", "target-session:s2"
         )
-        real_map = claims_core._pid_holder_map
+        real_door = claims_core.claim_verdicts
+        released = False
 
-        def _release_sibling_then_map(dirs):
-            holder_map = real_map(dirs)
-            if sibling.exists():
+        def _release_sibling_then_fresh_door(keys=None, *, prefix=None, root=None):
+            nonlocal released
+            if prefix == "" and not released:
+                released = True
                 sibling.unlink()
-            return holder_map
+            return real_door(keys, prefix=prefix, root=root)
 
-        monkeypatch.setattr(
-            claims_core, "_pid_holder_map", _release_sibling_then_map
-        )
+        monkeypatch.setattr(claims_core, "claim_verdicts", _release_sibling_then_fresh_door)
         summary = reap_dead_claims(
-            roots=[tmp_path], apply=True, abandonment_probe=lambda _c: True
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c, **_: True
         )
         assert summary["reaped"] == 0
         assert summary["kept_live"] == 1

@@ -415,7 +415,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     # must not appear here (test_rust_only_verb_help_covers_unregistered_verbs
     # enforces the invariant).
     "status": "Report daemon liveness and the control-plane arms table (one row per scheduled arm, red when its last tick is stale); --json for the machine payload with `arms`.",
-    "reap": "Garbage-collect finished agent-view rows (terminal, past grace, clean worktree); --json for machine output, --dry-run to rehearse (names the gate keeping every held-back row, mutates nothing).",
+    "reap": "Retire finished agent rows (every node the session is named on is done AND its transcript is quiet past agents.retire_grace_s); stages a resume receipt, prunes a clean merged worktree, --json for machine output, --dry-run to rehearse (names the gate keeping every held-back row, mutates nothing).",
     "loop-check": "Stop-hook decision: external-truth done()/backstop check (read-only).",
     "loop": "Unified driver loop: run --driver target [options] (step 5).",
     "finalize": "Terminal-only side-effect writer: ledger record + (ship) plan stamp/handoff (step 6).",

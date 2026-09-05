@@ -290,6 +290,66 @@ mod tests {
     }
 
     #[test]
+    fn the_origin_key_is_never_absent_from_a_serialized_local_verdict() {
+        // A read whose process resolved no authoring session (a
+        // carried_base_sync row re-read from a cwd whose target manifest is
+        // elsewhere) classifies the local verdict Unknown, and Unknown used to
+        // be SKIPPED on serialize - the persisted row carried no
+        // attestation_origin at all, and a consumer reading absent as "not
+        // self_attested" cleared a PR whose only review was the author's own.
+        // The key must always be present: "unknown" when authorship could not
+        // be measured, "self_attested" when it could. The loop-side twin
+        // refuses the same row: an unmeasured read under require_corroboration
+        // holds the PR instead of finishing green on authorship nobody
+        // measured.
+        let events = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
+        let unmeasured = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        let row = serde_json::to_value(&unmeasured.verdicts).unwrap();
+        let v = row
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["producer"] == "local_attestation")
+            .unwrap();
+        assert_eq!(v["attestation_origin"], serde_json::json!("unknown"));
+
+        let measured = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        let row = serde_json::to_value(&measured.verdicts).unwrap();
+        let v = row
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["producer"] == "local_attestation")
+            .unwrap();
+        assert_eq!(v["attestation_origin"], serde_json::json!("self_attested"));
+
+        let mut held = unmeasured;
+        assert!(held.rests_on_self_attestation_alone());
+        held.apply_corroboration_policy(true);
+        assert_eq!(held.coverage, Coverage::Covered(0));
+    }
+
+    #[test]
     fn coverage_receipt_names_a_stale_reviewer_instead_of_four_zeros() {
         // The receipt for the x-5b99 specimen used to read "0 reviewed, 0
         // refused, 0 errored, 0 absent" - four zeros over a PR codex really did

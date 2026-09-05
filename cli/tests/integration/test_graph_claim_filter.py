@@ -22,8 +22,7 @@ from typer.testing import CliRunner
 from fno.cli import app
 from fno.claims.core import acquire_claim, release_claim
 from fno.claims.io import claim_path, claims_dir, serialize_claim
-from fno.claims.types import Claim
-from fno.claims.staleness import now_ms
+from fno.claims.types import Claim, now_ms
 
 runner = CliRunner()
 

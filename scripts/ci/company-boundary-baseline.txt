@@ -24,9 +24,9 @@
 # See docs/architecture/company-boundaries.md.
 cli/src/fno/events/cli.py:136: L0 platform -> L5 runtime / from fno.agents.self_stamp import resolve_self_model
 cli/src/fno/events/cli.py:168: L0 platform -> L5 runtime / from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
-cli/src/fno/claims/cli.py:849: L1 core -> L5 runtime / from fno.agents.watchdog import fleet_rows
-cli/src/fno/claims/cli.py:865: L1 core -> L5 runtime / from fno.agents.watchdog import ADVISORY_WARNING_PREFIX
-cli/src/fno/claims/cli.py:939: L1 core -> L5 runtime / from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES
+cli/src/fno/claims/cli.py:863: L1 core -> L5 runtime / from fno.agents.watchdog import fleet_rows
+cli/src/fno/claims/cli.py:879: L1 core -> L5 runtime / from fno.agents.watchdog import ADVISORY_WARNING_PREFIX
+cli/src/fno/claims/cli.py:949: L1 core -> L5 runtime / from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES
 #
 # Added 2026-09-03 (x-1182). `fno agents claim list --silent-after` reads a
 # claim's own transcript tail to answer "has this worker gone quiet", the
@@ -35,8 +35,8 @@ cli/src/fno/claims/cli.py:939: L1 core -> L5 runtime / from fno.agents.watchdog 
 # or opencode worker). tail_facts IS the transcript reader; there is no
 # lower-layer copy to call instead, and the same shape as the two entries
 # above it.
-cli/src/fno/claims/cli.py:1139: L1 core -> L5 runtime / from fno.agents.watchdog import tail_facts
-cli/src/fno/claims/cli.py:1396: L1 core -> L5 runtime / from fno.agents.watchdog import (
-cli/src/fno/claims/cli.py:1420: L1 core -> L5 runtime / from fno.agents.watchdog import (
-cli/src/fno/claims/cli.py:1440: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
+cli/src/fno/claims/cli.py:1146: L1 core -> L5 runtime / from fno.agents.watchdog import tail_facts
+cli/src/fno/claims/cli.py:1392: L1 core -> L5 runtime / from fno.agents.watchdog import (
+cli/src/fno/claims/cli.py:1416: L1 core -> L5 runtime / from fno.agents.watchdog import (
+cli/src/fno/claims/cli.py:1436: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
 layer cycle: L0 platform -> L5 runtime -> L0 platform

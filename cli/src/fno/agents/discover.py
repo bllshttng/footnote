@@ -37,7 +37,7 @@ from fno import paths
 from fno.agents.fs_scan import path_exists_strict, scan_files
 from fno.agents.reachability import (
     REACHABLE,
-    WIRE_STATUS,
+    rendered_activity,
     Reachability,
     classify_progress,
     classify_reachability,
@@ -1147,12 +1147,17 @@ class DiscoveredSession:
             "pid": self.pid,
             "cwd": self.cwd,
             "project": self.project,
-            "status": WIRE_STATUS[reach.verdict],
+            "status": rendered_activity(
+                truth_state=self.truth_state,
+                age_s=reach.age_s,
+                reachability=reach.verdict,
+            ),
             # The evidence, not just the word derived from it. Reducing the
             # verdict to a bare `status` here left this lane unable to say
-            # whether a `live` came from a transcript reading or an `orphaned`
-            # from a fired falsifier -- on the one list surface whose rows are
-            # ALL derived, and which the Rust path re-serves verbatim.
+            # whether a `writing` came from a transcript reading or an
+            # `orphaned` from a fired falsifier -- on the one list surface
+            # whose rows are ALL derived, and which the Rust path re-serves
+            # verbatim.
             "reachability": reach.verdict,
             "basis": reach.basis,
             "progress": progress.verdict,

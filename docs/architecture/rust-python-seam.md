@@ -30,7 +30,7 @@ The write path is the asymmetry that matters, and the store port moved where it 
 
 Rust owns what must not stop: the daemon, the PTY, the loop, liveness, and the claim protocol its own decisions read. Python owns what a user types and what reads the graph: the CLI verb surface, `graph.json`, and config resolution.
 
-When the caller does not own the decision the answer feeds, the crossing is legitimate. When the caller owns it, the crossing is not. `finalize` shelling `fno backlog` to record an outcome is legitimate: it writes a Python-owned record through the single writer. The daemon shelling `claim list` to decide its own sweep is not. The caller owns the decision. The fact set belongs on the caller's side of the seam.
+When the caller does not own the decision the answer feeds, the crossing is legitimate. When the caller owns it, the crossing is not. `finalize` shelling `fno backlog` to record an outcome is legitimate: it writes a Python-owned record through the single writer. The daemon's former `claim list` shell-out was not: the daemon owned the sweep decision, so the claim fact set now lives natively beside it.
 
 ## The classification
 
@@ -48,7 +48,6 @@ The table classifies the crossing sites, one line of reason each. The pass that 
 | `client_verbs.rs:3155` | conforming | pane launch through the one front door to the mux server |
 | `client_verbs.rs:3463` | conforming | recovery relaunch through the same single door |
 | `daemon.rs:1468` | conforming | reapable predicate read from its one implementation, shared by three callers |
-| `daemon.rs:3477` | violating | the daemon reads `claim list` to decide its own worktree sweep, a caller-owned decision fed across the seam |
 | `daemon.rs:3486` | conforming | the cleanup sweep executes through the verb that owns the buckets and guards |
 | `daemon.rs:3530` | conforming | stale-question reconcile routed through the verb that owns it, no apply form |
 | `daemon.rs:7876` | conforming | pane kill through the only path to the server that owns pane state |
@@ -97,9 +96,9 @@ The table classifies the crossing sites, one line of reason each. The pass that 
 
 ## The refusal of consumer-driven scoping
 
-`claims.rs:5-8` states the pattern this seam must stop minting: "Scope is consumer-driven: acquire / release / status plus the liveness classifier - exactly what the daemon/adopt/drive/stream-worker call sites need. Everything else (list, refresh, force-release, lane slots) remains Python-only."
+Before this port, `claims.rs` stated the pattern this seam must stop minting: a consumer-driven Rust subset where `list` and the rest of the decision's fact set stayed Python-only. The native claim list, sweep classification, and batch verdict door now close that gap.
 
-What that scope produces is predictable. Today's caller needs today's verbs, so the port moves today's verbs. Tomorrow's caller needs `list`, and `list` is on the far side of the seam, so tomorrow's caller shells back. Each new consumer adds a crossing instead of removing one, and the two implementations drift on the verbs nobody moved.
+The old scope produced a predictable regression. Today's caller needed today's verbs, so the port moved today's verbs. Tomorrow's caller needed `list`, and `list` was on the far side of the seam, so tomorrow's caller shelled back. The complete fact-set port removes that crossing and leaves Python with one batch door instead of a second classifier.
 
 The replacement rule: port a decision's whole fact set, or do not port the decision. Under the process-only ruling this is arithmetic. A port that carries half a fact set adds a spawn per missing fact.
 
@@ -118,6 +117,6 @@ The store port is the counter-example, and it names its own costs. It removed th
 
 Order ports topologically over the crossing dependency graph, not by risk. Risk ranks the claim classifier first on the inventory page because nothing pins it. Dependency says which port can land first, and the two orders disagree.
 
-The first real edge: `claim list` becomes Rust-owned before the daemon's reap decision can be. Porting the decision first makes the daemon shell for the facts it no longer owns, which adds a crossing. Port the fact set, then the decision, in that order, and the crossing count falls instead of rotating.
+The first real edge landed: `claim list` and the sweep fact set became Rust-owned before the daemon's reap decision moved. The daemon now reads the native list directly, so the crossing count falls instead of rotating.
 
-The two violating sites above are where that order starts. `daemon.rs:3477` waits for the claim fact set. `provider.rs:544` waits for the plan-path fact set, and the remedy is carrying the fact set, never a native re-implementation that raises axis two.
+The remaining violating site is `provider.rs:544`, which waits for the plan-path fact set. The remedy is carrying that fact set, never a native re-implementation that raises axis two.

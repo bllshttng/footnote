@@ -1710,11 +1710,11 @@ def test_worktree_occupancy_defers_to_finished_with_the_tree(monkeypatch, tmp_pa
         return calls.get("done", False)
 
     monkeypatch.setattr("fno.agents.watchdog.finished_with_the_tree", fake_finished)
-    from fno.agents.watchdog import REAP_QUIET_AFTER_S
+    from fno.agents.watchdog import QUIET_AFTER_S
 
     verdict, info = target_cli._classify_worktree_occupancy(wt)
     assert verdict == "occupied_worktree"
     assert info["session_id"] == "s-1"
-    assert calls["quiet"] == REAP_QUIET_AFTER_S
+    assert calls["quiet"] == QUIET_AFTER_S
     calls["done"] = True
     assert target_cli._classify_worktree_occupancy(wt)[0] == "available"
