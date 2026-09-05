@@ -691,6 +691,18 @@ impl PtyShell {
         }
     }
 
+    /// Ask the child to repaint: jiggle the kernel winsize (cols+1, then
+    /// back to the true size) so both writes are real changes and each
+    /// raises SIGWINCH. Same-size writes are silent on macOS and Linux, so
+    /// this is the only portable way to re-signal without a new keeper
+    /// frame tag (an unknown tag drops the subscriber stream). Rides the
+    /// same resize path for local and keeper panes alike.
+    pub fn nudge_winch(&self, rows: u16, cols: u16) {
+        let wide = (u32::from(cols) + 1).min(u32::from(u16::MAX)) as u16;
+        let _ = self.resize(rows, wide, 0, 0);
+        let _ = self.resize(rows, cols, 0, 0);
+    }
+
     pub fn is_reap_ready(&self) -> bool {
         match self {
             PtyShell::Local(local) => local.is_reap_ready(),
