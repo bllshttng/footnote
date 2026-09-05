@@ -68,6 +68,11 @@ fn serve_queries(listener: UnixListener, duration: Duration) {
     }
 }
 
+/// Serializes the env-seam tests: FNO_TEST_*_HOLD_MS is process-global, so a
+/// parallel run of this binary would race one test's env write into another
+/// test's bind. Same shape as the persistence suite's PTY_GATE.
+static ENV_SEAM_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn proto_fresh_bind_wins() {
     let scratch = Scratch::new("fresh");
@@ -321,9 +326,9 @@ fn proto_startup_marker_removed_mid_acquire_is_a_retry_not_an_error() {
         let _ = std::fs::remove_file(&holder_sock);
         let _ = std::fs::remove_file(fno::proto::startup_sidecar_path(&holder_sock));
     });
-    // The seam below is process-global env, so this test assumes the serial
-    // run the CI contract already pins (--test-threads=1); a parallel run of
-    // this binary would race the env read inside other tests' servers.
+    // The seam below is process-global env; the gate makes the test safe
+    // under a parallel run of this binary, not just the CI serial contract.
+    let _seam_gate = ENV_SEAM_GATE.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("FNO_TEST_MARKER_HOLD_MS", "400");
     let outcome = bind_or_probe(&sock);
     std::env::remove_var("FNO_TEST_MARKER_HOLD_MS");
@@ -365,8 +370,9 @@ fn proto_racer_waits_out_a_live_marker_instead_of_binding_over_a_starter() {
     // binding while another starter holds the marker is the old behavior
     // this pins out. FNO_TEST_OWNED_HOLD_MS parks the winner between its
     // marker and its bind, so the old racer's bind lands inside the window
-    // deterministically. Process-global env: assumes the serial run the CI
-    // contract already pins (--test-threads=1).
+    // deterministically. The env seam is process-global; ENV_SEAM_GATE makes
+    // the test safe under a parallel run, not just the CI serial contract.
+    let _seam_gate = ENV_SEAM_GATE.lock().unwrap_or_else(|e| e.into_inner());
     let scratch = Scratch::new("wait-out");
     let sock = scratch.path("wo.sock");
     let _guard = EnvVar::hold("FNO_TEST_OWNED_HOLD_MS", "400");
