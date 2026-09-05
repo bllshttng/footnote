@@ -95,9 +95,9 @@ pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
     // rather than settling. The cost is bounded and visible: one extra
     // fast-failing spawn per affected row, and the second attempt always keeps
     // its WARN, so a stuck probe is loud rather than silent.
-    // Ten seconds TOTAL, which the retrying reader splits into two five-second
-    // attempts - the per-attempt budget this probe has always had.
-    family1_truth_latched(handle, Duration::from_secs(10))
+    // No deadline: nobody handed this probe a budget, so the latch wait is not
+    // taken out of its attempts. Five seconds each, as it has always had.
+    family1_truth_latched(handle, Duration::from_secs(5), None)
 }
 
 /// One `fno agents truth <handle>` in flight per handle, machine-wide.
@@ -107,15 +107,22 @@ pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
 /// seconds, and a slow read made the next one overlap it. The retry rides
 /// INSIDE the flight: retrying outside it would leave a joiner waiting on a
 /// claim nobody holds, and that joiner would then spawn a second probe.
-/// `total` is the WHOLE budget: the latch wait plus both attempts. The wait is
-/// subtracted before the work is bounded, so a joiner that had to run its own
-/// probe still lands inside the deadline its caller set.
-fn family1_truth_latched(handle: &str, total: Duration) -> Option<TruthProbe> {
+/// `per_attempt` bounds each of the two attempts the retrying reader may make.
+/// `deadline` is the caller's TOTAL budget when it handed one down, and then
+/// the latch wait comes out of it: without that subtraction the wait is
+/// additive and a joiner blows the bound its caller set. `None` means nobody
+/// set one, and the wait then costs the attempts nothing.
+fn family1_truth_latched(
+    handle: &str,
+    per_attempt: Duration,
+    deadline: Option<Duration>,
+) -> Option<TruthProbe> {
     let key = single_flight::flight_key(&["agents", "truth", handle, "--json"]);
     let mut own: Option<TruthAttempt> = None;
-    let flight = single_flight::run_or_join(&key, latch_ttl(), join_budget(total), |spent| {
-        let per_attempt = attempt_budget(total, spent)?;
-        let answer = family1_truth_answer(|| family1_truth_command(handle), per_attempt, handle);
+    let budget = join_budget(deadline.unwrap_or(per_attempt));
+    let flight = single_flight::run_or_join(&key, latch_ttl(), budget, |spent| {
+        let bound = bound_by_deadline(per_attempt, deadline, spent)?;
+        let answer = family1_truth_answer(|| family1_truth_command(handle), bound, handle);
         let shared = shareable(&answer.stdout);
         own = Some(answer);
         shared
@@ -147,27 +154,33 @@ fn latch_ttl() -> Duration {
 }
 
 /// How long to wait for somebody else's answer, never longer than this caller
-/// would have waited for its own.
+/// would have spent on its own.
 ///
-/// `family1_truth_probe_with_timeout` exists so a waiter's outer deadline stays
-/// authoritative; a joiner that could sit for the configured 30 s inside a call
-/// bounded at 5 s would take that back. The spawn bound already scales with the
-/// handle count, so a batch whose own run would time out at 12 s has no reason
-/// to wait 30 s for another process's.
-fn join_budget(total: Duration) -> Duration {
-    crate::agents_config::single_flight_join_budget(&current_dir()).min(total)
+/// `bound` is the caller's deadline when it has one, and its own run bound when
+/// it does not. Either way a joiner that could sit for the configured 30 s
+/// inside a call bounded at 5 s would take that bound back, and a batch whose
+/// own run would time out at 12 s has no reason to wait 30 s for another
+/// process's.
+fn join_budget(bound: Duration) -> Duration {
+    crate::agents_config::single_flight_join_budget(&current_dir()).min(bound)
 }
 
-/// What is left of `total` after `spent` in the latch, split across the two
-/// attempts the retrying reader may make.
+/// The per-attempt bound, narrowed to whatever a caller deadline leaves after
+/// `spent` in the latch. No deadline means no narrowing.
 ///
-/// `None` when nothing is left: the caller's deadline is already gone, and
-/// spawning a child with a zero bound would kill it on arrival - one wasted
-/// process from the module whose whole job is deleting wasted processes.
-fn attempt_budget(total: Duration, spent: Duration) -> Option<Duration> {
-    let remaining = total.checked_sub(spent)?;
-    let per_attempt = remaining / 2;
-    (!per_attempt.is_zero()).then_some(per_attempt)
+/// `None` when nothing is left: the deadline is already gone, and spawning a
+/// child with a zero bound would kill it on arrival - one wasted process from
+/// the module whose whole job is deleting wasted processes.
+fn bound_by_deadline(
+    per_attempt: Duration,
+    deadline: Option<Duration>,
+    spent: Duration,
+) -> Option<Duration> {
+    let Some(total) = deadline else {
+        return Some(per_attempt);
+    };
+    let bound = per_attempt.min(total.checked_sub(spent)? / 2);
+    (!bound.is_zero()).then_some(bound)
 }
 
 fn current_dir() -> std::path::PathBuf {
@@ -181,7 +194,7 @@ fn current_dir() -> std::path::PathBuf {
 /// answer. Both come out of `timeout`, so a waiter's outer deadline remains
 /// authoritative even when the truth command is unavailable.
 pub fn family1_truth_probe_with_timeout(handle: &str, timeout: Duration) -> Option<TruthProbe> {
-    family1_truth_latched(handle, timeout)
+    family1_truth_latched(handle, timeout / 2, Some(timeout))
 }
 
 /// [`family1_truth_probe`] with the command built per attempt, so a test can

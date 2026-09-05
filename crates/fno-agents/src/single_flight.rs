@@ -232,18 +232,24 @@ where
                 if let Some(bytes) = read_record(&path, None, Some(joined_at)) {
                     return finish(key, FlightKind::Join, Some(bytes), started, None);
                 }
-                // A holder can finish WITHOUT an answer: `work` returning None
-                // writes no record, and release then frees the claim. Waiting
+                // Keep waiting only while the holder is verifiably ALIVE.
+                // Every other state means no record is coming from it: `Free`
+                // is a clean finish with no answer (`work` returned None, so
+                // nothing was written), `Suspect` and `Stale` are a holder
+                // whose process is gone, and `Corrupted` cannot say. Waiting
                 // out the budget for a record nobody will ever write is the
-                // wedge this module refuses to have, so a freed claim ends the
-                // wait immediately rather than at the bound.
-                if claims::status(key, Some(&root)).0 == claims::ClaimState::Free {
+                // wedge this module refuses to have. `Suspect` matters most:
+                // the claim TTL is floored at a minute, well past any join
+                // budget, so a holder killed mid-flight - the `uv tool install
+                // --reinstall` window this crate already plans around - would
+                // otherwise stall every joiner for the whole budget.
+                if claims::status(key, Some(&root)).0 != claims::ClaimState::Live {
                     return finish(
                         key,
                         FlightKind::Timeout,
                         work(started.elapsed()),
                         started,
-                        Some("holder-released-unanswered"),
+                        Some("holder-gone-unanswered"),
                     );
                 }
             }
@@ -494,10 +500,11 @@ mod tests {
         );
     }
 
-    /// A joiner whose holder finishes WITHOUT an answer must not wait out the
-    /// budget: no record is coming, and the released claim says so.
+    /// A joiner whose holder stops being alive must not wait out the budget:
+    /// no record is coming, and the claim says so. A dead holder is the case
+    /// that bites hardest, because the claim TTL outlives every join budget.
     #[test]
-    fn a_freed_claim_ends_the_wait_before_the_budget_does() {
+    fn a_holder_that_stops_running_ends_the_wait_before_the_budget_does() {
         let (root, key) = root_for("holder-released");
         claims::acquire(
             &key,
@@ -526,6 +533,44 @@ mod tests {
             flight.waited_ms,
             budget.as_millis()
         );
+
+        // The harder half: a holder whose PROCESS died. Its claim stays
+        // unexpired for the whole minimum TTL, which outlives every join
+        // budget, so a `Free`-only check would have left this one waiting.
+        let (root, key) = root_for("holder-died");
+        let dead = reaped_pid();
+        claims::acquire(
+            &key,
+            "dead-holder",
+            claims::AcquireOpts {
+                pid: Some(dead),
+                ttl_ms: Some(120_000),
+                root: Some(root.clone()),
+                ..Default::default()
+            },
+        );
+        assert_ne!(
+            claims::status(&key, Some(&root)).0,
+            claims::ClaimState::Live,
+            "the fixture must not be alive, or this proves nothing"
+        );
+        let flight = run_or_join_at(Some(&root), &key, Duration::from_secs(10), budget, |_| {
+            Some(b"own-answer".to_vec())
+        });
+        assert_eq!(flight.kind, FlightKind::Timeout);
+        assert!(flight.waited_ms < budget.as_millis() as u64);
+        let _ = claims::release(&key, "dead-holder", Some(&root), None);
+    }
+
+    /// A pid that ran and was reaped, so it names no live process.
+    fn reaped_pid() -> u32 {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn");
+        let pid = child.id();
+        child.wait().expect("wait");
+        pid
     }
 
     // AC1: no record -> spawn once, write the record, release.

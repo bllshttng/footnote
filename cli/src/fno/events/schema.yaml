@@ -1220,7 +1220,7 @@ event_types:
       properties:
         key_hash:
           type: string
-          description: "First 12 hex of the blake3 of the flight key. The key itself can carry a session id or a path, and the line is size-capped."
+          description: "First 12 hex of the flight key's digest. The key is itself `flight:<blake3 of the normalized argv>`, because the raw argv is unbounded and the claim it locks is a filename, so this is a prefix of the name `fno agents claim status` shows."
         outcome:
           type: string
           description: "spawn (held the claim and ran), cache (a fresh record answered), join (someone else's answer arrived), timeout (the join budget expired, so this caller ran its own)."
