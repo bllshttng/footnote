@@ -1095,25 +1095,21 @@ pub fn launch_account_from_env() -> Option<String> {
 /// An id-adjacent adjective, never a credential.
 pub const LAUNCH_ACCOUNT_SOURCE_ENV_KEY: &str = "FNO_LAUNCH_ACCOUNT_SOURCE";
 
-/// WHO chose the row's launch account (x-04ce). Three answers, in order:
-/// the provenance carrier wins (an injected pick names itself `"config"`);
-/// else `FNO_LAUNCH_ACCOUNT` means the flag was on this spawn's argv
-/// (`"caller"` - the seam that sets it runs only for an explicit
-/// `--account`); else `None` - launch_account is `"default"` or the mint
-/// cannot attribute the choice, and `launch_account` already carries the
-/// value axis.
+/// WHO chose the row's launch account (x-04ce). A source rides a concrete
+/// account: only when `launch_account_from_env()` named a specific id (not
+/// `"default"`, not unknown) does a source exist, and the carrier must then
+/// speak the vocabulary (`"caller"` / `"config"`); anything else reads as the
+/// flag (`"caller"`). A source over `"default"` or an unknown id is the
+/// contradiction this pairing forbids - nobody config-picked the fallback.
 pub fn launch_account_source_from_env() -> Option<String> {
-    if let Ok(src) = std::env::var(LAUNCH_ACCOUNT_SOURCE_ENV_KEY) {
-        if !src.is_empty() {
-            return Some(src);
-        }
+    let id = launch_account_from_env()?;
+    if id == "default" {
+        return None;
     }
-    if let Ok(id) = std::env::var(LAUNCH_ACCOUNT_ENV_KEY) {
-        if !id.is_empty() {
-            return Some("caller".to_string());
-        }
+    match std::env::var(LAUNCH_ACCOUNT_SOURCE_ENV_KEY) {
+        Ok(src) if src == "caller" || src == "config" => Some(src),
+        _ => Some("caller".to_string()),
     }
-    None
 }
 
 /// The launch-account pair a mint seam stamps (x-04ce): the row's
@@ -2436,6 +2432,10 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), StateEr
 mod tests {
     use super::*;
 
+    /// Tests that mutate process-wide env vars hold this so parallel test
+    /// threads never interleave mid-arm snapshots of the same keys.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn enters_fires_once_per_episode() {
         use InsideLegState::{Blocked, Done, Working};
@@ -3433,7 +3433,10 @@ mod tests {
         // x-d285: the Rust mint's account fact. An explicit seam id wins; an
         // ambient config dir the mint cannot attribute is unknown; neither
         // present proves the default slot. Environment mutation is process-
-        // wide, so the test snapshots and restores both keys around its arms.
+        // wide, so the test snapshots and restores both keys around its arms,
+        // under the shared env-mutation lock (a sibling test mutating the same
+        // keys on another thread would interleave mid-arm snapshots).
+        let _guard = ENV_LOCK.lock().unwrap();
         fn restore(launch: Option<std::ffi::OsString>, dir: Option<std::ffi::OsString>) {
             match launch {
                 Some(v) => std::env::set_var(LAUNCH_ACCOUNT_ENV_KEY, v),
@@ -3465,6 +3468,61 @@ mod tests {
             c.as_deref(),
             Some("default"),
             "neither present proves default"
+        );
+    }
+
+    #[test]
+    fn launch_account_source_rides_a_concrete_account() {
+        // x-04ce P2: a source over "default" or an unknown id is the
+        // contradiction "config picked the fallback". The carrier counts only
+        // when the value read names a real account, and only caller/config
+        // speak the vocabulary. Environment mutation is process-wide, so the
+        // test snapshots and restores both keys around its arms, under the
+        // same env-mutation lock the three-valued test holds.
+        let _guard = ENV_LOCK.lock().unwrap();
+        fn restore(launch: Option<std::ffi::OsString>, src: Option<std::ffi::OsString>) {
+            match launch {
+                Some(v) => std::env::set_var(LAUNCH_ACCOUNT_ENV_KEY, v),
+                None => std::env::remove_var(LAUNCH_ACCOUNT_ENV_KEY),
+            }
+            match src {
+                Some(v) => std::env::set_var(LAUNCH_ACCOUNT_SOURCE_ENV_KEY, v),
+                None => std::env::remove_var(LAUNCH_ACCOUNT_SOURCE_ENV_KEY),
+            }
+        }
+        let saved_launch = std::env::var_os(LAUNCH_ACCOUNT_ENV_KEY);
+        let saved_src = std::env::var_os(LAUNCH_ACCOUNT_SOURCE_ENV_KEY);
+
+        std::env::remove_var(LAUNCH_ACCOUNT_ENV_KEY);
+        std::env::set_var(LAUNCH_ACCOUNT_SOURCE_ENV_KEY, "config");
+        let no_id = launch_account_source_from_env();
+
+        std::env::set_var(LAUNCH_ACCOUNT_ENV_KEY, "default");
+        let default_id = launch_account_source_from_env();
+
+        std::env::set_var(LAUNCH_ACCOUNT_ENV_KEY, "makers");
+        let picked = launch_account_source_from_env();
+
+        std::env::remove_var(LAUNCH_ACCOUNT_SOURCE_ENV_KEY);
+        let flag_only = launch_account_source_from_env();
+
+        std::env::set_var(LAUNCH_ACCOUNT_SOURCE_ENV_KEY, "bogus");
+        let off_vocabulary = launch_account_source_from_env();
+
+        restore(saved_launch, saved_src);
+
+        assert_eq!(no_id, None, "a carrier without an account proves nothing");
+        assert_eq!(default_id, None, "nobody config-picked the fallback slot");
+        assert_eq!(picked.as_deref(), Some("config"), "the pick names itself");
+        assert_eq!(
+            flag_only.as_deref(),
+            Some("caller"),
+            "an id without a carrier was on the argv"
+        );
+        assert_eq!(
+            off_vocabulary.as_deref(),
+            Some("caller"),
+            "a word outside the vocabulary reads as the flag"
         );
     }
 

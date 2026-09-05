@@ -38,6 +38,7 @@ from typing import IO, TYPE_CHECKING, Callable, Mapping, NoReturn, Optional, Seq
 # The binary lookup itself is stdlib-only and has callers below this layer, so
 # it lives at fno.rust_binary; this module keeps the dispatch/routing half.
 from fno import rust_binary
+from fno.agents.launch_provenance import LAUNCH_ACCOUNT_SOURCE_ENV
 
 if TYPE_CHECKING:
     import click
@@ -877,7 +878,7 @@ def _pick_account_at_seam(args: Sequence[str]) -> list[str]:
     out = list(args)
     # This function owns the provenance carrier: drop any previous spawn's
     # decision before every guard, so a stale "config" never outlives its pick.
-    os.environ.pop("FNO_LAUNCH_ACCOUNT_SOURCE", None)
+    os.environ.pop(LAUNCH_ACCOUNT_SOURCE_ENV, None)
     if _spawn_flag_value(out, "--account") is not None:
         return out
     if _is_role_bearing_spawn("spawn", out) or _is_route_bearing_spawn("spawn", out):
@@ -918,7 +919,7 @@ def _pick_account_at_seam(args: Sequence[str]) -> list[str]:
             break
     # Name the injection for what it is: without this carrier the Rust mint
     # stamps a config pick as "caller" - the misread this column ends.
-    os.environ["FNO_LAUNCH_ACCOUNT_SOURCE"] = "config"
+    os.environ[LAUNCH_ACCOUNT_SOURCE_ENV] = "config"
     return [*out[:boundary], "--account", picked, *out[boundary:]]
 
 
@@ -961,7 +962,7 @@ def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
         os.environ.pop("FNO_LAUNCH_ACCOUNT", None)
         # Its provenance twin dies with it, or a stale "config" mislabels
         # the next spawn the way a stale id would.
-        os.environ.pop("FNO_LAUNCH_ACCOUNT_SOURCE", None)
+        os.environ.pop(LAUNCH_ACCOUNT_SOURCE_ENV, None)
         return
     if _is_route_bearing_spawn("spawn", args):
         return
@@ -1353,31 +1354,30 @@ def make_agents_group_cls() -> type:
                 # A bad config never bricks spawning: the helper returns args
                 # unchanged on a load failure (an unknown config provider still
                 # exits 2 by design).
-                if verb == "spawn":
-                    from fno.agents.spawn_defaults import inject_spawn_defaults
+                if verb == "spawn" or verb in _WORKER_DIR_VERBS:
+                    if verb == "spawn":
+                        from fno.agents.spawn_defaults import inject_spawn_defaults
 
-                    args = inject_spawn_defaults(args)
+                        args = inject_spawn_defaults(args)
                     # Same seam, same reason as the account handling below: the
                     # writable-dir grant must cover BOTH runtimes. The Python
                     # token builders only ever see the pane substrate, because
                     # the carve-out above keeps just that lane in Python; every
                     # other spawn execs the Rust binary, which builds the
                     # harness argv itself. Publishing on the env is what reaches
-                    # that binary (os.execv inherits it).
-                    _export_worker_dirs_at_seam(args)
-                elif verb in _WORKER_DIR_VERBS:
-                    # resume/ask reach the SAME argv builders as spawn on the
-                    # bounded codex lane, where `writable_roots` is a whole-value
-                    # override. Publishing only for `spawn` left the resume grant
-                    # inert: the readers run in this process, and the variable was
-                    # never set here. One seam, every verb that can launch a
-                    # worker.
+                    # that binary (os.execv inherits it). resume/ask reach the
+                    # SAME argv builders on the bounded codex lane, where
+                    # `writable_roots` is a whole-value override: one seam,
+                    # every verb that can launch a worker.
                     _export_worker_dirs_at_seam(args)
                     # Same seam, same reason: these must see the post-defaults
                     # args and must cover BOTH runtimes, so they run here rather
                     # than in either spawn implementation. The pick runs FIRST so
                     # the scrub below sees the account it chose and applies that
                     # overlay, exactly as it would for an explicit --account.
+                    # spawn runs them too: an exec-routed bg spawn never
+                    # reaches a Python spawn seam, and would mint a parent's
+                    # stale account provenance.
                     args = _pick_account_at_seam(args)
                     _scrub_account_auth_at_seam(args)
                     _refuse_inherited_tier_remap(args)

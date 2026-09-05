@@ -387,17 +387,6 @@ const KNOWN_STATUSES: &[&str] = &[
     "exited",
     "permanent_dead",
 ];
-/// Registry schema versions this fno reads: `1..=REGISTRY_SCHEMA_VERSION` (the
-/// current write version plus the older shapes it back-fills in memory). Each
-/// bump is forward-compat: a stale reader pinned to a lower set rejects a newer
-/// store instead of silently dropping a field. v10 (x-880e) removes the on-disk
-/// `provider` + per-provider session-id trio; a legacy v1..=v9 row still
-/// carries `provider`, read leniently below. A range, not a list: the upper
-/// bound cannot drift from the version this binary writes.
-
-/// Load the registry rows as raw JSON values, reproducing Python
-/// `registry.load_registry`:
-
 /// Load the registry rows as raw JSON values, reproducing Python
 /// `registry.load_registry`:
 ///
@@ -441,6 +430,14 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
     // taken on one leaves no trace. Fixing only Python would have left this
     // path, the daemon, and mux still failing closed on the same file.
     let on_disk_version = obj.get("schema_version").and_then(Value::as_u64);
+    // Registry schema versions this fno reads: `1..=REGISTRY_SCHEMA_VERSION`
+    // (the current write version plus the older shapes it back-fills in
+    // memory). Each bump is forward-compat: a stale reader pinned to a lower
+    // set rejects a newer store instead of silently dropping a field. v10
+    // (x-880e) removes the on-disk `provider` + per-provider session-id trio;
+    // a legacy v1..=v9 row still carries `provider`, read leniently below. A
+    // range, not a list: the upper bound cannot drift from the version this
+    // binary writes.
     let mut read_forward = false;
     match on_disk_version {
         Some(v) if (1..=REGISTRY_SCHEMA_VERSION as u64).contains(&v) => {}
