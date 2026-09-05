@@ -59,6 +59,7 @@ pub mod claude_attach;
 pub mod claude_drive;
 pub mod claude_roster;
 pub mod client;
+pub mod claim_verbs;
 pub mod client_verbs;
 pub mod codex_ask;
 /// Test support: a fake shared codex app-server daemon. Public because the
