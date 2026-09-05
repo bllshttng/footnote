@@ -308,8 +308,8 @@ fn default_true() -> bool {
 /// unchanged; a repoint keeps owning its geometry and says so).
 /// v68 (x-5baf): `LayoutSlot.cwd`, `#[serde(default)]`; floor stays 58.
 /// v69 (x-a600): `Command::RedrawPane`, `#[serde(default)]`; floor stays 58.
-/// v71 (prune sync): `ControlVerb::SquadReload` + `ServerMsg::SquadReloaded`;
-/// a v69 peer cannot decode them, so the handshake stops the skew.
+/// v71 (prune sync): `ControlVerb::SquadReload` + `ServerMsg::SquadReloaded`
+/// (handshake stops the skew) and the additive `PaneInfo.orphaned_worker`.
 pub const PROTO_VERSION: u32 = 71;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
@@ -2473,33 +2473,32 @@ pub struct PaneInfo {
     #[serde(default)]
     pub pristine_idle_shell: bool,
     /// (v65, x-cf97) The pane ran something and sits at a prompt NOW: shell
-    /// integration measured (`saw_marker`), no command running, at least one
-    /// completed block. Deliberately narrower than `!pristine_idle_shell`,
-    /// which also covers running and unmeasured panes - a cleanup caller may
-    /// close on this reading, never on the bare negation. `#[serde(default)]`
-    /// keeps a pre-v65 reader wire-tolerant.
+    /// integration measured, no command running, a completed block. Narrower
+    /// than `!pristine_idle_shell` (which also covers running and unmeasured
+    /// panes): a cleanup caller may close on this, never the bare negation.
+    /// `#[serde(default)]` keeps a pre-v65 reader wire-tolerant.
     #[serde(default)]
     pub shell_idle: bool,
     /// (v51, x-1499) The pane's tab name and 1-based ordinal, so the human
-    /// listing prints `tab=<name-or-·N> tab_id=<id>`. `None` for a pane
-    /// mid-teardown (not in any tab) or on a pre-v51 reply.
+    /// listing prints `tab=<name-or-·N> tab_id=<id>`. `None` mid-teardown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_ordinal: Option<usize>,
     /// (v41, layout-api) The `fno_id` of the session hosting this pane, filled
     /// server-side from the registry join the mux already caches. `None` for a
-    /// pane with no registry row (an ad-hoc shell). `#[serde(default)]` keeps a
-    /// v40 reader wire-tolerant. Powers `pane ls --fno-id` and the reverse
-    /// direction of `where` (Locked Decision 6).
+    /// pane with no registry row (an ad-hoc shell). Powers `pane ls --fno-id`
+    /// and the reverse direction of `where` (Locked Decision 6).
     #[serde(default)]
     pub fno_id: Option<String>,
+    /// (v69) Hosts a stored member judged Dead; the default prune closes its
+    /// tab. `#[serde(default)]`: a v68 payload reads false.
+    #[serde(default)]
+    pub orphaned_worker: bool,
     /// (x-dfe7) The joined row's classified lineage: the CURRENT harness
-    /// session the row answers as, the succession chain it retired (oldest
-    /// first), and the fork edge of a parallel branch. `fno_id` stays the
-    /// stable thread join; these fields are printed BESIDE it so a retired
-    /// id can never silently read as current. `#[serde(default)]` keeps a
-    /// pre-lineage reader wire-tolerant.
+    /// session the row answers as, the succession chain it retired, and the
+    /// fork edge of a parallel branch. `fno_id` stays the stable thread join;
+    /// these print BESIDE it so a retired id never reads as current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4753,6 +4752,7 @@ mod tests {
                     tab_name: None,
                     tab_ordinal: Some(1),
                     fno_id: None,
+                    orphaned_worker: false,
                     harness_session_id: None,
                     predecessor_session_ids: Vec::new(),
                     forked_from_session_id: None,
