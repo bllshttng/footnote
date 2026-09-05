@@ -4147,6 +4147,15 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                             crate::agents_config::orphan_reap_after(&grace_cwd),
                             &crate::gc::registry_live_pids(&home),
                         );
+                        // The latch's own leftovers. Its record dir is keyed by
+                        // argv and the roster's handle set changes with every
+                        // worker, so unpruned it fills the state root with
+                        // answers to questions nobody asks any more.
+                        let _ = crate::single_flight::prune_records(
+                            None,
+                            crate::agents_config::single_flight_ttl(&grace_cwd),
+                            crate::agents_config::single_flight_join_budget(&grace_cwd),
+                        );
                     });
                 }
                 // Worktree sweep: the backstop for what the merge ritual

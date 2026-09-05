@@ -225,6 +225,41 @@ fn record_path(root: &Path, key: &str) -> PathBuf {
         .join(format!("{}.json", claims::encode_key(key)))
 }
 
+/// Remove flight records nothing can still read.
+///
+/// A record only ever answers inside its TTL, and the longest anyone waits on
+/// one is the join budget, so `ttl + budget` is the point past which no reader
+/// exists. It is doubled for margin against a clock that moved.
+///
+/// This is not tidiness. The record dir is keyed by argv, and the roster's
+/// handle set changes every time a worker comes or goes, so without a prune the
+/// machine slowly fills with files answering questions nobody asks any more -
+/// the shape this whole module exists to delete.
+pub fn prune_records(root: Option<&Path>, ttl: Duration, budget: Duration) -> usize {
+    let Some(root) = root
+        .map(Path::to_path_buf)
+        .or_else(claims::global_claims_root)
+    else {
+        return 0;
+    };
+    let horizon = (ttl + budget) * 2;
+    let Ok(entries) = std::fs::read_dir(root.join(".fno/flight")) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let too_old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|t| t.elapsed().map(|age| age > horizon).unwrap_or(false))
+            .unwrap_or(false);
+        if too_old && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// A holder string unique to ONE flight, not one process.
 ///
 /// `claims::acquire` treats an identical holder as an idempotent re-acquire, so
@@ -391,6 +426,30 @@ mod tests {
             claims::status(&key, Some(&root)).0,
             claims::ClaimState::Free
         );
+    }
+
+    // A record past every reader's horizon is dead weight; one inside it is
+    // still somebody's answer.
+    #[test]
+    fn pruning_removes_only_records_no_reader_can_still_use() {
+        let (root, key) = root_for("prune");
+        let path = record_path(&root, &key);
+        write_record(&path, b"fresh");
+        assert_eq!(
+            prune_records(
+                Some(&root),
+                Duration::from_secs(10),
+                Duration::from_secs(30)
+            ),
+            0
+        );
+        assert!(path.exists());
+        // A zero horizon makes every record older than every reader.
+        assert_eq!(
+            prune_records(Some(&root), Duration::from_secs(0), Duration::from_secs(0)),
+            1
+        );
+        assert!(!path.exists());
     }
 
     // AC2: a fresh record answers and nothing runs.

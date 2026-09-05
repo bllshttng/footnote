@@ -108,7 +108,7 @@ pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
 fn family1_truth_latched(handle: &str, timeout: Duration) -> Option<TruthProbe> {
     let key = single_flight::flight_key(&["agents", "truth", handle, "--json"]);
     let mut own: Option<TruthAttempt> = None;
-    let flight = single_flight::run_or_join(&key, latch_ttl(), latch_join_budget(), || {
+    let flight = single_flight::run_or_join(&key, latch_ttl(), join_budget(timeout), || {
         let answer = family1_truth_answer(|| family1_truth_command(handle), timeout, handle);
         let shared = shareable(&answer.stdout);
         own = Some(answer);
@@ -140,8 +140,16 @@ fn latch_ttl() -> Duration {
     crate::agents_config::single_flight_ttl(&current_dir())
 }
 
-fn latch_join_budget() -> Duration {
-    crate::agents_config::single_flight_join_budget(&current_dir())
+/// How long to wait for somebody else's answer, never longer than this caller
+/// would have waited for its own.
+///
+/// `family1_truth_probe_with_timeout` exists so a waiter's outer deadline stays
+/// authoritative; a joiner that could sit for the configured 30 s inside a call
+/// bounded at 5 s would take that back. The spawn bound already scales with the
+/// handle count, so a batch whose own run would time out at 12 s has no reason
+/// to wait 30 s for another process's.
+fn join_budget(spawn_timeout: Duration) -> Duration {
+    crate::agents_config::single_flight_join_budget(&current_dir()).min(spawn_timeout)
 }
 
 fn current_dir() -> std::path::PathBuf {
@@ -647,7 +655,7 @@ fn family1_truth_batch_latched(
     let timeout = family1_truth_batch_timeout(handles.len());
     let key = single_flight::flight_key(&["agents", "truth", "--handles", &handles.join(",")]);
     let mut own: Option<Option<TruthBatchAttempt>> = None;
-    let flight = single_flight::run_or_join(&key, latch_ttl(), latch_join_budget(), || {
+    let flight = single_flight::run_or_join(&key, latch_ttl(), join_budget(timeout), || {
         let answer = family1_truth_batch_answer(handles, family1_truth_batch_command, timeout);
         let shared = answer.as_ref().and_then(|a| shareable(&a.stdout));
         own = Some(answer);
