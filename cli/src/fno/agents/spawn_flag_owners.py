@@ -15,26 +15,23 @@ a flag fno branches on is not.
   spelling map named by ``site``. Movable once the passthrough covers every
   substrate (it is pane-only today). Two sites on one row means two copies of
   one map, the ``--effort`` defect this module records.
-- ``forwarded``: fno passes the value through unread. Movable today. Measured
-  EMPTY: every harness flag fno accepts, it also translates. An empty class is
-  a finding, not a gap, so the lint can still name it.
+- ``forwarded``: fno passes the value through unread. Measured EMPTY: every
+  harness flag fno accepts, it also translates. An empty class is a finding,
+  not a gap, so the lint can still name it.
 
-Provenance: ``sources`` names how a value can reach a spawn, in the same four
-words the spawn receipt prints at runtime on ``account_source``. The defect
-that forced the column: a receipt named the account it launched on but not WHO
-chose it, and a config injection read as a caller decision.
+``sources`` names how a value can reach a spawn, in the same words the spawn
+receipt prints at runtime on ``account_source``. Before the column, a config
+injection read as a caller decision.
 
 - ``caller``: an explicit flag on this spawn's argv.
 - ``config``: a config gate injected it (``accounts.quota.pick_on_launch``).
-- ``env``: inherited from the spawning environment (the harness axis's
-  invoking-harness inference).
+- ``env``: inherited from the spawning environment.
 - ``default``: nobody chose; the resolver's fallback.
 
-A row whose value can only ever be caller-or-default says so; a new injection
-path lands together with its ``sources`` edit in the same diff. The harness
-axis predates this vocabulary and keeps its own receipt wire values
-(``harness_source:`` explicit / harness-inferred / builtin-default); they map
-onto it as caller / env / default.
+A new injection path lands together with its ``sources`` edit in the same
+diff. The harness axis keeps its own receipt wire values (``harness_source:``
+explicit / harness-inferred / builtin-default); they map onto it as caller /
+env / default.
 """
 
 from __future__ import annotations
