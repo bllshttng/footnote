@@ -1287,10 +1287,15 @@ def _node_settlement(reading: Optional[RosterReading] = None):
 
     Two positive findings, both proven by FINDING things, never by failing to:
 
-      * The claim's node is terminal in the graph (done/superseded). The
-        closure release should have dropped the claim already; one that
-        outlived its node (pre-fix leaks, a closer that crashed mid-release)
-        protects nothing whoever holds it. Holder-independent evidence.
+      * The claim's node is terminal in the graph (done/superseded) and the
+        holder cannot be proven alive. The closure release should have
+        dropped the claim already; one that outlived its node (pre-fix
+        leaks, a closer that crashed mid-release) protects nothing once its
+        lease is spent or its pid is gone. A LIVE holder keeps the claim
+        until its own lease ends: measured 2026-09-05, this arm reaped four
+        unexpired, live-pid claims on closed nodes (x-a114 twice, x-04ce,
+        x-9223-node) on every sweep, killing active loop-check leases and
+        opening the dup-PR window each time.
       * The lease is EXPIRED and the holder's roster row resolves to a
         DIFFERENT node. An expired lease is the holder's own statement that
         it stopped renewing; a row on another node is where it went. An
@@ -1335,6 +1340,21 @@ def _node_settlement(reading: Optional[RosterReading] = None):
         node_id = claim.key[len("node:") :]
         terminal = _terminal_ids()
         if terminal is not None and node_id in terminal:
+            # Closure settles a holder that cannot be proven alive, never one
+            # that can. Measured 2026-09-05 on four premature reaps (x-a114
+            # twice, x-04ce, x-9223-node): every one was an UNEXPIRED lease
+            # with a live recorded pid on a node the graph had closed, reaped
+            # by this arm on each sweep - a live session's loop-check lease
+            # (the follow-up-work shape) died with it, and every reap opened
+            # the dup-PR window the claim exists to close. An expired lease
+            # still settles here, as does a dead pid: the holder named its
+            # own end or the pid table ends it, and a closure release that
+            # crashed mid-way is exactly the leak this arm heals.
+            if native_verdict is not None and (
+                native_verdict.get("expired") is False
+                and native_verdict.get("bucket") == "live"
+            ):
+                return None
             return True
         if native_verdict is None or native_verdict.get("expired") is not True:
             return None

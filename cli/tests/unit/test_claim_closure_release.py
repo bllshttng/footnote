@@ -251,6 +251,61 @@ def _native_verdict(claim: Claim) -> dict:
 
 
 class TestNodeSettlement:
+    def test_terminal_node_keeps_a_live_unexpired_holder(self, tmp_path, monkeypatch):
+        """The 2026-09-05 specimen, pinned: a live holder's fresh lease on a
+        CLOSED node survives the sweep. Four claims died this way (x-a114
+        twice, x-04ce, x-9223-node) - each unexpired, pid alive, node done -
+        reaped by the terminal arm on every sweep, killing active loop-check
+        leases and opening the dup-PR window each time. Closure heals a leak,
+        it never kills a living holder."""
+        graph = _make_graph(
+            tmp_path, [{"id": "x-gone", "status": "done", "completed_at": "2026-09-05T14:08:00Z"}]
+        )
+        monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+        claim = Claim(
+            key="node:x-gone",
+            holder="target-session:sid-a",
+            acquired_at=now_ms(),
+            expires_at=now_ms() + 7_200_000,
+            pid=os.getpid(),
+            host=socket.gethostname(),
+        )
+        settlement = _node_settlement(_reading({}))
+        assert settlement(claim, native_verdict=_native_verdict(claim)) is None
+        verdict, bucket = sweep_verdict(
+            claim,
+            node_settlement=settlement,
+            native_verdict=_native_verdict(claim),
+        )
+        assert verdict is False and bucket == "live"
+
+    def test_terminal_node_still_settles_a_dead_pid_holder(self, tmp_path, monkeypatch):
+        """The healing half survives the guard: an unexpired claim whose pid
+        is gone settles on a closed node - nobody can refresh it, nobody is
+        behind it, and the closure release may have crashed mid-way. The
+        native verdict names the liveness the sweep measured: unexpired but
+        bucket suspect, which is the dead-pid shape the Rust probe emits."""
+        graph = _make_graph(
+            tmp_path, [{"id": "x-gone", "status": "done", "completed_at": "2026-08-21T03:16:00Z"}]
+        )
+        monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+        claim = Claim(
+            key="node:x-gone",
+            holder="target-session:sid-a",
+            acquired_at=now_ms(),
+            expires_at=now_ms() + 3_600_000,
+            pid=_dead_pid(),
+            host=socket.gethostname(),
+        )
+        settlement = _node_settlement(_reading({}))
+        native = {
+            "key": claim.key,
+            "expired": False,
+            "provably_dead": False,
+            "bucket": "suspect",
+        }
+        assert settlement(claim, native_verdict=native) is True
+
     def test_terminal_node_settles_a_live_expired_claim(self, tmp_path, monkeypatch):
         """The healing read: a node the graph closed has no legitimate holder,
         whatever the pid table says."""
