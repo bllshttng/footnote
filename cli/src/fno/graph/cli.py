@@ -8967,9 +8967,6 @@ def cmd_backfill_deferred_kind(
 @cli.command("stuck-epics", hidden=True)
 def cmd_stuck_epics(
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON report"),
-    closed: bool = typer.Option(
-        False, "--closed", help="Inverse report: terminal epics holding live children"
-    ),
 ) -> None:
     """Epics whose only incomplete children are deferred/superseded.
 
@@ -8979,39 +8976,11 @@ def cmd_stuck_epics(
     do, and a wont_do deferral is a decision, not a delay. Everything else
     (an unclassified or contingent deferral) holds the epic open and needs a
     human ruling.
-
-    ``--closed`` runs the inverse question on the same predicate: which
-    terminal (done/superseded) epics hold a live child. It never mutates
-    either - both directions surface, neither closes.
     """
+    from fno.graph.epics import stuck_epics
     from fno.graph.store import read_graph
 
     entries = read_graph(_graph_path())
-
-    if closed:
-        from fno.graph.epics import stuck_epics_closed
-
-        closed_rows = stuck_epics_closed(entries)
-        if json_output:
-            typer.echo(
-                json.dumps({"stuck_epics_closed": closed_rows}, default=lambda o: o.__dict__)
-            )
-            return
-        typer.echo(f"terminal parents holding open children: {len(closed_rows)}")
-        for r in closed_rows:
-            typer.echo(f"  {r.id} [{r.status}] {r.title} - held open by {r.held_open_by}")
-            for h in r.holders:
-                typer.echo(f"      {h['id']} [{h['status']}"
-                           f"{', ' + h['deferred_kind'] if h.get('deferred_kind') else ''}]")
-        if closed_rows:
-            typer.echo(
-                "  read-only: reopening or re-parenting any of these is an operator ruling, "
-                "never automatic"
-            )
-        return
-
-    from fno.graph.epics import stuck_epics
-
     rows = stuck_epics(entries)
     if json_output:
         typer.echo(json.dumps({"stuck_epics": rows}, default=lambda o: o.__dict__))
@@ -9139,27 +9108,20 @@ def _clear_completion_fields(node: dict, *, reason: str) -> None:
     node["completion_note"] = None
     node["reopened_at"] = datetime.now(timezone.utc).isoformat()
     node["reopened_reason"] = reason
-    # The node is no longer done, so any "a live child reopened under this
-    # done parent" marker on it is moot - it applies only while the parent
-    # itself is still terminal. See _cascade_reopen_parents's warn branch.
-    node.pop("reopen_warning", None)
+    node.pop("reopen_warning", None)  # moot once the parent itself is not done
 
 
 def _auto_closed_note(entry: dict) -> str:
     """completion_note for a container closed by all-children-complete (x-b9a5).
 
-    Both close paths (_cascade_close_parents on a child close,
-    _sweep_close_done_epics on reconcile) reach here holding the parent dict. A
-    container with its own plan_path but no PR may carry planned deliverables
-    the children never built; the cascade closes it anyway and stamps a real
-    completed_at, so the false-done is invisible to any audit keyed on
-    completion. Flag the gap: when plan_path is set and there is no pr_number,
-    the note records the container's own deliverables as UNVERIFIED.
-
-    It asserts nothing about whether the deliverables exist. A filesystem stat
-    had a measured 75% false-positive rate (renames and path conventions read
-    as missing), so plan_path + no pr_number is the only signal that does not
-    lie. A flag, not a gate: the close still happens, it just becomes findable.
+    Both close paths (_cascade_close_parents, _sweep_close_done_epics) reach
+    here holding the parent dict. A container with its own plan_path but no
+    PR may carry deliverables the children never built; the cascade closes it
+    anyway, so an untracked false-done needs a flag. When plan_path is set and
+    pr_number is not, the note marks the deliverables UNVERIFIED - not that
+    they are missing (a filesystem stat measured 75% false positives from
+    renames and path conventions), only that no PR proves them. A flag, not a
+    gate: the close still happens, it just becomes findable.
     """
     if entry.get("plan_path") and not entry.get("pr_number"):
         return "auto-closed: all children complete; own plan deliverables UNVERIFIED (plan_path set, no PR)"
@@ -9187,6 +9149,7 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
     Idempotent: an already-done or missing ancestor stops that branch. The walk
     is depth-capped against a malformed parent cycle.
     """
+    from fno.graph._reconcile import cascade_close_should_stop
     id_to_entry = {
         e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
@@ -9204,22 +9167,9 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
         parent = id_to_entry.get(pid)
         if parent is None:
             break  # missing ancestor -> stop this branch
-        # The child that reopened this (already-done) parent just closed
-        # again: the marker _cascade_reopen_parents left describes a state
-        # that no longer holds, so clear it here in the same mutation,
-        # whether or not the parent goes on to re-close below.
-        marker = parent.get("reopen_warning")
-        if (
-            isinstance(cur, dict)
-            and isinstance(marker, dict)
-            and marker.get("child") == cur.get("id")
-        ):
-            parent.pop("reopen_warning", None)
-        if parent.get("completed_at"):
-            break  # already closed -> stop this branch
         kids = children_by_parent.get(pid) or []
-        if not kids or any(not k.get("completed_at") for k in kids):
-            break  # at least one child still open -> the epic is not done yet
+        if cascade_close_should_stop(parent, kids, cur):
+            break  # already closed, or a child still open -> stop this branch
         _apply_completion_fields(parent)
         if not parent.get("completion_note"):
             parent["completion_note"] = _auto_closed_note(parent)
@@ -10548,6 +10498,7 @@ def _cascade_reopen_parents(entries: list[dict], node_id: str) -> tuple[list[str
 
     Walks up under the same 64-deep cap the close path uses, for the same reason.
     """
+    from fno.graph._reconcile import stamp_reopen_warning
     id_to_entry = {
         e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
@@ -10564,20 +10515,7 @@ def _cascade_reopen_parents(entries: list[dict], node_id: str) -> tuple[list[str
         note = str(parent.get("completion_note") or "")
         if not note.startswith("auto-closed:"):
             warned.append(pid)
-            # The warning printed at the reopen call site is stderr-only and
-            # gone the moment that terminal closes. Stamp the same fact on
-            # the parent so a later report (stuck-epics --closed) can find
-            # it without re-deriving it: which child reopened under this
-            # done-on-its-own-evidence parent, and when. Cleared in
-            # _clear_completion_fields (the parent itself is reopened) and
-            # in _cascade_close_parents (the named child closes again).
-            parent["reopen_warning"] = {
-                # cur, not node_id: at a multi-level climb the live child is
-                # whichever ancestor sits directly under this parent, which
-                # can differ from the node the caller originally reopened.
-                "child": cur.get("id") if isinstance(cur, dict) else node_id,
-                "at": datetime.now(timezone.utc).isoformat(),
-            }
+            stamp_reopen_warning(parent, cur, node_id)
             break  # closed on its own evidence; stop rather than climb past it
         _clear_completion_fields(parent, reason=f"child {node_id} reopened")
         reopened.append(pid)
@@ -11120,45 +11058,6 @@ def cmd_reconcile_findings(
     typer.echo(f"reconcile-findings: closed {closed}/{len(findings)} node(s)")
 
 
-@cli.command("confirm-candidate", hidden=True)
-def cmd_confirm_candidate(
-    task_id: str = typer.Argument(..., help="Node id a `reconcile --candidates` row named"),
-    pr_number: int = typer.Option(..., "--pr-number", help="The candidate's PR number"),
-    pr_url: Optional[str] = typer.Option(None, "--pr-url", help="The candidate's PR URL"),
-) -> None:
-    """Bind a diff candidate a human confirmed. Never automatic.
-
-    A file overlap from `reconcile --candidates` is evidence someone worked
-    nearby, not proof the symptom is gone - this verb is the human
-    confirmation step. Binds the PR ref (fills the primary, or appends to
-    additional_prs, exactly as any other pr-to-node bind) and stamps
-    `pr_edge_derivation` naming this as a diff-candidate close, distinct
-    from a branch-name close, so a later reader can tell them apart. Does
-    NOT mark the node done - that is still `fno backlog done` (or a merge
-    the ship gate detects), same as any other PR-bound node.
-    """
-    from fno.graph._reconcile import confirm_diff_candidate
-    from fno.graph.store import locked_mutate_graph
-
-    result_box: list = []
-
-    def mutator(entries):
-        result = confirm_diff_candidate(
-            entries, task_id, pr_number=pr_number, pr_url=pr_url,
-            confirmed_by=os.environ.get("USER"),
-        )
-        result_box.append(result)
-        return entries
-
-    locked_mutate_graph(_graph_path(), mutator)
-    result = result_box[0]
-    if result.outcome == "refused":
-        typer.echo(f"Error: {result.refusal}", err=True)
-        raise typer.Exit(code=1)
-    action = result.bindings[0].action if result.bindings else "unknown"
-    typer.echo(f"Confirmed {task_id} <- PR #{pr_number} (diff-candidate, {action})")
-
-
 @cli.command(
     "reconcile",
     hidden=True,
@@ -11199,15 +11098,6 @@ def cmd_reconcile(
         "--repo",
         help="owner/repo scoping --pr-number's gh query and cross-repo claim "
         "check. Resolved from the checkout's origin remote when omitted.",
-    ),
-    candidates: bool = typer.Option(
-        False,
-        "--candidates",
-        help="Report diff-derived closure candidates only (defect A's weaker "
-        "edge): open nodes whose declared surfaces overlap a recently merged "
-        "PR the branch-name edge did not already close. Read-only - never "
-        "combine with --pr-number or --node, never mutates, never runs on "
-        "the default (auto-reconcile) sweep.",
     ),
 ) -> None:
     """Close open backlog nodes whose PR has merged outside the ship gate.
@@ -11257,38 +11147,6 @@ def cmd_reconcile(
             "which --node cannot narrow without silently stranding the "
             "other claimed nodes stamped-but-unclosed. Run them separately."
         )
-
-    if candidates:
-        if node is not None or pr_number is not None:
-            raise typer.BadParameter(
-                "--candidates is a separate, read-only report; it does not "
-                "combine with --node or --pr-number."
-            )
-        from fno.graph._reconcile import reconcile_diff_candidates
-        from fno.graph.store import read_graph as _read_graph_for_candidates
-
-        entries = _read_graph_for_candidates(_graph_path())
-        rows = reconcile_diff_candidates(entries, cwd=os.getcwd())
-        if json_out:
-            typer.echo(json.dumps({"diff_candidates": rows}, default=lambda o: o.__dict__))
-            return
-        if not rows:
-            typer.echo("diff candidates: none")
-            return
-        typer.echo(f"diff candidates: {len(rows)}")
-        for row in rows:
-            typer.echo(
-                f"  {row.node_id} <- PR #{row.pr_number}"
-                f"{f' ({row.pr_url})' if row.pr_url else ''}: {', '.join(row.overlapping_paths)}"
-            )
-            if row.probe is not None:
-                probe_verdict = "PASS" if row.probe.passed else "FAIL"
-                typer.echo(f"      closure_probe: {probe_verdict} - {row.probe.detail}")
-        typer.echo(
-            "  read-only: confirm with `fno backlog confirm-candidate <node-id> "
-            "--pr-number N`, or ignore - a file overlap is evidence, not proof"
-        )
-        return
 
     # A truly unscoped, no-args sweep (SessionStart, a bare manual run) - the
     # only shape allowed to touch the whole graph: revert detection, the
@@ -15713,7 +15571,6 @@ _TRACKER_OWNED_VERBS = frozenset(
         # orchestration that stamps nodes
         "advance",
         "reconcile",
-        "confirm-candidate",
         "reconcile-findings",
         "lanes",
         "lane-fill",

@@ -88,10 +88,6 @@ The gate fails open on an absent/unreadable/unparseable plan (a stale
 `plan_path` never wedges a close) or a gh outage while counting ships (retryable,
 matching the merge gate). Those limits are stated in the refusal/warning text.
 
-## The stamp is no longer the only closure route
-
-Node closure was designed to run through this stamp alone. Most open nodes never reach it. A plan-less node has no frontmatter to stamp. A branch that never named its node has no way back to it either. `fno backlog reconcile --candidates` is the second, weaker edge. It reports an open node whose declared surface overlaps a recent merge's changed files. A declared surface is a plan's Files to Modify table, or a path-shaped token in `details`. It never closes the node automatically. A human confirms one with `fno backlog confirm-candidate <node-id> --pr-number N`. That binds the PR ref and stamps `pr_edge_derivation` naming the edge: `diff-candidate` here, `branch` for the existing branch-name match. A later reader can then tell the two apart. Confirming a candidate does not close it. The node still goes through `fno backlog done` (or a ship-gate merge) exactly as before. This stamp and the promise gate above stay the closure's actual gate. This edge, and the derivation it stamps, live on the graph node. They sit outside the repo `check-no-internal-refs.sh` scans by construction, not by exemption.
-
 ## Invocation Points
 
 Three call sites write stamps. Each has a different role:

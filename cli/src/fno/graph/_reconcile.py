@@ -1483,244 +1483,41 @@ def _branch_matches_node(head_ref: str, node_id: str) -> bool:
     return re.search(rf"(^|[/-]){re.escape(node_id)}([/-]|$)", head_ref) is not None
 
 
-_DETAILS_PATH_RE = re.compile(r"`([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9_]+)`")
+def stamp_reopen_warning(parent: dict, child: object, node_id: str) -> None:
+    """Stamp which child reopened this done-on-its-own-evidence parent, and when.
 
-
-def node_declared_surfaces(node: dict) -> set[str]:
-    """Repo-relative paths ``node`` records as its own, from what it actually has.
-
-    A plan's ``Files to Modify`` table when ``plan_path`` resolves to one -
-    reusing ``graph.collision.parse_files_to_modify`` rather than a second
-    table parser. Otherwise the backtick-fenced path-shaped tokens in
-    ``details``, which is the only surface a plan-less node has ever
-    recorded: most open p1 nodes on the live graph carry no ``plan_path``,
-    and this is how they are reachable as a diff candidate at all.
+    ``_cascade_reopen_parents``'s stderr warning is gone the moment that
+    terminal closes; this survives on the graph node instead. ``child`` is
+    ``cur`` at the call site (falls back to ``node_id`` when not a dict, same
+    as before this was extracted). Cleared by
+    :func:`clear_reopen_warning_if_child_matches` or a direct reopen.
     """
-    plan_path = node.get("plan_path")
-    if isinstance(plan_path, str) and plan_path:
-        from fno.graph.collision import parse_files_to_modify, resolve_plan_path
-
-        try:
-            files = parse_files_to_modify(resolve_plan_path(plan_path))
-        except Exception:  # noqa: BLE001 - an unreadable plan falls through to details
-            files = set()
-        if files:
-            return {_normalize_surface(f) for f in files}
-    details = str(node.get("details") or "")
-    return {_normalize_surface(m.group(1)) for m in _DETAILS_PATH_RE.finditer(details)}
+    child_id = child.get("id") if isinstance(child, dict) else node_id
+    parent["reopen_warning"] = {"child": child_id, "at": datetime.now(timezone.utc).isoformat()}
 
 
-# Wall clock for a node's opt-in closure_probe (reconcile's own subprocess,
-# not fno-agents probe-run's PROBE_RUN_TIMEOUT_S - a node-level probe is one
-# shell command, not a batch of a plan's close_probes).
-NODE_PROBE_TIMEOUT_S = 30.0
+def clear_reopen_warning_if_child_matches(parent: dict, child: object) -> None:
+    """Clear ``parent``'s ``reopen_warning`` when it names ``child``'s id.
 
-
-@dataclass(frozen=True)
-class NodeProbeVerdict:
-    """The pass/fail/unevaluable result of one node's ``closure_probe``.
-
-    Same contract ``resolve_promise_evidence`` documents for a plan's
-    ``close_probes`` (assert a positive marker, bound in time, fail closed
-    when it cannot be evaluated) - not the same runner, because a plan-less
-    node has no plan frontmatter to declare a probe in. This shells the
-    node's own command directly instead.
+    The child that reopened this already-done parent just closed again: the
+    marker no longer describes a live state. Runs unconditionally on
+    ``_cascade_close_parents``'s climb, whether or not the parent re-closes.
     """
+    marker = parent.get("reopen_warning")
+    child_id = child.get("id") if isinstance(child, dict) else None
+    if isinstance(marker, dict) and marker.get("child") == child_id:
+        parent.pop("reopen_warning", None)
 
-    passed: bool
-    detail: str
 
-
-def evaluate_node_closure_probe(
-    node: dict,
-    *,
-    cwd: Optional[str] = None,
-    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-) -> Optional[NodeProbeVerdict]:
-    """Run ``node``'s opt-in ``closure_probe`` shell command, fail-closed.
-
-    Returns ``None`` when the node declares no probe - the caller then
-    reports the diff candidate with no probe evidence, unchanged from
-    before this field existed. A declared probe that cannot be evaluated
-    (a timeout, a launch failure, a non-zero exit) returns ``passed=False``
-    naming why, never ``None`` - an absence must not read as a pass.
+def cascade_close_should_stop(parent: dict, kids: list[dict], child: object) -> bool:
+    """One climb step of ``_cascade_close_parents``: clear a stale marker on
+    ``parent`` first, then report whether the walk stops here (``parent``
+    already done, or a kid still open) rather than closing it and climbing on.
     """
-    probe = node.get("closure_probe")
-    if not isinstance(probe, str) or not probe.strip():
-        return None
-    try:
-        proc = runner(
-            probe, shell=True, capture_output=True, text=True,
-            timeout=NODE_PROBE_TIMEOUT_S, cwd=cwd,
-        )
-    except subprocess.TimeoutExpired:
-        return NodeProbeVerdict(
-            False, f"closure_probe timed out after {NODE_PROBE_TIMEOUT_S:.0f}s"
-        )
-    except OSError as exc:
-        return NodeProbeVerdict(False, f"closure_probe failed to launch: {exc}")
-    if proc.returncode == 0:
-        return NodeProbeVerdict(True, (proc.stdout or "").strip()[:200])
-    detail = (proc.stderr or proc.stdout or "").strip()[:200] or "no diagnostic"
-    return NodeProbeVerdict(False, f"closure_probe exited {proc.returncode}: {detail}")
-
-
-@dataclass(frozen=True)
-class DiffCandidate:
-    """One open node whose declared surfaces overlap a merge's changed files.
-
-    Never a closure - the whole point of this edge. A file overlap is
-    evidence someone worked nearby, not that the symptom is gone; a human or
-    king reads this list, plus ``probe`` when the node declared one, and
-    confirms or discards each row.
-    """
-
-    node_id: str
-    pr_number: int
-    pr_url: Optional[str]
-    overlapping_paths: list[str]
-    probe: Optional[NodeProbeVerdict] = None
-
-
-def diff_closure_candidates(
-    entries: list[dict],
-    *,
-    pr_number: int,
-    pr_url: Optional[str],
-    changed_files: Iterable[str],
-    matched_node_ids: Iterable[str] = (),
-    probe_cwd: Optional[str] = None,
-    probe_runner: Optional[Callable[..., subprocess.CompletedProcess]] = None,
-) -> list[DiffCandidate]:
-    """Open nodes whose declared surfaces overlap one merge's changed files.
-
-    ``matched_node_ids`` excludes nodes already closing through the
-    branch-name edge (:func:`_branch_matches_node`), so a PR is never
-    reported through both edges for the same node. A candidate node
-    carrying an opt-in ``closure_probe`` has it evaluated here (change 5) -
-    only for a node that already overlaps this merge, never repo-wide, so a
-    probe cost is paid only where the diff edge already found something.
-    """
-    changed = {
-        _normalize_surface(p) for p in changed_files if isinstance(p, str) and p.strip()
-    }
-    if not changed:
-        return []
-    excluded = set(matched_node_ids)
-    out: list[DiffCandidate] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        node_id = entry.get("id")
-        if not isinstance(node_id, str) or node_id in excluded:
-            continue
-        if not node_is_open(entry):
-            continue
-        overlap = sorted(node_declared_surfaces(entry) & changed)
-        if overlap:
-            probe = (
-                evaluate_node_closure_probe(entry, cwd=probe_cwd, runner=probe_runner)
-                if probe_runner is not None
-                else evaluate_node_closure_probe(entry, cwd=probe_cwd)
-            )
-            out.append(
-                DiffCandidate(
-                    node_id=node_id, pr_number=pr_number, pr_url=pr_url,
-                    overlapping_paths=overlap, probe=probe,
-                )
-            )
-    out.sort(key=lambda c: c.node_id)
-    return out
-
-
-def reconcile_diff_candidates(
-    entries: list[dict],
-    *,
-    cwd: str,
-    list_merged: Optional[Callable[..., list[dict]]] = None,
-    merge_state_reader: Optional[Callable[..., PrMergeState]] = None,
-    probe_runner: Optional[Callable[..., subprocess.CompletedProcess]] = None,
-) -> list[DiffCandidate]:
-    """Diff-derived closure candidates across one repo's recently merged PRs.
-
-    Fetches changed-file evidence only for a merged PR whose branch matched
-    NO node id - the branch edge already accounts for the rest, so this
-    stays a small remainder rather than one gh call per merged PR. Never
-    mutates the graph; a candidate is confirmed (or not) by a human.
-
-    ``list_merged`` and ``merge_state_reader`` are injected in tests to
-    avoid shelling to gh.
-    """
-    if list_merged is None:
-        list_merged = list_merged_pr_branches
-    if merge_state_reader is None:
-        merge_state_reader = query_pr_merge_state
-
-    node_ids = [
-        e["id"] for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
-    ]
-    try:
-        merged = list_merged(cwd=cwd)
-    except ReconcileError:
-        return []
-
-    candidates: list[DiffCandidate] = []
-    for row in merged:
-        if not isinstance(row, dict):
-            continue
-        number = row.get("number")
-        if not isinstance(number, int):
-            continue
-        head_ref = str(row.get("headRefName") or "")
-        matched = {nid for nid in node_ids if _branch_matches_node(head_ref, nid)}
-        if matched:
-            continue  # the branch edge already closes these
-        try:
-            state = merge_state_reader(number, cwd=cwd, include_files=True)
-        except ReconcileError:
-            continue
-        candidates.extend(
-            diff_closure_candidates(
-                entries, pr_number=number, pr_url=row.get("url") or state.url,
-                changed_files=state.changed_files, matched_node_ids=matched,
-                probe_cwd=cwd, probe_runner=probe_runner,
-            )
-        )
-    candidates.sort(key=lambda c: (c.pr_number, c.node_id))
-    return candidates
-
-
-def confirm_diff_candidate(
-    entries: list[dict],
-    node_id: str,
-    *,
-    pr_number: int,
-    pr_url: Optional[str],
-    confirmed_by: Optional[str] = None,
-) -> PrRowBindResult:
-    """Bind a diff candidate a human confirmed, with its provenance recorded.
-
-    Reuses :func:`bind_pr_rows` for the actual ref write (the only pr-to-node
-    writer, so a diff-confirmed bind and a claim-trailer bind cannot drift),
-    then stamps ``pr_edge_derivation`` on success: which edge produced the
-    close (always ``diff-candidate`` here - the branch edge closes through
-    its own path and never calls this), the PR, and who confirmed it. This
-    lives on the graph node, never in the repo, so it is outside
-    ``check-no-internal-refs.sh`` by construction rather than by exemption.
-    """
-    result = bind_pr_rows(entries, [node_id], pr_number=pr_number, pr_url=pr_url)
-    if result.outcome == "bound":
-        from fno.graph._intake import _find_node
-
-        node = _find_node(entries, node_id)
-        if node is not None:
-            node["pr_edge_derivation"] = {
-                "via": "diff-candidate",
-                "pr_number": pr_number,
-                "confirmed_by": confirmed_by,
-                "confirmed_at": datetime.now(timezone.utc).isoformat(),
-            }
-    return result
+    clear_reopen_warning_if_child_matches(parent, child)
+    if parent.get("completed_at"):
+        return True
+    return not kids or any(not k.get("completed_at") for k in kids)
 
 
 @dataclass
