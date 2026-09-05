@@ -259,6 +259,12 @@ no_docs = false
 max_iterations = 40
 
 [agents]
+# Seconds a single-flight answer counts as fresh (default 10). Callers arriving inside the window read one child's stdout instead of each spawning their own; the latch is keyed on the normalized argv, so two `do pr wait` calls for different PRs stay two flights.
+single_flight_ttl_seconds = 10
+# Seconds a later caller waits for the in-flight holder's answer before running its own (default 30). Set over the 23.2 s worst-measured roster read: load is when the latch has to hold. An exhausted budget spawns and says so, because a latch that can wedge a caller is worse than the fan-out it prevents.
+single_flight_join_budget_seconds = 30
+# Age at which an fno child that init inherited is reaped (default 5400). Three times `do pr wait --timeout 30m`, the longest detached child allowed to be running. The sweep also needs parent pid 1 and a pid no registry row names live.
+orphan_reap_after_seconds = 5400
 # Per-verb spawn-defaults overlay keyed by the seed's leading slash-verb. A profile may set scalar fields or a strict ordered lanes list whose links use {provider,model,effort,substrate,permission_mode,route,account,pane_group}. Lane fields sit one rung above profile scalars; explicit flags still win. Malformed lanes refuse at the spawn seam rather than billing an unintended vendor.
 profiles = {}
 # Ordered fallback chain per node size, consulted ONLY when a provider refuses and the account queue cannot answer (agents.fallback.<S|M|L|default> = a list of {harness,model,effort,substrate,permission_mode,route,account} links). The operator rule 'simple work to a claude sonnet bg thread, complex work to codex' written where a daemon can read it. Give every size more than one link: a claude weekly cap and a z.ai five-hour cap are different meters with different periods, and either can be the one that is down. A link whose own provider reads EXHAUSTED with an unexpired reset is SKIPPED; UNKNOWN is not exhausted and stays eligible. An all-exhausted chain returns empty rather than link zero, because routing into a known-capped provider is worse than holding. Unlike agents.profiles this block REFUSES a malformed value rather than degrading open: degrading open on the failover path spawns a worker at an unintended vendor and bills it.
