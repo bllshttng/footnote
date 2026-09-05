@@ -1211,6 +1211,47 @@ event_types:
           description: "Comma-separated ancestor epic ids reopened alongside, because the cascade had auto-closed them when this node closed. Empty when none."
     consumers: [operator]
 
+  - name: single_flight_gate
+    retention: ephemeral
+    description: "One trip through the single-flight latch on an identical fno invocation. Emitted on every path, including the ones that spawn and the ones that could not latch at all: a latch silent when its cache is unreadable reports 'nothing was deduped' and 'the cache is broken' with the same silence."
+    sources: [fno-loop]
+    data:
+      required: [key_hash, outcome, waited_ms, answered]
+      properties:
+        key_hash:
+          type: string
+          description: "First 12 hex of the flight key's digest. The key is itself `flight:<blake3 of the normalized argv>`, because the raw argv is unbounded and the claim it locks is a filename, so this is a prefix of the name `fno agents claim status` shows."
+        outcome:
+          type: string
+          description: "spawn (held the claim and ran), cache (a fresh record answered), join (someone else's answer arrived), timeout (the join budget expired, so this caller ran its own)."
+        waited_ms:
+          type: integer
+          description: "Wall-clock milliseconds this caller spent in the latch."
+        answered:
+          type: boolean
+          description: "Whether the trip produced any stdout at all. False is a real run that measured nothing, never a latch that refused."
+        note:
+          type: string
+          description: "Present only when the latch could not function: no claims root, or an unreadable claim."
+  - name: orphan_reap_sweep
+    retention: ephemeral
+    description: "The daemon swept for fno children that init inherited. Emitted on EVERY run, including the runs that reap nothing: a reaper that speaks only when it kills cannot be told apart from a reaper that never ran."
+    sources: [daemon]
+    data:
+      required: [scanned, candidates, reaped, older_than_secs]
+      properties:
+        scanned:
+          type: integer
+          description: "Rows read from the process table. One ps for the whole machine, not one probe per candidate."
+        candidates:
+          type: integer
+          description: "Rows passing all four reap clauses: the fno-py entrypoint in argv, parent pid 1, past the age threshold, and no live registry row naming the pid."
+        reaped:
+          type: integer
+          description: "Candidates actually signalled. Lower than candidates when one had already exited or refused the signal."
+        older_than_secs:
+          type: integer
+          description: "The configured age threshold (config.agents.orphan_reap_after_seconds)."
   - name: claim_acquired
     retention: ephemeral
     description: "A work-claim was acquired on a key. First write to .fno/claims/<key>.lock."
