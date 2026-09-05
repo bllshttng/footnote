@@ -7514,13 +7514,9 @@ fn coverage_origin_unknown_when_attester_empty_count_unchanged() {
     assert_eq!(rep.coverage_count(), Some(1));
 }
 
-/// No authoring session known (no manifest / unparseable) -> a local verdict
-/// with a concrete attester is Unmeasured (the comparison failed, never
-/// guessed), and the verdict set keeps counting it - origin is recorded,
-/// never gating. Fail CLOSED at the corroboration gate, not open: with every
-/// counted verdict unresolved, the row rests on self-attestation alone and
-/// require_corroboration refuses it. The unknown bucket (attester absent or
-/// empty) refuses the same way.
+/// No author session known: a concrete attester is Unmeasured (the comparison
+/// failed, never guessed) and still counts - origin is recorded, never gating,
+/// and the corroboration gate refuses a row whose whole count is unresolved.
 #[test]
 fn coverage_origin_author_unmeasured_counts_but_refuses_uncorroborated() {
     let events = format!(
