@@ -2431,13 +2431,6 @@ def _name_lane_send(
     # node x-1904: the live lane's own cause when a claude inject misses, so the
     # durable receipt names it (e.g. not-confirmed) instead of a bare live-miss.
     live_reason: Optional[str] = None
-    # The session actually injected into, for the landed check to grep (never
-    # the handle, which can outlive the process it names). Set from `resolved`
-    # when a live session was found by discovery; the token ladder below fills
-    # it in for the probe-target lane once `token_reachable` is known. Left
-    # `None` on any lane this cannot cheaply pin (e.g. an unregistered raw
-    # token with no discovery row) -- the landed check then honestly reports
-    # `landed: null` rather than guessing.
     to_session: Optional[str] = resolved.session_id if resolved is not None else None
     to_harness: Optional[str] = resolved.agent if resolved is not None else None
 
@@ -4769,9 +4762,8 @@ def cmd_sent(
     ``--unclaimed`` applies exactly the predicate the nag applies, so what this
     prints is what that line is counting, never a differently-scoped set.
 
-    ``landed`` proves the text reached the recipient's own transcript. It
-    never proves the agent read it or acted on it -- that fourth state is not
-    observable, so three is the honest ceiling here.
+    ``landed`` proves the text reached the recipient's own transcript, never
+    that the agent read or acted on it -- that fourth state isn't observable.
     """
     from fno.agents.self_stamp import stamp_from
     from fno.bus.log import HOSTED_DELIVERY, TYPED_DELIVERY, iter_messages, withdrawn_ids
@@ -4805,20 +4797,14 @@ def cmd_sent(
             if m.kind == "send" and m.from_ == handle and m.id not in retracted
         ]
 
-    # `claimed` has one meaning: the durable consume-cursor was read past this
-    # row. A hosted row has no cursor -- reporting `true` there unconditionally
-    # was the decoration this node exists to delete, so it reports `null`
-    # (see `landed` instead). A typed row is neither claimed nor claimABLE:
-    # bytes at a prompt can be discarded by that prompt, so it keeps its own
-    # `false` rather than falling into the cursor comparison.
-    claimed_flag: dict[str, Optional[bool]] = {}
-    for m in msgs:
-        if m.delivery == HOSTED_DELIVERY:
-            claimed_flag[m.id] = None
-        elif m.delivery == TYPED_DELIVERY:
-            claimed_flag[m.id] = False
-        else:
-            claimed_flag[m.id] = m.id not in unclaimed_ids
+    # `claimed`: durable cursor read past this row. A hosted row has none, so
+    # it reports `null` (see `landed`), never the unconditional `true` before.
+    claimed_flag: dict[str, Optional[bool]] = {
+        m.id: (None if m.delivery == HOSTED_DELIVERY
+               else False if m.delivery == TYPED_DELIVERY
+               else m.id not in unclaimed_ids)
+        for m in msgs
+    }
     landed_flag = landed_states(all_msgs, msgs)
 
     if json_out or not is_tty:
@@ -4837,8 +4823,6 @@ def cmd_sent(
                         # durable row that can still clear, so this renderer and
                         # `--unclaimed-only` disagreed about the same row.
                         "claimable": m.delivery != TYPED_DELIVERY,
-                        # Proof the text reached the recipient's transcript.
-                        # It never proves the agent read it or acted on it.
                         "landed": landed_flag.get(m.id),
                     }
                     for m in msgs
@@ -4860,11 +4844,8 @@ def cmd_sent(
                 state = f"handed {age_minutes(m.ts) or 0}m ago, not in transcript"
             else:
                 state = "handed, transcript unreadable"
-        # `typed` gets its own word. It is excluded from the unclaimed scan
-        # like a hosted row, so it fell through to "claimed" here and told
-        # the sender the recipient had consumed it. That is the one claim
-        # this transport must never make: bytes written into a PTY can be
-        # discarded by the prompt they land on.
+        # `typed`: bytes written into a PTY can be discarded by the prompt they
+        # land on, so this transport must never claim the recipient consumed it.
         elif m.delivery == TYPED_DELIVERY:
             state = "typed (unconfirmed)"
         else:
@@ -4876,9 +4857,7 @@ def cmd_sent(
         "\nunclaimed means the recipient never read it. Wake it first - "
         "fno agents peek <recipient> to check, fno agents resume <recipient> "
         "to wake (the wake lane delivers); withdraw one only when stale: "
-        "fno agents mail withdraw <id>\n"
-        "landed proves the text reached the recipient's transcript; it never "
-        "proves the agent read it or acted on it."
+        "fno agents mail withdraw <id>"
     )
 
 
@@ -5646,10 +5625,6 @@ def cmd_notify_self() -> None:
 
     ttl = load_settings().inbox.unclaimed_ttl
     unclaimed = _sent_unclaimed(handle, ttl)
-    # Silent when everything has landed (AC6-HP). Names the keystroke because
-    # no receipt can perform it: a hosted send that never reaches its
-    # recipient's turn only resolves when a human interrupts the loop it is
-    # stuck in.
     line = nag_line(unclaimed)
     if line:
         lines.append(line)

@@ -473,21 +473,9 @@ def record_hosted_delivery(
     to_session: Optional[str] = None,
     to_harness: Optional[str] = None,
 ) -> Envelope:
-    """Append one audit-only record after confirmed hosted delivery.
-
-    ``to_session``/``to_harness`` name the session actually injected into --
-    never the recipient handle, and never re-resolved later, since a handle
-    can outlive the process it named at send time. That coordinate is what
-    the landed check greps: proof the text reached the recipient's own
-    transcript, which a hosted delivery alone never was -- one message
-    reached its recipient's turn only because a human pressed ESC to
-    interrupt a busy loop, after the send had already printed as delivered.
-    """
-    meta: dict = {}
-    if to_session:
-        meta["to_session"] = to_session
-    if to_harness:
-        meta["to_harness"] = to_harness
+    """Append one audit-only record after confirmed hosted delivery. ``to_session``/
+    ``to_harness`` name the session actually injected into, for the landed check."""
+    meta = {k: v for k, v in (("to_session", to_session), ("to_harness", to_harness)) if v}
     env = Envelope.new(
         id=msg_id,
         thread=thread or msg_id,
@@ -638,10 +626,7 @@ def withdrawn_ids(msgs: list[Envelope]) -> set[str]:
     return out
 
 
-#: A landed row is control traffic proving one id reached its recipient's own
-#: transcript. Never itself deliverable, and durable rather than a re-grep:
-#: a transcript rotates and a session dies, and a state that can un-flip on
-#: that is the exact decoration this kind exists to delete.
+#: Durable proof one id reached its recipient's transcript. Never deliverable.
 LANDED_KIND = "landed"
 
 
@@ -659,15 +644,9 @@ def record_landed(*, msg_id: str, sender: str, recipient: str) -> Envelope:
 
 
 def landed_ids(msgs: list[Envelope]) -> set[str]:
-    """Ids a ``record_landed`` row proves reached their recipient's transcript.
-
-    Mirrors ``withdrawn_ids``'s read-side ownership check: a landed row counts
-    only when it marks a message the same sender sent to the same address, so
-    a hand-appended or replayed line cannot mark someone else's mail landed.
-    Unlike a withdrawal, a landed message stays visible (with ``landed:
-    true``) rather than disappearing, so the control row's own id is never
-    added to the returned set -- only the message it proves.
-    """
+    """Ids proven landed by a same-sender/recipient ``record_landed`` row (mirrors
+    ``withdrawn_ids``). The control row's own id is never added -- unlike a
+    withdrawal, a landed message must stay visible."""
     by_id = {m.id: m for m in msgs}
     out: set[str] = set()
     for m in msgs:

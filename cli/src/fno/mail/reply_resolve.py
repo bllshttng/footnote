@@ -150,17 +150,9 @@ def resolve_live_sender(msg_id: str) -> Optional[str]:
 
 def mail_ids_in_transcript(harness: str, session_id: str) -> Optional[set[str]]:
     """Every ``<fno_mail id="...">`` id in ``(harness, session_id)``'s own
-    transcript, or ``None`` when it cannot be resolved or read.
-
-    Parameterized out of ``present_mail_ids`` below, which is the single-store
-    special case: the invoking session's own identity. The same read serves a
-    landed check proving a message reached a DIFFERENT session's transcript --
-    one reader, not two.
-
-    ``None`` (not an empty set) means a read failure, never evidence of
-    absence: a caller proving a message landed must withhold that verdict on
-    an unreadable transcript rather than assert it did not land.
-    """
+    transcript. ``None`` (not an empty set) means a read failure, never
+    evidence of absence. Parameterized out of ``present_mail_ids`` below so
+    a landed check proving a message reached a DIFFERENT session reuses it."""
     path = _transcript_path(harness, session_id)
     if path is None:
         return None
@@ -168,9 +160,7 @@ def mail_ids_in_transcript(harness: str, session_id: str) -> Optional[set[str]]:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    # JSONL-escaped envelopes arrive with \\"; normalize so the regex matches the
-    # raw form too (mirrors sender_from_transcript_text).
-    return set(_ID_RE.findall(text.replace('\\"', '"')))
+    return set(_ID_RE.findall(text.replace('\\"', '"')))  # JSONL-escapes quotes
 
 
 def present_mail_ids() -> Optional[set[str]]:
@@ -186,16 +176,7 @@ def present_mail_ids() -> Optional[set[str]]:
     drop. An empty set means "read it; nothing matched," which is a safe
     print-everything because the transcript genuinely carries none of these ids.
     """
-    # Imported HERE, not at module scope (the same trap `truth_status.py`
-    # calls out): a module-level `from fno.harness_identity import
-    # resolve_harness_identity` binds whatever that name pointed to at the
-    # moment of THIS module's first import, permanently, since the module is
-    # cached in `sys.modules` thereafter. A test that monkeypatches
-    # `harness_identity.resolve_harness_identity` and happens to trigger this
-    # module's first import while the patch is active poisons every later
-    # caller in the same process; monkeypatch's teardown only reverts the
-    # attribute on `fno.harness_identity`, not this module's separate name
-    # binding.
+    # Imported here, not at module scope: see `truth_status.py`'s sys.modules trap.
     from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
 
     # Still routes through the single-store pick `resolve_live_sender` no longer
