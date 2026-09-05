@@ -170,8 +170,12 @@ check "$([[ $rc -eq 0 ]] && echo 1)" \
 # Bash arithmetic reads a leading zero as octal. `08` used to abort the script
 # under `set -u`, exiting 1 and printing NO verdict line, which breaks both of
 # the contracts stated at the top of the reporter. A digit-only string check
-# does not catch it; forcing base 10 does.
-for pair in "1063 08" "08 30" "0000001063 30"; do
+# does not catch it; forcing base 10 does. An ALL-zero input ("0", "000") is
+# the sharper edge: stripping leaves an empty base, which bash 5 treats as a
+# fatal expansion error inside the substitution - the margin-0 call died
+# silently in CI and the verdict fell back to the default, exactly the
+# "did it run, or was it fine?" ambiguity this guard exists to remove.
+for pair in "1063 08" "08 30" "0000001063 30" "0 30" "000 30"; do
   set -- $pair
   out="$(bash "$SCRIPT" smoke-rest "$1" "$2" 2>&1)"; rc=$?
   check "$([[ $rc -eq 0 ]] && echo 1)" \

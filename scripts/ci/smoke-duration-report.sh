@@ -43,8 +43,17 @@ say() { printf 'smoke-duration: %s\n' "$*"; }
 # Every number this script reads is forced to base 10. Bash arithmetic treats a
 # leading zero as octal, so a caller passing `08` aborted the script under
 # `set -u` before it printed any verdict, which is the one output a reader
-# needs. A digit-only string check is not enough on its own.
-as_int() { printf '%s' "$((10#${1#0}))" 2>/dev/null || printf '0'; }
+# needs. A digit-only string check is not enough on its own. Stripping must
+# also survive an all-zero input: `${1#0}` alone leaves an empty base, and a
+# bare `$((10#))` is a fatal expansion error on bash 5 (where the knob's own
+# margin-0 call died) while bash 3 merely mumbles - the loop keeps every
+# version on the same path.
+as_int() {
+    local n="${1:-}"
+    while [ "$n" != "${n#0}" ]; do n="${n#0}"; done
+    [ -n "$n" ] || n=0
+    printf '%s' "$((10#$n))"
+}
 
 is_digits() { case "${1:-}" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 
