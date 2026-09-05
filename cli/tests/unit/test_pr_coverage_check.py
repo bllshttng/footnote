@@ -3768,7 +3768,10 @@ def test_rests_on_self_attestation_counts_only_row_reads_all_self_attested():
 def test_rests_on_self_attestation_counts_only_row_refuses_an_absent_count():
     """The omit the producer itself emits when authorship was unmeasured: a
     counts-only row with no self_attested_count key must refuse, never read
-    the None comparison as "not self-attested" and clear."""
+    the None comparison as "not self-attested" and clear - at reviewed 3 and
+    at reviewed 0, the absence convention does not depend on the count that
+    is missing beside it. A measured count still answers: zero reviewed with
+    a recorded zero stays clear, as before."""
     assert _coverage_gate.rests_on_self_attestation_alone({"reviewed_count": 3}) is True
     assert (
         _coverage_gate.rests_on_self_attestation_alone(
@@ -3781,6 +3784,14 @@ def test_rests_on_self_attestation_counts_only_row_refuses_an_absent_count():
             {"reviewed_count": 3, "self_attested_count": "3"}
         )
         is True
+    )
+    assert _coverage_gate.rests_on_self_attestation_alone({"reviewed_count": 0}) is True
+    assert _coverage_gate.rests_on_self_attestation_alone({}) is True
+    assert (
+        _coverage_gate.rests_on_self_attestation_alone(
+            {"reviewed_count": 0, "self_attested_count": 0}
+        )
+        is False
     )
 
 
@@ -3811,8 +3822,11 @@ def test_rests_on_self_attestation_held_row_reads_preserved_verdicts():
     assert _coverage_gate.rests_on_self_attestation_alone(cov) is True
 
 
-def test_rests_on_self_attestation_uncovered_row_without_evidence_stays_clear():
-    """A merely-uncovered row with no self-attestation record and no verdicts
-    is not self-attested-only; it reads as what it is."""
+def test_rests_on_self_attestation_uncovered_row_without_evidence_refuses():
+    """A row with no self-attestation record and no verdicts refuses at
+    reviewed 0 the same as at reviewed 3: the absence convention does not
+    depend on the count that is missing beside it, and an uncovered row was
+    never the shape that leaned on this predicate clearing (the coverage
+    conjunct refuses it first). Supersedes the earlier stays-clear pin."""
     cov = {"reviewed_count": 0}
-    assert _coverage_gate.rests_on_self_attestation_alone(cov) is False
+    assert _coverage_gate.rests_on_self_attestation_alone(cov) is True

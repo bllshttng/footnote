@@ -545,17 +545,17 @@ def rests_on_self_attestation_alone(
     verdicts = [v for v in (cov.get("verdicts") or []) if isinstance(v, dict)]
     if not verdicts:
         # A pre-verdicts producer recorded only the counts. The counts path
-        # answers for this shape and fails closed on the count itself: an
-        # ABSENT self_attested_count (the producer's own omit when authorship
-        # was unmeasured) leaves the row unable to prove an independent
-        # reviewer, so it refuses like the absent-origin case, never reads as
+        # answers for this shape and fails closed on the count itself at ANY
+        # reviewed_count: an ABSENT self_attested_count (the producer's own
+        # omit when authorship was unmeasured) is the same unmeasured-author
+        # shape at reviewed 3 and at reviewed 0, and neither may read as
         # "not self-attested".
-        if not (isinstance(reviewed, int) and reviewed > 0):
-            return False
         self_attested = cov.get("self_attested_count")
         if not isinstance(self_attested, int):
             return True
-        return self_attested == reviewed
+        if isinstance(reviewed, int) and reviewed > 0:
+            return self_attested == reviewed
+        return self_attested > 0
     counted = [
         v
         for v in verdicts
