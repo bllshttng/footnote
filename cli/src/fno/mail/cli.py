@@ -1784,7 +1784,7 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
     live and reachable, so the preamble says so and names the cause rather than
     claiming "is not live" -- a receipt naming the wrong cause is worse than one
     naming none, because it sends the reader to diagnose a recipient that was
-    never the problem. A None/unreachable reason keeps the honest not-live line.
+    never the problem. A None or unreachable reason repeats a transcript verdict.
 
     A lock timeout gets its own arm for the same reason. The per-agent flock is
     shared by every verb that touches the agent (send, ask, spawn, stop, rm), so
@@ -1838,9 +1838,8 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             "    fno agents mail withdraw <id>      # none of the above? retract it"
         )
     else:
-        msg = (
-            f"mail: {target} is not live; queued durably as recovery only - the "
-            "recipient must drain its inbox to read this, and may never do so\n"
+        from fno.mail.deferred_liveness import deferred_liveness_head
+        msg = deferred_liveness_head(target) + (
             "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
             f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
             f"    fno agents resume {target}   # wakes it (claude) or resumes it (other harnesses), then re-send\n"

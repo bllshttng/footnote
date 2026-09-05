@@ -578,6 +578,23 @@ def test_the_unattributed_row_warning_fires_once_per_process(monkeypatch):
 
     assert len([m for m in seen if "without a provider stamp" in m]) == 1
 
+
+def test_census_caption_points_at_the_transcript_verdict(runner):
+    """The table's footer names itself a census and defers liveness to truth.
+
+    A row's presence is launch-time evidence; the caption must say so in every
+    render, including the empty board, so nobody reads STATUS as an answer
+    about whether the session behind the row can move now.
+    """
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(agents_app, ["top"])
+    out = result.output
+    assert result.exit_code == 0, out
+    assert "census: rows are processes present at scan time" in out, out
+    assert "for a liveness verdict use fno agents truth" in out, out
+
+
 def test_status_column_renders_served_activity_with_age(tmp_path, monkeypatch, runner):
     """AC7-HP (x-c672): the STATUS column answers what the session is doing -
     `writing 30s` for a transcript touched half a minute ago, `quiet 3h` for

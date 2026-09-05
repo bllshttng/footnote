@@ -586,6 +586,10 @@ def render_top(
         )
     if c.slot_claims:
         out.append(f"(+{c.slot_claims} queued headless slot claim(s))")
+    out.append(
+        "census: rows are processes present at scan time; for a liveness "
+        "verdict use fno agents truth"
+    )
     if subagents is not None:
         out.append("")
         out.extend(subagents["warnings"])

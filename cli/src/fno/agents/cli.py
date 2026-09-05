@@ -3243,7 +3243,7 @@ def cmd_list(
         help="Retired: filter by --harness.",
     ),
     status: AgentStatusFilter = typer.Option(
-        None, "--status", help="Filter by served activity (writing | quiet | parked | orphaned | unknown)."
+        None, "--status", help="Filter by served activity (writing | quiet | parked | orphaned | unknown); liveness is `fno agents truth`."
     ),
     progress: AgentProgressFilter = typer.Option(
         None,

@@ -173,7 +173,10 @@ def history_command(arg: str) -> None:
     else:
         reasons = ["no reap receipt on disk under " + str(receipts_dir())]
         if live_sids:
-            reasons.append("the matching row is live, so no receipt is expected")
+            reasons.append(
+                "a registry row still names it (row presence, not a liveness "
+                "verdict), so no receipt is expected"
+            )
         typer.echo("receipt:  not recorded - " + "; ".join(reasons))
 
     if ledger_matches:

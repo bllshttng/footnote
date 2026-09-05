@@ -376,9 +376,29 @@ def resolve_session_truth(
 
 
 def _default_resolve(handle: str):
-    from fno.agents.discover import resolve_or_suggest
+    from fno.agents.discover import (
+        DiscoveredSession,
+        ReachableSession,
+        StoreReadError,
+        resolve_or_suggest,
+        resolve_reachable,
+    )
 
-    return resolve_or_suggest(handle, require_alive=False)
+    session: Optional[DiscoveredSession | ReachableSession] = None
+    session, suggestions = resolve_or_suggest(handle, require_alive=False)
+    if session is not None:
+        return session, suggestions
+    # The listing discovery serves is liveness-gated, so a handle whose only
+    # record is an aged transcript falls through it and truth would read
+    # "unknown" for a session a wake can still reach. The durable-store rung
+    # the send ladder uses is the reach below discovery; an ambiguous token
+    # still resolves to nothing, and an unproven-unique one only when the
+    # error carries its lone candidate.
+    try:
+        session, _ = resolve_reachable(handle)
+    except StoreReadError as exc:
+        session = exc.resolved
+    return session, suggestions
 
 
 _EVIDENCE = {

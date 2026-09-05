@@ -33,14 +33,6 @@ Traps a fresh agent re-hits because they are not yet a lint, guard or refusal. I
 
 AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read, proving this corpus reached its harness. A unit test asserts it: `kdc-delivery-sentinel-1932`.
 
-### Claim snapshots and liveness probes have both lied
-
-Manifest snapshots, process argv and liveness probes have each lied about a live session. Only the live lockfile and the transcript stayed truthful. A manifest's `target_claim_*` fields are an init-time snapshot and can name a respawned supervisor pid. A row's argv-derived fields can outlive the process they describe. Verify ownership against the live lockfile (`fno agents claim status node:<id>`, real holder) and liveness against the transcript, never a stored snapshot.
-
-- specimens: manifest `target_claim_*` fields are an init-time snapshot, never ownership truth.
-- graduates-to: transcript-keyed liveness.
-- added: 2026-07-23
-
 ### Assert a positive marker, never an absence
 
 An absence has three explanations: the real outcome, "the instrument never ran", or a pipeline loss. In the third case, the instrument ran, it HIT, and the pipeline ate the output before anything read it. Require a marker only the outcome produces, pinned to the measured thing, not a matching word. A positive control validates the TOOL, not the TARGET. A green control aimed at the wrong SYMBOL still reads as proof. Before trusting a zero, name the behavior's symbol: for a Python capability, use the function name, not the CLI spelling. Never truncate or post-process a search whose zero you intend to trust.
@@ -54,7 +46,7 @@ An absence has three explanations: the real outcome, "the instrument never ran",
 `fno agents mail send` injects as user-shaped text, indistinguishable from operator typing. So a "can the agent do X unprompted?" probe sent by mail tests the USER-TRIGGERED path and cannot fail. Reading that as proof of autonomy is the receipt-can-lie shape: a snapshot that a call was accepted, not that an agent can make it unaided. The valid test is a run with no user-shaped prompt in the transcript.
 
 - specimens: 2026-08-05, a `/code-review` probe mailed to a worker succeeded and was read as proof of self-invocation; the mail was the user-shaped trigger.
-- graduates-to: a probe distinguishing user-shaped injection from an autonomous tool call, or a lint flagging a capability claim evidenced only by a mail probe.
+- graduates-to: a probe separating user-shaped injection from an autonomous tool call, or a lint demanding evidence beyond a mail probe.
 - added: 2026-08-05
 
 ### Codex RPC
@@ -62,7 +54,7 @@ An absence has three explanations: the real outcome, "the instrument never ran",
 `fno agents mail send <full-session-id> --raw '/review'` fires daemon RPC: NATIVE verbs only. --raw types verbatim. fno verbs want $fno:target. A /fno: reads as prose.
 
 - specimens: mail_inject.rs, mux_cli.rs
-- graduates-to: submit receipt
+- graduates-to: Codex RPC dispatch returns a submit receipt naming the accepted verb.
 - added: 2026-08-24
 
 ## Repository
