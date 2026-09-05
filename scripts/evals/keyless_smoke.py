@@ -34,13 +34,14 @@ def _write_executable(path: Path, body: str) -> None:
 def _journal_text(path: Path) -> str:
     """A journal plus its .ephemeral sibling (retention routing):
     ephemeral-class rows like claim_acquired land in the sibling, so a reader
-    that wants the full stream reads both files. The sibling derives from the
-    resolved journal so a symlinked journal still finds it."""
-    base = path.resolve() if path.exists() else path
-    parts = [base.read_text(encoding="utf-8") if base.exists() else ""]
-    sibling = base.with_name(base.name + ".ephemeral")
-    if sibling.exists():
-        parts.append(sibling.read_text(encoding="utf-8"))
+    that wants the full stream reads both files. The shared derivation resolves
+    the journal first so a symlinked journal still finds its sibling."""
+    from fno.paths import journal_and_ephemeral_sibling
+
+    parts = [
+        p.read_text(encoding="utf-8") if p.exists() else ""
+        for p in journal_and_ephemeral_sibling(path)
+    ]
     return "".join(parts)
 
 

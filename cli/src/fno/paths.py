@@ -812,6 +812,26 @@ def project_events_json() -> Path:
 EPHEMERAL_EVENTS_SUFFIX = ".ephemeral"
 
 
+def journal_and_ephemeral_sibling(path: Path) -> list[Path]:
+    """The resolved journal plus its ``.ephemeral`` sibling, oldest first.
+
+    The one derivation for readers that take an explicit journal path: the
+    journal is RESOLVED first because callers pass worktree journals that are
+    symlinks into the repo space, and the sibling lives beside the real file,
+    not beside the link. Readers with a different shape (the scoreboard's
+    static ledger pair, the pane reader's rotation bridge) still derive their
+    own lists but must keep this resolve-first order.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path.absolute()
+    return [
+        resolved,
+        resolved.with_name(resolved.name + EPHEMERAL_EVENTS_SUFFIX),
+    ]
+
+
 def event_journals() -> list[Path]:
     """Return every event journal and retained rotation, oldest first.
 

@@ -639,17 +639,7 @@ def read_node_events(paths: Sequence[Path]) -> list[dict[str, Any]]:
         "claim_stale_reclaimed",
         "claim_released",
     }
-    from fno.paths import EPHEMERAL_EVENTS_SUFFIX
+    from fno.paths import journal_and_ephemeral_sibling
 
-    journals: list[Path] = []
-    for p in paths:
-        try:
-            resolved = Path(p).resolve()
-        except OSError:
-            resolved = Path(p).absolute()
-        journals.append(resolved)
-        # Derived from the RESOLVED journal: callers pass worktree journals that
-        # are symlinks into the repo space, and the sibling lives beside the
-        # real file, not beside the link.
-        journals.append(resolved.with_name(resolved.name + EPHEMERAL_EVENTS_SUFFIX))
+    journals = [j for p in paths for j in journal_and_ephemeral_sibling(Path(p))]
     return read_jsonl_events_with_coverage(journals, kinds)["events"]
