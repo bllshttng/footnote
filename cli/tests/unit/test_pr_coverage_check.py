@@ -2226,6 +2226,84 @@ def test_attestation_chain_keeps_same_invocation_reattests_at_new_heads(
     assert refusal == "", nonterminal
 
 
+def test_attestation_chain_keeps_same_invocation_same_head_reruns(
+    monkeypatch, tmp_path
+):
+    """One invocation, one head, TWO rounds: nothing may collapse.
+
+    Measured live on feature/x-a3e8: a pass and the later fail that
+    superseded it shared invocation_id AND head_sha (the hold mints one id
+    per branch, and both rows attested the same commit), so an
+    invocation+head key deleted the second row. The timestamp separates
+    them: two distinct emissions never share a microsecond ts, while a
+    mirror pair always does."""
+    from fno.pr import _reviews
+
+    head = "46695fffc00000000000000000000000000000000"
+    finding = {
+        "finding_key": "f.py:1:correctness",
+        "category": "correctness",
+        "verdict": "CONFIRMED",
+    }
+    fail_row = {
+        "reviewer": "code-review",
+        "head_sha": head,
+        "verdict": "fail",
+        "session_id": "s-1",
+        "attester_session_id": "s-1",
+        "branch": "feature/x-77be",
+        "invocation_id": "ri-1",
+        "findings": [finding],
+    }
+    pass_row = {
+        **fail_row,
+        "verdict": "pass",
+        "findings": [],
+        "dispositions": [
+            {
+                "finding_key": finding["finding_key"],
+                "disposition": "fixed",
+                "reason": "fixed and re-reviewed at the same head",
+            }
+        ],
+    }
+
+    def _row(ts, data):
+        return json.dumps(
+            {"ts": ts, "type": "review_attestation", "data": data}
+        ) + "\n"
+
+    project = tmp_path / "project-events.jsonl"
+    project.write_text(
+        _row("2026-09-04T15:53:10Z", fail_row)
+        + _row("2026-09-04T16:36:23Z", pass_row),
+        encoding="utf-8",
+    )
+    global_log = tmp_path / "global-events.jsonl"
+    global_log.write_text(
+        _row("2026-09-04T15:53:10Z", {**fail_row, "repo": "bllshttng/footnote"})
+        + _row("2026-09-04T16:36:23Z", {**pass_row, "repo": "bllshttng/footnote"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        _reviews,
+        "_coverage_logs",
+        lambda cwd, project_events: (project, global_log, "bllshttng/footnote"),
+    )
+    chain = _coverage_gate.attestation_chain(
+        str(tmp_path), head_branch="feature/x-77be", head=head
+    )
+    assert [(row["verdict"], row["dispositions"]) for row in chain] == [
+        ("fail", None),
+        ("pass", pass_row["dispositions"]),
+    ], "a same-head re-run under one invocation is two rounds, not one"
+    refusal, _note, nonterminal, _hard = _coverage_gate.disposition_refusal(
+        chain, cov=None, cwd=str(tmp_path)
+    )
+    assert refusal == "", nonterminal
+    assert nonterminal == []
+
+
 def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):
     """The helper rides the shared _rest_pages reader (page-per-call arrays)
     and maps the three fields the counter reads; a failed read answers with
