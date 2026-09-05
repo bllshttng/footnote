@@ -174,7 +174,10 @@ def test_exited_keepers_are_zombies_until_drained(tmp_path, monkeypatch):
     )
 
     reaped = store_mod.drain_exited_keepers()
-    assert reaped == len(pids), f"drain must name every exited keeper; reaped {reaped}"
+    # >= not ==: the keeper ledger is shared with every earlier test on this
+    # worker, so the drain legitimately collects their exited stragglers too.
+    # The strong claim is the line below: THIS test's three are all collected.
+    assert reaped >= len(pids), f"drain must reap this test's keepers; reaped {reaped}"
     _assert_reaped_or_reused(pids)
 
 
