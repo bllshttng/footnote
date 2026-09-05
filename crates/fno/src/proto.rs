@@ -321,7 +321,8 @@ fn default_true() -> bool {
 /// where the slot lookup knows occupancy. Additive, so the compatibility
 /// floor does not move; a repoint keeps owning its geometry and says so.
 /// v68 (x-5baf): `LayoutSlot.cwd`, `#[serde(default)]`; floor stays 58.
-pub const PROTO_VERSION: u32 = 68;
+/// v69 (x-a600): `Command::RedrawPane`, `#[serde(default)]`; floor stays 58.
+pub const PROTO_VERSION: u32 = 69;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -341,25 +342,9 @@ pub const MIN_COMPAT_PROTO: u32 = 58;
 /// test: it misflags every one-generation-old floor-admitting server.
 pub const FLOOR_SINCE_PROTO: u32 = 60;
 
-/// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
-/// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
-/// because a silently cut instruction to a worker is worse than a visible
-/// refusal (Locked Decision 7).
-pub const MAX_MAIL_TEXT: usize = 400;
-
-/// The stored tab-name ceiling (x-c150), shared by the server-side sanitize
-/// (the authoritative cap for any wire client) and the rename overlay's input
-/// cap (the TUI affordance, so the operator sees exactly what will be stored).
-pub const MAX_TAB_NAME: usize = 32;
-
-/// The stored squad-name ceiling (x-96e8), the same 32-char cap as
-/// [`MAX_TAB_NAME`] applied to `RenameSquad` on both the server sanitize and
-/// the client input. A sibling const (not a shared rename) so the two rename
-/// paths stay independently readable.
-pub const MAX_SQUAD_NAME: usize = 32;
-
-/// The crate version, carried in the handshake purely for the error message.
-pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
+#[path = "proto_limits.rs"]
+mod limits;
+pub use limits::{BUILD_VERSION, MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME};
 
 /// Refuse frames larger than this. A full 500x500 styled grid serializes to a
 /// few MB of JSON; 32MB is far above any real frame, low enough that a
@@ -1669,6 +1654,17 @@ pub enum Command {
     ToggleDiffPane {
         #[serde(default)]
         agent: Option<String>,
+        #[serde(default)]
+        pane: Option<u64>,
+    },
+    /// (v69, x-a600) The operator's repaint gesture for a garbled pane: the
+    /// server nudges the child's winsize (two SIGWINCHes over the existing
+    /// resize path) and re-seeds the pane's frame to every viewer, the same
+    /// flush-then-re-emit `push_layout(reemit)` does, scoped to one pane.
+    /// `None` resolves to the sender's viewed tab's focused pane (the
+    /// keybind path); `Some` names a catalog pane, refused fail-closed with
+    /// a notice when stale, like `FocusPane`.
+    RedrawPane {
         #[serde(default)]
         pane: Option<u64>,
     },
@@ -4197,7 +4193,8 @@ mod tests {
         // The registry-keyed identity pair (StopAgent/RemoveAgent carry
         // `harness_session_id`; AgentRow carries `liveness_age_s`) bumps it
         // 66 -> 67. `LayoutSlot.cwd` (x-5baf) bumps it 67 -> 68.
-        assert_eq!(PROTO_VERSION, 68);
+        // `Command::RedrawPane` (x-a600) bumps it 68 -> 69.
+        assert_eq!(PROTO_VERSION, 69);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the

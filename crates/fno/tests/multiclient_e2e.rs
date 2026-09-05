@@ -133,6 +133,109 @@ fn multiclient_clamp_below_min_pane_size_recovers_exactly() {
     a.wait_pane_text(15, after.focus, |t| t.contains("alive#"));
 }
 
+/// (x-a600) A coviewer clamp resize must ask the child to repaint, and
+/// prefix+R must re-ask on demand. The child is a WINCH-trapping painter:
+/// every signal repaints a full screen (TOPMARK, filler rows, an INPUTBOX
+/// marker on the CURRENT last row, and a visible paint counter) - the
+/// incremental-renderer stand-in the operator's garbled screenshot reported.
+/// The assertions are the node's verify markers: the smaller viewer must
+/// still see the input box, and no viewer may hold a duplicated row.
+#[test]
+fn multiclient_coviewed_tui_repaints_and_redraw_binding_nudges() {
+    let scratch = Scratch::new("repaint");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+
+    let mut a = FakeClient::attach(&scratch.sock(), 40, 120, cwd.to_str().unwrap());
+    let pane = a
+        .wait_layout(10, "first layout", |l| l.panes.len() == 1)
+        .focus;
+    a.wait_prompt(pane);
+
+    // The painter reads `stty size` on every signal, so INPUTBOX lands on
+    // the pane's REAL last row each time - the "input box follows the live
+    // size" behavior the screenshot lost.
+    std::fs::write(
+        cwd.join("winchpaint.sh"),
+        "#!/bin/sh\n\
+n=0\n\
+paint() {\n\
+  n=$((n+1))\n\
+  set -- $(stty size)\n\
+  rows=$1\n\
+  printf '\\033[2J\\033[H'\n\
+  echo TOPMARK\n\
+  i=2\n\
+  while [ $i -lt $rows ]; do echo filler$i; i=$((i+1)); done\n\
+  printf '\\033[%s;1H' \"$rows\"\n\
+  printf 'INPUTBOX n=%s' \"$n\"\n\
+}\n\
+trap 'paint' WINCH\n\
+paint\n\
+while :; do sleep 0.2; done\n",
+    )
+    .unwrap();
+    a.input(b"sh ./winchpaint.sh\r");
+    a.wait_pane_text(15, pane, |t| t.contains("INPUTBOX n=1"));
+
+    // A smaller coviewer clamps the pane 40x120 -> 20x80. The resize ioctl
+    // signals once and the nudge jiggles twice more; a shell may coalesce
+    // back-to-back signals, so the floor is >= 2 repaints past the initial.
+    let mut b = FakeClient::attach(&scratch.sock(), 20, 80, cwd.to_str().unwrap());
+    a.wait_layout(10, "a clamped", |l| l.area == (20, 80));
+    b.wait_layout(10, "b clamped", |l| l.area == (20, 80));
+
+    let count = |t: &str| -> i32 {
+        t.split("INPUTBOX n=")
+            .nth(1)
+            .and_then(|rest| rest.split(['\r', '\n', ' ']).next())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(-1)
+    };
+    let settled = a.wait_pane_text(15, pane, |t| count(t) >= 3);
+    assert_eq!(
+        settled.matches("TOPMARK").count(),
+        1,
+        "no duplicated row from a stale-width remnant"
+    );
+    assert_eq!(
+        settled.matches("INPUTBOX").count(),
+        1,
+        "the input box renders exactly once"
+    );
+    let frame = a.frames.get(&pane).expect("clamped frame");
+    assert_eq!(
+        (frame.rows, frame.cols),
+        (20, 80),
+        "frame is the clamped grid"
+    );
+    // The node's first marker: the SMALLER viewer's own grid carries the
+    // input box, on its last row.
+    b.wait_pane_text(15, pane, |t| t.contains("INPUTBOX"));
+    let btext = b.pane_text(pane);
+    assert!(
+        btext
+            .trim_end()
+            .lines()
+            .next_back()
+            .unwrap_or("")
+            .contains("INPUTBOX"),
+        "smaller viewer's last row is the input box: {:?}",
+        btext.lines().last()
+    );
+
+    // The recovery gesture: prefix+R (RedrawPane on the focused pane) must
+    // nudge the child again (two more winsize writes; coalescing floors this
+    // at one further repaint) and re-seed both viewers.
+    let before = count(&a.pane_text(pane));
+    a.cmd(Command::RedrawPane { pane: None });
+    a.wait_pane_text(15, pane, |t| count(t) > before.max(0));
+    a.wait(10, "repaint notice", |c| {
+        Some(c.notices.iter().any(|n| n.contains("repaint requested")))
+    });
+    b.wait_pane_text(15, pane, |t| count(t) > before.max(0));
+}
+
 // -- AC2: two clients, different views --------------------------------------
 
 #[test]
