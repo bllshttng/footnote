@@ -6308,9 +6308,9 @@ fn disposition_blockers_on_chain(
     }
     let last_round = chain.len().saturating_sub(1);
 
-    let mut findings: Vec<(String, &Value, usize)> = Vec::new(); // key, primitive, raised round
-    let mut dispositions: std::collections::HashMap<String, (&str, &str)> =
-        std::collections::HashMap::new(); // key -> (disposition, reason)
+    let mut findings: Vec<(String, &Value, usize, String)> = Vec::new(); // key, primitive, raised round, raised head
+    let mut dispositions: std::collections::HashMap<String, (&str, &str, String)> =
+        std::collections::HashMap::new(); // key -> (disposition, reason, disposing head)
     let mut truncated = false;
     for (index, val) in chain.iter().enumerate() {
         if val
@@ -6320,6 +6320,11 @@ fn disposition_blockers_on_chain(
         {
             truncated = true;
         }
+        let row_head = val
+            .pointer("/data/head_sha")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         for primitive in val
             .pointer("/data/findings")
             .and_then(|v| v.as_array())
@@ -6328,11 +6333,12 @@ fn disposition_blockers_on_chain(
         {
             if let Some(key) = primitive.get("finding_key").and_then(|v| v.as_str()) {
                 if !key.is_empty() {
-                    if let Some(slot) = findings.iter_mut().find(|(k, _, _)| k == key) {
+                    if let Some(slot) = findings.iter_mut().find(|(k, _, _, _)| k == key) {
                         slot.1 = primitive;
                         slot.2 = index;
+                        slot.3 = row_head.clone();
                     } else {
-                        findings.push((key.to_string(), primitive, index));
+                        findings.push((key.to_string(), primitive, index, row_head.clone()));
                     }
                 }
             }
@@ -6353,7 +6359,7 @@ fn disposition_blockers_on_chain(
                 .unwrap_or("");
             let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("");
             if !key.is_empty() {
-                dispositions.insert(key.to_string(), (disposition, reason));
+                dispositions.insert(key.to_string(), (disposition, reason, row_head.clone()));
             }
         }
     }
@@ -6366,7 +6372,7 @@ fn disposition_blockers_on_chain(
             hard: true,
         });
     }
-    for (key, primitive, raised) in &findings {
+    for (key, primitive, raised, raised_head) in &findings {
         if !gate_finding_blocks(primitive) {
             continue; // non-blocking by class: no action clears the gate
         }
@@ -6376,9 +6382,14 @@ fn disposition_blockers_on_chain(
                 axis: "open",
                 hard: hard_finding(primitive),
             }),
-            Some(("fixed", _)) => {
-                // Terminal only when a LATER round reviewed the fix delta.
-                if *raised >= last_round {
+            Some(("fixed", _, disposed_head)) => {
+                // Terminal only when a LATER round reviewed the fix delta
+                // AND attested a different head: a same-head re-run is one
+                // more row under the same branch invocation with no new
+                // commit, so the index alone would let an author clear a
+                // CONFIRMED finding by re-attesting the head that raised
+                // it. Equal heads refuse, empty included.
+                if *raised >= last_round || disposed_head == raised_head {
                     blockers.push(DispositionBlocker {
                         finding_key: key.clone(),
                         axis: "fixed-unreviewed",
@@ -6386,7 +6397,7 @@ fn disposition_blockers_on_chain(
                     });
                 }
             }
-            Some(("declined", reason)) => {
+            Some(("declined", reason, _)) => {
                 if reason.trim().is_empty() {
                     blockers.push(DispositionBlocker {
                         finding_key: key.clone(),
@@ -18016,6 +18027,57 @@ git_bounded();";
         let out = unattested_reviewers(&p, &["sigma".to_string()], "", "");
         assert_eq!(out.len(), 1, "unpinned evidence must not satisfy the gate");
         assert_eq!(out[0].superseded_head, None);
+    }
+
+    #[test]
+    fn same_head_rerun_never_clears_a_fixed_finding() {
+        // A fixed disposition is terminal only when the disposing round
+        // attested a DIFFERENT head. A same-head re-run is one more row
+        // under the same branch invocation with no new commit; keyed on the
+        // round index alone, an author clears a CONFIRMED finding by
+        // re-attesting the head that raised it.
+        use serde_json::json;
+        let finding = json!({
+            "finding_key": "f.py:1:correctness",
+            "category": "correctness",
+            "verdict": "CONFIRMED",
+            "has_required_fields": true,
+        });
+        let row = |head: &str,
+                   verdict: &str,
+                   findings: Vec<serde_json::Value>,
+                   dispositions: Vec<serde_json::Value>| {
+            json!({
+                "type": "review_attestation",
+                "data": {
+                    "head_sha": head,
+                    "verdict": verdict,
+                    "branch": "feature/x",
+                    "findings": findings,
+                    "dispositions": dispositions,
+                }
+            })
+        };
+        let fixed_disp = json!({
+            "finding_key": "f.py:1:correctness",
+            "disposition": "fixed",
+            "reason": "re-attested at the same head",
+        });
+        // Same head, two rounds: the clearance must NOT read terminal.
+        let chain = vec![
+            row("h1", "fail", vec![finding.clone()], vec![]),
+            row("h1", "pass", vec![], vec![fixed_disp.clone()]),
+        ];
+        let blockers = disposition_blockers_on_chain(&chain, false);
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].axis, "fixed-unreviewed");
+
+        // A different head on the disposing round reviews the fix delta.
+        let chain = vec![
+            row("h1", "fail", vec![finding], vec![]),
+            row("h2", "pass", vec![], vec![fixed_disp]),
+        ];
+        assert!(disposition_blockers_on_chain(&chain, false).is_empty());
     }
 
     #[test]

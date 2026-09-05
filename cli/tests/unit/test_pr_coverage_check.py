@@ -2229,14 +2229,19 @@ def test_attestation_chain_keeps_same_invocation_reattests_at_new_heads(
 def test_attestation_chain_keeps_same_invocation_same_head_reruns(
     monkeypatch, tmp_path
 ):
-    """One invocation, one head, TWO rounds: nothing may collapse.
+    """One invocation, one head, ONE second, TWO rounds: kept, and terminal
+    for nothing.
 
     Measured live on feature/x-a3e8: a pass and the later fail that
     superseded it shared invocation_id AND head_sha (the hold mints one id
     per branch, and both rows attested the same commit), so an
-    invocation+head key deleted the second row. The timestamp separates
-    them: two distinct emissions never share a microsecond ts, while a
-    mirror pair always does."""
+    invocation-based key deleted the second row. The ts cannot separate
+    them either - most producers stamp second precision, so both rows here
+    share one second on purpose. The payload separates them (verdict and
+    findings differ). And the same-head re-run must not clear: a fixed
+    disposition is terminal only when the disposing round attested a
+    DIFFERENT head, else an author clears a CONFIRMED finding by
+    re-attesting the head that raised it."""
     from fno.pr import _reviews
 
     head = "46695fffc00000000000000000000000000000000"
@@ -2263,7 +2268,7 @@ def test_attestation_chain_keeps_same_invocation_same_head_reruns(
             {
                 "finding_key": finding["finding_key"],
                 "disposition": "fixed",
-                "reason": "fixed and re-reviewed at the same head",
+                "reason": "re-attested at the same head, which clears nothing",
             }
         ],
     }
@@ -2273,16 +2278,16 @@ def test_attestation_chain_keeps_same_invocation_same_head_reruns(
             {"ts": ts, "type": "review_attestation", "data": data}
         ) + "\n"
 
+    same_second = "2026-09-04T15:53:10Z"
     project = tmp_path / "project-events.jsonl"
     project.write_text(
-        _row("2026-09-04T15:53:10Z", fail_row)
-        + _row("2026-09-04T16:36:23Z", pass_row),
+        _row(same_second, fail_row) + _row(same_second, pass_row),
         encoding="utf-8",
     )
     global_log = tmp_path / "global-events.jsonl"
     global_log.write_text(
-        _row("2026-09-04T15:53:10Z", {**fail_row, "repo": "bllshttng/footnote"})
-        + _row("2026-09-04T16:36:23Z", {**pass_row, "repo": "bllshttng/footnote"}),
+        _row(same_second, {**fail_row, "repo": "bllshttng/footnote"})
+        + _row(same_second, {**pass_row, "repo": "bllshttng/footnote"}),
         encoding="utf-8",
     )
     monkeypatch.setattr(
@@ -2296,12 +2301,12 @@ def test_attestation_chain_keeps_same_invocation_same_head_reruns(
     assert [(row["verdict"], row["dispositions"]) for row in chain] == [
         ("fail", None),
         ("pass", pass_row["dispositions"]),
-    ], "a same-head re-run under one invocation is two rounds, not one"
+    ], "two distinct rounds in one second under one invocation are two entries"
     refusal, _note, nonterminal, _hard = _coverage_gate.disposition_refusal(
         chain, cov=None, cwd=str(tmp_path)
     )
-    assert refusal == "", nonterminal
-    assert nonterminal == []
+    assert nonterminal == ["f.py:1:correctness"], refusal
+    assert refusal != "", "a same-head fixed disposition must never read terminal"
 
 
 def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):

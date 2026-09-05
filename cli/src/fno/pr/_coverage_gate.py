@@ -1213,26 +1213,23 @@ def attestation_chain(
                     # Dedup the MIRROR, not the branch. invocation_id is
                     # minted once per branch review-hold (emit-attestation
                     # resolves it from the hold for the current branch), so
-                    # every round on a branch reuses it, and the mirror copies
-                    # one attestation into the global log at the SAME ts with
-                    # `repo` stamped on alone. Keyed on the invocation, the
-                    # chain collapsed every round on the branch into its first
-                    # row; keyed on invocation+head, it still swallowed a
-                    # same-head re-run (a pass and the later fail that
-                    # superseded it read as one entry). Two distinct emissions
-                    # never share a microsecond ts and the mirror pair always
-                    # does, so (ts, invocation) collapses exactly the mirror.
-                    # The payload fallback strips `repo` so pre-invocation
-                    # mirror rows still dedup.
-                    invocation_id = data.get("invocation_id")
-                    if isinstance(invocation_id, str) and invocation_id:
-                        discriminator: object = invocation_id
-                    else:
-                        discriminator = json.dumps(
+                    # every round on a branch reuses it and it separates
+                    # nothing. The ts cannot separate either: most producers
+                    # stamp it at second precision (40838 of 43711 events
+                    # measured), so two rounds inside one second are real.
+                    # What separates the mirror's copy from a distinct
+                    # attestation is the payload: the copy differs from its
+                    # original in exactly one key, `repo`, while two distinct
+                    # rounds differ in verdict, findings, dispositions or
+                    # head. One key for every row shape, no invocation-era
+                    # fallback.
+                    key = "{}|{}".format(
+                        event.get("ts", ""),
+                        json.dumps(
                             {k: v for k, v in data.items() if k != "repo"},
                             sort_keys=True,
-                        )
-                    key = f"{event.get('ts', '')}|{discriminator}"
+                        ),
+                    )
                     if key in seen:
                         continue
                     if _in_scope(data):
@@ -1321,6 +1318,8 @@ def disposition_refusal(
     # when a LATER round reviewed the fix delta).
     dispositions: dict[str, dict] = {}
     raised_in: dict[str, int] = {}
+    raised_head: dict[str, str] = {}
+    disposed_head: dict[str, str] = {}
     findings_by_key: dict[str, dict] = {}
     truncated = False
     last_round = len(chain) - 1
@@ -1332,9 +1331,11 @@ def disposition_refusal(
                 key = primitive["finding_key"]
                 findings_by_key[key] = primitive
                 raised_in[key] = index
+                raised_head[key] = event["head_sha"]
         for entry in event["dispositions"] or []:
             if isinstance(entry, dict) and entry.get("finding_key"):
                 dispositions[entry["finding_key"]] = entry
+                disposed_head[entry["finding_key"]] = event["head_sha"]
 
     if truncated:
         return (
@@ -1365,10 +1366,17 @@ def disposition_refusal(
         if disposition is None:
             nonterminal.append(key)
         elif disposition.get("disposition") == "fixed":
-            # Terminal when the chain moved past the round that raised it:
-            # a later attestation reviewed the fix delta. Exact range
+            # Terminal when the chain moved past the round that raised it
+            # AND the disposing round attested a DIFFERENT head: a fix
+            # delta was actually reviewed. The index alone is clearable by
+            # a same-head re-run, one more row under the same branch
+            # invocation with no new commit, and an author could clear a
+            # CONFIRMED finding by re-attesting the head that raised it.
+            # Equal heads refuse even when both are empty. Exact range
             # coverage is the tiling conjunct the covered row carries.
             if raised_in.get(key, last_round) >= last_round:
+                nonterminal.append(key)
+            elif disposed_head.get(key, "") == raised_head.get(key, ""):
                 nonterminal.append(key)
         elif disposition.get("disposition") == "declined":
             reason = disposition.get("reason")
