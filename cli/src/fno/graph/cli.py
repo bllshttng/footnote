@@ -1186,6 +1186,26 @@ def _append_creation_encounter(path: Path, node_id: str, evidence: str) -> None:
         _safe_stderr_warn(f"warning: creation vote skipped for {node_id}: {exc}\n")
 
 
+def _validate_priority_or_exit(priority: str, *, blocks_everything: bool = False) -> None:
+    """The shared priority gate: PRIORITY_ORDER membership, then the write rule.
+
+    P0 refuses without the blocks-everything acknowledgement; exit 1 is the
+    membership miss, exit 2 the write rule."""
+    from fno.graph._constants import PRIORITY_ORDER, validate_priority_write
+
+    if priority not in PRIORITY_ORDER:
+        typer.echo(
+            f"Error: invalid priority '{priority}'. Must be: {', '.join(PRIORITY_ORDER.keys())}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    try:
+        validate_priority_write(priority, blocks_everything=blocks_everything)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+
 def _create_node_impl(
     *,
     title: str,
@@ -1220,10 +1240,8 @@ def _create_node_impl(
     _refuse_create_on_external_backend()
     from fno.graph._constants import (
         DIFFICULTY_HELP,
-        PRIORITY_ORDER,
         mint_node_id,
         normalize_difficulty,
-        validate_priority_write,
     )
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import (
@@ -1233,17 +1251,7 @@ def _create_node_impl(
         repo_root,
     )
 
-    if priority not in PRIORITY_ORDER:
-        typer.echo(
-            f"Error: invalid priority '{priority}'. Must be: {', '.join(PRIORITY_ORDER.keys())}",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    try:
-        validate_priority_write(priority, blocks_everything=blocks_everything)
-    except ValueError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(code=2)
+    _validate_priority_or_exit(priority, blocks_everything=blocks_everything)
 
     if difficulty is None and require_difficulty:
         if not _stdin_is_interactive():
@@ -5951,15 +5959,27 @@ def _render_external_get(id: str, field: Optional[str]) -> None:
     joined["_resolved_cwd"] = sc.cwd
 
     if field:
-        value = joined.get(field)
+        _echo_node_entry(joined, field, False)
+        return
+    typer.echo(json.dumps(joined, indent=2))
+
+
+def _echo_node_entry(e: dict, field: Optional[str], grouped: bool) -> None:
+    """Render one resolved node: the field / grouped / JSON output ladder."""
+    if field:
+        value = e.get(field)
         if value is None:
             typer.echo("null")
         elif isinstance(value, (list, dict)):
             typer.echo(json.dumps(value))
         else:
             typer.echo(value)
-        return
-    typer.echo(json.dumps(joined, indent=2))
+    elif grouped:
+        from fno.graph.grouped import render_grouped
+
+        typer.echo(render_grouped(e))
+    else:
+        typer.echo(json.dumps(e, indent=2))
 
 
 @cli.command("get")
@@ -6011,20 +6031,7 @@ def cmd_get(
 
         root = project_root_from_settings(e["project"]) if e.get("project") else None
         e["_resolved_cwd"] = root or e.get("cwd")
-        if field:
-            value = e.get(field)
-            if value is None:
-                typer.echo("null")
-            elif isinstance(value, (list, dict)):
-                typer.echo(json.dumps(value))
-            else:
-                typer.echo(value)
-        elif grouped:
-            from fno.graph.grouped import render_grouped
-
-            typer.echo(render_grouped(e))
-        else:
-            typer.echo(json.dumps(e, indent=2))
+        _echo_node_entry(e, field, grouped)
         return
 
     # Read-through fallback: a node the sweep archived still resolves here
@@ -6033,21 +6040,7 @@ def cmd_get(
 
     matched_entry = resolve_node_with_archive(id, read_archive_entries())
     if matched_entry is not None:
-        e = matched_entry
-        if field:
-            value = e.get(field)
-            if value is None:
-                typer.echo("null")
-            elif isinstance(value, (list, dict)):
-                typer.echo(json.dumps(value))
-            else:
-                typer.echo(value)
-        elif grouped:
-            from fno.graph.grouped import render_grouped
-
-            typer.echo(render_grouped(e))
-        else:
-            typer.echo(json.dumps(e, indent=2))
+        _echo_node_entry(matched_entry, field, grouped)
         return
 
     typer.echo(f"No node matching '{id}' (id/slug/bare-hex) in {_graph_path()}", err=True)
@@ -8140,7 +8133,6 @@ def cmd_defer(
     from fno.graph._constants import (
         DEFERRED_KINDS,
         classify_deferred_reason,
-        has_node_id_prefix,
     )
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node, _find_dependents
@@ -8152,16 +8144,7 @@ def cmd_defer(
         )
         raise typer.Exit(code=1)
 
-    ids = _expand_id_args(task_ids)
-    if not ids:
-        typer.echo("Error: at least one task_id is required", err=True)
-        raise typer.Exit(code=1)
-    for tid in ids:
-        if not has_node_id_prefix(tid):
-            typer.echo(
-                f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True
-            )
-            raise typer.Exit(code=1)
+    ids = _expand_valid_ids(task_ids)
 
     # Strip and validate the reason at the CLI boundary so direct invocation
     # cannot land an empty-reason deferral. The triage validator already
@@ -8231,6 +8214,24 @@ def cmd_defer(
 # promotion rule).
 #
 # Cleared automatically by ``cmd_done``; reversible via ``unqueue``.
+
+
+def _expand_valid_ids(task_ids: list[str]) -> list[str]:
+    """Expand one-or-many id args; refuse an empty set and non-node ids
+    (the shared prologue of every batch-mutating verb)."""
+    from fno.graph._constants import has_node_id_prefix
+
+    ids = _expand_id_args(task_ids)
+    if not ids:
+        typer.echo("Error: at least one task_id is required", err=True)
+        raise typer.Exit(code=1)
+    for tid in ids:
+        if not has_node_id_prefix(tid):
+            typer.echo(
+                f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True
+            )
+            raise typer.Exit(code=1)
+    return ids
 
 
 def _expand_id_args(raw_ids: list[str]) -> list[str]:
@@ -8320,20 +8321,10 @@ def cmd_queue(
     Atomic across the batch: if any ID is unknown, none of the nodes
     are queued. Same reason applies to every ID in the batch.
     """
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node
 
-    ids = _expand_id_args(task_ids)
-    if not ids:
-        typer.echo("Error: at least one task_id is required", err=True)
-        raise typer.Exit(code=1)
-    for tid in ids:
-        if not has_node_id_prefix(tid):
-            typer.echo(
-                f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True
-            )
-            raise typer.Exit(code=1)
+    ids = _expand_valid_ids(task_ids)
 
     cleaned_reason = (reason or "").strip() or None
 
@@ -8371,20 +8362,10 @@ def cmd_unqueue(
     Reports each ID's prior state; warns (non-fatally) for IDs that
     were not actually queued.
     """
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node
 
-    ids = _expand_id_args(task_ids)
-    if not ids:
-        typer.echo("Error: at least one task_id is required", err=True)
-        raise typer.Exit(code=1)
-    for tid in ids:
-        if not has_node_id_prefix(tid):
-            typer.echo(
-                f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True
-            )
-            raise typer.Exit(code=1)
+    ids = _expand_valid_ids(task_ids)
 
     not_queued: list[str] = []
 
@@ -8792,20 +8773,10 @@ def cmd_undefer(
     not actually deferred. Each node that WAS deferred gets its own
     streak-reset event.
     """
-    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node
 
-    ids = _expand_id_args(task_ids)
-    if not ids:
-        typer.echo("Error: at least one task_id is required", err=True)
-        raise typer.Exit(code=1)
-    for tid in ids:
-        if not has_node_id_prefix(tid):
-            typer.echo(
-                f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True
-            )
-            raise typer.Exit(code=1)
+    ids = _expand_valid_ids(task_ids)
 
     was_deferred: list[tuple[str, bool]] = []
 
@@ -13352,7 +13323,7 @@ def cmd_reprioritize(
         False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."
     ),
 ) -> None:
-    from fno.graph._constants import PRIORITY_ORDER, has_node_id_prefix, validate_priority_write
+    from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node
 
@@ -13362,17 +13333,7 @@ def cmd_reprioritize(
         )
         raise typer.Exit(code=1)
 
-    if priority not in PRIORITY_ORDER:
-        typer.echo(
-            f"Error: invalid priority '{priority}'. Must be: {', '.join(PRIORITY_ORDER.keys())}",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    try:
-        validate_priority_write(priority, blocks_everything=blocks_everything)
-    except ValueError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(code=2)
+    _validate_priority_or_exit(priority, blocks_everything=blocks_everything)
 
     old_holder: list = [None]
 
@@ -14826,10 +14787,8 @@ def cmd_new(
     """
     _refuse_create_on_external_backend()
     from fno.graph._constants import (
-        PRIORITY_ORDER,
         mint_node_id,
         normalize_difficulty,
-        validate_priority_write,
     )
     from fno.graph.fuzzy import suggest_domain
     from fno.graph.store import read_graph, locked_mutate_graph
@@ -14843,17 +14802,7 @@ def cmd_new(
         )
         raise typer.Exit(code=1)
 
-    if priority not in PRIORITY_ORDER:
-        typer.echo(
-            f"Error: invalid priority '{priority}'. Must be: {', '.join(PRIORITY_ORDER.keys())}",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    try:
-        validate_priority_write(priority, blocks_everything=blocks_everything)
-    except ValueError as exc:
-        typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(code=2)
+    _validate_priority_or_exit(priority, blocks_everything=blocks_everything)
     try:
         normalized_difficulty = normalize_difficulty(difficulty)
         if normalized_difficulty is None:

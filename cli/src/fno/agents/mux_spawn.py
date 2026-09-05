@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
 from fno import paths
-from fno.agents import spawn_flag_owners
+from fno.agents import launch_provenance
 from fno.agents.dispatch import (
     DispatchAskError,
     _capture_parent_edge,
@@ -152,9 +152,6 @@ class MuxSpawnResult:
     # `painted` / `blank` / `unreadable`; None when no seed was requested.
     pane_observation: Optional[str] = None
     fno_id: Optional[str] = None
-    # The row's launch-account fact plus WHO chose it ("caller" / "config").
-    # `launch_account` carries the concrete id or the "default" sentinel
-    # exactly as the row records it; source is None when nothing to attribute.
     launch_account: Optional[str] = None
     launch_account_source: Optional[str] = None
 
@@ -703,19 +700,17 @@ _OPENCODE_BACKFILL_ATTEMPTS = 2
 _OPENCODE_BACKFILL_DELAY_S = 0.4
 _OPENCODE_DB_TIMEOUT_S = 5.0
 
+_HEADLESS_ESCAPE_HINT = ("Spawn with --substrate headless meanwhile (headless "
+                         "owns its own session and is unaffected)")
+
 #: A bare opencode session id on its own output line. Matching this (rather than
 #: reading the first line) skips both the `id` column header and the plugin
 #: banners opencode prints to stdout ahead of real output.
 _SES_ID_RE = re.compile(r"^ses_[A-Za-z0-9]+$")
 
 
-def _query_opencode_sessions(sql: str, runner: Optional[Callable] = None) -> Optional[list[str]]:
-    """Run one read-only store query, returning the session ids it printed.
-
-    ``None`` means the query could not be run at all (binary missing, timeout,
-    nonzero exit) as distinct from ``[]`` (ran clean, matched nothing) - the
-    caller treats both as "do not stamp", but only the latter is a real answer.
-    """
+def _run_opencode_db(sql: str, runner: Optional[Callable] = None) -> Optional[str]:
+    """One read-only ``opencode db`` query. Stdout on exit 0, else None."""
     run = runner or subprocess.run
     try:
         proc = run(
@@ -728,7 +723,20 @@ def _query_opencode_sessions(sql: str, runner: Optional[Callable] = None) -> Opt
         return None
     if proc.returncode != 0:
         return None
-    return [ln.strip() for ln in (proc.stdout or "").splitlines() if _SES_ID_RE.match(ln.strip())]
+    return proc.stdout or ""
+
+
+def _query_opencode_sessions(sql: str, runner: Optional[Callable] = None) -> Optional[list[str]]:
+    """Run one read-only store query, returning the session ids it printed.
+
+    ``None`` means the query could not be run at all (binary missing, timeout,
+    nonzero exit) as distinct from ``[]`` (ran clean, matched nothing) - the
+    caller treats both as "do not stamp", but only the latter is a real answer.
+    """
+    out = _run_opencode_db(sql, runner)
+    if out is None:
+        return None
+    return [ln.strip() for ln in out.splitlines() if _SES_ID_RE.match(ln.strip())]
 
 
 def _read_opencode_model(
@@ -742,19 +750,10 @@ def _read_opencode_model(
         f"WHERE session_id = '{session_id}' "
         "ORDER BY time_created DESC LIMIT 20"
     )
-    run = runner or subprocess.run
-    try:
-        proc = run(
-            ["opencode", "db", sql],
-            capture_output=True,
-            text=True,
-            timeout=_OPENCODE_DB_TIMEOUT_S,
-        )
-    except (OSError, subprocess.SubprocessError):
+    out = _run_opencode_db(sql, runner)
+    if out is None:
         return None
-    if proc.returncode != 0:
-        return None
-    for line in (proc.stdout or "").splitlines():
+    for line in out.splitlines():
         try:
             data = json.loads(line)
             if isinstance(data, str):
@@ -3709,15 +3708,15 @@ def dispatch_spawn_pane(
     # `cmd_spawn` routes it straight here, never through `dispatch_spawn` - so a
     # picker wired only there would cover bg/headless and leave every default
     # interactive spawn on the exhausted account while the option read enabled.
-    # Same helper, same rules (explicit account wins, routed spawns are skipped).
     # x-d285: the picked OVERLAY (not just its env) so the row can stamp the
     # account id it picked; an explicit launch_account from the caller wins.
-    # x-04ce: the source rides the row and receipt - the id alone answers
-    # WHICH account, never WHO chose it.
+    # x-04ce: the source rides the row and receipt - an id alone never says WHO chose it.
     effective_launch_account = launch_account
-    launch_account_source = (
-        spawn_flag_owners.CALLER if launch_account is not None else None
+    launch_account_source = launch_provenance.seam_launch_source(launch_account)
+    row_launch_account = (
+        (effective_launch_account or "default") if provider == "claude" else None
     )
+    row_launch_source = launch_account_source if provider == "claude" else None
     if account_env is None and provider == "claude":
         from fno.agents.dispatch import _pick_account_overlay
 
@@ -3725,7 +3724,7 @@ def dispatch_spawn_pane(
         if picked is not None:
             account_env = dict(picked.env)
             effective_launch_account = picked.account_id
-            launch_account_source = spawn_flag_owners.CONFIG
+            launch_account_source = launch_provenance.CONFIG
 
     # The monitor contract is judged BEFORE the generic route guard: an
     # explicit --monitor happy refusal names the zai-shaped gap it found, and
@@ -4313,15 +4312,14 @@ def dispatch_spawn_pane(
         seed_source: Optional[str] = None
         seed_pane: Optional[str] = None
         seed_in_argv = seed_rode_in_argv(message, argv)
+
+        _seed_once = functools.partial(
+            _submit_spawn_seed, provider, session, pane_id, message, runner,
+            seed_in_argv=seed_in_argv,
+        )
+
         if message and readiness != "failed":
-            seed_state, seed_detail, seed_source, seed_pane = _submit_spawn_seed(
-                provider,
-                session,
-                pane_id,
-                message,
-                runner,
-                seed_in_argv=seed_in_argv,
-            )
+            seed_state, seed_detail, seed_source, seed_pane = _seed_once()
             if seed_state == "unattempted":
                 # One retry, and ONLY from `unattempted`. That state means no
                 # send was made, so a second attempt cannot double-type: the
@@ -4346,14 +4344,7 @@ def dispatch_spawn_pane(
                 # same blank frame and the retry recovers nothing it was written
                 # to recover.
                 time.sleep(_SEED_RETRY_DELAY_S)
-                seed_state, seed_detail, seed_source, seed_pane = _submit_spawn_seed(
-                    provider,
-                    session,
-                    pane_id,
-                    message,
-                    runner,
-                    seed_in_argv=seed_in_argv,
-                )
+                seed_state, seed_detail, seed_source, seed_pane = _seed_once()
             if seed_state == "unconfirmed":
                 # A pane that REFUSED the payload is a worker that will never
                 # start. There is no retry budget on this path - the retry above
@@ -4580,8 +4571,7 @@ def dispatch_spawn_pane(
                             f"({unbound_reason or 'not-captured'}); pane {pane_id} reaped, "
                             "no registry row written. "
                             f"{_bind_failure_diagnostic(binding, registry_path)}"
-                            "Spawn with --substrate headless meanwhile (headless "
-                            "owns its own session and is unaffected)",
+                            f"{_HEADLESS_ESCAPE_HINT}",
                             exit_code=1,
                         )
                     raise DispatchAskError(
@@ -4875,14 +4865,8 @@ def dispatch_spawn_pane(
                     # account id - never an absence a re-entry would have to
                     # guess at. Non-claude rows stay None: the account axis is
                     # claude-only, same boundary as route_settings_path.
-                    launch_account=(
-                        (effective_launch_account or "default")
-                        if provider == "claude"
-                        else None
-                    ),
-                    launch_account_source=(
-                        launch_account_source if provider == "claude" else None
-                    ),
+                    launch_account=row_launch_account,
+                    launch_account_source=row_launch_source,
                     # x-98ab: the node this pane works, from the SAME resolved
                     # provenance map the child env got - never the spawning
                     # session's ambient value.
@@ -5148,8 +5132,7 @@ def dispatch_spawn_pane(
                         f"agent {name!r} required {provider} session binding "
                         f"({unbound_reason}); {cleanup_detail}. "
                         f"{_bind_failure_diagnostic(binding, registry_path)}"
-                        "Spawn with --substrate headless meanwhile (headless "
-                        "owns its own session and is unaffected)",
+                        f"{_HEADLESS_ESCAPE_HINT}",
                         exit_code=1,
                     )
                 raise DispatchAskError(
@@ -5248,10 +5231,6 @@ def dispatch_spawn_pane(
         seed_source=seed_source,
         pane_observation=seed_pane,
         fno_id=session_uuid or name,
-        launch_account=(
-            (effective_launch_account or "default") if provider == "claude" else None
-        ),
-        launch_account_source=(
-            launch_account_source if provider == "claude" else None
-        ),
+        launch_account=row_launch_account,
+        launch_account_source=row_launch_source,
     )
