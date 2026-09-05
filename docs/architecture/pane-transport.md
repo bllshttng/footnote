@@ -55,7 +55,7 @@ Four words now, and they are not interchangeable.
 | `typed (pane <id>)` | Bytes were written into that pane | That anyone read them, or that the turn was taken |
 | `queued (durable) [<reason>]` | A durable envelope exists and the named live lane missed | That the recipient is gone. `live-miss` today cannot tell a busy peer from an absent one |
 
-`delivered (hosted)` used to be read as proof the recipient's turn was reached. One message disproved that: it printed `delivered (hosted)` and reached its recipient only because the operator pressed ESC to interrupt a busy loop -- the send had confirmed nothing beyond its own injection. `landed` is the row that grew out of that gap, proven by grepping the recipient's own transcript for the bare message id (`fno agents mail sent --json`), and it is a strictly weaker claim than the old wording implied.
+`delivered (hosted)` used to be read as proof the recipient's turn was reached. One message disproved that. It printed `delivered (hosted)`. It reached its recipient only because the operator pressed ESC to interrupt a busy loop. The send had confirmed nothing beyond its own injection. `landed` is the row that grew out of that gap. It is proven by grepping the recipient's own transcript for the bare message id (`fno agents mail sent --json`). It is a strictly weaker claim than the old wording implied.
 
 `typed` is deliberately not `delivered`. Bytes written to a PTY is not delivery and is certainly not action. A full payload can arrive, render, and be discarded while the return selects a prompt's default. The confirmation a pane send cannot give is the recipient's own transcript showing the text.
 
