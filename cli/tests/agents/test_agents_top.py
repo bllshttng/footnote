@@ -578,6 +578,7 @@ def test_the_unattributed_row_warning_fires_once_per_process(monkeypatch):
 
     assert len([m for m in seen if "without a provider stamp" in m]) == 1
 
+
 def test_census_caption_points_at_the_transcript_verdict(runner):
     """The table's footer names itself a census and defers liveness to truth.
 
