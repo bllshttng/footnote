@@ -352,7 +352,9 @@ def _notify_setup(monkeypatch, msgs):
     monkeypatch.setattr("fno.agents.self_stamp.resolve_self_identity", lambda: _Ident())
     monkeypatch.setattr(harness_identity, "canonical_handle", lambda sid: "cl-abcd1234")
     monkeypatch.setattr(cursor_mod, "scan_unread", lambda h: msgs if h == "cl-abcd1234" else [])
-    monkeypatch.setattr(mail_cli, "_sent_unclaimed", lambda *a, **k: [])
+    from fno.mail import landed as landed_mod
+
+    monkeypatch.setattr(landed_mod, "_sent_unclaimed", lambda *a, **k: [])
     monkeypatch.setattr(
         "fno.config.load_settings",
         lambda: SimpleNamespace(inbox=SimpleNamespace(unclaimed_ttl=3600)),

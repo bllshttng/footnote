@@ -242,7 +242,7 @@ def resolve_truth_status(
     # Measured: `mail drain-self` read a node claim as `free` while a direct
     # read of the same key answered `live`, because this function was resolving
     # the claims root of an unrelated test's tmp dir. The same trap is called
-    # out on `fno.mail.reply_resolve._read_own_transcript_text`.
+    # out on `fno.mail.reply_resolve.present_mail_ids`.
     from fno.claims.io import claims_root_for
 
     key = f"node:{node_id}"

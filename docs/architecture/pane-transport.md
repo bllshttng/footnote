@@ -46,13 +46,16 @@ There are THREE cases here and only two flags, which is how one of them got lost
 
 ## Receipt vocabulary
 
-Three words, and they are not interchangeable.
+Four words now, and they are not interchangeable.
 
 | Receipt | What it asserts | What it does not assert |
 |---------|-----------------|-------------------------|
-| `delivered (hosted)` | The injector confirmed the message reached the recipient's turn | Anything about what the recipient did with it |
+| `delivered (hosted)` | The injector confirmed the payload was accepted at send time | That it reached the recipient's turn, or anything about what the recipient did with it |
+| `landed` | The message id is present in the recipient's own transcript | That the agent read it or acted on it |
 | `typed (pane <id>)` | Bytes were written into that pane | That anyone read them, or that the turn was taken |
 | `queued (durable) [<reason>]` | A durable envelope exists and the named live lane missed | That the recipient is gone. `live-miss` today cannot tell a busy peer from an absent one |
+
+`delivered (hosted)` used to be read as proof the recipient's turn was reached. One message disproved that. It printed `delivered (hosted)`. It reached its recipient only because the operator pressed ESC to interrupt a busy loop. The send had confirmed nothing beyond its own injection. `landed` is the row that grew out of that gap. It is proven by grepping the recipient's own transcript for the bare message id (`fno agents mail sent --json`). It is a strictly weaker claim than the old wording implied.
 
 `typed` is deliberately not `delivered`. Bytes written to a PTY is not delivery and is certainly not action. A full payload can arrive, render, and be discarded while the return selects a prompt's default. The confirmation a pane send cannot give is the recipient's own transcript showing the text.
 
