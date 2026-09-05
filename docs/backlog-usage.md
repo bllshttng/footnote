@@ -201,6 +201,8 @@ Two hidden verbs serve the migration and the operator:
 
 - `fno backlog backfill-deferred-kind [--map FILE] [--apply]` classifies existing deferred rows by exact match against the built-in table plus a TSV map (`kind<TAB>exact reason` per line). Dry run by default. It never overwrites an existing kind and never closes or undefers anything.
 - `fno backlog stuck-epics` lists epics whose only incomplete children are deferred or superseded, each with a `closable` verdict and its holders. Read-only: closing one is always an operator ruling.
+- `fno backlog stuck-epics --closed` runs the inverse question on the same predicate: which terminal (done or superseded) epics still hold a live child. Their parent already reads closed, so the ready board hides them. Read-only, same as the open-direction report. An operator ruling is still needed to reopen or re-parent one.
+- `fno backlog reopen <child> --reason ...` against a done-on-its-own-evidence parent stamps a `reopen_warning` on that parent, alongside the stderr warning. The marker names the child and the time. `stuck-epics --closed` is what makes that fact findable after the terminal with the warning is gone. When the parent is reopened directly, or the named child closes again, the marker clears.
 
 ## Finding work by meaning: find --fts
 
@@ -300,7 +302,10 @@ The "In progress" blocking fact comes from the cache's newest row for that PR. T
 fno backlog triage health          # idea pile, stale ready, collisions, dupes
 fno backlog maintain --apply       # recurring sweep: re-scope, prune, pr_url backfill, auto-defer
 fno backlog reconcile              # close nodes whose PR merged outside the gate
+fno backlog reconcile --candidates # report-only: open nodes a recent merge's diff might have fixed
 ```
+
+`reconcile`'s branch-name edge (a merged PR whose head ref carries a node id) is the only edge that closes a node automatically. Most open nodes carry no plan and no matching branch. `--candidates` adds a second, weaker edge for them: open nodes whose declared surface overlaps a merge's changed files. A declared surface is a plan's Files to Modify table, or a path-shaped token in `details`. The report names the PR and the overlapping paths. A candidate never closes automatically. A file overlap is evidence someone worked nearby, not proof the symptom is gone. Confirm one with `fno backlog confirm-candidate <node-id> --pr-number N [--pr-url URL]`. It binds the PR ref and stamps `pr_edge_derivation`. A later reader can then tell a branch-proven close from a human-confirmed one. Confirming does not mark the node done. `fno backlog done` (or a ship-gate merge) still finishes the close. A node can also declare a `closure_probe`: one shell command asserting its own symptom no longer reproduces. Reconcile evaluates it only once the node is already a candidate. The verdict prints beside the candidate. It never closes the node on its own either.
 
 ### The daily pass
 
