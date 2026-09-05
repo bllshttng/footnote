@@ -6101,9 +6101,6 @@ class DispatchSendResult:
     to_project: Optional[str] = None
 
 
-_MAX_FRAME_BYTES = 16 * 1024 * 1024  # mirrors protocol.rs MAX_FRAME_BYTES
-
-
 def rpc_roundtrip(
     sock_path: Path,
     method: str,
@@ -6127,8 +6124,8 @@ def rpc_roundtrip(
 
     emit = note if note is not None else (lambda _msg: None)
     payload = json.dumps({"id": 1, "method": method, "params": params}).encode("utf-8")
-    if len(payload) > _MAX_FRAME_BYTES:
-        return None
+    if len(payload) > 16 * 1024 * 1024:
+        return None  # mirror the outbound MAX_FRAME_BYTES cap (protocol.rs)
     frame = struct.pack("<I", len(payload)) + payload
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -6152,7 +6149,8 @@ def rpc_roundtrip(
             header += chunk
         (length,) = struct.unpack_from("<I", header)
 
-        if length > _MAX_FRAME_BYTES:
+        # Guard against absurd lengths (mirrors protocol.rs MAX_FRAME_BYTES).
+        if length > 16 * 1024 * 1024:
             emit(f"daemon returned oversized frame ({length} bytes)")
             return None
 
