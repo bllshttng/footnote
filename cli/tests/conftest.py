@@ -335,13 +335,15 @@ def _hermetic_claim_reap(monkeypatch):
     """
     import fno.claims.core as claims_core
 
-    def _noop_reap(
-        *, roots=None, apply=False, abandonment_probe=None, node_settlement=None
-    ):
+    def _noop_reap(*args, **kwargs):
+        # The verbs resolve core callables at call time, so this stub must
+        # absorb whatever signature the real reap_dead_claims grows (it
+        # already gained optout_sink after this fixture was written).
         return {
             "scanned": 0, "reaped": 0, "would_reap": 0, "kept_live": 0,
             "kept_suspect": 0, "kept_offhost": 0, "corrupted": 0, "vanished": 0,
-            "contended": 0, "reap_failed": [], "apply": apply, "roots": [],
+            "contended": 0, "reap_failed": [],
+            "apply": kwargs.get("apply", False), "roots": [],
         }
 
     monkeypatch.setattr(claims_core, "reap_dead_claims", _noop_reap)

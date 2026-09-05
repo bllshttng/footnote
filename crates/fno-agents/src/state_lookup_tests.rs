@@ -64,6 +64,7 @@ fn entry(name: &str, harness: &str, sid: Option<&str>) -> RegistryEntry {
         liveness: None,
         liveness_measured_at: None,
         harness_title: None,
+        launch_account_source: None,
         spawned_by_session: None,
         spawned_by_harness: None,
         spawned_by_cwd: None,

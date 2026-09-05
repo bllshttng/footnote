@@ -32,8 +32,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import socket
-import struct
 import subprocess
 import time
 from pathlib import Path
@@ -278,47 +276,22 @@ def _worker_rpc(
 ) -> Optional[dict]:
     """One length-prefixed JSON-RPC to a worker socket (NEVER raises).
 
-    Same 4-byte-LE-u32 + JSON framing as dispatch._daemon_rpc / agents.cli, but to
-    a per-worker socket (the worker serves ``worker.submit`` directly). Returns the
-    ``result`` dict, or None on any transport/error response (socket absent ->
-    worker dead/gone, which the caller treats as a deliver failure)."""
-    payload = json.dumps({"id": 1, "method": method, "params": params}).encode("utf-8")
-    if len(payload) > 16 * 1024 * 1024:
-        return None  # mirror the inbound MAX_FRAME_BYTES cap (protocol.rs); never send an oversized frame
-    frame = struct.pack("<I", len(payload)) + payload
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        sock.settimeout(connect_timeout)
-        try:
-            sock.connect(str(sock_path))
-        except (FileNotFoundError, ConnectionRefusedError, OSError):
-            return None
-        sock.settimeout(read_timeout)
-        sock.sendall(frame)
-        header = b""
-        while len(header) < 4:
-            chunk = sock.recv(4 - len(header))
-            if not chunk:
-                return None
-            header += chunk
-        (length,) = struct.unpack_from("<I", header)
-        if length > 16 * 1024 * 1024:
-            return None
-        data = b""
-        while len(data) < length:
-            chunk = sock.recv(length - len(data))
-            if not chunk:
-                return None
-            data += chunk
-        resp = json.loads(data.decode("utf-8"))
-        if not isinstance(resp, dict) or "error" in resp:
-            return None
-        result = resp.get("result")
-        return result if isinstance(result, dict) else None
-    except (OSError, ValueError):
-        return None
-    finally:
-        sock.close()
+    The shared dispatch.rpc_roundtrip framing, to a per-worker socket (the
+    worker serves ``worker.submit`` directly). Returns the ``result`` dict, or
+    None on any transport/error response (socket absent -> worker dead/gone,
+    which the caller treats as a deliver failure)."""
+    # Function-local: dispatch is heavy; the relay can be imported without it.
+    from fno.agents.dispatch import rpc_roundtrip
+
+    result = rpc_roundtrip(
+        sock_path,
+        method,
+        params,
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+    )
+    # This lane's stricter shape guard: a non-dict result is no result.
+    return result if isinstance(result, dict) else None
 
 
 def submit_via_worker(sock_path: Path, framed: str, *, settle_ms: int = DEFAULT_SETTLE_MS) -> bool:

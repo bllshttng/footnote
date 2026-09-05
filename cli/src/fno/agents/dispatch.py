@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 from fno import paths
 from fno.agents import events
 from fno.agents import rm_notice
+from fno.agents import launch_provenance
 from fno.agents.context import EventContext, build_context
 from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
@@ -2298,6 +2299,10 @@ class SpawnResult:
     # fabricated negative (a fresh spawn whose transcript has no sample yet
     # says nothing).
     model_substituted: Optional[dict] = None
+    # x-04ce: the row's launch-account fact plus WHO chose it; None = nothing
+    # concrete to attribute.
+    launch_account: Optional[str] = None
+    launch_account_source: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Convert the prose contract into a runtime trip-wire (sigma-review
@@ -2462,17 +2467,9 @@ def _pick_account_overlay(
     spawn seams stamp the picked id on the row's ``launch_account`` (x-d285);
     the env alone drops the one fact re-entry needs.
 
-    Advisory in every direction: opt-in via ``providers.quota.pick_on_launch``,
-    and any refusal or failure returns None so the spawn proceeds exactly as it
-    does today. The receipt is always printed, because a launch silently landing
-    on a different account than the operator expects is a billing surprise.
-
-    A ROUTED spawn is never picked for. Picking is a quota decision, and a
-    routed worker sends its model traffic to the route's vendor, consuming no
-    Anthropic account quota - there is nothing to pick for. An explicit
-    ``--account`` still composes with a route (profile from the account,
-    endpoint+auth+model from the vendor), but that is operator intent, never a
-    picker decision.
+    Advisory in every direction (see :func:`pick_account_id`): a routed spawn
+    is never picked for, and the printed receipt keeps a silent re-accounting
+    from becoming a billing surprise.
     """
     picked = pick_account_id(role=role, route_env=route_env)
     if picked is None:
@@ -2509,7 +2506,7 @@ def pick_account_id(
     ``--account`` flag so the Rust client inherits the same choice. One decision,
     so those two can never disagree about which account a worker is billing.
 
-    Advisory in every direction: opt-in via ``providers.quota.pick_on_launch``,
+    Advisory in every direction: opt-in via ``accounts.quota.pick_on_launch``,
     and any refusal or failure returns None so the spawn proceeds exactly as it
     does today. A routed spawn is never picked for: it bills the route's
     vendor, not an Anthropic account, so there is no quota to manage.
@@ -2533,7 +2530,8 @@ def pick_account_id(
             )
             return None
         print(
-            f"account: {verdict.account} (picked, {_picked_headroom_note(verdict.account)})",
+            f"account: {verdict.account} (picked by accounts.quota.pick_on_launch, "
+            f"{_picked_headroom_note(verdict.account)})",
             file=sys.stderr,
         )
         return verdict.account
@@ -2688,11 +2686,13 @@ def dispatch_spawn(
     # never picked for (the transcript lives under its birth config dir).
     # x-d285: a picked overlay names its account id; launch_account wins.
     effective_launch_account = launch_account
+    launch_account_source = launch_provenance.seam_launch_source(launch_account)
     if account_env is None and harness == "claude" and not resume_session_id:
         picked_overlay = _pick_account_overlay(role=role, route_env=route_env)
         if picked_overlay is not None:
             account_env = picked_overlay.env
             effective_launch_account = picked_overlay.account_id
+            launch_account_source = launch_provenance.CONFIG
 
     launch_role = role
     resolved_providers: list[str] = []
@@ -2999,6 +2999,7 @@ def dispatch_spawn(
             # evidence means unknown (None), never "default": stamping default
             # on a revive is the silent wrong-account re-entry.
             row_launch_account = effective_launch_account
+            row_launch_account_source = launch_account_source
             if resume_session_id and row_launch_account is None:
                 account_source = existing if revive else next(
                     (
@@ -3009,8 +3010,14 @@ def dispatch_spawn(
                     None,
                 )
                 row_launch_account = getattr(account_source, "launch_account", None)
+                # A revive inherits the source row's provenance; None is honest.
+                row_launch_account_source = getattr(
+                    account_source, "launch_account_source", None
+                )
             elif not resume_session_id:
                 row_launch_account = effective_launch_account or "default"
+                if row_launch_account == "default":
+                    row_launch_account_source = None
             if resume_session_id and source_row is not None and not sandbox_settings:
                 from fno.agents.model_routing import read_recorded_sandbox_block
 
@@ -3220,6 +3227,8 @@ def dispatch_spawn(
                         # getattr: `created` is any ask-path result, including
                         # duck-typed stubs minted before the field existed.
                         model_substituted=getattr(created, "model_substituted", None),
+                        launch_account=row_launch_account,
+                        launch_account_source=row_launch_account_source,
                     )
 
                 # 4b2. opencode bg: delegate to the Rust serve lane. This arm
@@ -6092,6 +6101,95 @@ class DispatchSendResult:
     to_project: Optional[str] = None
 
 
+def rpc_roundtrip(
+    sock_path: Path,
+    method: str,
+    params: dict,
+    *,
+    connect_timeout: float = 3.0,
+    read_timeout: float = 5.0,
+    note=None,
+    unreachable: str = "fno-agents daemon unreachable; message queued durable",
+) -> Optional[dict]:
+    """One JSON-RPC request over a unix socket, the single client for the
+    4-byte-LE-u32 + JSON framing of crates/fno-agents/src/protocol.rs.
+
+    Returns the ``result`` field dict on success; None on any transport error
+    or ``error`` response. NEVER raises. ``note(message)`` receives each
+    diagnostic (None = silent); ``unreachable`` wording is the lane's own.
+    """
+    import json
+    import socket
+    import struct
+
+    emit = note if note is not None else (lambda _msg: None)
+    payload = json.dumps({"id": 1, "method": method, "params": params}).encode("utf-8")
+    if len(payload) > 16 * 1024 * 1024:
+        return None  # mirror the outbound MAX_FRAME_BYTES cap (protocol.rs)
+    frame = struct.pack("<I", len(payload)) + payload
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(connect_timeout)
+        try:
+            sock.connect(str(sock_path))
+        except (FileNotFoundError, ConnectionRefusedError, OSError):
+            emit(unreachable)
+            return None
+
+        sock.settimeout(read_timeout)
+        sock.sendall(frame)
+
+        header = b""
+        while len(header) < 4:
+            chunk = sock.recv(4 - len(header))
+            if not chunk:
+                emit("daemon closed connection unexpectedly")
+                return None
+            header += chunk
+        (length,) = struct.unpack_from("<I", header)
+
+        # Guard against absurd lengths (mirrors protocol.rs MAX_FRAME_BYTES).
+        if length > 16 * 1024 * 1024:
+            emit(f"daemon returned oversized frame ({length} bytes)")
+            return None
+
+        data = b""
+        while len(data) < length:
+            chunk = sock.recv(length - len(data))
+            if not chunk:
+                emit("daemon closed connection mid-frame")
+                return None
+            data += chunk
+
+        resp = json.loads(data.decode("utf-8"))
+        if not isinstance(resp, dict):
+            emit("daemon returned invalid JSON-RPC response shape")
+            return None
+        if "error" in resp:
+            err = resp["error"]
+            emit(f"daemon RPC error: {err.get('message', err)}")
+            return None
+        return resp.get("result")
+    except (OSError, ValueError) as exc:
+        # ValueError covers a malformed daemon response; print the reason.
+        emit(f"socket error: {exc}")
+        return None
+    finally:
+        sock.close()
+
+
+def agents_home() -> Path:
+    """The fno-agents home, resolved as the Rust client does:
+    ``$FNO_AGENTS_HOME`` else ``$HOME/.fno/agents``."""
+    import os
+
+    env = os.environ.get("FNO_AGENTS_HOME")
+    if env:
+        return Path(env)
+    return Path(os.path.expanduser("~")) / ".fno" / "agents"
+
+
 def _daemon_rpc(
     method: str,
     params: dict,
@@ -6101,106 +6199,24 @@ def _daemon_rpc(
 ) -> Optional[dict]:
     """Send one JSON-RPC request to the daemon and return the result dict.
 
-    Uses the 4-byte little-endian u32 length-prefix framing defined in
-    crates/fno-agents/src/protocol.rs:
-
-        <u32 LE length> <UTF-8 JSON>
-
-    The daemon socket is resolved exactly as the Rust client does: read
-    ``FNO_AGENTS_HOME`` env var; if absent, use ``$HOME/.fno/agents/``;
-    the supervisor socket is ``supervisor.sock`` inside that directory.
-
-    Returns the ``result`` field dict on success; returns None on any
-    transport error (socket absent / refused / timeout) or when the daemon
-    returns an ``error`` response.  NEVER raises (callers demote to durable
-    on any falsy return).
-
-    Exactly one attempt, no retry.
+    The supervisor socket is ``supervisor.sock`` inside :func:`agents_home`.
+    None on any transport error or ``error`` response (the
+    :func:`rpc_roundtrip` contract, exactly one attempt); callers demote to
+    durable on any falsy return.
     """
-    import json
-    import os
-    import socket
-    import struct
+    sock_path = agents_home() / "supervisor.sock"
 
-    # Resolve the supervisor socket path using the same env-var logic as Rust.
-    agents_home = os.environ.get("FNO_AGENTS_HOME")
-    if agents_home:
-        sock_path = Path(agents_home) / "supervisor.sock"
-    else:
-        home = Path(os.path.expanduser("~"))
-        sock_path = home / ".fno" / "agents" / "supervisor.sock"
+    def _note(message: str) -> None:
+        print(message, file=sys.stderr)
 
-    # Frame the request.
-    req_id = 1
-    payload = json.dumps(
-        {"id": req_id, "method": method, "params": params},
-        ensure_ascii=True,
-        sort_keys=False,
-    ).encode("utf-8")
-    frame = struct.pack("<I", len(payload)) + payload
-
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        sock.settimeout(connect_timeout)
-        try:
-            sock.connect(str(sock_path))
-        except (FileNotFoundError, ConnectionRefusedError, OSError):
-            print(
-                "fno-agents daemon unreachable; message queued durable",
-                file=sys.stderr,
-            )
-            return None
-
-        sock.settimeout(read_timeout)
-        sock.sendall(frame)
-
-        # Read the 4-byte length prefix.
-        header = b""
-        while len(header) < 4:
-            chunk = sock.recv(4 - len(header))
-            if not chunk:
-                print("daemon closed connection unexpectedly", file=sys.stderr)
-                return None
-            header += chunk
-        (length,) = struct.unpack_from("<I", header)
-
-        # Guard against absurd lengths (mirrors protocol.rs MAX_FRAME_BYTES).
-        if length > 16 * 1024 * 1024:
-            print(f"daemon returned oversized frame ({length} bytes)", file=sys.stderr)
-            return None
-
-        # Read the JSON body.
-        data = b""
-        while len(data) < length:
-            chunk = sock.recv(length - len(data))
-            if not chunk:
-                print("daemon closed connection mid-frame", file=sys.stderr)
-                return None
-            data += chunk
-
-        resp = json.loads(data.decode("utf-8"))
-        if not isinstance(resp, dict):
-            print(
-                "daemon returned invalid JSON-RPC response shape",
-                file=sys.stderr,
-            )
-            return None
-        if "error" in resp:
-            err = resp["error"]
-            print(
-                f"daemon RPC error: {err.get('message', err)}",
-                file=sys.stderr,
-            )
-            return None
-        return resp.get("result")
-
-    except (OSError, ValueError) as exc:
-        # ValueError covers json.JSONDecodeError / UnicodeDecodeError from a
-        # malformed daemon response; the docstring contract is NEVER raise.
-        print(f"daemon socket error: {exc}", file=sys.stderr)
-        return None
-    finally:
-        sock.close()
+    return rpc_roundtrip(
+        sock_path,
+        method,
+        params,
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+        note=_note,
+    )
 
 
 # read_timeout exceeds the daemon's per-turn ceiling
@@ -7666,6 +7682,29 @@ def _delivery_policy_refusal(target) -> Optional[str]:
     return None
 
 
+def _run_mail_inject(argv: list[str], text: str, timeout: float, _record) -> bool:
+    """Run one ``mail-inject`` probe and classify its stdout verdict."""
+    try:
+        proc = subprocess.run(
+            argv,
+            input=text,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _record("probe-unavailable")
+        return False
+    try:
+        out = json.loads(proc.stdout.strip())
+        delivered = bool(out.get("delivered"))
+        _record(str(out.get("reason") or "unknown"))
+        return delivered
+    except (ValueError, AttributeError):
+        _record("unreadable")
+        return False
+
+
 def _mail_inject_keeper(
     recipient: str,
     text: str,
@@ -7691,8 +7730,6 @@ def _mail_inject_keeper(
     Unlike ``_mail_inject_claude`` there is no claude fallback for an unknown
     harness: a fallback name would route to lane A's socket, so an unreadable
     row is a refusal, never a wrong-lane guess."""
-    import json
-
     from fno import rust_binary
 
     def _record(reason: str) -> None:
@@ -7712,25 +7749,7 @@ def _mail_inject_keeper(
     argv = [str(binary), "mail-inject", "--session", recipient, "--harness", harness]
     if sender:
         argv += ["--sender", sender]
-    try:
-        proc = subprocess.run(
-            argv,
-            input=text,
-            capture_output=True,
-            text=True,
-            timeout=_MAIL_INJECT_TIMEOUT_S,
-        )
-    except (OSError, subprocess.SubprocessError):
-        _record("probe-unavailable")
-        return False
-    try:
-        out = json.loads(proc.stdout.strip())
-        delivered = bool(out.get("delivered"))
-        _record(str(out.get("reason") or "unknown"))
-        return delivered
-    except (ValueError, AttributeError):
-        _record("unreadable")
-        return False
+    return _run_mail_inject(argv, text, _MAIL_INJECT_TIMEOUT_S, _record)
 
 
 def _mail_inject_claude(
@@ -7778,8 +7797,6 @@ def _mail_inject_claude(
     ``None`` resolves it from the roster by session id; a miss (no row, no
     registry, or a harness the table does not know) falls back to claude, the
     table's largest delay, so an unresolved read waits longer, never less."""
-    import json
-
     from fno import rust_binary
 
     def _record(reason: str) -> None:
@@ -7838,25 +7855,7 @@ def _mail_inject_claude(
     if liveness_scaled:
         argv += ["--attempts", str(_MAIL_INJECT_LIVENESS_SCALED_ATTEMPTS)]
         timeout = _MAIL_INJECT_LIVENESS_SCALED_TIMEOUT_S
-    try:
-        proc = subprocess.run(
-            argv,
-            input=text,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except (OSError, subprocess.SubprocessError):
-        _record("probe-unavailable")
-        return False
-    try:
-        out = json.loads(proc.stdout.strip())
-        delivered = bool(out.get("delivered"))
-        _record(str(out.get("reason") or "unknown"))
-        return delivered
-    except (ValueError, AttributeError):
-        _record("unreadable")
-        return False
+    return _run_mail_inject(argv, text, timeout, _record)
 
 
 # Rung-2 (x-eea5 1.1) probe budget: a revived session needs a moment to bind its

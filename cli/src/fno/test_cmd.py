@@ -647,6 +647,7 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("State-roots ratchet (declared root, R4/R5)", "cli", "uv run fno-py doctor lint state-roots"),
     ("Agent field coverage accounting", "cli", "uv run fno-py doctor lint field-coverage"),
     ("In-N-Out menu-cap ratchet", "cli", "uv run fno-py doctor lint menu-caps"),
+    ("Spawn flag-ownership ratchet (owner + provenance per flag)", "cli", "uv run fno-py doctor lint spawn-flag-owners"),
     ("Verb-surface ratchet (real count, both binaries)", "cli", "uv run fno-py doctor lint verb-ratchet"),
     ("Schema parity self-test", ".", "bash scripts/tests/check-event-schema-parity-selftest.sh"),
     ("Schema parity check (Python side)", ".", "bash scripts/check-event-schema-parity.sh"),
