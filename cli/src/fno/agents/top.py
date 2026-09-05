@@ -367,13 +367,19 @@ _PANE_COUNTER_FIELDS = (
 
 
 def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
-    """Difference the last two ``mux_pane_counters`` snapshots in the journal.
+    """Difference the last two ``mux_pane_counters`` snapshots in the journals.
 
     THE one reader for per-pane mux counters: ``fno agents top --pane-stats``
     renders it here, and the spawn gate's pane-vs-bg-session pricing imports
     this same function rather than growing a second implementation. The mux
     emits monotonic TOTALS, never rates - the delta over the window between
     two samples is computed here, per pane.
+
+    Since retention routing (x-add3) the gauge's rows live in the
+    ``.ephemeral`` sibling journal; the main journal still carries rows a
+    pre-routing daemon wrote. Both are scanned, oldest file first, so the
+    deploy window and a sibling rotation (the ``.ephemeral.1`` generation)
+    both yield a sample pair.
 
     Returns ``{status, rows, born, gone, session, window_s}``. ``status`` is
     ``ok`` | ``insufficient-samples`` | ``unreadable``; an honest message is
@@ -385,9 +391,11 @@ def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
     restarted on the same socket name and pane ids reset, so that pane is
     reported born-and-gone rather than differenced into a negative delta.
     """
+    from fno.events import EPHEMERAL_SUFFIX
     from fno.paths import global_events_json
 
     path = events_path if events_path is not None else global_events_json()
+    sibling = path.with_name(path.name + EPHEMERAL_SUFFIX)
     empty: dict = {
         "status": "insufficient-samples",
         "rows": [],
@@ -396,14 +404,25 @@ def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
         "session": None,
         "window_s": None,
     }
-    try:
-        size = path.stat().st_size
-        with path.open("rb") as fh:
-            if size > _PANE_COUNTERS_TAIL_BYTES:
-                fh.seek(size - _PANE_COUNTERS_TAIL_BYTES)
-                fh.readline()  # drop the partial line the seek landed in
-            tail = fh.read().decode("utf-8", errors="replace")
-        samples = []
+    samples: list = []
+    # Oldest file first so a session spanning the routing deploy or a sibling
+    # rotation keeps chronological within-session order.
+    for candidate in (
+        path,
+        sibling.with_name(sibling.name + ".1"),
+        sibling,
+    ):
+        try:
+            size = candidate.stat().st_size
+            with candidate.open("rb") as fh:
+                if size > _PANE_COUNTERS_TAIL_BYTES:
+                    fh.seek(size - _PANE_COUNTERS_TAIL_BYTES)
+                    fh.readline()  # drop the partial line the seek landed in
+                tail = fh.read().decode("utf-8", errors="replace")
+        except FileNotFoundError:
+            continue  # a missing candidate = no samples from it, not a broken read
+        except OSError as exc:
+            return {**empty, "status": "unreadable", "error": f"{type(exc).__name__}: {exc}"}
         for line in tail.splitlines():
             if '"mux_pane_counters"' not in line:
                 continue  # cheap pre-filter: the journal carries many types
@@ -413,10 +432,9 @@ def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
                 continue
             if ev.get("type") == "mux_pane_counters":
                 samples.append(ev)
-    except FileNotFoundError:
+
+    if not samples and not path.exists() and not sibling.exists():
         return empty  # no journal at all = no samples, not a broken read
-    except OSError as exc:
-        return {**empty, "status": "unreadable", "error": f"{type(exc).__name__}: {exc}"}
 
     if len(samples) < 2:
         return empty

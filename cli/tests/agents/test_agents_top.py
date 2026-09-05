@@ -295,6 +295,56 @@ def test_pane_stats_reports_born_and_gone(tmp_path, monkeypatch):
     assert section["gone"] == [3]
 
 
+def test_pane_stats_reads_rows_from_the_ephemeral_sibling(tmp_path, monkeypatch):
+    """Post-routing shape: the gauge's rows live only in the .ephemeral sibling."""
+    from fno.agents.top import pane_counter_rows
+
+    journal = _counter_event(
+        tmp_path,
+        monkeypatch,
+        {
+            "2026-08-22T14:30:00Z": [_PANE_A],
+            "2026-08-22T14:30:30Z": [{**_PANE_A, "bytes_in": 250}],
+        },
+    )
+    sibling = journal.with_name(journal.name + ".ephemeral")
+    sibling.write_text(journal.read_text())
+    journal.unlink()  # post-deploy: the durable journal holds no gauge rows
+
+    section = pane_counter_rows(journal)
+    assert section["status"] == "ok"
+    assert len(section["rows"]) == 1
+    assert section["rows"][0]["bytes_in"] == 150
+
+
+def test_pane_stats_bridges_a_just_rotated_sibling(tmp_path, monkeypatch):
+    """A sibling that rotated mid-window holds its newest pair in the .1
+    generation; the reader must bridge instead of reporting
+    insufficient-samples for the active file's first minute."""
+    from fno.agents.top import pane_counter_rows
+
+    journal = tmp_path / "global-events.jsonl"
+    older_gen = journal.with_name(journal.name + ".ephemeral.1")
+    with older_gen.open("a") as fh:
+        for ts, pane in (
+            ("2026-08-22T14:30:00Z", _PANE_A),
+            ("2026-08-22T14:30:30Z", {**_PANE_A, "bytes_in": 250}),
+        ):
+            fh.write(
+                json.dumps(
+                    {"ts": ts, "type": "mux_pane_counters", "source": "daemon",
+                     "data": {"session": "main", "panes": [pane]}}
+                )
+                + "\n"
+            )
+    active_sibling = journal.with_name(journal.name + ".ephemeral")
+    active_sibling.write_text("")  # just rotated: empty until the next 30s tick
+
+    section = pane_counter_rows(journal)
+    assert section["status"] == "ok"
+    assert section["rows"][0]["bytes_in"] == 150
+
+
 def test_pane_stats_single_sample_says_so(tmp_path, monkeypatch):
     """Honest-edge: one sample prints an explicit insufficiency, never an
     empty table that reads as 'no cost'."""

@@ -31,11 +31,22 @@ def _write_executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
+def _journal_text(path: Path) -> str:
+    """A journal plus its .ephemeral sibling (retention routing, x-add3):
+    ephemeral-class rows like claim_acquired land in the sibling, so a reader
+    that wants the full stream reads both files."""
+    parts = [path.read_text(encoding="utf-8") if path.exists() else ""]
+    sibling = path.with_name(path.name + ".ephemeral")
+    if sibling.exists():
+        parts.append(sibling.read_text(encoding="utf-8"))
+    return "".join(parts)
+
+
 def _rows(path: Path) -> list[dict]:
     if not path.exists():
         return []
     rows: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in _journal_text(path).splitlines():
         if not line.strip():
             continue
         try:

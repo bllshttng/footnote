@@ -623,7 +623,10 @@ def read_node_events(paths: Sequence[Path]) -> list[dict[str, Any]]:
 
     Thin wrapper over the reducer's coverage-aware reader so the receipt's
     event view is identical to the scoreboard's (same dedup, same paths). The
-    caller filters to the node before passing to revalidate.
+    caller filters to the node before passing to revalidate. Each journal's
+    ``.ephemeral`` sibling is read too: the claim lifecycle kinds below are
+    ephemeral-class and have lived there since retention routing (x-add3),
+    and the coverage reader dedups and tolerates the missing file.
     """
     kinds = {
         "delegated",
@@ -636,4 +639,8 @@ def read_node_events(paths: Sequence[Path]) -> list[dict[str, Any]]:
         "claim_stale_reclaimed",
         "claim_released",
     }
-    return read_jsonl_events_with_coverage([Path(p) for p in paths], kinds)["events"]
+    from fno.paths import EPHEMERAL_EVENTS_SUFFIX
+
+    journals = [Path(p) for p in paths]
+    journals += [p.with_name(p.name + EPHEMERAL_EVENTS_SUFFIX) for p in journals]
+    return read_jsonl_events_with_coverage(journals, kinds)["events"]
