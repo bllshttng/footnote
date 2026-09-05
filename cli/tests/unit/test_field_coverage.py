@@ -73,11 +73,12 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
     # 48 -> 54 declared, accounted as rust_only (the Rust row projects them).
     # x-7955: substrate moved out of storage_only into the projected key set
     # (required 41 -> 42). The reign parent-edge change adds required
-    # spawned_by_session on top of v26: 54 -> 55 declared, 41 -> 43 required,
-    # counted from the merged tree.
-    assert payload["declared_count"] == 55
+    # spawned_by_session on top of v26: 41 -> 43 required, declared unchanged
+    # at 54 (spawned_by_session was already a declared v26 leaf), counted from
+    # the merged tree.
+    assert payload["declared_count"] == 54
     assert payload["required_count"] == 43
-    assert payload["accounted_count"] == 55
+    assert payload["accounted_count"] == 54
     assert payload["known_gaps"] == {}
 
 
