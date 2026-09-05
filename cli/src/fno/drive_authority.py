@@ -85,11 +85,11 @@ def is_drive_authority_active(agents_dir: Optional[Path] = None) -> bool:
 
 
 def _project_events_path() -> Path:
-    """Resolve the project events.jsonl (best-effort, cwd fallback)."""
+    """Resolve the project event journal (best-effort, relative fallback)."""
     try:
-        from fno.paths import resolve_repo_root
+        from fno.paths import project_log
 
-        return resolve_repo_root() / ".fno" / "events.jsonl"
+        return project_log("events.jsonl")
     except Exception:
         return Path(".fno") / "events.jsonl"
 
