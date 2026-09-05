@@ -121,7 +121,9 @@ def _emit_audit(
     repo_root: str, state_file: str, pr_number: str, reason: str, extra: Optional[dict] = None
 ) -> None:
     """Append a transcript_audit_failed event (best-effort; never fatal)."""
-    events_file = os.path.join(repo_root, ".fno", "events.jsonl")
+    from fno.paths import project_log
+
+    events_file = str(project_log("events.jsonl", project_root=Path(repo_root)))
     nonce = _read_field(state_file, "provenance_nonce")
     sid = _read_field(state_file, "session_id")
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -801,7 +803,9 @@ def run_verify_reviews(pr_number: str, state_file: str, cwd: Optional[str] = Non
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     nonce = _read_field(state_file, "provenance_nonce")
     sid = _read_field(state_file, "session_id")
-    events_file = os.path.join(repo_root, ".fno", "events.jsonl")
+    from fno.paths import project_log
+
+    events_file = str(project_log("events.jsonl", project_root=Path(repo_root)))
     for reviewer in missing:
         last_at = reviewer_map.get(reviewer) or ""
         event = {
