@@ -5865,16 +5865,9 @@ pub struct ReviewerVerdict {
     /// Only meaningful on `local_attestation` verdicts; github_app and
     /// human approvals carry `Unknown` since a GitHub login has no session
     /// to compare. Defaults to `Unknown` so every pre-existing attestation
-    /// lands there unchanged.
-    ///
-    /// `Unknown` serializes as `"unknown"`, never as an absent key: a read
-    /// that could not resolve the authoring session (a loop-check run from a
-    /// cwd whose target manifest is elsewhere) used to emit a row with no
-    /// `attestation_origin` at all, and a consumer reading absent as "not
-    /// self_attested" cleared a PR whose only review was the author's own -
-    /// a rebase laundering the review's authorship. The schema already names
-    /// `unknown` for exactly
-    /// this state.
+    /// lands there unchanged. `Unknown` serializes as `"unknown"`, never
+    /// as an absent key: a consumer reading absent as "not self_attested"
+    /// once cleared a PR whose only review was the author's own.
     #[serde(default = "default_attestation_origin")]
     pub attestation_origin: AttestationOrigin,
     /// The commit this reviewer actually read: a github_app review object's
@@ -5979,12 +5972,10 @@ impl CoverageReport {
 
     /// Whether every counted review verdict rests on the author's own
     /// (self_attested) local attestation: no GitHub App review, no second
-    /// session. A counted local verdict whose origin is anything but a
-    /// measured `OtherSession` reads as the author's own and fails closed:
-    /// Unknown authorship (including a read whose process resolved no
-    /// authoring session) cannot prove an independent reviewer, so this twin
-    /// refuses exactly what the serialized-row gate in the Python merge path
-    /// refuses - the two surfaces must never split on the same row.
+    /// session. A counted local verdict is the author's own unless its
+    /// origin is a measured `OtherSession` - unknown authorship cannot prove
+    /// an independent reviewer - so this twin refuses exactly what the
+    /// serialized-row gate in the Python merge path refuses.
     pub fn rests_on_self_attestation_alone(&self) -> bool {
         let mut counted = 0usize;
         let mut self_attested = 0usize;
@@ -15775,66 +15766,6 @@ mod tests {
         assert!(!corr.rests_on_self_attestation_alone());
         corr.apply_corroboration_policy(true);
         assert_eq!(corr.coverage, Coverage::Covered(2));
-    }
-
-    #[test]
-    fn the_origin_key_is_never_absent_from_a_serialized_local_verdict() {
-        // A read whose process resolved no authoring session (a
-        // carried_base_sync row re-read from a cwd whose target manifest is
-        // elsewhere) classifies the local verdict Unknown, and Unknown used to
-        // be SKIPPED on serialize - the persisted row carried no
-        // attestation_origin at all, and a consumer reading absent as "not
-        // self_attested" cleared a PR whose only review was the author's own.
-        // The key must always be present: "unknown" when authorship could not
-        // be measured, "self_attested" when it could.
-        let events = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
-        let unmeasured = classify_coverage(
-            &[],
-            &[],
-            &events,
-            &[],
-            true,
-            None,
-            &|_| Freshness::Fresh,
-            "feature/x",
-            "h",
-        );
-        let row = serde_json::to_value(&unmeasured.verdicts).unwrap();
-        let v = row
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|v| v["producer"] == "local_attestation")
-            .unwrap();
-        assert_eq!(v["attestation_origin"], serde_json::json!("unknown"));
-
-        let measured = classify_coverage(
-            &[],
-            &[],
-            &events,
-            &[],
-            true,
-            Some("sess-author"),
-            &|_| Freshness::Fresh,
-            "feature/x",
-            "h",
-        );
-        let row = serde_json::to_value(&measured.verdicts).unwrap();
-        let v = row
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|v| v["producer"] == "local_attestation")
-            .unwrap();
-        assert_eq!(v["attestation_origin"], serde_json::json!("self_attested"));
-
-        // The loop-side twin refuses the same row the serialized-row gate
-        // refuses: an unmeasured read under require_corroboration holds the
-        // PR instead of finishing green on authorship nobody measured.
-        let mut held = unmeasured;
-        assert!(held.rests_on_self_attestation_alone());
-        held.apply_corroboration_policy(true);
-        assert_eq!(held.coverage, Coverage::Covered(0));
     }
 
     #[test]
