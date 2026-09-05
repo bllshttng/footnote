@@ -364,6 +364,14 @@ fn read_record(
 /// the child never wrote. Its caller still gets the real answer; only the
 /// sharing is skipped.
 fn write_record(path: &Path, stdout: &[u8]) {
+    write_record_at(path, stdout, claims::now_ms())
+}
+
+/// [`write_record`] with the stamp supplied, so a test can age a record
+/// without sleeping. The freshness clock is milliseconds, and a write and a
+/// read inside one of them are the same instant, so a test that wants a STALE
+/// record has to say so rather than race the clock into saying it.
+fn write_record_at(path: &Path, stdout: &[u8], written_at_ms: i64) {
     let Ok(text) = std::str::from_utf8(stdout) else {
         return;
     };
@@ -371,7 +379,7 @@ fn write_record(path: &Path, stdout: &[u8]) {
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
-    let record = json!({"written_at_ms": claims::now_ms(), "stdout": text});
+    let record = json!({"written_at_ms": written_at_ms, "stdout": text});
     let tmp = dir.join(format!(".{}.{}.tmp", file_stem(path), std::process::id()));
     let write = std::fs::File::create(&tmp).and_then(|mut f| {
         f.write_all(record.to_string().as_bytes())
@@ -639,9 +647,13 @@ mod tests {
     fn a_stale_record_does_not_answer() {
         let (root, key) = root_for("ac2-stale");
         let path = record_path(&root, &key);
-        write_record(&path, b"old");
-        assert!(read_record(&path, Some(Duration::from_secs(10)), None).is_some());
-        assert!(read_record(&path, Some(Duration::from_millis(0)), None).is_none());
+        // Stamped a minute back rather than written now and read with a zero
+        // max age. A record is stale once its age EXCEEDS the bound, so a zero
+        // bound needs the clock to have advanced a millisecond, and on a fast
+        // machine the write and the read land inside the same one.
+        write_record_at(&path, b"old", claims::now_ms() - 60_000);
+        assert!(read_record(&path, Some(Duration::from_secs(120)), None).is_some());
+        assert!(read_record(&path, Some(Duration::from_secs(10)), None).is_none());
     }
 
     // AC3: a second caller arriving while a flight is held waits for the
