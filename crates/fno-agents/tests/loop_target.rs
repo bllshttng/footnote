@@ -1263,7 +1263,52 @@ fn write_king_manifest(dir: &Path, scope: &str, fno_id: &str, count: u64, ceilin
     fs::write(kings.join(format!("{scope}.md")), content).unwrap();
 }
 
+/// Pin a CLEAN board at `dir`: the graph carries only the scope epic and the
+/// config makes the in-process collector resolve it on a bare machine (no
+/// global config, no `~/.fno`). Every shelled source (gh, fno-py) is stubbed
+/// in `dir/bin` so no read degrades into an unreadable row the loop would
+/// treat as work. The board is read in process since the port, so a stub
+/// `fno` can no longer serve it.
+fn pin_clean_board(dir: &Path, scope: &str) {
+    let fno_dir = dir.join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
+    let graph = dir.join("graph.json");
+    fs::write(
+        &graph,
+        format!(
+            "{{\"entries\":[{{\"id\":\"{scope}\",\"type\":\"epic\",\"status\":\"ready\",\"priority\":\"p1\"}}]}}"
+        ),
+    )
+    .unwrap();
+    fs::write(dir.join("lane.md"), "").unwrap();
+    fs::write(
+        fno_dir.join("config.toml"),
+        format!(
+            "[paths]\ngraph_json = \"{}\"\noperator_lane = \"{}\"\n\n[work.workspaces]\n",
+            graph.display(),
+            dir.join("lane.md").display()
+        ),
+    )
+    .unwrap();
+    let bin_dir = dir.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(bin_dir.join("gh"), "#!/bin/sh\necho '[]'\n").unwrap();
+    fs::write(
+        bin_dir.join("fno-py"),
+        "#!/bin/sh\ncase \"$*\" in\n  *\"backlog ready\"*) echo '[]';;\n  *) echo '{}';;\nesac\n",
+    )
+    .unwrap();
+    fs::write(bin_dir.join("fno"), "#!/bin/sh\necho '{}'\n").unwrap();
+    #[cfg(unix)]
+    for stub in ["gh", "fno-py", "fno"] {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(bin_dir.join(stub), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
 /// A stub `fno` binary whose `inbox board` prints the given actionable count.
+/// The board read went in process, so its board half is inert; the dispatch
+/// tests that call it pass on the scope queue's own unreadable row.
 fn write_stub_fno_board(dir: &Path, actionable: u64) {
     write_stub_binary(
         dir,
@@ -1298,7 +1343,7 @@ fn king_walk_proceeds_past_driver_validation_into_preflight() {
     write_stub_driver(&lib_dir, "claude-code", 2, "exit 0");
     let bin_dir = dir.path().join("bin");
     write_stub_binary(&bin_dir, "claude", "exit 0");
-    write_stub_fno_board(&bin_dir, 0);
+    pin_clean_board(dir.path(), "epic-x");
     write_king_manifest(dir.path(), "epic-x", "k-9331", 0, 4);
 
     let (stdout, stderr, code) = run_verb(
@@ -1627,7 +1672,7 @@ fn king_wake_mode_over_an_empty_board_terminates_nowork() {
     );
     let bin_dir = dir.path().join("bin");
     write_stub_binary(&bin_dir, "claude", "exit 0");
-    write_stub_fno_board(&bin_dir, 0);
+    pin_clean_board(dir.path(), "epic-x");
     write_king_manifest(dir.path(), "epic-x", "k-9331", 4, 4);
 
     let (stdout, stderr, code) = run_verb(
