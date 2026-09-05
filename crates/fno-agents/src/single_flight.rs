@@ -57,16 +57,6 @@ use serde_json::{json, Map, Value};
 
 use crate::claims;
 
-/// How long a written answer counts as fresh. Matches the Pydantic default for
-/// `agents.single_flight_ttl_seconds`.
-pub const DEFAULT_TTL_SECONDS: u64 = 10;
-
-/// How long a joiner waits for the holder's answer before spawning its own.
-/// Matches `agents.single_flight_join_budget_seconds`. Comfortably over the
-/// 23.2 s worst-measured roster read, so a loaded box joins instead of timing
-/// out - the load is exactly when the latch has to hold.
-pub const DEFAULT_JOIN_BUDGET_SECONDS: u64 = 30;
-
 /// Gap between record reads while joining. The thing being waited on takes
 /// seconds, so a tighter poll would only burn the CPU this module exists to
 /// give back.
@@ -115,15 +105,24 @@ pub struct Flight {
 /// A token carrying commas is a LIST: it is split, trimmed, emptied, sorted and
 /// rejoined, so `a,b` and `b,a` are one flight. Every other token is compared
 /// verbatim, so `do pr wait 1463` and `do pr wait 1462` stay two.
+///
+/// The normalized argv is then HASHED, and the digest is the key. Not for
+/// tidiness: the argv itself is unbounded and the claim it locks is a FILENAME.
+/// `claims::acquire` refuses a key over `MAX_KEY_LENGTH` (256) or an encoded
+/// filename over `MAX_ENCODED_FILENAME_BYTES` (240), and the daemon's own roster
+/// sweep carries 25 handles, which is a 954-byte key. Passing that through left
+/// the latch refusing every acquire and spawning anyway - inert for exactly the
+/// fan-out it exists to delete, and silent about it. The break-even was six
+/// handles, which is why a one-handle test could not see it.
 pub fn flight_key<S: AsRef<str>>(argv: &[S]) -> String {
-    let mut out = String::from("flight:");
+    let mut normalized = String::new();
     for (i, token) in argv.iter().enumerate() {
         if i > 0 {
-            out.push(' ');
+            normalized.push(' ');
         }
-        out.push_str(&normalize_token(token.as_ref()));
+        normalized.push_str(&normalize_token(token.as_ref()));
     }
-    out
+    format!("flight:{}", blake3::hash(normalized.as_bytes()).to_hex())
 }
 
 fn normalize_token(token: &str) -> String {
@@ -152,9 +151,14 @@ fn normalize_token(token: &str) -> String {
 /// retry policy belongs INSIDE it: a crashed run that retries while still
 /// holding the claim hands the retried answer to a joiner, where a retry outside
 /// the flight would have the joiner start a second run of its own.
+///
+/// `work` is handed the time already spent inside the latch, so a caller with an
+/// outer deadline can subtract it. Without that argument the wait is ADDITIVE to
+/// the caller's own bound, and a joiner that waited and then ran its own work
+/// overran the deadline it was given.
 pub fn run_or_join<F>(key: &str, ttl: Duration, budget: Duration, work: F) -> Flight
 where
-    F: FnOnce() -> Option<Vec<u8>>,
+    F: FnOnce(Duration) -> Option<Vec<u8>>,
 {
     run_or_join_at(None, key, ttl, budget, work)
 }
@@ -172,9 +176,14 @@ pub fn run_or_join_at<F>(
     work: F,
 ) -> Flight
 where
-    F: FnOnce() -> Option<Vec<u8>>,
+    F: FnOnce(Duration) -> Option<Vec<u8>>,
 {
     let started = Instant::now();
+    // Read BEFORE the cache probe, not after the failed acquire. A record the
+    // holder writes in the gap between this caller's cache miss and its acquire
+    // would otherwise fall below the floor, and the joiner would wait out its
+    // whole budget for an answer already on disk.
+    let joined_at = claims::now_ms();
     let root = match root
         .map(Path::to_path_buf)
         .or_else(claims::global_claims_root)
@@ -184,7 +193,7 @@ where
             return finish(
                 key,
                 FlightKind::Spawn,
-                work(),
+                work(started.elapsed()),
                 started,
                 Some("no-flight-root"),
             )
@@ -210,7 +219,7 @@ where
     };
     match claims::acquire(key, &holder, opts) {
         claims::AcquireOutcome::Acquired(_) => {
-            let out = work();
+            let out = work(started.elapsed());
             if let Some(bytes) = out.as_deref() {
                 write_record(&path, bytes);
             }
@@ -218,21 +227,40 @@ where
             finish(key, FlightKind::Spawn, out, started, None)
         }
         claims::AcquireOutcome::HeldByOther { .. } => {
-            let joined_at = claims::now_ms();
             while started.elapsed() < budget {
                 std::thread::sleep(JOIN_POLL);
                 if let Some(bytes) = read_record(&path, None, Some(joined_at)) {
                     return finish(key, FlightKind::Join, Some(bytes), started, None);
                 }
+                // A holder can finish WITHOUT an answer: `work` returning None
+                // writes no record, and release then frees the claim. Waiting
+                // out the budget for a record nobody will ever write is the
+                // wedge this module refuses to have, so a freed claim ends the
+                // wait immediately rather than at the bound.
+                if claims::status(key, Some(&root)).0 == claims::ClaimState::Free {
+                    return finish(
+                        key,
+                        FlightKind::Timeout,
+                        work(started.elapsed()),
+                        started,
+                        Some("holder-released-unanswered"),
+                    );
+                }
             }
-            finish(key, FlightKind::Timeout, work(), started, None)
+            finish(
+                key,
+                FlightKind::Timeout,
+                work(started.elapsed()),
+                started,
+                None,
+            )
         }
         // An unreadable claim is not evidence that nobody is in flight, but
         // refusing to answer is worse than one extra child. Run, and name it.
         claims::AcquireOutcome::Error(e) => finish(
             key,
             FlightKind::Spawn,
-            work(),
+            work(started.elapsed()),
             started,
             Some(&format!("claim-error: {e}")),
         ),
@@ -385,10 +413,17 @@ fn finish(
     }
 }
 
-/// The key, hashed. The full argv can carry a session id or a path, and the
-/// event line is capped; the hash is enough to correlate two callers.
+/// The key's digest, shortened. The key IS `flight:<digest>`, so this is a
+/// prefix of that digest and an operator can match an event line to the
+/// lockfile `fno agents claim status` names. Hashing the key again here would
+/// print a number that appears nowhere else on the machine.
 fn key_hash(key: &str) -> String {
-    blake3::hash(key.as_bytes()).to_hex()[..12].to_string()
+    key.rsplit(':')
+        .next()
+        .unwrap_or(key)
+        .chars()
+        .take(12)
+        .collect()
 }
 
 #[cfg(test)]
@@ -428,6 +463,71 @@ mod tests {
         );
     }
 
+    /// The claim this latch is built on is a FILENAME, and the argv it is built
+    /// from is unbounded. The daemon's own roster sweep carries 25 handles; as
+    /// raw argv that key was 954 bytes, `claims::acquire` refused it, and the
+    /// latch spawned every single time while saying nothing.
+    #[test]
+    fn a_real_roster_key_fits_inside_what_a_claim_accepts() {
+        let handles: Vec<String> = (0..25)
+            .map(|i| format!("119e3c52-62bf-43b4-b3c4-3c7ce659f{i:03}"))
+            .collect();
+        let key = flight_key(&["agents", "truth", "--handles", &handles.join(",")]);
+        assert!(
+            key.len() <= claims::MAX_KEY_LENGTH,
+            "key is {} bytes, over MAX_KEY_LENGTH={}",
+            key.len(),
+            claims::MAX_KEY_LENGTH
+        );
+        assert!(
+            claims::encode_key(&key).len() <= claims::MAX_ENCODED_FILENAME_BYTES,
+            "encoded filename is {} bytes, over MAX_ENCODED_FILENAME_BYTES={}",
+            claims::encode_key(&key).len(),
+            claims::MAX_ENCODED_FILENAME_BYTES
+        );
+        // The bound must not have been bought by collapsing distinct work.
+        let mut other = handles.clone();
+        other.push("119e3c52-62bf-43b4-b3c4-3c7ce659f999".to_string());
+        assert_ne!(
+            key,
+            flight_key(&["agents", "truth", "--handles", &other.join(",")])
+        );
+    }
+
+    /// A joiner whose holder finishes WITHOUT an answer must not wait out the
+    /// budget: no record is coming, and the released claim says so.
+    #[test]
+    fn a_freed_claim_ends_the_wait_before_the_budget_does() {
+        let (root, key) = root_for("holder-released");
+        claims::acquire(
+            &key,
+            "foreign-holder",
+            claims::AcquireOpts {
+                ttl_ms: Some(120_000),
+                root: Some(root.clone()),
+                ..Default::default()
+            },
+        );
+        let release_key = key.clone();
+        let release_root = root.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = claims::release(&release_key, "foreign-holder", Some(&release_root), None);
+        });
+        let budget = Duration::from_secs(30);
+        let flight = run_or_join_at(Some(&root), &key, Duration::from_secs(10), budget, |_| {
+            Some(b"own-answer".to_vec())
+        });
+        assert_eq!(flight.kind, FlightKind::Timeout);
+        assert_eq!(flight.stdout.as_deref(), Some(&b"own-answer"[..]));
+        assert!(
+            flight.waited_ms < budget.as_millis() as u64,
+            "waited {}ms of a {}ms budget for an answer nobody was writing",
+            flight.waited_ms,
+            budget.as_millis()
+        );
+    }
+
     // AC1: no record -> spawn once, write the record, release.
     #[test]
     fn first_caller_spawns_and_writes_the_record() {
@@ -437,7 +537,7 @@ mod tests {
             &key,
             Duration::from_secs(10),
             Duration::from_secs(5),
-            || Some(b"{\"ok\":1}".to_vec()),
+            |_| Some(b"{\"ok\":1}".to_vec()),
         );
         assert_eq!(flight.kind, FlightKind::Spawn);
         assert_eq!(flight.stdout.as_deref(), Some(&b"{\"ok\":1}"[..]));
@@ -481,7 +581,7 @@ mod tests {
         let ttl = Duration::from_secs(10);
         for _ in 0..2 {
             let runs = Arc::clone(&runs);
-            run_or_join_at(Some(&root), &key, ttl, Duration::from_secs(5), move || {
+            run_or_join_at(Some(&root), &key, ttl, Duration::from_secs(5), move |_| {
                 runs.fetch_add(1, Ordering::SeqCst);
                 Some(b"answer".to_vec())
             });
@@ -525,7 +625,7 @@ mod tests {
             &key,
             Duration::from_secs(10),
             Duration::from_secs(5),
-            || panic!("a joiner must not run the work"),
+            |_| panic!("a joiner must not run the work"),
         );
         assert_eq!(flight.kind, FlightKind::Join);
         assert_eq!(flight.stdout.as_deref(), Some(&b"holder-answer"[..]));
@@ -552,7 +652,7 @@ mod tests {
             &key,
             Duration::from_secs(10),
             Duration::from_millis(300),
-            || Some(b"own-answer".to_vec()),
+            |_| Some(b"own-answer".to_vec()),
         );
         assert_eq!(flight.kind, FlightKind::Timeout);
         assert_eq!(flight.stdout.as_deref(), Some(&b"own-answer"[..]));

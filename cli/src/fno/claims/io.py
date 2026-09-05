@@ -117,7 +117,9 @@ def global_claims_dir() -> Path:
 #                  (loopcheck/finalize) resolve this prefix to the global root
 #                  too; a Python write landing anywhere else is a lease the
 #                  merge lane cannot see.
-# - flight:<argv>  the single-flight latch on an identical fno invocation. The
+# - flight:<hash>  the single-flight latch on an identical fno invocation, keyed
+#                  by a DIGEST of the normalized argv: a real roster read names
+#                  25 handles, four times MAX_KEY_LENGTH as raw argv. The
 #                  fan-out it deletes is machine-wide (seven concurrent
 #                  `agents truth` children from five parents in different
 #                  worktrees), so a cwd-local root would dedupe nothing. Rust

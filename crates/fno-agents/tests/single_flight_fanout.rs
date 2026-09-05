@@ -20,8 +20,25 @@ use std::time::Duration;
 use fno_agents::truth_probe::family1_truth_probe_many;
 
 /// How long the fake roster read takes. Long enough that every thread is inside
-/// the same window, short enough to keep the suite quick.
-const SLOW_READ: Duration = Duration::from_secs(2);
+/// the same window, short enough to leave real headroom under the join budget:
+/// a joiner that outlasts the budget runs its own child and the count climbs,
+/// so a thin margin turns a working latch into a failing assertion on a loaded
+/// machine. [`assert_headroom`] refuses to measure anything without it.
+const SLOW_READ: Duration = Duration::from_secs(1);
+
+/// The join budget resolves from `config.agents.*` against the current dir, so
+/// a repo config could put it under the fake read and fail these tests for a
+/// reason that has nothing to do with the latch. Say so instead of counting.
+fn assert_headroom() {
+    let budget = fno_agents::agents_config::single_flight_join_budget(
+        &std::env::current_dir().expect("cwd"),
+    );
+    assert!(
+        budget >= SLOW_READ * 3,
+        "join budget {budget:?} leaves no headroom over a {SLOW_READ:?} read; \
+         raise config.agents.single_flight_join_budget_seconds"
+    );
+}
 
 const CALLERS: usize = 5;
 
@@ -80,6 +97,7 @@ printf '{{%s}}' "${{body%,}}"
 fn concurrent_children(log_name: &str, handles_for: impl Fn(usize) -> Vec<String>) -> usize {
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    assert_headroom();
     let log = harness().join(log_name);
     let _ = std::fs::remove_file(&log);
     std::env::set_var("FNO_FANOUT_LOG", &log);
@@ -100,13 +118,27 @@ fn concurrent_children(log_name: &str, handles_for: impl Fn(usize) -> Vec<String
     std::fs::read_to_string(&log).map_or(0, |s| s.lines().count())
 }
 
-/// AC15: concurrent callers over the SAME handle set cost exactly one child.
+/// A roster the size of the one that was actually measured.
+///
+/// The scale is the test. A one-handle set produces a short flight key, and a
+/// short key hid a real defect: the key used to BE the argv, so the daemon's
+/// 25-handle sweep built a 954-byte key, `claims::acquire` refused it for
+/// exceeding `MAX_KEY_LENGTH`, and the latch spawned every time while a
+/// one-handle test reported a perfect dedup. Break-even was six handles.
+fn measured_roster() -> Vec<String> {
+    (0..25)
+        .map(|i| format!("119e3c52-62bf-43b4-b3c4-3c7ce659f{i:03}"))
+        .collect()
+}
+
+/// AC15: concurrent callers over the SAME handle set cost exactly one child,
+/// at the handle count the fan-out was measured at.
 #[test]
 fn one_handle_set_costs_one_child_however_many_callers_arrive() {
-    let children = concurrent_children("same.log", |_| vec!["ses-shared".to_string()]);
+    let children = concurrent_children("same.log", |_| measured_roster());
     assert_eq!(
         children, 1,
-        "{CALLERS} callers over one handle set spawned {children} children"
+        "{CALLERS} callers over one 25-handle set spawned {children} children"
     );
 }
 

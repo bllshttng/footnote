@@ -3140,7 +3140,9 @@ fn fetch_discovered_sessions(
         &key,
         fno_agents::agents_config::single_flight_ttl(&cwd),
         fno_agents::agents_config::single_flight_join_budget(&cwd),
-        || {
+        // No outer deadline to subtract from: this path has no caller-supplied
+        // budget, so the wait it may have spent changes nothing about the run.
+        |_spent| {
             let mut cmd = Command::new("fno");
             cmd.args(&argv);
             cmd.env("FNO_AGENTS_RUNTIME", "python");
