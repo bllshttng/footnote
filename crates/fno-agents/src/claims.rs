@@ -1558,6 +1558,7 @@ fn same_session_id(left: &str, right: &str) -> bool {
 fn vendor_identity_from(get: &impl Fn(&str) -> Option<String>) -> (Option<(String, String)>, bool) {
     let mut family: Option<&'static str> = None;
     let mut session: Option<String> = None;
+    let mut family_conflicted = false;
     for (marker, harness) in HARNESS_SESSION_MARKERS
         .iter()
         .chain(LEGACY_HARNESS_SESSION_MARKERS.iter())
@@ -1574,8 +1575,23 @@ fn vendor_identity_from(get: &impl Fn(&str) -> Option<String>) -> (Option<(Strin
                 session = Some(value);
             }
             Some(previous) if previous != *harness => return (None, true),
-            Some(_) => {}
+            // Same family, DIFFERENT id: a disagreement, not a precedence
+            // case (the durable CODEX_THREAD_ID against the legacy
+            // CODEX_SESSION_ID naming two sessions). Degrade like Python's
+            // _vendor_identity does; without proof the id could belong to
+            // either session (x-0992).
+            Some(_) => {
+                if !session
+                    .as_deref()
+                    .map_or(true, |s| same_session_id(s, &value))
+                {
+                    family_conflicted = true;
+                }
+            }
         }
+    }
+    if family_conflicted {
+        return (None, true);
     }
     (
         family
@@ -1703,9 +1719,10 @@ pub fn resolve_harness_from(get: impl Fn(&str) -> Option<String>) -> Option<Stri
 /// Same family rules as [`resolve_harness_from`]: a set-but-blank marker is
 /// unset, and two DISAGREEING families attribute NOTHING - a foreign inherited
 /// marker must not be laundered into a parent record for the life of the row.
-/// Within one family the earlier marker wins (`CODEX_THREAD_ID` over legacy
-/// `CODEX_SESSION_ID`, matching Python's AC-EDGE-multi), and the winner's
-/// VALUE is the parent session id, not just its harness kind.
+/// Within one family the DURABLE marker leads (`CODEX_THREAD_ID` over legacy
+/// `CODEX_SESSION_ID`), the winner's VALUE is the parent session id, not just
+/// its harness kind, and two ids of one family that DISAGREE attribute
+/// nothing - the same degrade Python's `_vendor_identity` applies (x-0992).
 pub fn ambient_parent_edge() -> (Option<String>, Option<String>, Option<String>) {
     ambient_parent_edge_from(|k| std::env::var(k).ok())
 }
@@ -3113,13 +3130,22 @@ mod tests {
             _ => None,
         };
         assert_eq!(resolve_harness_from(both).as_deref(), None);
-        // Two markers of ONE family agree -> that family, not ambiguous.
+        // Two markers of ONE family carrying the SAME id -> that family.
         let same_family = |k: &str| match k {
+            "CODEX_THREAD_ID" => Some("cx".to_string()),
+            "CODEX_SESSION_ID" => Some("CX".to_string()),
+            _ => None,
+        };
+        assert_eq!(resolve_harness_from(same_family).as_deref(), Some("codex"));
+        // Two DIFFERENT ids of ONE family disagree: attribute nothing, never
+        // the table-first value (x-0992) - without proof either id could be
+        // the stranger's.
+        let same_family_disagree = |k: &str| match k {
             "CODEX_THREAD_ID" => Some("cx".to_string()),
             "CODEX_SESSION_ID" => Some("cx2".to_string()),
             _ => None,
         };
-        assert_eq!(resolve_harness_from(same_family).as_deref(), Some("codex"));
+        assert_eq!(resolve_harness_from(same_family_disagree).as_deref(), None);
         // A blank higher-precedence marker is UNSET; a lower real one still wins.
         let blank_hi = |k: &str| match k {
             "CODEX_THREAD_ID" => Some("   ".to_string()),
@@ -3247,11 +3273,13 @@ mod tests {
                 ambient_parent_edge_from(|_| None).2
             )
         );
-        // Within the codex family the thread id wins over the legacy var, and
-        // the winner's value (not the loser's) is the parent id.
+        // Within the codex family one id under both names resolves to it.
+        // Two DIFFERENT ids of the family disagree and attribute nothing
+        // (x-0992) - the durable thread id used to win by position, which
+        // laundered whichever marker sorted first into the parent record.
         let codex = |k: &str| match k {
             "CODEX_THREAD_ID" => Some("t-1".to_string()),
-            "CODEX_SESSION_ID" => Some("legacy-1".to_string()),
+            "CODEX_SESSION_ID" => Some("t-1".to_string()),
             _ => None,
         };
         assert_eq!(
@@ -3261,6 +3289,15 @@ mod tests {
                 Some("codex".to_string()),
                 ambient_parent_edge_from(|_| None).2
             )
+        );
+        let codex_disagree = |k: &str| match k {
+            "CODEX_THREAD_ID" => Some("t-1".to_string()),
+            "CODEX_SESSION_ID" => Some("legacy-1".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            ambient_parent_edge_from(codex_disagree),
+            (None, None, ambient_parent_edge_from(|_| None).2)
         );
         // Two DISAGREEING families attribute NOTHING: no laundered lineage.
         let mixed = |k: &str| match k {

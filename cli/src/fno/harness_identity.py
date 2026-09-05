@@ -103,8 +103,15 @@ def harness_from_env(env: "Mapping[str, str]", *, warn: bool = True) -> "Optiona
     return legacy or None
 
 
-# Highest precedence first. Callers that need ambiguity detection may inspect
-# the same marker facts without duplicating names or harness mappings.
+# Highest precedence first. Within ONE harness family the order is a
+# durability rule, not an arbitrary position: CODEX_THREAD_ID is the durable
+# codex conversation identity and outranks the legacy CODEX_SESSION_ID. Two
+# markers of one family carrying the SAME value are one session with two
+# names and resolve normally; carrying DIFFERENT values is a disagreement,
+# and the family degrades to unresolved rather than pick by position - the
+# id under test could belong to either session (x-0992). Callers that need
+# ambiguity detection may inspect the same marker facts without duplicating
+# names or harness mappings.
 HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
     ("CODEX_THREAD_ID", "codex"),
     ("CLAUDE_CODE_SESSION_ID", "claude"),
@@ -632,12 +639,24 @@ def _vendor_identity(
 ) -> HarnessIdentity:
     families: list[str] = []
     winner: Optional[HarnessIdentity] = None
+    family_value_keys: dict[str, str] = {}
+    conflicted = False
     for _marker, harness, session_id in markers:
         if harness not in families:
             families.append(harness)
-        if winner is None:
-            winner = HarnessIdentity(session_id=session_id, harness=harness)
-    if len(families) > 1:
+        value_key = session_identity_key(session_id)
+        seen = family_value_keys.get(harness)
+        if seen is None:
+            family_value_keys[harness] = value_key
+            if winner is None:
+                winner = HarnessIdentity(session_id=session_id, harness=harness)
+        elif seen != value_key:
+            # Two ids of one family disagree (the durability order in
+            # HARNESS_SESSION_MARKERS names the durable one, but without proof
+            # picking it would be position-picking): unresolved, never
+            # table-first (x-0992).
+            conflicted = True
+    if len(families) > 1 or conflicted:
         return HarnessIdentity(session_id=None, harness=None)
     return winner or HarnessIdentity(session_id=None, harness=None)
 
@@ -885,6 +904,12 @@ def resolve_owned_identity(
         # dominant case). A collision or an active contradiction makes the
         # remaining unproven marker suspect (a same-family sibling could be
         # foreign), so those degrade below rather than stamp by elimination.
+        family_value_keys = {session_identity_key(value) for _m, _h, value in unresolved}
+        if len(family_value_keys) > 1:
+            # The family's markers disagree on the id (x-0992): unresolved,
+            # never table-first - without proof either marker could be the
+            # stranger's.
+            return OwnedHarnessIdentity(None, None, present, "ambiguous", rejected_t)
         _marker, harness, value = unresolved[0]
         return OwnedHarnessIdentity(value, harness, present, "single", rejected_t)
     # Multi-family with no proof, or a single family the prover contradicted:
@@ -1047,11 +1072,17 @@ def resolve_attester_identity(
     marker_name: Optional[str] = None
     session_id = ""
     families: list[str] = []
+    family_value_keys: dict[str, str] = {}
     for marker, family in HARNESS_SESSION_MARKERS:
         value = (environ.get(marker) or "").strip()
         if value:
             if family not in families:
                 families.append(family)
+            seen = family_value_keys.get(family)
+            if seen is None:
+                family_value_keys[family] = session_identity_key(value)
+            elif seen != session_identity_key(value):
+                family_value_keys[family] = "conflicted"
             if marker_name is None:
                 marker_name, session_id = marker, value
     if len(families) > 1 or marker_name is None:
@@ -1064,6 +1095,9 @@ def resolve_attester_identity(
     try:
         proc: "Optional[psutil.Process]" = psutil.Process(os.getppid())
     except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+        if family_value_keys.get(families[0]) == "conflicted":
+            # Unreadable ancestry cannot break a family disagreement either.
+            return ("", "env_only")
         return (session_id, "env_only")
     depth = 0
     while proc is not None and depth < _MAX_ANCESTRY_DEPTH:
@@ -1105,10 +1139,13 @@ def resolve_attester_identity(
         except psutil.Error:
             break
         depth += 1
-    return (
-        session_id,
-        _attester_witness(marker_name, session_id, chain, carrier_is_family),
-    )
+    witness = _attester_witness(marker_name, session_id, chain, carrier_is_family)
+    if witness != "process" and family_value_keys.get(families[0]) == "conflicted":
+        # The winning family carried two DIFFERENT ids and nothing proves
+        # which names this session: unresolved, never the table-first value
+        # (x-0992). A process witness on the durable marker resolves it.
+        return ("", "env_only")
+    return (session_id, witness)
 
 
 def current_session_id(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
