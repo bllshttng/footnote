@@ -613,6 +613,166 @@ def twin_lines(
 
 
 # ---------------------------------------------------------------------------
+# Leg 2d: mis-harnessed stamps with no twin (deterministic repair)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class HarnessShapeFix:
+    """A sessions[] row whose harness its own session id contradicts, with no
+    shape-correct twin to drop it against. The row is the node's only record of
+    the session, so the harness field is corrected, never the row deleted."""
+
+    node_id: str
+    session_id: str
+    phase: str
+    wrong_harness: str
+    right_harness: str
+
+
+def detect_harness_shape_fixes(entries: list[dict]) -> list[HarnessShapeFix]:
+    """Rows stamped under a harness their id's shape contradicts, where the node
+    carries NO shape-correct twin for the same (session_id, phase).
+
+    The twin lever drops a wrong row beside its correct twin; this lever
+    repairs the only row, because deleting it would erase the node's record
+    that the session ran here at all. Correcting the harness re-keys the row
+    onto the identity every resolver already uses, so the phantom second
+    session disappears.
+    """
+    from fno.harness_identity import harness_of_session_id
+
+    out: list[HarnessShapeFix] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        nid = e.get("id")
+        rows = e.get("sessions")
+        if not isinstance(nid, str) or not isinstance(rows, list):
+            continue
+        groups: dict[tuple[str, str], list[dict]] = {}
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            sid, phase, harness = (
+                r.get("session_id"), r.get("phase"), r.get("harness")
+            )
+            if not all(isinstance(v, str) and v for v in (sid, phase, harness)):
+                continue
+            groups.setdefault((sid, phase), []).append(r)
+        for (sid, phase), group in groups.items():
+            shape = harness_of_session_id(sid)
+            if shape is None:
+                continue
+            if any(r.get("harness") == shape for r in group):
+                continue  # the twin lever owns the wrong rows beside a correct one
+            for r in group:
+                if r.get("harness") != shape:
+                    out.append(
+                        HarnessShapeFix(
+                            node_id=nid,
+                            session_id=sid,
+                            phase=phase,
+                            wrong_harness=r.get("harness", "?"),
+                            right_harness=shape,
+                        )
+                    )
+    out.sort(key=lambda f: (f.node_id, f.session_id, f.phase, f.wrong_harness))
+    return out
+
+
+def apply_harness_shape_fixes(
+    ents: list[dict],
+    fixes: list[HarnessShapeFix],
+    current_claimed: set[str],
+) -> tuple[list[dict], list[str], list[str]]:
+    """Correct each detected harness inside the caller's locked mutation.
+
+    Re-checked under the lock so a row settled since the scan (dropped as a
+    twin, gone, or already correct) is never rewritten. Returns ``(applied
+    records, claimed node ids, warnings)``.
+    """
+    applied: list[dict] = []
+    skipped: list[str] = []
+    warnings: list[str] = []
+    for fix in fixes:
+        if fix.node_id in current_claimed:
+            skipped.append(fix.node_id)
+            continue
+        try:
+            n = next(
+                (
+                    e
+                    for e in ents
+                    if isinstance(e, dict) and e.get("id") == fix.node_id
+                ),
+                None,
+            )
+            rows = n.get("sessions") if isinstance(n, dict) else None
+            if not isinstance(rows, list):
+                continue
+            touched = False
+            for r in rows:
+                if (
+                    isinstance(r, dict)
+                    and r.get("session_id") == fix.session_id
+                    and r.get("phase") == fix.phase
+                    and r.get("harness") == fix.wrong_harness
+                ):
+                    r["harness"] = fix.right_harness
+                    touched = True
+            if touched:
+                applied.append(
+                    {
+                        "node_id": fix.node_id,
+                        "session_id": fix.session_id,
+                        "phase": fix.phase,
+                        "was_harness": fix.wrong_harness,
+                        "now_harness": fix.right_harness,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 - one bad row must not abort
+            warnings.append(f"harness fix on {fix.node_id} failed: {exc}")
+    return applied, skipped, warnings
+
+
+def shape_fix_payload(
+    fixes: list[HarnessShapeFix], applied: list[dict], apply: bool
+) -> dict:
+    """The ``session_harness_fixes`` block of the maintain ``--json`` payload."""
+    return {
+        "applied": applied if apply else [],
+        "candidates": [
+            {
+                "node_id": f.node_id,
+                "session_id": f.session_id,
+                "phase": f.phase,
+                "was_harness": f.wrong_harness,
+                "now_harness": f.right_harness,
+            }
+            for f in fixes
+        ],
+    }
+
+
+def shape_fix_lines(
+    fixes: list[HarnessShapeFix], applied: list[dict], apply: bool
+) -> list[str]:
+    """Human-report lines, one per fix (or per candidate under dry-run)."""
+    if apply:
+        return [
+            f"  fixed harness {d['node_id']} ({d['session_id']}, phase "
+            f"{d['phase']}): {d['was_harness']} -> {d['now_harness']} "
+            "(the id's own shape)"
+            for d in applied
+        ]
+    return [
+        f"  would fix harness {f.node_id} ({f.session_id}, phase {f.phase}): "
+        f"{f.wrong_harness} -> {f.right_harness} (the id's own shape)"
+        for f in fixes
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Leg 4: drain stale ideas (propose-only)
 # ---------------------------------------------------------------------------
 

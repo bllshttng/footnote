@@ -12816,6 +12816,7 @@ def cmd_maintain(
     prune_ids = _maintain.detect_temp_leaks(entries)
     pr_url_fixes = _maintain.detect_url_less_prs(entries)
     twin_drops = _maintain.detect_misharnessed_twins(entries)
+    shape_fixes = _maintain.detect_harness_shape_fixes(entries)
     pr_url_writable = [f for f in pr_url_fixes if f.pr_url]
     pr_url_unresolvable = [f for f in pr_url_fixes if not f.pr_url]
     dup_groups = _maintain.detect_dup_groups(entries)
@@ -12829,7 +12830,6 @@ def cmd_maintain(
 
     try:
         from fno.config import load_settings
-
         _maintain_cfg = load_settings().backlog.maintain
         staleness_days = _maintain_cfg.staleness_days
         max_failed_attempts = _maintain_cfg.max_failed_attempts
@@ -12886,11 +12886,11 @@ def cmd_maintain(
     applied_stale_ready: list[dict] = []
     applied_pr_urls: list[dict] = []
     applied_twin_drops: list[dict] = []
+    applied_shape_fixes: list[dict] = []
     skipped_claimed: list[str] = []
 
-    if apply and (rescope_fixes or prune_ids or defer_cands or stale_ready_cands or pr_url_writable or twin_drops):
-        # One locked mutation: the board renders once, and one failed item
-        # never strands the rest (AC1-ERR).
+    if apply and (rescope_fixes or prune_ids or defer_cands or stale_ready_cands or pr_url_writable or twin_drops or shape_fixes):
+        # One locked mutation: the board renders once; one failed item never strands the rest.
         def mutator(ents):
             current_claimed = claimed | _require_live_claimed_node_ids("backlog maintain --apply")
             applied_rescope.clear()
@@ -12927,8 +12927,7 @@ def cmd_maintain(
                     if blocked:
                         e["blocked_by"] = [b for b in blocked if b not in prune_set]
                 ents = [e for e in ents if e.get("id") not in prune_set]
-            # Leg 2b: backfill a derived pr_url onto url-less pr_number rows,
-            # re-checked in-lock (a present url always outranks a derived one).
+            # Leg 2b: backfill a pr_url onto url-less rows, in-lock (a present url outranks).
             for fix in pr_url_writable:
                 if fix.node_id in current_claimed:
                     skipped_claimed.append(fix.node_id)
@@ -12940,20 +12939,21 @@ def cmd_maintain(
                     n["pr_url"] = fix.pr_url
                     applied_pr_urls.append({"node_id": fix.node_id, "pr_url": fix.pr_url})
                 except Exception as exc:  # noqa: BLE001 - one bad row must not abort
-                    typer.echo(
-                        f"warning: pr_url backfill of {fix.node_id} failed: {exc}",
-                        err=True,
-                    )
+                    typer.echo(f"warning: pr_url backfill of {fix.node_id} failed: {exc}", err=True)
             # Leg 2c: drop the mis-harnessed session twin (re-checked in-lock).
             applied_twin_drops, twin_skipped, twin_warn = _maintain.apply_twin_drops(
                 ents, twin_drops, current_claimed
             )
             skipped_claimed.extend(twin_skipped)
-            for _tw in twin_warn:
-                typer.echo(f"warning: {_tw}", err=True)
-            # Leg 7: auto-defer failure-prone nodes (#34). Mirrors cmd_defer's
-            # field-set; re-checks live state and claims INSIDE the lock so a
-            # node that raced to done, deferred, or claimed is not touched.
+            # Leg 2d: correct a wrong harness the twin leg left (no twin to drop).
+            applied_shape_fixes, fix_skipped, fix_warn = _maintain.apply_harness_shape_fixes(
+                ents, shape_fixes, current_claimed
+            )
+            skipped_claimed.extend(fix_skipped)
+            for _w in [*twin_warn, *fix_warn]:
+                typer.echo(f"warning: {_w}", err=True)
+            # Leg 7: auto-defer failure-prone nodes (#34). Re-checks live state
+            # and claims INSIDE the lock so a node that raced is not touched.
             defer_claimed = current_claimed
             for cand in defer_cands:
                 if cand.node_id in defer_claimed:
@@ -13116,7 +13116,6 @@ def cmd_maintain(
         if apply
         else [{"node_id": c.node_id, "age_days": c.age_days} for c in stale_ready_cands],
         "stale_ready_truncated": stale_ready_truncated,
-        "session_twins_dropped": len(applied_twin_drops) if apply else len(twin_drops),
     }
     try:
         from fno.health_monitor import append_history
@@ -13177,6 +13176,8 @@ def cmd_maintain(
                 "truncated": stale_ready_truncated,
             },
             "session_twins": _maintain.twin_payload(twin_drops, applied_twin_drops, apply),
+            "session_harness_fixes": _maintain.shape_fix_payload(
+                shape_fixes, applied_shape_fixes, apply),
         }
         if validity_result is not None:
             payload["validity"] = {
@@ -13285,17 +13286,16 @@ def cmd_maintain(
         )
     for _tl in _maintain.twin_lines(twin_drops, applied_twin_drops, apply):
         typer.echo(_tl)
+    for _fl in _maintain.shape_fix_lines(shape_fixes, applied_shape_fixes, apply):
+        typer.echo(_fl)
     for nid, epic_id, score in rollup_cands:
         typer.echo(
             f"  rollup candidate {nid} -> {epic_id} ({score:.2f}): "
             f"fno backlog update {nid} --parent {epic_id}"
         )
-    # Bounded stale-idea receipt: the per-candidate echo scaled to one line per
-    # stale idea (hundreds on a mature graph), swamping the one-screen report.
-    # Summary + 10 oldest + one drain command instead. The drain lands the whole
-    # batch in one locked write via the variadic `defer` (one read/backup/write/
-    # render regardless of id count); --no-validity skips the analyzer call that
-    # made an earlier `maintain -J` hang past 120s.
+    # Bounded stale-idea receipt: the per-candidate echo swamped the report on
+    # a mature graph. Summary + 10 oldest + one drain command instead;
+    # --no-validity skips the analyzer call that made an earlier `maintain -J` hang.
     if stale:
         ages = sorted(s.age_days for s in stale)
         oldest = sorted(stale, key=lambda s: s.age_days, reverse=True)[:10]
