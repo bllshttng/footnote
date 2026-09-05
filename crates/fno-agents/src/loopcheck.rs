@@ -7097,9 +7097,24 @@ pub fn classify_coverage_tiled(
     }
     if local_passes.iter().any(|lp| answered_fail(lp)) {
         let chain = in_scope_chain(events_text, head_branch, head_sha);
+        // The disposition basis counts the ANSWERED-FAIL candidates too, not
+        // only the passes: a chain with no pass at all - one declined fail -
+        // left the basis empty, rests_on_self_attestation_alone read false on
+        // zero counted verdicts, and the author's own reasoned decline read
+        // terminal on the author's signature alone. The candidates' origins
+        // are exactly what the predicate must measure.
+        let mut basis_verdicts = verdicts.clone();
+        for lp in local_passes.iter().filter(|lp| answered_fail(lp)) {
+            basis_verdicts.push(local_attestation_verdict(
+                lp,
+                freshness,
+                tiling,
+                author_session,
+            ));
+        }
         let basis = CoverageReport {
             coverage: Coverage::Covered(0),
-            verdicts: verdicts.clone(),
+            verdicts: basis_verdicts,
             github_approval_satisfies,
         };
         // Locked Decision 2: a disposition pass carries its OWN corroboration
