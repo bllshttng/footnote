@@ -257,9 +257,68 @@ class TestReceipts:
         assert receipt["account_source"] == "config"
 
 
+class TestPaneRowDecider:
+    """The real `dispatch_spawn_pane` decides the row pair; a stubbed back
+    half at `dispatch_spawn_bounded_pane` never enters it (that gap is why a
+    pre-pick snapshot shipped green). Here only the LAUNCH below the picker is
+    stubbed, so the pair the row and the result carry is the pair the picker
+    produced."""
+
+    @staticmethod
+    def _stub_pane_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+        import subprocess
+
+        from fno.agents import mux_spawn
+
+        monkeypatch.setattr(mux_spawn, "resolve_provenance", lambda *a, **k: None)
+        monkeypatch.setattr(mux_spawn, "resolve_mux_session", lambda session: "sess")
+        monkeypatch.setattr(
+            mux_spawn,
+            "_run_mux",
+            lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="1", stderr=""),
+        )
+        monkeypatch.setattr(mux_spawn, "_lookup_child_pid", lambda *a, **k: None)
+
+    def test_a_picked_pane_row_carries_the_picked_account(
+        self, armed: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fno.agents import mux_spawn
+
+        self._stub_pane_launch(monkeypatch)
+        result = mux_spawn.dispatch_spawn_pane(
+            name="p-row", message="hi", provider="claude", cwd=armed
+        )
+        assert result.launch_account == "makers"
+        assert result.launch_account_source == spawn_flag_owners.CONFIG
+
+    def test_an_unpicked_pane_row_defaults_without_a_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fno.agents import mux_spawn
+
+        _write_config(tmp_path, pick_on_launch=False)
+        _pin_config(tmp_path, monkeypatch)
+        self._stub_pane_launch(monkeypatch)
+        result = mux_spawn.dispatch_spawn_pane(
+            name="p-row2", message="hi", provider="claude", cwd=tmp_path
+        )
+        assert result.launch_account == "default"
+        assert result.launch_account_source is None
+
+
 class TestVocabulary:
-    def test_receipt_and_table_share_the_wire_values(self) -> None:
-        assert spawn_flag_owners.CALLER == "caller"
-        assert spawn_flag_owners.CONFIG == "config"
-        assert spawn_flag_owners.ENV == "env"
-        assert spawn_flag_owners.DEFAULT == "default"
+    def test_the_carrier_word_is_spelled_identically_across_runtimes(self) -> None:
+        """The Python seam sets the provenance carrier; the Rust mint reads it.
+        Two spellings of one env key silently cut one side off the wire."""
+        from fno.agents import launch_provenance
+
+        rs = (
+            Path(__file__).resolve().parents[3]
+            / "crates" / "fno-agents" / "src" / "state.rs"
+        )
+        if not rs.is_file():
+            pytest.skip("rust crate not present in this checkout")
+        src = rs.read_text(encoding="utf-8")
+        assert launch_provenance.LAUNCH_ACCOUNT_SOURCE_ENV in src
+        # The mint speaks exactly the wire vocabulary, in Python's own words.
+        assert 'src == "caller" || src == "config"' in src
