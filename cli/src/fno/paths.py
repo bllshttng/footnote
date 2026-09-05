@@ -901,7 +901,10 @@ def event_journals() -> list[Path]:
             rotated: list[tuple[int, Path]] = []
             entries: Iterable[Path]
             try:
-                entries = parent.iterdir()
+                # list() forces the lazy iterdir generator INSIDE the try: the
+                # open happens on first next(), so a bare assignment never catches
+                # the missing-parent error this handler exists to absorb.
+                entries = list(parent.iterdir())
             except OSError:
                 entries = ()
             for candidate in entries:
