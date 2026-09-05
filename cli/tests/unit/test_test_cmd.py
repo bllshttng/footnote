@@ -421,7 +421,9 @@ def test_changed_pytest_step_is_preceded_by_the_binary_scrub() -> None:
 
     import fno.test_cmd as tc
     src = inspect.getsource(tc._run_changed)
-    assert "Pytest (changed subset" in src and "target/debug/fno-agents" in src
+    assert "Pytest (changed subset" in src
+    assert "_scrub_target_bins(root)" in src
+    assert any("target/debug/fno-agents" in rel for rel in tc._TARGET_BIN_RELS)
 
 
 # --- the changed-packet estimate (what CI sizes the job ceiling from) ---------
