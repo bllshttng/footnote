@@ -2099,14 +2099,17 @@ mod tests {
                 LayoutSlot {
                     name: "aaaaaaaa".into(),
                     binding: LayoutBinding::Fno("aaaaaaaa".into()),
+                    cwd: None,
                 },
                 LayoutSlot {
                     name: "p1".into(),
                     binding: LayoutBinding::Shell,
+                    cwd: None,
                 },
                 LayoutSlot {
                     name: "p2".into(),
                     binding: LayoutBinding::Shell,
+                    cwd: None,
                 },
             ],
             focus: Some("p1".into()),
@@ -2169,6 +2172,48 @@ mod tests {
         let loaded = load();
         assert_eq!(loaded.squads.len(), 1, "not quarantined");
         assert_eq!(loaded.squads[0].members[0].cwd, None);
+    }
+
+    #[test]
+    fn pre_v68_slot_loads_without_cwd_field_and_serializes_byte_identically() {
+        // AC1-HP / AC2-EDGE (x-5baf): a tab_trees slot written before v68 has
+        // no "cwd" key. It must load unquarantined with cwd defaulting to
+        // None, and a None-cwd `LayoutSlot` must never emit a "cwd" key
+        // (`skip_serializing_if`) - so a pre-v68 store round-trips byte for
+        // byte through this version.
+        use crate::proto::{LayoutBinding, LayoutSlot, LayoutTreeSpec};
+        let s = Scratch::new("no-slot-cwd");
+        let tree = StoredTabTree {
+            tab_name: None,
+            tree: LayoutTreeSpec::Slot("p1".into()),
+            slots: vec![LayoutSlot {
+                name: "p1".into(),
+                binding: LayoutBinding::Shell,
+                cwd: None,
+            }],
+            focus: None,
+        };
+        let raw = serde_json::json!({
+            "version": 1,
+            "squads": [{
+                "name": "w",
+                "origins": [],
+                "members": [],
+                "created_at": "2026-08-11T00:00:00Z",
+                "tab_specs": [],
+                "tab_trees": [tree],
+                "active_tab": 0,
+            }]
+        })
+        .to_string();
+        assert!(
+            !raw.contains("\"cwd\""),
+            "a None-cwd slot must carry no cwd key: {raw}"
+        );
+        std::fs::write(s.file(), raw).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.squads.len(), 1, "not quarantined");
+        assert_eq!(loaded.squads[0].tab_trees[0].slots[0].cwd, None);
     }
 
     #[test]

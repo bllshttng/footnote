@@ -4305,10 +4305,7 @@ fn layout_graft_cli(
             let slots = names
                 .iter()
                 .zip(slot_bindings)
-                .map(|(n, b)| LayoutSlot {
-                    name: n.clone(),
-                    binding: b,
-                })
+                .map(|(n, b)| LayoutSlot::new(n.clone(), b))
                 .collect();
             AnchoredLayoutSpec {
                 version: 1,

@@ -473,6 +473,7 @@ mod tests {
         LayoutSlot {
             name: name.into(),
             binding,
+            cwd: None,
         }
     }
     fn spec(tree: LayoutTreeSpec, slots: Vec<(&str, LayoutBinding)>) -> AnchoredLayoutSpec {

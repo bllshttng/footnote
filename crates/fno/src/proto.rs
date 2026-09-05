@@ -320,7 +320,8 @@ fn default_true() -> bool {
 /// open honors, now that the geometry refusal lives inside `reach_portal`
 /// where the slot lookup knows occupancy. Additive, so the compatibility
 /// floor does not move; a repoint keeps owning its geometry and says so.
-pub const PROTO_VERSION: u32 = 67;
+/// v68 (x-5baf): `LayoutSlot.cwd`, `#[serde(default)]`; floor stays 58.
+pub const PROTO_VERSION: u32 = 68;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1121,6 +1122,9 @@ pub enum LayoutBinding {
 pub struct LayoutSlot {
     pub name: String,
     pub binding: LayoutBinding,
+    /// (v68, x-5baf) pane's cwd at capture; `None` pre-v68.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// A versioned anchored layout (v44, x-6928): a typed [`LayoutTreeSpec`] plus
@@ -4223,8 +4227,8 @@ mod tests {
         // edit; they now assert only their own wire shapes.
         // The registry-keyed identity pair (StopAgent/RemoveAgent carry
         // `harness_session_id`; AgentRow carries `liveness_age_s`) bumps it
-        // 66 -> 67.
-        assert_eq!(PROTO_VERSION, 67);
+        // 66 -> 67. `LayoutSlot.cwd` (x-5baf) bumps it 67 -> 68.
+        assert_eq!(PROTO_VERSION, 68);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4375,18 +4379,9 @@ mod tests {
                 ],
             },
             slots: vec![
-                LayoutSlot {
-                    name: "anchor".into(),
-                    binding: LayoutBinding::Anchor,
-                },
-                LayoutSlot {
-                    name: "reviewer".into(),
-                    binding: LayoutBinding::Fno("abcd1234".into()),
-                },
-                LayoutSlot {
-                    name: "tester".into(),
-                    binding: LayoutBinding::Shell,
-                },
+                LayoutSlot::new("anchor".into(), LayoutBinding::Anchor),
+                LayoutSlot::new("reviewer".into(), LayoutBinding::Fno("abcd1234".into())),
+                LayoutSlot::new("tester".into(), LayoutBinding::Shell),
             ],
         };
         let json = serde_json::to_string(&spec).unwrap();

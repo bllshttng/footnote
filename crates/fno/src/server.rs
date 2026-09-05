@@ -48,8 +48,8 @@ use crate::pty::{shell_candidates, PtyShell};
 #[cfg(test)]
 use crate::spawn_journal::parse_spawn_receipts;
 use crate::spawn_journal::{
-    parse_never_bound_removals, receipt_for_member, scan_spawn_journal, worker_binding_key,
-    BatchReplay, DetachedPane, HeldWorker, ReentrySpawnRequest, ReentryVerdict, SpawnJournal,
+    receipt_for_member, scan_spawn_journal, worker_binding_key, BatchReplay, DetachedPane,
+    HeldWorker, ReentrySpawnRequest, ReentryVerdict, SpawnJournal,
 };
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
 use crate::squad_store::StoredTabTree;
@@ -2156,7 +2156,7 @@ struct TruthReading {
     age_s: Option<u64>,
 }
 
-struct Core {
+pub(crate) struct Core {
     session: Session,
     panes: HashMap<u64, PaneEntry>,
     /// Per-pane output signal for off-loop `PaneWait` watchers. One entry per
@@ -2524,15 +2524,18 @@ fn wheel_gate(
 /// case `PaneLocation` documents) gets a `#2` suffix rather than colliding.
 struct SlotCapture<'a> {
     pane_owner: &'a HashMap<u64, &'a str>,
+    /// (x-5baf) Each pane's live cwd, read once before the tab loop.
+    pane_cwd: &'a HashMap<u64, String>,
     slots: Vec<LayoutSlot>,
     by_pane: HashMap<u64, String>,
     ordinal: usize,
 }
 
 impl<'a> SlotCapture<'a> {
-    fn new(pane_owner: &'a HashMap<u64, &str>) -> Self {
+    fn new(pane_owner: &'a HashMap<u64, &str>, pane_cwd: &'a HashMap<u64, String>) -> Self {
         SlotCapture {
             pane_owner,
+            pane_cwd,
             slots: Vec::new(),
             by_pane: HashMap::new(),
             ordinal: 0,
@@ -2587,6 +2590,7 @@ impl<'a> SlotCapture<'a> {
         self.slots.push(LayoutSlot {
             name: name.clone(),
             binding,
+            cwd: self.pane_cwd.get(&pane).cloned(),
         });
         self.by_pane.insert(pane, name.clone());
         name
@@ -2706,7 +2710,7 @@ fn spec_to_node(tree: &LayoutTreeSpec, resolve: &dyn Fn(&str) -> Option<u64>) ->
 /// member) and a stored path that fails `is_dir` both fall back to `cwd0` -
 /// the two-path notice (member wants -> where it actually landed) is the
 /// caller's job, since only the caller knows the member's identity to name.
-fn restore_member_cwd(
+pub(crate) fn restore_member_cwd(
     stored: Option<&str>,
     cwd0: &str,
     is_dir: impl Fn(&str) -> bool,
@@ -3515,7 +3519,7 @@ impl Core {
     /// squads from MANY repos; inheriting the server process cwd would start
     /// every later squad's shell in the first client's directory). Empty /
     /// vanished dirs degrade to the server cwd inside `PtyShell::spawn`.
-    fn spawn_pane(&mut self, rows: u16, cols: u16, cwd: &str) -> Result<u64, String> {
+    pub(crate) fn spawn_pane(&mut self, rows: u16, cols: u16, cwd: &str) -> Result<u64, String> {
         let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
         let pty = PtyShell::spawn(
@@ -7531,6 +7535,9 @@ impl Core {
         // (x-8f9d) Every portal seat, collected once: the per-tab prune below
         // folds over all of them.
         let seats: Vec<u64> = self.portals.values().map(|p| p.seat).collect();
+        // (x-5baf) Filled per tab below, after the portal prune, so a pruned
+        // portal pane never costs a cwd syscall nothing reads.
+        let mut pane_cwd: HashMap<u64, String> = HashMap::new();
         let mut trees = Vec::with_capacity(sq.tabs.len());
         let mut active_tab = 0;
         // If pruning hollows out the active tab itself, `active_tab` has no
@@ -7578,7 +7585,13 @@ impl Core {
                 active_tab = trees.len();
             }
             let root = pruned.as_ref().unwrap_or(&t.root);
-            let mut capture = SlotCapture::new(&pane_owner);
+            let cwd_of = |p| {
+                self.panes
+                    .get(&p)
+                    .map(|e| (e.pty.child_pid(), e.cwd.as_str()))
+            };
+            crate::pane_cwd::fill_leaf_cwds(tree::leaves(root), cwd_of, &mut pane_cwd);
+            let mut capture = SlotCapture::new(&pane_owner, &pane_cwd);
             let tree = capture.node_to_spec(root);
             let focus = capture.slot_of(t.focus);
             trees.push(StoredTabTree {
@@ -8042,7 +8055,7 @@ impl Core {
     /// received it, so a caller latching on the broadcast knows the message
     /// actually landed (x-0719): a latch set on an empty room burns a
     /// once-per-lifetime notice on nobody.
-    fn notice_all(&self, text: impl Into<String>) -> bool {
+    pub(crate) fn notice_all(&self, text: impl Into<String>) -> bool {
         let text = text.into();
         let mut delivered = false;
         for c in &self.clients {
@@ -9005,17 +9018,14 @@ impl Core {
                             Some(p) => {
                                 slot_pane.insert(slot.name.as_str(), p);
                             }
-                            None => match self.spawn_pane(rows, cols, &cwd0) {
-                                Ok(p) => {
+                            None => {
+                                let tab_name = st.tab_name.as_deref().unwrap_or("?");
+                                if let Some(p) =
+                                    self.restore_shell_slot(slot, rows, cols, &cwd0, tab_name)
+                                {
                                     slot_pane.insert(slot.name.as_str(), p);
                                 }
-                                Err(e) => {
-                                    self.notice_all(format!(
-                                        "restore: tab {}: could not open shell: {e}",
-                                        st.tab_name.as_deref().unwrap_or("?")
-                                    ));
-                                }
-                            },
+                            }
                         }
                     }
                     let lookup = |name: &str| slot_pane.get(name).copied();
@@ -19410,14 +19420,8 @@ mod tests {
                 ],
             },
             slots: vec![
-                LayoutSlot {
-                    name: "a".into(),
-                    binding: LayoutBinding::Anchor,
-                },
-                LayoutSlot {
-                    name: "b".into(),
-                    binding: LayoutBinding::Shell,
-                },
+                LayoutSlot::new("a".into(), LayoutBinding::Anchor),
+                LayoutSlot::new("b".into(), LayoutBinding::Shell),
             ],
         };
         let err = core
@@ -19489,14 +19493,8 @@ mod tests {
                 ],
             },
             slots: vec![
-                LayoutSlot {
-                    name: "a".into(),
-                    binding: LayoutBinding::Anchor,
-                },
-                LayoutSlot {
-                    name: "b".into(),
-                    binding: LayoutBinding::Fno("S1".into()),
-                },
+                LayoutSlot::new("a".into(), LayoutBinding::Anchor),
+                LayoutSlot::new("b".into(), LayoutBinding::Fno("S1".into())),
             ],
         };
         let msg = core
@@ -21282,9 +21280,11 @@ mod tests {
         )
         .unwrap();
         // Two one-slot tabs: one for the done member, one for the live one.
-        let slot_for = |session: &str| crate::proto::LayoutSlot {
-            name: "s0".into(),
-            binding: LayoutBinding::Fno(format!("worker:codex:{session}")),
+        let slot_for = |session: &str| {
+            crate::proto::LayoutSlot::new(
+                "s0".into(),
+                LayoutBinding::Fno(format!("worker:codex:{session}")),
+            )
         };
         let tree_for = |session: &str| crate::proto::LayoutTreeSpec::Slot("s0".into());
         crate::squad_store::set_tab_trees(
@@ -24053,7 +24053,6 @@ mod tests {
         assert_eq!(hits, 1, "the merged agent renders exactly once");
     }
 
-    #[test]
     #[test]
     fn card_ready_gate_only_passes_ready_cards() {
         // x-a496 (codex peer review): a targeted dispatch only proceeds for a
