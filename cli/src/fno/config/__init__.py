@@ -4395,15 +4395,16 @@ class AccountsBlock(BaseModel):
 #: The texts a reign self-injects as native commands (x-7b36), module-level so
 #: the fail-safe validators return the same default the field was born with.
 KING_CHECKIN_TEXT = (
-    "reign check-in: run the check-in body of the reign skill "
-    "(skills/reign/SKILL.md); journal reign_checkin; if nothing changed "
-    "since the last check-in, print 'no change' and stop"
+    "reign check-in. Run the check-in body of the reign skill "
+    "(skills/reign/SKILL.md). Journal reign_checkin. When nothing changed "
+    "since the last check-in, print 'no change' and stop."
 )
 KING_GOAL_TEXT = (
-    "reign goal: fno inbox board --json reports no actionable rows for the "
-    "crown scope, fno agents court --json shows no split, and the operator "
-    "has not ordered a stand-down; until then keep reigning and never "
-    "/goal clear on NoProgress"
+    "reign goal. When fno inbox board --json reports no actionable rows "
+    "for the crown scope, the goal is met. It also needs fno agents court "
+    "--json to show no split. A stand-down order from the operator ends "
+    "the reign too. Until then keep reigning. Never /goal clear on "
+    "NoProgress."
 )
 
 
