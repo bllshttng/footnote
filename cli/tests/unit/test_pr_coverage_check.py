@@ -743,7 +743,10 @@ def _ac5b_finding():
 
 
 def test_ac5_marker_specimen_is_covered(monkeypatch, tmp_path):
-    """AC5-MARKER: the disposition-complete specimen returns literal COVERED."""
+    """AC5-MARKER: the disposition-complete specimen returns literal COVERED.
+    The specimen's fixing round attests from a second session: a fixed
+    disposition is terminal only with corroboration, so the author's own
+    signature alone no longer covers this chain."""
     _specimen_gates(monkeypatch)
     _seed_specimen(tmp_path)
     state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
