@@ -638,9 +638,11 @@ async fn run(args: Vec<String>) -> i32 {
         }
         if let Some(code) = maybe_run_spawn(&home, &params, &agent_name) {
             if code == 0 {
+                // A placement failure never recolors the spawn verdict: the
+                // receipt is the truth, the worker is live, and a nonzero here
+                // reads as spawn failure to a retrying caller - a duplicate.
                 if let Err(detail) = place_thread_portal_after_spawn(&params, &agent_name) {
                     eprintln!("{detail}");
-                    return 1;
                 }
             }
             return code;
@@ -838,7 +840,6 @@ async fn run(args: Vec<String>) -> i32 {
                     if let Err(detail) = place_thread_portal_after_spawn(place_params, &agent_name)
                     {
                         eprintln!("{detail}");
-                        return 1;
                     }
                 }
                 0
@@ -1093,7 +1094,8 @@ fn validate_effort_for_spawn(
 /// `--portal` ends with the portal open, through the same `fno mux thread`
 /// reach a manual second command would type. The worker is already live, so
 /// a placement failure is reported AFTER the spawn receipt and never
-/// un-spawns anyone.
+/// un-spawns anyone; the exit code stays the spawn's, because a nonzero
+/// here reads as spawn failure to a retrying caller - a duplicate worker.
 fn place_thread_portal_after_spawn(params: &Value, name: &str) -> Result<(), String> {
     let Some(portal) = params.get("portal").and_then(Value::as_u64) else {
         return Ok(());

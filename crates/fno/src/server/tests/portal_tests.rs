@@ -1615,6 +1615,56 @@ async fn portal_ctl_claude_row_with_a_refused_plan_names_the_reason() {
     assert!(core.portals.is_empty(), "no portal on a refused plan");
 }
 
+#[tokio::test]
+async fn portal_ctl_reaches_a_paneless_row_whose_key_also_matches_a_hosted_row() {
+    // Door parity: the duplicate refusal counts live paneless rows, the rows
+    // a reach could serve - the same filter reach_portal applies. A hosted
+    // namesake answers the location only when no reachable row exists.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let mut hosted = claude_row("hosted-name", "deadbee1");
+    hosted.mux = Some(("some-session".into(), 7));
+    let live = claude_row("live-name", "deadbee1");
+    let new_pid = core.next_pane_id;
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+
+    core.portal_ctl(
+        "deadbee1",
+        1,
+        PanePlacement::default(),
+        Some(vec![hosted, live]),
+        tx,
+    );
+    core.handle(CoreMsg::ReentryPlanReady {
+        id: u64::MAX, // the control door's observer client
+        request: Box::new(ReentrySpawnRequest::Attach {
+            attach_id: "deadbee1".into(),
+            placement: PanePlacement {
+                portal: Some(1),
+                ..Default::default()
+            },
+        }),
+        verdict: Ok(ReentryVerdict {
+            argv: vec!["/bin/cat".into()],
+            env: vec![],
+            config_dir: None,
+        }),
+    });
+
+    match rx.await.expect("a reply") {
+        ServerMsg::Err { msg, .. } => {
+            panic!("the hosted namesake turned a reachable row into a refusal: {msg}")
+        }
+        ServerMsg::Notice { text } => assert!(
+            text.contains("portal 1"),
+            "the reach served the live paneless row: {text}"
+        ),
+        other => panic!("expected a Notice landing, got {other:?}"),
+    }
+    assert!(core.portals.get(&1).is_some_and(|e| e.seat == new_pid));
+    core.reap_pane(new_pid); // don't leak the stand-in child
+}
+
 #[test]
 fn close_pane_stand_in_shell_still_removes_its_tab() {
     // The idle-shell stand-in must stay closable by hand: its own close

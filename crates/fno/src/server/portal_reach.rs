@@ -539,36 +539,16 @@ impl Core {
             self.agents = rows;
         }
         // Names are not unique; a name that matches two rows must refuse,
-        // never pick, same as reach_portal's own guard.
-        let mut named_hits = self
-            .agents
-            .iter()
-            .filter(|a| a.name == name || a.attach_id.as_deref() == Some(name));
+        // never pick, same as reach_portal's own guard. The count is over
+        // LIVE PANELESS rows - the rows a reach could serve - so a hosted
+        // or exited namesake never turns a reachable row into a refusal.
+        let mut named_hits = self.agents.iter().filter(|a| {
+            a.mux.is_none() && !a.exited && (a.name == name || a.attach_id.as_deref() == Some(name))
+        });
         if let (Some(_), Some(_)) = (named_hits.next(), named_hits.next()) {
             let _ = reply.send(ServerMsg::Err {
                 code: err_code::BAD_REQUEST,
                 msg: "more than one row goes by that name - reach it by its pane".to_string(),
-            });
-            return;
-        }
-        // A row already pane-hosted has its viewport: answer with the location
-        // instead of opening a second one. Another session's row is that
-        // server's to view - saying so beats the reach's no-row refusal,
-        // which would lie about a row the registry knows (the inline attach
-        // this verb replaced attached it regardless of hosting session).
-        let hosted = self
-            .agents
-            .iter()
-            .find(|a| (a.name == name || a.attach_id.as_deref() == Some(name)) && a.mux.is_some());
-        if let Some(a) = hosted {
-            let (sess, pane) = a.mux.as_ref().expect("checked");
-            let where_at = if sess == &self.session_name {
-                "this session; focus it in the mux".to_string()
-            } else {
-                format!("session {sess}; focus it in that session's mux")
-            };
-            let _ = reply.send(ServerMsg::Notice {
-                text: format!("{} hosts pane {pane} in {where_at}", a.name),
             });
             return;
         }
@@ -583,6 +563,29 @@ impl Core {
                     && !a.exited
             })
             .cloned();
+        // A row already pane-hosted has its viewport: answer with the location
+        // instead of opening a second one - but only when no live paneless row
+        // answers the key, the rows reach_portal serves. Another session's row
+        // is that server's to view - saying so beats the reach's no-row
+        // refusal, which would lie about a row the registry knows (the inline
+        // attach this verb replaced attached it regardless of hosting session).
+        if live_row.is_none() {
+            let hosted = self.agents.iter().find(|a| {
+                (a.name == name || a.attach_id.as_deref() == Some(name)) && a.mux.is_some()
+            });
+            if let Some(a) = hosted {
+                let (sess, pane) = a.mux.as_ref().expect("checked");
+                let where_at = if sess == &self.session_name {
+                    "this session; focus it in the mux".to_string()
+                } else {
+                    format!("session {sess}; focus it in that session's mux")
+                };
+                let _ = reply.send(ServerMsg::Notice {
+                    text: format!("{} hosts pane {pane} in {where_at}", a.name),
+                });
+                return;
+            }
+        }
         // (x-7955) A claude Drive row's argv is the canonical re-entry plan,
         // resolved OFF this loop. The TUI gesture hands that wait to a live
         // client whose replay re-enters in place; this door's observer is
