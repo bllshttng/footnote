@@ -96,6 +96,14 @@ def _stub_signals(
     from fno import update
 
     monkeypatch.setattr(update, "stale_mux_servers", lambda: [])
+    # Control-plane arm staleness shells out to the real `fno-agents status
+    # --json`. A developer machine with genuinely stale arms leaks STALE lines
+    # into full-output assertions, so stub it like the other probes.
+    monkeypatch.setattr(
+        doctor,
+        "_control_plane_arms_report",
+        lambda: {"stale": [], "unknown_reason": None},
+    )
 
 
 # ---------------------------------------------------------------------------

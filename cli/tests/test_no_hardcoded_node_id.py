@@ -46,6 +46,13 @@ LEGACY_FASTPATH_FILES = {
     # the format regex here IS the intended, load-bearing use - not a stray
     # re-implementation. (finding A2, x-ae52)
     "scripts/ci/check-no-internal-refs.sh",
+    # The pitfalls-corpus gate: a standalone bash CI script whose python
+    # heredoc detects node-id-shaped strings inside corpus fields where ids
+    # are barred (graduations are named by filed title, and the id itself
+    # must not ship in always-loaded prose). It cannot import the canonical
+    # helper for the same standalone-script reason as the entry above, so the
+    # format regex is the intended, load-bearing use.
+    "scripts/ci/check-pitfalls.sh",
 }
 
 # A hardcoded format matcher: ``ab-`` glued to a hex character class.
