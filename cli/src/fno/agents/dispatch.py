@@ -6119,8 +6119,7 @@ def rpc_roundtrip(
 
     Returns the ``result`` field dict on success; None on any transport error
     or ``error`` response. NEVER raises. ``note(message)`` receives each
-    diagnostic (None = silent); ``unreachable`` is the connect-failure text,
-    wording owned by the lane that reports it.
+    diagnostic (None = silent); ``unreachable`` wording is the lane's own.
     """
     import json
     import socket
@@ -6129,7 +6128,7 @@ def rpc_roundtrip(
     emit = note if note is not None else (lambda _msg: None)
     payload = json.dumps({"id": 1, "method": method, "params": params}).encode("utf-8")
     if len(payload) > _MAX_FRAME_BYTES:
-        return None  # never send a frame the peer would refuse
+        return None
     frame = struct.pack("<I", len(payload)) + payload
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
