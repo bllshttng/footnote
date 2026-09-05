@@ -3,21 +3,20 @@
 Two questions ``recovery.watchdog`` spelled as one word, so "is this armed"
 had to be asked as ``!= "off"``. Separate fields here; `coerce_legacy` keeps
 every config already written parsing unchanged. Its own module because
-``config/__init__.py`` is over the shrink-only file budget.
+``config/__init__.py`` is over the shrink-only file budget, which is also why
+the ``retire_grace_s`` legacy lift lives here.
 """
 from __future__ import annotations
 
+import sys
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
 
 class WatchdogBlock(BaseModel):
-    """The lane's four settings. The per-key text an operator reads is
-    `FIELD_META` in `registry.py`; a copy here would drift from it. One rule
-    belongs beside the fields: ``reap`` is the only lane that ships off,
-    because it runs ``stop`` then ``rm`` and deletes the session's worktree.
-    A wrong wake can be undone and a wrong reap cannot.
+    """The lane's settings. The per-key text an operator reads is
+    `FIELD_META` in `registry.py`; a copy here would drift from it.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -25,7 +24,6 @@ class WatchdogBlock(BaseModel):
     enabled: bool = False
     mode: Literal["report", "wake", "handoff"] = "report"
     mail_to: str = ""
-    reap: bool = False
 
 
 def coerce_legacy(data: object) -> object:
@@ -47,9 +45,35 @@ def coerce_legacy(data: object) -> object:
         block["enabled"] = word not in {"", "off"}
         if block["enabled"]:
             block["mode"] = word
-    for legacy, key in (("watchdog_mail_to", "mail_to"), ("watchdog_reap", "reap")):
-        if legacy in data and key not in block:
-            block[key] = data[legacy]
+    if "watchdog_mail_to" in data and "mail_to" not in block:
+        block["mail_to"] = data["watchdog_mail_to"]
     if block or isinstance(flat, str):
         data = {**data, "watchdog": block}
     return data
+
+
+def lift_retire_grace(data: object) -> object:
+    """Lift a legacy ``recovery.retire_grace_s`` onto ``agents.retire_grace_s``.
+
+    The key moved to the agents block when retirement became the daemon
+    sweep's question (x-c672); the daemon reads ``agents.retire_grace_s``
+    (agents_config.rs). A config still carrying the recovery spelling parses,
+    answers under the new key, and prints ONE line naming the legacy key.
+    The new spelling wins when both are present.
+    """
+    if not isinstance(data, dict):
+        return data
+    recovery = data.get("recovery")
+    if not isinstance(recovery, dict) or "retire_grace_s" not in recovery:
+        return data
+    agents = data.get("agents")
+    agents = dict(agents) if isinstance(agents, dict) else {}
+    if "retire_grace_s" not in agents:
+        agents["retire_grace_s"] = recovery["retire_grace_s"]
+        print(
+            "fno config: recovery.retire_grace_s moved to agents.retire_grace_s; "
+            "using the legacy value (x-c672)",
+            file=sys.stderr,
+        )
+    recovery = {k: v for k, v in recovery.items() if k != "retire_grace_s"}
+    return {**data, "agents": agents, "recovery": recovery}

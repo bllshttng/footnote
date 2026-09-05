@@ -1390,7 +1390,7 @@ def _transcript_activity(session_id: str, cwd: str):
         import time
 
         from fno.agents.watchdog import (
-            REAP_QUIET_AFTER_S,
+            QUIET_AFTER_S,
             finished_with_the_tree,
             tail_facts,
         )
@@ -1398,7 +1398,7 @@ def _transcript_activity(session_id: str, cwd: str):
         facts = tail_facts(session_id, cwd)
         if facts is None:
             return None
-        return finished_with_the_tree(facts, time.time(), REAP_QUIET_AFTER_S)
+        return finished_with_the_tree(facts, time.time(), QUIET_AFTER_S)
     except Exception:  # noqa: BLE001 - an unreadable transcript answers nothing
         return None
 
@@ -1414,12 +1414,14 @@ def _transcript_says_finished(session_id: str, cwd: str) -> bool:
         import time
 
         from fno.agents.watchdog import (
-            REAP_QUIET_AFTER_S,
+            QUIET_AFTER_S,
             finished_with_the_tree,
             tail_facts,
         )
 
-        return finished_with_the_tree(tail_facts(session_id, cwd), time.time(), REAP_QUIET_AFTER_S)
+        return finished_with_the_tree(
+            tail_facts(session_id, cwd), time.time(), QUIET_AFTER_S
+        )
     except Exception:  # noqa: BLE001 - an unreadable transcript proves nothing
         return False
 

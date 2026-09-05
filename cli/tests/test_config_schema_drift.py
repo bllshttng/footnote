@@ -61,10 +61,33 @@ def test_provider_outage_config_defaults_and_minima_are_fail_closed() -> None:
     assert defaults.provider_outage_reset_grace_seconds == 120
     assert defaults.provider_health_marker_ttl_seconds == 120
     # The flat spelling every config written before the split carries.
-    legacy = RecoveryBlock(watchdog="handoff", watchdog_reap=True)
+    legacy = RecoveryBlock(watchdog="handoff")
     assert (legacy.watchdog.enabled, legacy.watchdog.mode) == (True, "handoff")
-    assert legacy.watchdog.reap is True
     assert RecoveryBlock(watchdog="off").watchdog.enabled is False
+
+
+def test_legacy_recovery_retire_grace_lifts_onto_agents(capsys) -> None:
+    """AC6-EDGE (x-c672): the retire grace moved to the agents block with the
+    daemon's retirement sweep. A config still carrying the recovery spelling
+    parses, answers under the new key, and prints ONE line naming the legacy
+    key; the new spelling wins when both are present."""
+    from fno.config import ConfigBlock
+
+    cfg = ConfigBlock(recovery={"retire_grace_s": 1200})
+    assert cfg.agents.retire_grace_s == 1200
+    err = capsys.readouterr().err
+    assert len(err.strip().splitlines()) == 1, err
+    assert "recovery.retire_grace_s" in err
+
+    both = ConfigBlock(
+        recovery={"retire_grace_s": 1200},
+        agents={"retire_grace_s": 60},
+    )
+    assert both.agents.retire_grace_s == 60
+
+    fresh = ConfigBlock()
+    assert fresh.agents.retire_grace_s == 900
+    assert capsys.readouterr().err == ""
 
     for field, value in {
         "provider_outage_quorum": 0,

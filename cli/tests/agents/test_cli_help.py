@@ -85,12 +85,6 @@ def test_watchdog_help_advertises_the_live_verdict_set(runner: CliRunner) -> Non
     assert f"({expected})" in _watchdog_only_help()
 
 
-def test_retire_is_an_addressable_watchdog_verdict() -> None:
-    from fno.agents import watchdog
-
-    assert watchdog.RETIRE in watchdog.VERDICTS
-
-
 def test_spawn_harness_help_no_longer_presents_a_closed_accepted_set(
     runner: CliRunner,
 ) -> None:

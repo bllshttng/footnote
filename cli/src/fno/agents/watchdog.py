@@ -1,14 +1,13 @@
 """fno.agents.watchdog - the external fleet watchdog (x-55c3).
 
 Runs OUTSIDE every session (a manual verb, or a leg on the pr_watch tick) and
-decides, per fleet row: wake it, reroute it, reap it, or leave it. The decision
-is made from TRANSCRIPT truth keyed by session id; the two stores (the fno
-registry, ``claude agents --json``) are hints. Measured 2026-08-15: 8 roster
-rows claimed ``working`` while their transcripts had not moved in 30+ minutes,
-``claude agents --json`` inverted live/dead on a capped lane, and a bulk reap
-that trusted a session's ``done`` state as terminal killed live sessions (a
-``done`` row means the turn finished and the session is RESUMABLE). The
-transcript was right every single time.
+decides, per fleet row: wake it, reroute it, or leave it. The decision is made
+from TRANSCRIPT truth keyed by session id; the two stores (the fno registry,
+``claude agents --json``) are hints. Measured 2026-08-15: 8 roster rows claimed
+``working`` while their transcripts had not moved in 30+ minutes, and
+``claude agents --json`` inverted live/dead on a capped lane. The transcript
+was right every single time. Row retirement is NOT this module's question
+anymore (x-c672): the daemon's sweep retires a row on work-done plus quiet.
 
 The classifier is one pure function over injected inputs (no subprocess inside
 it), so tests need no live fleet. Mechanisms delegate: the wake lane calls
@@ -16,8 +15,7 @@ it), so tests need no live fleet. Mechanisms delegate: the wake lane calls
 recipient transcript - a state field reading ``working`` was caught claiming a
 wake that never landed. Reroute reuses ``fno.recovery._redispatch`` (stop
 FIRST, then respawn; skipping the stop wakes a duplicate when the window
-opens). Reap refuses on a dirty worktree and leans on ``claude rm``'s own
-refusal rather than forcing past it.
+opens).
 
 Two traps a stranger inherits (both measured by hand on 2026-08-15):
   - node identity joins on the recorded ``node:<id>`` claim holder / worktree
@@ -27,7 +25,7 @@ Two traps a stranger inherits (both measured by hand on 2026-08-15):
 
 A third, added 2026-08-19 (x-cd1e): the ``unclaimed`` verdict flags a live row
 whose node carries no claim, and it is ADVISORY. The worker is fine; the record
-is wrong. It never wakes, reroutes or reaps, and its own blind spot is the shape
+is wrong. It never wakes or reroutes, and its own blind spot is the shape
 that produced the defect - see ``_unclaimed_node_basis``.
 """
 from __future__ import annotations
@@ -48,59 +46,30 @@ from typing import Any, Callable, Iterable, Optional
 # The shipped tail classifier is the POSITIVE resumability marker: its
 # ``stalled`` verdict asserts the session went silent while still owing its
 # next move, which is a fact about the tail rather than an absence in it.
-#
-# ``_HELP_RE`` rides along for the same reason: the retire predicate re-asks the
-# question half of that classifier, and a second spelling of "is this a question"
-# would drift from the one the classifier itself uses.
-from fno.agents.session_truth import STALLED_AFTER_S, _HELP_RE, classify_tail
+from fno.agents.session_truth import classify_tail
 
-#: ``cotenants`` is the occupancy tally for THIS row's cwd, filled only on
-#: REAP verdicts and read only by the apply lane's worktree guard (x-ad13):
-#: the tree is never deleted while a peer stands in it, but the row verdict
-#: itself no longer gates on it. Default 0 keeps every positional
-#: construction site valid; only ``verdicts()`` produces REAP verdicts, so
-#: only it fills the field.
-Verdict = namedtuple(
-    "Verdict", "row_id name state verdict basis action cotenants", defaults=(0,)
-)
-#: ``origin`` and ``last_message_at`` are read off the joined registry entry in
-#: ``fleet_rows`` and consulted by ``reap_decision`` as PROTECTORS. They default
-#: to None so an older construction site (and every test that builds a Row
-#: positionally) still works, and because None is the honest never-recorded -
-#: distinct from "recorded as not-an-operator" or "recorded as never spoke".
-#: ``retire_decision`` reads the same raw ``origin``: the two lanes that act on
-#: who owns a session read one field, so they cannot come to disagree about it.
-#: ``probe`` is the group 1 liveness answer ("alive" | "dead" | "unknown") read
-#: off the same entry, and ``crowned`` whether the row holds an orchestrator
-#: crown - a crown spans many nodes, so a done node is never a reap basis for
-#: one (x-ad13).
-Row = namedtuple(
-    "Row", "row_id name state node cwd origin last_message_at probe crowned",
-    defaults=(None, None, "unknown", False),
-)
+Verdict = namedtuple("Verdict", "row_id name state verdict basis action")
+Row = namedtuple("Row", "row_id name state node cwd", defaults=(None, ""))
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the
 #: flattened join of those texts; ``last_role``/``last_text`` describe the LAST
 #: record so the wake gate can run the shipped tail classifier (a POSITIVE
-#: resumability marker - the absence of a 429 is not one); ``last_kind`` is
-#: "tool" when the last event was a tool call, which reap must never fire on.
+#: resumability marker - the absence of a 429 is not one).
 #: No transcript resolving -> None (ghost), which is a different fact from a
 #: resolved-but-quiet transcript.
 TailFacts = namedtuple(
     "TailFacts",
-    "records last_event_epoch tail_text last_role last_text last_kind",
-    defaults=(None, "", None),
+    "records last_event_epoch tail_text last_role last_text",
+    defaults=(None, ""),
 )
 
 GHOST = "ghost"
-REAP = "reap"
-RETIRE = "retire"
 REROUTE = "reroute"
 WAKE = "wake"
 STALE = "stale"
 LEAVE = "leave"
 #: Advisory only (x-cd1e): the worker is fine, the RECORD is wrong. Never a
-#: wake, never a reroute, never a reap - the action lanes below switch on the
-#: specific verdict, so this one cannot reach any of them. It replaces LEAVE so
+#: wake, never a reroute - the action lanes below switch on the specific
+#: verdict, so this one cannot reach either of them. It replaces LEAVE so
 #: the row surfaces in the digest, which is the whole point: nothing today
 #: notices a live worker on a node no claim covers.
 UNCLAIMED = "unclaimed"
@@ -116,7 +85,7 @@ KEEPER = "keeper"
 #: verdict was added, and `--only unclaimed` exited 2 on a verdict the sweep
 #: had been producing all along.
 VERDICTS = frozenset({
-    GHOST, REAP, RETIRE, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED, RECOVERABLE, KEEPER,
+    GHOST, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED, RECOVERABLE, KEEPER,
 })
 
 _RECOVERY_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhd])$", re.IGNORECASE)
@@ -185,7 +154,7 @@ def run_recoverable_sweep(
     verdicts_out: list[Verdict] = []
     for candidate in scan.recoverable:
         handle = canonical_handle(candidate.session_id)
-        rows.append(Row(candidate.session_id, handle, "orphaned", None, candidate.cwd, "adopted"))
+        rows.append(Row(candidate.session_id, handle, "orphaned", None, candidate.cwd))
         usable = bool(candidate.transcript_usable)
         verdicts_out.append(
             Verdict(
@@ -437,80 +406,10 @@ def recovery_result_counts(results: Iterable[dict]) -> dict[str, int]:
     return counts
 
 
-#: How long a finished worker stays parked before the retire lane stops it.
-#: Operator-tunable via ``config.recovery.retire_grace_s``; ``0`` turns the lane
-#: off. The grace is the follow-up window: a worker that just delivered can
-#: still be asked one more thing before anything stops it.
-RETIRE_GRACE_S = 900
-
-#: Where a terminal marker BEGINS. Only the opening delimiter, because
-#: `_question_pending` cuts at it rather than deleting a span.
-#:
-#: A span-deleting regex was tried and cannot be made correct here. `re` has no
-#: right-most search, so a pattern spanning an open tag to a close tag matches
-#: LEFTMOST: a turn reading "the loop keys on <promise> here. Should I widen
-#: it?" followed by a real `<promise>DONE</promise>` matched from the FIRST tag
-#: to the only closing one, deleted the question with it, and retired a row with
-#: the question stranded. Anchoring the span to end-of-string does not help,
-#: because that leftmost match already reaches the end. Cutting at each marker
-#: start and testing the text before it has no such ordering to get wrong, and
-#: it needs no closing tag, so the cut-off-mid-promise shape falls out rather
-#: than costing its own alternative.
-_TERMINAL_TAG_START_RE = re.compile(r"<(?:promise|watching)\b", re.IGNORECASE)
-
-#: Trailing decoration a question mark can hide behind. A worker closing on
-#: `**Do you want me to cover the migration path too?**` ends on `*`, and a bare
-#: `endswith("?")` answered no-question-pending for it. Agents write bold,
-#: quoted and parenthesised closing questions constantly, and this predicate
-#: gates a lane that stops sessions.
-#:
-#: Stripped from the END only, so a `?` anywhere else is still not a question at
-#: the end of the turn. Over-stripping can only ever DECLINE to retire.
-_QUESTION_TRAILERS = "*_~`'\"\u2019\u201d)]}>"
-
-#: A promise the worker actually CLOSED. `classify_tail` answers `done` on any
-#: `<promise` in the last turn, a prose mention included, and agents working on
-#: this repo write the tag in prose routinely. The question half of this lane
-#: already refuses to trust a bare mention; the done half read the classifier's
-#: single answer and stopped a live worker whose turn merely said "the loop keys
-#: on <promise> here". So retire asks for the closed block itself.
-#:
-#: Closed, not merely opened, and that is the conservative half on purpose. An
-#: unclosed tag means a turn cut off mid-promise, which is not a worker calmly
-#: declaring itself finished. Refusing there costs a slot that stays held; the
-#: other direction stops a session that never said it was done.
-_CLOSED_PROMISE_RE = re.compile(
-    r"<promise\b[^>]*>.*?</promise\s*>|<promise\b[^>]*/>",
-    re.DOTALL | re.IGNORECASE,
-)
-
-#: Code the worker QUOTED rather than emitted. Fenced blocks first, then inline
-#: spans, because a fence can contain backticks.
-#:
-#: 34 files in this repo contain a literal closing promise tag, this module
-#: among them. A worker whose last turn summarises a diff to one of them quotes
-#: the closed block, and every read below it - `classify_tail`, then
-#: `_CLOSED_PROMISE_RE` - answers exactly as if the worker had declared itself
-#: done. The lane ships armed, so that stops a session mid-task by default.
-#:
-#: Stripped for the DONE read only. The question read keeps the raw text,
-#: because losing a question there stops a session and gaining one only holds a
-#: slot.
-#:
-#: An UNTERMINATED fence consumes to the end of the turn, and that alternative
-#: has to come after the matched pair so a closed fence is not swallowed whole.
-#: A turn that opens a block and stops is a worker cut off mid-quote, so
-#: everything after the opener is quoted material. Requiring the closing fence
-#: read that turn's quoted promise as a declaration and retired it - the same
-#: shape as an unclosed `<promise>`, and refused the same way.
-_QUOTED_CODE_RE = re.compile(
-    r"```.*?```"
-    r"|~~~.*?~~~"
-    r"|```.*"
-    r"|~~~.*"
-    r"|`[^`\n]*`",
-    re.DOTALL,
-)
+#: How long a transcript must stay quiet before a session reads as finished
+#: with its tree. Fallback when ``config.recovery.idle_threshold_seconds``
+#: will not read; the claims-staleness and target-liveness readers share it.
+QUIET_AFTER_S = 900
 
 #: States that make a transcript-less row a ghost: the row claims a live-ish
 #: session whose recorded id resolves to nothing. A ``stopped`` row with no
@@ -559,8 +458,7 @@ _FINISHED_NODE_STATUSES = frozenset({"done", "superseded", "deferred"})
 #: Two warnings earn it. The latency notice is about elapsed time on a probe
 #: that returned everything. An unmapped row state is a fidelity note on a row
 #: that IS in the result, and it degrades conservatively downstream: an unknown
-#: state matches no finished state, so a reader sees an engaged worker and a
-#: reaper sees a holder still working.
+#: state matches no finished state, so a reader sees an engaged worker.
 ADVISORY_WARNING_PREFIX = "roster advisory: "
 
 #: Prefix of the headroom notice. It carries ADVISORY_WARNING_PREFIX because a
@@ -594,18 +492,6 @@ ROSTER_HEADROOM = 0.5
 #: hands the action lanes a window that opened half a day ago.
 WAKE_MAX_AGE_S = 12 * 3600
 
-#: Reap is the one verdict that must satisfy THREE signals (king ruling
-#: 2026-08-17, the c696fddd case): the basis says the process is real, the
-#: last event says what it is doing NOW, and the node says its OLD task
-#: finished. A done node proves the old task ended and proves nothing about
-#: whether the session was re-tasked since - an operator mail can hand a
-#: worker new work after its PR merges. So a done-node row reaps only when
-#: the transcript has gone QUIET (past recovery's idle threshold,
-#: ``config.recovery.idle_threshold_seconds``; this constant is only the
-#: fallback when the config will not read) and its last event was not a tool
-#: call. A row executing a tool never reaps.
-REAP_QUIET_AFTER_S = 900
-
 # Reset stamps ride the provider error text in Singapore local time (UTC+8):
 # "02:48:21 SGT" is 18:48:21Z. Two sessions launched at 18:45 and 18:46 took
 # a 429 they would not have taken three minutes later, so waking inside a
@@ -621,17 +507,6 @@ _TAIL_RECORDS = 60
 #: Confirmation scans deeper still, so a landed wake message is never read
 #: as refused because the attach that followed it was chatty.
 _CONFIRM_RECORDS = 120
-
-#: The generated no-session holder form: ``<UTC stamp>-<pid junk>-<hex>``.
-#: LEGACY-ONLY MATCHES: the producers that used to mint it
-#: (target_cli._successor_claim_holder and init-target-state.sh's
-#: claim_owner_id) now derive a proven session id or refuse outright
-#: (holder_unattributable), so nothing new writes this shape. Rows written
-#: before that change still carry it, and such a holder is an operator/daemon
-#: context, not a fleet session, so it never justifies reaping a row as "held
-#: by another session". A claude UUID can never match: its first segment is 8
-#: hex chars and this shape puts a literal ``T`` at position 9.
-_GENERATED_HOLDER_RE = re.compile(r"^\d{8}T\d{6}Z-")
 
 #: The bare resume word (x-e21e): a bus-only row is woken with this and never
 #: a message payload - a wake is an attach and a neutral resume, not a paste.
@@ -711,62 +586,19 @@ def verdicts(
     claim_for: Callable[[str], dict],
     node_state_for: Callable[[str], Optional[dict]],
     now_s: float,
-    quiet_after_s: float = REAP_QUIET_AFTER_S,
     provider_outages: Optional[dict[str, Any]] = None,
-    retire_grace_s_value: Optional[float] = None,
 ) -> list[Verdict]:
-    """One verdict per row, in table precedence (ghost > reap > retire >
-    reroute > wake > leave). Each basis string names the measurement that decided it, so
+    """One verdict per row, in table precedence (ghost > reroute > wake >
+    leave). Each basis string names the measurement that decided it, so
     a reader can falsify the call. ``claim_for(node)`` returns the
     ``node:<id>`` claim view (``{"state", "holder"}``); ``node_state_for``
     returns the graph entry (``{"status", ...}``) or None."""
-    # Occupancy is read from the TRANSCRIPT, never from the roster state.
-    # This module exists because both stores lie about liveness, and the
-    # measured 2026-08-15 inversion had claude report `done` for a session
-    # that was working. Keying occupancy on that field let a live row count
-    # as zero, which handed its quiet sibling a reap on the tree the live
-    # one was mid-task in - the same reading-about-one-thing-as-a-verdict-
-    # about-another that the reap predicate below exists to end.
-    #
-    # So the tally asks the same question the predicate asks: is there a
-    # POSITIVE marker that this row is finished with the tree? A transcript
-    # that is fresh says occupied. A transcript that is missing, unreadable
-    # or unparseable says UNKNOWN, and unknown counts as occupied, because
-    # the cost of guessing wrong is somebody's uncommitted work.
-    #
-    # The tally guards the WORKTREE branch since x-ad13: it rides the REAP
-    # verdict's ``cotenants`` field down to ``_apply_reap``, which holds the
-    # destructive step while a peer stands in the tree. The row verdict
-    # itself is judged on the probe, the receipt and the transcript - never
-    # on who shares the checkout.
     facts_by_row: dict[str, Optional[TailFacts]] = {}
     for row in rows:
         try:
             facts_by_row[row.row_id] = transcript_for(row.row_id)
         except Exception:  # noqa: BLE001 - a failed read is never a verdict
             facts_by_row[row.row_id] = None
-
-    def _still_in_the_tree(row: Row) -> bool:
-        return not finished_with_the_tree(
-            facts_by_row.get(row.row_id), now_s, quiet_after_s
-        )
-
-    occupants = Counter(
-        row.cwd for row in rows if row.cwd and _still_in_the_tree(row)
-    )
-
-    def _cotenants(row: Row) -> int:
-        # Subtract this row only if it was counted, or the subtraction
-        # cancels a sibling that WAS counted and the guard inverts.
-        if not row.cwd:
-            return 0
-        mine = 1 if _still_in_the_tree(row) else 0
-        return max(0, occupants[row.cwd] - mine)
-
-    # Resolved ONCE per sweep, not per row: a config read inside the row loop
-    # would answer differently mid-sweep if the file changed under it, and two
-    # rows in one report must be judged against the same grace.
-    grace = retire_grace_s() if retire_grace_s_value is None else retire_grace_s_value
 
     # A row only earns REROUTE by appearing in an already-quorum-confirmed
     # breaker (_breakers() in provider_outage.py refuses to emit one below
@@ -785,9 +617,6 @@ def verdicts(
             claim_for=claim_for,
             node_state_for=node_state_for,
             now_s=now_s,
-            quiet_after_s=quiet_after_s,
-            cotenants=_cotenants(row),
-            retire_grace_s_value=grace,
             in_quorum_breaker=row.row_id in quorum_row_ids,
         )
         # The unclaimed advisory upgrades a LEAVE, and it is applied HERE
@@ -808,297 +637,6 @@ def verdicts(
                 )
         out.append(verdict)
     return out
-
-
-# ---------------------------------------------------------------------------
-# The retire predicate (stop a finished worker; destroys nothing)
-# ---------------------------------------------------------------------------
-#
-# A worker that finishes its deliverable and never exits holds a live slot
-# against `config.agents.max_live` forever. `terminal_stop.rs` already stops
-# that population, but only for a loop worker: the marker is written by
-# `finalize`, and a `/fno:blueprint` or `/fno:think` worker mails its plan and
-# never reaches finalize. Nothing tells it to stop.
-#
-# The trigger here is a PREDICATE over transcript truth, not a signal the worker
-# emits. A signal is a guard on one of N reachable paths: a worker that dies
-# mid-delivery, or ships through a channel nobody wired, emits nothing - and
-# that is exactly the population that leaks slots. A predicate needs no
-# cooperation from the thing it measures.
-
-
-def _question_pending(facts: Optional[TailFacts]) -> bool:
-    """Does the last turn leave a question the operator still owes an answer to?
-
-    `classify_tail` returns on its FIRST match, checking watching, then
-    `<promise>`, then question-or-`<help>`. So a turn that both promises and
-    asks classifies `done` and never `your-move`. That is the modal shape for
-    the workers this lane targets: a blueprint worker mails its plan and asks
-    one thing in the same turn.
-
-    Asking again here, rather than reordering `classify_tail`, is deliberate.
-    That classifier is shared by `reap_decision`, the loop runtime's parked
-    reading and the progress axis; reordering it would change what reap does,
-    and reap deletes worktrees. One caller needs the finer reading, so the
-    finer reading lives in that caller.
-    """
-    if facts is None or facts.last_role != "assistant":
-        return False
-    text = (facts.last_text or "").rstrip()
-    if _HELP_RE.search(text) is not None:
-        return True
-
-    def _asks(chunk: str) -> bool:
-        """Does this chunk end on a question, decoration and all?"""
-        return chunk.rstrip().rstrip(_QUESTION_TRAILERS).rstrip().endswith("?")
-
-    # Where the turn actually ends. The plain reading, and the only one needed
-    # when the worker asked its question last.
-    if _asks(text):
-        return True
-    # The worker is instructed to emit its promise LAST (skills/target/
-    # references/pre-promise.md), so the modal shape of the case this function
-    # exists for ends on `>`: the question, then a closing promise block. Read
-    # against the raw text that answers False on exactly the population the
-    # docstring describes, and the row retires with the question stranded.
-    #
-    # So ask again in front of every terminal marker, not just the last one. A
-    # turn may mention the tag in prose and THEN ask its question, and agents
-    # working on this repo write it in prose routinely. Testing every cut point
-    # covers both shapes without ordering the two readings against each other.
-    # The failure direction is over-detection: a question mark that happens to
-    # sit before some marker declines to retire, and never stops a row.
-    return any(_asks(text[: m.start()]) for m in _TERMINAL_TAG_START_RE.finditer(text))
-
-
-def _shipped_work_basis(
-    row: Row,
-    node_state_for: Optional[Callable[[str], Optional[dict]]],
-) -> str:
-    """The external half of the retire marker: proof the WORK landed.
-
-    Both halves are required - ``status == "done"`` AND ``merge_status ==
-    "merged"`` - because `done` alone is not a ship marker: on the reference
-    graph 460 nodes read `done` and 42 of those carry no merge_status, so a
-    done-only basis would stop rows whose work never shipped. The crowned
-    exclusion is the one `reap_decision` records: a king spans many nodes, so
-    resolving its row to ONE node's status mis-buckets it.
-
-    Every unreadable read answers ``""`` - the module's uniform rule that an
-    absence is never a verdict, and here never a stop. A row retires on
-    EITHER this basis OR its own closed promise; silence arms neither.
-    """
-    if not row.node or row.crowned or node_state_for is None:
-        return ""
-    try:
-        entry = node_state_for(row.node)
-    except Exception:  # noqa: BLE001 - a failed read is never a marker
-        return ""
-    if not isinstance(entry, dict):
-        return ""
-    if entry.get("status") != "done" or entry.get("merge_status") != "merged":
-        return ""
-    return f"node {row.node} done and its PR merged"
-
-
-def retire_decision(
-    row: Row,
-    *,
-    facts: Optional[TailFacts],
-    now_s: float,
-    grace_s: float,
-    window: str = "none",
-    node_state_for: Optional[Callable[[str], Optional[dict]]] = None,
-) -> tuple[bool, str]:
-    """Should this row be stopped as finished? Returns ``(answer, basis)``.
-
-    Every condition is a POSITIVE marker and every unreadable read answers no:
-
-    1. the row is a footnote-spawned worker, never an operator's own session;
-    2. the work is over, on EITHER marker: its tail says `done` - it declared
-       itself finished, rather than merely having gone quiet - or the graph
-       proves the deliverable landed, node `done` AND its PR `merged`
-       (`_shipped_work_basis`). The shipped marker reads only a turn the
-       worker itself ended: a trailing user turn is an operator re-task the
-       row owes a move on, and a `<watching>` tail is an armed external wait
-       the row is still in play on whatever the graph says. Either way it
-       carries no question the operator owes;
-    3. it has been quiet longer than the grace.
-
-    The declared-done path, unlike reap, does not require the node to be done
-    and does not require the worktree to be this row's alone; the shipped-work
-    path is the opposite, decided BY the node being done and merged. Reap
-    needs both because reap deletes a worktree. Retire runs a stop: the
-    transcript, the worktree and the registry row all survive and `fno agents
-    resume` brings the session back. That reversibility is why it can be armed
-    where reap cannot, and it is why a blueprint worker whose node is still
-    `ready` is in scope here and out of scope for reap.
-
-    The loop-driven exclusion `terminal_stop::should_mark` carries has no
-    counterpart here, and does not need one: a `fno-agents loop run` child exits
-    on allow rather than parking at an idle prompt (`loopcheck.rs`,
-    `harness_can_idle`), so it never becomes a quiet parked row and never
-    reaches this predicate. Nothing in the roster join can read `FNO_DRIVER_LIB`
-    anyway, so a condition on it would be decorative.
-    """
-    if grace_s <= 0:
-        return False, ""
-    # POSITIVE membership on the raw `origin` the reap protectors already read,
-    # never the absence of an operator stamp. `origin` is written once at row
-    # birth and every creator states which kind it made: the spawn sites stamp
-    # `spawn`, the two register paths stamp `operator`, the harness-store healer
-    # stamps `adopted`. Only the first is a row footnote made.
-    #
-    # Reading "not operator" instead would put two other populations in a lane
-    # that stops sessions. A row written before the field existed carries None,
-    # and `adopted` is routinely an operator's own terminal the healer found
-    # already running. Neither is evidence of a worker, so both decline here.
-    if row.origin != "spawn":
-        return False, ""
-    # The group 1 probe (x-ad13): retire STOPS sessions, so a worker the
-    # probe positively reports alive is never "finished" however done its
-    # tail reads - the same liveness source the reap lane reads, because two
-    # lanes that act on a session must not disagree about whether it is
-    # running. A silent probe is no marker either way and retires on its own
-    # transcript evidence, unchanged.
-    if (row.probe or "unknown") == "alive":
-        return False, "the liveness probe positively reports the worker alive"
-    # The state must be one this lane recognises as holding a live slot. A row
-    # whose PROCESS is gone holds none, so stopping it frees nothing and the
-    # receipt would promise an undo for a session that is not running.
-    #
-    # Written as positive membership because an unreadable state (`_row_state`
-    # returns `""`) and an unmapped new spelling are both absences, and a
-    # negative test admits them. `_RETIRABLE_STATES` carries why it is not the
-    # complement of the stopped words, and why `done` belongs in it.
-    if row.state not in _RETIRABLE_STATES:
-        return False, ""
-    # A session waiting out a rate limit is silent and is NOT finished. The
-    # reap predicate refuses on the same reading, and retire sits ABOVE the
-    # reroute lane, so without this it stops exactly the rows reroute exists to
-    # move onto a fresh account - and stops them without rotating anything.
-    #
-    # `unknown` too, not just `live`: a 429 whose reset stamp will not parse is
-    # a window that MIGHT be open, and the wake lane already refuses it. The
-    # lane that ships armed must not be the laxer one.
-    if window in ("live", "unknown"):
-        return False, ""
-    if facts is None or facts.last_event_epoch is None:
-        return False, ""
-    age_s = max(0.0, now_s - facts.last_event_epoch)
-    if age_s <= grace_s:
-        return False, ""
-    # The last record being the assistant turn that ISSUED a tool call means the
-    # tool has not returned. A worker twenty minutes into a build, a `gh pr
-    # checks --watch` or a full test run looks quiet to every read above this
-    # line, and when that same turn mentions a promise `classify_tail` answers
-    # `done` and this lane stops it mid-call. `reap_decision` refuses on the
-    # same reading for the same reason, and a lane that ships ARMED must not be
-    # the laxer one.
-    if facts.last_kind == "tool":
-        return False, ""
-    # Either/or: the closed promise and the shipped-work read are alternative
-    # POSITIVE markers for the same fact, the work being over. A shipped row
-    # needs no promise it was never going to emit, because a `<promise>` is a
-    # ship-phase artifact and a think or blueprint worker legitimately ends on
-    # a recap. Two gates above the either/or keep the armed lane honest: a
-    # trailing USER turn is an operator re-task or answer, which clears any
-    # stale assistant marker - the row owes its next move - and a `<watching>`
-    # tail is an armed external wait the row is still IN PLAY on, whatever the
-    # graph says about the work; stopping it kills the wait it is parked on.
-    # Either way the tail branch below refuses exactly as the promise path
-    # always did.
-    truth = classify_tail(facts.last_role, facts.last_text, age_s)
-    shipped_basis = ""
-    if facts.last_role == "assistant" and truth != "watching":
-        shipped_basis = _shipped_work_basis(row, node_state_for)
-    if not shipped_basis:
-        if truth != "done":
-            return False, ""
-        # `classify_tail` reaches `done` on any `<promise` in the turn, so the
-        # classifier alone cannot tell a declaration from a prose mention. This lane
-        # stops sessions, so it asks for the closed block rather than the loose read
-        # its siblings share - and asks it of the text the worker EMITTED, with
-        # anything it merely quoted removed first.
-        if _CLOSED_PROMISE_RE.search(_QUOTED_CODE_RE.sub("", facts.last_text or "")) is None:
-            return False, ""
-    if _question_pending(facts):
-        return (
-            False,
-            f"tail reads {truth} but ends on a question the operator owes, "
-            f"{int(age_s // 60)}m quiet",
-        )
-    marker = shipped_basis or "worker declared itself done"
-    return (
-        True,
-        f"{marker} and has been quiet {int(age_s // 60)}m "
-        f"(grace {int(grace_s // 60)}m); stop only, worktree and row survive",
-    )
-
-
-def retire_grace_s() -> float:
-    """The configured grace. Fails CLOSED, like ``_reap_execution_enabled``.
-
-    `0` is a documented off switch for a lane that stops sessions, and
-    `load_settings()` raises on an invalid value ANYWHERE in the file - so an
-    operator who disarmed retire, then mistyped an unrelated key, would have it
-    silently re-armed at 900 by a fallback-to-default. A read that did not
-    answer cannot be allowed to answer "armed"; the operator re-runs it after
-    fixing the config, which is the direction this lane is allowed to fail in.
-    """
-    try:
-        from fno.config import load_settings
-
-        value = getattr(load_settings().recovery, "retire_grace_s", RETIRE_GRACE_S)
-        return max(0.0, float(value))
-    except Exception as exc:  # noqa: BLE001 - an unreadable config never arms a stop
-        logging.getLogger(__name__).warning(
-            "retire lane disarmed, config unreadable (%s). Fix the config and "
-            "re-run; it will not act on a default", exc,
-        )
-        return 0.0
-
-
-# ---------------------------------------------------------------------------
-# The reap predicate (the one gate to the only destructive verdict)
-# ---------------------------------------------------------------------------
-
-#: Reap's three answers. UNKNOWN is the whole point of the tri-state: every
-#: read that FAILED, and every reading this lane cannot interpret, lands here
-#: instead of being folded into NO or, worse, into YES.
-REAP_YES = "yes"
-REAP_NO = "no"
-REAP_UNKNOWN = "unknown"
-
-#: The two reap-protection rules, in the text every refusal that enforces them
-#: quotes verbatim. They live here, next to the code that applies them, rather
-#: than in a config key or a prompt: a rule the decision itself emits cannot
-#: drift from the decision, and two measurements in this repo (x-7d6b, x-bb60)
-#: found prompt-level rules decay. There is deliberately no knob - an operator
-#: session is never reapable and a recent message always protects, so a config
-#: value here would only be a way to turn the safety off.
-#:
-#: Tests assert membership of THESE objects in a basis string, never a
-#: duplicated literal, so a reworded rule cannot leave the assertions green
-#: while the emitted text says something else.
-REAP_PROTECTION_RULES = {
-    "origin": (
-        "a session a human started by hand is never reaped"
-    ),
-    "recency": (
-        "liveness is last-message recency, not a pid; a recent message "
-        "protects the session whatever the pid says"
-    ),
-    "probe": (
-        "a positively probed-alive worker is never reaped, and a silent "
-        "probe is never death"
-    ),
-}
-
-#: How recent a message has to be to protect. Reuses the module-neighbour that
-#: already names itself the reap-safety window (``session_truth.STALLED_AFTER_S``)
-#: rather than minting a second number that can drift from it.
-REAP_RECENT_MESSAGE_S = STALLED_AFTER_S
 
 
 def lane_armed(settings: Any) -> bool:
@@ -1152,15 +690,10 @@ def finished_with_the_tree(
 ) -> bool:
     """Is this session done with its worktree? One question, one answer.
 
-    The occupancy tally and the reap predicate both need this, and when they
-    each derived it their own way they disagreed. Occupancy asked "did the
-    transcript move recently"; the predicate asked "is the tail engaged". A
-    session parked on ``<watching>`` is silent, so the first said gone while
-    the second said present, and that disagreement handed a sibling a reap on
-    the tree the parked session was sitting in.
-
-    Two callers, one function, so they cannot drift apart again. False is the
-    safe answer and every unreadable input returns it.
+    The claims-staleness reader and the daemon's retirement grace ask the
+    same question, so they share one derivation: quiet past the bar AND a
+    tail that is not still in play. False is the safe answer and every
+    unreadable input returns it.
     """
     if facts is None or facts.last_event_epoch is None:
         return False
@@ -1185,373 +718,6 @@ def _iso_epoch_s(stamp: Optional[str]) -> Optional[float]:
     return parsed.timestamp()
 
 
-def _probe_liveness(entry: Any) -> str:
-    """The group 1 probe (x-5d96), read off a registry entry: positive
-    markers only. Returns ``"alive"``, ``"dead"`` or ``"unknown"``.
-
-    Two rungs, mirroring the Rust ladder's answer vocabulary:
-
-    - **pid**: delegated to ``spawn_gate._pid_alive``, the one reader that
-      knows ``pid_start_time`` is a per-platform incarnation token (Linux
-      /proc ticks, macOS epoch microseconds), not an epoch second - and
-      that compares it reuse-safe. A process gone, or present under a
-      different incarnation, is a POSITIVE death proof; a matching
-      incarnation is a positive life marker; an unreadable probe answers
-      None and falls through - a failed read is never a verdict.
-    - **heartbeat**: an ``inside_leg`` report whose ``received_at`` is
-      STRICTLY LATER than ``exited_at`` proves the row advanced past its own
-      exit stamp - the x-d3ad rule as a positive marker. A report carrying a
-      ``ttl_ms`` must still be inside its window, so a three-week-old stamp
-      cannot prove life forever.
-
-    Silence on every rung is ``"unknown"``, never death. That is the whole
-    point of gating reap on this probe: a row reaps only on a positive death
-    proof, and ``unknown`` never reaps (x-ad13).
-    """
-    if entry is None:
-        return "unknown"
-    from fno.agents.spawn_gate import _pid_alive
-
-    pid = getattr(entry, "pid", None)
-    start = getattr(entry, "pid_start_time", None)
-    if pid is not None and start is not None:
-        alive = _pid_alive(int(pid), int(start))
-        if alive is True:
-            return "alive"
-        if alive is False:
-            return "dead"
-    # The heartbeat read fails open into "unknown": a malformed report (a
-    # non-dict leg, a non-numeric ttl) is a failed read, never a verdict.
-    beat = getattr(entry, "inside_leg", None)
-    if not isinstance(beat, dict):
-        beat = {}
-    received = _iso_epoch_s(beat.get("received_at"))
-    exited = _iso_epoch_s(getattr(entry, "exited_at", None))
-    if received is not None and exited is not None and received > exited:
-        try:
-            ttl_ms = beat.get("ttl_ms")
-            if ttl_ms is None or received + float(ttl_ms) / 1000.0 > time.time():
-                return "alive"
-        except (TypeError, ValueError):
-            pass
-    return "unknown"
-
-
-def reap_decision(
-    row: Row,
-    *,
-    facts: Optional[TailFacts],
-    node_state_for: Callable[[str], Optional[dict]],
-    claim_for: Callable[[str], dict],
-    now_s: float,
-    quiet_after_s: float,
-    window: str = "none",
-) -> tuple[str, str]:
-    """The ONLY path to a reap verdict. Returns ``(answer, basis)``.
-
-    Eight review findings across three rounds were one defect wearing eight
-    costumes: a reading about one thing treated as a verdict about another,
-    and three of them turned an ABSENCE into a positive verdict. Fixing them
-    where they were found converged on nothing, because the shape was the
-    bug. So every question reap asks comes through here, and the rule is
-    uniform: a reap needs a POSITIVE marker, and anything else - a read that
-    raised, a read that returned nothing, a reading this code does not
-    recognise - is UNKNOWN. UNKNOWN never reaps.
-
-    That is what makes it converge. A new state spelling, a transcript that
-    moved, a schema that raised, a store that is briefly unreadable: none of
-    them can produce the marker, so none of them can reach the delete. The
-    failure mode of a bug here is a row a human has to look at, which is the
-    direction this lane is allowed to fail in.
-
-    Two PROTECTORS bracket the reads, and either one alone refuses (x-944f).
-    A row whose ``origin`` reads ``"operator"`` is a session a human started by
-    hand and is never reaped; that one answers FIRST, because no reading of a
-    transcript outranks it. A row whose ``last_message_at`` falls inside the
-    protection window is protected by that recency whatever its pid says - the
-    mirror of x-9de7, which forbade the opposite inference - and that one
-    answers LAST, so every read with a more specific reason gets to speak
-    before it. Between them sits a third: a row the liveness probe positively
-    reports ALIVE refuses outright, and a silent probe is UNKNOWN, never
-    death (x-ad13) - the read that made the old occupancy guard redundant.
-    Each refusal quotes its rule out of ``REAP_PROTECTION_RULES``
-    so the text and the behaviour cannot drift apart.
-
-    The positive signals a reap needs, all of them present: the DELIVERABLE
-    is settled (the node is done and the row is uncrowned, or another live
-    session holds its claim), the row is not an operator's, the liveness
-    probe POSITIVELY proves the worker dead, no 429 window is open, the
-    transcript says the session DECLARED ITSELF FINISHED, and nothing spoke
-    to it inside the protection window. Worktree co-tenancy is deliberately
-    NOT among them (x-ad13): a row is metadata, a worktree is a checkout,
-    and the tree is guarded at the apply lane instead.
-
-    That last one used to be silence past a 900s bar, which is the defect
-    this whole predicate exists to end: silence is a reading about the last
-    write, never a verdict about whether the work is over. A worker parked on
-    ``<watching>`` is silent. A worker waiting out a rate limit is silent. A
-    worker re-tasked and thinking is silent. So the destructive lane now asks
-    ``classify_tail`` and refuses every reading that says the session is
-    still IN PLAY: parked on ``<watching>``, holding a question the operator
-    owes an answer to, or simply still working. What remains is ``done`` (it
-    said so) and ``stalled`` (it died mid-turn and owes a move nobody is
-    coming to make), which is the pair the deliverable ruling is about - a
-    node whose PR merged reaps at any age.
-
-    Refusing ``working`` also lifts the quiet bar to the stalled threshold as
-    a side effect, which fixes the inversion where the DESTRUCTIVE lane
-    accepted 900s of silence while the harmless wake lane demanded 7200s.
-    """
-    if not row.node:
-        return REAP_NO, ""
-
-    # Read one: the deliverable. A store that raises is unknown, never "not
-    # done" - that is the absence-as-verdict move this predicate exists to
-    # refuse.
-    try:
-        entry = node_state_for(row.node)
-    except Exception as exc:  # noqa: BLE001 - a failed read is never a verdict
-        return REAP_UNKNOWN, f"node {row.node} state unreadable ({exc!r})"
-
-    reap_basis = ""
-    # A crowned row is never reaped on a node-done basis (x-ad13): a king
-    # spans many nodes, so resolving the row to ONE node's status mis-buckets
-    # it. Measured 2026-08-31, king-footnote-g4 (node x-4c87, done) and
-    # king-isolation (node x-16bd, done) were both alive, and every one of the
-    # 14 ledger hits resolved to a done node - the node-done basis selects
-    # crowned rows first. The claim read below still applies to them: another
-    # live session holding the node's claim is a fact about THIS row's
-    # deliverable, not about the crown.
-    if entry is not None and entry.get("status") == "done" and not row.crowned:
-        reap_basis = f"node {row.node} done"
-    else:
-        try:
-            claim = claim_for(row.node)
-        except Exception as exc:  # noqa: BLE001 - same rule as the node read
-            return REAP_UNKNOWN, f"claim on {row.node} unreadable ({exc!r})"
-        holder_sid = _holder_session(claim.get("holder"))
-        if (
-            claim.get("state") == "live"
-            and holder_sid
-            and holder_sid != row.row_id
-            and not _GENERATED_HOLDER_RE.match(holder_sid)
-        ):
-            reap_basis = f"claim held by {holder_sid}"
-
-    if not reap_basis:
-        # The deliverable is not settled. This one IS a read that answered.
-        return REAP_NO, ""
-
-    # Read two: WHO owns this session. Placed ahead of every read that costs
-    # I/O so a protected row never spends the budget, and ahead of the
-    # transcript because no reading of a transcript can outrank the fact that a
-    # human started the session by hand.
-    #
-    # Only the literal "operator" protects. `None` is never-recorded and
-    # `"spawn"` is a worker, and collapsing those two into one "not an
-    # operator" is precisely the defect this node was filed against: before
-    # x-944f every Rust write dropped the field, so every row read absent and
-    # every reap was decided without it.
-    if row.origin == "operator":
-        return REAP_NO, (
-            f"{reap_basis} but origin=operator, and "
-            f"{REAP_PROTECTION_RULES['origin']}"
-        )
-
-    # Read three: occupancy. Held by the apply lane since x-ad13 - the row
-    # verdict no longer gates on it, because a fact about the WORKTREE never
-    # answers a verdict about the ROW. The tally computed in ``verdicts()``
-    # rides the REAP verdict's ``cotenants`` field down to ``_apply_reap``,
-    # which holds the destructive step while a peer stands in the tree.
-
-    # Read four: the transcript. None has two causes - never written, and
-    # could not be read - and this lane cannot tell them apart, so it treats
-    # neither as evidence.
-    if facts is None:
-        return REAP_UNKNOWN, (
-            f"{reap_basis} but no transcript to read, and an unreadable "
-            f"transcript is not evidence of a finished session"
-        )
-    if facts.last_event_epoch is None:
-        return REAP_UNKNOWN, (
-            f"{reap_basis} but no parseable last event, so quiet is unproven"
-        )
-
-    # Read five: a session waiting out a rate limit is silent and is NOT
-    # finished. Reap outranks reroute in the table, so without this the
-    # destructive lane got first look at exactly the rows reroute exists for.
-    if window == "live":
-        return REAP_UNKNOWN, (
-            f"{reap_basis} but a 429 window is open, so silence is the rate "
-            f"limit, not a finished session"
-        )
-
-    age_s = max(0.0, now_s - facts.last_event_epoch)
-    if facts.last_kind == "tool":
-        return REAP_NO, (
-            f"{reap_basis} but last event is a tool call, never reaped on "
-            f"tool activity"
-        )
-
-    # Read six: is this session finished with the tree? The SAME call the
-    # occupancy tally makes, deliberately, because when the two derived it
-    # separately they disagreed about a parked session and the disagreement
-    # deleted a worktree somebody was sitting in.
-    truth = classify_tail(facts.last_role, facts.last_text, age_s)
-    if not finished_with_the_tree(facts, now_s, quiet_after_s):
-        return REAP_NO, (
-            f"{reap_basis}, quiet {_mins(now_s, facts.last_event_epoch)}m, "
-            f"but the tail reads {truth}, which is a session still in play"
-        )
-    # Read seven: an UNRECORDED owner is UNKNOWN, never "not a human's".
-    #
-    # The early read above protects the literal "operator". This one closes the
-    # hole underneath it, and the hole was the node's own thesis turned back on
-    # the fix: absent read as not-an-operator-session rather than as
-    # never-recorded, one value carrying two facts. The recency read below has
-    # always treated its own absence that way. Origin did not, so the two
-    # protectors applied opposite rules to the same kind of silence.
-    #
-    # Reachable, not theoretical. `mint_adopted_entry` writes origin None
-    # beside a FRESH last_message_at, and adopt takes in both a session a human
-    # started by hand and a footnote orphan. For two hours the stamp protects
-    # the row. After that both protectors fall silent and a hand-started
-    # session's worktree is deletable. The synthesized-row minter has the same
-    # shape.
-    #
-    # LATE, beside recency, for the reason the recency read is late. Placed up
-    # at the early origin read it would answer first on every refusal and
-    # silence the probe, unreadable-transcript and still-in-play
-    # guards, which is the exact bug already fixed once in this predicate.
-    #
-    # The marginal cost is small, because a row only reaches here by carrying a
-    # parseable stamp already. What it newly protects is precisely the
-    # dangerous set: a stamped row whose owner nothing ever recorded.
-    # Read eight: recency, as the LAST protector. The mirror of x-9de7, not a
-    # repeat of it: that node forbade inferring DEATH from silence, this one
-    # makes a recent message an active refusal whatever the pid says, because
-    # the operator drives sessions by hand in ways no probe observes.
-    #
-    # LAST, deliberately, and this position is the whole of its correctness.
-    # Placed ahead of the reads above it answered FIRST on every refusal, so a
-    # row refused by the probe, for an unreadable transcript, or for
-    # a tail still parked on <watching> reported "recency unproven" instead -
-    # each of those guards still ran and none of them could ever speak. A
-    # refusal whose reason names the wrong read is worse than no reason, and
-    # the guards it silenced are decorative. Here it catches only what every
-    # other read passed: a transcript that says finished, and a registry stamp
-    # that says somebody spoke to this session anyway. That gap IS rule 2.
-    #
-    # An absent or unparseable stamp is UNKNOWN, never a fall-through to the
-    # delete. Absent has two causes - nothing ever stamped it, and the session
-    # genuinely never spoke - and this lane cannot tell them apart, which is
-    # the rule every other unreadable input here already gets. State the cost
-    # plainly: measured 2026-08-20, 12 of 23 live rows carried the stamp, so
-    # reap now declines the rest and hands them to a human instead. That is the
-    # direction this lane is allowed to fail in.
-    # POSITIVE evidence first, then the two absences. A recent message is a
-    # reading that ANSWERED, so it outranks both "nobody recorded the owner"
-    # and "nobody recorded a message" - each of which is only a silence. Order
-    # them the other way and a protected row reports an absence as its reason,
-    # which is the same wrong-reason defect the placement above exists to stop.
-    recent_age_s = _stamp_age_s(row.last_message_at, now_s)
-    if recent_age_s is not None and recent_age_s <= REAP_RECENT_MESSAGE_S:
-        return REAP_NO, (
-            f"{reap_basis}, tail reads {truth}, but last message was "
-            f"{int(recent_age_s / 60)}m ago, inside the "
-            f"{int(REAP_RECENT_MESSAGE_S / 60)}m protection window: "
-            f"{REAP_PROTECTION_RULES['recency']}"
-        )
-
-    # An UNRECORDED owner is UNKNOWN, never "not a human's".
-    #
-    # The early read protects the literal "operator". This closes the hole
-    # underneath it, and the hole was the node's own thesis turned back on the
-    # fix: absent read as not-an-operator-session rather than as
-    # never-recorded, one value carrying two facts. The recency read has always
-    # treated its own absence that way. Origin did not, so the two protectors
-    # applied opposite rules to the same silence.
-    #
-    # Reachable, not theoretical. `mint_adopted_entry` writes origin None
-    # beside a FRESH last_message_at, and adopt takes in both a session a human
-    # started by hand and a footnote orphan. For two hours the stamp protects
-    # the row. After that both protectors fell silent together and a
-    # hand-started session's worktree was deletable. The synthesized-row minter
-    # has the same shape. The marginal cost is small: a row only reaches here
-    # by carrying a parseable stamp already, so what this newly protects is
-    # exactly that dangerous set.
-    #
-    # `adopted` is the SAME fact wearing a name. The healers now stamp the rows
-    # they adopt rather than leaving the field empty, which is strictly better
-    # for a reader - but only if every reader learns the word. Read as merely
-    # not-"operator" it would walk past this guard, and the population it names
-    # is the one the guard was written for.
-    if row.origin is None or row.origin == "adopted":
-        recorded = "adopted, which does not say who started the session"
-        return REAP_UNKNOWN, (
-            f"{reap_basis}, tail reads {truth}, but origin "
-            f"{'reads ' + recorded if row.origin else 'was never recorded'}, "
-            f"which is not evidence of a worker, and "
-            f"{REAP_PROTECTION_RULES['origin']}"
-        )
-
-    if recent_age_s is None:
-        return REAP_UNKNOWN, (
-            f"{reap_basis}, tail reads {truth}, but last_message_at is "
-            f"{'absent' if not row.last_message_at else 'unparseable'}, so "
-            f"recency is unproven and {REAP_PROTECTION_RULES['recency']}"
-        )
-
-    # Read nine: the group 1 probe (x-5d96, x-ad13), the LAST gate before a
-    # yes. A row reaps only when the probe POSITIVELY proves the worker
-    # dead; a positive life marker refuses outright, and a silent probe is
-    # UNKNOWN, never death. It sits HERE, after every read with a more
-    # specific reason, for the same reason the recency read sits last:
-    # placed early it answered FIRST on every refusal and silenced the
-    # still-in-play, unreadable-transcript and ownership guards - the
-    # wrong-reason defect this predicate has already fixed once. It replaced
-    # the old occupancy read, which answered a verdict about the ROW from a
-    # fact about the WORKTREE: on this project every session shares one
-    # checkout, so "N other session(s) share <cwd>" was permanently true and
-    # no row could ever reap - and it was also the only thing standing
-    # between the sweep and two live kings, which is why it could not be
-    # relaxed until a liveness source existed. The tree keeps its own guard,
-    # at the apply lane.
-    probe = row.probe or "unknown"
-    if probe == "alive":
-        return REAP_NO, (
-            f"{reap_basis}, tail reads {truth}, but the liveness probe "
-            f"positively reports the worker alive, and "
-            f"{REAP_PROTECTION_RULES['probe']}"
-        )
-    if probe != "dead":
-        return REAP_UNKNOWN, (
-            f"{reap_basis}, tail reads {truth}, but the liveness probe is "
-            f"silent (unknown), and {REAP_PROTECTION_RULES['probe']}"
-        )
-
-    return REAP_YES, (
-        f"{reap_basis}, tail reads {truth}, quiet "
-        f"{_mins(now_s, facts.last_event_epoch)}m, last message "
-        f"{int(recent_age_s / 60)}m ago"
-    )
-
-
-def _stamp_age_s(stamp: Optional[str], now_s: float) -> Optional[float]:
-    """Age in seconds of an ISO stamp, or None when it will not read.
-
-    One None for three causes - absent, not a string, unparseable - because
-    every one of them means the same thing to the caller: this stamp proved
-    nothing. Clamped at zero so a clock skewed into the future reads as
-    "just now" (a protector) rather than as a negative age that compares
-    below every window.
-    """
-    epoch = _iso_epoch_s(stamp)
-    if epoch is None:
-        return None
-    return max(0.0, now_s - epoch)
-
-
 def _mins(now_s: float, epoch: Optional[float]) -> Optional[int]:
     if epoch is None:
         return None
@@ -1570,20 +736,12 @@ def _verdict_one(
     claim_for: Callable[[str], dict],
     node_state_for: Callable[[str], Optional[dict]],
     now_s: float,
-    quiet_after_s: float = REAP_QUIET_AFTER_S,
-    cotenants: int = 0,
-    # No default: `config.recovery.retire_grace_s = 0` is documented as turning
-    # the lane off, and a hardcoded fallback here would arm it for any caller
-    # that skipped `verdicts()`. A switch documented as off-capable must not
-    # have an on-by-default back door.
-    retire_grace_s_value: float,
     in_quorum_breaker: bool = False,
 ) -> Verdict:
 
     # ghost: the row claims working/blocked but its recorded id resolves to no
     # transcript - a wake that failed to attach, fell back to spawning, minted
-    # a new id, and left this row claiming a session that does not exist. It
-    # outranks reap because a row with no transcript cannot be safely stopped.
+    # a new id, and left this row claiming a session that does not exist.
     if facts is None and row.state in _GHOST_STATES:
         return Verdict(row.row_id, row.name, row.state, GHOST,
                        f"no transcript for {row.row_id}", "report")
@@ -1592,80 +750,12 @@ def _verdict_one(
     if facts is not None:
         window, reset_epoch, stamp = rate_limit_window(facts.records, now_s)
 
-    reap_basis = ""
-    reap_unknown_basis = ""
-    if row.node:
-        answer, reap_basis = reap_decision(
-            row,
-            facts=facts,
-            node_state_for=node_state_for,
-            claim_for=claim_for,
-            now_s=now_s,
-            quiet_after_s=quiet_after_s,
-            window=window,
-        )
-        if answer is REAP_YES:
-            # `cotenants` rides the verdict for the APPLY lane: co-tenancy
-            # guards the worktree branch now (x-ad13), never the row verdict.
-            return Verdict(row.row_id, row.name, row.state, REAP,
-                           reap_basis, "stop+rm", cotenants)
-        if answer is REAP_UNKNOWN:
-            # HELD, not returned. A row with no pid and no heartbeat can only
-            # answer UNKNOWN, so returning STALE here reported the whole fleet
-            # instead of stopping it. Retire is weaker and carries its own probe
-            # and state guards, so it inherits none of reap's protection by
-            # answering first. Returned below if retire also declines.
-            reap_unknown_basis = reap_basis
-
-    # retire: below a reap that ANSWERED yes, above one that did not answer, and
-    # reachable whether or not the row carries a node - a blueprint worker's row
-    # routinely has none, and it is the population this lane was built for. It
-    # runs before reap's LEAVE return so a row reap declines on its own
-    # (stricter) preconditions can still be stopped by this (weaker,
-    # non-destructive) one.
-    retire_yes, retire_basis = retire_decision(
-        row,
-        facts=facts,
-        now_s=now_s,
-        grace_s=retire_grace_s_value,
-        window=window,
-        # The SAME callable reap read: run_sweep resolves _graph_index() once
-        # per sweep and graph_fn closes over it, so this is no second graph
-        # read and no new seam.
-        node_state_for=node_state_for,
-    )
-    if retire_yes:
-        # The held non-answer rides along: this row is about to be STOPPED, and
-        # dropping it would hide the unread reap in the one case that acts.
-        if reap_unknown_basis:
-            retire_basis += f" (reap did not answer: {reap_unknown_basis})"
-        return Verdict(row.row_id, row.name, row.state, RETIRE,
-                       retire_basis, "stop")
-
-    if reap_unknown_basis:
-        # Not "leave": leave says the row was read and is healthy. This says
-        # the read did not answer, which is a different fact and a human's to
-        # resolve.
-        return Verdict(row.row_id, row.name, row.state, STALE,
-                       reap_unknown_basis, "report")
-
-    if reap_basis:
-        return Verdict(row.row_id, row.name, row.state, LEAVE,
-                       reap_basis, "none")
-
     # stale: the hard age ceiling, BEFORE the 429 window math - the reset
     # stamp carries no date, so on a tail older than the ceiling its
     # time-of-day reading is garbage and would poison reroute below.
     facts_age_s: Optional[float] = None
     if facts is not None and facts.last_event_epoch is not None:
         facts_age_s = max(0.0, now_s - facts.last_event_epoch)
-    # The retire near-miss basis rides BELOW this ceiling on purpose. It names a
-    # row one condition away from being stopped, which is worth reading, but it
-    # is a LEAVE - and a LEAVE returned above the ceiling silently demoted the
-    # rows that most need a human. Measured on review: a spawned row owing the
-    # operator an answer and quiet 13h read `stale / needs a human` with the
-    # lane off and `leave / none` with it armed, so arming the lane deleted the
-    # escalation. The ceiling answers first; the near miss answers after.
     if row.state in _WAKE_STATES and facts_age_s is not None:
         if facts_age_s > WAKE_MAX_AGE_S:
             return Verdict(
@@ -1674,13 +764,6 @@ def _verdict_one(
                 f"{int(WAKE_MAX_AGE_S // 3600)}h wake ceiling, needs a human",
                 "report",
             )
-
-    if retire_basis:
-        # The retire predicate declined for a reason worth reading: this row was
-        # one condition away from being stopped. A generic "no lane applies"
-        # would hide the near miss, and the near miss is the interesting row.
-        return Verdict(row.row_id, row.name, row.state, LEAVE,
-                       retire_basis, "none")
 
     # reroute: blocked on a 429 whose window has NOT opened. A single 429 is
     # terminal for this session but is not provider-wide authority: the durable
@@ -1815,29 +898,6 @@ def _unclaimed_node_basis(
     return f"node {row.node} carries NO claim while this row is live"
 
 
-def _holder_session(holder: Optional[str]) -> Optional[str]:
-    """The canonical holder parser, so the holder vocabulary (claude
-    ``target-session:<uuid>`` today, codex durable thread ids as they land)
-    lives in one place; a foreign holder shape returns None and condemns
-    nothing."""
-    from fno.agents.truth_status import _session_from_holder
-
-    return _session_from_holder(holder)
-
-
-# ---------------------------------------------------------------------------
-# Real I/O seams (every one injectable; the classifier above stays pure)
-# ---------------------------------------------------------------------------
-
-#: The per-tick transcript tail read. One size serves both consumers of a
-#: tick's single read+parse: the outage evidence collector's freshness window
-#: (it read 256KB before the sharing) and the tail classifier's record window
-#: (which read 64KB - now derived from the same parse, so a chatty transcript
-#: can no longer truncate the classifier's 60-record window below what the
-#: file actually holds).
-_TICK_TAIL_BYTES = 256 * 1024
-
-
 def tail_entries(
     session_id: str,
     cwd: str,
@@ -1902,33 +962,30 @@ def _facts_from_entries(
     """Pure derivation of :class:`TailFacts` from a parsed transcript tail."""
     if entries is None:
         return None
-    windowed: list[tuple[Optional[float], str, Optional[str], Optional[str]]] = []
+    windowed: list[tuple[Optional[float], str, Optional[str]]] = []
     for record in entries:
         text = _record_text(record)
         msg = record.get("message")
         role = msg.get("role") if isinstance(msg, dict) else None
-        kind = ("tool" if _has_tool_use(record) else "text") if role else None
-        windowed.append((_record_epoch(record), text, str(role) if role else None, kind))
-    # The window bounds EVERYTHING downstream, the (role, text, kind) triple
-    # included: a triple read from a record older than max_records would pair
-    # a stale text with the fresh age and window inputs it is classified
-    # against.
+        windowed.append((_record_epoch(record), text, str(role) if role else None))
+    # The window bounds EVERYTHING downstream, the (role, text) pair included:
+    # a pair read from a record older than max_records would pair a stale text
+    # with the fresh age and window inputs it is classified against.
     window = windowed[-max_records:]
-    records = [(epoch, text) for epoch, text, _role, _kind in window]
+    records = [(epoch, text) for epoch, text, _role in window]
     last_epoch = next((t for t, _ in reversed(records) if t is not None), None)
     last_role: Optional[str] = None
     last_text = ""
-    last_kind: Optional[str] = None
-    for _epoch, text, role, kind in reversed(window):
+    for _epoch, text, role in reversed(window):
         if role:
             # The LAST role-bearing record inside the window decides the tail
             # classifier's input; a trailing user turn clears stale assistant
             # signals.
-            last_role, last_text, last_kind = role, text, kind
+            last_role, last_text = role, text
             break
     return TailFacts(
         records, last_epoch, " ".join(t for _, t in records),
-        last_role, last_text, last_kind,
+        last_role, last_text,
     )
 
 
@@ -1951,22 +1008,6 @@ def tail_facts(
     again.
     """
     return _facts_from_entries(tail_entries(session_id, cwd, agent=agent), max_records)
-
-
-def _has_tool_use(e: dict) -> bool:
-    """Does this record carry tool activity - a call OR a result? A trailing
-    tool_result is a round trip mid-flight (the result landed, the next
-    assistant turn has not), which is a session WORKING exactly like a
-    trailing tool_use (the c696fddd case: re-tasked after its PR merged),
-    and reap must never fire on either."""
-    msg = e.get("message")
-    content = msg.get("content") if isinstance(msg, dict) else None
-    if not isinstance(content, list):
-        return False
-    return any(
-        isinstance(p, dict) and p.get("type") in ("tool_use", "tool_result")
-        for p in content
-    )
 
 
 def _record_text(e: dict) -> str:
@@ -1992,7 +1033,7 @@ def _ledger_nodes() -> dict[str, str]:
     """``{claude session id -> node id}`` from the execution ledger.
 
     A worker that ran in the CANONICAL checkout has no worktree manifest of
-    its own (king ruling 2026-08-17: its deliverable must still reap), and
+    its own, and
     the operator fleet's ``t-`` shorthand names are ambiguous (the node's
     dash is stripped, so the slug boundary is unknowable - the name-join trap
     in its exact measured form). The ledger is machine-written recorded
@@ -2115,28 +1156,6 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             state=state,
             node=node,
             cwd=cwd,
-            # The two reap protectors, read off the SAME joined registry entry
-            # this loop already holds - they were always one line away, and
-            # discarding them is why every reap decision was made without
-            # knowing whether a human was sitting in the session (x-944f).
-            # `getattr` with a default, not attribute access: a row loaded by
-            # an older reader has no such attribute, and an AttributeError here
-            # would take the whole sweep down.
-            #
-            # The retire lane reads this same raw field, and no derived marker
-            # rides beside it. A `spawned` boolean computed here would be a
-            # second place for the answer to differ from what reap sees, and
-            # every population it had to special-case - a row the join did not
-            # answer for, an `orphaned` session `store_fallback` adopted with no
-            # `origin` - already answers None here, which retire declines on.
-            origin=getattr(match, "origin", None),
-            last_message_at=getattr(match, "last_message_at", None),
-            # The group 1 probe and the crown stamp, off the SAME entry.
-            # No entry (a roster-only row) probes "unknown", which refuses -
-            # the honest direction: nothing positive is known about a session
-            # the registry never recorded.
-            probe=_probe_liveness(match),
-            crowned=bool(getattr(match, "crown_level", None)),
         ))
     if skipped_no_sid:
         warnings = [
@@ -2155,66 +1174,19 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
 _CANONICAL_STATE = {"Working": "working", "Needs input": "blocked",
                     "Idle": "idle", "Done": "done"}
 
-#: Tail readings that mean the session is still IN PLAY, so a reap on one is
-#: a kill and not a cleanup. ``watching`` is a worker parked by the loop
-#: runtime, ``your-move`` is one holding a question for a human, ``working``
-#: is one whose silence has not yet reached the stalled threshold.
+#: Tail readings that mean the session is still IN PLAY, so a
+#: finished-with-the-tree read on one is wrong. ``watching`` is a worker
+#: parked by the loop runtime, ``your-move`` is one holding a question for a
+#: human, ``working`` is one whose silence has not yet reached the stalled
+#: threshold.
 _ENGAGED_TAILS = frozenset({"watching", "your-move", "working"})
 
-#: States that mean the roster considers a session over. Occupancy does NOT
-#: use this: it asks the transcript through ``finished_with_the_tree``,
-#: because the roster called a working session done on 2026-08-15 and keying
-#: the tally on that field let a live row count as zero. The use left is
-#: deciding whether an unmapped spelling deserves a drift warning, where a
-#: terminal word is expected and anything else is news.
+#: States that mean the roster considers a session over. The classifier
+#: asks the transcript, never this: the roster called a working session done
+#: on 2026-08-15. The one use left is deciding whether an unmapped spelling
+#: deserves a drift warning, where a terminal word is expected and anything
+#: else is news.
 _TERMINAL_STATES = frozenset({"stopped", "done", "completed", "exited", "killed"})
-
-#: The states retire will act on, as a POSITIVE membership test.
-#:
-#: HAND-KEPT, and it does not track the harness by itself. Claude's live
-#: vocabulary folds to four canonical words; three are here and `blocked` is
-#: deliberately out. A fifth would fold to a word this set does not carry, and
-#: `_row_state` returns no drift warning for it because `_LIVE_STATUS_INPUT`
-#: mapped it fine - so retire would silently stop classifying that population
-#: and the slot leak would come back with nothing said. A test asserts the fold
-#: is fully accounted for, which is what actually tracks the harness.
-#:
-#: Positive, not "anything the roster does not call stopped", and the
-#: difference is the whole point. `_row_state` returns `""` for a row carrying no state under
-#: either alias, and returns an unmapped new spelling verbatim; neither is a
-#: stopped word, so a negative test admits both. Its own docstring records that
-#: claude has already renamed that field once and every row read `""`. Under a
-#: negative test the next rename turns one `--apply-all` into a fleet-wide stop
-#: of every row whose tail carries a promise. Unmeasurable must answer no.
-#:
-#: `done` is IN even though `_TERMINAL_STATES` also carries it, and the two
-#: readings do not conflict. `Done` is a member of claude's own
-#: KNOWN_LIVE_STATUSES: a pane painting it is ALIVE and holding a slot, which is
-#: the whole population this lane reclaims. Measured on a live 36-row fleet: no
-#: row wore `idle`, and every parked worker wore `done`. `_TERMINAL_STATES`
-#: answers a different question, whether the ROSTER considers the work over, and
-#: its own comment records that the roster called a working session done.
-#:
-#: `completed` is deliberately absent: it is not in claude's live vocabulary, so
-#: whether it describes the work or the process is unknown, and unknown does not
-#: retire.
-#:
-#: `blocked` is absent for a stronger reason. It is claude's `Needs input`, and
-#: a worker that has finished does not need input - so a row wearing it is one a
-#: human owes something to, which is the opposite of the population this lane
-#: reclaims. `_question_pending` cannot cover it either: that reads the
-#: assistant's own text, and a permission prompt is not assistant text. This
-#: lane ships ARMED, so the ambiguous state stays out.
-#:
-#: `working` is claude's "executing right now", and it is IN because that stamp
-#: is the thing this lane distrusts: a parked worker that never emitted a
-#: closing status keeps wearing it, which is the phantom slot the node reported.
-#: The transcript is the truth source, and every read below has to agree before
-#: a `working` row retires - past the grace, no open rate-limit window, no
-#: pending tool call, a tail that classifies `done`, no question owed. A session
-#: genuinely executing fails the tool-call read or the age read.
-_RETIRABLE_STATES = frozenset({"working", "idle", "done"})
-
 
 def _row_state(r: dict) -> tuple[str, str]:
     """This lane's canonical state for a row, and a warning when it is new.
@@ -2267,8 +1239,8 @@ class _Unreadable:
     """A seam read that FAILED, which is not the fact an empty answer states.
 
     Both seams answered ``{}`` on any exception, so an unreadable claims root
-    and a node with no claim produced one value, and `reap_decision`'s
-    UNKNOWN-on-a-raise contract held only for injected test seams.
+    and a node with no claim produced one value - the two facts a caller must
+    be able to tell apart (an unreadable read is never a verdict).
     """
 
     __slots__ = ("detail",)
@@ -2278,7 +1250,7 @@ class _Unreadable:
 
 
 def _answered(value: Any) -> Any:
-    """A failed seam read becomes the raise `reap_decision` reads as UNKNOWN."""
+    """Unfold a failed seam read into the raise its caller treats as unknown."""
     if isinstance(value, _Unreadable):
         raise RuntimeError(value.detail)
     return value
@@ -3007,19 +1979,12 @@ def run_sweep(
     graph_state = graph_fn()
     if isinstance(graph_state, _Unreadable):
         warnings = [*warnings, f"graph unreadable for every row: {graph_state.detail}"]
-    try:
-        from fno.config import load_settings
-
-        quiet_after_s = float(load_settings().recovery.idle_threshold_seconds)
-    except Exception:  # noqa: BLE001 - config miss falls back to the default
-        quiet_after_s = REAP_QUIET_AFTER_S
     vs = verdicts(
         rows,
         transcript_for=transcript_fn,
         claim_for=claim_for,
         node_state_for=node_state_for,
         now_s=now_s,
-        quiet_after_s=quiet_after_s,
         provider_outages=provider_outages,
     )
     counts: dict[str, int] = {}
@@ -3529,49 +2494,6 @@ def _fno() -> list[str]:
     return [*_subprocess_util.fno_py_cmd()]
 
 
-def worktree_refusal(cwd: str) -> Optional[str]:
-    """Why this worktree may NOT be reaped, or None when it is clean. Named so
-    the refusal is actionable: unstaged changes and unpushed commits are work
-    that exists nowhere else. A branch with no upstream reads as unpushed -
-    a worktree whose commits are not on any remote is exactly that.
-
-    ``claude rm`` refuses a dirty worktree too, and reap never passes
-    ``--force``, so that guard still backstops this one. This check is a
-    DELIBERATE duplicate for three reasons: it runs before the STOP, where
-    claude's runs at the rm, by which point refusing leaves a session dead
-    and its row kept; it names the reason in a dry-run receipt, so a reader
-    sees why a row will not reap without executing anything; and it is the
-    lane's own hook, where the co-tenancy check the harness cannot make (it
-    sees one session, never the fleet) is the one that matters most."""
-    if not cwd:
-        return "no recorded cwd"
-    try:
-        dirty = subprocess.run(
-            ["git", "-C", cwd, "status", "--porcelain"],
-            capture_output=True, text=True, timeout=30, check=False,
-        )
-        if dirty.returncode != 0:
-            # A failed status with empty stdout reads as clean unless the
-            # exit is checked - an index.lock held by the very agent working
-            # there must read as NOT-reapable, not as a clean tree.
-            return f"git status failed in {cwd} (exit {dirty.returncode})"
-        n_dirty = len([ln for ln in (dirty.stdout or "").splitlines() if ln.strip()])
-        if n_dirty:
-            return f"{n_dirty} uncommitted change(s) in {cwd}"
-        unpushed = subprocess.run(
-            ["git", "-C", cwd, "rev-list", "--count", "@{upstream}..HEAD"],
-            capture_output=True, text=True, timeout=30, check=False,
-        )
-        if unpushed.returncode != 0:
-            return f"no upstream to compare in {cwd}"
-        n = (unpushed.stdout or "").strip()
-        if n and n != "0":
-            return f"{n} unpushed commit(s) in {cwd}"
-    except (OSError, subprocess.SubprocessError) as exc:
-        return f"worktree check failed: {exc}"
-    return None
-
-
 #: The shipped content-confirm cadence (dispatch._mux_content_confirm): resume
 #: returns when the live STATE reads working, which is before the injected turn
 #: is flushed to the transcript, so a one-shot read reports a landed wake as
@@ -3629,14 +2551,10 @@ def _confirm_once(
 
 
 #: Which verdicts each apply level may execute. ``wake`` is the one lane that
-#: cannot destroy work, so bare ``--apply`` stops there; reap and reroute both
-#: stop a session, so they need ``--apply-all``. ghost NEVER auto-acts: the
+#: cannot destroy work, so bare ``--apply`` stops there; reroute stops and
+#: respawns a session, so it needs ``--apply-all``. ghost NEVER auto-acts: the
 #: remedy is a respawn under a new id, which is the operator's call.
-#: `retire` rides the `all` lane, not `wake`: it stops a session, and `--apply`
-#: is documented as the one action that cannot destroy work. It needs no config
-#: freeze of its own the way reap does - a wrong retire costs a `fno agents
-#: resume`, while a wrong reap costs a worktree.
-LANES = {"wake": frozenset({WAKE}), "all": frozenset({WAKE, REROUTE, REAP, RETIRE})}
+LANES = {"wake": frozenset({WAKE}), "all": frozenset({WAKE, REROUTE})}
 
 #: The one silent outcome: the verdict was outside the lane the caller asked
 #: for, so nothing was attempted and there is nothing to report. Every other
@@ -3666,7 +2584,6 @@ def apply_verdict(
     runner=subprocess.run,
     failover_fn: Optional[Callable[[Any, Any], str]] = None,
     rotation: Optional[RotationBudget] = None,
-    reap_enabled: Optional[bool] = None,
 ) -> tuple[str, str]:
     """Execute one verdict inside ``lanes`` ("wake" | "all"). Returns
     ``(outcome, detail)``. Exactly ONE outcome is silent: ``SKIPPED``, which
@@ -3674,46 +2591,17 @@ def apply_verdict(
     was attempted. Every other word is news and callers surface all of them.
 
     That inversion is deliberate. Callers used to enumerate which outcomes
-    were worth printing, and three receipts were swallowed by that list in
-    turn: a stop that landed without its rm, a reap withheld by the config
-    freeze, and a reroute held because the provider had already rotated.
-    Each was added to the list only after a review found it missing.
-    Defaulting to surface means the next outcome added here cannot go silent
-    by omission.
+    were worth printing, and receipts were swallowed by that list in turn
+    (a reroute held because the provider had already rotated). Defaulting
+    to surface means the next outcome added here cannot go silent by
+    omission.
     Mechanisms delegate: resume (which verifies the state move and holds its
-    own single-writer claim), recovery._redispatch for reroute, stop + rm for
-    reap - rm is never forced, ``claude rm``'s own refusal on a dirty worktree
-    is a safety feature this lane leans on rather than bypasses. Every
-    delegated lifecycle command runs with ``cwd`` set to the row's worktree:
-    a registry-less row from another project must resolve in its own project,
-    not in whatever project launched the sweep."""
+    own single-writer claim) for wake, recovery._redispatch for reroute.
+    Every delegated lifecycle command runs with ``cwd`` set to the row's
+    worktree: a registry-less row from another project must resolve in its
+    own project, not in whatever project launched the sweep."""
     if v.verdict not in LANES.get(lanes, frozenset()):
         return SKIPPED, f"{v.verdict} outside {lanes} lane"
-    if v.verdict == RETIRE and retire_grace_s() <= 0:
-        # `retire_grace_s = 0` is documented as the lane's off switch, and until
-        # now it was read only at CLASSIFICATION time. A caller handing a
-        # pre-built RETIRE verdict to this funnel stopped the session with the
-        # lane switched off. That is the same defect the reap comment below
-        # names, so the switch sits at the same funnel.
-        return (
-            "frozen",
-            "retire classified but not executed: config.recovery."
-            "retire_grace_s is 0, which turns the lane off",
-        )
-    if v.verdict == REAP:
-        # The freeze sits HERE, at the one funnel every lane and every
-        # caller passes through, rather than in the CLI that happens to
-        # expose --apply-all today. A guard on one of several reachable
-        # paths reads as protection and ships with the others open.
-        allowed = _reap_execution_enabled() if reap_enabled is None else reap_enabled
-        if not allowed:
-            return (
-                "frozen",
-                "reap classified but not executed: config.recovery."
-                "watchdog.reap is false. Reap deletes the worktree and a "
-                "wrong one is unrecoverable, so it ships off. Turn it on to "
-                "execute, or stop and rm this row by hand",
-            )
     try:
         if v.verdict == WAKE:
             return _apply_wake(v, cwd=cwd, runner=runner)
@@ -3721,109 +2609,9 @@ def apply_verdict(
             return _apply_reroute(
                 v, cwd=cwd, failover_fn=failover_fn, rotation=rotation
             )
-        if v.verdict == REAP:
-            return _apply_reap(v, cwd=cwd, runner=runner)
-        if v.verdict == RETIRE:
-            return _apply_retire(v, cwd=cwd, runner=runner)
     except (OSError, subprocess.SubprocessError) as exc:
         return "refused", f"{v.verdict} action failed: {exc}"
     return SKIPPED, f"{v.verdict} has no auto-action"
-
-
-def _reap_execution_enabled() -> bool:
-    """Is the reap lane armed? Fails CLOSED on any config trouble.
-
-    A config that cannot be read is not permission. This is the one switch
-    whose wrong answer deletes a worktree, so an unreadable or malformed
-    settings file withholds the action rather than assuming the default that
-    happens to be convenient.
-    """
-    try:
-        from fno.config import load_settings
-
-        return bool(load_settings().recovery.watchdog.reap)
-    except Exception:  # noqa: BLE001 - unreadable config is never permission
-        return False
-
-
-def _persist_reap_receipt(row_id: str) -> tuple[bool, str]:
-    """Build and durably write the reap receipt from the registry row (x-b150).
-
-    Returns ``(ok, detail)``. A row whose receipt cannot be built - no session
-    identity, or a harness with no capability row - never reaps: the caller
-    refuses and the row stays. The resume form is rendered from the capability
-    table (the same single source ``fno whoami ledger`` reads), never a
-    hardcoded string, and the ledger entry enriches the receipt when one
-    exists. Mirrors the daemon sweep's Rust receipt: same keys, same
-    ``reap-receipts/`` directory, so a reader cannot tell which writer ran.
-    """
-    from fno import paths as _paths
-    from fno.agents.harness_map import DispatchResolveError, render_session_argv
-    from fno.agents.registry import load_registry
-    from fno.scoreboard.fold import load_ledger_rows
-
-    try:
-        entries = load_registry(_paths.agents_registry_path())
-    except Exception as exc:  # noqa: BLE001 - an unreadable registry is never a reap
-        return False, f"registry unreadable, receipt cannot be staged: {exc}"
-    entry = next(
-        (e for e in entries if row_id in (e.name, getattr(e, "short_id", "") or e.name)),
-        None,
-    )
-    if entry is None:
-        return False, f"registry has no row {row_id!r}, receipt cannot be staged"
-    harness = (getattr(entry, "harness", "") or "").strip()
-    sid = (getattr(entry, "harness_session_id", "") or "").strip()
-    if not harness or not sid:
-        return False, (
-            f"row {row_id!r} carries no resumable identity "
-            f"(harness={harness!r}, session={bool(sid)})"
-        )
-    try:
-        argv = render_session_argv(harness, "interactive_resume", sid)
-    except DispatchResolveError as exc:
-        return False, f"row {row_id!r}: {exc}"
-    receipt: dict = {
-        "row_name": entry.name,
-        "short_id": getattr(entry, "short_id", "") or "",
-        "harness": harness,
-        "harness_session_id": sid,
-        "cwd": entry.cwd,
-        "log_path": (getattr(entry, "log_path", "") or None),
-        "created_at": entry.created_at,
-        "reaped_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "resume": " ".join(argv),
-    }
-    try:
-        match = next(
-            (
-                r
-                for r in load_ledger_rows(_paths.ledger_json())
-                # Only a real list of session ids matches: a row carrying
-                # `sessions` as a string would turn `in` into a substring test.
-                if isinstance(r.get("sessions"), list) and sid in r["sessions"]
-            ),
-            None,
-        )
-    except Exception:  # noqa: BLE001 - enrichment is a bonus, never the floor
-        match = None
-    if match is not None:
-        receipt["ledger"] = match
-    # Same alphabet as the Rust writer's receipt_filename_part: ascii alnum
-    # plus . _ -, everything else underscored, so both writers land on the
-    # same filename for the same session.
-    safe = "".join(
-        c if (c.isascii() and c.isalnum()) or c in "._-" else "_" for c in sid
-    )
-    dir_path = _paths.agents_home_dir() / "reap-receipts"
-    path = dir_path / f"{harness}-{safe}.json"
-    try:
-        dir_path.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
-        path.chmod(0o600)
-    except OSError as exc:
-        return False, f"receipt did not persist for {row_id!r}: {exc}"
-    return True, str(path)
 
 
 def _apply_wake(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
@@ -3877,9 +2665,7 @@ def _apply_reroute(
         # this cwd - the shared-manifest read `fleet_rows` refuses to trust
         # for identity, because on a canonical checkout every session reads
         # the same node. Acting on it force-releases a claim a DIFFERENT live
-        # session may hold and then spawns a duplicate /target onto it. The
-        # reap lane guards this one function below; the lane that ships ON
-        # was the one missing it.
+        # session may hold and then spawns a duplicate /target onto it.
         return (
             "refused",
             f"reroute refused: {cwd} is not a linked worktree, so the node "
@@ -3932,116 +2718,3 @@ def _apply_reroute(
         f"reroute refused: failover outcome {outcome!r}, no alternate armed "
         f"({v.basis}). Nothing rotated and the session is left as-is",
     )
-
-
-def _apply_retire(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
-    """Stop a finished worker. The stop half of reap, and nothing else.
-
-    No `worktree_refusal`, no linked-worktree check, no config freeze: those
-    guard reap's `rm`, and this lane never removes anything. The worktree, the
-    transcript and the registry row all survive, so the recovery for a wrong
-    call is `fno agents resume <row>` - which is why the receipt says so.
-    """
-    stopped = runner(
-        [*_fno(), "agents", "stop", v.row_id],
-        capture_output=True, text=True, timeout=60, check=False,
-        cwd=cwd or None,
-    )
-    if stopped.returncode != 0:
-        why = (stopped.stderr or stopped.stdout or "").strip()[:160]
-        return (
-            "refused",
-            f"retire refused: stop exited {stopped.returncode}"
-            f"{f' ({why})' if why else ''}. The row still holds its slot",
-        )
-    return (
-        "applied",
-        f"stopped ({v.basis}). Nothing removed; `fno agents resume {v.row_id}` "
-        f"brings it back",
-    )
-
-
-def _apply_reap(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
-    refusal = worktree_refusal(cwd)
-    if refusal:
-        return "refused", f"reap refused: {refusal}"
-    # The worktree half of the guard split (x-ad13): co-tenancy guards the
-    # TREE at apply, never the row verdict. `rm`'s harness cascade can drag
-    # the checkout with it, and a linked worktree's .git being a file proves
-    # nothing about how many sessions stand in it - so a tally that answers
-    # non-zero holds the destructive step here and names the tree, while the
-    # row above it was judged on its own probe, receipt and transcript.
-    cotenants = getattr(v, "cotenants", 0)
-    if cotenants:
-        return "refused", (
-            f"reap refused: {cotenants} other session(s) share "
-            f"{cwd or 'this cwd'}, so the worktree is not touched. Stop and "
-            f"remove this row by hand once the tree is free"
-        )
-    if not _is_linked_worktree(cwd):
-        # `claude rm` is documented as removing "session record + worktree",
-        # and the ledger join means cwd is routinely a repo ROOT: a
-        # worktree.policy = "never" project, or a bg session started in the
-        # canonical checkout. Whether that arm scopes its delete is an
-        # external binary's undocumented behaviour, and the blast radius of
-        # being wrong is the main checkout. This lane deletes only a tree it
-        # can prove is disposable.
-        return (
-            "refused",
-            f"reap refused: {cwd or 'no cwd'} is not a linked worktree, so "
-            f"rm would act on a canonical checkout. Stop and remove this row "
-            f"by hand",
-        )
-    # The receipt gate (x-b150): rm removes the registry row, the only place
-    # the row's resume identity lives. A receipt that cannot be built and
-    # persisted holds the row here - unknown never reaps, same as the daemon
-    # sweep's gate.
-    receipt_ok, receipt_detail = _persist_reap_receipt(v.row_id)
-    if not receipt_ok:
-        return "refused", f"reap refused: {receipt_detail}"
-    stopped = runner(
-        [*_fno(), "agents", "stop", v.row_id],
-        capture_output=True, text=True, timeout=60, check=False,
-        cwd=cwd or None,
-    )
-    if stopped.returncode != 0:
-        # Exit 2 is the lifecycle verbs' "not found in registry". The roster
-        # is `claude agents --json --all`, which enumerates store-only rows
-        # the registry never recorded (24 of 43 on the measured fleet), so
-        # this is a permanent scope mismatch and not a transient failure -
-        # the receipt has to say so or a reader retries it forever.
-        why = (
-            "not in the registry, and reap resolves registry rows only"
-            if stopped.returncode == 2
-            else (stopped.stderr or "").strip()[:200]
-        )
-        return "refused", f"stop exit {stopped.returncode}: {why}"
-    # rm is the destructive step, so the receipt is re-staged here from the
-    # row AS IT IS NOW: a row recreated under the same name since the gate
-    # above read it must leave behind its own identity, not the old one's.
-    # Kept adjacent to the rm so the re-read can see almost no window.
-    restaged, restage_detail = _persist_reap_receipt(v.row_id)
-    if not restaged:
-        return (
-            "partial",
-            f"stopped, but the receipt re-stage held the rm "
-            f"({restage_detail}). The session is already stopped - remove "
-            f"the row by hand, never re-run this as a stop",
-        )
-    removed = runner(
-        [*_fno(), "agents", "rm", v.row_id],
-        capture_output=True, text=True, timeout=60, check=False,
-        cwd=cwd or None,
-    )
-    if removed.returncode != 0:
-        # The stop already landed, so "refused" ("declined to act") is a
-        # receipt that lies about a session which is now dead. Same partial
-        # application the reroute lane reports honestly.
-        return (
-            "partial",
-            f"stopped, but rm exited {removed.returncode} so the registry row "
-            f"remains ({v.basis}). The session is already stopped - remove "
-            f"the row by hand, never re-run this as a stop: "
-            f"{(removed.stderr or '').strip()[:200]}",
-        )
-    return "applied", f"stopped and removed ({v.basis})"

@@ -2452,6 +2452,13 @@ class AgentsBlock(BaseModel):
     # sibling harness's number -- see `agents_config::dead_row_grace_secs`,
     # the resolver this type mirrors.
     dead_row_grace: int | dict[str, int] = 3600
+    # Row-retirement grace in SECONDS (x-c672): a worker's registry row
+    # retires when every node its session is named on is done AND its
+    # transcript has been quiet this long. The Rust daemon's sweep reads the
+    # same `config.agents.retire_grace_s` key (agents_config.rs), so a
+    # non-default here changes both the idle tick and `fno agents reap`.
+    # A legacy `recovery.retire_grace_s` still parses (lifted with a warning).
+    retire_grace_s: int = Field(default=900, ge=0)
     # Reap-receipt retention (x-6db9). The Rust daemon expires receipts past
     # this window in the same GC sweep that writes new ones; the Pydantic
     # mirror keeps `fno config get` honest. A receipt whose reaped_at cannot
@@ -3323,25 +3330,14 @@ class RecoveryBlock(BaseModel):
     idle_threshold_seconds:
         How old family-1 transcript activity may be before recovery acts on a
         session (default 900 = 15 min). Keep it above the longest expected
-        single-tool runtime because a long build can legitimately produce no
-        transcript turn while it runs.
+        single-tool runtime: a long build legitimately produces no turn.
     max_nudges:
-        Per-session cap on held-by-design surfaces before the sweep gives up and
-        emits ``recovery_capped`` (default 3) so a genuinely wedged session
-        surfaces instead of looping forever. Close notifications are once-only,
-        tracked separately.
+        Per-session cap on held-by-design surfaces before the sweep gives up
+        and emits ``recovery_capped`` (default 3). Close notifications are
+        once-only, tracked separately.
     watchdog:
         The fleet watchdog lane, as a nested block. See
         :mod:`fno.config._watchdog`.
-    retire_grace_s:
-        How long a finished worker stays parked before ``--apply-all`` stops
-        it (default 900). A worker that declares itself done and never exits
-        holds a live slot against ``config.agents.max_live`` forever; this is
-        the follow-up window before the retire lane takes the slot back, so a
-        worker that just delivered can still be asked one more thing. ``0``
-        turns the lane off entirely. Unlike reap this ships ARMED, because
-        retire only runs ``stop``: the worktree, the transcript and the
-        registry row all survive and ``fno agents resume`` undoes it.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -3357,7 +3353,6 @@ class RecoveryBlock(BaseModel):
     def _coerce_legacy_watchdog(cls, data: object) -> object:
         return _watchdog.coerce_legacy(data)
 
-    retire_grace_s: int = Field(default=900, ge=0)
     provider_outage_quorum: int = Field(default=2, ge=1)
     provider_outage_fup_window_seconds: int = Field(default=300, ge=300)
     provider_outage_529_count: int = Field(default=3, ge=3)
@@ -4605,6 +4600,11 @@ class ConfigBlock(BaseModel):
     status_fanout: StatusFanoutConfig = Field(default_factory=StatusFanoutConfig)
     king: KingBlock = Field(default_factory=KingBlock)
     accounts: AccountsBlock = Field(default_factory=AccountsBlock)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_legacy_retire_grace(cls, data: object) -> object:
+        return _watchdog.lift_retire_grace(data)
 
     @field_validator("status_sinks", mode="before")
     @classmethod

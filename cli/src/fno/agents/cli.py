@@ -3904,16 +3904,15 @@ def cmd_register(
 
     # `origin` is write-once, so a human taking over a pane footnote spawned
     # keeps `spawned` and this call cannot change it. Silence there reads as
-    # success: the operator believes they are registered as attended, while mail
-    # still treats them as unattended and the retire lane still holds them
-    # stoppable. The refusal is deliberate - a birth fact is not a claim a later
-    # caller gets to revise - so this says it rather than hiding it.
+    # success: the operator believes they are registered as attended, while
+    # mail still treats them as unattended. The refusal is deliberate - a
+    # birth fact is not a claim a later caller gets to revise - so this says
+    # it rather than hiding it.
     if entry.origin is not None and entry.origin != "operator":
         sys.stderr.write(
             f"note: origin stays {entry.origin!r}; it records what created this "
-            "row and is written once. Mail escalation and the watchdog retire "
-            "lane both read it, so this session is still treated as "
-            f"{entry.origin!r}.\n"
+            "row and is written once. Mail escalation reads it, so this "
+            f"session is still treated as {entry.origin!r}.\n"
         )
 
     # x-481e: record a clock saying "no expiry" beside a hand-stamped policy.
@@ -4463,11 +4462,10 @@ def cmd_watchdog(
         False,
         "--apply-all",
         help=(
-            "Execute every lane: wake plus reap, reroute and retire, which all "
-            "stop a session, plus keeper collection, which kills an orphaned "
-            "keeper process and its hosted children. Only reap also deletes "
-            "its worktree; retire is a stop that `fno agents resume` undoes. "
-            "Implies --apply."
+            "Execute every lane: wake plus reroute (which stops and respawns "
+            "a session), plus keeper collection, which kills an orphaned "
+            "keeper process and its hosted children. Row retirement is the "
+            "daemon sweep's question (`fno agents reap`). Implies --apply."
         ),
     ),
     only: Optional[str] = typer.Option(
@@ -4902,7 +4900,7 @@ def cmd_stale_escalate(
     and reconciles ONE ``[watchdog-stale:*]`` operator question to that set:
     same set is a duplicate, a changed set closes the old ask and asks fresh,
     an empty set closes what is open. Report-only by contract: this verb
-    never wakes, retires, reaps, or touches a worktree - the daemon's idle
+    never wakes or reroutes, and never touches a worktree - the daemon's idle
     tick is its only scheduled caller.
     """
     from fno.agents import stale_lane as se
