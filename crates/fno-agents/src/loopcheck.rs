@@ -12,10 +12,12 @@ use crate::{
     check_supersession::latest_per_name,
     completion_output::allow_output,
     delivery_completion::pr_passes,
-    disposition_gate::{
-        blockers_impossible, blockers_withhold, disposition_blockers_on_chain, DispositionBlocker,
-    },
+    disposition_gate::{disposition_blockers_on_chain, DispositionBlocker},
 };
+// The integration tests reach the blocker predicates through loopcheck, the
+// facade they have always imported from; the predicates live in
+// disposition_gate since the line-budget refactor moved them there.
+pub use crate::disposition_gate::{blockers_impossible, blockers_withhold};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
