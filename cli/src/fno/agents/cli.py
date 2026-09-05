@@ -1479,16 +1479,6 @@ def cmd_spawn(
             "with room, or create the next. --substrate pane only."
         ),
     ),
-    portal: int | None = typer.Option(
-        None,
-        "--portal",
-        help=(
-            "Portal placement (x-9b60): open portal N (0-255) showing the new "
-            "worker, in one call. --substrate thread only. Makes the placement "
-            "flags meaningful for a thread: a fresh portal open honors them; "
-            "a portal that already has a live viewer keeps its geometry."
-        ),
-    ),
     bounded_placement: bool = typer.Option(
         False,
         "--bounded-placement",
