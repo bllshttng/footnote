@@ -236,7 +236,7 @@ jobs:
   # raising a ceiling again.
   #
   # History: 20 left no margin and cancelled green runs. Measured 2026-08-06,
-  # the test step alone was 16m35s on a warm main run and about 19m on the cold
+  # the test step alone was 995s on a warm main run and about 1140s on the cold
   # uv/cargo cache that is the normal state for a new branch, which hit the cap
   # with every test passing. Raised to 30. On 2026-08-21 it hit 30 too, and the
   # comment then standing said that at 30 the suite is the thing to fix. It was
@@ -341,8 +341,9 @@ jobs:
         # Measured on the 1750s run that hit the cap, not guessed: of 1733s of
         # reported step time, the stress harness alone was 756s. It builds the
         # three test binaries once (38s) and then costs a flat 35.9s per trial,
-        # so 20 trials is 718s of the shard on their own. Three trials is 146s
-        # and puts the shard back near 20 minutes.
+        # so 20 trials is 718s of the shard on their own. Three trials is 146s,
+        # which still left the then-unsharded shard near 1120s; the four legs
+        # below are what bring it under the cap.
         #
         # The 20-trial contract did not move to a smaller number, it moved to
         # rust-ci's `stress` job, which is path-triggered on the crates and on
