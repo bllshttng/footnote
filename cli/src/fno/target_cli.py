@@ -3371,13 +3371,17 @@ def start(
         )
         raise typer.Exit(code=1)
     wt_path = Path(wt)
-    # ensure's stderr receipt says "reusing worktree at <path>" when the tree
-    # already existed; anything else means THIS invocation created it. The
-    # distinction belongs to the init-failure receipt below: a tree this run
-    # created and failed to claim is named for reclaim, while a tree that
-    # predates the run is another session's subject and is not characterized
-    # as our creation.
-    created_this_run = "reusing" not in (ens.stderr or "")
+    # Whether the tree is THIS invocation's creation decides the init-failure
+    # receipt below: a tree this run created and failed to claim is named for
+    # reclaim, while a tree that predates the run is another session's subject
+    # and is not characterized as our creation. ensure stamps created=true|
+    # false on its receipt; an installed ensure that predates the token is
+    # read through its reuse wording instead.
+    _created_token = re.search(r"\bcreated=(true|false)\b", ens.stderr or "")
+    if _created_token:
+        created_this_run = _created_token.group(1) == "true"
+    else:
+        created_this_run = "reusing" not in (ens.stderr or "")
     # ensure names the branch's provenance (continued/salvaged/fresh) on its
     # stderr receipt; a re-dispatched worker must see it is continuing.
     _from = re.search(r" base=(\S+)", ens.stderr or "")
