@@ -23,9 +23,12 @@ from typing import Optional
 def _project_events_path(events: Optional[Path]) -> Path:
     if events is not None:
         return events
-    from fno.paths import resolve_repo_root
+    # The space journal, not a hand-built checkout path: the coverage reader
+    # (_reviews) resolves the space, so a hand-built path here writes
+    # attestations the gate can never see (x-d2e9).
+    from fno.paths import project_events_json
 
-    return resolve_repo_root() / ".fno" / "events.jsonl"
+    return project_events_json()
 
 
 def _strip_slashes(name: str) -> str:

@@ -183,7 +183,9 @@ def test_closed_blocks_exit_1_and_audits(tmp_path, gh_on, monkeypatch):
     monkeypatch.setattr(_verify, "run", fake)
     monkeypatch.setattr(_merge, "run", fake)
     assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path)) == 1
-    events = (tmp_path / ".fno" / "events.jsonl").read_text()
+    from fno.paths import project_log
+
+    events = project_log("events.jsonl", project_root=tmp_path).read_text()
     assert "pr_closed_without_merge" in events
 
 
@@ -516,7 +518,9 @@ def test_reviews_no_qualifying_reply_flips_exit_1(tmp_path, monkeypatch, capsys)
     assert rc == 1
     out = capsys.readouterr().out
     assert "flipped back to false" in out and "bot" in out
-    events = (tmp_path / ".fno" / "events.jsonl").read_text()
+    from fno.paths import project_log
+
+    events = project_log("events.jsonl", project_root=tmp_path).read_text()
     audit = json.loads(events.strip().splitlines()[-1])
     assert audit["data"]["gate"] == "external_review_passed"
     assert audit["data"]["reviewer"] == "bot"

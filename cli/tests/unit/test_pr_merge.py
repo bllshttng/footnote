@@ -2851,9 +2851,13 @@ def test_project_log_still_wins_when_it_is_newer(monkeypatch, tmp_path):
     _write_coverage(
         global_dir / "events.jsonl", 781, repo="github.com/bllshttng/footnote", ts="2026-08-08T01:00:00Z", count=1
     )
-    _write_coverage(
-        canonical / ".fno" / "events.jsonl", 781, ts="2026-08-08T02:00:00Z", count=5
-    )
+    # The project log the gate reads is the space journal (x-d2e9); the legacy
+    # checkout path is only a migration source now, so seed the real one.
+    from fno.paths import project_log
+
+    project_journal = project_log("events.jsonl", project_root=canonical)
+    project_journal.parent.mkdir(parents=True, exist_ok=True)
+    _write_coverage(project_journal, 781, ts="2026-08-08T02:00:00Z", count=5)
 
     cov, _note = _merge._review_coverage_for_pr(781, str(canonical))
     assert cov is not None and cov["reviewed_count"] == 5
@@ -2963,7 +2967,11 @@ def test_corrupt_line_does_not_wedge_the_gate(monkeypatch, tmp_path):
     canonical = _git_repo(tmp_path / "canonical", "git@github.com:bllshttng/footnote.git")
     _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
 
-    events = canonical / ".fno" / "events.jsonl"
+    # The project log the gate reads is the space journal (x-d2e9).
+    from fno.paths import project_log
+
+    events = project_log("events.jsonl", project_root=canonical)
+    events.parent.mkdir(parents=True, exist_ok=True)
     events.write_text('{"type": "review_coverage", TRUNCATED\n', encoding="utf-8")
     _write_coverage(events, 781)
 

@@ -245,11 +245,18 @@ def _canonical_for(root: Path) -> Path:
     return root
 
 
-def spaces_root() -> Path:
-    """``FNO_SPACES_DIR`` > ``config.paths.spaces_dir`` > ``<state_dir>/spaces``."""
-    explicit = os.environ.get("FNO_SPACES_DIR")
-    if explicit:
-        return _guard_state_path(Path(os.path.expanduser(explicit)).resolve())
+def spaces_root(*, durable: bool = False) -> Path:
+    """``FNO_SPACES_DIR`` > ``config.paths.spaces_dir`` > ``<state_dir>/spaces``.
+
+    ``durable=True`` skips the env pin: the env var rides one process (a test
+    sandbox, an isolation run), while the config override and the default
+    state root outlive it. A one-time migration moves the ONLY copy, so its
+    destination must be a root the repo's own processes still resolve.
+    """
+    if not durable:
+        explicit = os.environ.get("FNO_SPACES_DIR")
+        if explicit:
+            return _guard_state_path(Path(os.path.expanduser(explicit)).resolve())
     settings = _settings()
     override = settings.paths.spaces_dir
     if override is not None:
@@ -289,13 +296,42 @@ def target_state_path_or_legacy(project_root: Optional[Path] = None) -> Path:
     return root / ".fno" / "target-state.md"
 
 
+def _repo_root_of(path: Path) -> Optional[Path]:
+    """The nearest ancestor of ``path`` that is a checkout root, or None.
+
+    A pure filesystem walk: no env, no cwd, no subprocess, so the answer
+    about ``old`` cannot be bent by whoever is resolving state in this call.
+    """
+    probe = path.parent.resolve()
+    for candidate in (probe, *probe.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
 def migrate_from_checkout(old: Path, new: Path) -> bool:
     """One-shot lazy migration onto the space: move a legacy checkout file to
     ``new`` unless either exists or old is a symlink, then leave a MOVED-TO
     pointer. Best effort: any failure leaves ``old`` in place and returns
     False, degrading to the legacy path.
+
+    The destination must be the source repository's own DURABLE space
+    (``config.paths.spaces_dir`` or the default state root - never a
+    per-process ``FNO_SPACES_DIR`` pin): a move into a sandbox root strands
+    the only copy where the repo's own readers never look again, behind a
+    MOVED-TO pointer they do not follow (x-d2e9). A source outside any
+    checkout has no durable space to check against and keeps the old
+    behavior.
     """
     if old == new or new.exists() or not old.exists() or old.is_symlink():
+        return False
+    try:
+        repo = _repo_root_of(old)
+        if repo is not None:
+            durable_space = spaces_root(durable=True) / space_slug(_canonical_for(repo))
+            if not new.resolve().is_relative_to(durable_space.resolve()):
+                return False
+    except Exception:  # noqa: BLE001 - the documented degrade: a guard that cannot compute refuses
         return False
     try:
         new.parent.mkdir(parents=True, exist_ok=True)
@@ -828,7 +864,10 @@ def event_journals() -> list[Path]:
         rotated: list[tuple[int, Path]] = []
         entries: Iterable[Path]
         try:
-            entries = parent.iterdir()
+            # list() forces the lazy iterdir generator INSIDE the try: the
+            # open happens on first next(), so a bare assignment never catches
+            # the missing-parent error this handler exists to absorb.
+            entries = list(parent.iterdir())
         except OSError:
             entries = ()
         for candidate in entries:

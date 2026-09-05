@@ -892,7 +892,7 @@ fn emit_review_invocation_event(
         .ok()
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| crate::paths::worktree_repo_root(&cwd).join(".fno/events.jsonl"));
+        .unwrap_or_else(|| crate::paths::events_path(&cwd));
     let fields = review_invocation_event_fields(
         invocation_id,
         thread_id,
