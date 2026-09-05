@@ -419,6 +419,59 @@ mod tests {
     }
 
     #[test]
+    fn a_non_spawn_row_names_its_own_gate_even_when_the_graph_is_unreadable() {
+        // The origin gate runs BEFORE the graph read in the sweep, so a row
+        // fno never spawned is held under not-a-spawn-row whatever the
+        // graph's state - kept_graph_unreadable must not shadow the policy's
+        // own first gate (gc_decide checks origin before work).
+        let dir = std::env::temp_dir().join(format!(
+            "fno-gc-notspawn-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = AgentsHome::at(&dir);
+        home.ensure_root().unwrap();
+        crate::state::update_registry(&home.registry_json(), |r| {
+            let mut e = crate::state::RegistryEntry::default();
+            e.name = "adop".into();
+            e.short_id = "adop".into();
+            e.origin = Some("adopted".into());
+            e.harness = Some("codex".into());
+            e.harness_session_id = Some("S-adop".into());
+            r.entries.push(e);
+        })
+        .unwrap();
+        let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
+        let summary = gc_sweep::run(
+            &home,
+            &emitter,
+            900,
+            false,
+            7,
+            // The graph read answers NOTHING: every row would class as
+            // graph-unreadable if the origin gate did not run first.
+            &|_| None,
+            &|_| None,
+            &|_| true,
+            &|_| (None, None),
+            &|_| {},
+        );
+        assert_eq!(
+            summary.kept_not_spawn,
+            vec![("adop".to_string(), "adopted".to_string())]
+        );
+        assert!(
+            summary.kept_graph_unreadable.is_empty(),
+            "{:?}",
+            summary.kept_graph_unreadable
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn ac3_edge_operator_crown_open_work_and_active_keep() {
         let operator = GcRow {
             origin: Some("operator".into()),

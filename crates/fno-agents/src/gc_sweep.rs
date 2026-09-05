@@ -244,6 +244,16 @@ pub(crate) fn run(
             summary.kept_crowned.push(id);
             continue;
         }
+        // The origin gate runs BEFORE the graph read so a row fno never
+        // spawned is named by its own gate whatever the graph's state - the
+        // policy's own order (gc_decide checks origin first), not shadowed by
+        // kept_graph_unreadable.
+        if e.origin.as_deref() != Some("spawn") {
+            summary
+                .kept_not_spawn
+                .push((id, e.origin.clone().unwrap_or_default()));
+            continue;
+        }
         let Some(graph) = &graph else {
             summary.kept_graph_unreadable.push(id);
             continue;
