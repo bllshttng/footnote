@@ -60,6 +60,7 @@ use crate::vt::{self, frame_text, Modes};
 
 mod agent_actions;
 mod agent_rows_join;
+mod pane_reseat;
 mod portal_reach;
 
 use self::agent_actions::{
@@ -833,6 +834,14 @@ enum CoreMsg {
         portal: u8,
         placement: PanePlacement,
         agents: Option<Vec<RegistryAgent>>,
+        reply: ControlReply,
+    },
+    /// (v69) Re-seat a live pane-hosted worker into a portal seat, keeping the
+    /// PTY (see [`ControlVerb::ThreadReseat`]). The server moves the topology;
+    /// the registry `mux` flip is the caller's half, on this receipt.
+    ReseatPane {
+        pane: u64,
+        portal: Option<u8>,
         reply: ControlReply,
     },
     TabJoin {
@@ -5636,179 +5645,6 @@ impl Core {
         } else {
             self.squad_members.remove(&detached.squad);
             self.persist_remove(&detached.squad_name, &detached.squad_key);
-        }
-    }
-
-    /// Detach a live worker pane from the visible topology without reaping its
-    /// child. A one-leaf tab gets a replacement shell so the session never
-    /// renders an empty tab or loses its last anchor.
-    fn detach_worker_pane(&mut self, pane: u64) -> Result<(), String> {
-        let (squad, tab_index) = self
-            .session
-            .find_pane(pane)
-            .ok_or_else(|| format!("no such pane: {pane}"))?;
-        let (rows, cols, entry_cwd) = {
-            let entry = self
-                .panes
-                .get(&pane)
-                .ok_or_else(|| format!("no such pane: {pane}"))?;
-            if !entry.pty.is_child_alive() {
-                return Err(format!("pane {pane} is no longer live"));
-            }
-            let (rows, cols) = entry.vt.size();
-            (rows, cols, entry.cwd.clone())
-        };
-        let agent_matches = self
-            .agents
-            .iter()
-            .filter(|agent| {
-                !agent.exited
-                    && (agent.mux.as_ref().is_some_and(|(session, candidate)| {
-                        session == &self.session_name && *candidate == pane
-                    }) || self.worker_pane_for_agent(agent) == Some(pane))
-            })
-            .collect::<Vec<_>>();
-        let mapped_worker = self.worker_member_context(pane).filter(|worker| {
-            self.worker_pane
-                .get(&worker.name)
-                .is_some_and(|panes| panes.contains(&pane))
-        });
-        let agent = match agent_matches.as_slice() {
-            [agent] => Some((*agent).clone()),
-            [] => None,
-            matches => {
-                return Err(format!(
-                    "pane {pane} has no unique live worker row (matches: {}, session: {})",
-                    matches.len(),
-                    self.session_name
-                ))
-            }
-        };
-        if agent.is_none() && mapped_worker.is_none() {
-            return Err(format!("pane {pane} has no unique live worker row"));
-        }
-        let (only_leaf, tab_name, tid, squad_name, squad_key, origins) = {
-            let sq = self
-                .session
-                .squad(squad)
-                .expect("find_pane returned live squad");
-            let tab = &sq.tabs[tab_index];
-            (
-                tree::leaves(&tab.root).len() == 1,
-                tab.name.clone(),
-                tab.id,
-                sq.name.clone().unwrap_or_default(),
-                sq.key.clone(),
-                sq.origins.clone(),
-            )
-        };
-        let cwd = if entry_cwd.is_empty() {
-            agent
-                .as_ref()
-                .map(|agent| agent.cwd.clone())
-                .or_else(|| mapped_worker.as_ref().map(|worker| worker.cwd.clone()))
-                .unwrap_or_default()
-        } else {
-            entry_cwd
-        };
-        let replacement = if only_leaf {
-            Some(self.spawn_pane(rows, cols, &cwd)?)
-        } else {
-            None
-        };
-        let vp = self.tab_rect(tid);
-        let si = self
-            .session
-            .squads
-            .iter()
-            .position(|s| s.id == squad)
-            .expect("squad live");
-        let outcome = {
-            let tab = &mut self.session.squads[si].tabs[tab_index];
-            tree::detach_leaf(tab, vp, pane).map_err(|error| error.to_string())?
-        };
-        if let (tree::DetachOutcome::TabEmptied, Some(shell)) = (outcome, replacement) {
-            let tab = &mut self.session.squads[si].tabs[tab_index];
-            tab.root = Node::Leaf(shell);
-            tab.focus = shell;
-        }
-        let detached = if let Some(agent) = agent {
-            DetachedPane::from_agent(&agent, squad, squad_name, squad_key, origins, tab_name)
-        } else {
-            mapped_worker.ok_or_else(|| format!("pane {pane} has no worker mapping"))?
-        };
-        self.detached_panes.insert(pane, detached.clone());
-        self.persist_detached_member(&detached, true);
-        Ok(())
-    }
-
-    fn reattach_detached_pane(
-        &mut self,
-        pane: u64,
-        fallback_squad: u64,
-    ) -> Result<(u64, TabId), String> {
-        let detached = self
-            .detached_panes
-            .get(&pane)
-            .cloned()
-            .ok_or_else(|| format!("no detached pane: {pane}"))?;
-        if !self
-            .panes
-            .get(&pane)
-            .is_some_and(|entry| entry.pty.is_child_alive())
-        {
-            return Err(format!("detached pane {pane} is no longer live"));
-        }
-        let squad = self
-            .session
-            .squad(detached.squad)
-            .map(|_| detached.squad)
-            .or_else(|| self.session.squad(fallback_squad).map(|_| fallback_squad))
-            .ok_or_else(|| "target workspace no longer exists".to_string())?;
-        let tid = self.session.mint_tab_id();
-        self.session
-            .squad_mut(squad)
-            .expect("target squad checked")
-            .tabs
-            .push(Tab {
-                name: detached.tab_name.clone(),
-                id: tid,
-                root: Node::Leaf(pane),
-                focus: pane,
-            });
-        self.detached_panes.remove(&pane);
-        self.bind_worker_pane(&detached, pane);
-        self.persist_detached_member(&detached, false);
-        Ok((squad, tid))
-    }
-
-    /// Detach `pane` from whatever tab currently holds it, keeping the PTY alive
-    /// (the [`Self::pane_break`] cleanup, minus the new-tab step). A no-op if the
-    /// pane is in no tab. Used to relocate a bound session's live pane into a
-    /// template tab without ever reaping it (Reconcile: relocate, never kill).
-    fn detach_pane_keep_pty(&mut self, pane: u64) {
-        let Some((sid, ti)) = self.session.find_pane(pane) else {
-            return;
-        };
-        let tid = self.session.squad(sid).expect("find_pane live").tabs[ti].id;
-        let vp = self.tab_rect(tid);
-        let si = self
-            .session
-            .squads
-            .iter()
-            .position(|s| s.id == sid)
-            .expect("squad live");
-        let outcome = {
-            let tab = &mut self.session.squads[si].tabs[ti];
-            tree::detach_leaf(tab, vp, pane)
-        };
-        // TabEmptied leaves the tree unchanged (the pane still nominally in that
-        // single-pane tab); dropping the tab frees the pane. Either way the PTY
-        // survives, ready to graft into the template tree.
-        if matches!(outcome, Ok(tree::DetachOutcome::TabEmptied)) {
-            self.session.remove_tab(sid, ti);
-            self.tab_areas.remove(&tid);
-            self.reanchor_views();
         }
     }
 
@@ -14652,6 +14488,15 @@ impl Core {
                 self.portal_ctl(&name, portal, placement, agents, reply);
                 Flow::Continue
             }
+            CoreMsg::ReseatPane {
+                pane,
+                portal,
+                reply,
+            } => {
+                let msg = self.reseat_pane_into_portal(pane, portal);
+                let _ = reply.send(msg);
+                Flow::Continue
+            }
             CoreMsg::TabJoin {
                 src_tab,
                 anchor_pane,
@@ -16290,6 +16135,15 @@ async fn handle_control(
                 })
                 .await
         }
+        ControlVerb::ThreadReseat { pane, portal } => {
+            core_tx
+                .send(CoreMsg::ReseatPane {
+                    pane,
+                    portal,
+                    reply: reply_tx,
+                })
+                .await
+        }
         ControlVerb::TabJoin {
             src_tab,
             anchor_pane,
@@ -16828,6 +16682,8 @@ mod tests {
     mod portal_tests;
     // Same treatment: the lifecycle-resolution test family.
     mod lifecycle_tests;
+    // The (v69) re-seat test family, same treatment.
+    mod reseat_tests;
 
     // The sideline rename test family, same treatment.
     mod rename_tests;
