@@ -8,7 +8,7 @@ answer mid-session.
 
 The claim ``host`` field is doing PID-reuse SCOPING - "is this pid namespace
 mine?" - not display. Keying that on a moving string made a live holder read
-as cross-host, which short-circuits ``staleness.is_live`` before the pid check
+as cross-host, which the native claim verdict reports before the pid check
 and drops the claim to STALE. STALE is recoverable, so the claim became
 stealable out from under a working session: duplicate work, duplicate PR.
 

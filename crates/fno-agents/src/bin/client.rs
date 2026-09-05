@@ -175,7 +175,7 @@ async fn run(args: Vec<String>) -> i32 {
     // and it stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS — `fno agents claim`
     // remains the only operator CLI for claims.
     if matches!(verb, "claim") {
-        return fno_agents::client_verbs::run_claim(&args[1..]);
+        return fno_agents::claim_verbs::run_claim(&args[1..]);
     }
 
     // `detect` is the HIDDEN debug front over the screen-manifest fallback

@@ -81,7 +81,10 @@ def _seat(name: str, session: str, *, scope: str | None = SCOPE, status: str = "
 
 
 def _manifest(court, scope: str = SCOPE, session: str = CALLER_SESSION):
-    path = king_manifest_path(scope, state_root=court / ".fno")
+    # No state_root pin: the shape verb resolves the default (the repo's
+    # space), so the fixture must write through the same resolver or the verb
+    # reads a different file than the test wrote.
+    path = king_manifest_path(scope)
     write_manifest(path, scope=scope, harness_session_id=session)
     return path
 
@@ -109,7 +112,8 @@ def test_shape_is_idempotent_on_a_second_call(court) -> None:
     _seat("reigning-king", CALLER_SESSION)
     manifest = _manifest(court)
 
-    assert _shape("court").exit_code == 0
+    _first = _shape("court")
+    assert _first.exit_code == 0, f"DBG={_first.output!r}"
     second = _shape("court")
 
     assert second.exit_code == 0, second.output

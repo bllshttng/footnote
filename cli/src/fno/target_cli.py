@@ -2963,7 +2963,7 @@ def _read_node_claim(node_id: str) -> Optional[dict]:
         return None
 
 
-def _classify_node_claim(node_id: str) -> tuple[str, Optional[dict]]:
+def _classify_node_claim(node_id: str, *, info: Optional[dict] = None) -> tuple[str, Optional[dict]]:
     """``(verdict, info)`` for ``node:<id>`` from THIS session's view.
 
     verdict in ``{ours, foreign_live, dead_predecessor, free}``. Liveness is
@@ -2971,9 +2971,11 @@ def _classify_node_claim(node_id: str) -> tuple[str, Optional[dict]]:
     the surface that lets a caller park a second session instead of being told
     the owner went idle. Read-only, never raises; a probe failure reads as
     ``free`` (a re-acquire candidate) so an unreadable claims dir never wedges
-    start.
+    start. ``info`` overrides the claim read (a batch verdict row), so every
+    caller maps state through this one function.
     """
-    info = _read_node_claim(node_id)
+    if info is None:
+        info = _read_node_claim(node_id)
     if not info:
         return ("free", None)
     state = info.get("state")

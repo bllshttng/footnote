@@ -9,6 +9,7 @@ ClaimState is the four-way classification used by status/list verbs.
 """
 from __future__ import annotations
 
+import time
 from enum import Enum
 from typing import Any, Optional
 
@@ -31,6 +32,11 @@ MAX_KEY_LENGTH = 256
 MAX_ENCODED_FILENAME_BYTES = 240  # 240 + ".lock" suffix = 245 bytes
 MIN_TTL_MS = 60_000        # 1 minute
 MAX_TTL_MS = 86_400_000    # 24 hours
+
+
+def now_ms() -> int:
+    """Return current UTC time as epoch milliseconds."""
+    return int(time.time() * 1000)
 
 
 class ClaimState(str, Enum):
@@ -76,13 +82,13 @@ class Claim(BaseModel):
         machine_id: stable machine identity (``hostid.machine_id``). Additive:
             absent on pre-change records (reads as None, never a parse error),
             which fall back to the host compare. Cross-machine claims are
-            intentionally treated as opaque (see staleness.is_live).
+            intentionally treated as opaque by the native claim verdict.
         reason: optional human-readable context string.
         pid_provenance: how ``pid`` was resolved at write time. "session-prover"
             = the process-tree prover resolved it from the acquiring session's
             own anchor; "ambient" = everything else (caller-supplied, resolved
             through an ambient harness marker, or the default transient
-            subprocess pid). The expired-TTL hybrid arm in staleness.classify
+            subprocess pid). The expired-TTL hybrid arm in the native classifier
             reads it: a live pid keeps an expired claim LIVE only when it was
             proven to be the holder session's own process, so a long-lived
             foreign process can never make a lease permanent. Additive: absent

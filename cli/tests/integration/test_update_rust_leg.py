@@ -177,6 +177,17 @@ def test_update_rust_leg_journey(tmp_path: Path) -> None:
         "TERM": "dumb",
         "COLUMNS": "200",
     }
+    # Run 2 reclaims run 1's install-guard claim through the native claim
+    # door, and that door is a subprocess: without a resolvable fno-agents
+    # binary the acquire fails closed ("held") and the rust-fresh
+    # short-circuit never runs. Forward the caller's binary; skip when the
+    # caller has none - this journey needs the real instrument, not a stub.
+    if not os.environ.get("FNO_AGENTS_BIN"):
+        pytest.skip(
+            "FNO_AGENTS_BIN unset: the claim-door reclaim this journey drives "
+            "needs a resolvable fno-agents binary"
+        )
+    env["FNO_AGENTS_BIN"] = os.environ["FNO_AGENTS_BIN"]
 
     # --- Run 1: stale marker -> cargo refresh + installer handoff ---
     result = _run_update(cli_src, env, cwd=repo)

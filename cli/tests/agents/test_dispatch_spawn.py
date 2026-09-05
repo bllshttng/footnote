@@ -448,7 +448,14 @@ def test_spawn_claude_once_uses_headless(workdir_claude) -> None:
 
 def test_spawn_codex_plain_no_once_requires_runtime(workdir, monkeypatch) -> None:
     """Codex thread spawn reports the missing Rust runtime distinctly."""
+    from fno import rust_binary
     from fno.agents.cli import agents_app
+
+    # A smoke run preserves a real fno-agents for the claim door and may leave
+    # it reachable; this test pins the missing-runtime refusal, so force the
+    # fallback by stubbing both resolvers.
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
 
     runner = _make_runner()
     result = runner.invoke(

@@ -236,7 +236,7 @@ def test_node_claim_predispatch_is_family2_loud(
     monkeypatch.setattr(
         target_cli,
         "_classify_node_claim",
-        lambda _node: (
+        lambda _node, **_: (
             claim_verdict,
             {
                 "state": claim_state,
@@ -907,7 +907,7 @@ def test_predispatch_auto_defers_before_birth_at_durable_failure_limit(monkeypat
     )
     monkeypatch.setattr(
         "fno.target_cli._classify_node_claim",
-        lambda _node: ("free", None),
+        lambda _node, **_: ("free", None),
         raising=False,
     )
     monkeypatch.setattr(
@@ -962,7 +962,7 @@ def test_predispatch_refuses_birth_when_auto_defer_write_fails(monkeypatch, caps
     monkeypatch.setattr("fno.notify._impl.send_notification", lambda *_a, **_k: (0, ""))
     monkeypatch.setattr(
         "fno.target_cli._classify_node_claim",
-        lambda _node: ("free", None),
+        lambda _node, **_: ("free", None),
         raising=False,
     )
     monkeypatch.setattr(

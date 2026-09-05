@@ -1356,6 +1356,7 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
 # build; selection has to carry it along.
 _RUST_BIN_MARKER = "target/debug/fno-agents"
 _RUST_BUILD_STEP = "Build fno-agents debug binary (for journey tests)"
+_CLAIM_DOOR_NAME = "fno-agents-claim-door"
 
 
 def _needs_rust_binary(root: Path, rel: str) -> bool:
@@ -1403,6 +1404,8 @@ def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, st
         steps.append((rel, ".", f"bash {shlex.quote(rel)}"))
     shell_targets = set(shell_rels)
     for name in sorted({s["target"] for s in selections if s["kind"] == "step"}):
+        if name == _RUST_BUILD_STEP:
+            continue
         step = by_name[name]
         if name == _RUST_BUILD_STEP and steps and steps[0] == step:
             continue  # already placed ahead of pytest; never run the build twice
@@ -1411,6 +1414,49 @@ def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, st
             continue  # every harness it wraps is already selected directly
         steps.append(step)
     return steps
+
+
+_TARGET_BIN_RELS = (
+    "crates/fno-agents/target/debug/fno-agents",
+    "crates/fno-agents/target/release/fno-agents",
+)
+
+
+def _scrub_target_bins(root: Path) -> None:
+    """Remove the checkout's target/ binaries: the parity-test marker."""
+    for rel in _TARGET_BIN_RELS:
+        try:
+            (root / rel).unlink()
+        except OSError:
+            pass
+
+
+def _pin_claim_door(env: dict[str, str], binary: Path) -> None:
+    """Pin the claim door: the env name outranks PATH in resolve_binary.
+
+    Never touches PATH. Hook harnesses shell bare `fno-agents` and route on
+    its absence (spaces fallback); a PATH-visible binary would flip those
+    writes onto space paths mid-shard.
+    """
+    env["FNO_AGENTS_BIN"] = str(binary)
+
+
+def _preserve_claim_door(root: Path, env: dict[str, str]) -> None:
+    """Keep the native claim reader available after the Rust-marker scrub."""
+    candidates = [Path(v) for v in (env.get("FNO_AGENTS_BIN"), env.get("FNO_AGENTS_FRONT")) if v]
+    candidates += [root / rel for rel in _TARGET_BIN_RELS]
+    source = next((c for c in candidates if c.is_file() and os.access(c, os.X_OK)), None)
+    if source is None:
+        return
+    preserved_dir = _sandbox() / _CLAIM_DOOR_NAME
+    preserved_dir.mkdir(parents=True, exist_ok=True)
+    preserved = preserved_dir / "fno-agents"
+    shutil.copyfile(source, preserved)
+    preserved.chmod(source.stat().st_mode & 0o777)
+    # The scrub unlinks the target/ copies this function may have been handed,
+    # so a BIN inherited from the job env goes dead at exactly the moment the
+    # claim consumers run. Re-point it at the preserved copy.
+    _pin_claim_door(env, preserved)
 
 
 def _write_changed_receipt(path: str, payload: dict) -> None:
@@ -1534,18 +1580,17 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
         return CHANGED_RC_PREREQ
 
     # Same faithful-ordering guard the full run applies: the pytest step must
-    # see NO fno-agents binary so the @requires_rust parity tests skip, as they
-    # do in CI. preflight deliberately preserves target/ across runs, so without
-    # this the packet runs ~15 tests the full gate skips - and a failure there
-    # aborts preflight on a discrepancy the gate would never report. Any journey
-    # harness that needs the binary is preceded by its build step (above).
+    # see NO checkout fno-agents binary so the @requires_rust parity tests skip,
+    # as they do in CI. The claim door is preserved outside target/ first.
     if any(n.startswith("Pytest (changed subset") for n, _, _ in steps):
-        for rel in ("crates/fno-agents/target/debug/fno-agents",
-                    "crates/fno-agents/target/release/fno-agents"):
-            try:
-                (root / rel).unlink()
-            except OSError:
-                pass
+        if _RUST_BUILD_STEP in {name for name, _, _ in steps}:
+            # The changed-smoke job has Rust but no setup build. Its selected
+            # build step must run before claim tests, so keep the target path
+            # present and pin the door at the fresh build.
+            _pin_claim_door(env, root / "crates/fno-agents/target/debug/fno-agents")
+        else:
+            _preserve_claim_door(root, env)
+            _scrub_target_bins(root)
 
     e0 = time.monotonic()
     results, rc = _execute_steps(root, env, steps, keep_going=opts["keep_going"])
@@ -1903,12 +1948,8 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     # keeps using whatever binary is already on disk.
     _DELETE_TRIGGERS = {"Pytest (unit + integration)", _RUST_BUILD_STEP}
     if _DELETE_TRIGGERS & {names[i] for i in selected}:
-        for rel in ("crates/fno-agents/target/debug/fno-agents",
-                    "crates/fno-agents/target/release/fno-agents"):
-            try:
-                (root / rel).unlink()
-            except OSError:
-                pass
+        _preserve_claim_door(root, env)
+        _scrub_target_bins(root)
 
     results, first_rc = _execute_steps(
         root, env, [steps[i] for i in selected], keep_going,
