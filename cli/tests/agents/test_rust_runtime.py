@@ -476,7 +476,11 @@ def test_rust_client_verbs_match_client_rs() -> None:
     # Verbs dispatched before build_request via `verb == "…"` (drive, status; the
     # `--emit-schema` flag starts with `-` so it is excluded by the same anchor).
     specials = set(re.findall(r'verb == "([a-z][a-z0-9-]*)"', src))
-    routable = arms | specials
+    # Hidden direct-dispatch arms: the binary serves them before build_request,
+    # but Python never routes them. `board` is reached only through
+    # `fno inbox board` shelling to the binary via resolve_binary (d-e11b2b3e);
+    # adding it to RUST_CLIENT_VERBS would mint a second surface for it.
+    routable = arms | (specials - {"board"})
 
     assert routable == set(rr.RUST_CLIENT_VERBS), (
         "RUST_CLIENT_VERBS is out of sync with client.rs routable verbs.\n"

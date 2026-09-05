@@ -79,15 +79,15 @@ consolidation:
 surface:
   question: "Which nodes need dispatch?"   # ONE line, phrased as a question
   ruling: d-00000000                       # optional: the live law the question is quoted from
-  sweep: "rg -n 'plan_path' cli/src/fno/king/"  # the exact command run; must return the control below
-  control: cli/src/fno/king/board.py:275   # an answerer known BEFORE the sweep ran
+  sweep: "rg -n 'plan_path' crates/fno-agents/src/king_board.rs"  # the exact command run; must return the control below
+  control: crates/fno-agents/src/king_board.rs build_board  # an answerer known BEFORE the sweep ran
   answerers:
-    - at: cli/src/fno/king/board.py:275
+    - at: crates/fno-agents/src/king_board.rs build_board (undispatched filter)
       disposition: dual-logic              # dual-logic | shared-vocabulary | generated-artifact | out-of-scope
-      reads: "for node in undispatched_read.rows()"   # the expression the site evaluates, quoted
+      reads: "inputs.undispatched.rows()"   # the expression the site evaluates, quoted
       feed: "fno backlog undispatched --json"         # the command believed to supply the site
       emits: "31 rows, 31 with plan_path, 0 without (measured 2026-09-02)"
-    - at: cli/src/fno/king/board.py:306
+    - at: crates/fno-agents/src/king_board.rs build_board (unplanned filter)
       disposition: out-of-scope
       reason: "already correct; its feed is SRC_READY, measured above"
   count: 2                                 # the PR estimate, stated

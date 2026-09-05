@@ -86,9 +86,11 @@ def test_rust_shellouts_use_the_folded_mcp_and_board_paths() -> None:
     loopcheck = (REPO_ROOT / "crates/fno-agents/src/loopcheck.rs").read_text()
 
     assert '.args(["agents", "mcp", "send", "--session-id", channel_id])' in daemon
-    # The king's board read moved behind bounded_read; the pinned invariant is
-    # the folded `inbox board` spelling, not the Command::args call shape.
-    assert '&["inbox", "board", "--json", "--state"' in loopcheck
+    # The king's board read is IN PROCESS since x-25b8: the stop gate calls the
+    # collector as a library. The pinned invariant is the library call with the
+    # stop-gate budget handed in, never a subprocess spelling.
+    assert "crate::king_board::read_board(&opts)" in loopcheck
+    assert "budget_ms: stopgate_read_timeout()" in loopcheck
 
 
 def test_growth_launch_uses_the_folded_roles_path() -> None:

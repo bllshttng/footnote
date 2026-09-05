@@ -26,6 +26,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "ask",
     "attach",
     "bash-census",
+    "board",
     "claim",
     "codex-loaded-threads",
     "detect",
@@ -271,6 +272,16 @@ async fn run(args: Vec<String>) -> i32 {
     }
     if verb == "session-start-bytes" {
         return fno_agents::session_start_bytes::run_session_start_bytes(&args[1..]);
+    }
+
+    // `board` (x-25b8): the king board collector, read-only, daemon-free. Not a
+    // routable `fno agents` verb (same `matches!` treatment as graph-get): the
+    // Python surface is `fno inbox board` / `fno king board`, whose typer
+    // command shells HERE and renders, and the stop hook reads the collector
+    // in-process. Matched with `==` beside graph-get so the routable-verb
+    // parity guard does not see it - no advertised fno verb is added.
+    if verb == "board" {
+        return fno_agents::king_board::run_board(&args[1..]);
     }
 
     // `verify-evidence`: Rust port of scripts/lib/verify-event-evidence.sh

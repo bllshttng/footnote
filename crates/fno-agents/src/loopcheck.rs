@@ -12880,8 +12880,10 @@ fn row_identity(queue: &str, row: &Value) -> String {
     format!("{queue}:{}", id.trim_matches('"'))
 }
 
-pub(crate) fn parse_king_board(stdout: &str) -> Option<KingBoard> {
-    let value: Value = serde_json::from_str(stdout).ok()?;
+/// The value-level parser: the in-process collector hands its payload over as
+/// a `Value`, so the stop gate reads the board without a serialize/parse
+/// round trip.
+pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
     let actionable = value.get("actionable")?.as_i64()?;
     let unreadable = value
         .get("unreadable")
@@ -12928,36 +12930,28 @@ pub(crate) fn read_king_board(
     cwd: &Path,
     state_path: &Path,
 ) -> Result<KingBoard, String> {
-    // The board's own exit code is non-zero when any queue is unreadable, and
-    // it still prints a full payload in that case. So the payload is parsed
-    // regardless of that exit code; only an absent or unparseable one is a read
-    // failure, and that one blocks, because a king that cannot see its board
-    // must not certify itself finished.
-    let state_arg = state_path.to_string_lossy().into_owned();
-    let read = bounded_read(
-        fno_bin.as_ref(),
-        &["inbox", "board", "--json", "--state", &state_arg],
-        cwd,
-        "king_board",
-        stopgate_read_timeout(),
-    )
-    .map_err(|e| match e.kind {
-        ReadErrorKind::TimedOut => e.render(),
-        ReadErrorKind::Failed => {
-            format!("cannot run {fno_bin} inbox board: {}", e.stderr_tail)
-        }
-        ReadErrorKind::Unrunnable => {
-            format!("cannot run {fno_bin} inbox board: {}", e.stderr_tail)
-        }
-    })?;
-    let stdout = String::from_utf8_lossy(&read.stdout);
-    parse_king_board(&stdout).ok_or_else(|| {
-        let stderr = String::from_utf8_lossy(&read.stderr_tail);
-        format!(
-            "unparseable board output (exit {}): {}",
-            read.status.code().unwrap_or(-1),
-            stderr.trim().chars().take(300).collect::<String>()
-        )
+    // The board is now read IN PROCESS (x-25b8): the collector is this same
+    // binary's library, so the stop gate passes its own 30s bound in as the
+    // whole-board budget and parses the returned payload directly. No
+    // subprocess, no transport timeout: a timeout of the old shellout read as
+    // "a slow source" when it was the board's own deadline enforcement; that
+    // failure class is gone. The board still self-enforces (every source gets
+    // a slice of the budget and names what it could not read), so an
+    // unreadable queue still blocks - a king that cannot see its board must
+    // not certify itself finished.
+    let _ = fno_bin;
+    let opts = crate::king_board::BoardOpts {
+        budget_ms: stopgate_read_timeout().as_millis() as u64,
+        max_pr_reads: 20,
+        state_path: Some(state_path.to_path_buf()),
+        // The old subprocess board ran with this cwd; config-tier, claims-root
+        // and project-journal resolution anchor on the same directory now.
+        cwd: Some(cwd.to_path_buf()),
+    };
+    let payload = crate::king_board::read_board(&opts);
+    parse_king_board_value(&payload).ok_or_else(|| {
+        "unparseable board payload: the collector returned a shape parse_king_board_value cannot read"
+            .to_string()
     })
 }
 

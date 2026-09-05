@@ -23,14 +23,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Default fold window when `--since-epoch` is absent: the last 24h.
-const DEFAULT_WINDOW_SECS: u64 = 24 * 60 * 60;
+pub const DEFAULT_WINDOW_SECS: u64 = 24 * 60 * 60;
 
 /// `fires` floor for `review_wedged`: the loop must have re-checked at least
 /// this many times before a green-PR block counts as wedged (a fresh block
 /// during a normal review wait is not yet a wedge). Hardcoded heuristic, not a
 /// config knob - tune the const if it misfires (ponytail: no config for a value
 /// that never changes); a hidden `--fires-floor` overrides it for tests.
-const DEFAULT_FIRES_FLOOR: u64 = 2;
+pub const DEFAULT_FIRES_FLOOR: u64 = 2;
 
 /// Below this age, a pile of unharvested carve-outs or stale claims is not yet
 /// a needs-me item - only a pile that has actually gone stale belongs in the
@@ -863,6 +863,59 @@ fn scan_claim_ages(dir: &Path) -> Vec<ClaimAge> {
     out
 }
 
+/// The whole needs fold over explicit sources: events read + fold + the three
+/// non-event legs (carveout age, stale claims, refused workers) + liveness
+/// stamp. Shared by the `needs` verb and the king board's in-process needs
+/// read, so the two surfaces cannot drift (the king board is why this is `pub`).
+/// `cwd` anchors the carveout leg: the verb passes the process cwd it inherits,
+/// the board passes its own resolved cwd (the process cwd is not guaranteed to
+/// be the project for an in-process caller).
+pub fn collect_needs_items(
+    home: &AgentsHome,
+    event_paths: &[PathBuf],
+    ledger_path: &Path,
+    since: u64,
+    fires_floor: u64,
+    cwd: &Path,
+) -> Vec<NeedItem> {
+    let mut events_raw = String::new();
+    for p in event_paths {
+        if let Ok(content) = std::fs::read_to_string(p) {
+            events_raw.push_str(&content);
+            if !content.ends_with('\n') {
+                events_raw.push('\n');
+            }
+        }
+    }
+    let ledger_raw = std::fs::read_to_string(ledger_path).unwrap_or_default();
+
+    let mut items = fold(&events_raw, &ledger_raw, since, fires_floor);
+
+    // Carve-out-age and stale-claim legs: durable on-disk state, not events,
+    // so they are read directly here (IO layer) rather than folded from
+    // `events_raw`, and never windowed by `since` (see the doc comments on
+    // `carveout_age_item` / `stale_claim_item`). The ledger lives under the
+    // canonical checkout's `.fno/` (`resolve_carveout_root` on the write
+    // side); a worktree only sees it through a skip-if-missing symlink, so
+    // read the canonical path directly and fall back to cwd outside a repo.
+    let carveouts_path = crate::paths::canonical_repo_root(cwd)
+        .map(|r| r.join(".fno").join("carveouts.jsonl"))
+        .unwrap_or_else(|| PathBuf::from(".fno").join("carveouts.jsonl"));
+    let carveouts_raw = std::fs::read_to_string(&carveouts_path).unwrap_or_default();
+    if let Some(item) = carveout_age_item(&carveouts_raw, now_secs()) {
+        items.push(item);
+    }
+    if let Some(dir) = crate::claims::claims_dir_for(None) {
+        let ages = scan_claim_ages(&dir);
+        if let Some(item) = stale_claim_item(&ages, crate::claims::now_ms()) {
+            items.push(item);
+        }
+    }
+    items.extend(refused_worker_items(home));
+
+    stamp_liveness(items)
+}
+
 /// The `fno-agents needs` verb. Read-only; exits 0 on empty/corrupt input (only
 /// a usage error exits 2), so the overlay caller never sees a failure it must
 /// handle beyond a nonzero exit.
@@ -901,45 +954,17 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
     }
     let ledger_path = args.ledger_override.unwrap_or(default_ledger);
 
-    let mut events_raw = String::new();
-    for p in &event_paths {
-        if let Ok(content) = std::fs::read_to_string(p) {
-            events_raw.push_str(&content);
-            if !content.ends_with('\n') {
-                events_raw.push('\n');
-            }
-        }
-    }
-    let ledger_raw = std::fs::read_to_string(&ledger_path).unwrap_or_default();
-
     let since = args
         .since_epoch
         .unwrap_or_else(|| now_secs().saturating_sub(DEFAULT_WINDOW_SECS));
-    let mut items = fold(&events_raw, &ledger_raw, since, args.fires_floor);
-
-    // Carve-out-age and stale-claim legs: durable on-disk state, not events,
-    // so they are read directly here (IO layer) rather than folded from
-    // `events_raw`, and never windowed by `since` (see the doc comments on
-    // `carveout_age_item` / `stale_claim_item`). The ledger lives under the
-    // canonical checkout's `.fno/` (`resolve_carveout_root` on the write
-    // side); a worktree only sees it through a skip-if-missing symlink, so
-    // read the canonical path directly and fall back to cwd outside a repo.
-    let carveouts_path = canonical
-        .map(|r| r.join(".fno").join("carveouts.jsonl"))
-        .unwrap_or_else(|| PathBuf::from(".fno").join("carveouts.jsonl"));
-    let carveouts_raw = std::fs::read_to_string(&carveouts_path).unwrap_or_default();
-    if let Some(item) = carveout_age_item(&carveouts_raw, now_secs()) {
-        items.push(item);
-    }
-    if let Some(dir) = crate::claims::claims_dir_for(None) {
-        let ages = scan_claim_ages(&dir);
-        if let Some(item) = stale_claim_item(&ages, crate::claims::now_ms()) {
-            items.push(item);
-        }
-    }
-    items.extend(refused_worker_items(home));
-
-    let items = stamp_liveness(items);
+    let items = collect_needs_items(
+        home,
+        &event_paths,
+        &ledger_path,
+        since,
+        args.fires_floor,
+        &cwd,
+    );
 
     if args.json {
         println!(

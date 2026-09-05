@@ -1205,12 +1205,7 @@ fn gc_sweep_turns_unterminated_node_reap_into_durable_failure() {
     let done_repo = home.root().join("done-repo");
     for repo in [&dead_repo, &done_repo] {
         std::fs::create_dir_all(repo.join(".fno")).unwrap();
-        assert!(std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(repo)
-            .status()
-            .unwrap()
-            .success());
+        assert!(crate::git_test_helpers::git_init(repo));
     }
 
     let dead_session = "target-run-dead";
@@ -1306,12 +1301,7 @@ fn gc_sweep_restores_row_when_termination_evidence_is_unknown() {
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     let repo = home.root().join("repo");
     std::fs::create_dir_all(repo.join(".fno")).unwrap();
-    assert!(std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&repo)
-        .status()
-        .unwrap()
-        .success());
+    assert!(crate::git_test_helpers::git_init(&repo));
     std::fs::write(
         repo.join(".fno/target-state.md"),
         "---\nfno_id: reused-run\ninput: x-other\nplan_path: \"\"\n---\n",
@@ -1354,12 +1344,7 @@ fn gc_sweep_restores_row_when_dead_dispatch_receipt_cannot_persist() {
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     let repo = home.root().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    assert!(std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&repo)
-        .status()
-        .unwrap()
-        .success());
+    assert!(crate::git_test_helpers::git_init(&repo));
     state::update_registry(&home.registry_json(), |registry| {
         let mut row = bg_claude_row("target-x-a35a-route-atomicity", "dead0001");
         row.status = AgentStatus::Exited;

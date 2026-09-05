@@ -15,9 +15,12 @@ king_app = typer.Typer(
 )
 
 
-def _default_max_rows() -> int:
-    from fno.king.board import DEFAULT_MAX_ROWS
+#: Per-queue render cap for the human board view (was board.DEFAULT_MAX_ROWS;
+#: the count in the payload stays whole, only the rendered rows are cut).
+DEFAULT_MAX_ROWS = 25
 
+
+def _default_max_rows() -> int:
     return DEFAULT_MAX_ROWS
 
 
@@ -464,16 +467,29 @@ def board_cmd(
         help="Instead of reading the board, ask whether a king walk terminated recently.",
     ),
     since: str = typer.Option("24h", "--since", help="Window for --last-run (e.g. 24h, 90m, 7d)."),
+    budget_ms: Optional[int] = typer.Option(
+        None,
+        "--budget-ms",
+        help="Whole-board budget in milliseconds. Every per-source slice is "
+        "derived from this one total; a caller that enforces an outer timer "
+        "(the stop gate) passes that same bound in, so the board returns a "
+        "payload naming what it could not read instead of being killed.",
+    ),
     state: Optional[Path] = typer.Option(
         None, "--state", hidden=True, help="King manifest whose scope bounds the board."
     ),
 ) -> None:
     """Report every queue that would keep a king working.
 
+    The collector is the Rust runtime (x-25b8, d-e11b2b3e): this command is a
+    shell over `fno-agents board` - it resolves the binary, passes the whole
+    budget and the manifest through, and renders or emits the returned payload.
     Exits non-zero when any queue could not be read: an unreadable queue is not
     an empty one.
     """
-    from fno.king.board import read_board
+    import subprocess
+
+    from fno.rust_binary import resolve_binary
 
     if last_run:
         from fno.king.state import last_run_is_fresh, parse_window
@@ -487,39 +503,35 @@ def board_cmd(
         typer.echo(f"last king walk within {since}: {'yes' if fresh else 'no'}")
         raise typer.Exit(0 if fresh else 1)
 
-    scope = None
-    if state is not None:
-        from fno.king.state import parse_manifest
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno inbox board: the fno-agents binary was not found, and the board reads "
+            "through the Rust runtime. Reinstall fno, run `fno doctor update --rust`, "
+            "or set FNO_AGENTS_BIN.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
-        scope = parse_manifest(state).get("scope")
-        if not scope:
-            board = {
-                "actionable": 1,
-                "unreadable": 1,
-                "queues": [
-                    {
-                        "name": "scope",
-                        "source": str(state),
-                        "status": "unreadable",
-                        "error": "king manifest has no scope",
-                        "count": None,
-                        "rows": [],
-                        "actionable": True,
-                        "note": "",
-                    }
-                ],
-                "warnings": [],
-                "exit_code": 1,
-            }
-        else:
-            board = read_board(scope=scope)
-    else:
-        board = read_board()
+    cmd = [str(binary), "board", "--json"]
+    if budget_ms is not None:
+        cmd += ["--budget-ms", str(budget_ms)]
+    if state is not None:
+        cmd += ["--state", str(state)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    # The board prints a full payload even when queues are unreadable (its exit
+    # code carries that); parse the stdout regardless, as the stop gate does.
+    try:
+        board = json.loads(proc.stdout or "")
+    except ValueError as exc:
+        detail = (proc.stderr or proc.stdout or "").strip()[:300]
+        typer.echo(f"king: board unreadable (exit {proc.returncode}): {detail or exc}", err=True)
+        raise typer.Exit(code=1) from exc
     if as_json:
         typer.echo(json.dumps(board, indent=2))
     else:
         _render(board, max_rows)
-    raise typer.Exit(cast(int, board["exit_code"]))
+    raise typer.Exit(cast(int, board.get("exit_code", 1)))
 
 
 @king_app.command("escalate")

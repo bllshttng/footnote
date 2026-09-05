@@ -80,6 +80,8 @@ pub mod events_limits;
 pub mod finalize;
 pub mod gc;
 pub mod gemini_ask;
+#[cfg(test)]
+mod git_test_helpers;
 pub mod graph_get;
 pub mod graph_keeper;
 pub mod graph_store;
@@ -89,6 +91,7 @@ pub mod heal;
 mod identity;
 pub mod interrupt_classify;
 pub mod kill_criteria;
+pub mod king_board;
 pub mod logs;
 pub mod logs_client;
 pub mod loop_dispatch;

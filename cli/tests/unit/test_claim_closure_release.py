@@ -21,7 +21,6 @@ from fno.claims.io import claim_path, claims_dir, serialize_claim
 from fno.claims.staleness import now_ms
 from fno.claims.types import Claim
 from fno.graph.store import locked_mutate_graph, read_graph, release_node_claim_at_closure
-from fno.king.board import BoardInputs, SourceRead, build_board
 
 
 HOLDER = "target-session:sid-a"
@@ -363,48 +362,9 @@ class TestNodeSettlement:
         assert verdict is False
 
 
-# ---------------------------------------------------------------------------
-# Task 4: the king board never reports a done node as a stalled holder
-# ---------------------------------------------------------------------------
-
-
-def _held_inputs(node: dict, holder: str) -> BoardInputs:
-    return BoardInputs(
-        ready=SourceRead(payload=[]),
-        claims=SourceRead(
-            payload=[{"key": f"node:{node['id']}", "state": "live", "holder": holder}]
-        ),
-        claimed_nodes=SourceRead(payload=[node]),
-        holder_activity={holder: {"state": "stalled", "age_s": 9000}},
-        prs=SourceRead(payload=[]),
-        outstanding=SourceRead(payload={}),
-        needs=SourceRead(payload=[]),
-        lane=SourceRead(payload=[]),
-    )
-
-
-def _stalled_ids(board) -> list:
-    for q in board["queues"]:
-        if q["name"] == "stalled_holder":
-            return [r["id"] for r in q["rows"]]
-    raise AssertionError("no stalled_holder queue")
-
-
-def test_stalled_holder_excludes_done_nodes():
-    node = {
-        "id": "x-doen",
-        "priority": "p0",
-        "status": "done",
-        "completed_at": "2026-08-21T03:16:00Z",
-    }
-    board = build_board(_held_inputs(node, HOLDER))
-    assert _stalled_ids(board) == []
-
-
-def test_stalled_holder_still_names_a_live_open_node():
-    node = {"id": "x-open", "priority": "p0", "status": "in_progress"}
-    board = build_board(_held_inputs(node, HOLDER))
-    assert _stalled_ids(board) == ["x-open"]
+# The done-node exclusion moved with build_board into the Rust collector
+# (x-25b8): king_board.rs stalled_holder_excludes_done_nodes /
+# stalled_holder_still_names_a_live_open_node cover them.
 
 
 # ---------------------------------------------------------------------------

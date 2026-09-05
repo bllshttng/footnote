@@ -12160,11 +12160,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str], cwd: &std::path::Path| {
-            std::process::Command::new("git")
-                .current_dir(cwd)
-                .args(args)
-                .output()
-                .unwrap()
+            crate::git_test_helpers::git_run(args, cwd).unwrap()
         };
         let commit_args = [
             "-c",
