@@ -3175,6 +3175,19 @@ def advance(
     # does not describe the armed value it is attached to.
     armed, rank = _auto_continue_resolve(project_root)
 
+    def _tick(acted: int, skip_reason: Optional[str], detail: str = "") -> None:
+        """One auto-continue arm row: what this advance did, or why not."""
+        from fno.control_plane import emit_tick, scheduler_from_env
+
+        emit_tick(
+            "auto_continue",
+            scheduler=scheduler_from_env(),
+            interval_s=1800,
+            acted=acted,
+            skip_reason=skip_reason,
+            detail=(f"closed={closed_node_id or '-'} " + detail)[:200] or None,
+        )
+
     def skip(
         reason: str,
         *,
@@ -3195,6 +3208,7 @@ def advance(
         if detail:
             data["detail"] = detail[:200]
         _emit(EVENT_SKIPPED, data, ev_path)
+        _tick(0, reason, f"node={node_id or '-'} reason={reason}")
         return AdvanceResult(
             "skipped", EVENT_SKIPPED, reason=reason, node_id=node_id, detail=detail
         )
@@ -3204,6 +3218,7 @@ def advance(
         if closed_node_id:
             data["closed_node_id"] = closed_node_id
         _emit(EVENT_FAILED, data, ev_path)
+        _tick(0, "spawn-failed", f"node={node_id} error={error[:120]}")
         return AdvanceResult(
             "failed", EVENT_FAILED, reason="spawn-failed", node_id=node_id, detail=error
         )
@@ -3397,6 +3412,7 @@ def advance(
             f"advance: dispatched {node_id} -> target worker {short_id} (brief={_brief_tag})",
             file=sys.stderr,
         )
+    _tick(1, None, f"node={node_id} worker={short_id}")
     # Wake the active-backlog drain daemon (node x-c070): a successor may now be
     # unblocked. Best-effort; the poll floor is the guarantee.
     try:

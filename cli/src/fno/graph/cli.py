@@ -12438,6 +12438,24 @@ def cmd_reconcile(
             "supersession_evidence_failures": owed_evidence_failures,
         }
         typer.echo(json.dumps(payload, indent=2))
+        # Auto-continue arm row, ONLY from a scheduled context (the launchd
+        # script exports FNO_CONTROL_PLANE_SCHEDULER): this reconcile call is
+        # the arm's 1800s heartbeat, and a SessionStart reconcile must not
+        # mask an unloaded agent with its own fresh row.
+        if os.environ.get("FNO_CONTROL_PLANE_SCHEDULER"):
+            from fno.control_plane import emit_tick, scheduler_from_env
+
+            emit_tick(
+                "auto_continue",
+                scheduler=scheduler_from_env(),
+                interval_s=1800,
+                acted=len(closed),
+                skip_reason=None if closed else "no-web-merges",
+                detail=(
+                    f"closed={len(closed)} healed={len(healed_epics)} "
+                    f"failures={len(failures)}"
+                ),
+            )
         # Unresolved PR queries are a partial failure: signal it so unattended
         # callers can detect it from the exit code, not just the JSON body.
         if failures or owed_evidence_failures:

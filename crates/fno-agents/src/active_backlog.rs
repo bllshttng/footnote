@@ -135,6 +135,8 @@ pub struct DrainConfig {
     pub mission: String,
     /// Cross-tick consecutive-failure limit (the circuit breaker).
     pub failure_limit: u32,
+    /// The mission's poll interval, for the control-plane tick row's staleness.
+    pub interval_seconds: u64,
 }
 
 /// What one [`mission_drain_tick`]'s reconcile did, for tests. Dispatch itself
@@ -682,14 +684,44 @@ fn dispatch_mission(
 /// dispatch the mission's currently-ready children. Reconcile runs FIRST so a
 /// child that just auto-deferred is excluded from this tick's `advance --epic`
 /// selection. Synchronous (the loop offloads it to a blocking task).
+///
+/// Every tick also appends one `control_plane_tick` row (arm `active_backlog`),
+/// so the arms readout can tell a draining mission from a dead supervisor.
 pub fn mission_drain_tick(
     cfg: &DrainConfig,
     breaker: &mut CircuitBreaker,
     pending: &mut Vec<PendingDispatch>,
     journal: &Journal,
 ) -> MissionDispatch {
+    let pending_before = pending.len();
     reconcile_pending(cfg, breaker, pending, journal);
-    dispatch_mission(cfg, pending, journal)
+    let closed = pending_before.saturating_sub(pending.len()) as u64;
+    let pre_dispatch = pending.len();
+    let outcome = dispatch_mission(cfg, pending, journal);
+    let newly_dispatched = (pending.len() - pre_dispatch) as u64;
+    let skip_reason = match outcome {
+        MissionDispatch::Retire => Some("mission_retired"),
+        MissionDispatch::Continue if closed + newly_dispatched > 0 => None,
+        MissionDispatch::Continue if pending.is_empty() => Some("no_work"),
+        MissionDispatch::Continue => Some("in_flight"),
+    };
+    let detail = format!(
+        "mission={} closed={} dispatched={} pending={}",
+        cfg.mission,
+        closed,
+        newly_dispatched,
+        pending.len()
+    );
+    crate::tick_ledger::emit_tick(
+        journal,
+        "active_backlog",
+        "daemon",
+        closed + newly_dispatched,
+        skip_reason,
+        Some(&detail),
+        cfg.interval_seconds.max(1),
+    );
+    outcome
 }
 
 // ── target resolution + resident supervisor ─────────────────────────────────────
@@ -715,12 +747,40 @@ pub struct ResolvedTarget {
 /// Best-effort: any failure (missing fno, non-zero exit, unparseable output)
 /// yields an empty list, so the feature simply stays dormant.
 pub fn resolve_targets(fno_bin: &str) -> Vec<ResolvedTarget> {
+    resolve_targets_report(fno_bin).0
+}
+
+/// [`resolve_targets`] plus the failure detail the supervisor reports in its
+/// tick row: an empty target list from a broken resolver (`env_broken`, the
+/// missing-click class) is a different arm state from an empty list because
+/// nothing is enabled (`no_missions`).
+pub fn resolve_targets_report(fno_bin: &str) -> (Vec<ResolvedTarget>, Option<String>) {
     match fno_cmd(fno_bin)
         .args(["config", "active-backlog", "--json"])
         .output()
     {
-        Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).unwrap_or_default(),
-        _ => Vec::new(),
+        Ok(o) if o.status.success() => match serde_json::from_slice(&o.stdout) {
+            Ok(targets) => (targets, None),
+            Err(e) => (
+                Vec::new(),
+                Some(format!("active-backlog receipt unparseable: {e}")),
+            ),
+        },
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            (
+                Vec::new(),
+                Some(format!(
+                    "active-backlog resolve exited {}: {}",
+                    o.status,
+                    stderr.chars().take(120).collect::<String>()
+                )),
+            )
+        }
+        Err(e) => (
+            Vec::new(),
+            Some(format!("active-backlog resolve failed: {e}")),
+        ),
     }
 }
 
@@ -828,6 +888,7 @@ fn drain_config_for(target: &ResolvedTarget, fno_bin: &str) -> Option<DrainConfi
         fno_bin: fno_bin.to_string(),
         mission,
         failure_limit: target.failure_limit,
+        interval_seconds: target.interval_seconds,
     })
 }
 
@@ -916,7 +977,7 @@ pub async fn run_supervisor(
         tasks.retain(|_, h| !h.is_finished());
         fanout_tasks.retain(|_, h| !h.is_finished());
 
-        let targets = resolve_targets(&fno_bin);
+        let (targets, resolve_failure) = resolve_targets_report(&fno_bin);
         let fanout_targets = resolve_fanout_targets(&fno_bin);
         // `live` keeps the daemon out of idle-exit while ANY supervised work
         // exists - drain OR fanout. A sink-only project (no active_backlog) must
@@ -926,6 +987,30 @@ pub async fn run_supervisor(
             !targets.is_empty() || !fanout_targets.is_empty(),
             Ordering::SeqCst,
         );
+
+        // The arm's supervisor-level tick row, ONLY while no mission loop is
+        // live to write its own (fresher) rows: it says why the drain has
+        // nothing to do - a broken resolver (env_broken, the class that ticked
+        // silently for hours because its Python env lacked click) or simply no
+        // enabled missions. ab_live covers the fanout family too.
+        if targets.is_empty() {
+            let _ = emitter.emit(
+                crate::tick_ledger::EVENT_TYPE,
+                &serde_json::json!({
+                    "arm": "active_backlog",
+                    "scheduler": "daemon",
+                    "acted": 0,
+                    "skip_reason": if resolve_failure.is_some() { "env_broken" } else { "no_missions" },
+                    "detail": format!(
+                        "targets=0 ab_live={} fanouts={}{}",
+                        !fanout_targets.is_empty(),
+                        fanout_targets.len(),
+                        resolve_failure.as_deref().map(|f| format!(" resolve={f}")).unwrap_or_default()
+                    ),
+                    "interval_s": 300,
+                }),
+            );
+        }
 
         for target in targets {
             // Key by mission (epic id). A target with no mission is a malformed
@@ -1251,6 +1336,7 @@ mod tests {
             fno_bin,
             mission: "x-epic".to_string(),
             failure_limit,
+            interval_seconds: 300,
         }
     }
 

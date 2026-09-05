@@ -93,6 +93,62 @@ def _emit_for_sweep(event_type: str, data: dict[str, Any]) -> None:
     _emit_event(event_type, data)
 
 
+#: The launchd label every phase in this tick rides on. The arms readout
+#: stamps it on each tick row so a row names what scheduled it.
+_PR_WATCH_SCHEDULER = "launchd:sh.fno.pr-watcher"
+
+#: Tick outcomes that mean the dispatch legs did nothing, and the one-token
+#: reason each carries on its arm row.
+_PR_WATCH_MERGE_SKIP = {
+    "disabled": "disabled",
+    "lock_held": "lock_held",
+    "quota_skip": "quota",
+    "error": "error",
+    "timeout": "timeout",
+}
+
+
+def _emit_tick_row(
+    arm: str,
+    *,
+    interval_s: int,
+    acted: int = 0,
+    skip_reason: Optional[str] = None,
+    detail: Optional[str] = None,
+) -> None:
+    """One control-plane arm tick row for this tick's phases (never raises).
+
+    Rides ``_emit_event`` (not a direct control_plane call) so the
+    ``_no_global_tick_events`` test fixture captures these rows like every
+    other tick emission.
+    """
+    data: dict[str, Any] = {
+        "arm": arm,
+        "scheduler": _PR_WATCH_SCHEDULER,
+        "acted": acted,
+        "interval_s": int(interval_s),
+    }
+    if skip_reason is not None:
+        data["skip_reason"] = skip_reason
+    if detail is not None:
+        data["detail"] = detail[:200]
+    _emit_event("control_plane_tick", data)
+
+
+def _pr_watch_interval_s(settings: Any) -> int:
+    """This tick's own cadence, for the arms the tick hosts."""
+    try:
+        return int(settings.pr_watch.interval_seconds)
+    except Exception:
+        return 600
+
+
+def _king_debounce_s(settings: Any) -> int:
+    """King wake's interval is its own debounce key."""
+    raw = getattr(getattr(settings, "king", None), "wake_debounce_seconds", None)
+    return int(raw) if raw is not None else 900
+
+
 def _notify_parked(message: str) -> None:
     """Send an OS notification for a parked PR.
 
@@ -466,6 +522,7 @@ def tick() -> None:
         # getattr with the modeled default: a settings stub or a partially-loaded
         # config must never crash the tick - "off" is the no-op that fails safe.
         if _wd_lane_armed(settings):
+            acted = 0
             try:
                 import time as _time
 
@@ -567,7 +624,6 @@ def tick() -> None:
                 # Internal recovery, wake mode only. Session verdicts drive
                 # nothing here in report mode, and their receipts stay
                 # separate from the report's event stream.
-                acted = 0
                 recoverable_results = []
                 if _wd_wake_armed(settings):
                     # Recompute the budget AFTER the report: budgeting both
@@ -782,10 +838,39 @@ def tick() -> None:
                     f"recoverable_applied={recoverable_applied} "
                     f"recoverable_remaining={recoverable_remaining}"
                 )
+                _emit_tick_row(
+                    "watchdog",
+                    acted=acted,
+                    skip_reason=None,
+                    detail=f"{counts} recoverable_applied={recoverable_applied} "
+                    f"recoverable_remaining={recoverable_remaining}",
+                    interval_s=_pr_watch_interval_s(settings),
+                )
             except _WatchdogBudgetSpent as exc:
                 log.info("pr-watch: watchdog leg skipped: %s", exc)
+                _emit_tick_row(
+                    "watchdog",
+                    skip_reason="budget_spent",
+                    detail=str(exc)[:200],
+                    interval_s=_pr_watch_interval_s(settings),
+                )
             except Exception as exc:  # noqa: BLE001 - never let the watchdog break pr-watch
                 log.warning("pr-watch: watchdog sweep failed: %s", exc)
+                _emit_tick_row(
+                    "watchdog",
+                    skip_reason="sweep_failed",
+                    detail=str(exc)[:200],
+                    interval_s=_pr_watch_interval_s(settings),
+                )
+        else:
+            # An unarmed lane still ticks: "why it did nothing" is the row the
+            # arms readout exists to carry (watchdog_off ran silently for
+            # weeks; this is the line that would have said so).
+            _emit_tick_row(
+                "watchdog",
+                skip_reason="watchdog_off",
+                interval_s=_pr_watch_interval_s(settings),
+            )
 
         set_tick_phase("sweep")
         # A dead tick must not kill the legs below. The receipt contract makes
@@ -875,8 +960,38 @@ def tick() -> None:
                     f"king wake: crowns={wake_summary.get('crowns', 0)}"
                     + (f" woke={woke}" if woke else "")
                 )
+                crowns = int(wake_summary.get("crowns", 0) or 0)
+                woke_n = len(wake_summary.get("woke", []) or [])
+                _emit_tick_row(
+                    "king_wake",
+                    acted=woke_n,
+                    skip_reason=(
+                        "no_crowned_target" if crowns == 0
+                        else None if woke_n else "no_trigger"
+                    ),
+                    detail=f"crowns={crowns}"
+                    + (f" woke={woke}" if woke else "")
+                    + (
+                        f" note={wake_summary.get('note')}"
+                        if wake_summary.get("note")
+                        else ""
+                    ),
+                    interval_s=_king_debounce_s(settings),
+                )
             except Exception as exc:  # noqa: BLE001 - never let a wake break the tick
                 log.warning("pr-watch: king wake phase failed: %s", exc)
+                _emit_tick_row(
+                    "king_wake",
+                    skip_reason="wake_failed",
+                    detail=str(exc)[:200],
+                    interval_s=_king_debounce_s(settings),
+                )
+        else:
+            _emit_tick_row(
+                "king_wake",
+                skip_reason="wake_disabled",
+                interval_s=_king_debounce_s(settings),
+            )
 
         # The heal drive loop (x-974c): nothing called the healer on a timer,
         # so every red open PR waited for a hand. The loop lives in Rust; this
@@ -1020,6 +1135,21 @@ def tick() -> None:
         # attempt/end pair brackets every invocation; only outcome=ok/degraded
         # corresponds to a pr_watch_tick (the liveness watermark) having fired.
         _emit_event("pr_watch_tick_end", end_data)
+        # The arms-readout row for the dispatch legs this tick ran (or why they
+        # never ran). Same finally contract as the end record: a tick that died
+        # in bootstrap still says why.
+        _emit_tick_row(
+            "pr_watch_merge",
+            acted=int(getattr(result, "acted", 0) or 0),
+            skip_reason=_PR_WATCH_MERGE_SKIP.get(outcome),
+            detail=f"outcome={outcome} phase={end_data.get('phase')}"
+            + (
+                f" open_prs={result.open_prs}"
+                if result is not None and getattr(result, "open_prs", None) is not None
+                else ""
+            ),
+            interval_s=_pr_watch_interval_s(settings),
+        )
 
     if timed_out:
         raise typer.Exit(code=_TICK_TIMEOUT_EXIT)
