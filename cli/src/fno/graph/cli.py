@@ -12815,6 +12815,7 @@ def cmd_maintain(
     rescope_fixes = _maintain.detect_rescope_fixes(entries, workspaces)
     prune_ids = _maintain.detect_temp_leaks(entries)
     pr_url_fixes = _maintain.detect_url_less_prs(entries)
+    twin_drops = _maintain.detect_misharnessed_twins(entries)
     pr_url_writable = [f for f in pr_url_fixes if f.pr_url]
     pr_url_unresolvable = [f for f in pr_url_fixes if not f.pr_url]
     dup_groups = _maintain.detect_dup_groups(entries)
@@ -12884,10 +12885,16 @@ def cmd_maintain(
     applied_defers: list[dict] = []
     applied_stale_ready: list[dict] = []
     applied_pr_urls: list[dict] = []
+    applied_twin_drops: list[dict] = []
     skipped_claimed: list[str] = []
 
     if apply and (
-        rescope_fixes or prune_ids or defer_cands or stale_ready_cands or pr_url_writable
+        rescope_fixes
+        or prune_ids
+        or defer_cands
+        or stale_ready_cands
+        or pr_url_writable
+        or twin_drops
     ):
         # Batch every change under ONE locked mutation so the board renders once,
         # not per node (Domain Pitfall). Each item is guarded so one failure
@@ -12899,6 +12906,7 @@ def cmd_maintain(
             applied_defers.clear()
             applied_stale_ready.clear()
             applied_pr_urls.clear()
+            applied_twin_drops.clear()
             skipped_claimed.clear()
             prune_set: set[str] = set()
             for fix in rescope_fixes:
@@ -12944,6 +12952,52 @@ def cmd_maintain(
                 except Exception as exc:  # noqa: BLE001 - one bad row must not abort
                     typer.echo(
                         f"warning: pr_url backfill of {fix.node_id} failed: {exc}",
+                        err=True,
+                    )
+            # Leg 2c: drop the mis-harnessed session twin where the
+            # shape-correct twin for the same (session_id, phase) exists.
+            # Re-check inside the lock so a row settled since the scan (the
+            # wrong twin gained the shape-correct harness, or the correct twin
+            # left) never drops provenance.
+            for drop in twin_drops:
+                if drop.node_id in current_claimed:
+                    skipped_claimed.append(drop.node_id)
+                    continue
+                try:
+                    n = _find_node(ents, drop.node_id)
+                    rows = n.get("sessions") if n else None
+                    if not isinstance(rows, list):
+                        continue
+                    keep = [
+                        r for r in rows
+                        if not (
+                            isinstance(r, dict)
+                            and r.get("session_id") == drop.session_id
+                            and r.get("phase") == drop.phase
+                            and r.get("harness") == drop.bad_harness
+                            and any(
+                                isinstance(o, dict)
+                                and o.get("session_id") == drop.session_id
+                                and o.get("phase") == drop.phase
+                                and o.get("harness") == drop.keep_harness
+                                for o in rows
+                            )
+                        )
+                    ]
+                    if len(keep) != len(rows):
+                        n["sessions"] = keep
+                        applied_twin_drops.append(
+                            {
+                                "node_id": drop.node_id,
+                                "session_id": drop.session_id,
+                                "phase": drop.phase,
+                                "dropped_harness": drop.bad_harness,
+                                "kept_harness": drop.keep_harness,
+                            }
+                        )
+                except Exception as exc:  # noqa: BLE001 - one bad row must not abort
+                    typer.echo(
+                        f"warning: twin drop on {drop.node_id} failed: {exc}",
                         err=True,
                     )
             # Leg 7: auto-defer failure-prone nodes (#34). Mirrors cmd_defer's
@@ -13118,6 +13172,7 @@ def cmd_maintain(
         if apply
         else [{"node_id": c.node_id, "age_days": c.age_days} for c in stale_ready_cands],
         "stale_ready_truncated": stale_ready_truncated,
+        "session_twins_dropped": len(applied_twin_drops) if apply else len(twin_drops),
     }
     try:
         from fno.health_monitor import append_history
@@ -13176,6 +13231,19 @@ def cmd_maintain(
                     {"node_id": c.node_id, "age_days": c.age_days} for c in stale_ready_cands
                 ],
                 "truncated": stale_ready_truncated,
+            },
+            "session_twins": {
+                "applied": applied_twin_drops if apply else [],
+                "candidates": [
+                    {
+                        "node_id": t.node_id,
+                        "session_id": t.session_id,
+                        "phase": t.phase,
+                        "dropped_harness": t.bad_harness,
+                        "kept_harness": t.keep_harness,
+                    }
+                    for t in twin_drops
+                ],
             },
         }
         if validity_result is not None:
@@ -13283,6 +13351,20 @@ def cmd_maintain(
             f"delivery unit, the rest are contained). Read-only: pick the unit "
             f"and `fno backlog update <other> --plan-path null` by hand."
         )
+    if apply:
+        for d in applied_twin_drops:
+            typer.echo(
+                f"  dropped twin {d['node_id']} ({d['session_id']}, phase {d['phase']}): "
+                f"harness {d['dropped_harness']} contradicts the id shape, "
+                f"{d['kept_harness']} twin kept"
+            )
+    else:
+        for t in twin_drops:
+            typer.echo(
+                f"  would drop twin {t.node_id} ({t.session_id}, phase {t.phase}): "
+                f"harness {t.bad_harness} contradicts the id shape, "
+                f"{t.keep_harness} twin kept"
+            )
     for nid, epic_id, score in rollup_cands:
         typer.echo(
             f"  rollup candidate {nid} -> {epic_id} ({score:.2f}): "

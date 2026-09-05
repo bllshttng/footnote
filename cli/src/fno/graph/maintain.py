@@ -446,6 +446,72 @@ def detect_shared_plan_cost_violations(entries: list[dict]) -> list[SharedPlanCo
 
 
 # ---------------------------------------------------------------------------
+# Leg 2c: mis-harnessed session twins (deterministic repair)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class MisharnessedTwin:
+    """A sessions[] row whose harness its own session id contradicts, while a
+    shape-correct twin with the same (session_id, phase) exists on the node."""
+
+    node_id: str
+    session_id: str
+    phase: str
+    bad_harness: str
+    keep_harness: str
+
+
+def detect_misharnessed_twins(entries: list[dict]) -> list[MisharnessedTwin]:
+    """Rows stamped under a harness their id's shape contradicts, where the
+    node also carries the shape-correct twin for the same (session_id, phase).
+
+    These are phantom rows minted before the store refused wrong-shape
+    harnesses: a codex UUIDv7 id under ``harness: claude`` reads as a second,
+    distinct session to every keyed resolver. Dropped only when the correct
+    twin exists, so the provenance itself never leaves the graph.
+    """
+    from fno.harness_identity import harness_of_session_id
+
+    out: list[MisharnessedTwin] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        nid = e.get("id")
+        rows = e.get("sessions")
+        if not isinstance(nid, str) or not isinstance(rows, list):
+            continue
+        groups: dict[tuple[str, str], list[dict]] = {}
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            sid, phase, harness = (
+                r.get("session_id"), r.get("phase"), r.get("harness")
+            )
+            if not all(isinstance(v, str) and v for v in (sid, phase, harness)):
+                continue
+            groups.setdefault((sid, phase), []).append(r)
+        for (sid, phase), group in groups.items():
+            shape = harness_of_session_id(sid)
+            if shape is None or len(group) < 2:
+                continue
+            if not any(r.get("harness") == shape for r in group):
+                continue
+            for r in group:
+                if r.get("harness") != shape:
+                    out.append(
+                        MisharnessedTwin(
+                            node_id=nid,
+                            session_id=sid,
+                            phase=phase,
+                            bad_harness=r.get("harness", "?"),
+                            keep_harness=shape,
+                        )
+                    )
+    out.sort(key=lambda t: (t.node_id, t.session_id, t.phase, t.bad_harness))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Leg 4: drain stale ideas (propose-only)
 # ---------------------------------------------------------------------------
 

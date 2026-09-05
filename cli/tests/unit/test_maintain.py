@@ -1459,3 +1459,40 @@ def test_contained_node_is_never_stale_quarantined():
     # Same node, only containment differs.
     assert is_stale_ready(node, now, 21) is True
     assert is_stale_ready({**node, "contained_in": "x-6320"}, now, 21) is False
+
+
+def test_misharnessed_twin_detected_only_with_a_shape_correct_twin():
+    """The phantom shape: a codex v7 id stamped under harness claude while the
+    codex twin sits beside it. Detected and dropped only when the correct twin
+    exists; a lone mis-harnessed row and a shape-silent pair are left alone."""
+    codex_id = "01a06886-9405-74a1-8afd-5b67baf89604"
+    node = {
+        "id": "x-a78b",
+        "sessions": [
+            {"session_id": codex_id, "phase": "do", "harness": "codex"},
+            {"session_id": codex_id, "phase": "do", "harness": "claude"},
+        ],
+    }
+    twins = m.detect_misharnessed_twins([node])
+    assert [(t.node_id, t.bad_harness, t.keep_harness) for t in twins] == [
+        ("x-a78b", "claude", "codex")
+    ]
+
+    # No shape-correct twin: nothing is provably wrong, nothing reported.
+    lone = {
+        "id": "x-lone",
+        "sessions": [{"session_id": codex_id, "phase": "do", "harness": "claude"}],
+    }
+    assert m.detect_misharnessed_twins([lone]) == []
+
+    # A shape-silent id under two harness spellings is legal, not a twin.
+    legacy = {
+        "id": "x-legacy",
+        "sessions": [
+            {"session_id": "20260823T083106Z-cx87209-9d434e", "phase": "do",
+             "harness": "claude"},
+            {"session_id": "20260823T083106Z-cx87209-9d434e", "phase": "do",
+             "harness": "unknown"},
+        ],
+    }
+    assert m.detect_misharnessed_twins([legacy]) == []
