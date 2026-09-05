@@ -128,6 +128,20 @@ for margin in "junk" "" "0; echo pwned"; do
         "SMOKE_TIMEOUT_MARGIN_SECS was evaluated as shell"
 done
 
+# A margin at or above the cap itself would put every run inside the timeout
+# band - even a 100s run of a 30m shard. The knob is bounded against the cap
+# it is subtracted from, and says so.
+out="$(SMOKE_TIMEOUT_MARGIN_SECS=2000 bash "$SCRIPT" smoke-rest 100 30 2>&1)"; rc=$?
+check "$([[ $rc -eq 0 ]] && echo 1)" \
+      "a margin above the cap still exits 0" \
+      "a margin above the cap exited $rc"
+check "$(grep -q 'meets or exceeds the 30m cap' <<<"$out" && echo 1)" \
+      "a margin above the cap is refused with a diagnostic" \
+      "a margin above the cap was accepted silently"
+check "$(grep -q 'verdict=ok' <<<"$out" && echo 1)" \
+      "a margin above the cap cannot timeout a healthy run" \
+      "100s of a 30m cap reported timeout - the margin-out-of-range clamp broke"
+
 # --- two durations are refused, never summed ------------------------------
 out="$(bash "$SCRIPT" smoke-pytest 1142 30 1063 2>&1)"; rc=$?
 check "$(grep -qi 'parallel' <<<"$out" && echo 1)" \
