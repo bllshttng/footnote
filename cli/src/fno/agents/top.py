@@ -433,11 +433,8 @@ def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
             if ev.get("type") == "mux_pane_counters":
                 samples.append(ev)
 
-    if not samples and not path.exists() and not sibling.exists():
-        return empty  # no journal at all = no samples, not a broken read
-
     if len(samples) < 2:
-        return empty
+        return empty  # also the no-journal-at-all case: no samples, not a broken read
 
     # Group by mux session before differencing: the global journal interleaves
     # every live session's 30s rows, so "the last two samples journal-wide"
