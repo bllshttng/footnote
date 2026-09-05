@@ -1294,6 +1294,10 @@ def _live_claude_procs(psutil_mod) -> list[tuple[int, str]]:
     scan below to live sessions' dirs only — never the full 454-dir / 13k-file
     store (the plan's no-full-scan contract). Best-effort: any psutil failure
     yields fewer rows, never raises.
+
+    Cmdline is launch-time evidence: it says how a process was started, never
+    what state it is in now; liveness verdicts come from
+    ``fno.agents.session_truth``, not this walk.
     """
     out: list[tuple[int, str]] = []
     try:
