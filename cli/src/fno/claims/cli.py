@@ -634,13 +634,9 @@ def _stamp_do_on_acquire(key: str, claim, holder: str) -> None:
     node_id, harness, session_id, started, effort = coords
     try:
         found, _added = append_session_record(
-            graph_json(),
-            node_id,
-            phase="do",
-            harness=harness,
-            session_id=session_id,
-            started_at=started,
-            effort=effort,
+            graph_json(), node_id, phase="do",
+            harness=harness, session_id=session_id,
+            started_at=started, effort=effort,
         )
     except (Exception, SystemExit) as exc:
         typer.echo(
@@ -679,14 +675,9 @@ def _stamp_do_on_release(key: str, claim, holder: str) -> None:
     ended = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         found, _added = append_session_record(
-            graph_json(),
-            node_id,
-            phase="do",
-            harness=harness,
-            session_id=session_id,
-            started_at=started,
-            ended_at=ended,
-            effort=effort,
+            graph_json(), node_id, phase="do",
+            harness=harness, session_id=session_id,
+            started_at=started, ended_at=ended, effort=effort,
         )
     except (Exception, SystemExit) as exc:
         typer.echo(
@@ -730,11 +721,8 @@ def _rollback_do_on_release(key: str, claim, holder: str) -> None:
     node_id, harness, session_id, started, _effort = coords
     try:
         found, removed = remove_open_session_record(
-            graph_json(),
-            node_id,
-            phase="do",
-            harness=harness,
-            session_id=session_id,
+            graph_json(), node_id, phase="do",
+            harness=harness, session_id=session_id,
             started_at=started,
         )
     except (Exception, SystemExit) as exc:
@@ -770,9 +758,7 @@ def refresh(
 ) -> None:
     """Extend a TTL claim's expires_at. No-op for PID-liveness claims."""
     try:
-        result = refresh_claim(
-            key=key, holder=holder, ttl_ms=_parse_ttl(ttl), root=_node_aware_root(key)
-        )
+        result = refresh_claim(key=key, holder=holder, ttl_ms=_parse_ttl(ttl), root=_node_aware_root(key))
     except HolderMismatch as exc:
         typer.echo(f"holder mismatch: {exc}", err=True)
         raise typer.Exit(code=4)
@@ -1113,9 +1099,7 @@ def _merge_claims_across_roots(
 
     for candidate_root, cdir in deduped_roots:
         rows, _counts, states_by_key = list_claims_with_counts(
-            prefix=prefix or None,
-            include_stale=include_stale,
-            root=candidate_root,
+            prefix=prefix or None, include_stale=include_stale, root=candidate_root,
         )
         row_by_key = {r["key"]: r for r in rows}
         for key, state in states_by_key.items():
