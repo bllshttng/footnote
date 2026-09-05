@@ -103,7 +103,10 @@ def test_map_covers_current_surface_once():
     # place before merge): 568 -> 569.
     # This branch adds `agents feed`, the activity feed projection: counted
     # from the merged file, 569 -> 570.
-    assert len(mapped) == 570, (
+    # The reseat branch adds `agents reseat`, the registry half of the v69
+    # pane-into-portal move, on the same base: counted from the merged
+    # file, never either side, both rows together: 570 -> 571.
+    assert len(mapped) == 571, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
