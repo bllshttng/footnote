@@ -6196,8 +6196,8 @@ def _daemon_rpc(
     the supervisor socket is ``supervisor.sock`` inside that directory.
 
     None on any transport error or ``error`` response (the
-    :func:`rpc_roundtrip` contract); callers demote to durable on any falsy
-    return. Exactly one attempt, no retry.
+    :func:`rpc_roundtrip` contract, exactly one attempt); callers demote to
+    durable on any falsy return.
     """
     import os
 
