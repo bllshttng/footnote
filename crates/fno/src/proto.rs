@@ -320,10 +320,8 @@ fn default_true() -> bool {
 /// open honors, now that the geometry refusal lives inside `reach_portal`
 /// where the slot lookup knows occupancy. Additive, so the compatibility
 /// floor does not move; a repoint keeps owning its geometry and says so.
-/// v68 (shell tab cwd): `LayoutSlot.cwd`, `#[serde(default)]`. Restore reads
-/// it to reopen a shell tab in the directory it was captured in instead of
-/// the squad root. Additive: an absent field loads to `None`, so the
-/// compatibility floor stays at 58.
+/// v68 (shell tab cwd): `LayoutSlot.cwd`, `#[serde(default)]`. Additive, so
+/// the floor stays at 58.
 pub const PROTO_VERSION: u32 = 68;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
@@ -1125,12 +1123,22 @@ pub enum LayoutBinding {
 pub struct LayoutSlot {
     pub name: String,
     pub binding: LayoutBinding,
-    /// (v68, x-5baf) The directory this slot's pane was in at capture, for a
-    /// shell slot restore would otherwise open at the squad root. Additive and
-    /// `#[serde(default)]`, so the compatibility floor does not move and a
-    /// pre-v68 store loads it as `None`.
+    /// (v68, x-5baf) This slot's pane's directory at capture, so a shell
+    /// slot restores there instead of the squad root. `None` pre-v68.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+}
+
+impl LayoutSlot {
+    /// A slot with no recorded cwd - every construction site but capture's
+    /// own `SlotCapture::name_leaf` (x-5baf).
+    pub fn new(name: String, binding: LayoutBinding) -> Self {
+        Self {
+            name,
+            binding,
+            cwd: None,
+        }
+    }
 }
 
 /// A versioned anchored layout (v44, x-6928): a typed [`LayoutTreeSpec`] plus
@@ -4385,21 +4393,9 @@ mod tests {
                 ],
             },
             slots: vec![
-                LayoutSlot {
-                    name: "anchor".into(),
-                    binding: LayoutBinding::Anchor,
-                    cwd: None,
-                },
-                LayoutSlot {
-                    name: "reviewer".into(),
-                    binding: LayoutBinding::Fno("abcd1234".into()),
-                    cwd: None,
-                },
-                LayoutSlot {
-                    name: "tester".into(),
-                    binding: LayoutBinding::Shell,
-                    cwd: None,
-                },
+                LayoutSlot::new("anchor".into(), LayoutBinding::Anchor),
+                LayoutSlot::new("reviewer".into(), LayoutBinding::Fno("abcd1234".into())),
+                LayoutSlot::new("tester".into(), LayoutBinding::Shell),
             ],
         };
         let json = serde_json::to_string(&spec).unwrap();

@@ -2509,55 +2509,6 @@ fn wheel_gate(
     }
 }
 
-/// The CURRENT directory of `pid`, read from the kernel (x-5baf). A shell's
-/// own cwd, not the pane's spawn cwd: every tab is born at the squad root
-/// (`create_tab_in`), so the spawn cwd tells two tabs apart in no case.
-/// `None` on any failure, which the caller degrades to the spawn cwd.
-#[cfg(target_os = "macos")]
-fn process_cwd(pid: u32) -> Option<String> {
-    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
-    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
-    let written = unsafe {
-        libc::proc_pidinfo(
-            pid as libc::c_int,
-            libc::PROC_PIDVNODEPATHINFO,
-            0,
-            &mut info as *mut _ as *mut libc::c_void,
-            size,
-        )
-    };
-    if written != size {
-        return None;
-    }
-    // `vip_path` is `[[c_char; 32]; 32]`, a libc workaround for
-    // `[c_char; MAXPATHLEN]` (1024) that flattens identically since a 2D
-    // fixed array has no inter-row padding.
-    let bytes: &[libc::c_char] = unsafe {
-        std::slice::from_raw_parts(
-            info.pvi_cdir.vip_path.as_ptr().cast::<libc::c_char>(),
-            32 * 32,
-        )
-    };
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    if end == 0 {
-        return None;
-    }
-    let path_bytes: Vec<u8> = bytes[..end].iter().map(|&b| b as u8).collect();
-    String::from_utf8(path_bytes).ok()
-}
-
-#[cfg(target_os = "linux")]
-fn process_cwd(pid: u32) -> Option<String> {
-    std::fs::read_link(format!("/proc/{pid}/cwd"))
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned())
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn process_cwd(_pid: u32) -> Option<String> {
-    None
-}
-
 /// Capture-side pane -> slot naming (x-caef). Slot names are decided at
 /// CAPTURE, never at restore, so two snapshots of one session agree on which
 /// pane is which: a pane with an fno id names its slot that id and binds
@@ -7641,11 +7592,7 @@ impl Core {
                     continue;
                 }
                 if let Some(entry) = self.panes.get(&pane) {
-                    let cwd = entry
-                        .pty
-                        .child_pid()
-                        .and_then(process_cwd)
-                        .unwrap_or_else(|| entry.cwd.clone());
+                    let cwd = crate::pane_cwd::live_or_spawn(entry.pty.child_pid(), &entry.cwd);
                     pane_cwd.insert(pane, cwd);
                 }
             }
@@ -20088,16 +20035,8 @@ mod tests {
                 ],
             },
             slots: vec![
-                LayoutSlot {
-                    name: "a".into(),
-                    binding: LayoutBinding::Anchor,
-                    cwd: None,
-                },
-                LayoutSlot {
-                    name: "b".into(),
-                    binding: LayoutBinding::Shell,
-                    cwd: None,
-                },
+                LayoutSlot::new("a".into(), LayoutBinding::Anchor),
+                LayoutSlot::new("b".into(), LayoutBinding::Shell),
             ],
         };
         let err = core
@@ -20169,16 +20108,8 @@ mod tests {
                 ],
             },
             slots: vec![
-                LayoutSlot {
-                    name: "a".into(),
-                    binding: LayoutBinding::Anchor,
-                    cwd: None,
-                },
-                LayoutSlot {
-                    name: "b".into(),
-                    binding: LayoutBinding::Fno("S1".into()),
-                    cwd: None,
-                },
+                LayoutSlot::new("a".into(), LayoutBinding::Anchor),
+                LayoutSlot::new("b".into(), LayoutBinding::Fno("S1".into())),
             ],
         };
         let msg = core
@@ -21964,10 +21895,11 @@ mod tests {
         )
         .unwrap();
         // Two one-slot tabs: one for the done member, one for the live one.
-        let slot_for = |session: &str| crate::proto::LayoutSlot {
-            name: "s0".into(),
-            binding: LayoutBinding::Fno(format!("worker:codex:{session}")),
-            cwd: None,
+        let slot_for = |session: &str| {
+            crate::proto::LayoutSlot::new(
+                "s0".into(),
+                LayoutBinding::Fno(format!("worker:codex:{session}")),
+            )
         };
         let tree_for = |session: &str| crate::proto::LayoutTreeSpec::Slot("s0".into());
         crate::squad_store::set_tab_trees(
