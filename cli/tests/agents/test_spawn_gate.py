@@ -189,13 +189,15 @@ class TestCensus:
         monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
         assert spawn_gate.census().count == 0
 
-    def test_spawning_outlived_by_a_live_pid_renders_live_with_basis(
+    def test_spawning_outlived_by_a_live_pid_renders_quiet_with_basis(
         self, monkeypatch
     ):
         """(x-d401 / x-0248) AC3-HP: a stored `spawning` token a live pid has
         outlived does not render a bare `spawning` - the row names the
-        movement-derived state and a basis for the rewrite. AC3-EDGE: a row
-        with no pid recorded yet keeps its honest token."""
+        movement-derived state and a basis for the rewrite. The process is
+        confirmed but the transcript is unread, so the served word is
+        `quiet`, never a `live` token. AC3-EDGE: a row with no pid recorded
+        yet keeps its honest token."""
         from datetime import datetime, timedelta, timezone
 
         stale = datetime.now(timezone.utc) - timedelta(hours=13)
@@ -210,7 +212,7 @@ class TestCensus:
 
         by_name = {w.name: w for w in spawn_gate.census().workers}
 
-        assert by_name["stale-spawn"].status == "live", (
+        assert by_name["stale-spawn"].status == "quiet", (
             "a working row must not read spawning"
         )
         assert by_name["stale-spawn"].status_basis == "stale-spawning-live-pid"

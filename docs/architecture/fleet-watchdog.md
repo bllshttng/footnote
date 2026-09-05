@@ -1,6 +1,8 @@
 # Fleet watchdog
 
-`fno agents watchdog` runs outside every session and decides, per fleet row, one of three things: wake it, reroute it, or leave it. A leg on the `pr_watch` tick can do the same on a cadence behind `config.recovery.watchdog`. The classifier lives in `cli/src/fno/agents/watchdog.py`. It is pure over injected inputs, so tests need no live fleet. Row retirement is NOT this module's question (x-c672): the Rust daemon's sweep retires a row when its work is done and its transcript is quiet, and `fno agents reap` runs that same sweep by hand.
+`fno agents watchdog` runs outside every session and decides, per fleet row, one of three things: wake it, reroute it, or leave it. A leg on the `pr_watch` tick can do the same on a cadence behind `config.recovery.watchdog`. The classifier lives in `cli/src/fno/agents/watchdog.py`. It is pure over injected inputs, so tests need no live fleet. Row retirement is NOT this module's question: the Rust daemon's sweep retires a row when its work is done and its transcript is quiet, and `fno agents reap` runs that same sweep by hand.
+
+The STATUS word a roster surface renders is served activity, never liveness. `fno agents list` and `fno agents top` both use it. `writing` means the transcript moved inside ten minutes. `quiet` means it is older. `parked` means the tail closed a promise. `orphaned` means a falsifier fired. `unknown` means no probe answered. The measured age rides beside the word. The old `live` token is gone. No decision keys on this word. Retirement reads the reverse join and the quiet grace. The lanes read their own probes.
 
 ## Why the transcript is the truth source
 
@@ -67,7 +69,7 @@ One more trap deserves its name: `sessionIdTaken`. A worker launches `--resume` 
 
 ## Which reading removes a registry row
 
-Retirement is the daemon sweep's question (x-c672), and it asks two things: is the WORK done, and is the transcript quiet. WORK-done is read through the reverse join - every node the session is named on in `node.sessions[]` carries `status == "done`. Quiet is the served transcript mtime past `config.agents.retire_grace_s` (default 900; a legacy `recovery.retire_grace_s` still parses and lifts with a warning). Operator-origin rows and crowned rows never retire, and a row named in no node's sessions has no provenance, so no verdict is possible and it stays.
+Retirement is the daemon sweep's question, and it asks two things: is the WORK done, and is the transcript quiet. WORK-done is read through the reverse join - every node the session is named on in `node.sessions[]` carries `status == "done`. Quiet is the served transcript mtime past `config.agents.retire_grace_s` (default 900; a legacy `recovery.retire_grace_s` still parses and lifts with a warning). Operator-origin rows and crowned rows never retire, and a row named in no node's sessions has no provenance, so no verdict is possible and it stays.
 
 Nothing waits for a session to end, because a session never ends (d-10a72d88). The exit-stamp machinery that used to ask - `exited_at`, corroboration gates, the backstop, the dormant probe - is deleted. Silence alone still removes nothing: an unreadable transcript is never quiet, and an unreadable graph keeps every row. A retired row leaves behind a receipt under `~/.fno/reap-receipts/` carrying its resume command, and the node's own sessions[] row survives, so `fno agents resume` still opens the session afterwards. The worktree is a separate question with separate buckets: dirty and unmerged trees stay, clean and merged trees are pruned and the branch survives.
 

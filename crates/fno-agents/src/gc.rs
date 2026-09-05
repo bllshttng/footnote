@@ -294,6 +294,33 @@ mod tests {
     }
 
     #[test]
+    fn stop_row_process_inside_an_ambient_block_on_does_not_panic() {
+        // The CLI verb runs the sweep under main's block_on, so the stop seam
+        // executes on a thread that already drives a runtime. The re-entrant
+        // block_on that shape used to hit panicked the reap verb before it
+        // classified a single row; the dedicated thread keeps it silent. A
+        // default entry owns no socket, so nothing answers and nothing is
+        // stopped - the subject is the absence of a panic, not the verdict.
+        let dir = std::env::temp_dir().join(format!(
+            "fno-gc-stop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = AgentsHome::at(&dir);
+        home.ensure_root().unwrap();
+        let entry = crate::state::RegistryEntry::default();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _stopped = rt.block_on(async { gc_sweep::stop_row_process(&home, &entry) });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn ac3_edge_operator_crown_open_work_and_active_keep() {
         let operator = GcRow {
             origin: Some("operator".into()),

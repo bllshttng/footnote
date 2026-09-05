@@ -5838,7 +5838,7 @@ fn apply_row_contradiction(row: &mut Map<String, Value>, now: chrono::DateTime<c
         && row_timestamp(row.get("created_at"))
             .is_some_and(|created_at| now - created_at > chrono::Duration::seconds(600))
     {
-        row.insert("status".into(), json!("live"));
+        row.insert("status".into(), json!("quiet"));
         row.insert("basis".into(), json!("stale-spawning-live-pid"));
     }
     row.remove("pid_alive");
@@ -5926,27 +5926,30 @@ fn liveness_origin(row: &Map<String, Value>) -> (Value, Option<String>) {
     }
 }
 
+/// The STATUS word `list` renders: SERVED ACTIVITY, never a `live` token
+/// (x-c672, AC7). Nothing decides on this word anymore - retirement reads the
+/// reverse join, the lanes read their own probes - so the column answers the
+/// operator's actual question, what is this session doing: `writing` (the
+/// transcript moved inside `STALE_ATTENTION_S`), `quiet` (older), `parked`
+/// (the tail closed a promise). A positively falsified row reads `orphaned`,
+/// and a probe that did not answer reads `unknown` - unless a confirmed-live
+/// pid keeps it readable as `quiet`, the process being there either way.
 fn rendered_status_from_truth(
     probe: Option<&crate::claude_ask::TruthProbe>,
     pid_confirmed_live: bool,
 ) -> &'static str {
-    match probe.and_then(|p| p.reachability.as_deref()) {
-        Some("reachable") => return "live",
-        Some("unreachable") => return "orphaned",
-        Some("unknown") => {
-            return if pid_confirmed_live {
-                "live"
-            } else {
-                "unknown"
-            }
-        }
-        _ => {}
+    if probe.and_then(|p| p.reachability.as_deref()) == Some("unreachable") {
+        return "orphaned";
     }
     match probe.map(|p| p.state.as_str()) {
-        Some("working" | "watching" | "your-move") => "live",
-        Some("done" | "stalled") => "orphaned",
-        _ if pid_confirmed_live => "live",
-        _ => "unknown",
+        Some("done") => "parked",
+        Some(_) => match probe.and_then(|p| p.last_activity_age_s) {
+            Some(age) if age < STALE_ATTENTION_S => "writing",
+            Some(_) => "quiet",
+            None => "unknown",
+        },
+        None if pid_confirmed_live => "quiet",
+        None => "unknown",
     }
 }
 
@@ -6086,11 +6089,16 @@ where
     // Mirrors Python's AgentStatusFilter enum, which Typer
     // rejects at parse time.
     if let Some(ref st) = filter_status {
-        if st != "live" && st != "orphaned" && st != "unknown" {
+        if !matches!(
+            st.as_str(),
+            "writing" | "quiet" | "parked" | "orphaned" | "unknown"
+        ) {
             return Response::err(
                 req.id,
                 ErrorCode::InvalidStatus,
-                format!("invalid --status '{st}' (expected: live | orphaned | unknown)"),
+                format!(
+                    "invalid --status '{st}' (expected: writing | quiet | parked | orphaned | unknown)"
+                ),
             );
         }
     }
@@ -14970,18 +14978,18 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
                 false
             ),
             "orphaned",
-            "a falsified row must not render live merely because its transcript is recent"
+            "a falsified row must not render writing merely because its transcript is recent"
         );
-        // And silence is not death: the verdict says unknown where the legacy
-        // state mapping said orphaned.
+        // A verdict that did not resolve falls through to the ACTIVITY read:
+        // a 12s-old transcript is writing whatever the state word says.
         assert_eq!(
             rendered_status_from_truth(probe_with_verdict("stalled", "unknown").as_ref(), false),
-            "unknown"
+            "writing"
         );
         assert_eq!(
             rendered_status_from_truth(probe("stalled").as_ref(), false),
-            "orphaned",
-            "the fallback keeps its old meaning for a fno too old to send a verdict"
+            "unknown",
+            "a probe that answered nothing reads unknown, never orphaned (x-c672)"
         );
     }
 
@@ -14991,18 +14999,14 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         // found): a row with no short_id/harness_session_id resolves through
         // its bare name, which the truth probe can never find -- "unknown" is
         // then a statement about missing session identity, not about whether
-        // the worker is alive. A confirmed-live pid is its own measurement.
-        assert_eq!(
-            rendered_status_from_truth(probe_with_verdict("working", "unknown").as_ref(), true),
-            "live",
-            "an unresolvable probe + a confirmed-live pid must render live, not unknown"
-        );
+        // the worker is alive. A confirmed-live pid keeps the row readable.
         assert_eq!(
             rendered_status_from_truth(None, true),
-            "live",
-            "no probe at all (too-old fno / shellout failure) + a live pid still renders live"
+            "quiet",
+            "no probe at all (too-old fno / shellout failure) + a live pid reads quiet, not unknown"
         );
-        // The override is scoped to the two unmeasured shapes ONLY. A probe
+        assert_eq!(rendered_status_from_truth(None, false), "unknown");
+        // The override is scoped to the unanswered shape ONLY. A probe
         // that positively falsified the row (unreachable) is never raised by
         // a live pid -- that would contradict the monotone-lowering rule
         // task 4 exists to enforce.
@@ -15114,12 +15118,12 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     }
 
     #[test]
-    fn progress_deliberately_wedged_open_turn_is_live_but_not_advancing() {
+    fn progress_deliberately_wedged_open_turn_is_quiet_but_not_advancing() {
         let probe = probe_with_age("working", "reachable", Some(STALE_ATTENTION_S + 1.0));
         assert_eq!(
             rendered_status_from_truth(probe.as_ref(), true),
-            "live",
-            "the process and reachability axes still say live"
+            "quiet",
+            "the process and reachability axes still say present; the transcript has not moved"
         );
         assert_eq!(
             progress_from_truth(probe.as_ref(), "claude", None),
@@ -15848,10 +15852,10 @@ done
     /// The end-to-end shape of the king's live measurement (x-9de7 task 3): a
     /// codex pane row with no short_id and no harness_session_id -- the exact
     /// specimen -- resolves through `registry_truth_handle` to its bare name,
-    /// which no truth probe can ever find. `status` must still read `live`
-    /// when the pid demonstrably is, not `unknown`.
+    /// which no truth probe can ever find. `status` must still read `quiet`
+    /// when the pid demonstrably is there, not `unknown`.
     #[test]
-    fn list_status_is_live_for_an_unresolvable_row_with_a_confirmed_live_pid() {
+    fn list_status_is_quiet_for_an_unresolvable_row_with_a_confirmed_live_pid() {
         let home = short_home("listlivepid");
         state::update_registry(&home.registry_json(), |r| {
             let mut e = seed_bare_row("cx-x-e14b");
@@ -15865,7 +15869,7 @@ done
 
         let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| None));
         let row = &response.result().unwrap()["agents"][0];
-        assert_eq!(row["status"], "live");
+        assert_eq!(row["status"], "quiet");
 
         std::fs::remove_dir_all(home.root()).ok();
     }
@@ -16009,13 +16013,17 @@ done
         })
         .unwrap();
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+        let req = Request::new(1, "agent.list", json!({"status": "writing"}));
 
-        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|_handle| probe_with_verdict("working", "reachable")),
+        );
         let result = response.result().unwrap();
         let agents = result["agents"].as_array().unwrap();
         assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0]["status"], "live");
+        assert_eq!(agents[0]["status"], "writing");
 
         std::fs::remove_dir_all(home.root()).ok();
     }
@@ -16025,7 +16033,7 @@ done
         let home = short_home("listidentity");
         seed_stream_row(&home, "custom-worker-name", "abc12345");
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+        let req = Request::new(1, "agent.list", json!({"status": "writing"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
         let response = handle_list_with_truth(
@@ -16033,7 +16041,7 @@ done
             &req,
             per_handle(|handle| {
                 seen.borrow_mut().push(handle.to_string());
-                probe("working")
+                probe_with_verdict("working", "reachable")
             }),
         );
 
@@ -16054,7 +16062,7 @@ done
         })
         .unwrap();
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+        let req = Request::new(1, "agent.list", json!({"status": "writing"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
         let response = handle_list_with_truth(
@@ -16062,7 +16070,7 @@ done
             &req,
             per_handle(|handle| {
                 seen.borrow_mut().push(handle.to_string());
-                probe("working")
+                probe_with_verdict("working", "reachable")
             }),
         );
 
@@ -16085,7 +16093,7 @@ done
         })
         .unwrap();
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
-        let req = Request::new(1, "agent.list", json!({"status": "live"}));
+        let req = Request::new(1, "agent.list", json!({"status": "writing"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
         let response = handle_list_with_truth(
@@ -16093,7 +16101,7 @@ done
             &req,
             per_handle(|handle| {
                 seen.borrow_mut().push(handle.to_string());
-                probe("working")
+                probe_with_verdict("working", "reachable")
             }),
         );
 

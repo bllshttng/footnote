@@ -155,20 +155,24 @@ pub(crate) fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     Some(GraphRead { index, open_do })
 }
 
-/// Stop a retiring row's held process from a sync caller. On a tokio blocking
-/// thread the ambient handle serves the async stop; a sync caller (the CLI
-/// verb) gets a one-shot current-thread runtime. A runtime that cannot be
-/// built fails closed: the row keeps under `stop_refused`.
+/// Stop a retiring row's held process from a sync caller. The stop is async,
+/// so it runs on a dedicated thread with a one-shot current-thread runtime:
+/// `Handle::block_on` on the caller's own thread panics inside an ambient
+/// runtime (the CLI verb runs under `main`'s `block_on`, the daemon's tick
+/// under `spawn_blocking`), and a fresh thread is legal in both. A runtime
+/// that cannot be built fails closed: the row keeps under `stop_refused`.
 pub(crate) fn stop_row_process(home: &AgentsHome, e: &state::RegistryEntry) -> bool {
-    let stop = || async { crate::daemon::stop_worker_confirmed_for_home(home, e).await };
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle.block_on(stop()),
-        Err(_) => tokio::runtime::Builder::new_current_thread()
+    let home = home.clone();
+    let entry = e.clone();
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map(|rt| rt.block_on(stop()))
-            .unwrap_or(false),
-    }
+            .map(|rt| rt.block_on(crate::daemon::stop_worker_confirmed_for_home(&home, &entry)))
+            .unwrap_or(false)
+    })
+    .join()
+    .unwrap_or(false)
 }
 
 /// The production tree probes for a retiring row: cleanliness first, the

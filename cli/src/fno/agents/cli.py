@@ -35,9 +35,16 @@ agents_app = typer.Typer(
 )
 
 class AgentStatusFilter(str, enum.Enum):
-    """Rendered family-1 liveness values accepted by ``list --status``."""
+    """Served-activity words accepted by ``list --status`` (x-c672, AC7).
 
-    live = "live"
+    The old `live` token is gone: the column answers what the session is
+    DOING. A live-but-unmeasured row reads `quiet` beside its evidence, and
+    only a positively falsified row reads `orphaned`.
+    """
+
+    writing = "writing"
+    quiet = "quiet"
+    parked = "parked"
     orphaned = "orphaned"
     unknown = "unknown"
 
@@ -45,11 +52,11 @@ class AgentStatusFilter(str, enum.Enum):
 class AgentProgressFilter(str, enum.Enum):
     """Progress-axis values accepted by ``list --progress``.
 
-    A SECOND axis beside ``--status``, not a finer version of it: reachability
-    answers "can I reach this process"; progress answers "is it advancing,
-    awaiting the operator, parked, or refused" (fno.agents.reachability). The
-    two filter independently -- a row filtered `--progress parked` still
-    counts toward `--status live`.
+    A SECOND axis beside ``--status``, not a finer version of it: the status
+    word answers "what is it doing right now"; progress answers "is it
+    advancing, awaiting the operator, parked, or refused"
+    (fno.agents.reachability). The two filter independently -- a row filtered
+    `--progress parked` still counts toward `--status quiet`.
     """
 
     advancing = "advancing"
@@ -3242,7 +3249,9 @@ def cmd_list(
         help="Retired: filter by --harness.",
     ),
     status: AgentStatusFilter = typer.Option(
-        None, "--status", help="Filter by liveness (live | orphaned | unknown)."
+        None,
+        "--status",
+        help="Filter by served activity (writing | quiet | parked | orphaned | unknown).",
     ),
     progress: AgentProgressFilter = typer.Option(
         None,
