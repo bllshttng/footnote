@@ -99,7 +99,7 @@ cli.add_typer(_retro_app, name="retro", hidden=True)
 # never pick up the same node. The implementation is homed in graph/statuses.py
 # (so the board renderers can share it without a cli<->render cycle); re-exported
 # under the original module-global name that existing tests monkeypatch.
-from fno.graph.statuses import _LEGACY_DEFER_PREFIX, derived_status, live_claimed_node_ids as _live_claimed_node_ids, node_is_done  # noqa: E402
+from fno.graph.statuses import derived_status, live_claimed_node_ids as _live_claimed_node_ids, node_is_done  # noqa: E402
 
 
 def _require_live_claimed_node_ids(operation: str) -> set[str]:
