@@ -1538,3 +1538,82 @@ def test_raw_refuses_from_self(runner, mailbox, monkeypatch):
     )
     assert res.exit_code == 2
     assert "envelope" in (res.output + (res.stderr or ""))
+
+
+def _seed_codex_pane_self(mailbox, monkeypatch, attested: str):
+    """This process IS a pane-spawned codex worker: the fno name_only stamp
+    (no session id - the pane row is written after the child starts), both
+    codex markers, no walkable ancestry, an env_only witness. The attester is
+    pinned because a real runner's ancestry is machine-dependent: a dev shell
+    under a codex process would carry a DIFFERENT CODEX_THREAD_ID, and the
+    answer must not depend on that."""
+    _clear_harness_markers(monkeypatch)
+    # The canonical pair is scrubbed too: a session-id left over from the
+    # runner's own environment would complete the name_only stamp into a
+    # COMPLETE one naming a stranger, the exact contamination the spawn scrub
+    # (AMBIENT_IDENTITY_ENV) exists to prevent.
+    monkeypatch.delenv("FNO_HARNESS_SESSION_ID", raising=False)
+    monkeypatch.setenv("FNO_HARNESS_NAME", "codex")
+    monkeypatch.setenv("CODEX_THREAD_ID", SID_CODEX)
+    monkeypatch.setenv("CODEX_SESSION_ID", SID_CODEX)
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_attester_identity",
+        lambda env=None: (attested, "env_only"),
+    )
+    register_existing_session(
+        provider="codex", session_id=SID_CODEX, cwd=str(mailbox), name="codexself"
+    )
+    # The claude PEER, seeded without the marker scrub (_seed_claude clears the
+    # very env this seeder just wrote): only the recipient row + inject seam.
+    register_existing_session(
+        provider="claude", session_id=SID_CLAUDE, cwd=str(mailbox), name="claudepeer"
+    )
+    injected = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda s, t, sender=None, **_kwargs: injected.append((s, t, sender)) or True,
+    )
+    return injected
+
+
+def test_from_self_resolves_a_pane_codex_worker(runner, mailbox, monkeypatch):
+    """Regression (pane identity): a codex pane worker's stamp is name_only by
+    construction, its own registry row already holds its id, and the walk is
+    silent in the sandbox - the exact shape that refused --from-self and drove
+    the worker to report without a stamp. It now resolves and the envelope
+    carries the codex session's canonical handle."""
+    injected = _seed_codex_pane_self(mailbox, monkeypatch, SID_CODEX)
+    res = runner.invoke(
+        app, ["agents", "mail", "send", "claudepeer", "status: ok", "--from-self"]
+    )
+    assert res.exit_code == 0, res.output + (res.stderr or "")
+    assert injected, "send never reached the claude transport"
+    # The wrapped envelope carries the sender inside its fno_mail header; the
+    # transport's sender kwarg is the raw lane's.
+    assert f'from="{SID_CODEX[:8]}"' in injected[0][1]
+
+
+def test_from_self_still_refuses_a_codex_disagreement(runner, mailbox, monkeypatch):
+    """Two DIFFERENT codex ids with no proof: the resolution refuses at exit 2
+    and the message still names every marker to strip - the degrade is a
+    refusal, never a silent pick of the durable-looking id (x-0992)."""
+    _clear_harness_markers(monkeypatch)
+    monkeypatch.setenv("CODEX_THREAD_ID", "019fc973-aaaa-4abc-9def-0123456789ab")
+    monkeypatch.setenv("CODEX_SESSION_ID", "019fc973-bbbb-4abc-9def-0123456789ab")
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_attester_identity",
+        lambda env=None: ("", "env_only"),
+    )
+    res = runner.invoke(
+        app, ["agents", "mail", "send", "claudepeer", "status: ok", "--from-self"]
+    )
+    assert res.exit_code == 2
+    out = res.output + (res.stderr or "")
+    assert "cannot decide which session is 'self'" in out
+    assert "CODEX_THREAD_ID" in out and "CODEX_SESSION_ID" in out
