@@ -1,19 +1,12 @@
 """Knobs the daemon's periodic sweeps read.
 
-Two neighbours that share one job: keeping the machine from filling up with
-work nobody is waiting on.
-
-- The reap-receipt store's retention.
-- The single-flight latch and the orphan reaper, both born from one measurement
-  on the operator's box: load 319 against a ceiling of 96, with seven
-  concurrent ``fno agents truth`` children from five parents and one orphaned
-  child at 44.7% CPU that had been reparented to init.
+Reap-receipt retention, the single-flight latch, and the orphan reaper share
+one job: keeping the machine from filling up with work nobody is waiting on.
 
 The flat keys ride a mixin rather than a nested block because they are read as
-``agents.single_flight_ttl_seconds``, not ``agents.single_flight.ttl_seconds``.
-The Rust daemon resolves the same three keys in ``agents_config.rs``; this
-model is what keeps ``fno config get`` and ``fno config doctor`` honest about
-them.
+``agents.single_flight_ttl_seconds``. The Rust daemon resolves the same three
+in ``agents_config.rs``; this model keeps ``fno config get`` and ``fno config
+doctor`` honest about them.
 """
 from __future__ import annotations
 
@@ -48,9 +41,7 @@ class SweepKeys(BaseModel):
 
     ``single_flight_join_budget_seconds`` is how long a later caller waits for
     the holder's answer before running its own. It sits over the 23.2 s
-    worst-measured roster read on purpose: load is exactly when the latch has
-    to hold, and a budget under the slow read would time out at the moment it
-    matters.
+    worst-measured roster read on purpose: load is when the latch has to hold.
 
     ``orphan_reap_after_seconds`` is the age at which a child that init
     inherited is reaped. 90 minutes is derived, not picked: the longest

@@ -142,6 +142,7 @@ pub mod subscribe;
 pub mod supervisor;
 pub mod terminal_stop;
 pub mod tick_ledger;
+pub mod truth_probe;
 pub mod usage;
 pub mod verify_evidence;
 pub mod version;

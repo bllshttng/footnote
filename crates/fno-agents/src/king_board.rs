@@ -417,7 +417,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                         .unwrap_or_else(|| h.clone())
                 })
                 .collect();
-            Some(s.spawn(move || crate::claude_ask::family1_truth_probe_many(&tokens)))
+            Some(s.spawn(move || crate::truth_probe::family1_truth_probe_many(&tokens)))
         };
         // The needs fold rides a thread too: in-process, but its
         // refused-worker leg batch probes the whole registry and measured
@@ -500,7 +500,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 .unwrap_or_else(|_| SourceRead::err("needs: reader panicked")),
         };
         let (holder_activity, truth_panicked): (
-            HashMap<String, crate::claude_ask::TruthProbe>,
+            HashMap<String, crate::truth_probe::TruthProbe>,
             bool,
         ) = match t_truth {
             None => (HashMap::new(), false),

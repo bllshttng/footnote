@@ -2600,3 +2600,75 @@ fn session_transition_apply_preserves_succession_and_splits_live_branch() {
         .expect("second branch row");
     assert_eq!(second_branch.name, "worker-branch-2");
 }
+
+// ── moved verbatim out of daemon.rs (file budget shrink) ──
+
+#[test]
+fn gc_sweep_reaps_stamped_stamps_unstamped_keeps_live() {
+    let home = tmp_home("gc-sweep");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+
+    state::update_registry(&home.registry_json(), |r| {
+        // Stamped long ago -> past grace -> reaped (AC1-HP; ask row skips the
+        // worktree probe).
+        r.entries
+            .push(ask_row("ask-old", Some("2020-01-01T00:00:00Z")));
+        // Terminal but never observed dead before -> stamped, not reaped.
+        r.entries.push(ask_row("ask-new", None));
+        // A live worker (our own pid, no start time -> bare-existence live) is
+        // never touched (AC1-FR).
+        let mut live = ask_row("live", None);
+        live.name = "live".into();
+        live.short_id = "wkL".into();
+        live.status = AgentStatus::Live;
+        live.pid = Some(std::process::id());
+        r.entries.push(live);
+    })
+    .unwrap();
+
+    let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
+
+    assert_eq!(summary.reaped, vec!["ask-old".to_string()]);
+
+    let reg = state::load_registry(&home.registry_json()).unwrap();
+    let names: Vec<&str> = reg.entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(!names.contains(&"ask-old"), "ask-old should be reaped");
+    assert!(
+        names.contains(&"ask-new"),
+        "ask-new should be kept (in grace)"
+    );
+    assert!(names.contains(&"live"), "live row must never be reaped");
+
+    // ask-new got its exit stamp; the live row stayed unstamped.
+    let new = reg.entries.iter().find(|e| e.name == "ask-new").unwrap();
+    assert!(
+        new.exited_at.is_some(),
+        "ask-new should be stamped this pass"
+    );
+    let live = reg.entries.iter().find(|e| e.name == "live").unwrap();
+    assert!(live.exited_at.is_none());
+
+    // The removal emitted exactly one agent_row_reaped for ask-old.
+    let events = read_events(&home);
+    let reaped: Vec<&Value> = events
+        .iter()
+        .filter(|e| e.get("type").and_then(Value::as_str) == Some("agent_row_reaped"))
+        .collect();
+    assert_eq!(reaped.len(), 1);
+    assert_eq!(
+        reaped[0]
+            .get("data")
+            .and_then(|d| d.get("name"))
+            .and_then(Value::as_str),
+        Some("ask-old")
+    );
+}
+#[test]
+fn gc_sweep_empty_registry_is_noop() {
+    let home = tmp_home("gc-empty");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
+    assert!(summary.reaped.is_empty());
+    assert!(summary.kept_dirty.is_empty());
+    assert!(summary.kept_uncorroborated.is_empty());
+}

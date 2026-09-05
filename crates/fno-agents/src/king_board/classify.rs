@@ -234,7 +234,7 @@ pub(crate) fn read_claimed_nodes(
 
 /// Positive evidence the holder is doing something (board._holder_is_active):
 /// an absent reading is not a staffed lane.
-pub(crate) fn holder_is_active(probe: Option<&crate::claude_ask::TruthProbe>) -> bool {
+pub(crate) fn holder_is_active(probe: Option<&crate::truth_probe::TruthProbe>) -> bool {
     let Some(probe) = probe else {
         return false;
     };
@@ -252,7 +252,7 @@ pub(crate) fn holder_is_active(probe: Option<&crate::claude_ask::TruthProbe>) ->
 pub(crate) fn node_driver<'a>(
     node_id: &str,
     claim_by_node: &'a HashMap<String, Value>,
-    activity: &'a HashMap<String, crate::claude_ask::TruthProbe>,
+    activity: &'a HashMap<String, crate::truth_probe::TruthProbe>,
 ) -> (&'static str, Option<&'a Value>) {
     let claim = claim_by_node.get(node_id);
     let Some(claim) = claim else {
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn holder_activity_reads_only_positive_evidence() {
-        let active = crate::claude_ask::TruthProbe {
+        let active = crate::truth_probe::TruthProbe {
             state: "working".to_string(),
             harness_title: None,
             reachability: None,
@@ -329,12 +329,12 @@ mod tests {
             observed_model: Value::Null,
         };
         assert!(holder_is_active(Some(&active)));
-        let old = crate::claude_ask::TruthProbe {
+        let old = crate::truth_probe::TruthProbe {
             last_activity_age_s: Some(STALLED_AFTER_S + 1.0),
             ..active.clone()
         };
         assert!(!holder_is_active(Some(&old)));
-        let parked = crate::claude_ask::TruthProbe {
+        let parked = crate::truth_probe::TruthProbe {
             state: "your-move".to_string(),
             ..active
         };

@@ -2349,7 +2349,7 @@ pub(crate) fn reap_node_session(
 pub(crate) fn live_truth_tail_states(
     handles: &[String],
 ) -> std::collections::HashMap<String, String> {
-    crate::claude_ask::family1_truth_probe_many(handles)
+    crate::truth_probe::family1_truth_probe_many(handles)
         .into_iter()
         .map(|(handle, probe)| (handle, probe.state))
         .collect()
@@ -2406,8 +2406,8 @@ pub(crate) fn batched_row_probes(
     truth_tail_probes: &dyn Fn(
         &[String],
     )
-        -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>,
-) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe> {
+        -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>,
+) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe> {
     let handles = row_truth_handles(entries);
     if handles.is_empty() {
         return std::collections::HashMap::new();
@@ -4137,6 +4137,16 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         let retain_days =
                             crate::agents_config::reap_receipt_retain_days(&grace_cwd);
                         let _ = gc_sweep(&home, &emitter, &grace_for_harness, retain_days);
+                        // Reap what init inherited, on the same tick and behind
+                        // the same gate. gc_sweep reaps registry ROWS; a child
+                        // whose parent died is reparented to init and nothing
+                        // owned it at all. One `ps` for the whole machine, so a
+                        // sweep meant to reduce the process count never fans out.
+                        let _ = crate::gc::orphan_sweep(
+                            &emitter,
+                            crate::agents_config::orphan_reap_after(&grace_cwd),
+                            &crate::gc::registry_live_pids(&home),
+                        );
                     });
                 }
                 // Worktree sweep: the backstop for what the merge ritual
@@ -7245,7 +7255,7 @@ fn liveness_origin(row: &Map<String, Value>) -> (Value, Option<String>) {
 }
 
 fn rendered_status_from_truth(
-    probe: Option<&crate::claude_ask::TruthProbe>,
+    probe: Option<&crate::truth_probe::TruthProbe>,
     pid_confirmed_live: bool,
 ) -> &'static str {
     match probe.and_then(|p| p.reachability.as_deref()) {
@@ -7311,7 +7321,7 @@ fn is_refused(observed_model: &Value, harness: &str, route_settings_path: Option
 /// truth-state arms plus the measured transcript age. A written `working`
 /// state is not progress evidence when its transcript stopped advancing.
 pub(crate) fn progress_from_truth(
-    probe: Option<&crate::claude_ask::TruthProbe>,
+    probe: Option<&crate::truth_probe::TruthProbe>,
     harness: &str,
     route_settings_path: Option<&str>,
 ) -> (&'static str, &'static str) {
@@ -7363,7 +7373,7 @@ const LIST_PROJECTION_OMISSIONS: [&str; 2] = ["model", "model_basis"];
 
 fn handle_list_with_truth<F>(ctx: &Ctx, req: &Request, truth_fn: F) -> Response
 where
-    F: Fn(&[String]) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>,
+    F: Fn(&[String]) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>,
 {
     let all = req
         .params
@@ -9570,7 +9580,7 @@ struct ReconcileSweepResult {
 ///
 /// `probe` is injected so this is testable without shelling out.
 fn predecessor_reachability(session_id: &str) -> Option<bool> {
-    crate::claude_ask::family1_truth_probe(session_id).and_then(|probe| {
+    crate::truth_probe::family1_truth_probe(session_id).and_then(|probe| {
         match probe.reachability.as_deref() {
             Some("reachable") => Some(true),
             Some("unreachable") => Some(false),
@@ -10400,7 +10410,7 @@ fn run_reconcile_sweep(
     // The session-names overlay folds into the rows on every sweep:
     // best-effort, one small file read, and the count is an event.
     crate::session_names_fold::fold_session_names(home, emitter);
-    let probes = batched_row_probes(&entries, &crate::claude_ask::family1_truth_probe_many);
+    let probes = batched_row_probes(&entries, &crate::truth_probe::family1_truth_probe_many);
     // One batch feeds both consumers: the ladder's truth rung reads states,
     // the title detector reads titles. The probes are keyed by the row's
     // claude uuid (the handle the batch asked for), which is also the map
@@ -13071,66 +13081,6 @@ mod tests {
         assert!(!mux_pane_is_absent("fno mux: permission denied"));
     }
 
-    #[test]
-    fn gc_sweep_reaps_stamped_stamps_unstamped_keeps_live() {
-        let home = tmp_home("gc-sweep");
-        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-
-        state::update_registry(&home.registry_json(), |r| {
-            // Stamped long ago -> past grace -> reaped (AC1-HP; ask row skips the
-            // worktree probe).
-            r.entries
-                .push(ask_row("ask-old", Some("2020-01-01T00:00:00Z")));
-            // Terminal but never observed dead before -> stamped, not reaped.
-            r.entries.push(ask_row("ask-new", None));
-            // A live worker (our own pid, no start time -> bare-existence live) is
-            // never touched (AC1-FR).
-            let mut live = ask_row("live", None);
-            live.name = "live".into();
-            live.short_id = "wkL".into();
-            live.status = AgentStatus::Live;
-            live.pid = Some(std::process::id());
-            r.entries.push(live);
-        })
-        .unwrap();
-
-        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
-
-        assert_eq!(summary.reaped, vec!["ask-old".to_string()]);
-
-        let reg = state::load_registry(&home.registry_json()).unwrap();
-        let names: Vec<&str> = reg.entries.iter().map(|e| e.name.as_str()).collect();
-        assert!(!names.contains(&"ask-old"), "ask-old should be reaped");
-        assert!(
-            names.contains(&"ask-new"),
-            "ask-new should be kept (in grace)"
-        );
-        assert!(names.contains(&"live"), "live row must never be reaped");
-
-        // ask-new got its exit stamp; the live row stayed unstamped.
-        let new = reg.entries.iter().find(|e| e.name == "ask-new").unwrap();
-        assert!(
-            new.exited_at.is_some(),
-            "ask-new should be stamped this pass"
-        );
-        let live = reg.entries.iter().find(|e| e.name == "live").unwrap();
-        assert!(live.exited_at.is_none());
-
-        // The removal emitted exactly one agent_row_reaped for ask-old.
-        let events = read_events(&home);
-        let reaped: Vec<&Value> = events
-            .iter()
-            .filter(|e| e.get("type").and_then(Value::as_str) == Some("agent_row_reaped"))
-            .collect();
-        assert_eq!(reaped.len(), 1);
-        assert_eq!(
-            reaped[0]
-                .get("data")
-                .and_then(|d| d.get("name"))
-                .and_then(Value::as_str),
-            Some("ask-old")
-        );
-    }
 
     /// The real summary line, copied from this machine's output.
     const REAL_SUMMARY: &str = "would-archive      feature/x-3e17   /some/wt\n\
@@ -13638,15 +13588,6 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         assert!(!is_linked_worktree("/nonexistent/path/that/cannot/be/read"));
     }
 
-    #[test]
-    fn gc_sweep_empty_registry_is_noop() {
-        let home = tmp_home("gc-empty");
-        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(3600), 7);
-        assert!(summary.reaped.is_empty());
-        assert!(summary.kept_dirty.is_empty());
-        assert!(summary.kept_uncorroborated.is_empty());
-    }
 
     /// x-9de7 task 5: the "stuck and invisible" case named in the plan -
     /// past grace, a liveness surface on record, but no positive corroboration
@@ -15883,8 +15824,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     /// `rendered_status_from_truth` (a `fno` too old to emit the verdict), which
     /// is what keeps these pre-existing state-mapping assertions meaningful.
     /// `probe_reachable` below covers the current wire.
-    fn probe(state: &str) -> Option<crate::claude_ask::TruthProbe> {
-        Some(crate::claude_ask::TruthProbe {
+    fn probe(state: &str) -> Option<crate::truth_probe::TruthProbe> {
+        Some(crate::truth_probe::TruthProbe {
             state: state.into(),
             reachability: None,
             basis: None,
@@ -16568,8 +16509,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     /// handler called it once or once per row, so the call SHAPE needs its own
     /// test against the raw seam.
     fn per_handle(
-        f: impl Fn(&str) -> Option<crate::claude_ask::TruthProbe>,
-    ) -> impl Fn(&[String]) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>
+        f: impl Fn(&str) -> Option<crate::truth_probe::TruthProbe>,
+    ) -> impl Fn(&[String]) -> std::collections::HashMap<String, crate::truth_probe::TruthProbe>
     {
         move |handles: &[String]| {
             handles
@@ -16583,8 +16524,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
     fn probe_with_verdict(
         state: &str,
         reachability: &str,
-    ) -> Option<crate::claude_ask::TruthProbe> {
-        Some(crate::claude_ask::TruthProbe {
+    ) -> Option<crate::truth_probe::TruthProbe> {
+        Some(crate::truth_probe::TruthProbe {
             state: state.into(),
             reachability: Some(reachability.into()),
             basis: Some("transcript".into()),
@@ -16602,7 +16543,7 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         state: &str,
         reachability: &str,
         age_s: Option<f64>,
-    ) -> Option<crate::claude_ask::TruthProbe> {
+    ) -> Option<crate::truth_probe::TruthProbe> {
         let mut probe = probe_with_verdict(state, reachability).unwrap();
         probe.last_activity_age_s = age_s;
         Some(probe)
@@ -16670,8 +16611,8 @@ Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         state: &str,
         reachability: &str,
         observed_model: Value,
-    ) -> Option<crate::claude_ask::TruthProbe> {
-        Some(crate::claude_ask::TruthProbe {
+    ) -> Option<crate::truth_probe::TruthProbe> {
+        Some(crate::truth_probe::TruthProbe {
             state: state.into(),
             reachability: Some(reachability.into()),
             basis: Some("transcript".into()),
@@ -17467,7 +17408,7 @@ done
             &ctx,
             &req,
             per_handle(|_handle| {
-                Some(crate::claude_ask::TruthProbe {
+                Some(crate::truth_probe::TruthProbe {
                     state: "working".into(),
                     reachability: Some("reachable".into()),
                     basis: Some("transcript".into()),

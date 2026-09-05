@@ -19,9 +19,8 @@
 //!   lines are already compact, so each matching line is emitted verbatim to
 //!   preserve source key order without a crate-wide serde_json `preserve_order`.
 
-use crate::claude_ask::{
-    family1_truth_state, family1_truth_state_for_resume, liveness_probe, locate_session, ClaudeHome,
-};
+use crate::claude_ask::{liveness_probe, locate_session, ClaudeHome};
+use crate::truth_probe::{family1_truth_state, family1_truth_state_for_resume};
 #[cfg(test)]
 use crate::manifest_lookup::parse_manifest_identity;
 use crate::manifest_lookup::{find_manifest_for_session, git_worktree_paths, ManifestIdentity};
