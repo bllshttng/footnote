@@ -942,7 +942,7 @@ class TestAbandonmentProbe:
     def test_a_proven_abandoned_node_claim_is_reaped(self, tmp_path):
         self._suspect_node(tmp_path)
         summary = reap_dead_claims(
-            roots=[tmp_path], apply=False, abandonment_probe=lambda _c: True
+            roots=[tmp_path], apply=False, abandonment_probe=lambda _c, **_: True
         )
         assert summary["would_reap"] == 1
         assert summary["kept_suspect_alive"] == 0
@@ -952,7 +952,7 @@ class TestAbandonmentProbe:
         sessions in one worktree and a duplicate PR."""
         self._suspect_node(tmp_path)
         summary = reap_dead_claims(
-            roots=[tmp_path], apply=True, abandonment_probe=lambda _c: False
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c, **_: False
         )
         assert summary["reaped"] == 0
         assert summary["kept_suspect_alive"] == 1
@@ -963,7 +963,7 @@ class TestAbandonmentProbe:
         inversion of this fix."""
         self._suspect_node(tmp_path)
         summary = reap_dead_claims(
-            roots=[tmp_path], apply=True, abandonment_probe=lambda _c: None
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c, **_: None
         )
         assert summary["reaped"] == 0
         assert summary["kept_suspect_unprobed"] == 1
@@ -972,7 +972,7 @@ class TestAbandonmentProbe:
     def test_the_probe_is_never_asked_about_a_non_node_key(self, tmp_path):
         """No other key family has a roster to consult. The reservation is kept
         because its TTL is the boot window, not because the probe said so."""
-        def _boom(_claim):
+        def _boom(_claim, **_):
             raise AssertionError("probe asked about a non-node key")
 
         acquire_claim(
@@ -986,7 +986,7 @@ class TestAbandonmentProbe:
         assert summary["kept_suspect"] == 1
 
     def test_the_probe_is_never_asked_about_a_live_claim(self, tmp_path):
-        def _boom(_claim):
+        def _boom(_claim, **_):
             raise AssertionError("probe asked about a live claim")
 
         acquire_claim(
@@ -1038,7 +1038,7 @@ class TestSharedPidExclusivity:
         self._expired_prover_on_disk(tmp_path, "node:x-one", "target-session:s1")
         self._expired_prover_on_disk(tmp_path, "node:x-two", "target-session:s2")
         summary = reap_dead_claims(
-            roots=[tmp_path], apply=False, abandonment_probe=lambda _c: True
+            roots=[tmp_path], apply=False, abandonment_probe=lambda _c, **_: True
         )
         assert summary["would_reap"] == 2
         assert summary["kept_live"] == 0
@@ -1053,7 +1053,7 @@ class TestSharedPidExclusivity:
         self._expired_prover_on_disk(tmp_path, "node:x-one", "target-session:s1")
         self._expired_prover_on_disk(tmp_path, "node:x-two", "target-session:s2")
         summary = reap_dead_claims(
-            roots=[tmp_path], apply=True, abandonment_probe=lambda _c: True
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c, **_: True
         )
         assert summary["reaped"] == 2
         assert summary["kept_live"] == 0
@@ -1064,7 +1064,7 @@ class TestSharedPidExclusivity:
         self._expired_prover_on_disk(tmp_path, "node:x-one", "target-session:s1")
         self._expired_prover_on_disk(tmp_path, "node:x-two", "target-session:s2")
         summary = reap_dead_claims(
-            roots=[tmp_path], apply=True, abandonment_probe=lambda _c: False
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c, **_: False
         )
         assert summary["reaped"] == 0
         assert summary["kept_suspect_alive"] == 2
@@ -1113,7 +1113,7 @@ class TestSharedPidExclusivity:
 
         monkeypatch.setattr(claims_core, "claim_verdicts", _release_sibling_then_fresh_door)
         summary = reap_dead_claims(
-            roots=[tmp_path], apply=True, abandonment_probe=lambda _c: True
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c, **_: True
         )
         assert summary["reaped"] == 0
         assert summary["kept_live"] == 1

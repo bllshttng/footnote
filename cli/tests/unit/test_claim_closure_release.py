@@ -355,7 +355,7 @@ class TestNodeSettlement:
             root=tmp_path,
         )
 
-        def _boom(_claim, now=None):
+        def _boom(_claim, now=None, native_verdict=None):
             raise RuntimeError("settlement on fire")
 
         # Falls through to liveness: dead pid + unexpired TTL = suspect, kept.

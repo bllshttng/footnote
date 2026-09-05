@@ -18,7 +18,6 @@ writes are best-effort: the YAML lock file write is authoritative.
 
 from __future__ import annotations
 
-import inspect
 import os
 import socket
 from pathlib import Path
@@ -1585,32 +1584,12 @@ def sweep_verdict(
         return provably_dead, bucket
     if abandonment_probe is None or not claim.key.startswith("node:"):
         return False, "suspect"
-    probe_verdict = _call_native_aware_probe(abandonment_probe, claim, verdict)
+    probe_verdict = abandonment_probe(claim, native_verdict=verdict)
     if probe_verdict is True:
         return True, ""
     # False: a live worker holds this node. None: the probe could not run,
     # which is unknown, and unknown keeps.
     return False, "suspect_alive" if probe_verdict is False else "suspect_unprobed"
-
-
-def _call_native_aware_probe(
-    probe: Callable[..., Optional[bool]],
-    claim: Claim,
-    native_verdict: dict[str, Any],
-) -> Optional[bool]:
-    """Pass the batch verdict to native-aware probes without breaking old hooks."""
-    parameters: tuple[inspect.Parameter, ...]
-    try:
-        parameters = tuple(inspect.signature(probe).parameters.values())
-    except (TypeError, ValueError):
-        parameters = ()
-    accepts_native = any(
-        parameter.name == "native_verdict" or parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters
-    )
-    if accepts_native:
-        return probe(claim, native_verdict=native_verdict)
-    return probe(claim)
 
 
 def _default_reap_roots() -> list[Path]:
