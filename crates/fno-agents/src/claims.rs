@@ -1485,18 +1485,31 @@ pub(crate) fn append_event_line(
 ) -> Result<(), String> {
     let mut line = serde_json::to_vec(event).map_err(|e| e.to_string())?;
     line.push(b'\n');
+    // Honor the declared retention class (x-add3): ephemeral rows (the claim
+    // lifecycle, single_flight_gate) go to the sibling journal - the same
+    // routing EventEmitter::write_line and the Python append_event apply - so
+    // an event lands in one store whichever language emitted it.
+    let ephemeral = event
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(crate::events::is_ephemeral_event);
     loop {
         // Setup can replace a local journal with a canonical-journal symlink
         // while this writer waits on the old mutex. Re-resolve after acquiring
         // and retry whenever the leaf changed during that handoff.
         let resolved_path =
             std::fs::canonicalize(events_path).unwrap_or_else(|_| events_path.to_path_buf());
-        if let Some(parent) = resolved_path.parent() {
+        let target_path = if ephemeral {
+            crate::events::ephemeral_path(&resolved_path)
+        } else {
+            resolved_path.clone()
+        };
+        if let Some(parent) = target_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        let lock_dir = resolved_path.with_file_name(format!(
+        let lock_dir = target_path.with_file_name(format!(
             "{}.lock.d",
-            resolved_path
+            target_path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "events.jsonl".into())
@@ -1512,7 +1525,7 @@ pub(crate) fn append_event_line(
         let res = std::fs::OpenOptions::new()
             .append(true)
             .create(true)
-            .open(&resolved_path)
+            .open(&target_path)
             .and_then(|mut f| f.write_all(&line))
             .map_err(|e| e.to_string());
         release_dir_mutex(&lock_dir, &token);
@@ -2696,8 +2709,15 @@ mod tests {
     }
 
     fn read_events(root: &TempDir) -> Vec<Value> {
-        let text =
+        // The claim lifecycle kinds are ephemeral-class, so they live in the
+        // .ephemeral sibling since retention routing (x-add3). Read both files
+        // so the assertions below keep describing the full audit trail.
+        let mut text =
             std::fs::read_to_string(root.path().join(".fno/events.jsonl")).unwrap_or_default();
+        text.push_str(
+            &std::fs::read_to_string(root.path().join(".fno/events.jsonl.ephemeral"))
+                .unwrap_or_default(),
+        );
         text.lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()

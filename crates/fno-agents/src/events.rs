@@ -38,6 +38,38 @@ pub const MAX_EVENT_PAYLOAD_BYTES: usize = 500;
 /// operator's archive concern, not the daemon's).
 pub const ROTATE_AT_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Sibling journal suffix for ephemeral-class rows (x-add3). The Python
+/// `fno.events` module declares the same string; a parity test
+/// (`cli/tests/events/test_ephemeral_set_parity.py`) holds the two equal so
+/// both languages write the same sibling file.
+pub const EPHEMERAL_SUFFIX: &str = ".ephemeral";
+
+/// Event types the schema declares `retention: ephemeral` (x-add3). These are
+/// routed to the `.ephemeral` sibling journal at the write boundary so a
+/// high-cadence gauge (mux_pane_counters: 30s samples, ~5KB a row) cannot
+/// consume the durable journal's rotation budget. Kept equal to
+/// `cli/src/fno/events/schema.yaml` by the same parity test; flip the class in
+/// both places or the two write boundaries route differently.
+pub const EPHEMERAL_EVENT_TYPES: &[&str] = &[
+    "claim_acquired",
+    "claim_clock_skew_rejected",
+    "claim_force_overridden",
+    "claim_idempotent_reacquired",
+    "claim_rebound",
+    "claim_refreshed",
+    "claim_released",
+    "claim_stale_reclaimed",
+    "human_touch",
+    "mux_pane_counters",
+    "orphan_reap_sweep",
+    "single_flight_gate",
+];
+
+/// Whether an event kind belongs to the schema-declared ephemeral class.
+pub fn is_ephemeral_event(kind: &str) -> bool {
+    EPHEMERAL_EVENT_TYPES.contains(&kind)
+}
+
 /// Errors the emitter surfaces to its caller. Emission failures are logged by
 /// the daemon rather than aborting the operation that triggered them: a missing
 /// audit line must not take down a live agent.
@@ -126,16 +158,29 @@ impl EventEmitter {
             .map_err(|e| EmitError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         line.push('\n');
 
-        self.maybe_rotate()?;
-        if let Some(parent) = self.path.parent() {
+        // Honor the declared retention class (x-add3): an ephemeral row goes to
+        // the sibling journal beside this emitter's file, rotating on its own
+        // size; every other class keeps the emitter's path. The sibling shares
+        // the emitter's directory, so the append/rotate machinery below runs
+        // unchanged against whichever file the row targets.
+        let ephemeral_target = is_ephemeral_event(event_type).then(|| {
+            // Follow a journal symlink before deriving the sibling (a worktree
+            // journal linked into the repo space routes its ephemeral rows to
+            // that space's sibling, mirroring the Python writer's resolve-then-
+            // derive order). A journal that does not exist yet has no symlink
+            // to follow, so the unresolved path is the right base there.
+            let base = std::fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
+            ephemeral_path(&base)
+        });
+        let target: &Path = ephemeral_target.as_deref().unwrap_or(&self.path);
+
+        self.maybe_rotate(target)?;
+        if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
         // O_APPEND open-write-close: the append is atomic for a sub-PIPE_BUF
         // line, so concurrent emitters never interleave a single line.
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        let mut f = OpenOptions::new().create(true).append(true).open(target)?;
         f.write_all(line.as_bytes())?;
         Ok(())
     }
@@ -144,18 +189,18 @@ impl EventEmitter {
     /// Best-effort: a rotation race (two emitters both seeing the file large)
     /// is harmless because the rename is idempotent at the path level and the
     /// next `open(..., append)` recreates the active file.
-    fn maybe_rotate(&self) -> Result<(), EmitError> {
-        let size = match std::fs::metadata(&self.path) {
+    fn maybe_rotate(&self, path: &Path) -> Result<(), EmitError> {
+        let size = match std::fs::metadata(path) {
             Ok(m) => m.len(),
             Err(_) => return Ok(()), // not yet created; nothing to rotate
         };
         if size <= ROTATE_AT_BYTES {
             return Ok(());
         }
-        let rotated = rotated_path(&self.path);
+        let rotated = rotated_path(path);
         // Ignore a rename failure (another emitter already rotated): the goal is
         // bounded file size, not exclusive rotation ownership.
-        let _ = std::fs::rename(&self.path, rotated);
+        let _ = std::fs::rename(path, rotated);
         Ok(())
     }
 
@@ -168,6 +213,15 @@ impl EventEmitter {
 fn rotated_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(".1");
+    PathBuf::from(s)
+}
+
+/// The sibling journal an ephemeral-class row is routed to (same directory,
+/// same stem, the [`EPHEMERAL_SUFFIX`] tail). Shared with the claims audit
+/// writer so every Rust journal writer routes identically.
+pub(crate) fn ephemeral_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(EPHEMERAL_SUFFIX);
     PathBuf::from(s)
 }
 
@@ -306,5 +360,48 @@ mod tests {
         assert_eq!(civil_from_unix(0), (1970, 1, 1, 0, 0, 0));
         // 1700000000 -> 2023-11-14T22:13:20 UTC (known fixture)
         assert_eq!(civil_from_unix(1_700_000_000), (2023, 11, 14, 22, 13, 20));
+    }
+
+    #[test]
+    fn ephemeral_kind_lands_in_sibling_never_main() {
+        let path = temp_events_path("ephemeral");
+        let em = EventEmitter::new(&path, "daemon");
+        em.emit("mux_pane_counters", &json!({"session": "s1", "panes": []}))
+            .unwrap();
+
+        assert!(
+            read_lines(&path).is_empty(),
+            "ephemeral row reached the durable journal"
+        );
+        let sibling = ephemeral_path(&path);
+        let rows = read_lines(&sibling);
+        assert_eq!(
+            rows.len(),
+            1,
+            "the gauge must be provably alive in the sibling"
+        );
+        assert_eq!(rows[0]["type"], "mux_pane_counters");
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&sibling).ok();
+    }
+
+    #[test]
+    fn durable_kind_keeps_emitter_path() {
+        let path = temp_events_path("durable");
+        let em = EventEmitter::new(&path, "daemon");
+        em.emit(
+            "operator_decision",
+            &json!({"decision_id": "d-1", "decision": "x"}),
+        )
+        .unwrap();
+
+        let rows = read_lines(&path);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["type"], "operator_decision");
+        assert!(
+            !ephemeral_path(&path).exists(),
+            "non-ephemeral emit created the sibling"
+        );
+        std::fs::remove_file(&path).ok();
     }
 }

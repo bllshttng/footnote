@@ -43,7 +43,7 @@ A	cargo-test:fno-agents-e2e	py=cli/src/fno/pr/_preflight.py;rs=crates/fno-agents
 A	cargo-test:fno-agents-unit	py=cli/src/fno/pr/_preflight.py;rs=crates/fno-agents/src/verify_evidence.rs	# protocol: the preflight receipt scope both trust lists compare against; scripts/tests/test_preflight_parity.sh fails when the two lists or preflight.sh disagree
 A	direct needs model and effort placeholders	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: Python and Rust validators intentionally enforce one declarative switch contract
 A	anthropic_default_haiku_model	py=cli/src/fno/agents/model_routing.py|cli/src/fno/route_cli.py;rs=crates/fno-agents/src/model_env_scrub.rs	# protocol: route_cli renders the tier and its staleness against the same registry model_routing resolves
-A	claim_idempotent_reacquired	py=cli/src/fno/claims/events.py|cli/src/fno/resume/receipt.py|cli/src/fno/scoreboard/fold.py;rs=crates/fno-agents/src/claims.rs	# protocol
+A	claim_idempotent_reacquired	py=cli/src/fno/claims/events.py|cli/src/fno/resume/receipt.py|cli/src/fno/scoreboard/fold.py;rs=crates/fno-agents/src/claims.rs|crates/fno-agents/src/events.rs	# protocol: events.rs carries the name in the retention-routing const, the set a parity test holds equal to schema.yaml
 A	claude attach failed: {exc}	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	claude logs: claude binary not found on path; install claude or check $path	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	claude_code_stop_hook_block_cap	py=cli/src/fno/agents/harnesses/claude.py|cli/src/fno/hermetic.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol

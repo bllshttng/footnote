@@ -646,7 +646,18 @@ mod tests {
         // examples inside doc comments in the test module that the byte-level
         // scanner picks up. (Escaped `.emit(\"...\")` in the scanner self-check
         // string is NOT matched: the char after `(` is a backslash, not `"`.)
-        const TEST_ONLY_EMIT_KINDS: &[&str] = &["tick", "heartbeat", "foo", "x"];
+        // `mux_pane_counters`/`operator_decision` are real kinds whose production
+        // emitters live outside this crate (the mux server shells out to the
+        // Python CLI; operator_decision is Python-only); the routing unit tests
+        // in events.rs emit them below the test boundary.
+        const TEST_ONLY_EMIT_KINDS: &[&str] = &[
+            "tick",
+            "heartbeat",
+            "foo",
+            "x",
+            "mux_pane_counters",
+            "operator_decision",
+        ];
         let test_only: BTreeSet<&str> = TEST_ONLY_EMIT_KINDS.iter().copied().collect();
 
         let mut below_only: Vec<String> = Vec::new();
