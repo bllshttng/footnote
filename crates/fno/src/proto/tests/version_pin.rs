@@ -72,3 +72,24 @@ fn thread_pane_placement_field_is_additive() {
     let back: ControlVerb = serde_json::from_str(&serde_json::to_string(&verb).unwrap()).unwrap();
     assert_eq!(verb, back);
 }
+
+#[test]
+fn thread_reseat_verb_decodes_both_portal_forms() {
+    // (v69) A pre-v69 client never sends ThreadReseat; the verb is NEW, so
+    // the pin is its wire shape: the bare pane form (portal defaults) and
+    // the explicit index form must both decode and round-trip.
+    let bare: ControlVerb = serde_json::from_str(r#"{"ThreadReseat":{"pane":42}}"#).unwrap();
+    match bare {
+        ControlVerb::ThreadReseat { pane, portal } => {
+            assert_eq!(pane, 42);
+            assert_eq!(portal, None, "an absent index takes the next free portal");
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+    let verb = ControlVerb::ThreadReseat {
+        pane: 42,
+        portal: Some(3),
+    };
+    let back: ControlVerb = serde_json::from_str(&serde_json::to_string(&verb).unwrap()).unwrap();
+    assert_eq!(verb, back);
+}

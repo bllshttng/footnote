@@ -83,6 +83,10 @@ enum Role {
     /// naming 0 and 1 put two threads in two panes for the tab menu's Join
     /// actions to tile.
     MuxThread(Vec<OsString>),
+    /// (v69) `mux thread reseat <pane-id> [--portal N]`: move a live
+    /// pane-hosted worker into a portal seat, keeping its PTY. The registry
+    /// `mux` flip is the Python front door's half (`fno agents reseat`).
+    MuxThreadReseat(Vec<OsString>),
     /// (x-b80d) `mux view <selector> [--url] [--fzf] [--json]`: point the
     /// operator's view at the pane hosting an agent, selected by node id,
     /// slug, or name; a selector naming no agent focuses the tab at that
@@ -231,6 +235,10 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             Some("where") if args.len() > 2 => Role::MuxWhere(args[2..].to_vec()),
             // (x-07c2, hidden) thread: drive the dedicated thread pane for a
             // row from outside the TUI - the door `fno agents attach` uses.
+            // (v69) `thread reseat <pane>` is its own door: the re-seat move.
+            Some("thread") if args.len() > 3 && args[2] == "reseat" => {
+                Role::MuxThreadReseat(args[3..].to_vec())
+            }
             Some("thread") if args.len() > 2 => Role::MuxThread(args[2..].to_vec()),
             // (x-b80d) view: focus a pane by node id/slug/name; --fzf picks.
             // An explicit -h/--help prints the usage banner (the verb family's
@@ -369,6 +377,7 @@ fn main() {
         Role::MuxLayout(rest) => exit_mux(mux_cli::layout(&rest, env_session.as_deref())),
         Role::MuxWhere(rest) => exit_mux(mux_cli::where_(&rest, env_session.as_deref())),
         Role::MuxThread(rest) => exit_mux(mux_cli::thread(&rest, env_session.as_deref())),
+        Role::MuxThreadReseat(rest) => exit_mux(mux_cli::reseat(&rest, env_session.as_deref())),
         Role::MuxView(rest) => exit_mux(mux_cli::view(&rest, env_session.as_deref())),
         Role::MuxWorkspace(rest) => exit_mux(mux_cli::workspace(&rest, env_session.as_deref())),
         Role::Client(flag) => {
