@@ -9139,6 +9139,10 @@ def _clear_completion_fields(node: dict, *, reason: str) -> None:
     node["completion_note"] = None
     node["reopened_at"] = datetime.now(timezone.utc).isoformat()
     node["reopened_reason"] = reason
+    # The node is no longer done, so any "a live child reopened under this
+    # done parent" marker on it is moot - it applies only while the parent
+    # itself is still terminal. See _cascade_reopen_parents's warn branch.
+    node.pop("reopen_warning", None)
 
 
 def _auto_closed_note(entry: dict) -> str:
@@ -9198,8 +9202,21 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
         if not isinstance(pid, str):
             break
         parent = id_to_entry.get(pid)
-        if parent is None or parent.get("completed_at"):
-            break  # missing or already-closed ancestor -> stop this branch
+        if parent is None:
+            break  # missing ancestor -> stop this branch
+        # The child that reopened this (already-done) parent just closed
+        # again: the marker _cascade_reopen_parents left describes a state
+        # that no longer holds, so clear it here in the same mutation,
+        # whether or not the parent goes on to re-close below.
+        marker = parent.get("reopen_warning")
+        if (
+            isinstance(cur, dict)
+            and isinstance(marker, dict)
+            and marker.get("child") == cur.get("id")
+        ):
+            parent.pop("reopen_warning", None)
+        if parent.get("completed_at"):
+            break  # already closed -> stop this branch
         kids = children_by_parent.get(pid) or []
         if not kids or any(not k.get("completed_at") for k in kids):
             break  # at least one child still open -> the epic is not done yet
@@ -10547,6 +10564,20 @@ def _cascade_reopen_parents(entries: list[dict], node_id: str) -> tuple[list[str
         note = str(parent.get("completion_note") or "")
         if not note.startswith("auto-closed:"):
             warned.append(pid)
+            # The warning printed at the reopen call site is stderr-only and
+            # gone the moment that terminal closes. Stamp the same fact on
+            # the parent so a later report (stuck-epics --closed) can find
+            # it without re-deriving it: which child reopened under this
+            # done-on-its-own-evidence parent, and when. Cleared in
+            # _clear_completion_fields (the parent itself is reopened) and
+            # in _cascade_close_parents (the named child closes again).
+            parent["reopen_warning"] = {
+                # cur, not node_id: at a multi-level climb the live child is
+                # whichever ancestor sits directly under this parent, which
+                # can differ from the node the caller originally reopened.
+                "child": cur.get("id") if isinstance(cur, dict) else node_id,
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
             break  # closed on its own evidence; stop rather than climb past it
         _clear_completion_fields(parent, reason=f"child {node_id} reopened")
         reopened.append(pid)
