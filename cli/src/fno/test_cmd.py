@@ -1416,27 +1416,34 @@ def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, st
     return steps
 
 
+_TARGET_BIN_RELS = (
+    "crates/fno-agents/target/debug/fno-agents",
+    "crates/fno-agents/target/release/fno-agents",
+)
+
+
+def _scrub_target_bins(root: Path) -> None:
+    """Remove the checkout's target/ binaries: the parity-test marker."""
+    for rel in _TARGET_BIN_RELS:
+        try:
+            (root / rel).unlink()
+        except OSError:
+            pass
+
+
+def _pin_claim_door(env: dict[str, str], directory: Path, binary: Path) -> None:
+    """Point the claim door at one binary. resolve_binary checks the env name
+    before PATH, so the pin outranks a stale inherited BIN; hermetic children
+    forward the name."""
+    env["FNO_AGENTS_BIN"] = str(binary)
+    env["PATH"] = str(directory) + os.pathsep + env.get("PATH", "")
+
+
 def _preserve_claim_door(root: Path, env: dict[str, str]) -> None:
     """Keep the native claim reader available after the Rust-marker scrub."""
-    candidates = []
-    for value in (env.get("FNO_AGENTS_BIN"), env.get("FNO_AGENTS_FRONT")):
-        if value:
-            candidates.append(Path(value))
-    candidates.extend(
-        root / rel
-        for rel in (
-            "crates/fno-agents/target/debug/fno-agents",
-            "crates/fno-agents/target/release/fno-agents",
-        )
-    )
-    source = next(
-        (
-            candidate
-            for candidate in candidates
-            if candidate.is_file() and os.access(candidate, os.X_OK)
-        ),
-        None,
-    )
+    candidates = [Path(v) for v in (env.get("FNO_AGENTS_BIN"), env.get("FNO_AGENTS_FRONT")) if v]
+    candidates += [root / rel for rel in _TARGET_BIN_RELS]
+    source = next((c for c in candidates if c.is_file() and os.access(c, os.X_OK)), None)
     if source is None:
         return
     preserved_dir = _sandbox() / _CLAIM_DOOR_NAME
@@ -1446,10 +1453,8 @@ def _preserve_claim_door(root: Path, env: dict[str, str]) -> None:
     preserved.chmod(source.stat().st_mode & 0o777)
     # The scrub unlinks the target/ copies this function may have been handed,
     # so a BIN inherited from the job env goes dead at exactly the moment the
-    # claim consumers run. Re-point it at the preserved copy: resolve_binary
-    # checks the env name first, and hermetic children forward it by name.
-    env["FNO_AGENTS_BIN"] = str(preserved)
-    env["PATH"] = str(preserved_dir) + os.pathsep + env.get("PATH", "")
+    # claim consumers run. Re-point it at the preserved copy.
+    _pin_claim_door(env, preserved_dir, preserved)
 
 
 def _write_changed_receipt(path: str, payload: dict) -> None:
@@ -1581,21 +1586,12 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
         if _RUST_BUILD_STEP in {name for name, _, _ in steps}:
             # The changed-smoke job has Rust but no setup build. Its selected
             # build step must run before claim tests, so keep the target path
-            # present and put its directory first on PATH after the build.
-            # Pin FNO_AGENTS_BIN at the same path: the resolver checks the env
-            # name before PATH, so a stale inherited BIN would outrank the
-            # fresh build (and a missing file falls through to PATH anyway).
+            # present and pin the door at the fresh build.
             debug_dir = root / "crates/fno-agents/target/debug"
-            env["FNO_AGENTS_BIN"] = str(debug_dir / "fno-agents")
-            env["PATH"] = str(debug_dir) + os.pathsep + env.get("PATH", "")
+            _pin_claim_door(env, debug_dir, debug_dir / "fno-agents")
         else:
             _preserve_claim_door(root, env)
-            for rel in ("crates/fno-agents/target/debug/fno-agents",
-                        "crates/fno-agents/target/release/fno-agents"):
-                try:
-                    (root / rel).unlink()
-                except OSError:
-                    pass
+            _scrub_target_bins(root)
 
     e0 = time.monotonic()
     results, rc = _execute_steps(root, env, steps, keep_going=opts["keep_going"])
@@ -1954,12 +1950,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     _DELETE_TRIGGERS = {"Pytest (unit + integration)", _RUST_BUILD_STEP}
     if _DELETE_TRIGGERS & {names[i] for i in selected}:
         _preserve_claim_door(root, env)
-        for rel in ("crates/fno-agents/target/debug/fno-agents",
-                    "crates/fno-agents/target/release/fno-agents"):
-            try:
-                (root / rel).unlink()
-            except OSError:
-                pass
+        _scrub_target_bins(root)
 
     results, first_rc = _execute_steps(
         root, env, [steps[i] for i in selected], keep_going,

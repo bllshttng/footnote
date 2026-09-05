@@ -3006,23 +3006,9 @@ def _observe_node_claim(
 ) -> DispatchClaimObservation:
     """Family-2 pre-dispatch verdict shared by Python and shell routes."""
     try:
-        if native_info is None:
-            from fno.target_cli import _classify_node_claim
+        from fno.target_cli import _classify_node_claim
 
-            verdict, info = _classify_node_claim(node_id)
-        else:
-            from fno.target_cli import _holder_is_ours
-
-            info = native_info
-            state = info.get("state")
-            if not state or state == "free":
-                verdict = "free"
-            elif _holder_is_ours(info.get("holder"), info):
-                verdict = "ours"
-            elif state in ("live", "suspect"):
-                verdict = "foreign_live"
-            else:
-                verdict = "dead_predecessor"
+        verdict, info = _classify_node_claim(node_id, info=native_info)
     except Exception:  # noqa: BLE001 - an unreadable claim must not crash advance
         verdict, info = "free", None
     info = info or {}
@@ -3087,14 +3073,11 @@ def _node_dispatch_block_reason(
     native_verdicts: Optional[dict[str, dict]] = None,
 ) -> Optional[str]:
     """One pre-birth decision for node ownership plus boot reservation."""
-    node_key = f"node:{node_id}"
-    if native_verdicts is not None and node_key not in native_verdicts:
-        return "claim-verdict-unavailable"
-    native_info = (
-        native_verdicts[node_key]
-        if native_verdicts is not None
-        else None
-    )
+    native_info = None
+    if native_verdicts is not None:
+        native_info = native_verdicts.get(f"node:{node_id}")
+        if native_info is None:
+            return "claim-verdict-unavailable"
     observation = _observe_node_claim(node_id, node_cwd, native_info=native_info)
     if observation.blocks_dispatch:
         return observation.refusal_reason
