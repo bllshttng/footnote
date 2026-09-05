@@ -63,6 +63,18 @@ def is_terminal_entry(entry: object) -> bool:
     return bool(completed) and not str(completed).startswith(_LEGACY_DEFER_PREFIX)
 
 
+def node_is_done(entry: object) -> bool:
+    """The one WORK-done read: the node's stored ruling, nothing else.
+
+    Every Python reader that asks "is this node's work done" calls this
+    (x-c672); ``completed_at`` spellings are retired from that question
+    (measured 0 divergence in graph and archive). Superseded is deliberately
+    absent - a superseded node's WORK is not done, it was replaced, and only
+    rebindability reads it that way.
+    """
+    return isinstance(entry, dict) and entry.get("status") == "done"
+
+
 def derived_status(entry: object, missing: str = "unknown") -> str:
     """The one status string every reader of a row must agree on.
 

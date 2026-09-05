@@ -25,11 +25,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from fno.graph.statuses import node_is_done
+
 Entry = dict[str, Any]
 
 
 def _is_done(e: Entry) -> bool:
-    return bool(e.get("completed_at"))
+    return node_is_done(e)
 
 
 def _is_superseded(e: Entry) -> bool:

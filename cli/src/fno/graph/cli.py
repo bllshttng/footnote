@@ -99,7 +99,7 @@ cli.add_typer(_retro_app, name="retro", hidden=True)
 # never pick up the same node. The implementation is homed in graph/statuses.py
 # (so the board renderers can share it without a cli<->render cycle); re-exported
 # under the original module-global name that existing tests monkeypatch.
-from fno.graph.statuses import _LEGACY_DEFER_PREFIX, live_claimed_node_ids as _live_claimed_node_ids  # noqa: E402
+from fno.graph.statuses import _LEGACY_DEFER_PREFIX, live_claimed_node_ids as _live_claimed_node_ids, node_is_done  # noqa: E402
 
 
 def _require_live_claimed_node_ids(operation: str) -> set[str]:
@@ -2541,7 +2541,7 @@ def cmd_decompose(
                 # containment stamp is withheld, and loudly.
                 _own_pr = target.get("pr_number")
                 _own_cost = target.get("cost_usd")
-                _is_done = bool(target.get("completed_at")) or target.get("status") == "done"
+                _is_done = node_is_done(target)
                 if (_own_pr or _own_cost is not None) and not _is_done:
                     # An UNFINISHED delivery unit cannot be adopted at all
                     # (codex P1). Withholding the stamp keeps it dispatchable,
@@ -14077,10 +14077,9 @@ def cmd_album(
             e
             for e in read_graph(archive_path)
             if isinstance(e, dict)
-            # Terminal facts, not the persisted field: legacy archived rows
-            # predate status stamping and carry only completed_at, which the
-            # archive subsystem itself treats as done (archive._is_done).
-            and (str(e.get("status") or "") == "done" or bool(e.get("completed_at")))
+            # The one WORK-done reader (measured 0 divergence between status
+            # and completed_at in the archive, x-c672).
+            and node_is_done(e)
             # Superseded is derived from superseded_by (graph/types.py), so a
             # row can carry both; the album shows shipped work only.
             and not e.get("superseded_by")
@@ -15313,7 +15312,7 @@ def cmd_supersede(
         # completed_at to let the precedence cascade flip to superseded -
         # erasing the ship timestamp on a shipped plan and destroying
         # forensic history. Use a follow-up node instead.
-        if old_node.get("completed_at") or old_node.get("status") == "done":
+        if node_is_done(old_node):
             typer.echo(
                 f"Error: cannot supersede {replaces}: it is already shipped "
                 f"(status=done). Open a follow-up node instead.",
