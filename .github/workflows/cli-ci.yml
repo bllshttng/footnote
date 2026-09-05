@@ -100,11 +100,7 @@ jobs:
   changed-smoke:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # 30, not 15: the packet grew past 15 and GitHub reports a timeout as
-    # cancelled - four green runs died at 15m15s before this was measured
-    # (2026-09-05). The scaled fix is splitting the packet; until that lands,
-    # the cap only has to be honest about what the packet costs.
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -128,7 +124,7 @@ jobs:
           CHANGED_BASE: ${{ github.event.pull_request.base.sha }}
           CHANGED_HEAD: ${{ github.event.pull_request.head.sha }}
           # The full stress contract remains 20 trials. The changed packet is
-          # partial evidence with a 30-minute cap; one trial proves the shell
+          # partial evidence with a 15-minute cap; one trial proves the shell
           # harness and the full rust-ci job owns the denominator.
           STRESS_TRIALS: "1"
         run: |
