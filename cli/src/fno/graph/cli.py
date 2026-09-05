@@ -99,7 +99,7 @@ cli.add_typer(_retro_app, name="retro", hidden=True)
 # never pick up the same node. The implementation is homed in graph/statuses.py
 # (so the board renderers can share it without a cli<->render cycle); re-exported
 # under the original module-global name that existing tests monkeypatch.
-from fno.graph.statuses import _LEGACY_DEFER_PREFIX, live_claimed_node_ids as _live_claimed_node_ids, node_is_done  # noqa: E402
+from fno.graph.statuses import _LEGACY_DEFER_PREFIX, derived_status, live_claimed_node_ids as _live_claimed_node_ids, node_is_done  # noqa: E402
 
 
 def _require_live_claimed_node_ids(operation: str) -> set[str]:
@@ -13997,8 +13997,11 @@ def cmd_album(
             e
             for e in read_graph(archive_path)
             if isinstance(e, dict)
-            # The one WORK-done reader (0 status/completed_at divergence, x-c672).
-            and node_is_done(e)
+            # The one status string every row reader agrees on. The album
+            # reads the ARCHIVE, whose pre-status-stamping rows carry only
+            # completed_at, so the status-only node_is_done ruling would
+            # evict every legacy ship (x-c672).
+            and derived_status(e) == "done"
             # Superseded is derived from superseded_by (graph/types.py), so a
             # row can carry both; the album shows shipped work only.
             and not e.get("superseded_by")
