@@ -11120,6 +11120,45 @@ def cmd_reconcile_findings(
     typer.echo(f"reconcile-findings: closed {closed}/{len(findings)} node(s)")
 
 
+@cli.command("confirm-candidate", hidden=True)
+def cmd_confirm_candidate(
+    task_id: str = typer.Argument(..., help="Node id a `reconcile --candidates` row named"),
+    pr_number: int = typer.Option(..., "--pr-number", help="The candidate's PR number"),
+    pr_url: Optional[str] = typer.Option(None, "--pr-url", help="The candidate's PR URL"),
+) -> None:
+    """Bind a diff candidate a human confirmed. Never automatic.
+
+    A file overlap from `reconcile --candidates` is evidence someone worked
+    nearby, not proof the symptom is gone - this verb is the human
+    confirmation step. Binds the PR ref (fills the primary, or appends to
+    additional_prs, exactly as any other pr-to-node bind) and stamps
+    `pr_edge_derivation` naming this as a diff-candidate close, distinct
+    from a branch-name close, so a later reader can tell them apart. Does
+    NOT mark the node done - that is still `fno backlog done` (or a merge
+    the ship gate detects), same as any other PR-bound node.
+    """
+    from fno.graph._reconcile import confirm_diff_candidate
+    from fno.graph.store import locked_mutate_graph
+
+    result_box: list = []
+
+    def mutator(entries):
+        result = confirm_diff_candidate(
+            entries, task_id, pr_number=pr_number, pr_url=pr_url,
+            confirmed_by=os.environ.get("USER"),
+        )
+        result_box.append(result)
+        return entries
+
+    locked_mutate_graph(_graph_path(), mutator)
+    result = result_box[0]
+    if result.outcome == "refused":
+        typer.echo(f"Error: {result.refusal}", err=True)
+        raise typer.Exit(code=1)
+    action = result.bindings[0].action if result.bindings else "unknown"
+    typer.echo(f"Confirmed {task_id} <- PR #{pr_number} (diff-candidate, {action})")
+
+
 @cli.command(
     "reconcile",
     hidden=True,
@@ -11160,6 +11199,15 @@ def cmd_reconcile(
         "--repo",
         help="owner/repo scoping --pr-number's gh query and cross-repo claim "
         "check. Resolved from the checkout's origin remote when omitted.",
+    ),
+    candidates: bool = typer.Option(
+        False,
+        "--candidates",
+        help="Report diff-derived closure candidates only (defect A's weaker "
+        "edge): open nodes whose declared surfaces overlap a recently merged "
+        "PR the branch-name edge did not already close. Read-only - never "
+        "combine with --pr-number or --node, never mutates, never runs on "
+        "the default (auto-reconcile) sweep.",
     ),
 ) -> None:
     """Close open backlog nodes whose PR has merged outside the ship gate.
@@ -11209,6 +11257,35 @@ def cmd_reconcile(
             "which --node cannot narrow without silently stranding the "
             "other claimed nodes stamped-but-unclosed. Run them separately."
         )
+
+    if candidates:
+        if node is not None or pr_number is not None:
+            raise typer.BadParameter(
+                "--candidates is a separate, read-only report; it does not "
+                "combine with --node or --pr-number."
+            )
+        from fno.graph._reconcile import reconcile_diff_candidates
+        from fno.graph.store import read_graph as _read_graph_for_candidates
+
+        entries = _read_graph_for_candidates(_graph_path())
+        rows = reconcile_diff_candidates(entries, cwd=os.getcwd())
+        if json_out:
+            typer.echo(json.dumps({"diff_candidates": rows}, default=lambda o: o.__dict__))
+            return
+        if not rows:
+            typer.echo("diff candidates: none")
+            return
+        typer.echo(f"diff candidates: {len(rows)}")
+        for row in rows:
+            typer.echo(
+                f"  {row.node_id} <- PR #{row.pr_number}"
+                f"{f' ({row.pr_url})' if row.pr_url else ''}: {', '.join(row.overlapping_paths)}"
+            )
+        typer.echo(
+            "  read-only: confirm with `fno backlog confirm-candidate <node-id> "
+            "--pr-number N`, or ignore - a file overlap is evidence, not proof"
+        )
+        return
 
     # A truly unscoped, no-args sweep (SessionStart, a bare manual run) - the
     # only shape allowed to touch the whole graph: revert detection, the
@@ -15633,6 +15710,7 @@ _TRACKER_OWNED_VERBS = frozenset(
         # orchestration that stamps nodes
         "advance",
         "reconcile",
+        "confirm-candidate",
         "reconcile-findings",
         "lanes",
         "lane-fill",

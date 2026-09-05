@@ -2308,3 +2308,112 @@ def test_open_pr_heal_rechecks_current_node_inside_graph_lock(cli_env, tmp_path,
     node = next(e for e in _read_entries(graph_path) if e["id"] == "ab-9a0b")
     assert node["pr_number"] == 99
     assert node["additional_prs"] == []
+
+
+# ---------------------------------------------------------------------------
+# --candidates and confirm-candidate (defect A's weaker, diff-derived edge)
+# ---------------------------------------------------------------------------
+
+
+def test_candidates_reports_an_overlap_the_branch_edge_did_not_close(cli_env, monkeypatch):
+    graph_path, _sentinel_dir = cli_env
+    _make_graph(
+        graph_path,
+        [_node("ab-c1", details="Fix in `cli/src/fno/plan/fidelity.py`.")],
+    )
+    monkeypatch.setattr(
+        rec, "list_merged_pr_branches",
+        lambda **kw: [{"number": 9, "url": "u9", "headRefName": "feature/unrelated", "mergedAt": "t"}],
+    )
+    monkeypatch.setattr(
+        rec, "query_pr_merge_state",
+        lambda number, **kw: PrMergeState(
+            number=number, state="MERGED", url="u9", merged_at="t",
+            changed_files=["cli/src/fno/plan/fidelity.py"],
+        ),
+    )
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--candidates", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert [c["node_id"] for c in payload["diff_candidates"]] == ["ab-c1"]
+    assert payload["diff_candidates"][0]["pr_number"] == 9
+
+    # Read-only: the graph is untouched.
+    entries = _read_entries(graph_path)
+    assert entries[0]["completed_at"] is None
+    assert entries[0].get("pr_number") is None
+
+
+def test_candidates_excludes_a_node_the_branch_edge_already_closes(cli_env, monkeypatch):
+    graph_path, _sentinel_dir = cli_env
+    _make_graph(
+        graph_path,
+        [_node("x-5b660000", cwd=None, details="Fix in `cli/src/fno/plan/fidelity.py`.")],
+    )
+    monkeypatch.setattr(
+        rec, "list_merged_pr_branches",
+        lambda **kw: [{"number": 9, "url": "u9", "headRefName": "feature/x-5b660000", "mergedAt": "t"}],
+    )
+
+    def _fail_if_called(number, **kw):
+        raise AssertionError("a branch-matched merge must never fetch changed files")
+
+    monkeypatch.setattr(rec, "query_pr_merge_state", _fail_if_called)
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--candidates"])
+    assert result.exit_code == 0, result.output
+    assert "diff candidates: none" in result.output
+
+
+def test_candidates_says_so_when_a_merge_touches_nothing(cli_env, monkeypatch):
+    graph_path, _sentinel_dir = cli_env
+    _make_graph(graph_path, [_node("ab-c1", details="Fix in `cli/src/fno/other.py`.")])
+    monkeypatch.setattr(
+        rec, "list_merged_pr_branches",
+        lambda **kw: [{"number": 9, "url": "u9", "headRefName": "feature/unrelated", "mergedAt": "t"}],
+    )
+    monkeypatch.setattr(
+        rec, "query_pr_merge_state",
+        lambda number, **kw: PrMergeState(
+            number=number, state="MERGED", url="u9", merged_at="t",
+            changed_files=["docs/unrelated.md"],
+        ),
+    )
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--candidates"])
+    assert result.exit_code == 0, result.output
+    assert "diff candidates: none" in result.output
+
+
+def test_candidates_refuses_alongside_node_or_pr_number(cli_env):
+    graph_path, _sentinel_dir = cli_env
+    _make_graph(graph_path, [_node("ab-c1")])
+    result = runner.invoke(app, ["backlog", "reconcile", "--candidates", "--node", "ab-c1"])
+    assert result.exit_code != 0
+
+
+def test_confirm_candidate_binds_the_pr_and_marks_the_derivation(cli_env):
+    graph_path, _sentinel_dir = cli_env
+    _make_graph(graph_path, [_node("ab-c1000000")])
+
+    result = runner.invoke(
+        app,
+        ["backlog", "confirm-candidate", "ab-c1000000", "--pr-number", "9", "--pr-url", "u9"],
+    )
+    assert result.exit_code == 0, result.output
+
+    node = next(e for e in _read_entries(graph_path) if e["id"] == "ab-c1000000")
+    assert node["pr_number"] == 9
+    assert node["pr_edge_derivation"]["via"] == "diff-candidate"
+    assert node["completed_at"] is None  # confirming is not closing
+
+
+def test_confirm_candidate_refuses_an_unknown_node(cli_env):
+    graph_path, _sentinel_dir = cli_env
+    _make_graph(graph_path, [_node("ab-c1000000")])
+
+    result = runner.invoke(
+        app, ["backlog", "confirm-candidate", "ab-99999999", "--pr-number", "9"]
+    )
+    assert result.exit_code != 0
