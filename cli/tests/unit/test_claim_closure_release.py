@@ -285,23 +285,23 @@ class TestNodeSettlement:
             pid=os.getpid(),
             host=socket.gethostname(),
         )
-        assert settlement(claim, now=now_ms(), native_verdict=_native_verdict(claim)) is None
+        assert settlement(claim, native_verdict=_native_verdict(claim)) is None
 
     def test_holder_on_a_different_node_settles_an_expired_lease(self):
         settlement = _node_settlement(_reading({"x-other": [_row()]}))
         claim = _expired_live_claim()
-        assert settlement(claim, now=now_ms(), native_verdict=_native_verdict(claim)) is True
+        assert settlement(claim, native_verdict=_native_verdict(claim)) is True
 
     def test_holder_on_this_node_is_not_settled(self):
         settlement = _node_settlement(_reading({"x-gone": [_row()]}))
         claim = _expired_live_claim()
-        assert settlement(claim, now=now_ms(), native_verdict=_native_verdict(claim)) is None
+        assert settlement(claim, native_verdict=_native_verdict(claim)) is None
 
     def test_row_absent_is_not_settled(self):
         """Not-found is not gone (the doctrine the probe lives by)."""
         settlement = _node_settlement(_reading({"x-other": [_row("someone-else")]}))
         claim = _expired_live_claim()
-        assert settlement(claim, now=now_ms(), native_verdict=_native_verdict(claim)) is None
+        assert settlement(claim, native_verdict=_native_verdict(claim)) is None
 
     def test_unexpired_lease_is_never_settled(self):
         settlement = _node_settlement(_reading({"x-other": [_row()]}))
@@ -313,19 +313,19 @@ class TestNodeSettlement:
             pid=os.getpid(),
             host=socket.gethostname(),
         )
-        assert settlement(claim, now=now_ms(), native_verdict=_native_verdict(claim)) is None
+        assert settlement(claim, native_verdict=_native_verdict(claim)) is None
 
     def test_roster_not_consulted_is_not_settled(self):
         settlement = _node_settlement(_reading({}, consulted=False))
         claim = _expired_live_claim()
-        assert settlement(claim, now=now_ms(), native_verdict=_native_verdict(claim)) is None
+        assert settlement(claim, native_verdict=_native_verdict(claim)) is None
 
     def test_unreadable_graph_is_not_settled(self, tmp_path, monkeypatch):
         monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "nope.json")
         settlement = _node_settlement(_reading({"x-other": [_row()]}))
         # Graph unreadable -> None; the different-node arm still answers.
         claim = _expired_live_claim()
-        assert settlement(claim, now=now_ms(), native_verdict=_native_verdict(claim)) is True
+        assert settlement(claim, native_verdict=_native_verdict(claim)) is True
 
     def test_settlement_true_reaps_through_the_sweep(self, tmp_path, monkeypatch):
         """The settlement reaches reap_dead_claims, not just the predicate."""
@@ -355,7 +355,7 @@ class TestNodeSettlement:
             root=tmp_path,
         )
 
-        def _boom(_claim, now=None, native_verdict=None):
+        def _boom(_claim, native_verdict=None):
             raise RuntimeError("settlement on fire")
 
         # Falls through to liveness: dead pid + unexpired TTL = suspect, kept.

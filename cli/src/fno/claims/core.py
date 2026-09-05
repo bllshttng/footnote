@@ -1539,7 +1539,6 @@ def force_release_claim(
 def sweep_verdict(
     claim: Claim,
     *,
-    now: Optional[int] = None,
     abandonment_probe: Optional[Callable[[Claim], Optional[bool]]] = None,
     node_settlement: Optional[Callable[..., Optional[bool]]] = None,
     native_verdict: Optional[dict[str, Any]] = None,
@@ -1572,7 +1571,7 @@ def sweep_verdict(
         # must never become a verdict. The CLI-built settlement never raises
         # by contract - this is the belt under it.
         try:
-            if node_settlement(claim, now=now, native_verdict=verdict) is True:
+            if node_settlement(claim, native_verdict=verdict) is True:
                 return True, ""
         except Exception:  # noqa: BLE001 - unknown keeps
             pass
@@ -1715,7 +1714,6 @@ def reap_dead_claims(
             return False, "suspect_unprobed"
         return sweep_verdict(
             claim,
-            now=ts,
             abandonment_probe=abandonment_probe,
             node_settlement=node_settlement,
             native_verdict=native,

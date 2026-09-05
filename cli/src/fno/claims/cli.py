@@ -1347,7 +1347,7 @@ def _node_settlement(reading: Optional[RosterReading] = None):
                 cache["terminal"] = None
         return cache["terminal"]
 
-    def _probe(claim, now=None, native_verdict=None) -> Optional[bool]:
+    def _probe(claim, native_verdict=None) -> Optional[bool]:
         node_id = claim.key[len("node:") :]
         terminal = _terminal_ids()
         if terminal is not None and node_id in terminal:

@@ -42,7 +42,7 @@ def claim_verdicts(
     if binary is None:
         raise ClaimVerdictUnavailable(
             "fno-agents claim verdict unavailable: the fno-agents binary was not found; "
-            "set FNO_AGENTS_BIN or reinstall fno (or run `fno doctor update --rust`)."
+            "set FNO_AGENTS_BIN or reinstall fno."
         )
 
     requested = tuple(keys or ())
@@ -62,13 +62,11 @@ def claim_verdicts(
     except OSError as exc:
         raise ClaimVerdictUnavailable(
             "fno-agents claim verdict unavailable: could not run the native binary; "
-            "set FNO_AGENTS_BIN or reinstall fno (or run `fno doctor update --rust`)."
+            "set FNO_AGENTS_BIN or reinstall fno."
         ) from exc
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
-        raise ClaimVerdictError(
-            f"fno-agents claim sweep failed with exit {result.returncode}: {detail}"
-        )
+        raise ClaimVerdictError(f"fno-agents claim sweep failed with exit {result.returncode}: {detail}")
 
     try:
         payload = json.loads(result.stdout)
@@ -85,11 +83,8 @@ def claim_verdicts(
     for key in requested:
         if key in verdicts:
             continue
-        candidate_roots = [global_claims_root()]
-        candidate_roots.append(root if root is not None else Path.cwd())
-        if any(claim_path(key, root=candidate).exists() for candidate in candidate_roots):
-            raise ClaimVerdictError(
-                f"native claim sweep omitted existing claim {key!r}; refusing to assume free"
-            )
+        roots = [global_claims_root(), root if root is not None else Path.cwd()]
+        if any(claim_path(key, root=candidate).exists() for candidate in roots):
+            raise ClaimVerdictError(f"native claim sweep omitted existing claim {key!r}; refusing to assume free")
         verdicts[key] = {"key": key, "state": "free"}
     return verdicts
