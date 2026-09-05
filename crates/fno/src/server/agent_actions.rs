@@ -4,7 +4,8 @@
 
 use std::time::Duration;
 
-use super::{first_line_or, fno_bin, ReentryVerdict};
+use super::{first_line_or, fno_bin};
+use crate::spawn_journal::ReentryVerdict;
 
 /// Shell `fno-agents <verb> <name>` for a sideline lifecycle gesture (x-76ea),
 /// bounded + fail-open (the `run_dispatch_one` idiom): a short outcome notice,

@@ -32,6 +32,7 @@ pub mod pty;
 pub mod registry_label;
 pub mod server;
 pub mod sideline_color;
+pub mod spawn_journal;
 pub mod sprites;
 pub mod squad;
 pub mod squad_store;
