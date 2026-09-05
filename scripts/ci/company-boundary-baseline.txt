@@ -36,7 +36,7 @@ cli/src/fno/claims/cli.py:949: L1 core -> L5 runtime / from fno.agents.watchdog 
 # lower-layer copy to call instead, and the same shape as the two entries
 # above it.
 cli/src/fno/claims/cli.py:1146: L1 core -> L5 runtime / from fno.agents.watchdog import tail_facts
-cli/src/fno/claims/cli.py:1392: L1 core -> L5 runtime / from fno.agents.watchdog import (
-cli/src/fno/claims/cli.py:1416: L1 core -> L5 runtime / from fno.agents.watchdog import (
-cli/src/fno/claims/cli.py:1436: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
+cli/src/fno/claims/cli.py:1412: L1 core -> L5 runtime / from fno.agents.watchdog import (
+cli/src/fno/claims/cli.py:1436: L1 core -> L5 runtime / from fno.agents.watchdog import (
+cli/src/fno/claims/cli.py:1456: L1 core -> L5 runtime / from fno.agents.truth_status import _session_from_holder
 layer cycle: L0 platform -> L5 runtime -> L0 platform
