@@ -57,7 +57,10 @@ def emit_tick(
                 from fno.paths import state_dir
 
                 events_path = state_dir() / "events.jsonl"
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - a readout row must never break its arm
+            import sys
+
+            print(f"control_plane: journal path for {arm} unresolved: {exc}", file=sys.stderr)
             return False
     data: dict[str, Any] = {
         "arm": arm,
@@ -74,5 +77,8 @@ def emit_tick(
 
         append_event(_build(EVENT_TYPE, "daemon", data), events_path)
         return True
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - a readout row must never break its arm
+        import sys
+
+        print(f"control_plane: emit {arm} tick row failed: {exc}", file=sys.stderr)
         return False

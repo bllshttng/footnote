@@ -1007,7 +1007,10 @@ pub async fn run_supervisor(
                         fanout_targets.len(),
                         resolve_failure.as_deref().map(|f| format!(" resolve={f}")).unwrap_or_default()
                     ),
-                    "interval_s": 300,
+                    // The recheck cadence this row actually rides, not the
+                    // configured drain interval: staleness must bound the
+                    // supervisor's own 60s loop.
+                    "interval_s": 60,
                 }),
             );
         }

@@ -638,3 +638,79 @@ class TestClosedPrEvictionAtOrchestrator:
         assert WatermarkStore(path=store_path).get("owner/repo#5") is None
         receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
         assert receipt["dropped"] == {"closed": {"owner/repo": [5]}}
+
+
+# ---------------------------------------------------------------------------
+# Control-plane arm rows (x-1b88): the tick command writes one row per arm
+# ---------------------------------------------------------------------------
+
+
+class TestControlPlaneArmRows:
+    """Drives the REAL cli.tick() command with every phase unarmed and asserts
+    the three pr-watch-hosted arm rows land in the anchored journal, each
+    saying why it did nothing."""
+
+    def test_tick_writes_watchdog_king_wake_and_merge_arm_rows(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        fake_home = tmp_path / "home"
+        fno_dir = fake_home / ".fno"
+        fno_dir.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("PR_WATCH_FIRE_CMD", "true")
+        try:
+            from fno.config import load_settings
+            load_settings.cache_clear()
+        except Exception:
+            pass
+
+        def ns(**kw):
+            return SimpleNamespace(**kw)
+
+        settings = ns(
+            pr_watch=ns(
+                enabled=False,
+                interval_seconds=600,
+                tick_timeout_seconds=None,
+                max_age_days=14,
+                retries=2,
+                graphql_min_remaining=200,
+                model="m",
+            ),
+            review=ns(github_apps=[], required_bots=[]),
+            autonomy=ns(enabled=False),
+            recovery=ns(enabled=False, watchdog=ns(enabled=False, mode="report")),
+            king=ns(wake_enabled=False, wake_debounce_seconds=900),
+            auto_heal=ns(enabled=False),
+        )
+
+        with patch("fno.pr_watch.cli.load_settings", return_value=settings), \
+             patch("fno.pr_watch.cli.claim_status", return_value={"state": "free"}), \
+             patch("fno.claims.acquire_claim"), \
+             patch("fno.claims.release_claim"):
+            from fno.pr_watch.cli import tick
+            tick()
+
+        rows = [
+            json.loads(line)
+            for line in (fno_dir / "events.jsonl").read_text().splitlines()
+            if line.strip() and json.loads(line).get("type") == "control_plane_tick"
+        ]
+        by_arm = {r["data"]["arm"]: r["data"] for r in rows}
+        assert by_arm["watchdog"]["skip_reason"] == "watchdog_off"
+        assert by_arm["watchdog"]["scheduler"] == "launchd:sh.fno.pr-watcher"
+        assert by_arm["king_wake"]["skip_reason"] == "wake_disabled"
+        assert by_arm["king_wake"]["interval_s"] == 900
+        assert by_arm["pr_watch_merge"]["skip_reason"] == "disabled"
+        assert by_arm["pr_watch_merge"]["interval_s"] == 600
+        from fno.events import validate
+        for data in by_arm.values():
+            validate(
+                {
+                    "ts": "2026-09-05T00:00:00Z",
+                    "type": "control_plane_tick",
+                    "source": "daemon",
+                    "data": data,
+                }
+            )
