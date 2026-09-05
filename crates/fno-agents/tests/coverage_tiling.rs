@@ -13,10 +13,10 @@
 //! pass, and distinct attesters yield distinct verdicts. The live incident
 //! was a stale served row, not logic, and these tests keep it that way.
 
+use fno_agents::disposition_gate::disposition_blockers_on_chain;
 use fno_agents::loopcheck::{
-    classify_coverage_tiled, compute_range_tiling, coverage_receipt_line,
-    disposition_blockers_on_chain, in_scope_chain, Coverage, CoverageProducer, CoverageVerdict,
-    Freshness, RangeTiling, ReviewState,
+    classify_coverage_tiled, compute_range_tiling, coverage_receipt_line, in_scope_chain, Coverage,
+    CoverageProducer, CoverageVerdict, Freshness, RangeTiling, ReviewState,
 };
 use std::fs;
 use std::path::Path;
