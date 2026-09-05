@@ -9131,6 +9131,47 @@ def _auto_closed_note(entry: dict) -> str:
     return "auto-closed: all children complete"
 
 
+def _reopen_outranks_child_closes(parent: dict, kids: list[dict]) -> bool:
+    """True when a deliberate reopen postdates every child's close.
+
+    Both close paths ask only whether every child carries ``completed_at``, and
+    that predicate stays true forever once the last child merges. So a node
+    reopened after its children finished was re-closed by the very next sweep:
+    measured 2026-09-05, a reopen carrying a written reason was overridden by
+    ``reconcile`` seven minutes later, and no retry could hold it. ``reopen``
+    requires ``--reason`` precisely because a close is evidenced by a merged PR
+    while a reopen is nothing but human judgment; an automatic sweep discarding
+    that judgment without a word is the defect this guards.
+
+    Keyed on the CHILDREN's closes rather than on "now", so it expires by
+    itself. A reopen made BEFORE the last child landed is stale and the cascade
+    still fires, because the parent genuinely became complete after that
+    judgment was formed. Only a reopen postdating every child close is a
+    statement about the finished set, and only that one holds.
+
+    Ambiguity favours the human, deliberately and in both directions: an
+    unreadable ``reopened_at`` protects, and so does an unreadable child
+    ``completed_at``. Those stamps are written by one place in one format, so a
+    value this cannot parse means something is already wrong, and re-closing on
+    the strength of a timestamp we failed to read is the same silent override in
+    a different coat. A parent carrying no ``reopened_at`` is unaffected, which
+    is every node that was never reopened.
+    """
+    from fno.graph.board import _parse_iso
+
+    reopened_raw = parent.get("reopened_at")
+    if not isinstance(reopened_raw, str) or not reopened_raw.strip():
+        return False
+    reopened = _parse_iso(reopened_raw)
+    if reopened is None:
+        return True
+    for kid in kids:
+        closed = _parse_iso(kid.get("completed_at"))
+        if closed is not None and closed >= reopened:
+            return False
+    return True
+
+
 def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
     """Close ancestor epics whose children are now all complete (x-33b2).
 
@@ -9172,6 +9213,8 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
         kids = children_by_parent.get(pid) or []
         if not kids or any(not k.get("completed_at") for k in kids):
             break  # at least one child still open -> the epic is not done yet
+        if _reopen_outranks_child_closes(parent, kids):
+            break  # reopened after its children finished -> the human call holds
         _apply_completion_fields(parent)
         if not parent.get("completion_note"):
             parent["completion_note"] = _auto_closed_note(parent)
@@ -9469,6 +9512,7 @@ def _strandable_epic_ids(entries: list[dict]) -> set[str]:
             parent is not None
             and not parent.get("completed_at")
             and all(k.get("completed_at") for k in kids)
+            and not _reopen_outranks_child_closes(parent, kids)
         ):
             out.add(pid)
     return out
