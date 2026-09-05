@@ -10,13 +10,19 @@ read as a caller decision.
 from __future__ import annotations
 
 import json
+import os
 from typing import Optional
 
 from fno.agents.spawn_flag_owners import CALLER, CONFIG
 
+#: The env carrier across the exec seam: the seam that injects a picked
+#: ``--account`` sets it to ``config`` so a flag-shaped read stays honest.
+LAUNCH_ACCOUNT_SOURCE_ENV = "FNO_LAUNCH_ACCOUNT_SOURCE"
+
 __all__ = [
     "CALLER",
     "CONFIG",
+    "LAUNCH_ACCOUNT_SOURCE_ENV",
     "bg_account_field",
     "receipt_account_fields",
     "row_launch_source",
@@ -25,8 +31,12 @@ __all__ = [
 
 
 def seam_launch_source(launch_account: Optional[str]) -> Optional[str]:
-    """The source at the spawn seam: an explicit ``--account`` is a caller."""
-    return CALLER if launch_account is not None else None
+    """A typed flag is a caller; the carrier names the pick's ``config``."""
+    if launch_account is None:
+        return None
+    if os.environ.get(LAUNCH_ACCOUNT_SOURCE_ENV) == CONFIG:
+        return CONFIG
+    return CALLER
 
 
 def row_launch_source(source: Optional[str], account_value: Optional[str]) -> Optional[str]:

@@ -633,7 +633,8 @@ def provider_live_count(provider: str, counted: Optional[set[str]] = None) -> in
             continue
         if pane is False:
             continue
-        if pane is not None:
+        if isinstance(row.mux, dict):
+            # Unreadable is not absent: the cap refuses before the bg fallback.
             raise ProviderCountUnavailable(
                 f"pane liveness unreadable for {row.name}"
             )

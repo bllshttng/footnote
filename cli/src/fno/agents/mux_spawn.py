@@ -3704,27 +3704,27 @@ def dispatch_spawn_pane(
         message, crown_level, crown_scope, revive=False
     )
 
-    # Launch-time headroom picking (x-7d45). `pane` is the DEFAULT substrate and
-    # `cmd_spawn` routes it straight here, never through `dispatch_spawn` - so a
-    # picker wired only there would cover bg/headless and leave every default
-    # interactive spawn on the exhausted account while the option read enabled.
+    # Launch-time headroom picking (x-7d45): `pane` is the DEFAULT substrate and
+    # `cmd_spawn` routes it straight here, so the picker must live on this lane.
     # x-d285: the picked OVERLAY (not just its env) so the row can stamp the
     # account id it picked; an explicit launch_account from the caller wins.
-    # x-04ce: the source rides the row and receipt - an id alone never says WHO chose it.
     effective_launch_account = launch_account
     launch_account_source = launch_provenance.seam_launch_source(launch_account)
-    row_launch_account = (
-        (effective_launch_account or "default") if provider == "claude" else None
-    )
-    row_launch_source = launch_account_source if provider == "claude" else None
     if account_env is None and provider == "claude":
         from fno.agents.dispatch import _pick_account_overlay
-
         picked = _pick_account_overlay(role=role, route_env=route_env)
         if picked is not None:
             account_env = dict(picked.env)
             effective_launch_account = picked.account_id
             launch_account_source = launch_provenance.CONFIG
+    # The pair reads POST-pick facts: a pre-pick snapshot stamps "default"
+    # on a spawn the picker just billed to a real account.
+    row_launch_account = (
+        (effective_launch_account or "default") if provider == "claude" else None
+    )
+    row_launch_source = launch_provenance.row_launch_source(
+        launch_account_source if provider == "claude" else None, row_launch_account
+    )
 
     # The monitor contract is judged BEFORE the generic route guard: an
     # explicit --monitor happy refusal names the zai-shaped gap it found, and
