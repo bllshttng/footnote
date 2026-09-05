@@ -814,7 +814,7 @@ def compare_and_rebind(
             raise RebindRefused(
                 f"holder {existing.holder!r} is not a launch-window holder; "
                 "only a spawn-side handover claim can be taken over",
-                state=_claim_state(existing, root=root).value,
+                state=state.value,
                 holder=existing.holder,
                 pid=existing.pid,
             )
@@ -1110,7 +1110,9 @@ def release_claim(
         release_dir_mutex(recovery_lock, token)
 
 
-def _reanchor_pid_for(existing: Claim, *, root: Optional[Path] = None) -> Optional[int]:
+def _reanchor_pid_for(
+    existing: Claim, *, root: Optional[Path] = None, verdict: Optional[dict[str, Any]] = None
+) -> Optional[int]:
     """The durable pid a renewal should re-anchor EXISTING to, or None.
 
     Mirrors ``renew`` in ``crates/fno-agents/src/claims.rs``. Renewal used to
@@ -1156,10 +1158,10 @@ def _reanchor_pid_for(existing: Claim, *, root: Optional[Path] = None) -> Option
     # was mid-flight. `renew_locked` in `crates/fno-agents/src/claims.rs`, which
     # this mirrors, has always refused there; without the same refusal here the
     # two implementations of one operation answered differently.
-    verdict = _claim_verdict(existing, root=root)
+    verdict = verdict or _claim_verdict(existing, root=root)
     if existing.pid_unavailable or verdict.get("expired") is True:
         return None
-    if verdict.get("bucket") == "offhost" or verdict.get("expired") is True:
+    if verdict.get("bucket") == "offhost":
         return None
     if verdict.get("state") not in (ClaimState.STALE.value, ClaimState.SUSPECT.value):
         return None
@@ -1249,13 +1251,14 @@ def refresh_claim(
             raise HolderMismatch(expected=holder, actual=existing.holder, key=key)
         if existing.expires_at is None:
             return None
-        if _claim_verdict(existing, root=root).get("expired") is True:
+        verdict = _claim_verdict(existing, root=root)
+        if verdict.get("expired") is True:
             raise ClaimValidationError(
                 f"claim {key!r} expired before refresh; refusing to resurrect it"
             )
 
         window = ttl_ms if ttl_ms is not None else MIN_TTL_MS
-        anchor_pid = _reanchor_pid_for(existing, root=root)
+        anchor_pid = _reanchor_pid_for(existing, root=root, verdict=verdict)
         if anchor_pid is not None:
             refreshed = _rebound_claim(
                 existing,
