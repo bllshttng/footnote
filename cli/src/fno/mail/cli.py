@@ -1784,7 +1784,11 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
     live and reachable, so the preamble says so and names the cause rather than
     claiming "is not live" -- a receipt naming the wrong cause is worse than one
     naming none, because it sends the reader to diagnose a recipient that was
-    never the problem. A None/unreachable reason keeps the honest not-live line.
+    never the problem. A None/unreachable reason says the same about itself:
+    :func:`resolve_session_truth` is consulted and its verdict repeated -- could
+    not establish liveness when the transcript is unreadable, the transcript's
+    own state (named as its evidence) when it is not. This arm never asserts
+    "not live".
 
     A lock timeout gets its own arm for the same reason. The per-agent flock is
     shared by every verb that touches the agent (send, ask, spawn, stop, rm), so
@@ -1838,9 +1842,35 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
             "    fno agents mail withdraw <id>      # none of the above? retract it"
         )
     else:
-        msg = (
-            f"mail: {target} is not live; queued durably as recovery only - the "
-            "recipient must drain its inbox to read this, and may never do so\n"
+        # The live lane gave no failure cause, so it proves nothing about the
+        # recipient in either direction. Consult the one liveness oracle and
+        # repeat its verdict; `unknown` here means could-not-establish, and
+        # only a transcript that positively reads stalled may say "may never".
+        from fno.agents.session_truth import _humanize_age, resolve_session_truth
+
+        truth = resolve_session_truth(target)
+        state = truth["state"]
+        if state == "stalled":
+            silent = _humanize_age(truth["last_activity_age_s"]).strip()
+            head = (
+                f"mail: {target} reads stalled on its transcript (silent "
+                f"{silent}); queued durably as recovery only - the recipient "
+                "must drain its inbox to read this, and may never do so\n"
+            )
+        elif state == "unknown":
+            head = (
+                f"mail: liveness of {target} could not be established; queued "
+                "durably as recovery only - the recipient must drain its inbox "
+                "to read this, and may never do so\n"
+            )
+        else:
+            head = (
+                f"mail: {target} reads {state} on its transcript (activity "
+                f"{_humanize_age(truth['last_activity_age_s']).strip()} ago); "
+                "queued durably as recovery only - the recipient must drain "
+                "its inbox to read this, and may never do so\n"
+            )
+        msg = head + (
             "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
             f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
             f"    fno agents resume {target}   # wakes it (claude) or resumes it (other harnesses), then re-send\n"

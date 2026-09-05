@@ -471,10 +471,18 @@ def test_ac1fr_offline_full_uuid_handle_wire_to_matches_durable(
 
 
 def test_deferred_warning_on_inject_miss(runner, mailbox, monkeypatch, tmp_path):
-    # The recipient is rostered (resolves) but the live inject misses -> the
-    # message hits only the durable floor, so stderr carries the deferral line.
+    # The recipient is rostered (resolves) but the live inject misses and the
+    # transcript reads unknown -> the message hits only the durable floor, and
+    # stderr reports could-not-establish without ever asserting not-live.
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda *_args, **_kwargs: {"state": "unknown", "last_activity_age_s": None},
+    )
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
 
@@ -483,7 +491,8 @@ def test_deferred_warning_on_inject_miss(runner, mailbox, monkeypatch, tmp_path)
     )
     r = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
     assert r.exit_code == 0, r.output
-    assert "is not live" in (r.stderr or "")
+    assert "could not be established" in (r.stderr or "")
+    assert "is not live" not in (r.stderr or "")
     assert "may never" in (r.stderr or "")
     assert "queued (durable)" in r.stdout
 
