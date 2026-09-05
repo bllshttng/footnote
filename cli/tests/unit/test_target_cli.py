@@ -1522,26 +1522,30 @@ def test_check_contained_says_so_when_the_store_is_unavailable(tmp_path,
     assert "no store for you" in result.output
 
 
-def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(
+def test_resolve_owned_identity_verb_proven_claude_wins_foreign_codex_refused(
     tmp_path, monkeypatch
 ) -> None:
-    """AC1-HP + AC3-ERR at the verb: a CODEX_THREAD_ID a live row already owns
-    is refused and the proven claude marker wins.
+    """AC1-HP + AC3-ERR at the verb: the proven claude marker wins and the
+    foreign codex marker is refused by the walk (it contradicts the prover),
+    with no registry collision consulted - a session with no stamp resolves by
+    elimination and contradiction only, because colliding there read a
+    hand-started joined session's OWN registered row as contention and refused
+    every crown grantor. Collision reporting lives on the stamped branches.
 
     Proven in Python so it does not depend on the PATH-resolved `fno` carrying
     the verb - the bash hook test's CI limitation, since the PR's own CI runs a
     `fno` that predates the verb. The prover is pinned to claude (a real claude
-    process's view) so the claude marker is proven and wins; the foreign codex
-    marker is refused as another live row's. CI-robust: no real process tree.
+    process's view) so the claude marker is proven and wins. CI-robust: no real
+    process tree.
     """
     from fno.agents.registry import register_existing_session
     from fno.paths_testing import use_tmpdir
 
     use_tmpdir(monkeypatch, tmp_path)
     foreign = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
-    owner = register_existing_session(
+    register_existing_session(
         provider="codex", session_id=foreign, cwd="/x"
-    ).name
+    )
     # Pin the prover to claude (what a real claude session's process tree sees),
     # so the test does not depend on the runner's actual harness.
     monkeypatch.setattr(
@@ -1561,8 +1565,8 @@ def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(
     assert fields["HARNESS"] == "claude"
     assert fields["SESSION_ID"] == "aaaa1111-mine"
     assert fields["DISPOSITION"] == "proven"
-    assert fields["COLLISION"] == owner
-    assert fields["COLLISION_ID"] == foreign
+    assert fields["COLLISION"] == ""
+    assert fields["COLLISION_ID"] == ""
 
 
 def test_resolve_owned_identity_self_row_is_not_contention(tmp_path, monkeypatch) -> None:

@@ -83,9 +83,15 @@ def resolve_self_identity(
         fallback_prove = (
             None if true_harness is None else (lambda harness, sid: harness == true_harness)
         )
-        return resolve_owned_identity(
-            env, prove=fallback_prove, collide=collide_with(None)
-        )
+        # No collide here: a session with no stamp at all (a hand-started
+        # joined session) resolves by the uncontended single-family
+        # elimination, exactly as the registry's own SessionStart
+        # registration expects - colliding would read that session's OWN
+        # registered row as contention and refuse every crown grantor,
+        # whoami and --from-self for it. The fail-closed collide lives in
+        # the stamped branches below, where an attester can still witness
+        # self.
+        return resolve_owned_identity(env, prove=fallback_prove)
 
     try:
         attested_session_id, witness = resolve_attester_identity(env)

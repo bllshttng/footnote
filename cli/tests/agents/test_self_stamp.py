@@ -183,10 +183,13 @@ def test_self_stamp_forwards_the_completed_canonical_pair(monkeypatch):
     assert identity.rejected[0]["owner"] == "some-row"
 
 
-def test_self_stamp_passes_the_explicit_sentinel_without_a_stamp(monkeypatch):
-    """The sentinel still rides exactly where nothing proves self: an env with
-    NO canonical stamp completes no pair, so the detector stays self-blind and
-    a foreign row is reported under it (the round-1 P1 shape)."""
+def test_self_stamp_passes_the_explicit_sentinel_without_an_id(monkeypatch):
+    """The sentinel rides exactly where nothing proves self: a name_only stamp
+    completes no pair, so the detector stays self-blind and a foreign row is
+    reported under it (the round-1 P1 shape). A session with NO stamp at all
+    resolves by the uncontended elimination instead and never consults the
+    registry - that fallback is where hand-started joined sessions live, and
+    colliding there read their own registered row as contention."""
     captured: dict = {}
 
     def fake_detector(session_id, *, self_binding):
@@ -198,12 +201,19 @@ def test_self_stamp_passes_the_explicit_sentinel_without_a_stamp(monkeypatch):
         lambda from_pid=None: None,
     )
     monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_attester_identity",
+        lambda _env: ("", ""),
+    )
+    monkeypatch.setattr(
         "fno.agents.registry.row_owning_session_id", fake_detector
     )
 
-    identity = self_stamp.resolve_self_identity({"CODEX_THREAD_ID": "victim-session"})
+    identity = self_stamp.resolve_self_identity(
+        {"FNO_HARNESS_NAME": "codex", "CODEX_THREAD_ID": "victim-session"}
+    )
 
     assert captured["self_binding"] is None
+    assert identity.disposition == "ambiguous"
     assert identity.rejected[0]["owner"] == "some-row"
 
 
