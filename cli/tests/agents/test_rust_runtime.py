@@ -1056,6 +1056,25 @@ def test_the_account_picker_leaves_a_cutover_spawn_alone(monkeypatch) -> None:
     assert rr._pick_account_at_seam(args) == args
 
 
+def test_the_seam_pick_fires_for_spawn_itself(monkeypatch) -> None:
+    """The pick, scrub and remap refusal live in the seam's shared arm, so a
+    spawn takes them like every worker verb. Wiring them only into the elif
+    made the whole provenance carrier decorative on the spawn path: a
+    bg spawn exec'd the Rust client and minted its row off whatever stale
+    parent env it inherited. The patch's exit code only surfaces if the seam
+    actually called it."""
+    from fno.cli import app
+
+    monkeypatch.setattr(rr, "_pick_account_at_seam", lambda args: exit(99))
+    result = CliRunner().invoke(app, ["agents", "spawn", "--name", "w-seam", "hi"])
+    assert result.exit_code == 99, result.output
+
+    # rm owns its own elif arm: the account seam must not leak into it.
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
+    result = CliRunner().invoke(app, ["agents", "rm", "--name", "w-seam"])
+    assert result.exit_code != 99, result.output
+
+
 def test_exec_lane_scrubs_ambient_identity_before_rust_spawn(monkeypatch, tmp_path) -> None:
     """A --substrate bg spawn execs the Rust client, which launches the worker
     from its own inherited env; the Python identity floor never runs on that
